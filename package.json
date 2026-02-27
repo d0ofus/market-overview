@@ -1,0 +1,18 @@
+{
+  "name": "market-command-centre",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "web",
+    "worker"
+  ],
+  "scripts": {
+    "dev": "npm run seed -w worker && concurrently \"npm run dev -w worker\" \"npm run dev -w web\"",
+    "build": "npm run build -w worker && npm run build -w web",
+    "test": "npm run test -w worker",
+    "seed": "npm run seed -w worker"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,16 @@
+name = "market-command-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+
+[vars]
+APP_TIMEZONE = "America/New_York"
+DATA_PROVIDER = "synthetic"
+TRADINGVIEW_WIDGET_ENABLED = "true"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "market_command"
+database_id = "local-market-command"
+
+[triggers]
+crons = ["15 22 * * 1-5"]
