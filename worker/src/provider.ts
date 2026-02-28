@@ -25,9 +25,17 @@ class SyntheticProvider implements MarketDataProvider {
 
 class StooqProvider implements MarketDataProvider {
   label = "Stooq (Free Delayed EOD)";
+  private readonly aliases: Record<string, string> = {
+    VIX: "^vix",
+    VXN: "^vxn",
+    VVIX: "^vvix",
+  };
 
   private symbolForStooq(ticker: string): string {
     const t = ticker.trim().toLowerCase();
+    const mapped = this.aliases[t.toUpperCase()];
+    if (mapped) return mapped;
+    if (t.startsWith("^")) return t;
     if (t.includes(".")) return t;
     return `${t}.us`;
   }
@@ -96,6 +104,7 @@ class AlpacaProvider implements MarketDataProvider {
   private readonly key: string;
   private readonly secret: string;
   private readonly feed: string;
+  private readonly stooqFallback = new StooqProvider();
 
   constructor(env: Env) {
     this.key = env.ALPACA_API_KEY ?? "";
@@ -169,8 +178,21 @@ class AlpacaProvider implements MarketDataProvider {
     const batches = this.chunk(unique, 100);
     const all: DailyBar[] = [];
     for (const batch of batches) {
-      const rows = await this.fetchChunk(batch, startDate, endDate);
+      let rows: DailyBar[] = [];
+      try {
+        rows = await this.fetchChunk(batch, startDate, endDate);
+      } catch (error) {
+        // Keep moving and use fallback for this batch.
+        console.error("alpaca batch fetch failed, trying fallback", { batch, error });
+      }
       all.push(...rows);
+
+      const present = new Set(rows.map((r) => r.ticker.toUpperCase()));
+      const missing = batch.filter((ticker) => !present.has(ticker.toUpperCase()));
+      if (missing.length > 0) {
+        const fallbackRows = await this.stooqFallback.getDailyBars(missing, startDate, endDate);
+        all.push(...fallbackRows.map((row) => ({ ...row, ticker: row.ticker.toUpperCase() })));
+      }
     }
     return all;
   }

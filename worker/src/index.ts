@@ -248,7 +248,24 @@ app.get("/api/sectors/calendar", async (c) => {
   )
     .bind(month)
     .all();
-  return c.json({ month, rows: rows.results ?? [] });
+  const links = await c.env.DB.prepare(
+    "SELECT es.entry_id as entryId, es.ticker, s.name FROM sector_tracker_entry_symbols es LEFT JOIN symbols s ON s.ticker = es.ticker WHERE es.entry_id IN (SELECT id FROM sector_tracker_entries WHERE substr(event_date, 1, 7) = ?) ORDER BY es.ticker",
+  )
+    .bind(month)
+    .all<{ entryId: string; ticker: string; name: string | null }>();
+  const symbolMap = new Map<string, Array<{ ticker: string; name: string | null }>>();
+  for (const link of links.results ?? []) {
+    const arr = symbolMap.get(link.entryId) ?? [];
+    arr.push({ ticker: link.ticker, name: link.name });
+    symbolMap.set(link.entryId, arr);
+  }
+  return c.json({
+    month,
+    rows: (rows.results ?? []).map((r: any) => ({
+      ...r,
+      symbols: symbolMap.get(r.id) ?? [],
+    })),
+  });
 });
 
 app.post("/api/sectors/entries", async (c) => {
@@ -381,6 +398,26 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   const payload = itemCreateSchema.parse(await c.req.json());
   const resolved = await resolveTickerMeta(payload.ticker, c.env);
   if (!resolved) return c.json({ error: `Ticker '${payload.ticker}' was not found in supported data sources.` }, 400);
+
+  let hasProviderData = false;
+  let providerError: string | null = null;
+  try {
+    const provider = getProvider(c.env);
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 45 * 86400_000).toISOString().slice(0, 10);
+    const rows = await provider.getDailyBars([resolved.ticker], start, end);
+    hasProviderData = rows.some((r) => r.ticker.toUpperCase() === resolved.ticker.toUpperCase());
+  } catch (error) {
+    providerError = error instanceof Error ? error.message : "provider request failed";
+  }
+  if (!hasProviderData) {
+    const detail = providerError ? ` (${providerError})` : "";
+    return c.json(
+      { error: `Ticker '${payload.ticker}' resolved, but no recent market data was returned by the active provider${detail}.` },
+      400,
+    );
+  }
+
   const orderRow = await c.env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS nextOrder FROM dashboard_items WHERE group_id = ?")
     .bind(groupId)
     .first<{ nextOrder: number }>();

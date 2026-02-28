@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 
-export function TradingViewWidget({ ticker, compact = false }: { ticker: string; compact?: boolean }) {
+export function TradingViewWidget({
+  ticker,
+  compact = false,
+  className = "",
+}: {
+  ticker: string;
+  compact?: boolean;
+  className?: string;
+}) {
   const ref = useRef<HTMLDivElement>(null);
-  const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
+  const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
   useEffect(() => {
     if (!ref.current) return;
     ref.current.innerHTML = "";
@@ -27,13 +36,8 @@ export function TradingViewWidget({ ticker, compact = false }: { ticker: string;
   }, [ticker, containerId]);
 
   return (
-    <div className="card p-2">
-      <div
-        className={`tradingview-widget-container mx-auto w-full ${
-          compact ? "h-[640px] max-w-[760px]" : "h-[760px] max-w-[1040px]"
-        }`}
-        ref={ref}
-      >
+    <div className={`card p-2 ${className}`}>
+      <div className={`tradingview-widget-container w-full ${compact ? "h-[360px] md:h-[420px]" : "h-[520px] md:h-[640px]"}`} ref={ref}>
         <div id={containerId} className="h-full" />
       </div>
     </div>
