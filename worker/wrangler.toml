@@ -11,7 +11,7 @@ TRADINGVIEW_WIDGET_ENABLED = "true"
 [[d1_databases]]
 binding = "DB"
 database_name = "market_command"
-database_id = "local-market-command"
+database_id = "30528f34-b249-4d93-9b18-1d60a36df85d"
 
 [triggers]
 crons = ["15 22 * * 1-5"]

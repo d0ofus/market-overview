@@ -33,18 +33,22 @@ app.get("/api/status", async (c) => {
     "SELECT id, name, timezone, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
   ).first<{ id: string; name: string; timezone: string; eodRunTimeLabel: string }>();
   const latest = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC LIMIT 1",
+    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
     .bind(config?.id ?? "default")
-    .first();
+    .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
+
+  const normalizedLastUpdated = latest?.generatedAt ?? latest?.generated_at ?? null;
+  const normalizedAsOf = latest?.asOfDate ?? latest?.as_of_date ?? null;
+  const normalizedProvider = latest?.providerLabel ?? latest?.provider_label ?? null;
 
   return c.json({
     configId: config?.id ?? "default",
     timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "America/New_York",
     autoRefreshLabel: config?.eodRunTimeLabel ?? "22:15 ET",
-    lastUpdated: latest?.generatedAt ?? null,
-    asOfDate: latest?.asOfDate ?? null,
-    providerLabel: latest?.providerLabel ?? "Alpaca (IEX Delayed Daily Bars)",
+    lastUpdated: normalizedLastUpdated,
+    asOfDate: normalizedAsOf,
+    providerLabel: normalizedProvider ?? "Alpaca (IEX Delayed Daily Bars)",
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
   });
 });
