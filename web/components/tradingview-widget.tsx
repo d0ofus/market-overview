@@ -14,6 +14,7 @@ export function TradingViewWidget({
   const ref = useRef<HTMLDivElement>(null);
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
+  const standardizedSize = compact ? "h-[520px] md:h-[620px]" : "h-[520px] md:h-[620px]";
   useEffect(() => {
     if (!ref.current) return;
     ref.current.innerHTML = "";
@@ -37,7 +38,10 @@ export function TradingViewWidget({
 
   return (
     <div className={`card p-2 ${className}`}>
-      <div className={`tradingview-widget-container w-full ${compact ? "h-[360px] md:h-[420px]" : "h-[520px] md:h-[640px]"}`} ref={ref}>
+      <div
+        className={`tradingview-widget-container mx-auto w-full max-w-[980px] ${standardizedSize}`}
+        ref={ref}
+      >
         <div id={containerId} className="h-full" />
       </div>
     </div>
