@@ -45,8 +45,8 @@ export default async function ThirteenFPage() {
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-900/60">
-                  <tr>
-                    {["Ticker", "Issuer", "Weight", "Value"].map((h) => (
+              <tr>
+                    {["Symbol", "Issuer", "Weight", "Value", "CUSIP"].map((h) => (
                       <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
                         {h}
                       </th>
@@ -55,11 +55,12 @@ export default async function ThirteenFPage() {
                 </thead>
                 <tbody>
                   {data.latestHoldings.slice(0, 10).map((h: any) => (
-                    <tr key={h.ticker} className="border-t border-borderSoft/60">
-                      <td className="px-3 py-2 font-semibold text-accent">{h.ticker}</td>
+                    <tr key={`${h.ticker ?? "NA"}:${h.issuerName}`} className="border-t border-borderSoft/60">
+                      <td className="px-3 py-2 font-semibold text-accent">{h.ticker ?? "-"}</td>
                       <td className="px-3 py-2 text-slate-300">{h.issuerName}</td>
                       <td className="px-3 py-2 text-slate-300">{h.weightPct?.toFixed(2)}%</td>
                       <td className="px-3 py-2 text-slate-300">{money(h.valueUsd)}</td>
+                      <td className="px-3 py-2 text-slate-300">{h.cusip ?? "-"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -75,7 +76,7 @@ export default async function ThirteenFPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-slate-900/60">
               <tr>
-                {["Ticker", "Issuer", "Weight", "Value"].map((h) => (
+                {["Symbol", "Issuer", "Weight", "Value", "Manager", "CUSIP"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
                     {h}
                   </th>
@@ -85,10 +86,12 @@ export default async function ThirteenFPage() {
             <tbody>
               {overview.topHoldings.slice(0, 20).map((h: any, idx: number) => (
                 <tr key={`${h.reportId}:${h.ticker}:${idx}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2 font-semibold text-accent">{h.ticker}</td>
+                  <td className="px-3 py-2 font-semibold text-accent">{h.ticker ?? "-"}</td>
                   <td className="px-3 py-2 text-slate-300">{h.issuerName}</td>
                   <td className="px-3 py-2 text-slate-300">{h.weightPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-slate-300">{money(h.valueUsd)}</td>
+                  <td className="px-3 py-2 text-slate-300">{h.managerName ?? "-"}</td>
+                  <td className="px-3 py-2 text-slate-300">{h.cusip ?? "-"}</td>
                 </tr>
               ))}
             </tbody>

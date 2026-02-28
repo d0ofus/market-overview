@@ -12,6 +12,7 @@ export function AdminBuilder() {
   const [tickerInput, setTickerInput] = useState<Record<string, string>>({});
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [newGroupTitle, setNewGroupTitle] = useState<Record<string, string>>({});
+  const [tickerErrors, setTickerErrors] = useState<Record<string, string | null>>({});
 
   const load = async () => {
     const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
@@ -31,14 +32,27 @@ export function AdminBuilder() {
       .split(",")
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
+    setTickerErrors((s) => ({ ...s, [groupId]: null }));
+    const failures: string[] = [];
     for (const t of list) {
-      await adminFetch("/api/admin/group/" + groupId + "/items", {
-        method: "POST",
-        body: JSON.stringify({ ticker: t, tags: [] }),
-      });
+      try {
+        await adminFetch("/api/admin/group/" + groupId + "/items", {
+          method: "POST",
+          body: JSON.stringify({ ticker: t, tags: [] }),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "unknown error";
+        failures.push(`${t} (${msg})`);
+      }
     }
     setTickerInput((s) => ({ ...s, [groupId]: "" }));
     await load();
+    if (failures.length > 0) {
+      setTickerErrors((s) => ({
+        ...s,
+        [groupId]: `Could not add: ${failures.join(" | ")}`,
+      }));
+    }
   };
 
   const removeItem = async (itemId: string) => {
@@ -170,6 +184,9 @@ export function AdminBuilder() {
                     Add
                   </button>
                 </div>
+                {tickerErrors[group.id] && (
+                  <p className="mb-2 text-xs text-red-300">{tickerErrors[group.id]}</p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   {group.items.map((item, ii) => (
                     <span key={item.id} className="rounded bg-panelSoft px-2 py-1 text-xs">

@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2025-01-15"
 
 [vars]
-APP_TIMEZONE = "America/New_York"
+APP_TIMEZONE = "Australia/Melbourne"
 DATA_PROVIDER = "alpaca"
 ALPACA_FEED = "iex"
 TRADINGVIEW_WIDGET_ENABLED = "true"

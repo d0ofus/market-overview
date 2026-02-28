@@ -5,6 +5,8 @@ import type { Env } from "./types";
 import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
 import { getProvider } from "./provider";
+import { resolveTickerMeta } from "./symbol-resolver";
+import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -44,7 +46,7 @@ app.get("/api/status", async (c) => {
 
   return c.json({
     configId: config?.id ?? "default",
-    timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "America/New_York",
+    timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "Australia/Melbourne",
     autoRefreshLabel: config?.eodRunTimeLabel ?? "22:15 ET",
     lastUpdated: normalizedLastUpdated,
     asOfDate: normalizedAsOf,
@@ -73,18 +75,73 @@ app.get("/api/breadth", async (c) => {
 });
 
 app.get("/api/13f/overview", async (c) => {
+  try {
+    const snapshots = (await Promise.all(MANAGER_DEFS.map((m) => fetchSec13fSnapshot(m)))).filter(Boolean);
+    if (snapshots.length > 0) {
+      const topHoldings = snapshots
+        .flatMap((s) =>
+          s!.holdings.slice(0, 20).map((h) => ({
+            managerId: s!.id,
+            managerName: s!.name,
+            ticker: h.ticker,
+            issuerName: h.issuerName,
+            valueUsd: h.valueUsd,
+            weightPct: h.weightPct,
+            cusip: h.cusip,
+            reportQuarter: s!.reportQuarter,
+          })),
+        )
+        .sort((a, b) => b.valueUsd - a.valueUsd)
+        .slice(0, 40);
+      const managers = snapshots.map((s) => ({
+        id: s!.id,
+        name: s!.name,
+        cik: s!.cik,
+        reportQuarter: s!.reportQuarter,
+        filedDate: s!.filedDate,
+        totalValueUsd: s!.totalValueUsd,
+        totalHoldingsCount: s!.totalHoldingsCount,
+      }));
+      return c.json({ source: "sec-live", managers, topHoldings });
+    }
+  } catch (error) {
+    console.error("13f sec-live overview failed", error);
+  }
   const managers = await c.env.DB.prepare(
     "SELECT m.id, m.name, m.cik, m.aum_usd as aumUsd, r.report_quarter as reportQuarter, r.filed_date as filedDate, r.total_value_usd as totalValueUsd, r.total_holdings_count as totalHoldingsCount FROM filings_13f_managers m LEFT JOIN filings_13f_reports r ON r.id = (SELECT id FROM filings_13f_reports rr WHERE rr.manager_id = m.id ORDER BY rr.report_quarter DESC LIMIT 1) ORDER BY m.aum_usd DESC",
   ).all();
-
   const topHoldings = await c.env.DB.prepare(
     "SELECT h.report_id as reportId, h.ticker, h.issuer_name as issuerName, h.value_usd as valueUsd, h.weight_pct as weightPct FROM filings_13f_holdings h WHERE h.report_id IN (SELECT id FROM filings_13f_reports WHERE report_quarter = (SELECT MAX(report_quarter) FROM filings_13f_reports)) ORDER BY h.value_usd DESC LIMIT 25",
   ).all();
-  return c.json({ managers: managers.results ?? [], topHoldings: topHoldings.results ?? [] });
+  return c.json({ source: "seed-fallback", managers: managers.results ?? [], topHoldings: topHoldings.results ?? [] });
 });
 
 app.get("/api/13f/manager/:id", async (c) => {
   const id = c.req.param("id");
+  const managerDef = MANAGER_DEFS.find((m) => m.id === id);
+  if (managerDef) {
+    try {
+      const snapshot = await fetchSec13fSnapshot(managerDef);
+      if (snapshot) {
+        return c.json({
+          source: "sec-live",
+          manager: { id: snapshot.id, name: snapshot.name, cik: snapshot.cik },
+          reports: [
+            {
+              id: `${snapshot.id}:${snapshot.reportQuarter}`,
+              reportQuarter: snapshot.reportQuarter,
+              filedDate: snapshot.filedDate,
+              totalValueUsd: snapshot.totalValueUsd,
+              totalHoldingsCount: snapshot.totalHoldingsCount,
+            },
+          ],
+          latestHoldings: snapshot.holdings.slice(0, 80),
+        });
+      }
+    } catch (error) {
+      console.error("13f sec-live manager failed", error);
+    }
+  }
   const manager = await c.env.DB.prepare("SELECT id, name, cik, aum_usd as aumUsd FROM filings_13f_managers WHERE id = ?")
     .bind(id)
     .first();
@@ -322,16 +379,25 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
   const payload = itemCreateSchema.parse(await c.req.json());
+  const resolved = await resolveTickerMeta(payload.ticker, c.env);
+  if (!resolved) return c.json({ error: `Ticker '${payload.ticker}' was not found in supported data sources.` }, 400);
   const orderRow = await c.env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS nextOrder FROM dashboard_items WHERE group_id = ?")
     .bind(groupId)
     .first<{ nextOrder: number }>();
   await c.env.DB.batch([
     c.env.DB.prepare(
-      "INSERT OR IGNORE INTO symbols (ticker, name, asset_class) VALUES (?, ?, 'equity')",
-    ).bind(payload.ticker, payload.ticker),
+      "INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class) VALUES (?, ?, ?, ?)",
+    ).bind(resolved.ticker, resolved.name, resolved.exchange, resolved.assetClass),
     c.env.DB.prepare(
       "INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json) VALUES (?, ?, ?, ?, ?, 1, ?)",
-    ).bind(crypto.randomUUID(), groupId, orderRow?.nextOrder ?? 1, payload.ticker, payload.displayName ?? null, JSON.stringify(payload.tags)),
+    ).bind(
+      crypto.randomUUID(),
+      groupId,
+      orderRow?.nextOrder ?? 1,
+      resolved.ticker,
+      payload.displayName ?? resolved.name,
+      JSON.stringify(payload.tags),
+    ),
   ]);
   await upsertAudit(c.env, "default", "ITEM_ADD", { groupId, payload });
   await refreshSnapshotSafe(c.env);

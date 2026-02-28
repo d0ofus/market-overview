@@ -88,7 +88,7 @@ Worker (`worker/wrangler.toml` vars and secrets):
 - `ADMIN_SECRET` (secret; required for admin auth in non-dev)
 - `DATA_PROVIDER` (`alpaca`, `stooq`, `synthetic`, `csv`)
 - `ALPACA_FEED` (`iex` default, optional)
-- `APP_TIMEZONE` (default `America/New_York`)
+- `APP_TIMEZONE` (default `Australia/Melbourne`)
 - `TRADINGVIEW_WIDGET_ENABLED` (`true`/`false`)
 
 Worker secrets for Alpaca:
@@ -137,6 +137,7 @@ wrangler d1 create market_command
 wrangler d1 execute market_command --remote --file=worker/migrations/0001_init.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0002_seed.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0003_trackers.sql
+wrangler d1 execute market_command --remote --file=worker/migrations/0005_market_leaders_timezone.sql
 ```
 
 4. Set worker secrets:

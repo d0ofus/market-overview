@@ -4,6 +4,8 @@ out
 .wrangler
 .env
 .env.local
+.vercel
+web/.vercel
 worker/.dev.vars
 coverage
 dist

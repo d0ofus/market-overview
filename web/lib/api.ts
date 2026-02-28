@@ -11,7 +11,16 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
     cache: "no-store",
   });
-  if (!res.ok) throw new Error(`API ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`API ${path} failed: ${res.status}${detail}`);
+  }
   return (await res.json()) as T;
 }
 

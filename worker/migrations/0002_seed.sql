@@ -1,5 +1,5 @@
 INSERT INTO dashboard_configs (id, name, is_default, timezone, eod_run_time_label)
-VALUES ('default', 'Default Swing Dashboard', 1, 'America/New_York', '22:15 ET');
+VALUES ('default', 'Default Swing Dashboard', 1, 'Australia/Melbourne', '08:15 AEST (prev US close)');
 
 INSERT INTO dashboard_sections (id, config_id, sort_order, title, description, is_collapsible, default_collapsed) VALUES
 ('sec-macro', 'default', 1, '01 Macro Overview', 'Macro risk regime and cross-asset leadership', 1, 0),
@@ -17,6 +17,7 @@ INSERT INTO dashboard_groups (id, section_id, sort_order, title, data_type, rank
 ('g-sector-etf', 'sec-equities', 2, 'Sector ETFs', 'equities', '1W', 1, 1),
 ('g-thematic', 'sec-equities', 3, 'Thematic ETFs', 'equities', '5D', 1, 1),
 ('g-country', 'sec-equities', 4, 'Country ETFs', 'equities', '1W', 1, 0),
+('g-market-leaders', 'sec-equities', 5, 'Market Leaders (FAANG)', 'equities', '1W', 1, 1),
 ('g-breadth', 'sec-breadth', 1, 'Market Internals Dashboard', 'breadth', '1D', 0, 0);
 
 INSERT INTO dashboard_columns (group_id, columns_json) VALUES
@@ -28,7 +29,8 @@ INSERT INTO dashboard_columns (group_id, columns_json) VALUES
 ('g-major-etf', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
 ('g-sector-etf', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]'),
 ('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline"]'),
-('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]');
+('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
+('g-market-leaders', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]');
 
 INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES
 ('SPY', 'SPDR S&P 500 ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Blend'),
@@ -58,7 +60,13 @@ INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALU
 ('EWJ', 'iShares MSCI Japan ETF', 'NYSEARCA', 'etf', 'International', 'Country'),
 ('EEM', 'iShares MSCI Emerging Markets ETF', 'NYSEARCA', 'etf', 'International', 'Country'),
 ('VGK', 'Vanguard FTSE Europe ETF', 'NYSEARCA', 'etf', 'International', 'Country'),
-('INDA', 'iShares MSCI India ETF', 'NYSEARCA', 'etf', 'International', 'Country');
+('INDA', 'iShares MSCI India ETF', 'NYSEARCA', 'etf', 'International', 'Country'),
+('AAPL', 'Apple Inc', 'NASDAQ', 'equity', 'Technology', 'Consumer Electronics'),
+('AMZN', 'Amazon.com Inc', 'NASDAQ', 'equity', 'Consumer Discretionary', 'Internet Retail'),
+('NFLX', 'Netflix Inc', 'NASDAQ', 'equity', 'Communication Services', 'Streaming'),
+('META', 'Meta Platforms Inc', 'NASDAQ', 'equity', 'Communication Services', 'Internet Content'),
+('GOOGL', 'Alphabet Inc', 'NASDAQ', 'equity', 'Communication Services', 'Internet Content'),
+('MSFT', 'Microsoft Corp', 'NASDAQ', 'equity', 'Technology', 'Software');
 
 INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES
 ('i1','g-us-index',1,'SPY',NULL,1,'[]',NULL),('i2','g-us-index',2,'QQQ',NULL,1,'[]',NULL),('i3','g-us-index',3,'IWM',NULL,1,'[]',NULL),('i4','g-us-index',4,'DIA',NULL,1,'[]',NULL),
@@ -71,7 +79,8 @@ INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, ena
 ('i29','g-thematic',1,'ARKK',NULL,1,'["high-beta"]','["TSLA","ROKU","COIN","CRSP","PATH"]'),
 ('i30','g-thematic',2,'SMH',NULL,1,'["semis"]','["NVDA","TSM","AVGO","AMD","ASML"]'),
 ('i31','g-thematic',3,'IYR',NULL,1,'["rates-sensitive"]','["PLD","AMT","EQIX","SPG","O"]'),
-('i32','g-country',1,'EEM',NULL,1,'[]',NULL),('i33','g-country',2,'EWJ',NULL,1,'[]',NULL),('i34','g-country',3,'VGK',NULL,1,'[]',NULL),('i35','g-country',4,'INDA',NULL,1,'[]',NULL),('i36','g-country',5,'KWEB',NULL,1,'[]',NULL);
+('i32','g-country',1,'EEM',NULL,1,'[]',NULL),('i33','g-country',2,'EWJ',NULL,1,'[]',NULL),('i34','g-country',3,'VGK',NULL,1,'[]',NULL),('i35','g-country',4,'INDA',NULL,1,'[]',NULL),('i36','g-country',5,'KWEB',NULL,1,'[]',NULL),
+('i37','g-market-leaders',1,'META',NULL,1,'[]',NULL),('i38','g-market-leaders',2,'AAPL',NULL,1,'[]',NULL),('i39','g-market-leaders',3,'AMZN',NULL,1,'[]',NULL),('i40','g-market-leaders',4,'NFLX',NULL,1,'[]',NULL),('i41','g-market-leaders',5,'GOOGL',NULL,1,'[]',NULL),('i42','g-market-leaders',6,'MSFT',NULL,1,'[]',NULL);
 
 INSERT INTO universes (id, name) VALUES ('sp500-lite', 'S&P 500 Lite Universe');
 INSERT INTO universe_symbols (universe_id, ticker) VALUES
