@@ -1,0 +1,7 @@
+ADMIN_SECRET=change-me
+DATA_PROVIDER=alpaca
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_API_SECRET=your_alpaca_secret
+ALPACA_FEED=iex
+APP_TIMEZONE=America/New_York
+TRADINGVIEW_WIDGET_ENABLED=true

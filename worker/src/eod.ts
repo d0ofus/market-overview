@@ -21,7 +21,17 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
   const asOfDate = toISODate(previousWeekday(today));
   const config = await loadConfig(env, configId);
-  const provider = getProvider(env);
+  let providerLabel = "Stored Daily Bars";
+  const provider = (() => {
+    try {
+      const p = getProvider(env);
+      providerLabel = p.label;
+      return p;
+    } catch (error) {
+      console.error("provider init failed, using stored bars only", error);
+      return null;
+    }
+  })();
 
   const tickers = Array.from(
     new Set(
@@ -35,14 +45,21 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
 
   const endDate = asOfDate;
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 420 * 86400_000));
-  const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
-  if (freshBars.length > 0) {
-    const stmts = freshBars.map((b) =>
-      env.DB.prepare(
-        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(b.ticker, b.date, b.o, b.h, b.l, b.c, b.volume),
-    );
-    await env.DB.batch(stmts);
+  if (provider) {
+    try {
+      const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
+      if (freshBars.length > 0) {
+        const stmts = freshBars.map((b) =>
+          env.DB.prepare(
+            "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ).bind(b.ticker, b.date, b.o, b.h, b.l, b.c, b.volume),
+        );
+        await env.DB.batch(stmts);
+      }
+    } catch (error) {
+      providerLabel = `${provider.label} (refresh failed; stored bars used)`;
+      console.error("provider refresh failed", error);
+    }
   }
 
   const barRows = await env.DB.prepare(
@@ -50,6 +67,9 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   )
     .bind(asOfDate)
     .all<{ ticker: string; date: string; c: number }>();
+
+  const symbols = await env.DB.prepare("SELECT ticker, name FROM symbols").all<{ ticker: string; name: string }>();
+  const symbolNameMap = new Map((symbols.results ?? []).map((s) => [s.ticker, s.name]));
 
   const barsByTicker = new Map<string, { dates: string[]; closes: number[] }>();
   for (const row of barRows.results ?? []) {
@@ -63,7 +83,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   await env.DB.prepare(
     "INSERT OR REPLACE INTO snapshots_meta (id, config_id, as_of_date, generated_at, provider_label) VALUES (?, ?, ?, ?, ?)",
   )
-    .bind(snapshotId, configId, asOfDate, new Date().toISOString(), provider.label)
+    .bind(snapshotId, configId, asOfDate, new Date().toISOString(), providerLabel)
     .run();
 
   const rowInserts = [];
@@ -76,7 +96,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
           const metrics = computeMetrics(bars?.dates ?? [], bars?.closes ?? []);
           return {
             ticker: item.ticker,
-            displayName: item.displayName,
+            displayName: item.displayName ?? symbolNameMap.get(item.ticker) ?? item.ticker,
             holdings: item.holdings,
             ...metrics,
             rankKey: rankValue(metrics, group.rankingWindowDefault),

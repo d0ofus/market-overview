@@ -14,6 +14,9 @@ This is a research tool only. It is not investment advice.
   - `02 Equities Overview`
   - `03 Market Breadth & Sentiment`
   - `04 Position Sizing Calculator`
+- New research modules:
+  - `13F Tracker` (major hedge fund holdings snapshots)
+  - `Key Sector Tracker` (trend list + calendar + narratives + linked stocks)
 - Top status bar: last updated timestamp, auto-refresh label, timezone, provider label
 - Ranked tables with configurable ranking windows (`1D`, `5D`, `1W`, `YTD`, `52W`)
 - Per-row trend sparklines (last ~60 closes)
@@ -41,7 +44,7 @@ This is a research tool only. It is not investment advice.
   - `scheduled()` cron handler for EOD run
 - Web:
   - Sidebar navigation
-  - Home (macro/equities), breadth page, tools page, admin page
+  - Home (overview), breadth page, tools page, 13F tracker, sector tracker, admin page
 
 ## Data Provider
 
@@ -49,7 +52,7 @@ Provider interface (worker) is pluggable:
 - `getDailyBars(tickers[], startDate, endDate)`
 - `getQuoteSnapshot(tickers[])` (optional)
 
-Current V1 defaults to synthetic/seeded EOD bars for free-first local startup.  
+Current V1 defaults to Alpaca delayed IEX daily bars (API key + secret required), with stored/seeded bars fallback if refresh fails.  
 CSV fallback upload endpoint is available:
 - `POST /api/admin/upload-bars`
 
@@ -65,7 +68,12 @@ Prereqs:
 npm install
 ```
 
-2. Start both apps:
+2. Configure local worker env:
+```bash
+copy worker\\.dev.vars.example worker\\.dev.vars
+```
+
+3. Start both apps:
 ```bash
 npm run dev
 ```
@@ -78,9 +86,14 @@ npm run dev
 
 Worker (`worker/wrangler.toml` vars and secrets):
 - `ADMIN_SECRET` (secret; required for admin auth in non-dev)
-- `DATA_PROVIDER` (`synthetic`, `csv`, or custom provider key)
+- `DATA_PROVIDER` (`alpaca`, `stooq`, `synthetic`, `csv`)
+- `ALPACA_FEED` (`iex` default, optional)
 - `APP_TIMEZONE` (default `America/New_York`)
 - `TRADINGVIEW_WIDGET_ENABLED` (`true`/`false`)
+
+Worker secrets for Alpaca:
+- `ALPACA_API_KEY`
+- `ALPACA_API_SECRET`
 
 Web (`web/.env.local`):
 - `NEXT_PUBLIC_API_BASE=http://127.0.0.1:8787`
@@ -90,6 +103,7 @@ Web (`web/.env.local`):
 
 - Schema: `worker/migrations/0001_init.sql`
 - Seed: `worker/migrations/0002_seed.sql`
+- Tracker schema + sample seed: `worker/migrations/0003_trackers.sql`
 
 Seed script:
 ```bash
@@ -122,11 +136,14 @@ wrangler d1 create market_command
 ```bash
 wrangler d1 execute market_command --remote --file=worker/migrations/0001_init.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0002_seed.sql
+wrangler d1 execute market_command --remote --file=worker/migrations/0003_trackers.sql
 ```
 
 4. Set worker secrets:
 ```bash
 wrangler secret put ADMIN_SECRET
+wrangler secret put ALPACA_API_KEY
+wrangler secret put ALPACA_API_SECRET
 ```
 
 5. Deploy worker:
@@ -156,5 +173,5 @@ npm run test -w worker
 ## Compliance Notes
 
 - TradingView usage is embed-widget only. No TradingView scraping.
-- Designed as low-cost/free-first (D1 + Worker + synthetic/CSV path).
-- Include your own provider keys only if/when upgrading from synthetic data.
+- Designed as low-cost/free-first (D1 + Worker + Alpaca free IEX delayed feed path).
+- Include provider keys for production-quality refresh (Alpaca recommended in this repo).

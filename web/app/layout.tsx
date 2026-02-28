@@ -3,7 +3,7 @@ import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 
 export const metadata: Metadata = {
-  title: "Market Command Centre",
+  title: "Market Command Centre | Overview",
   description: "EOD-first swing trading research dashboard",
 };
 

@@ -4,6 +4,8 @@ out
 .wrangler
 .env
 .env.local
+worker/.dev.vars
 coverage
 dist
 *.log
+*.tsbuildinfo

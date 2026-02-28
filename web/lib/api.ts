@@ -41,13 +41,40 @@ export function getTicker(ticker: string) {
   }>(`/api/ticker/${ticker}`);
 }
 
+export function get13fOverview() {
+  return getJson<{ managers: any[]; topHoldings: any[] }>("/api/13f/overview");
+}
+
+export function get13fManager(id: string) {
+  return getJson<{ manager: any; reports: any[]; latestHoldings: any[] }>(`/api/13f/manager/${id}`);
+}
+
+export function getSectorTrending(days = 30) {
+  return getJson<{ days: number; sectors: any[] }>(`/api/sectors/trending?days=${days}`);
+}
+
+export function getSectorEntries() {
+  return getJson<{ rows: any[] }>("/api/sectors/entries");
+}
+
+export function getSectorCalendar(month: string) {
+  return getJson<{ month: string; rows: any[] }>(`/api/sectors/calendar?month=${month}`);
+}
+
+export function getSectorNarratives() {
+  return getJson<{ rows: any[] }>("/api/sectors/narratives");
+}
+
+export function getSectorSymbolOptions(sector?: string) {
+  return getJson<{ rows: any[] }>(`/api/sectors/symbol-options${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`);
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
+  const headers: Record<string, string> = {};
+  if (secret) headers.Authorization = `Bearer ${secret}`;
   return getJson<T>(path, {
     ...init,
-    headers: {
-      Authorization: secret ? `Bearer ${secret}` : "",
-      ...(init?.headers ?? {}),
-    },
+    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
   });
 }

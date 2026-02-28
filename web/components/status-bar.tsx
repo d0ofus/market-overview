@@ -8,14 +8,14 @@ type Props = {
 
 export function StatusBar({ asOfDate, lastUpdated, timezone, autoRefreshLabel, providerLabel }: Props) {
   return (
-    <div className="card mb-4 flex flex-wrap items-center gap-4 px-4 py-3 text-sm">
-      <span>
+    <div className="card mb-4 flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
+      <span className="rounded-xl bg-slate-800/70 px-2 py-1">
         Last updated: <b>{lastUpdated ? new Date(lastUpdated).toLocaleString() : "N/A"}</b>
       </span>
-      <span className="muted">As-of: {asOfDate ?? "N/A"}</span>
-      <span className="muted">Auto-refresh: {autoRefreshLabel}</span>
-      <span className="muted">TZ: {timezone}</span>
-      <span className="rounded bg-accent/10 px-2 py-1 text-accent">Source: {providerLabel}</span>
+      <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">As-of: {asOfDate ?? "N/A"}</span>
+      <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Auto-refresh: {autoRefreshLabel}</span>
+      <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">TZ: {timezone}</span>
+      <span className="rounded-xl bg-accent/15 px-2 py-1 text-accent">Source: {providerLabel}</span>
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { adminFetch } from "@/lib/api";
 import type { SnapshotResponse } from "@/types/dashboard";
 
 const rankingOptions = ["1D", "5D", "1W", "YTD", "52W"] as const;
-const allColumns = ["ticker", "price", "1D", "1W", "5D", "YTD", "pctFrom52WHigh", "sparkline"];
+const allColumns = ["ticker", "name", "price", "1D", "1W", "5D", "YTD", "pctFrom52WHigh", "sparkline"];
 
 export function AdminBuilder() {
   const [data, setData] = useState<SnapshotResponse["config"] | null>(null);
@@ -73,7 +73,7 @@ export function AdminBuilder() {
 
   return (
     <div className="space-y-4">
-      <div className="card flex gap-2 p-3">
+      <div className="card flex flex-wrap gap-2 p-3">
         <input className="flex-1 rounded border border-borderSoft bg-panelSoft px-2 py-1" value={newSectionTitle} onChange={(e) => setNewSectionTitle(e.target.value)} placeholder="New section title" />
         <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={addSection}>
           Add section

@@ -2,6 +2,9 @@ export type Env = {
   DB: D1Database;
   ADMIN_SECRET?: string;
   DATA_PROVIDER?: string;
+  ALPACA_API_KEY?: string;
+  ALPACA_API_SECRET?: string;
+  ALPACA_FEED?: string;
   APP_TIMEZONE?: string;
   TRADINGVIEW_WIDGET_ENABLED?: string;
 };

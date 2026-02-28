@@ -4,6 +4,7 @@ import { computeAndStoreSnapshot, loadSnapshot } from "./eod";
 import type { Env } from "./types";
 import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
+import { getProvider } from "./provider";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -16,6 +17,14 @@ const isAuthed = (req: Request, env: Env): boolean => {
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
 };
+
+async function refreshSnapshotSafe(env: Env): Promise<void> {
+  try {
+    await computeAndStoreSnapshot(env, undefined, "default");
+  } catch (error) {
+    console.error("snapshot refresh failed after admin mutation", error);
+  }
+}
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 
@@ -35,8 +44,8 @@ app.get("/api/status", async (c) => {
     autoRefreshLabel: config?.eodRunTimeLabel ?? "22:15 ET",
     lastUpdated: latest?.generatedAt ?? null,
     asOfDate: latest?.asOfDate ?? null,
-    providerLabel: latest?.providerLabel ?? "Synthetic Seeded EOD",
-    dataProvider: c.env.DATA_PROVIDER ?? "synthetic",
+    providerLabel: latest?.providerLabel ?? "Alpaca (IEX Delayed Daily Bars)",
+    dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
   });
 });
 
@@ -57,6 +66,156 @@ app.get("/api/breadth", async (c) => {
     .bind(universeId, limit)
     .all();
   return c.json({ universeId, rows: (rows.results ?? []).reverse() });
+});
+
+app.get("/api/13f/overview", async (c) => {
+  const managers = await c.env.DB.prepare(
+    "SELECT m.id, m.name, m.cik, m.aum_usd as aumUsd, r.report_quarter as reportQuarter, r.filed_date as filedDate, r.total_value_usd as totalValueUsd, r.total_holdings_count as totalHoldingsCount FROM filings_13f_managers m LEFT JOIN filings_13f_reports r ON r.id = (SELECT id FROM filings_13f_reports rr WHERE rr.manager_id = m.id ORDER BY rr.report_quarter DESC LIMIT 1) ORDER BY m.aum_usd DESC",
+  ).all();
+
+  const topHoldings = await c.env.DB.prepare(
+    "SELECT h.report_id as reportId, h.ticker, h.issuer_name as issuerName, h.value_usd as valueUsd, h.weight_pct as weightPct FROM filings_13f_holdings h WHERE h.report_id IN (SELECT id FROM filings_13f_reports WHERE report_quarter = (SELECT MAX(report_quarter) FROM filings_13f_reports)) ORDER BY h.value_usd DESC LIMIT 25",
+  ).all();
+  return c.json({ managers: managers.results ?? [], topHoldings: topHoldings.results ?? [] });
+});
+
+app.get("/api/13f/manager/:id", async (c) => {
+  const id = c.req.param("id");
+  const manager = await c.env.DB.prepare("SELECT id, name, cik, aum_usd as aumUsd FROM filings_13f_managers WHERE id = ?")
+    .bind(id)
+    .first();
+  if (!manager) return c.json({ error: "Manager not found" }, 404);
+  const reports = await c.env.DB.prepare(
+    "SELECT id, report_quarter as reportQuarter, filed_date as filedDate, total_value_usd as totalValueUsd, total_holdings_count as totalHoldingsCount FROM filings_13f_reports WHERE manager_id = ? ORDER BY report_quarter DESC",
+  )
+    .bind(id)
+    .all();
+  const latestReport = (reports.results ?? [])[0];
+  const holdings = latestReport
+    ? await c.env.DB.prepare(
+        "SELECT ticker, issuer_name as issuerName, value_usd as valueUsd, shares, weight_pct as weightPct FROM filings_13f_holdings WHERE report_id = ? ORDER BY value_usd DESC LIMIT 50",
+      )
+        .bind((latestReport as { id: string }).id)
+        .all()
+    : { results: [] };
+  return c.json({ manager, reports: reports.results ?? [], latestHoldings: holdings.results ?? [] });
+});
+
+app.get("/api/sectors/trending", async (c) => {
+  const days = Math.max(5, Math.min(90, Number(c.req.query("days") ?? 30)));
+  const rows = await c.env.DB.prepare(
+    "SELECT s.sector, d.ticker, d.date, d.c FROM daily_bars d JOIN symbols s ON s.ticker = d.ticker WHERE s.sector IS NOT NULL AND d.date >= date('now', ?) ORDER BY s.sector, d.ticker, d.date",
+  )
+    .bind(`-${days + 7} day`)
+    .all<{ sector: string; ticker: string; date: string; c: number }>();
+
+  const bySector = new Map<string, Map<string, number[]>>();
+  for (const r of rows.results ?? []) {
+    const sectorMap = bySector.get(r.sector) ?? new Map<string, number[]>();
+    const arr = sectorMap.get(r.ticker) ?? [];
+    arr.push(r.c);
+    sectorMap.set(r.ticker, arr);
+    bySector.set(r.sector, sectorMap);
+  }
+
+  const out = [...bySector.entries()].map(([sector, tickers]) => {
+    const returns = [...tickers.values()]
+      .filter((v) => v.length > 6)
+      .map((v) => ((v[v.length - 1] - v[v.length - 6]) / v[v.length - 6]) * 100);
+    const score = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+    return { sector, trend5d: score, symbolCount: tickers.size };
+  });
+  out.sort((a, b) => b.trend5d - a.trend5d);
+  return c.json({ days, sectors: out });
+});
+
+app.get("/api/sectors/narratives", async (c) => {
+  const rows = await c.env.DB.prepare("SELECT id, title, description, created_at as createdAt FROM sector_narratives ORDER BY created_at DESC").all();
+  return c.json({ rows: rows.results ?? [] });
+});
+
+app.post("/api/sectors/narratives", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as { title: string; description?: string };
+  if (!body.title?.trim()) return c.json({ error: "title is required" }, 400);
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO sector_narratives (id, title, description) VALUES (?, ?, ?)")
+    .bind(id, body.title.trim(), body.description ?? null)
+    .run();
+  return c.json({ ok: true, id });
+});
+
+app.get("/api/sectors/symbol-options", async (c) => {
+  const sector = c.req.query("sector");
+  const rows = sector
+    ? await c.env.DB.prepare(
+        "SELECT ticker, name, sector, industry FROM symbols WHERE sector = ? ORDER BY ticker LIMIT 100",
+      )
+        .bind(sector)
+        .all()
+    : await c.env.DB.prepare(
+        "SELECT ticker, name, sector, industry FROM symbols ORDER BY ticker LIMIT 200",
+      ).all();
+  return c.json({ rows: rows.results ?? [] });
+});
+
+app.get("/api/sectors/entries", async (c) => {
+  const rows = await c.env.DB.prepare(
+    "SELECT e.id, e.sector_name as sectorName, e.event_date as eventDate, e.trend_score as trendScore, e.notes, e.narrative_id as narrativeId, n.title as narrativeTitle FROM sector_tracker_entries e LEFT JOIN sector_narratives n ON n.id = e.narrative_id ORDER BY e.event_date DESC",
+  ).all();
+  const links = await c.env.DB.prepare(
+    "SELECT es.entry_id as entryId, es.ticker, s.name FROM sector_tracker_entry_symbols es LEFT JOIN symbols s ON s.ticker = es.ticker ORDER BY es.ticker",
+  ).all<{ entryId: string; ticker: string; name: string | null }>();
+  const map = new Map<string, Array<{ ticker: string; name: string | null }>>();
+  for (const l of links.results ?? []) {
+    const arr = map.get(l.entryId) ?? [];
+    arr.push({ ticker: l.ticker, name: l.name });
+    map.set(l.entryId, arr);
+  }
+  return c.json({
+    rows: (rows.results ?? []).map((r: any) => ({
+      ...r,
+      symbols: map.get(r.id) ?? [],
+    })),
+  });
+});
+
+app.get("/api/sectors/calendar", async (c) => {
+  const month = c.req.query("month") ?? new Date().toISOString().slice(0, 7);
+  const rows = await c.env.DB.prepare(
+    "SELECT id, sector_name as sectorName, event_date as eventDate, trend_score as trendScore, notes FROM sector_tracker_entries WHERE substr(event_date, 1, 7) = ? ORDER BY event_date ASC",
+  )
+    .bind(month)
+    .all();
+  return c.json({ month, rows: rows.results ?? [] });
+});
+
+app.post("/api/sectors/entries", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as {
+    sectorName: string;
+    eventDate: string;
+    trendScore?: number;
+    notes?: string;
+    narrativeId?: string | null;
+    symbols?: string[];
+  };
+  if (!body.sectorName || !body.eventDate) return c.json({ error: "sectorName and eventDate are required" }, 400);
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    "INSERT INTO sector_tracker_entries (id, sector_name, event_date, trend_score, notes, narrative_id) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(id, body.sectorName, body.eventDate, body.trendScore ?? 0, body.notes ?? null, body.narrativeId ?? null)
+    .run();
+  const symbols = Array.from(new Set((body.symbols ?? []).map((s) => s.toUpperCase())));
+  if (symbols.length > 0) {
+    const stmts = symbols.map((ticker) =>
+      c.env.DB.prepare("INSERT OR IGNORE INTO sector_tracker_entry_symbols (entry_id, ticker) VALUES (?, ?)")
+        .bind(id, ticker),
+    );
+    await c.env.DB.batch(stmts);
+  }
+  return c.json({ ok: true, id });
 });
 
 app.get("/api/ticker/:ticker", async (c) => {
@@ -84,6 +243,40 @@ app.get("/api/admin/config", async (c) => {
   return c.json(config);
 });
 
+app.get("/api/admin/provider-check", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = (c.req.query("ticker") ?? "SPY").toUpperCase();
+  const latestBar = await c.env.DB.prepare(
+    "SELECT ticker, date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 1",
+  )
+    .bind(ticker)
+    .first<{ ticker: string; date: string; c: number }>();
+  let providerLabel = "unknown";
+  let providerSampleCount = 0;
+  let providerError: string | null = null;
+  try {
+    const provider = getProvider(c.env);
+    providerLabel = provider.label;
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 14 * 86400_000).toISOString().slice(0, 10);
+    const sample = await provider.getDailyBars([ticker], start, end);
+    providerSampleCount = sample.length;
+  } catch (error) {
+    providerError = error instanceof Error ? error.message : "Provider check failed";
+  }
+  const latestSnapshot = await c.env.DB.prepare(
+    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta ORDER BY generated_at DESC LIMIT 1",
+  ).first();
+  return c.json({
+    ticker,
+    latestBar,
+    latestSnapshot,
+    providerLabel,
+    providerSampleCount,
+    providerError,
+  });
+});
+
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
@@ -101,6 +294,7 @@ app.patch("/api/admin/config", async (c) => {
     .bind(payload.name, payload.timezone, payload.eodRunTimeLabel, payload.id)
     .run();
   await upsertAudit(c.env, payload.id, "CONFIG_PATCH", payload);
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -116,6 +310,7 @@ app.patch("/api/admin/group/:groupId", async (c) => {
       .bind(groupId, JSON.stringify(payload.columns)),
   ]);
   await upsertAudit(c.env, "default", "GROUP_PATCH", { groupId, payload });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -126,12 +321,16 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   const orderRow = await c.env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS nextOrder FROM dashboard_items WHERE group_id = ?")
     .bind(groupId)
     .first<{ nextOrder: number }>();
-  await c.env.DB.prepare(
-    "INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json) VALUES (?, ?, ?, ?, ?, 1, ?)",
-  )
-    .bind(crypto.randomUUID(), groupId, orderRow?.nextOrder ?? 1, payload.ticker, payload.displayName ?? null, JSON.stringify(payload.tags))
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO symbols (ticker, name, asset_class) VALUES (?, ?, 'equity')",
+    ).bind(payload.ticker, payload.ticker),
+    c.env.DB.prepare(
+      "INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json) VALUES (?, ?, ?, ?, ?, 1, ?)",
+    ).bind(crypto.randomUUID(), groupId, orderRow?.nextOrder ?? 1, payload.ticker, payload.displayName ?? null, JSON.stringify(payload.tags)),
+  ]);
   await upsertAudit(c.env, "default", "ITEM_ADD", { groupId, payload });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -151,6 +350,7 @@ app.post("/api/admin/section", async (c) => {
     .bind(id, configId, order?.nextOrder ?? 1, body.title, body.description ?? null)
     .run();
   await upsertAudit(c.env, configId, "SECTION_ADD", { id, ...body });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true, id });
 });
 
@@ -164,6 +364,7 @@ app.delete("/api/admin/section/:sectionId", async (c) => {
     c.env.DB.prepare("DELETE FROM dashboard_sections WHERE id = ?").bind(sectionId),
   ]);
   await upsertAudit(c.env, "default", "SECTION_DELETE", { sectionId });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -182,9 +383,10 @@ app.post("/api/admin/section/:sectionId/group", async (c) => {
       "INSERT INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES (?, ?, ?, ?, ?, '1W', 1, 0)",
     ).bind(id, sectionId, order?.nextOrder ?? 1, body.title, body.dataType ?? "custom"),
     c.env.DB.prepare("INSERT INTO dashboard_columns (group_id, columns_json) VALUES (?, ?)")
-      .bind(id, JSON.stringify(["ticker", "price", "1D", "1W", "YTD", "sparkline"])),
+      .bind(id, JSON.stringify(["ticker", "name", "price", "1D", "1W", "YTD", "sparkline"])),
   ]);
   await upsertAudit(c.env, "default", "GROUP_ADD", { sectionId, id, ...body });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true, id });
 });
 
@@ -197,6 +399,7 @@ app.delete("/api/admin/group/:groupId", async (c) => {
     c.env.DB.prepare("DELETE FROM dashboard_groups WHERE id = ?").bind(groupId),
   ]);
   await upsertAudit(c.env, "default", "GROUP_DELETE", { groupId });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -205,6 +408,7 @@ app.delete("/api/admin/item/:itemId", async (c) => {
   const itemId = c.req.param("itemId");
   await c.env.DB.prepare("DELETE FROM dashboard_items WHERE id = ?").bind(itemId).run();
   await upsertAudit(c.env, "default", "ITEM_DELETE", { itemId });
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 
@@ -219,6 +423,7 @@ app.post("/api/admin/upload-bars", async (c) => {
     ).bind(r.ticker.toUpperCase(), r.date, r.o, r.h, r.l, r.c, r.volume ?? 0),
   );
   await c.env.DB.batch(statements);
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true, upserted: rows.length });
 });
 
@@ -231,6 +436,7 @@ app.post("/api/admin/reorder", async (c) => {
   );
   if (stmts.length > 0) await c.env.DB.batch(stmts);
   await upsertAudit(c.env, "default", "REORDER", body);
+  await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });
 

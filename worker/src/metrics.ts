@@ -5,15 +5,7 @@ const pct = (now: number, then: number): number => {
   return ((now - then) / then) * 100;
 };
 
-const clampSparkline = (values: number[], maxPoints = 60): number[] => {
-  if (values.length <= maxPoints) return values;
-  const step = values.length / maxPoints;
-  const out: number[] = [];
-  for (let i = 0; i < maxPoints; i += 1) {
-    out.push(values[Math.floor(i * step)]);
-  }
-  return out;
-};
+const dailySparkline = (values: number[], lookback = 60): number[] => values.slice(Math.max(0, values.length - lookback));
 
 export function computeMetrics(dates: string[], closes: number[]): MetricBundle {
   if (dates.length === 0 || closes.length === 0) {
@@ -55,7 +47,7 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     change21d: pct(price, prev21d),
     ytd: pct(price, ytdAnchor),
     pctFrom52wHigh: pct(price, high52w),
-    sparkline: clampSparkline(closes.slice(Math.max(0, closes.length - 60))),
+    sparkline: dailySparkline(closes, 60),
   };
 }
 

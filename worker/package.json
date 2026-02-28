@@ -7,7 +7,7 @@
     "dev": "wrangler dev --local --persist-to .wrangler/state",
     "build": "wrangler deploy --dry-run",
     "test": "vitest run",
-    "seed": "wrangler d1 execute market_command --local --file=./migrations/0001_init.sql && wrangler d1 execute market_command --local --command=\"DELETE FROM symbols; DELETE FROM daily_bars; DELETE FROM dashboard_configs; DELETE FROM dashboard_sections; DELETE FROM dashboard_groups; DELETE FROM dashboard_items; DELETE FROM dashboard_columns; DELETE FROM universes; DELETE FROM universe_symbols; DELETE FROM snapshots_meta; DELETE FROM snapshot_rows; DELETE FROM breadth_snapshots;\" && wrangler d1 execute market_command --local --file=./migrations/0002_seed.sql"
+    "seed": "wrangler d1 execute market_command --local --file=./migrations/0001_init.sql && wrangler d1 execute market_command --local --file=./migrations/0003_trackers.sql && wrangler d1 execute market_command --local --command=\"DELETE FROM snapshot_rows; DELETE FROM snapshots_meta; DELETE FROM breadth_snapshots; DELETE FROM sector_tracker_entry_symbols; DELETE FROM sector_tracker_entries; DELETE FROM sector_narratives; DELETE FROM filings_13f_holdings; DELETE FROM filings_13f_reports; DELETE FROM filings_13f_managers; DELETE FROM dashboard_items; DELETE FROM dashboard_columns; DELETE FROM dashboard_groups; DELETE FROM dashboard_sections; DELETE FROM dashboard_configs; DELETE FROM universe_symbols; DELETE FROM universes; DELETE FROM daily_bars; DELETE FROM symbols; DELETE FROM config_audit;\" && wrangler d1 execute market_command --local --file=./migrations/0002_seed.sql && wrangler d1 execute market_command --local --file=./migrations/0003_trackers.sql"
   },
   "dependencies": {
     "hono": "^4.7.2",

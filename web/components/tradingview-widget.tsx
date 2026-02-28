@@ -2,8 +2,9 @@
 
 import { useEffect, useRef } from "react";
 
-export function TradingViewWidget({ ticker }: { ticker: string }) {
+export function TradingViewWidget({ ticker, compact = false }: { ticker: string; compact?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
+  const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
   useEffect(() => {
     if (!ref.current) return;
     ref.current.innerHTML = "";
@@ -20,15 +21,20 @@ export function TradingViewWidget({ ticker }: { ticker: string }) {
       allow_symbol_change: true,
       hide_top_toolbar: false,
       save_image: false,
-      container_id: "tv-adv",
+      container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker]);
+  }, [ticker, containerId]);
 
   return (
     <div className="card p-2">
-      <div className="tradingview-widget-container h-[480px]" ref={ref}>
-        <div id="tv-adv" className="h-full" />
+      <div
+        className={`tradingview-widget-container mx-auto w-full ${
+          compact ? "h-[640px] max-w-[760px]" : "h-[760px] max-w-[1040px]"
+        }`}
+        ref={ref}
+      >
+        <div id={containerId} className="h-full" />
       </div>
     </div>
   );

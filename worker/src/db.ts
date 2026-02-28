@@ -1,6 +1,7 @@
 import type { DashboardConfigPayload, Env } from "./types";
 
 const uid = () => crypto.randomUUID();
+const defaultColumns = ["ticker", "name", "price", "1D", "1W", "YTD", "sparkline"];
 
 export async function loadConfig(env: Env, configId = "default"): Promise<DashboardConfigPayload> {
   const config = await env.DB.prepare(
@@ -81,7 +82,19 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
           rankingWindowDefault: g.rankingWindowDefault,
           showSparkline: !!g.showSparkline,
           pinTop10: !!g.pinTop10,
-          columns: colMap.get(g.id) ?? ["ticker", "price", "1D", "1W", "YTD", "sparkline"],
+          columns: (() => {
+            const base = colMap.get(g.id) ?? defaultColumns;
+            if ((g.dataType === "macro" || g.dataType === "equities") && !base.includes("name")) {
+              const at = base.indexOf("ticker");
+              if (at >= 0) {
+                const next = [...base];
+                next.splice(at + 1, 0, "name");
+                return next;
+              }
+              return ["ticker", "name", ...base];
+            }
+            return base;
+          })(),
           items: itemRows
             .filter((it) => it.groupId === g.id)
             .map((it) => ({

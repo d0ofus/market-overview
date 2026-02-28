@@ -20,15 +20,15 @@ INSERT INTO dashboard_groups (id, section_id, sort_order, title, data_type, rank
 ('g-breadth', 'sec-breadth', 1, 'Market Internals Dashboard', 'breadth', '1D', 0, 0);
 
 INSERT INTO dashboard_columns (group_id, columns_json) VALUES
-('g-us-index', '["ticker","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
-('g-vol-dollar', '["ticker","price","1D","1W","YTD","sparkline"]'),
-('g-crypto', '["ticker","price","1D","1W","5D","sparkline"]'),
-('g-metals-energy', '["ticker","price","1D","5D","1W","sparkline"]'),
-('g-global', '["ticker","price","1D","1W","YTD","sparkline"]'),
-('g-major-etf', '["ticker","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
-('g-sector-etf', '["ticker","price","1D","1W","5D","YTD","sparkline"]'),
-('g-thematic', '["ticker","price","1D","5D","1W","YTD","sparkline"]'),
-('g-country', '["ticker","price","1D","1W","YTD","sparkline"]');
+('g-us-index', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
+('g-vol-dollar', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
+('g-crypto', '["ticker","name","price","1D","1W","5D","sparkline"]'),
+('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline"]'),
+('g-global', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
+('g-major-etf', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
+('g-sector-etf', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]'),
+('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline"]'),
+('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]');
 
 INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES
 ('SPY', 'SPDR S&P 500 ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Blend'),
