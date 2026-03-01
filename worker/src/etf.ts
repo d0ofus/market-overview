@@ -81,20 +81,72 @@ async function fetchStockAnalysisConstituents(etfTicker: string): Promise<EtfCon
   return [...dedup.values()];
 }
 
+async function fetchEtfDbConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+  const url = `https://etfdb.com/etf/${encodeURIComponent(etfTicker.toUpperCase())}/#holdings`;
+  const res = await fetch(url, { headers: { "User-Agent": "market-command-centre/1.0" } });
+  if (!res.ok) {
+    throw new Error(`ETFdb holdings fetch failed (${res.status})`);
+  }
+  const html = await res.text();
+  const rowRegex = /<tr[^>]*>[\s\S]*?<\/tr>/gi;
+  const symbolRegex = /\/stock\/([A-Z.\-]{1,20})\//i;
+  const weightRegex = /([0-9]+(?:\.[0-9]+)?)%/i;
+  const nameRegex = /<a[^>]*\/stock\/[A-Z.\-]{1,20}\/[^>]*>([^<]+)<\/a>/i;
+  const rows = html.match(rowRegex) ?? [];
+  const out: EtfConstituent[] = [];
+  for (const row of rows) {
+    const symbolMatch = row.match(symbolRegex);
+    if (!symbolMatch) continue;
+    const ticker = normalizeTicker(symbolMatch[1]);
+    if (!ticker) continue;
+    const nameMatch = row.match(nameRegex);
+    const weightMatch = row.match(weightRegex);
+    out.push({
+      ticker,
+      name: nameMatch?.[1]?.trim() ?? null,
+      weight: weightMatch ? Number(weightMatch[1]) : null,
+    });
+  }
+  const dedup = new Map<string, EtfConstituent>();
+  for (const row of out) if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+  return [...dedup.values()];
+}
+
 export async function syncEtfConstituents(env: Env, etfTickerInput: string): Promise<{ count: number; source: string }> {
   const etfTicker = normalizeTicker(etfTickerInput);
   if (!etfTicker) throw new Error("Invalid ETF ticker");
   let source = "stockanalysis:holdings-page";
   let holdings: EtfConstituent[] = [];
+  const errors: string[] = [];
   try {
     holdings = await fetchStockAnalysisConstituents(etfTicker);
-    if (holdings.length === 0) {
-      source = "yahoo:topHoldings";
-      holdings = await fetchYahooConstituents(etfTicker);
-    }
-    if (holdings.length === 0) throw new Error("No constituents returned from any free source");
+    if (holdings.length === 0) throw new Error("StockAnalysis returned no holdings");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Constituent sync failed";
+    errors.push(error instanceof Error ? error.message : "StockAnalysis sync failed");
+  }
+
+  if (holdings.length === 0) {
+    source = "etfdb:holdings-page";
+    try {
+      holdings = await fetchEtfDbConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("ETFdb returned no holdings");
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "ETFdb sync failed");
+    }
+  }
+
+  if (holdings.length === 0) {
+    source = "yahoo:topHoldings";
+    try {
+      holdings = await fetchYahooConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("Yahoo returned no holdings");
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Yahoo sync failed");
+    }
+  }
+
+  if (holdings.length === 0) {
+    const message = `No constituents returned for ${etfTicker}. Source errors: ${errors.join(" | ")}`.slice(0, 700);
     await env.DB.prepare(
       "INSERT OR REPLACE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, ?, 'error', ?, ?, COALESCE((SELECT records_count FROM etf_constituent_sync_status WHERE etf_ticker = ?), 0), CURRENT_TIMESTAMP)",
     )

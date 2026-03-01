@@ -11,6 +11,7 @@ const TICKER_ALIASES: Record<string, string[]> = {
   VIX: ["^VIX"],
   VXN: ["^VXN"],
   VVIX: ["^VVIX"],
+  XOI: ["^XOI"],
 };
 
 function candidateSymbols(tickerInput: string): string[] {

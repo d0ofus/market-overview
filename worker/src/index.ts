@@ -457,13 +457,42 @@ app.post("/api/sectors/entries", async (c) => {
     .run();
   const symbols = Array.from(new Set((body.symbols ?? []).map((s) => s.toUpperCase())));
   if (symbols.length > 0) {
-    const stmts = symbols.map((ticker) =>
+    const symbolUpserts = await Promise.all(
+      symbols.map(async (ticker) => {
+        const meta = await resolveTickerMeta(ticker, c.env).catch(() => null);
+        return c.env.DB.prepare(
+          "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)",
+        ).bind(
+          ticker,
+          meta?.name ?? ticker,
+          meta?.exchange ?? null,
+          meta?.assetClass ?? null,
+          null,
+          null,
+        );
+      }),
+    );
+    const linkInserts = symbols.map((ticker) =>
       c.env.DB.prepare("INSERT OR IGNORE INTO sector_tracker_entry_symbols (entry_id, ticker) VALUES (?, ?)")
         .bind(id, ticker),
     );
+    const stmts = [...symbolUpserts, ...linkInserts];
     await c.env.DB.batch(stmts);
   }
   return c.json({ ok: true, id });
+});
+
+app.get("/api/admin/ticker-meta/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = c.req.param("ticker").toUpperCase();
+  if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Invalid ticker" }, 400);
+  const meta = await resolveTickerMeta(ticker, c.env);
+  return c.json({
+    ticker,
+    name: meta?.name ?? null,
+    exchange: meta?.exchange ?? null,
+    assetClass: meta?.assetClass ?? null,
+  });
 });
 
 app.post("/api/admin/etfs", async (c) => {
@@ -501,6 +530,35 @@ app.post("/api/admin/etfs", async (c) => {
   ]);
   await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry });
   return c.json({ ok: true, ticker });
+});
+
+app.delete("/api/admin/etfs/:listType/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const listTypeRaw = c.req.param("listType").toLowerCase();
+  const listType = listTypeRaw === "industry" ? "industry" : listTypeRaw === "sector" ? "sector" : null;
+  if (!listType) return c.json({ error: "Invalid listType" }, 400);
+  const ticker = c.req.param("ticker").toUpperCase();
+  if (!ticker) return c.json({ error: "Ticker is required" }, 400);
+  const existing = await c.env.DB.prepare("SELECT ticker FROM etf_watchlists WHERE list_type = ? AND ticker = ?")
+    .bind(listType, ticker)
+    .first();
+  if (!existing) return c.json({ error: "ETF not found in watchlist" }, 404);
+  await c.env.DB.prepare("DELETE FROM etf_watchlists WHERE list_type = ? AND ticker = ?")
+    .bind(listType, ticker)
+    .run();
+  await upsertAudit(c.env, "default", "ETF_WATCHLIST_DELETE", { listType, ticker });
+  return c.json({ ok: true, ticker, listType });
+});
+
+app.get("/api/admin/etf-sync-status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const limit = Math.max(10, Math.min(500, Number(c.req.query("limit") ?? 200)));
+  const rows = await c.env.DB.prepare(
+    "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount, updated_at as updatedAt FROM etf_constituent_sync_status ORDER BY datetime(updated_at) DESC LIMIT ?",
+  )
+    .bind(limit)
+    .all();
+  return c.json({ rows: rows.results ?? [] });
 });
 
 app.post("/api/admin/etf/:ticker/sync", async (c) => {

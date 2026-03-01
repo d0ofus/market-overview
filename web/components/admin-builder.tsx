@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { adminFetch } from "@/lib/api";
 import type { SnapshotResponse } from "@/types/dashboard";
 
@@ -15,19 +15,29 @@ export function AdminBuilder() {
   const [tickerErrors, setTickerErrors] = useState<Record<string, string | null>>({});
   const [sectorEtfs, setSectorEtfs] = useState<any[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<any[]>([]);
+  const [etfSyncStatus, setEtfSyncStatus] = useState<any[]>([]);
   const [etfError, setEtfError] = useState<string | null>(null);
-  const [sectorEtfForm, setSectorEtfForm] = useState({ ticker: "", fundName: "", parentSector: "" });
-  const [industryEtfForm, setIndustryEtfForm] = useState({ ticker: "", fundName: "", parentSector: "", industry: "" });
+  const [sectorEtfForm, setSectorEtfForm] = useState({ ticker: "", fundName: "", parentSectorSelect: "", parentSectorNew: "" });
+  const [industryEtfForm, setIndustryEtfForm] = useState({
+    ticker: "",
+    fundName: "",
+    parentSectorSelect: "",
+    parentSectorNew: "",
+    industrySelect: "",
+    industryNew: "",
+  });
 
   const load = async () => {
-    const [config, sectorRes, industryRes] = await Promise.all([
+    const [config, sectorRes, industryRes, syncRes] = await Promise.all([
       adminFetch<SnapshotResponse["config"]>("/api/admin/config"),
       adminFetch<{ rows: any[] }>("/api/etfs/sector"),
       adminFetch<{ rows: any[] }>("/api/etfs/industry"),
+      adminFetch<{ rows: any[] }>("/api/admin/etf-sync-status?limit=200"),
     ]);
     setData(config);
     setSectorEtfs(sectorRes.rows ?? []);
     setIndustryEtfs(industryRes.rows ?? []);
+    setEtfSyncStatus(syncRes.rows ?? []);
   };
   useEffect(() => {
     void load();
@@ -94,6 +104,43 @@ export function AdminBuilder() {
     await load();
   };
 
+  const parentSectorOptions = useMemo(() => {
+    const options = new Set<string>();
+    for (const row of [...sectorEtfs, ...industryEtfs]) {
+      if (row.parentSector) options.add(String(row.parentSector));
+    }
+    return Array.from(options).sort((a, b) => a.localeCompare(b));
+  }, [sectorEtfs, industryEtfs]);
+
+  const industryOptions = useMemo(() => {
+    const options = new Set<string>();
+    for (const row of industryEtfs) {
+      if (row.industry) options.add(String(row.industry));
+    }
+    return Array.from(options).sort((a, b) => a.localeCompare(b));
+  }, [industryEtfs]);
+
+  const resolveFundName = async (tickerInput: string, form: "sector" | "industry") => {
+    const ticker = tickerInput.trim().toUpperCase();
+    if (!ticker) return;
+    try {
+      const meta = await adminFetch<{ name: string | null }>(`/api/admin/ticker-meta/${ticker}`);
+      if (!meta?.name) return;
+      if (form === "sector") {
+        setSectorEtfForm((s) => ({ ...s, ticker, fundName: s.fundName.trim() ? s.fundName : meta.name ?? "" }));
+      } else {
+        setIndustryEtfForm((s) => ({ ...s, ticker, fundName: s.fundName.trim() ? s.fundName : meta.name ?? "" }));
+      }
+    } catch {
+      // leave manual entry path available
+    }
+  };
+
+  const deleteEtf = async (listType: "sector" | "industry", ticker: string) => {
+    await adminFetch(`/api/admin/etfs/${listType}/${ticker}`, { method: "DELETE" });
+    await load();
+  };
+
   if (!data) return <div className="card p-4">Loading admin config...</div>;
 
   return (
@@ -104,23 +151,36 @@ export function AdminBuilder() {
           <div className="rounded border border-borderSoft p-2">
             <p className="mb-2 text-sm font-semibold">Add Sector ETF</p>
             <div className="grid gap-2">
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Ticker (e.g. XLF)" value={sectorEtfForm.ticker} onChange={(e) => setSectorEtfForm((s) => ({ ...s, ticker: e.target.value }))} />
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (optional)" value={sectorEtfForm.fundName} onChange={(e) => setSectorEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Parent sector (e.g. Financials)" value={sectorEtfForm.parentSector} onChange={(e) => setSectorEtfForm((s) => ({ ...s, parentSector: e.target.value }))} />
+              <input
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+                placeholder="Ticker (e.g. XLF)"
+                value={sectorEtfForm.ticker}
+                onChange={(e) => setSectorEtfForm((s) => ({ ...s, ticker: e.target.value }))}
+                onBlur={() => void resolveFundName(sectorEtfForm.ticker, "sector")}
+              />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (auto-filled if available)" value={sectorEtfForm.fundName} onChange={(e) => setSectorEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
+              <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={sectorEtfForm.parentSectorSelect} onChange={(e) => setSectorEtfForm((s) => ({ ...s, parentSectorSelect: e.target.value }))}>
+                <option value="">Select existing parent sector...</option>
+                {parentSectorOptions.map((opt) => (
+                  <option key={`sector-parent-${opt}`} value={opt}>{opt}</option>
+                ))}
+              </select>
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Or enter new parent sector" value={sectorEtfForm.parentSectorNew} onChange={(e) => setSectorEtfForm((s) => ({ ...s, parentSectorNew: e.target.value }))} />
               <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={async () => {
                 try {
                   setEtfError(null);
+                  const parentSector = (sectorEtfForm.parentSectorNew.trim() || sectorEtfForm.parentSectorSelect.trim()) || null;
                   await adminFetch("/api/admin/etfs", {
                     method: "POST",
                     body: JSON.stringify({
                       listType: "sector",
                       ticker: sectorEtfForm.ticker.trim().toUpperCase(),
                       fundName: sectorEtfForm.fundName.trim() || null,
-                      parentSector: sectorEtfForm.parentSector.trim() || null,
+                      parentSector,
                       industry: "Sector ETF",
                     }),
                   });
-                  setSectorEtfForm({ ticker: "", fundName: "", parentSector: "" });
+                  setSectorEtfForm({ ticker: "", fundName: "", parentSectorSelect: "", parentSectorNew: "" });
                   await load();
                 } catch (err) {
                   setEtfError(err instanceof Error ? err.message : "Failed to add sector ETF.");
@@ -133,24 +193,51 @@ export function AdminBuilder() {
           <div className="rounded border border-borderSoft p-2">
             <p className="mb-2 text-sm font-semibold">Add Industry ETF</p>
             <div className="grid gap-2">
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Ticker (e.g. SMH)" value={industryEtfForm.ticker} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, ticker: e.target.value }))} />
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (optional)" value={industryEtfForm.fundName} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Parent sector" value={industryEtfForm.parentSector} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, parentSector: e.target.value }))} />
-              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Industry category" value={industryEtfForm.industry} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, industry: e.target.value }))} />
+              <input
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+                placeholder="Ticker (e.g. SMH)"
+                value={industryEtfForm.ticker}
+                onChange={(e) => setIndustryEtfForm((s) => ({ ...s, ticker: e.target.value }))}
+                onBlur={() => void resolveFundName(industryEtfForm.ticker, "industry")}
+              />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (auto-filled if available)" value={industryEtfForm.fundName} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
+              <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={industryEtfForm.parentSectorSelect} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, parentSectorSelect: e.target.value }))}>
+                <option value="">Select existing parent sector...</option>
+                {parentSectorOptions.map((opt) => (
+                  <option key={`industry-parent-${opt}`} value={opt}>{opt}</option>
+                ))}
+              </select>
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Or enter new parent sector" value={industryEtfForm.parentSectorNew} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, parentSectorNew: e.target.value }))} />
+              <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={industryEtfForm.industrySelect} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, industrySelect: e.target.value }))}>
+                <option value="">Select existing industry category...</option>
+                {industryOptions.map((opt) => (
+                  <option key={`industry-category-${opt}`} value={opt}>{opt}</option>
+                ))}
+              </select>
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Or enter new industry category" value={industryEtfForm.industryNew} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, industryNew: e.target.value }))} />
               <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={async () => {
                 try {
                   setEtfError(null);
+                  const parentSector = (industryEtfForm.parentSectorNew.trim() || industryEtfForm.parentSectorSelect.trim()) || null;
+                  const industry = (industryEtfForm.industryNew.trim() || industryEtfForm.industrySelect.trim()) || null;
                   await adminFetch("/api/admin/etfs", {
                     method: "POST",
                     body: JSON.stringify({
                       listType: "industry",
                       ticker: industryEtfForm.ticker.trim().toUpperCase(),
                       fundName: industryEtfForm.fundName.trim() || null,
-                      parentSector: industryEtfForm.parentSector.trim() || null,
-                      industry: industryEtfForm.industry.trim() || null,
+                      parentSector,
+                      industry,
                     }),
                   });
-                  setIndustryEtfForm({ ticker: "", fundName: "", parentSector: "", industry: "" });
+                  setIndustryEtfForm({
+                    ticker: "",
+                    fundName: "",
+                    parentSectorSelect: "",
+                    parentSectorNew: "",
+                    industrySelect: "",
+                    industryNew: "",
+                  });
                   await load();
                 } catch (err) {
                   setEtfError(err instanceof Error ? err.message : "Failed to add industry ETF.");
@@ -165,23 +252,74 @@ export function AdminBuilder() {
         <div className="mt-3 grid gap-2 md:grid-cols-2">
           <div>
             <p className="mb-1 text-xs uppercase tracking-[0.08em] text-slate-400">Sector ETFs ({sectorEtfs.length})</p>
-            <div className="flex max-h-28 flex-wrap gap-1 overflow-auto rounded border border-borderSoft p-2">
+            <div className="max-h-48 overflow-auto rounded border border-borderSoft p-2">
               {sectorEtfs.map((row) => (
-                <span key={`s-${row.ticker}`} className="rounded bg-panelSoft px-2 py-1 text-xs">
-                  {row.ticker}
-                </span>
+                <div key={`s-${row.ticker}`} className="mb-1 flex items-center justify-between rounded bg-panelSoft px-2 py-1 text-xs">
+                  <span>{row.ticker}</span>
+                  <button className="rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] text-red-300" onClick={async () => {
+                    try {
+                      setEtfError(null);
+                      await deleteEtf("sector", row.ticker);
+                    } catch (err) {
+                      setEtfError(err instanceof Error ? err.message : `Failed to delete ${row.ticker}`);
+                    }
+                  }}>
+                    Delete
+                  </button>
+                </div>
               ))}
             </div>
           </div>
           <div>
             <p className="mb-1 text-xs uppercase tracking-[0.08em] text-slate-400">Industry ETFs ({industryEtfs.length})</p>
-            <div className="flex max-h-28 flex-wrap gap-1 overflow-auto rounded border border-borderSoft p-2">
+            <div className="max-h-48 overflow-auto rounded border border-borderSoft p-2">
               {industryEtfs.map((row) => (
-                <span key={`i-${row.ticker}-${row.industry}`} className="rounded bg-panelSoft px-2 py-1 text-xs">
-                  {row.ticker}
-                </span>
+                <div key={`i-${row.ticker}-${row.industry}`} className="mb-1 flex items-center justify-between rounded bg-panelSoft px-2 py-1 text-xs">
+                  <span>{row.ticker} {row.industry ? `(${row.industry})` : ""}</span>
+                  <button className="rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] text-red-300" onClick={async () => {
+                    try {
+                      setEtfError(null);
+                      await deleteEtf("industry", row.ticker);
+                    } catch (err) {
+                      setEtfError(err instanceof Error ? err.message : `Failed to delete ${row.ticker}`);
+                    }
+                  }}>
+                    Delete
+                  </button>
+                </div>
               ))}
             </div>
+          </div>
+        </div>
+        <div className="mt-3">
+          <p className="mb-1 text-xs uppercase tracking-[0.08em] text-slate-400">ETF Constituent Sync Status (Read-only)</p>
+          <div className="max-h-64 overflow-auto rounded border border-borderSoft">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-900/60">
+                <tr>
+                  {["Ticker", "Status", "Records", "Source", "Last Synced", "Error"].map((h) => (
+                    <th key={h} className="px-2 py-1 text-left font-semibold text-slate-300">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {etfSyncStatus.map((row) => (
+                  <tr key={`sync-${row.etfTicker}`} className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1">{row.etfTicker}</td>
+                    <td className="px-2 py-1">{row.status ?? "-"}</td>
+                    <td className="px-2 py-1">{row.recordsCount ?? 0}</td>
+                    <td className="px-2 py-1">{row.source ?? "-"}</td>
+                    <td className="px-2 py-1">{row.lastSyncedAt ?? "-"}</td>
+                    <td className="max-w-[420px] truncate px-2 py-1 text-red-300" title={row.error ?? ""}>{row.error ?? "-"}</td>
+                  </tr>
+                ))}
+                {etfSyncStatus.length === 0 && (
+                  <tr>
+                    <td className="px-2 py-2 text-slate-400" colSpan={6}>No sync status rows found.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

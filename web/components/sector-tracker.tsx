@@ -477,13 +477,13 @@ export function SectorTracker() {
                     <div className="text-xs text-slate-400">{day}</div>
                     <div className="mt-1 space-y-1.5">
                       {items.slice(0, 3).map((it) => (
-                        <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-[10px] text-slate-200">
+                        <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-xs text-slate-200">
                           <div className={`font-semibold ${pctCls(it.trendScore)}`}>{it.sectorName}</div>
                           <div className="mt-1 flex flex-wrap gap-1">
                             {(it.symbols ?? []).map((s) => (
                               <button
                                 key={`${it.id}-${s.ticker}`}
-                                className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/25"
+                                className="rounded bg-accent/15 px-1.5 py-0.5 text-xs text-accent hover:bg-accent/25"
                                 onClick={() => setActiveChartTicker(s.ticker)}
                                 title={s.name ?? s.ticker}
                               >
@@ -491,7 +491,7 @@ export function SectorTracker() {
                               </button>
                             ))}
                           </div>
-                          {it.notes && <p className="mt-1 whitespace-normal break-words text-[10px] leading-snug text-slate-300">{it.notes}</p>}
+                          {it.notes && <p className="mt-1 whitespace-normal break-words text-xs leading-snug text-slate-300">{it.notes}</p>}
                         </div>
                       ))}
                     </div>

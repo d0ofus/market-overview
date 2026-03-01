@@ -29,6 +29,7 @@ class StooqProvider implements MarketDataProvider {
     VIX: "^vix",
     VXN: "^vxn",
     VVIX: "^vvix",
+    XOI: "^xoi",
   };
 
   private symbolForStooq(ticker: string): string {
