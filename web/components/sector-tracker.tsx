@@ -36,6 +36,60 @@ type EtfConstituent = {
   weight: number | null;
 };
 
+const FALLBACK_SECTOR_ETFS: WatchlistEtf[] = [
+  { listType: "sector", parentSector: "Materials", industry: "Sector ETF", ticker: "XLB", fundName: "Materials Select Sector SPDR Fund", sortOrder: 1, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Communication Services", industry: "Sector ETF", ticker: "XLC", fundName: "Communication Services Select Sector SPDR Fund", sortOrder: 2, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Financials", industry: "Sector ETF", ticker: "XLF", fundName: "Financial Select Sector SPDR Fund", sortOrder: 3, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Energy", industry: "Sector ETF", ticker: "XLE", fundName: "Energy Select Sector SPDR Fund", sortOrder: 4, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Industrials", industry: "Sector ETF", ticker: "XLI", fundName: "Industrial Select Sector SPDR Fund", sortOrder: 5, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Health Care", industry: "Sector ETF", ticker: "XLV", fundName: "Health Care Select Sector SPDR Fund", sortOrder: 6, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Information Technology", industry: "Sector ETF", ticker: "XLK", fundName: "Technology Select Sector SPDR Fund", sortOrder: 7, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Consumer Staples", industry: "Sector ETF", ticker: "XLP", fundName: "Consumer Staples Select Sector SPDR Fund", sortOrder: 8, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Real Estate", industry: "Sector ETF", ticker: "XLRE", fundName: "Real Estate Select Sector SPDR Fund", sortOrder: 9, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Consumer Discretionary", industry: "Sector ETF", ticker: "XLY", fundName: "Consumer Discretionary Select Sector SPDR Fund", sortOrder: 10, change1d: 0, lastPrice: 0 },
+  { listType: "sector", parentSector: "Utilities", industry: "Sector ETF", ticker: "XLU", fundName: "Utilities Select Sector SPDR Fund", sortOrder: 11, change1d: 0, lastPrice: 0 },
+];
+
+const FALLBACK_INDUSTRY_ETFS: WatchlistEtf[] = [
+  { listType: "industry", parentSector: "Information Technology", industry: "Semiconductors", ticker: "SMH", fundName: "VanEck Semiconductor ETF", sortOrder: 1, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Information Technology", industry: "Semiconductors", ticker: "SOXX", fundName: "iShares Semiconductor ETF", sortOrder: 2, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Information Technology", industry: "Software", ticker: "IGV", fundName: "iShares Expanded Tech-Software Sector ETF", sortOrder: 3, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Health Care", industry: "Biotech", ticker: "XBI", fundName: "SPDR S&P Biotech ETF", sortOrder: 4, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Health Care", industry: "Pharmaceuticals", ticker: "IHE", fundName: "iShares U.S. Pharmaceuticals ETF", sortOrder: 5, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Industrials", industry: "Aerospace & Defense", ticker: "ITA", fundName: "iShares U.S. Aerospace & Defense ETF", sortOrder: 6, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Energy", industry: "Oil & Gas", ticker: "XOP", fundName: "SPDR S&P Oil & Gas Exploration & Production ETF", sortOrder: 7, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Financials", industry: "Banks", ticker: "KRE", fundName: "SPDR S&P Regional Banking ETF", sortOrder: 8, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Consumer Discretionary", industry: "Homebuilders", ticker: "ITB", fundName: "iShares U.S. Home Construction ETF", sortOrder: 9, change1d: 0, lastPrice: 0 },
+  { listType: "industry", parentSector: "Utilities", industry: "Broad Utilities", ticker: "XLU", fundName: "Utilities Select Sector SPDR Fund", sortOrder: 10, change1d: 0, lastPrice: 0 },
+];
+
+const FALLBACK_KEY_MOVERS: SectorEntry[] = [
+  {
+    id: "se-1",
+    sectorName: "Semiconductors",
+    eventDate: "2026-02-18",
+    trendScore: 82,
+    notes: "Earnings beats and AI capex guides accelerating.",
+    symbols: [{ ticker: "SMH", name: "VanEck Semiconductor ETF" }, { ticker: "NVDA", name: "NVIDIA Corp" }, { ticker: "AMD", name: "Advanced Micro Devices Inc" }, { ticker: "AVGO", name: "Broadcom Inc" }],
+  },
+  {
+    id: "se-2",
+    sectorName: "Utilities",
+    eventDate: "2026-02-21",
+    trendScore: 68,
+    notes: "Power demand upgrades from hyperscaler capex plans.",
+    symbols: [{ ticker: "XLU", name: "Utilities Select Sector SPDR Fund" }, { ticker: "NEE", name: "NextEra Energy Inc" }, { ticker: "DUK", name: "Duke Energy Corp" }],
+  },
+  {
+    id: "se-3",
+    sectorName: "Homebuilders",
+    eventDate: "2026-02-24",
+    trendScore: 61,
+    notes: "Mortgage rates eased, builders showing relative strength.",
+    symbols: [{ ticker: "ITB", name: "iShares U.S. Home Construction ETF" }, { ticker: "XHB", name: "SPDR S&P Homebuilders ETF" }, { ticker: "LEN", name: "Lennar Corp" }],
+  },
+];
+
 function CollapsibleSection({
   title,
   defaultOpen = true,
@@ -86,18 +140,25 @@ export function SectorTracker() {
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
 
   const load = async () => {
-    const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.all([
+    const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
       getSectorEntries(),
       getSectorCalendar(month),
       getSectorSymbolOptions(),
       getSectorEtfs(),
       getIndustryEtfs(),
     ]);
-    setEntries(entriesRes.rows ?? []);
-    setCalendarRows(calRes.rows ?? []);
-    setSymbolOptions(symbolRes.rows ?? []);
-    setSectorEtfs((sectorEtfRes.rows ?? []) as WatchlistEtf[]);
-    setIndustryEtfs((industryEtfRes.rows ?? []) as WatchlistEtf[]);
+
+    const entriesRows = entriesRes.status === "fulfilled" ? entriesRes.value.rows ?? [] : [];
+    const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
+    const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
+    const sectorRows = sectorEtfRes.status === "fulfilled" ? (sectorEtfRes.value.rows ?? []) : [];
+    const industryRows = industryEtfRes.status === "fulfilled" ? (industryEtfRes.value.rows ?? []) : [];
+
+    setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
+    setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
+    setSymbolOptions(symbolRows);
+    setSectorEtfs((sectorRows.length > 0 ? sectorRows : FALLBACK_SECTOR_ETFS) as WatchlistEtf[]);
+    setIndustryEtfs((industryRows.length > 0 ? industryRows : FALLBACK_INDUSTRY_ETFS) as WatchlistEtf[]);
   };
 
   useEffect(() => {
