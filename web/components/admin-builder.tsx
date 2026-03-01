@@ -26,6 +26,13 @@ export function AdminBuilder() {
     industrySelect: "",
     industryNew: "",
   });
+  const [dragTicker, setDragTicker] = useState<string | null>(null);
+  const [moveTarget, setMoveTarget] = useState({
+    parentSectorSelect: "",
+    parentSectorNew: "",
+    industrySelect: "",
+    industryNew: "",
+  });
 
   const load = async () => {
     const [config, sectorRes, industryRes, syncRes] = await Promise.all([
@@ -138,6 +145,39 @@ export function AdminBuilder() {
 
   const deleteEtf = async (listType: "sector" | "industry", ticker: string) => {
     await adminFetch(`/api/admin/etfs/${listType}/${ticker}`, { method: "DELETE" });
+    await load();
+  };
+
+  const industryCategoryGroups = useMemo(() => {
+    const map = new Map<string, { parentSector: string; industry: string; rows: Array<{ ticker: string; fundName?: string | null; parentSector?: string | null; industry?: string | null }> }>();
+    for (const row of industryEtfs) {
+      const parent = row.parentSector ?? "Other";
+      const industry = row.industry ?? "General";
+      const key = `${parent}::${industry}`;
+      const cur = map.get(key) ?? { parentSector: parent, industry, rows: [] as Array<{ ticker: string; fundName?: string | null; parentSector?: string | null; industry?: string | null }> };
+      cur.rows.push(row);
+      map.set(key, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      const p = a.parentSector.localeCompare(b.parentSector);
+      if (p !== 0) return p;
+      return a.industry.localeCompare(b.industry);
+    });
+  }, [industryEtfs]);
+
+  const moveIndustryTicker = async (ticker: string, parentSector: string, industry: string) => {
+    const row = industryEtfs.find((r) => String(r.ticker).toUpperCase() === ticker.toUpperCase());
+    if (!row) return;
+    await adminFetch("/api/admin/etfs", {
+      method: "POST",
+      body: JSON.stringify({
+        listType: "industry",
+        ticker: row.ticker,
+        fundName: row.fundName ?? null,
+        parentSector: parentSector || null,
+        industry: industry || null,
+      }),
+    });
     await load();
   };
 
@@ -288,6 +328,94 @@ export function AdminBuilder() {
                   </button>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 rounded border border-borderSoft p-2">
+          <p className="mb-2 text-xs uppercase tracking-[0.08em] text-slate-400">Industry ETF Category Organizer (Drag & Drop)</p>
+          <div className="mb-2 grid gap-2 md:grid-cols-2">
+            <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs" value={moveTarget.parentSectorSelect} onChange={(e) => setMoveTarget((s) => ({ ...s, parentSectorSelect: e.target.value }))}>
+              <option value="">Target parent sector (existing)</option>
+              {parentSectorOptions.map((opt) => (
+                <option key={`move-parent-${opt}`} value={opt}>{opt}</option>
+              ))}
+            </select>
+            <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs" placeholder="Or new parent sector" value={moveTarget.parentSectorNew} onChange={(e) => setMoveTarget((s) => ({ ...s, parentSectorNew: e.target.value }))} />
+            <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs" value={moveTarget.industrySelect} onChange={(e) => setMoveTarget((s) => ({ ...s, industrySelect: e.target.value }))}>
+              <option value="">Target industry (existing)</option>
+              {industryOptions.map((opt) => (
+                <option key={`move-industry-${opt}`} value={opt}>{opt}</option>
+              ))}
+            </select>
+            <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs" placeholder="Or new industry category" value={moveTarget.industryNew} onChange={(e) => setMoveTarget((s) => ({ ...s, industryNew: e.target.value }))} />
+          </div>
+          <p className="mb-2 text-[11px] text-slate-400">Drag a ticker chip and drop into any category box below. To move into a brand-new category, use the target fields above and drop into the New Target box.</p>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {industryCategoryGroups.map((group) => (
+              <div
+                key={`drop-${group.parentSector}-${group.industry}`}
+                className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={async (e) => {
+                  e.preventDefault();
+                  const ticker = e.dataTransfer.getData("text/plain") || dragTicker;
+                  if (!ticker) return;
+                  try {
+                    setEtfError(null);
+                    await moveIndustryTicker(ticker, group.parentSector, group.industry);
+                  } catch (err) {
+                    setEtfError(err instanceof Error ? err.message : `Failed to move ${ticker}`);
+                  } finally {
+                    setDragTicker(null);
+                  }
+                }}
+              >
+                <div className="mb-2 text-xs font-semibold text-slate-200">{group.parentSector} / {group.industry}</div>
+                <div className="flex flex-wrap gap-1">
+                  {group.rows.map((row) => (
+                    <span
+                      key={`drag-${group.parentSector}-${group.industry}-${row.ticker}`}
+                      draggable
+                      onDragStart={(e) => {
+                        const ticker = String(row.ticker).toUpperCase();
+                        setDragTicker(ticker);
+                        e.dataTransfer.setData("text/plain", ticker);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      className="cursor-move rounded bg-slate-800 px-2 py-1 text-xs text-slate-100"
+                      title="Drag to move category"
+                    >
+                      {row.ticker}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div
+              className="rounded border border-dashed border-accent/50 bg-accent/5 p-2"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={async (e) => {
+                e.preventDefault();
+                const ticker = e.dataTransfer.getData("text/plain") || dragTicker;
+                if (!ticker) return;
+                const parentSector = (moveTarget.parentSectorNew.trim() || moveTarget.parentSectorSelect.trim());
+                const industry = (moveTarget.industryNew.trim() || moveTarget.industrySelect.trim());
+                if (!parentSector || !industry) {
+                  setEtfError("Set target parent sector and industry before dropping into New Target.");
+                  return;
+                }
+                try {
+                  setEtfError(null);
+                  await moveIndustryTicker(ticker, parentSector, industry);
+                } catch (err) {
+                  setEtfError(err instanceof Error ? err.message : `Failed to move ${ticker}`);
+                } finally {
+                  setDragTicker(null);
+                }
+              }}
+            >
+              <div className="mb-1 text-xs font-semibold text-accent">New Target Category</div>
+              <div className="text-[11px] text-slate-300">Drop here to move dragged ticker into the target values above.</div>
             </div>
           </div>
         </div>

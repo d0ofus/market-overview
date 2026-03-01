@@ -43,7 +43,7 @@ export function TradingViewWidget({
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
       hide_side_toolbar: chartOnly,
-      hide_legend: false,
+      hide_legend: chartOnly,
       volume_force_overlay: false,
       withdateranges: chartOnly ? false : true,
       save_image: false,

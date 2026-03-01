@@ -127,9 +127,9 @@ export function SectorTracker() {
   const [sectorEtfs, setSectorEtfs] = useState<WatchlistEtf[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<WatchlistEtf[]>([]);
 
-  const [sectorNarrative, setSectorNarrative] = useState("");
+  const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
+  const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
   const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
-  const [trendScore, setTrendScore] = useState(0);
   const [notes, setNotes] = useState("");
   const [tickerInput, setTickerInput] = useState("");
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
@@ -239,6 +239,17 @@ export function SectorTracker() {
     return rows;
   }, [constituents, constituentSort]);
 
+  const sectorNarrativeOptions = useMemo(() => {
+    const options = new Set<string>();
+    for (const row of entries) {
+      if (row.sectorName?.trim()) options.add(row.sectorName.trim());
+    }
+    for (const row of calendarRows) {
+      if (row.sectorName?.trim()) options.add(row.sectorName.trim());
+    }
+    return Array.from(options).sort((a, b) => a.localeCompare(b));
+  }, [entries, calendarRows]);
+
   return (
     <div className="space-y-4">
       <div className="card p-3" id="section-selector">
@@ -332,10 +343,15 @@ export function SectorTracker() {
             Add Sector/Narrative
           </button>
           {addFormOpen && (
-          <div className="grid gap-2 md:grid-cols-6">
-            <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" placeholder="Sector/Narrative" value={sectorNarrative} onChange={(e) => setSectorNarrative(e.target.value)} />
+          <div className="grid gap-2 md:grid-cols-7">
+            <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" value={sectorNarrativeExisting} onChange={(e) => setSectorNarrativeExisting(e.target.value)}>
+              <option value="">Select existing Sector/Narrative...</option>
+              {sectorNarrativeOptions.map((opt) => (
+                <option key={`sector-narrative-${opt}`} value={opt}>{opt}</option>
+              ))}
+            </select>
+            <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" placeholder="Or add new Sector/Narrative" value={sectorNarrativeNew} onChange={(e) => setSectorNarrativeNew(e.target.value)} />
             <input type="date" className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
-            <input type="number" className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Trend score" value={trendScore} onChange={(e) => setTrendScore(Number(e.target.value))} />
             <input
               className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
               placeholder="Add tickers (comma-separated)"
@@ -382,7 +398,8 @@ export function SectorTracker() {
                   className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
                   onClick={async () => {
                     setFormError(null);
-                    if (!sectorNarrative.trim() || !eventDate) {
+                    const sectorNarrative = (sectorNarrativeNew.trim() || sectorNarrativeExisting.trim()).trim();
+                    if (!sectorNarrative || !eventDate) {
                       setFormError("Sector/Narrative and date are required.");
                       return;
                     }
@@ -392,16 +409,16 @@ export function SectorTracker() {
                         body: JSON.stringify({
                           sectorName: sectorNarrative.trim(),
                           eventDate,
-                          trendScore: Number.isFinite(trendScore) ? trendScore : 0,
+                          trendScore: 0,
                           notes: notes.trim() || null,
                           symbols: selectedTickers,
                         }),
                       });
-                      setSectorNarrative("");
+                      setSectorNarrativeExisting("");
+                      setSectorNarrativeNew("");
                       setNotes("");
                       setSelectedTickers([]);
                       setTickerInput("");
-                      setTrendScore(0);
                       await load();
                     } catch (err) {
                       setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
@@ -424,7 +441,7 @@ export function SectorTracker() {
             <table className="min-w-full text-sm">
               <thead className="bg-slate-900/60">
                 <tr>
-                  {["Date", "Sector/Narrative", "Trend", "Tickers", "Notes"].map((h) => (
+                  {["Date", "Sector/Narrative", "Tickers", "Notes"].map((h) => (
                     <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">{h}</th>
                   ))}
                 </tr>
@@ -434,7 +451,6 @@ export function SectorTracker() {
                   <tr key={e.id} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{e.eventDate}</td>
                     <td className="px-3 py-2">{e.sectorName}</td>
-                    <td className={`px-3 py-2 ${pctCls(e.trendScore)}`}>{e.trendScore.toFixed(1)}</td>
                     <td className="px-3 py-2 text-slate-300">
                       <div className="flex flex-wrap gap-1">
                         {(e.symbols ?? []).length === 0 && <span>-</span>}
@@ -478,7 +494,7 @@ export function SectorTracker() {
                     <div className="mt-1 space-y-1.5">
                       {items.slice(0, 3).map((it) => (
                         <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-xs text-slate-200">
-                          <div className={`font-semibold ${pctCls(it.trendScore)}`}>{it.sectorName}</div>
+                          <div className="font-semibold">{it.sectorName}</div>
                           <div className="mt-1 flex flex-wrap gap-1">
                             {(it.symbols ?? []).map((s) => (
                               <button
