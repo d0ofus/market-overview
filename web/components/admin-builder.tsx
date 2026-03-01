@@ -13,10 +13,21 @@ export function AdminBuilder() {
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [newGroupTitle, setNewGroupTitle] = useState<Record<string, string>>({});
   const [tickerErrors, setTickerErrors] = useState<Record<string, string | null>>({});
+  const [sectorEtfs, setSectorEtfs] = useState<any[]>([]);
+  const [industryEtfs, setIndustryEtfs] = useState<any[]>([]);
+  const [etfError, setEtfError] = useState<string | null>(null);
+  const [sectorEtfForm, setSectorEtfForm] = useState({ ticker: "", fundName: "", parentSector: "" });
+  const [industryEtfForm, setIndustryEtfForm] = useState({ ticker: "", fundName: "", parentSector: "", industry: "" });
 
   const load = async () => {
-    const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
+    const [config, sectorRes, industryRes] = await Promise.all([
+      adminFetch<SnapshotResponse["config"]>("/api/admin/config"),
+      adminFetch<{ rows: any[] }>("/api/etfs/sector"),
+      adminFetch<{ rows: any[] }>("/api/etfs/industry"),
+    ]);
     setData(config);
+    setSectorEtfs(sectorRes.rows ?? []);
+    setIndustryEtfs(industryRes.rows ?? []);
   };
   useEffect(() => {
     void load();
@@ -87,6 +98,93 @@ export function AdminBuilder() {
 
   return (
     <div className="space-y-4">
+      <div className="card p-3">
+        <h3 className="mb-2 text-base font-semibold">ETF Watchlists</h3>
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded border border-borderSoft p-2">
+            <p className="mb-2 text-sm font-semibold">Add Sector ETF</p>
+            <div className="grid gap-2">
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Ticker (e.g. XLF)" value={sectorEtfForm.ticker} onChange={(e) => setSectorEtfForm((s) => ({ ...s, ticker: e.target.value }))} />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (optional)" value={sectorEtfForm.fundName} onChange={(e) => setSectorEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Parent sector (e.g. Financials)" value={sectorEtfForm.parentSector} onChange={(e) => setSectorEtfForm((s) => ({ ...s, parentSector: e.target.value }))} />
+              <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={async () => {
+                try {
+                  setEtfError(null);
+                  await adminFetch("/api/admin/etfs", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      listType: "sector",
+                      ticker: sectorEtfForm.ticker.trim().toUpperCase(),
+                      fundName: sectorEtfForm.fundName.trim() || null,
+                      parentSector: sectorEtfForm.parentSector.trim() || null,
+                      industry: "Sector ETF",
+                    }),
+                  });
+                  setSectorEtfForm({ ticker: "", fundName: "", parentSector: "" });
+                  await load();
+                } catch (err) {
+                  setEtfError(err instanceof Error ? err.message : "Failed to add sector ETF.");
+                }
+              }}>
+                Add Sector ETF
+              </button>
+            </div>
+          </div>
+          <div className="rounded border border-borderSoft p-2">
+            <p className="mb-2 text-sm font-semibold">Add Industry ETF</p>
+            <div className="grid gap-2">
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Ticker (e.g. SMH)" value={industryEtfForm.ticker} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, ticker: e.target.value }))} />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Fund name (optional)" value={industryEtfForm.fundName} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, fundName: e.target.value }))} />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Parent sector" value={industryEtfForm.parentSector} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, parentSector: e.target.value }))} />
+              <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1" placeholder="Industry category" value={industryEtfForm.industry} onChange={(e) => setIndustryEtfForm((s) => ({ ...s, industry: e.target.value }))} />
+              <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={async () => {
+                try {
+                  setEtfError(null);
+                  await adminFetch("/api/admin/etfs", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      listType: "industry",
+                      ticker: industryEtfForm.ticker.trim().toUpperCase(),
+                      fundName: industryEtfForm.fundName.trim() || null,
+                      parentSector: industryEtfForm.parentSector.trim() || null,
+                      industry: industryEtfForm.industry.trim() || null,
+                    }),
+                  });
+                  setIndustryEtfForm({ ticker: "", fundName: "", parentSector: "", industry: "" });
+                  await load();
+                } catch (err) {
+                  setEtfError(err instanceof Error ? err.message : "Failed to add industry ETF.");
+                }
+              }}>
+                Add Industry ETF
+              </button>
+            </div>
+          </div>
+        </div>
+        {etfError && <p className="mt-2 text-xs text-red-300">{etfError}</p>}
+        <div className="mt-3 grid gap-2 md:grid-cols-2">
+          <div>
+            <p className="mb-1 text-xs uppercase tracking-[0.08em] text-slate-400">Sector ETFs ({sectorEtfs.length})</p>
+            <div className="flex max-h-28 flex-wrap gap-1 overflow-auto rounded border border-borderSoft p-2">
+              {sectorEtfs.map((row) => (
+                <span key={`s-${row.ticker}`} className="rounded bg-panelSoft px-2 py-1 text-xs">
+                  {row.ticker}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="mb-1 text-xs uppercase tracking-[0.08em] text-slate-400">Industry ETFs ({industryEtfs.length})</p>
+            <div className="flex max-h-28 flex-wrap gap-1 overflow-auto rounded border border-borderSoft p-2">
+              {industryEtfs.map((row) => (
+                <span key={`i-${row.ticker}-${row.industry}`} className="rounded bg-panelSoft px-2 py-1 text-xs">
+                  {row.ticker}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
       <div className="card flex flex-wrap gap-2 p-3">
         <input className="flex-1 rounded border border-borderSoft bg-panelSoft px-2 py-1" value={newSectionTitle} onChange={(e) => setNewSectionTitle(e.target.value)} placeholder="New section title" />
         <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={addSection}>

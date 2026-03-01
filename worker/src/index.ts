@@ -7,6 +7,7 @@ import { loadConfig, upsertAudit } from "./db";
 import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
+import { syncEtfConstituents } from "./etf";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -26,6 +27,24 @@ async function refreshSnapshotSafe(env: Env): Promise<void> {
   } catch (error) {
     console.error("snapshot refresh failed after admin mutation", error);
   }
+}
+
+const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean => {
+  if (!iso) return true;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return true;
+  return Date.now() - then > maxAgeDays * 86400_000;
+};
+
+async function getTicker1dStats(db: D1Database, ticker: string): Promise<{ change1d: number; lastPrice: number }> {
+  const bars = await db.prepare("SELECT c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 2")
+    .bind(ticker)
+    .all<{ c: number }>();
+  const rows = bars.results ?? [];
+  const lastPrice = rows[0]?.c ?? 0;
+  const prev = rows[1]?.c ?? 0;
+  if (!lastPrice || !prev) return { change1d: 0, lastPrice };
+  return { change1d: ((lastPrice - prev) / prev) * 100, lastPrice };
 }
 
 app.get("/api/health", (c) => c.json({ ok: true }));
@@ -165,26 +184,38 @@ app.get("/api/13f/manager/:id", async (c) => {
 app.get("/api/sectors/trending", async (c) => {
   const days = Math.max(5, Math.min(90, Number(c.req.query("days") ?? 30)));
   const rows = await c.env.DB.prepare(
-    "SELECT s.sector, d.ticker, d.date, d.c FROM daily_bars d JOIN symbols s ON s.ticker = d.ticker WHERE s.sector IS NOT NULL AND d.date >= date('now', ?) ORDER BY s.sector, d.ticker, d.date",
+    "SELECT s.sector, s.name, d.ticker, d.date, d.c FROM daily_bars d JOIN symbols s ON s.ticker = d.ticker WHERE s.sector IS NOT NULL AND d.date >= date('now', ?) ORDER BY s.sector, d.ticker, d.date",
   )
     .bind(`-${days + 7} day`)
-    .all<{ sector: string; ticker: string; date: string; c: number }>();
+    .all<{ sector: string; name: string | null; ticker: string; date: string; c: number }>();
 
-  const bySector = new Map<string, Map<string, number[]>>();
+  const bySector = new Map<string, Map<string, { name: string | null; closes: number[] }>>();
   for (const r of rows.results ?? []) {
-    const sectorMap = bySector.get(r.sector) ?? new Map<string, number[]>();
-    const arr = sectorMap.get(r.ticker) ?? [];
-    arr.push(r.c);
-    sectorMap.set(r.ticker, arr);
+    const sectorMap = bySector.get(r.sector) ?? new Map<string, { name: string | null; closes: number[] }>();
+    const tickerRow = sectorMap.get(r.ticker) ?? { name: r.name ?? null, closes: [] };
+    tickerRow.closes.push(r.c);
+    if (!tickerRow.name && r.name) tickerRow.name = r.name;
+    sectorMap.set(r.ticker, tickerRow);
     bySector.set(r.sector, sectorMap);
   }
 
   const out = [...bySector.entries()].map(([sector, tickers]) => {
-    const returns = [...tickers.values()]
-      .filter((v) => v.length > 6)
-      .map((v) => ((v[v.length - 1] - v[v.length - 6]) / v[v.length - 6]) * 100);
-    const score = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
-    return { sector, trend5d: score, symbolCount: tickers.size };
+    const tickerRows = [...tickers.entries()]
+      .map(([ticker, data]) => {
+        const hasWindow = data.closes.length > 6;
+        const trend5d = hasWindow ? ((data.closes[data.closes.length - 1] - data.closes[data.closes.length - 6]) / data.closes[data.closes.length - 6]) * 100 : 0;
+        return {
+          ticker,
+          name: data.name,
+          trend5d,
+          lastPrice: data.closes[data.closes.length - 1] ?? 0,
+          hasWindow,
+        };
+      })
+      .sort((a, b) => b.trend5d - a.trend5d);
+    const valid = tickerRows.filter((v) => v.hasWindow);
+    const score = valid.length > 0 ? valid.reduce((acc, cur) => acc + cur.trend5d, 0) / valid.length : 0;
+    return { sector, trend5d: score, symbolCount: tickers.size, tickers: tickerRows };
   });
   out.sort((a, b) => b.trend5d - a.trend5d);
   return c.json({ days, sectors: out });
@@ -268,6 +299,79 @@ app.get("/api/sectors/calendar", async (c) => {
   });
 });
 
+app.get("/api/etfs/sector", async (c) => {
+  const rowsRes = await c.env.DB.prepare(
+    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'sector' ORDER BY sort_order ASC, ticker ASC",
+  ).all();
+  const rows = rowsRes.results ?? [];
+  const withStats = await Promise.all(
+    rows.map(async (row: any) => {
+      const stats = await getTicker1dStats(c.env.DB, row.ticker);
+      return { ...row, ...stats };
+    }),
+  );
+  withStats.sort((a, b) => b.change1d - a.change1d);
+  return c.json({ rows: withStats });
+});
+
+app.get("/api/etfs/industry", async (c) => {
+  const rowsRes = await c.env.DB.prepare(
+    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'industry' ORDER BY parent_sector ASC, industry ASC, sort_order ASC, ticker ASC",
+  ).all();
+  const rows = rowsRes.results ?? [];
+  const withStats = await Promise.all(
+    rows.map(async (row: any) => {
+      const stats = await getTicker1dStats(c.env.DB, row.ticker);
+      return { ...row, ...stats };
+    }),
+  );
+  return c.json({ rows: withStats });
+});
+
+app.get("/api/etf/:ticker/constituents", async (c) => {
+  const ticker = c.req.param("ticker").toUpperCase();
+  const etf = await c.env.DB.prepare(
+    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
+  )
+    .bind(ticker)
+    .first();
+  if (!etf) return c.json({ error: "ETF ticker not found in watchlists" }, 404);
+
+  let status = await c.env.DB.prepare(
+    "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
+  )
+    .bind(ticker)
+    .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+  const shouldSync = !status || isStaleDate(status.lastSyncedAt, 30);
+  let warning: string | null = null;
+  if (shouldSync) {
+    try {
+      await syncEtfConstituents(c.env, ticker);
+      status = await c.env.DB.prepare(
+        "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
+      )
+        .bind(ticker)
+        .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+    } catch (error) {
+      warning = error instanceof Error ? error.message : "Constituent pull failed";
+    }
+  }
+  const rows = await c.env.DB.prepare(
+    "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
+  )
+    .bind(ticker)
+    .all();
+  if (!warning && status?.status === "error" && status.error) {
+    warning = status.error;
+  }
+  return c.json({
+    etf,
+    rows: rows.results ?? [],
+    syncStatus: status ?? null,
+    warning,
+  });
+});
+
 app.post("/api/sectors/entries", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const body = (await c.req.json()) as {
@@ -294,6 +398,56 @@ app.post("/api/sectors/entries", async (c) => {
     await c.env.DB.batch(stmts);
   }
   return c.json({ ok: true, id });
+});
+
+app.post("/api/admin/etfs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as {
+    listType: "sector" | "industry";
+    parentSector?: string | null;
+    industry?: string | null;
+    ticker: string;
+    fundName?: string | null;
+  };
+  const listType = body.listType === "industry" ? "industry" : "sector";
+  const ticker = body.ticker?.trim().toUpperCase();
+  if (!ticker) return c.json({ error: "ticker is required" }, 400);
+  const meta = await resolveTickerMeta(ticker, c.env);
+  const fundName = body.fundName?.trim() || meta?.name || ticker;
+  const order = await c.env.DB.prepare(
+    "SELECT COALESCE(MAX(sort_order), 0) + 1 as nextOrder FROM etf_watchlists WHERE list_type = ? AND COALESCE(parent_sector, '') = COALESCE(?, '') AND COALESCE(industry, '') = COALESCE(?, '')",
+  )
+    .bind(listType, body.parentSector ?? null, body.industry ?? null)
+    .first<{ nextOrder: number }>();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name",
+    ).bind(
+      listType,
+      body.parentSector ?? null,
+      body.industry ?? null,
+      ticker,
+      fundName,
+      order?.nextOrder ?? 1,
+    ),
+    c.env.DB.prepare("INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(ticker, meta?.name ?? fundName, meta?.exchange ?? "NYSEARCA", "etf", body.parentSector ?? null, body.industry ?? null),
+  ]);
+  await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry });
+  return c.json({ ok: true, ticker });
+});
+
+app.post("/api/admin/etf/:ticker/sync", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = c.req.param("ticker").toUpperCase();
+  try {
+    const result = await syncEtfConstituents(c.env, ticker);
+    await upsertAudit(c.env, "default", "ETF_CONSTITUENT_SYNC", { ticker, result });
+    return c.json({ ok: true, ticker, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "sync failed";
+    return c.json({ error: message }, 500);
+  }
 });
 
 app.get("/api/ticker/:ticker", async (c) => {
@@ -559,5 +713,16 @@ export default {
   fetch: app.fetch,
   scheduled: async (_event: ScheduledEvent, env: Env): Promise<void> => {
     await computeAndStoreSnapshot(env, undefined, "default");
+    const utcDay = new Date().getUTCDate();
+    if (utcDay <= 3) {
+      const watchRows = await env.DB.prepare("SELECT DISTINCT ticker FROM etf_watchlists ORDER BY ticker ASC").all<{ ticker: string }>();
+      for (const row of watchRows.results ?? []) {
+        try {
+          await syncEtfConstituents(env, row.ticker);
+        } catch (error) {
+          console.error("monthly etf constituent sync failed", row.ticker, error);
+        }
+      }
+    }
   },
 };

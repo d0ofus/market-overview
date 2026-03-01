@@ -5,21 +5,23 @@ import { useEffect, useId, useRef } from "react";
 export function TradingViewWidget({
   ticker,
   compact = false,
+  size = "default",
   className = "",
 }: {
   ticker: string;
   compact?: boolean;
+  size?: "small" | "default";
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
-  const frameClass = compact
-    ? "w-full max-w-[880px] aspect-[4/3]"
-    : "w-full max-w-[880px] aspect-[4/3]";
+  const maxWidth = size === "small" ? 420 : compact ? 640 : 880;
+  const frameClass = size === "small" ? "w-full max-w-[420px] aspect-[4/3]" : compact ? "w-full max-w-[640px] aspect-[4/3]" : "w-full max-w-[880px] aspect-[4/3]";
   useEffect(() => {
     if (!ref.current) return;
-    const width = Math.max(360, Math.min(ref.current.clientWidth, 880));
+    const minWidth = size === "small" ? 280 : 360;
+    const width = Math.max(minWidth, Math.min(ref.current.clientWidth, maxWidth));
     const height = Math.round(width * 0.75);
     ref.current.innerHTML = "";
     const script = document.createElement("script");
@@ -39,7 +41,7 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, containerId]);
+  }, [ticker, containerId, maxWidth, size]);
 
   return (
     <div className={`card p-2 ${className}`}>

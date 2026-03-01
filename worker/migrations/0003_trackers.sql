@@ -114,6 +114,8 @@ INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, indu
 ('QSR','Restaurant Brands International','NYSE','equity','Consumer Cyclical','Restaurants'),
 ('AMD','Advanced Micro Devices Inc','NASDAQ','equity','Technology','Semiconductors'),
 ('AVGO','Broadcom Inc','NASDAQ','equity','Technology','Semiconductors'),
+('SMH','VanEck Semiconductor ETF','NASDAQ','etf','Technology','Semiconductors'),
+('XLU','Utilities Select Sector SPDR Fund','NYSEARCA','etf','Utilities','Utilities'),
 ('NEE','NextEra Energy Inc','NYSE','equity','Utilities','Regulated Electric'),
 ('DUK','Duke Energy Corp','NYSE','equity','Utilities','Regulated Electric'),
 ('ITB','iShares U.S. Home Construction ETF','NYSEARCA','etf','Consumer Cyclical','Homebuilders'),

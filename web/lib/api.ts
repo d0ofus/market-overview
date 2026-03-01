@@ -62,6 +62,18 @@ export function getSectorTrending(days = 30) {
   return getJson<{ days: number; sectors: any[] }>(`/api/sectors/trending?days=${days}`);
 }
 
+export function getSectorEtfs() {
+  return getJson<{ rows: any[] }>("/api/etfs/sector");
+}
+
+export function getIndustryEtfs() {
+  return getJson<{ rows: any[] }>("/api/etfs/industry");
+}
+
+export function getEtfConstituents(ticker: string) {
+  return getJson<{ etf: any; rows: any[]; syncStatus: any; warning: string | null }>(`/api/etf/${ticker}/constituents`);
+}
+
 export function getSectorEntries() {
   return getJson<{ rows: any[] }>("/api/sectors/entries");
 }
