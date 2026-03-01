@@ -196,6 +196,39 @@ class AlpacaProvider implements MarketDataProvider {
     }
     return all;
   }
+
+  async getQuoteSnapshot(tickers: string[]): Promise<Record<string, { price: number; prevClose: number }>> {
+    const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
+    const out: Record<string, { price: number; prevClose: number }> = {};
+    const chunks = this.chunk(unique, 80);
+    for (const chunk of chunks) {
+      const params = new URLSearchParams({
+        symbols: chunk.join(","),
+        feed: this.feed,
+      });
+      const res = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+        headers: {
+          "APCA-API-KEY-ID": this.key,
+          "APCA-API-SECRET-KEY": this.secret,
+          "User-Agent": "market-command-centre/1.0",
+        },
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
+      }
+      const json = (await res.json()) as {
+        snapshots?: Record<string, { latestTrade?: { p?: number }; dailyBar?: { c?: number }; prevDailyBar?: { c?: number } }>;
+      };
+      for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
+        const price = snap.latestTrade?.p ?? snap.dailyBar?.c;
+        const prevClose = snap.prevDailyBar?.c;
+        if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
+        out[ticker.toUpperCase()] = { price, prevClose };
+      }
+    }
+    return out;
+  }
 }
 
 export function getProvider(env: Env): MarketDataProvider {

@@ -47,6 +47,56 @@ async function getTicker1dStats(db: D1Database, ticker: string): Promise<{ chang
   return { change1d: ((lastPrice - prev) / prev) * 100, lastPrice };
 }
 
+async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; source: string }>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  const map = new Map<string, { change1d: number; lastPrice: number; source: string }>();
+  for (const ticker of unique) {
+    const fallback = await getTicker1dStats(env.DB, ticker);
+    map.set(ticker, { change1d: fallback.change1d, lastPrice: fallback.lastPrice, source: "daily-bars" });
+  }
+  try {
+    const provider = getProvider(env);
+    const snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(unique) : {};
+    for (const ticker of unique) {
+      const snap = snapshots[ticker];
+      if (!snap?.prevClose || !snap?.price) continue;
+      map.set(ticker, {
+        change1d: ((snap.price - snap.prevClose) / snap.prevClose) * 100,
+        lastPrice: snap.price,
+        source: "provider-snapshot",
+      });
+    }
+  } catch (error) {
+    console.error("get quote snapshots failed, using daily bars fallback", error);
+  }
+  return map;
+}
+
+async function refreshRecentBarsForTickers(env: Env, tickers: string[]): Promise<void> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  if (unique.length === 0) return;
+  let provider: ReturnType<typeof getProvider> | null = null;
+  try {
+    provider = getProvider(env);
+  } catch {
+    return;
+  }
+  try {
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 21 * 86400_000).toISOString().slice(0, 10);
+    const bars = await provider.getDailyBars(unique, start, end);
+    if (bars.length === 0) return;
+    const stmts = bars.map((b) =>
+      env.DB.prepare(
+        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume ?? 0),
+    );
+    await env.DB.batch(stmts);
+  } catch (error) {
+    console.error("refresh recent bars for tickers failed", error);
+  }
+}
+
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/status", async (c) => {
@@ -304,10 +354,12 @@ app.get("/api/etfs/sector", async (c) => {
     "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'sector' ORDER BY sort_order ASC, ticker ASC",
   ).all();
   const rows = rowsRes.results ?? [];
+  await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
+  const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
-      const stats = await getTicker1dStats(c.env.DB, row.ticker);
-      return { ...row, ...stats };
+      const stats = statsMap.get(String(row.ticker).toUpperCase());
+      return { ...row, change1d: stats?.change1d ?? 0, lastPrice: stats?.lastPrice ?? 0, priceSource: stats?.source ?? "daily-bars" };
     }),
   );
   withStats.sort((a, b) => b.change1d - a.change1d);
@@ -319,10 +371,12 @@ app.get("/api/etfs/industry", async (c) => {
     "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'industry' ORDER BY parent_sector ASC, industry ASC, sort_order ASC, ticker ASC",
   ).all();
   const rows = rowsRes.results ?? [];
+  await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
+  const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
-      const stats = await getTicker1dStats(c.env.DB, row.ticker);
-      return { ...row, ...stats };
+      const stats = statsMap.get(String(row.ticker).toUpperCase());
+      return { ...row, change1d: stats?.change1d ?? 0, lastPrice: stats?.lastPrice ?? 0, priceSource: stats?.source ?? "daily-bars" };
     }),
   );
   return c.json({ rows: withStats });
@@ -361,12 +415,24 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   )
     .bind(ticker)
     .all();
+  const baseRows = rows.results ?? [];
+  await refreshRecentBarsForTickers(c.env, baseRows.map((r: any) => r.ticker));
+  const statsMap = await get1dStatsMap(c.env, baseRows.map((r: any) => r.ticker));
+  const rowsWithStats = baseRows.map((row: any) => {
+    const stats = statsMap.get(String(row.ticker).toUpperCase());
+    return {
+      ...row,
+      change1d: stats?.change1d ?? 0,
+      lastPrice: stats?.lastPrice ?? 0,
+      priceSource: stats?.source ?? "daily-bars",
+    };
+  });
   if (!warning && status?.status === "error" && status.error) {
     warning = status.error;
   }
   return c.json({
     etf,
-    rows: rows.results ?? [],
+    rows: rowsWithStats,
     syncStatus: status ?? null,
     warning,
   });

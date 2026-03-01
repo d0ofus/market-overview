@@ -34,6 +34,8 @@ type EtfConstituent = {
   ticker: string;
   name: string | null;
   weight: number | null;
+  change1d?: number;
+  lastPrice?: number;
 };
 
 const FALLBACK_SECTOR_ETFS: WatchlistEtf[] = [
@@ -138,6 +140,8 @@ export function SectorTracker() {
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [addFormOpen, setAddFormOpen] = useState(true);
+  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -170,6 +174,7 @@ export function SectorTracker() {
     setConstituentLoading(true);
     setConstituentWarning(null);
     setConstituents([]);
+    setConstituentSort("weight");
     try {
       const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []) as EtfConstituent[]);
@@ -224,6 +229,16 @@ export function SectorTracker() {
       .sort((a, b) => b.maxChange - a.maxChange);
   }, [industryEtfs]);
 
+  const sortedConstituents = useMemo(() => {
+    const rows = [...constituents];
+    if (constituentSort === "change1d") {
+      rows.sort((a, b) => (b.change1d ?? 0) - (a.change1d ?? 0));
+      return rows;
+    }
+    rows.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
+    return rows;
+  }, [constituents, constituentSort]);
+
   return (
     <div className="space-y-4">
       <div className="card p-3" id="section-selector">
@@ -262,7 +277,7 @@ export function SectorTracker() {
                   <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
                 </div>
               </div>
-              <TradingViewWidget ticker={etf.ticker} size="small" className="!border-0 !bg-transparent !shadow-none !p-0" />
+              <TradingViewWidget ticker={etf.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
             </div>
           ))}
         </div>
@@ -298,7 +313,7 @@ export function SectorTracker() {
                           <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
                         </div>
                       </div>
-                      <TradingViewWidget ticker={etf.ticker} size="small" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <TradingViewWidget ticker={etf.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
                     </div>
                   ))}
                 </div>
@@ -312,7 +327,11 @@ export function SectorTracker() {
       <div id="key-movers-tracker">
       <CollapsibleSection title="Key Movers Tracker">
         <div className="mb-3 rounded-xl border border-borderSoft/70 bg-panelSoft/25 p-3">
-          <h4 className="mb-2 text-sm font-semibold text-slate-200">Add Sector/Narrative</h4>
+          <button className="mb-2 inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-sm text-slate-200" onClick={() => setAddFormOpen((v) => !v)}>
+            <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
+            Add Sector/Narrative
+          </button>
+          {addFormOpen && (
           <div className="grid gap-2 md:grid-cols-6">
             <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" placeholder="Sector/Narrative" value={sectorNarrative} onChange={(e) => setSectorNarrative(e.target.value)} />
             <input type="date" className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
@@ -335,60 +354,65 @@ export function SectorTracker() {
               Add Tickers
             </button>
           </div>
-          <datalist id="sector-symbol-options">
-            {symbolOptions.map((s) => (
-              <option key={s.ticker} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
-            ))}
-          </datalist>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {selectedTickers.map((ticker) => (
-              <span key={ticker} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
-                {ticker}
+          )}
+          {addFormOpen && (
+            <>
+              <datalist id="sector-symbol-options">
+                {symbolOptions.map((s) => (
+                  <option key={s.ticker} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
+                ))}
+              </datalist>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {selectedTickers.map((ticker) => (
+                  <span key={ticker} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
+                    {ticker}
+                    <button
+                      className="rounded px-1 text-slate-400 hover:text-slate-100"
+                      onClick={() => setSelectedTickers((prev) => prev.filter((t) => t !== ticker))}
+                      aria-label={`Remove ${ticker}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              {formError && <p className="mt-2 text-xs text-red-300">{formError}</p>}
+              <div className="mt-2">
                 <button
-                  className="rounded px-1 text-slate-400 hover:text-slate-100"
-                  onClick={() => setSelectedTickers((prev) => prev.filter((t) => t !== ticker))}
-                  aria-label={`Remove ${ticker}`}
+                  className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+                  onClick={async () => {
+                    setFormError(null);
+                    if (!sectorNarrative.trim() || !eventDate) {
+                      setFormError("Sector/Narrative and date are required.");
+                      return;
+                    }
+                    try {
+                      await adminFetch("/api/sectors/entries", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          sectorName: sectorNarrative.trim(),
+                          eventDate,
+                          trendScore: Number.isFinite(trendScore) ? trendScore : 0,
+                          notes: notes.trim() || null,
+                          symbols: selectedTickers,
+                        }),
+                      });
+                      setSectorNarrative("");
+                      setNotes("");
+                      setSelectedTickers([]);
+                      setTickerInput("");
+                      setTrendScore(0);
+                      await load();
+                    } catch (err) {
+                      setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
+                    }
+                  }}
                 >
-                  <X className="h-3 w-3" />
+                  Save Entry
                 </button>
-              </span>
-            ))}
-          </div>
-          {formError && <p className="mt-2 text-xs text-red-300">{formError}</p>}
-          <div className="mt-2">
-            <button
-              className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-              onClick={async () => {
-                setFormError(null);
-                if (!sectorNarrative.trim() || !eventDate) {
-                  setFormError("Sector/Narrative and date are required.");
-                  return;
-                }
-                try {
-                  await adminFetch("/api/sectors/entries", {
-                    method: "POST",
-                    body: JSON.stringify({
-                      sectorName: sectorNarrative.trim(),
-                      eventDate,
-                      trendScore: Number.isFinite(trendScore) ? trendScore : 0,
-                      notes: notes.trim() || null,
-                      symbols: selectedTickers,
-                    }),
-                  });
-                  setSectorNarrative("");
-                  setNotes("");
-                  setSelectedTickers([]);
-                  setTickerInput("");
-                  setTrendScore(0);
-                  await load();
-                } catch (err) {
-                  setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
-                }
-              }}
-            >
-              Save Entry
-            </button>
-          </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="mb-3 flex flex-wrap gap-2">
@@ -487,8 +511,23 @@ export function SectorTracker() {
               <h4 className="text-sm font-semibold text-slate-100">
                 {activeEtf.ticker} Constituents {activeEtf.fundName ? `- ${activeEtf.fundName}` : ""}
               </h4>
-              <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveEtf(null)}>
+              <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveEtf(null)}>
                 Close
+              </button>
+            </div>
+            <div className="mb-2 flex items-center gap-2 rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs">
+              <span className="text-slate-400">Sort constituents by:</span>
+              <button
+                className={`rounded px-2 py-1 ${constituentSort === "weight" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+                onClick={() => setConstituentSort("weight")}
+              >
+                Weight %
+              </button>
+              <button
+                className={`rounded px-2 py-1 ${constituentSort === "change1d" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+                onClick={() => setConstituentSort("change1d")}
+              >
+                1D %
               </button>
             </div>
             {constituentWarning && (
@@ -503,14 +542,18 @@ export function SectorTracker() {
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {constituents.map((row) => (
+                {sortedConstituents.map((row) => (
                   <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-2">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{row.ticker}</span>
                       <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
                     </div>
+                    <div className="mb-1 text-xs">
+                      <span className={pctCls(row.change1d ?? 0)}>{(row.change1d ?? 0).toFixed(2)}%</span>
+                      <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
+                    </div>
                     <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                    <TradingViewWidget ticker={row.ticker} size="small" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                    <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
                   </div>
                 ))}
                 {constituents.length === 0 && (
@@ -526,11 +569,11 @@ export function SectorTracker() {
           <div className="w-full max-w-5xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
               <h4 className="text-sm font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
-              <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveChartTicker(null)}>
+              <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveChartTicker(null)}>
                 Close
               </button>
             </div>
-            <TradingViewWidget ticker={activeChartTicker} />
+            <TradingViewWidget ticker={activeChartTicker} chartOnly initialRange="3M" />
           </div>
         </div>
       )}

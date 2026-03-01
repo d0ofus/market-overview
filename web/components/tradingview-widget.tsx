@@ -6,11 +6,15 @@ export function TradingViewWidget({
   ticker,
   compact = false,
   size = "default",
+  chartOnly = false,
+  initialRange = "1M",
   className = "",
 }: {
   ticker: string;
   compact?: boolean;
   size?: "small" | "default";
+  chartOnly?: boolean;
+  initialRange?: "1M" | "3M" | "6M" | "12M";
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -32,16 +36,21 @@ export function TradingViewWidget({
       height,
       symbol: ticker,
       interval: "1D",
+      range: initialRange,
       timezone: "Etc/UTC",
       theme: "dark",
       style: "1",
-      allow_symbol_change: true,
+      allow_symbol_change: !chartOnly,
       hide_top_toolbar: false,
+      hide_side_toolbar: chartOnly,
+      hide_legend: false,
+      volume_force_overlay: false,
+      withdateranges: true,
       save_image: false,
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, containerId, maxWidth, size]);
+  }, [ticker, containerId, maxWidth, size, chartOnly, initialRange]);
 
   return (
     <div className={`card p-2 ${className}`}>
