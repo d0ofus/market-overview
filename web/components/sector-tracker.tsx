@@ -142,6 +142,7 @@ export function SectorTracker() {
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const [addFormOpen, setAddFormOpen] = useState(true);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
+  const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -250,25 +251,36 @@ export function SectorTracker() {
     return Array.from(options).sort((a, b) => a.localeCompare(b));
   }, [entries, calendarRows]);
 
+  const jumpToSection = (id: "sector-etfs" | "industry-etfs" | "key-movers-tracker") => {
+    setActiveSection(id);
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
     <div className="space-y-4">
       <div className="card p-3" id="section-selector">
         <label className="mb-1 block text-xs uppercase tracking-[0.08em] text-slate-400">Jump To Section</label>
-        <select
-          className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm md:max-w-sm"
-          defaultValue=""
-          onChange={(e) => {
-            const id = e.target.value;
-            if (!id) return;
-            const el = document.getElementById(id);
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-          }}
-        >
-          <option value="">Select section...</option>
-          <option value="sector-etfs">Sector ETFs</option>
-          <option value="industry-etfs">Industry ETFs</option>
-          <option value="key-movers-tracker">Key Movers Tracker</option>
-        </select>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={`rounded px-3 py-1.5 text-sm ${activeSection === "sector-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+            onClick={() => jumpToSection("sector-etfs")}
+          >
+            Sector ETFs
+          </button>
+          <button
+            className={`rounded px-3 py-1.5 text-sm ${activeSection === "industry-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+            onClick={() => jumpToSection("industry-etfs")}
+          >
+            Industry ETFs
+          </button>
+          <button
+            className={`rounded px-3 py-1.5 text-sm ${activeSection === "key-movers-tracker" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+            onClick={() => jumpToSection("key-movers-tracker")}
+          >
+            Key Movers Tracker
+          </button>
+        </div>
       </div>
 
       <div id="sector-etfs">
