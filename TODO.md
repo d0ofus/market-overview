@@ -11,6 +11,7 @@
 ## 🟡 Medium
 - Add dropdown list for 13F filings to choose hedge funds
 - Automatic weekly/monthly pull of data for 13F 
+- Add Calendar of US holidays
 
 ## 🟢 Low / Future
 - Light/Dark mode toggle
