@@ -260,7 +260,6 @@ export function SectorTracker() {
   return (
     <div className="space-y-4">
       <div className="card p-3" id="section-selector">
-        <label className="mb-1 block text-xs uppercase tracking-[0.08em] text-slate-400">Jump To Section</label>
         <div className="flex flex-wrap gap-2">
           <button
             className={`rounded px-3 py-1.5 text-sm ${activeSection === "sector-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
