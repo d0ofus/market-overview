@@ -29,6 +29,14 @@ async function refreshSnapshotSafe(env: Env): Promise<void> {
   }
 }
 
+async function ensureBreadthRowsSafe(env: Env): Promise<void> {
+  try {
+    await computeAndStoreSnapshot(env, undefined, "default");
+  } catch (error) {
+    console.error("on-demand breadth backfill failed", error);
+  }
+}
+
 const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean => {
   if (!iso) return true;
   const then = new Date(iso).getTime();
@@ -160,9 +168,17 @@ app.get("/api/breadth", async (c) => {
 
   let universeId = requestedUniverseId;
   let rows = await loadRows(universeId);
+  if ((rows.results ?? []).length === 0) {
+    await ensureBreadthRowsSafe(c.env);
+    rows = await loadRows(universeId);
+  }
   if ((rows.results ?? []).length === 0 && requestedUniverseId === "sp500-core") {
     universeId = "sp500-lite";
     rows = await loadRows(universeId);
+    if ((rows.results ?? []).length === 0) {
+      await ensureBreadthRowsSafe(c.env);
+      rows = await loadRows(universeId);
+    }
   }
 
   const parsedRows = (rows.results ?? []).reverse().map((row: any) => {
@@ -178,9 +194,13 @@ app.get("/api/breadth", async (c) => {
 
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
-  const maxDateRow = requestedDate
+  let maxDateRow = requestedDate
     ? { asOfDate: requestedDate }
     : await c.env.DB.prepare("SELECT MAX(as_of_date) as asOfDate FROM breadth_snapshots").first<{ asOfDate: string | null }>();
+  if (!maxDateRow?.asOfDate && !requestedDate) {
+    await ensureBreadthRowsSafe(c.env);
+    maxDateRow = await c.env.DB.prepare("SELECT MAX(as_of_date) as asOfDate FROM breadth_snapshots").first<{ asOfDate: string | null }>();
+  }
   const asOfDate = maxDateRow?.asOfDate ?? null;
   if (!asOfDate) {
     return c.json({
@@ -198,8 +218,16 @@ app.get("/api/breadth/summary", async (c) => {
   )
     .bind(asOfDate)
     .all();
+  let rowResults = rows.results ?? [];
+  if (rowResults.length === 0 && !requestedDate) {
+    await ensureBreadthRowsSafe(c.env);
+    const retried = await c.env.DB.prepare(
+      "SELECT b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id WHERE b.as_of_date = (SELECT MAX(as_of_date) FROM breadth_snapshots) ORDER BY b.universe_id ASC",
+    ).all();
+    rowResults = retried.results ?? [];
+  }
 
-  const parsedRows = (rows.results ?? []).map((row: any) => {
+  const parsedRows = rowResults.map((row: any) => {
     const sentiment = parseBreadthSentiment(row.sentimentJson);
     return {
       ...row,
