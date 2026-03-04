@@ -867,8 +867,14 @@ app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
   const configId = c.req.query("configId") ?? "default";
-  const result = await computeAndStoreSnapshot(c.env, date, configId);
-  return c.json({ ok: true, ...result });
+  try {
+    const result = await computeAndStoreSnapshot(c.env, date, configId);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "run-eod failed";
+    console.error("admin run-eod failed", { date, configId, error });
+    return c.json({ error: message }, 500);
+  }
 });
 
 app.patch("/api/admin/config", async (c) => {
