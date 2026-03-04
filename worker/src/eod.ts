@@ -106,7 +106,7 @@ async function ensureUniverseMembership(env: Env, universeId: string, universeNa
     env.DB.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
   ]);
 
-  const chunkSize = 90;
+  const chunkSize = 20;
   for (let i = 0; i < unique.length; i += chunkSize) {
     const chunk = unique.slice(i, i + chunkSize);
     const statements = chunk.map((ticker) =>
