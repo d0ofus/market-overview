@@ -163,6 +163,13 @@ function highCell(count: number, pctValue: number): string {
   return `${count} (${pctValue.toFixed(1)}%)`;
 }
 
+function universeDisplayName(row: { universeName: string; metrics: BreadthMetrics }): string {
+  if (row.metrics.totalUniverseMembers > 0) {
+    return `${row.universeName} (n=${row.metrics.totalUniverseMembers})`;
+  }
+  return row.universeName;
+}
+
 export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summary: SummaryPayload }) {
   const [lookback, setLookback] = useState<Lookback>(60);
   const [metricKey, setMetricKey] = useState<(typeof metricOptions)[number]["key"]>("pctAbove20MA");
@@ -240,7 +247,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
             <tbody>
               {summaryRows.map((row) => (
                 <tr key={`ma-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{row.universeName}</td>
+                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove5MA, 50)}`}>{pct(row.metrics.pctAbove5MA)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove20MA, 50)}`}>{pct(row.metrics.pctAbove20MA)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove50MA, 50)}`}>{pct(row.metrics.pctAbove50MA)}</td>
@@ -269,7 +276,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
             <tbody>
               {summaryRows.map((row) => (
                 <tr key={`highs-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{row.universeName}</td>
+                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
                   <td className="px-3 py-2">{highCell(row.metrics.new5DHighs, row.metrics.pctNew5DHighs)}</td>
                   <td className="px-3 py-2">{highCell(row.metrics.new1MHighs, row.metrics.pctNew1MHighs)}</td>
                   <td className="px-3 py-2">{highCell(row.metrics.new3MHighs, row.metrics.pctNew3MHighs)}</td>
@@ -298,7 +305,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
             <tbody>
               {summaryRows.map((row) => (
                 <tr key={`ad-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{row.universeName}</td>
+                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.advancers - row.metrics.decliners, 0)}`}>{row.metrics.advancers}</td>
                   <td className="px-3 py-2">{row.metrics.decliners}</td>
                   <td className="px-3 py-2">{row.metrics.unchanged}</td>
@@ -327,7 +334,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
             <tbody>
               {summaryRows.map((row) => (
                 <tr key={`other-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{row.universeName}</td>
+                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
                   <td className="px-3 py-2">{row.metrics.stocksGtPos4Pct}</td>
                   <td className="px-3 py-2">{row.metrics.stocksLtNeg4Pct}</td>
                   <td className="px-3 py-2">{row.metrics.stocksGtPos25Q}</td>
