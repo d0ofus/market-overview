@@ -84,6 +84,16 @@ async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[]
   }
 }
 
+async function ensureSymbolsExist(env: Env, tickers: string[]): Promise<void> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  if (unique.length === 0) return;
+  const statements = unique.map((ticker) =>
+    env.DB.prepare("INSERT OR IGNORE INTO symbols (ticker, name, asset_class) VALUES (?, ?, ?)")
+      .bind(ticker, ticker, "equity"),
+  );
+  await runStatementsInChunks(env, statements);
+}
+
 async function loadBarsForTickers(
   env: Env,
   tickers: string[],
@@ -132,6 +142,7 @@ async function loadTickersWithBars(env: Env): Promise<string[]> {
 async function ensureUniverseMembership(env: Env, universeId: string, universeName: string, tickers: string[]): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return;
+  await ensureSymbolsExist(env, unique);
   await env.DB.batch([
     env.DB.prepare("INSERT OR REPLACE INTO universes (id, name) VALUES (?, ?)").bind(universeId, universeName),
     env.DB.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
@@ -304,6 +315,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     try {
       const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
       if (freshBars.length > 0) {
+        await ensureSymbolsExist(env, freshBars.map((b) => b.ticker));
         const stmts = freshBars.map((b) =>
           env.DB.prepare(
             "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
