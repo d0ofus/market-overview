@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { computeAndStoreSnapshot, loadSnapshot } from "./eod";
+import { computeAndStoreSnapshot, loadSnapshot, refreshSp500CoreBreadth } from "./eod";
 import type { Env } from "./types";
 import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
@@ -79,7 +79,12 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
   ).first<{ asOfDate: string | null; advancers: number; decliners: number; unchanged: number; sentimentJson: string | null }>();
 
   if (!latestSp500Row) {
-    await ensureBreadthRowsSafe(env);
+    try {
+      await refreshSp500CoreBreadth(env);
+    } catch (error) {
+      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      await ensureBreadthRowsSafe(env);
+    }
     return;
   }
   const sentiment = parseBreadthSentiment(latestSp500Row.sentimentJson);
@@ -94,7 +99,12 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
     Boolean(latestSp500Row.asOfDate) &&
     String(latestSp500Row.asOfDate) < String(latestSnapshotAsOf);
   if (!usable || isStaleVsSnapshot) {
-    await ensureBreadthRowsSafe(env);
+    try {
+      await refreshSp500CoreBreadth(env);
+    } catch (error) {
+      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      await ensureBreadthRowsSafe(env);
+    }
   }
 }
 

@@ -411,6 +411,36 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   return { snapshotId, asOfDate };
 }
 
+export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string): Promise<{ asOfDate: string; barCount: number }> {
+  const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
+  const asOfDate = toISODate(previousWeekday(today));
+  const tickers = [...SP500_TICKERS];
+  await ensureUniverseMembership(env, "sp500-core", "S&P 500", tickers);
+  await ensureSymbolsExist(env, tickers);
+
+  let barCount = 0;
+  try {
+    const provider = getProvider(env);
+    const endDate = asOfDate;
+    const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
+    const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
+    if (freshBars.length > 0) {
+      barCount = freshBars.length;
+      const statements = freshBars.map((b) =>
+        env.DB.prepare(
+          "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume),
+      );
+      await runStatementsInChunks(env, statements);
+    }
+  } catch (error) {
+    console.error("sp500 core breadth refresh provider pull failed; using stored bars", error);
+  }
+
+  await computeAndStoreBreadth(env, asOfDate, "sp500-core", "S&P 500 constituents (bundled list) + provider daily bars");
+  return { asOfDate, barCount };
+}
+
 export async function computeAndStoreBreadth(
   env: Env,
   asOfDate: string,
