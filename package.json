@@ -9,7 +9,6 @@
   "scripts": {
     "dev": "npm run seed -w worker && concurrently \"npm run dev -w worker\" \"npm run dev -w web\"",
     "build": "npm run build -w worker && npm run build -w web",
-    "build:vercel": "npm run build -w web && node scripts/sync-next-output.mjs",
     "test": "npm run test -w worker",
     "seed": "npm run seed -w worker"
   },
