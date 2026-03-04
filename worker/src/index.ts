@@ -198,17 +198,6 @@ app.get("/api/breadth", async (c) => {
   let parsedRowsDesc = parseRows(rows.results ?? []);
   let usableRowsDesc = parsedRowsDesc.filter((row) => hasUsableBreadthRow(row));
 
-  if (usableRowsDesc.length === 0 && requestedUniverseId === "sp500-core") {
-    universeId = "sp500-lite";
-    rows = await loadRows(universeId);
-    if ((rows.results ?? []).length === 0) {
-      await ensureBreadthRowsSafe(c.env);
-      rows = await loadRows(universeId);
-    }
-    parsedRowsDesc = parseRows(rows.results ?? []);
-    usableRowsDesc = parsedRowsDesc.filter((row) => hasUsableBreadthRow(row));
-  }
-
   const parsedRows = usableRowsDesc.reverse().map((row: any) => {
     const sentiment = parseBreadthSentiment(row.sentimentJson);
     return {
@@ -247,7 +236,7 @@ app.get("/api/breadth/summary", async (c) => {
     const usableRequestedRows = parsedRequestedRows.filter((row) => hasUsableBreadthRow(row));
     const requestedRowById = new Map(usableRequestedRows.map((r: any) => [r.universeId, r]));
     const requestedOrderedRows = [
-      requestedRowById.get("sp500-core") ?? requestedRowById.get("sp500-lite"),
+      requestedRowById.get("sp500-core"),
       requestedRowById.get("nasdaq-core"),
       requestedRowById.get("nyse-core"),
       requestedRowById.get("russell2000-core"),
@@ -296,7 +285,7 @@ app.get("/api/breadth/summary", async (c) => {
   }
 
   const orderedRows = [
-    rowById.get("sp500-core") ?? rowById.get("sp500-lite"),
+    rowById.get("sp500-core"),
     rowById.get("nasdaq-core"),
     rowById.get("nyse-core"),
     rowById.get("russell2000-core"),
@@ -305,11 +294,11 @@ app.get("/api/breadth/summary", async (c) => {
 
   const present = new Set(orderedRows.map((r: any) => r.universeId));
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
-  if (!present.has("sp500-core") && !present.has("sp500-lite")) {
+  if (!present.has("sp500-core")) {
     unavailable.push({
       id: "sp500-core",
       name: "S&P 500",
-      reason: "SPY constituent proxy data has not synced yet",
+      reason: "S&P 500 breadth has insufficient live constituent coverage right now",
     });
   }
   if (!present.has("nasdaq-core")) {

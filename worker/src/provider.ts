@@ -133,6 +133,26 @@ class AlpacaProvider implements MarketDataProvider {
     return ts.slice(0, 10);
   }
 
+  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
+    if (tickers.length === 0) return [];
+    try {
+      return await this.fetchChunk(tickers, startDate, endDate);
+    } catch (error) {
+      if (tickers.length === 1) {
+        console.error("alpaca ticker fetch failed", { ticker: tickers[0], error });
+        return [];
+      }
+      const mid = Math.ceil(tickers.length / 2);
+      const left = tickers.slice(0, mid);
+      const right = tickers.slice(mid);
+      const [leftRows, rightRows] = await Promise.all([
+        this.fetchChunkWithIsolation(left, startDate, endDate),
+        this.fetchChunkWithIsolation(right, startDate, endDate),
+      ]);
+      return [...leftRows, ...rightRows];
+    }
+  }
+
   private async fetchChunk(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
     const out: DailyBar[] = [];
     let pageToken: string | undefined;
@@ -183,16 +203,10 @@ class AlpacaProvider implements MarketDataProvider {
 
   async getDailyBars(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
     const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
-    const batches = this.chunk(unique, 100);
+    const batches = this.chunk(unique, 80);
     const all: DailyBar[] = [];
     for (const batch of batches) {
-      let rows: DailyBar[] = [];
-      try {
-        rows = await this.fetchChunk(batch, startDate, endDate);
-      } catch (error) {
-        // Keep moving and use fallback for this batch.
-        console.error("alpaca batch fetch failed, trying fallback", { batch, error });
-      }
+      const rows = await this.fetchChunkWithIsolation(batch, startDate, endDate);
       all.push(...rows);
 
       const present = new Set(rows.map((r) => r.ticker.toUpperCase()));

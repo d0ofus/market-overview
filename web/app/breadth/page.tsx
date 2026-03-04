@@ -30,11 +30,10 @@ type SummaryPayload = {
   unavailable: Array<{ id: string; name: string; reason: string }>;
 };
 
-const universeOrder = ["sp500-core", "sp500-lite", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
+const universeOrder = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
 
 const universeNames: Record<string, string> = {
   "sp500-core": "S&P 500",
-  "sp500-lite": "S&P 500 Index (Proxy)",
   "nasdaq-core": "NASDAQ (QQQ Proxy)",
   "nyse-core": "NYSE (Proxy)",
   "russell2000-core": "Russell 2000",
@@ -42,8 +41,7 @@ const universeNames: Record<string, string> = {
 };
 
 const coreUniverseSource: Record<string, string> = {
-  "sp500-lite": "S&P 500 proxy set from local seeded universe + daily bars.",
-  "sp500-core": "SPY ETF holdings proxy (free holdings pages) + daily bars.",
+  "sp500-core": "S&P 500 constituent list (bundled) + provider daily bars.",
   "nasdaq-core": "QQQ ETF holdings proxy (NASDAQ-100 subset) + daily bars.",
   "nyse-core": "Exchange-tagged NYSE equities from local symbols + daily bars (proxy).",
   "russell2000-core": "IWM ETF holdings proxy + daily bars.",
@@ -77,7 +75,7 @@ function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asO
 
   const present = new Set(summaryRows.map((r) => r.universeId));
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
-  if (!present.has("sp500-core") && !present.has("sp500-lite")) {
+  if (!present.has("sp500-core")) {
     unavailable.push({ id: "sp500", name: "S&P 500", reason: "No breadth snapshots currently available from API host." });
   }
   if (!present.has("nasdaq-core")) {
@@ -101,10 +99,7 @@ export default async function BreadthPage() {
 
   const [status, sp500PrimaryRows, summaryApi] = await Promise.all([statusPromise, sp500PrimaryPromise, summaryPromise]);
 
-  let historyRows = sp500PrimaryRows;
-  if (historyRows.length === 0) {
-    historyRows = await loadUniverse("sp500-lite");
-  }
+  const historyRows = sp500PrimaryRows;
 
   const summary = summaryApi
     ? {
@@ -118,7 +113,6 @@ export default async function BreadthPage() {
     : buildSummaryFromUniverseRows(
         {
           "sp500-core": sp500PrimaryRows,
-          "sp500-lite": historyRows,
           "nasdaq-core": await loadUniverse("nasdaq-core"),
           "nyse-core": await loadUniverse("nyse-core"),
           "russell2000-core": await loadUniverse("russell2000-core"),

@@ -31,7 +31,7 @@ const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 200;
-const MIN_BREADTH_COVERAGE_PCT = 1;
+const MIN_BREADTH_COVERAGE_PCT = 30;
 
 const BREADTH_PROXY_UNIVERSES: BreadthUniverseDef[] = [
   {
@@ -310,7 +310,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers, ...SP500_TICKERS]));
 
   const endDate = asOfDate;
-  const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 420 * 86400_000));
+  const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
   if (provider) {
     try {
       const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
