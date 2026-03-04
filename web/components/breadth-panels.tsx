@@ -75,6 +75,13 @@ const metricOptions = [
 const positive = "text-pos";
 const negative = "text-neg";
 const numFmt = new Intl.NumberFormat("en-US");
+const metricSourceMap = [
+  "Advancers/Decliners/Unchanged and A/D Ratio: computed from each member's latest 1D close change in the selected universe.",
+  "Stocks Above 5/20/50/100/200 MA: computed from daily close vs simple moving average from stored daily bars.",
+  "New Highs (5D/1M/3M/6M/52W): computed from rolling high windows on stored daily closes; percentages are count / universe members.",
+  "Total Volume: sum of latest daily volume across universe members from daily bars.",
+  "Other Breadth Indicators (>+4%, <-4%, >+25% quarter, <-25% quarter): computed from 1D and ~63-trading-day returns.",
+];
 
 function asNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -424,6 +431,15 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
           </div>
         </div>
       )}
+
+      <div className="card p-4">
+        <div className="mb-2 text-sm font-semibold">Metric Source Map</div>
+        <div className="space-y-1 text-sm text-slate-300">
+          {metricSourceMap.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      </div>
 
       {!latestMetrics && <p className="text-sm text-slate-400">No breadth history available yet. Run EOD refresh to populate.</p>}
     </div>
