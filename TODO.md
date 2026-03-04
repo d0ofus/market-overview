@@ -7,14 +7,18 @@
 
 ## Breadth
 - Scoring for market breadth for overall 
-- Add in Chart of S&P with mc
+- Add in Chart of S&P with mcllean oscillator
+- Add in all industry/thematic ETFs and show top 10 by 1W % Change
+- Remove the 'n' from  (n=xxxx)
+- Keep record of past 90 days historical data of all metrics to show in the chart
+- Color 'Other Breadth Indicators', 'Stocks making new highs' and Adv/Dec + Volume
 
 ## 13F Tracker
 - Automatic weekly/monthly pull of data for 13F 
 - Add dropdown list for 13F filings to choose hedge funds
 
 ## Sector Tracker
-- Add delete button for Sector/Narrative Calendar
+- Add edit/delete function for Sector/Narrative Calendar
 - Make calendar view the default for sector tracker
 - Add OHLCV in status line of charts
 
