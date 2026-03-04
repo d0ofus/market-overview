@@ -234,8 +234,16 @@ class AlpacaProvider implements MarketDataProvider {
 
 export function getProvider(env: Env): MarketDataProvider {
   const mode = (env.DATA_PROVIDER ?? "alpaca").toLowerCase();
-  if (mode === "alpaca") return new AlpacaProvider(env);
+  if (mode === "alpaca") {
+    if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
+      return new StooqProvider();
+    }
+    return new AlpacaProvider(env);
+  }
   if (mode === "stooq") return new StooqProvider();
   if (mode === "synthetic" || mode === "csv") return new SyntheticProvider();
+  if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
+    return new StooqProvider();
+  }
   return new AlpacaProvider(env);
 }

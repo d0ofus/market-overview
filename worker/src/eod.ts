@@ -72,6 +72,31 @@ async function loadConstituentTickers(env: Env, etfTicker: string): Promise<stri
   return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
 }
 
+async function loadUniverseTickers(env: Env, universeId: string): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT ticker FROM universe_symbols WHERE universe_id = ? ORDER BY ticker ASC",
+  )
+    .bind(universeId)
+    .all<{ ticker: string }>();
+  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+}
+
+async function loadTickersByExchangeWithBars(env: Env, exchangeLike: string): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT s.ticker as ticker FROM symbols s JOIN daily_bars d ON d.ticker = s.ticker WHERE UPPER(COALESCE(s.exchange, '')) LIKE ? GROUP BY s.ticker HAVING COUNT(*) >= 2 ORDER BY s.ticker ASC",
+  )
+    .bind(exchangeLike.toUpperCase())
+    .all<{ ticker: string }>();
+  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+}
+
+async function loadTickersWithBars(env: Env): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT ticker FROM daily_bars GROUP BY ticker HAVING COUNT(*) >= 2 ORDER BY ticker ASC",
+  ).all<{ ticker: string }>();
+  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+}
+
 async function ensureUniverseMembership(env: Env, universeId: string, universeName: string, tickers: string[]): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return;
@@ -108,17 +133,32 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
     }
 
     if (tickers.length === 0) {
-      unavailable.push({
-        id: def.id,
-        name: def.name,
-        reason: `No free constituent data available for ${def.etfTicker} holdings`,
-      });
-      continue;
+      if (def.id === "sp500-core") {
+        tickers = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
+      } else if (def.id === "nasdaq-core") {
+        tickers = await loadTickersByExchangeWithBars(env, "%NASDAQ%");
+      } else if (def.id === "russell2000-core") {
+        const nyseLike = await loadTickersByExchangeWithBars(env, "%NYSE%");
+        const legacy = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
+        tickers = nyseLike.length > 0 ? nyseLike : legacy;
+      }
+      if (tickers.length > 0) {
+        sourceByUniverse.set(def.id, `Fallback proxy from local symbols/daily bars (no ${def.etfTicker} constituent feed available)`);
+      } else {
+        unavailable.push({
+          id: def.id,
+          name: def.name,
+          reason: `No free constituent data available for ${def.etfTicker} holdings and no local fallback universe was found`,
+        });
+        continue;
+      }
     }
 
     await ensureUniverseMembership(env, def.id, def.name, tickers);
     universeTickers.set(def.id, tickers);
-    sourceByUniverse.set(def.id, def.sourceLabel);
+    if (!sourceByUniverse.has(def.id)) {
+      sourceByUniverse.set(def.id, def.sourceLabel);
+    }
   }
 
   const unionTickers = Array.from(new Set([...universeTickers.values()].flat()));
@@ -131,23 +171,35 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
     );
   }
 
-  const nyseRows = await env.DB.prepare(
-    "SELECT ticker FROM symbols WHERE asset_class = 'equity' AND exchange IS NOT NULL AND UPPER(exchange) LIKE '%NYSE%' ORDER BY ticker",
-  ).all<{ ticker: string }>();
-  const nyseTickers = Array.from(new Set((nyseRows.results ?? []).map((r) => r.ticker.toUpperCase())));
-  if (nyseTickers.length >= 50) {
+  let nyseTickers = await loadTickersByExchangeWithBars(env, "%NYSE%");
+  if (nyseTickers.length === 0) {
+    nyseTickers = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
+  }
+  if (nyseTickers.length > 0) {
     await ensureUniverseMembership(env, NYSE_BREADTH_UNIVERSE_ID, "NYSE", nyseTickers);
     universeTickers.set(NYSE_BREADTH_UNIVERSE_ID, nyseTickers);
     sourceByUniverse.set(
       NYSE_BREADTH_UNIVERSE_ID,
-      "Exchange-tagged equities in local symbol table (partial NYSE proxy) + provider daily bars",
+      "Exchange-tagged symbols with local daily bars (NYSE proxy; falls back to SP500 proxy set when sparse)",
     );
   } else {
     unavailable.push({
       id: NYSE_BREADTH_UNIVERSE_ID,
       name: "NYSE",
-      reason: "No complete free NYSE constituent feed is configured in this stack",
+      reason: "No complete free NYSE constituent feed is configured and no local fallback tickers were found",
     });
+  }
+
+  if (!universeTickers.has(OVERALL_BREADTH_UNIVERSE_ID)) {
+    const allTickers = await loadTickersWithBars(env);
+    if (allTickers.length > 0) {
+      await ensureUniverseMembership(env, OVERALL_BREADTH_UNIVERSE_ID, "Overall Market (Proxy)", allTickers);
+      universeTickers.set(OVERALL_BREADTH_UNIVERSE_ID, allTickers);
+      sourceByUniverse.set(
+        OVERALL_BREADTH_UNIVERSE_ID,
+        "All locally available symbols with sufficient daily bars (overall free-data proxy)",
+      );
+    }
   }
 
   unavailable.push({

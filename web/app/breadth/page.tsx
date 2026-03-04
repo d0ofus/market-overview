@@ -34,7 +34,7 @@ const universeOrder = ["sp500-core", "sp500-lite", "nasdaq-core", "nyse-core", "
 
 const universeNames: Record<string, string> = {
   "sp500-core": "S&P 500",
-  "sp500-lite": "S&P 500 Lite Universe",
+  "sp500-lite": "S&P 500 Index (Proxy)",
   "nasdaq-core": "NASDAQ (QQQ Proxy)",
   "nyse-core": "NYSE (Proxy)",
   "russell2000-core": "Russell 2000",
@@ -42,7 +42,7 @@ const universeNames: Record<string, string> = {
 };
 
 const coreUniverseSource: Record<string, string> = {
-  "sp500-lite": "Seeded SP500-lite proxy universe from local DB + daily bars.",
+  "sp500-lite": "S&P 500 proxy set from local seeded universe + daily bars.",
   "sp500-core": "SPY ETF holdings proxy (free holdings pages) + daily bars.",
   "nasdaq-core": "QQQ ETF holdings proxy (NASDAQ-100 subset) + daily bars.",
   "nyse-core": "Exchange-tagged NYSE equities from local symbols + daily bars (proxy).",
@@ -107,7 +107,14 @@ export default async function BreadthPage() {
   }
 
   const summary = summaryApi
-    ? summaryApi
+    ? {
+        ...summaryApi,
+        rows: (summaryApi.rows ?? []).map((row: any) => ({
+          ...row,
+          universeName: universeNames[row.universeId] ?? row.universeName ?? row.universeId,
+          dataSource: row.dataSource ?? coreUniverseSource[row.universeId] ?? null,
+        })),
+      }
     : buildSummaryFromUniverseRows(
         {
           "sp500-core": sp500PrimaryRows,

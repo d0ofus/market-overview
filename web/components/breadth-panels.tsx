@@ -5,6 +5,8 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "rec
 
 type BreadthMetrics = {
   memberCount: number;
+  totalUniverseMembers: number;
+  dataCoveragePct: number;
   advancers: number;
   decliners: number;
   unchanged: number;
@@ -102,6 +104,8 @@ function pct(value: number): string {
 function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
   const m = (row.metrics ?? {}) as Record<string, unknown>;
   const memberCount = asNumber(m.memberCount, row.advancers + row.decliners + row.unchanged);
+  const totalUniverseMembers = asNumber(m.totalUniverseMembers, memberCount);
+  const dataCoveragePct = asNumber(m.dataCoveragePct, totalUniverseMembers > 0 ? (memberCount / totalUniverseMembers) * 100 : 0);
   const advancers = asNumber(m.advancers, row.advancers);
   const decliners = asNumber(m.decliners, row.decliners);
   const unchanged = asNumber(m.unchanged, row.unchanged);
@@ -113,6 +117,8 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
   const toPct = (count: number) => (memberCount > 0 ? (count / memberCount) * 100 : 0);
   return {
     memberCount,
+    totalUniverseMembers,
+    dataCoveragePct,
     advancers,
     decliners,
     unchanged,
@@ -197,6 +203,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
           <div className="card p-3">
             <div className="text-xs text-slate-400">{headline.universeName} Members</div>
             <div className="text-lg font-semibold">{numFmt.format(headline.metrics.memberCount)}</div>
+            <div className="text-[11px] text-slate-500">coverage {headline.metrics.dataCoveragePct.toFixed(1)}%</div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">Adv/Dec Ratio</div>

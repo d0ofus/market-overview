@@ -113,6 +113,7 @@ export function computeBreadthStats(seriesByTicker: Record<string, BreadthSeries
   let gtPos25q = 0;
   let ltNeg25q = 0;
   let totalVolume = 0;
+  let membersWithData = 0;
   const r1: number[] = [];
   const r5: number[] = [];
 
@@ -129,6 +130,7 @@ export function computeBreadthStats(seriesByTicker: Record<string, BreadthSeries
     const closes = series?.closes ?? [];
     const volumes = series?.volumes ?? [];
     if (!closes || closes.length < 2) continue;
+    membersWithData += 1;
     const last = closes[closes.length - 1];
     const prev = closes[closes.length - 2];
     const d1 = ((last - prev) / prev) * 100;
@@ -174,7 +176,8 @@ export function computeBreadthStats(seriesByTicker: Record<string, BreadthSeries
   highs126 = highCounts.m6;
   highs252 = highCounts.y1;
 
-  const total = tickers.length;
+  const total = membersWithData;
+  const totalUniverseMembers = tickers.length;
   const median = (arr: number[]) => {
     if (arr.length === 0) return 0;
     const s = [...arr].sort((a, b) => a - b);
@@ -185,6 +188,8 @@ export function computeBreadthStats(seriesByTicker: Record<string, BreadthSeries
 
   return {
     memberCount: total,
+    totalUniverseMembers,
+    dataCoveragePct: totalUniverseMembers > 0 ? (total / totalUniverseMembers) * 100 : 0,
     advancers: adv,
     decliners: dec,
     unchanged: unc,
