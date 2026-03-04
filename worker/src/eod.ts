@@ -97,6 +97,25 @@ async function loadTickersWithBars(env: Env): Promise<string[]> {
   return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
 }
 
+async function fetchSp500Tickers(): Promise<string[]> {
+  const url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv";
+  const res = await fetch(url, { headers: { "User-Agent": "market-command-centre/1.0" } });
+  if (!res.ok) throw new Error(`S&P 500 list fetch failed (${res.status})`);
+  const csv = await res.text();
+  const lines = csv.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 1) return [];
+  const tickers: string[] = [];
+  for (const line of lines.slice(1)) {
+    const firstComma = line.indexOf(",");
+    if (firstComma <= 0) continue;
+    const raw = line.slice(0, firstComma).replace(/^"|"$/g, "").trim().toUpperCase();
+    if (!raw || raw === "SYMBOL") continue;
+    // Provider and DB use dot notation for class shares (e.g., BRK.B)
+    tickers.push(raw);
+  }
+  return Array.from(new Set(tickers));
+}
+
 async function ensureUniverseMembership(env: Env, universeId: string, universeName: string, tickers: string[]): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return;
@@ -116,7 +135,20 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
 
   for (const def of BREADTH_PROXY_UNIVERSES) {
-    let tickers = await loadConstituentTickers(env, def.etfTicker);
+    let tickers: string[] = [];
+    if (def.id === "sp500-core") {
+      try {
+        tickers = await fetchSp500Tickers();
+      } catch (error) {
+        console.error("sp500 constituent list fetch failed", error);
+      }
+      if (tickers.length > 0) {
+        sourceByUniverse.set(def.id, "S&P 500 constituents (GitHub datasets mirror) + provider daily bars");
+      }
+    }
+    if (tickers.length === 0) {
+      tickers = await loadConstituentTickers(env, def.etfTicker);
+    }
     const status = await env.DB.prepare(
       "SELECT last_synced_at as lastSyncedAt FROM etf_constituent_sync_status WHERE etf_ticker = ? LIMIT 1",
     )
