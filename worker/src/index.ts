@@ -63,6 +63,41 @@ const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; un
   return adv + dec + unc > 0;
 };
 
+async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
+  let latestSnapshotAsOf: string | null = null;
+  try {
+    const latestSnapshot = await env.DB.prepare(
+      "SELECT as_of_date as asOfDate FROM snapshots_meta ORDER BY generated_at DESC LIMIT 1",
+    ).first<{ asOfDate: string | null }>();
+    latestSnapshotAsOf = latestSnapshot?.asOfDate ?? null;
+  } catch {
+    latestSnapshotAsOf = null;
+  }
+
+  const latestSp500Row = await env.DB.prepare(
+    "SELECT as_of_date as asOfDate, advancers, decliners, unchanged, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = 'sp500-core' ORDER BY as_of_date DESC LIMIT 1",
+  ).first<{ asOfDate: string | null; advancers: number; decliners: number; unchanged: number; sentimentJson: string | null }>();
+
+  if (!latestSp500Row) {
+    await ensureBreadthRowsSafe(env);
+    return;
+  }
+  const sentiment = parseBreadthSentiment(latestSp500Row.sentimentJson);
+  const usable = hasUsableBreadthRow({
+    advancers: latestSp500Row.advancers,
+    decliners: latestSp500Row.decliners,
+    unchanged: latestSp500Row.unchanged,
+    metrics: sentiment.metrics ?? null,
+  });
+  const isStaleVsSnapshot =
+    Boolean(latestSnapshotAsOf) &&
+    Boolean(latestSp500Row.asOfDate) &&
+    String(latestSp500Row.asOfDate) < String(latestSnapshotAsOf);
+  if (!usable || isStaleVsSnapshot) {
+    await ensureBreadthRowsSafe(env);
+  }
+}
+
 function parseBreadthSentiment(raw: unknown): BreadthSentiment {
   if (typeof raw !== "string" || raw.trim().length === 0) return {};
   try {
@@ -171,6 +206,9 @@ app.get("/api/dashboard", async (c) => {
 app.get("/api/breadth", async (c) => {
   const requestedUniverseId = c.req.query("universeId") ?? "sp500-core";
   const limit = Number(c.req.query("limit") ?? 60);
+  if (requestedUniverseId === "sp500-core") {
+    await ensureFreshSp500BreadthSafe(c.env);
+  }
   const loadRows = async (universeId: string) =>
     c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, universe_id as universeId, advancers, decliners, unchanged, pct_above_20ma as pctAbove20MA, pct_above_50ma as pctAbove50MA, pct_above_200ma as pctAbove200MA, new_20d_highs as new20DHighs, new_20d_lows as new20DLows, median_return_1d as medianReturn1D, median_return_5d as medianReturn5D, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC LIMIT ?",
@@ -211,6 +249,9 @@ app.get("/api/breadth", async (c) => {
 
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
+  if (!requestedDate) {
+    await ensureFreshSp500BreadthSafe(c.env);
+  }
   const selectCols =
     "b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson";
 
