@@ -29,6 +29,9 @@ type BreadthUniverseDef = {
 const LEGACY_BREADTH_UNIVERSE_ID = "sp500-lite";
 const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
+const DB_BATCH_CHUNK_SIZE = 200;
+const BAR_QUERY_TICKER_CHUNK_SIZE = 200;
+const MIN_BREADTH_COVERAGE_PCT = 70;
 
 const BREADTH_PROXY_UNIVERSES: BreadthUniverseDef[] = [
   {
@@ -71,6 +74,34 @@ async function loadConstituentTickers(env: Env, etfTicker: string): Promise<stri
     .bind(etfTicker)
     .all<{ ticker: string }>();
   return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+}
+
+async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[], chunkSize = DB_BATCH_CHUNK_SIZE): Promise<void> {
+  for (let i = 0; i < statements.length; i += chunkSize) {
+    const chunk = statements.slice(i, i + chunkSize);
+    if (chunk.length === 0) continue;
+    await env.DB.batch(chunk);
+  }
+}
+
+async function loadBarsForTickers(
+  env: Env,
+  tickers: string[],
+  asOfDate: string,
+): Promise<Array<{ ticker: string; date: string; c: number; volume: number | null }>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  const rows: Array<{ ticker: string; date: string; c: number; volume: number | null }> = [];
+  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    const sql = `SELECT ticker, date, c, volume FROM daily_bars WHERE ticker IN (${placeholders}) AND date <= ? ORDER BY ticker, date`;
+    const result = await env.DB.prepare(sql)
+      .bind(...chunk, asOfDate)
+      .all<{ ticker: string; date: string; c: number; volume: number | null }>();
+    rows.push(...(result.results ?? []));
+  }
+  return rows;
 }
 
 async function loadUniverseTickers(env: Env, universeId: string): Promise<string[]> {
@@ -276,9 +307,9 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
         const stmts = freshBars.map((b) =>
           env.DB.prepare(
             "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          ).bind(b.ticker, b.date, b.o, b.h, b.l, b.c, b.volume),
+          ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume),
         );
-        await env.DB.batch(stmts);
+        await runStatementsInChunks(env, stmts);
       }
     } catch (error) {
       providerLabel = `${provider.label} (refresh failed; stored bars used)`;
@@ -353,7 +384,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
       }
     }
   }
-  if (rowInserts.length > 0) await env.DB.batch(rowInserts);
+  if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
   const breadthUniverseIds = Array.from(
     new Set<string>([...breadthState.universeTickers.keys(), LEGACY_BREADTH_UNIVERSE_ID, "sp500-core"]),
   );
@@ -382,14 +413,10 @@ export async function computeAndStoreBreadth(
     tickers = [...SP500_TICKERS];
   }
   if (tickers.length === 0) return;
-  const allRows = await env.DB.prepare(
-    "SELECT ticker, date, c, volume FROM daily_bars WHERE ticker IN (SELECT ticker FROM universe_symbols WHERE universe_id = ?) AND date <= ? ORDER BY ticker, date",
-  )
-    .bind(universeId, asOfDate)
-    .all<{ ticker: string; date: string; c: number; volume: number | null }>();
+  const allRows = await loadBarsForTickers(env, tickers, asOfDate);
 
   const barsByTicker = new Map<string, { closes: number[]; volumes: number[] }>();
-  for (const r of allRows.results ?? []) {
+  for (const r of allRows) {
     const v = barsByTicker.get(r.ticker) ?? { closes: [], volumes: [] };
     v.closes.push(r.c);
     v.volumes.push(r.volume ?? 0);
@@ -407,6 +434,18 @@ export async function computeAndStoreBreadth(
       ]),
     ),
   );
+  const isCoreUniverse = universeId.endsWith("-core") || universeId === OVERALL_BREADTH_UNIVERSE_ID;
+  if (isCoreUniverse && stats.totalUniverseMembers > 0 && stats.dataCoveragePct < MIN_BREADTH_COVERAGE_PCT) {
+    console.warn("skipping low-coverage breadth snapshot", {
+      universeId,
+      asOfDate,
+      coveragePct: Number(stats.dataCoveragePct.toFixed(2)),
+      memberCount: stats.memberCount,
+      totalUniverseMembers: stats.totalUniverseMembers,
+    });
+    return;
+  }
+
   const id = `${asOfDate}:${universeId}`;
   await env.DB.prepare(
     "INSERT OR REPLACE INTO breadth_snapshots (id, as_of_date, universe_id, advancers, decliners, unchanged, pct_above_20ma, pct_above_50ma, pct_above_200ma, new_20d_highs, new_20d_lows, median_return_1d, median_return_5d, sentiment_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
