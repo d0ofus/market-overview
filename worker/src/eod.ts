@@ -378,7 +378,7 @@ export async function computeAndStoreBreadth(
     .bind(universeId)
     .all<{ ticker: string }>();
   let tickers = (members.results ?? []).map((r) => r.ticker);
-  if (tickers.length === 0 && universeId === "sp500-core") {
+  if (universeId === "sp500-core") {
     tickers = [...SP500_TICKERS];
   }
   if (tickers.length === 0) return;
