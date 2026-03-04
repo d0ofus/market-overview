@@ -30,7 +30,7 @@ const LEGACY_BREADTH_UNIVERSE_ID = "sp500-lite";
 const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
-const BAR_QUERY_TICKER_CHUNK_SIZE = 200;
+const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const MIN_BREADTH_COVERAGE_PCT = 30;
 
 const BREADTH_PROXY_UNIVERSES: BreadthUniverseDef[] = [
