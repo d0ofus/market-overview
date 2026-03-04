@@ -31,7 +31,7 @@ const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 200;
-const MIN_BREADTH_COVERAGE_PCT = 70;
+const MIN_BREADTH_COVERAGE_PCT = 1;
 
 const BREADTH_PROXY_UNIVERSES: BreadthUniverseDef[] = [
   {
@@ -448,6 +448,8 @@ export async function computeAndStoreBreadth(
   );
   const isCoreUniverse = universeId.endsWith("-core") || universeId === OVERALL_BREADTH_UNIVERSE_ID;
   if (isCoreUniverse && stats.totalUniverseMembers > 0 && stats.dataCoveragePct < MIN_BREADTH_COVERAGE_PCT) {
+    const id = `${asOfDate}:${universeId}`;
+    await env.DB.prepare("DELETE FROM breadth_snapshots WHERE id = ?").bind(id).run();
     console.warn("skipping low-coverage breadth snapshot", {
       universeId,
       asOfDate,

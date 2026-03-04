@@ -51,6 +51,18 @@ type BreadthSentiment = {
   dataSource?: string | null;
 };
 
+const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; unchanged?: unknown; metrics?: unknown }): boolean => {
+  const metrics = (row.metrics ?? {}) as Record<string, unknown>;
+  const memberCountRaw = metrics.memberCount;
+  if (typeof memberCountRaw === "number" && Number.isFinite(memberCountRaw)) {
+    return memberCountRaw > 0;
+  }
+  const adv = typeof row.advancers === "number" && Number.isFinite(row.advancers) ? row.advancers : 0;
+  const dec = typeof row.decliners === "number" && Number.isFinite(row.decliners) ? row.decliners : 0;
+  const unc = typeof row.unchanged === "number" && Number.isFinite(row.unchanged) ? row.unchanged : 0;
+  return adv + dec + unc > 0;
+};
+
 function parseBreadthSentiment(raw: unknown): BreadthSentiment {
   if (typeof raw !== "string" || raw.trim().length === 0) return {};
   try {
@@ -166,22 +178,38 @@ app.get("/api/breadth", async (c) => {
       .bind(universeId, limit)
       .all();
 
+  const parseRows = (rawRows: any[]) =>
+    rawRows.map((row: any) => {
+      const sentiment = parseBreadthSentiment(row.sentimentJson);
+      return {
+        ...row,
+        metrics: sentiment.metrics ?? null,
+        dataSource: sentiment.dataSource ?? null,
+      };
+    });
+
   let universeId = requestedUniverseId;
   let rows = await loadRows(universeId);
   if ((rows.results ?? []).length === 0) {
     await ensureBreadthRowsSafe(c.env);
     rows = await loadRows(universeId);
   }
-  if ((rows.results ?? []).length === 0 && requestedUniverseId === "sp500-core") {
+
+  let parsedRowsDesc = parseRows(rows.results ?? []);
+  let usableRowsDesc = parsedRowsDesc.filter((row) => hasUsableBreadthRow(row));
+
+  if (usableRowsDesc.length === 0 && requestedUniverseId === "sp500-core") {
     universeId = "sp500-lite";
     rows = await loadRows(universeId);
     if ((rows.results ?? []).length === 0) {
       await ensureBreadthRowsSafe(c.env);
       rows = await loadRows(universeId);
     }
+    parsedRowsDesc = parseRows(rows.results ?? []);
+    usableRowsDesc = parsedRowsDesc.filter((row) => hasUsableBreadthRow(row));
   }
 
-  const parsedRows = (rows.results ?? []).reverse().map((row: any) => {
+  const parsedRows = usableRowsDesc.reverse().map((row: any) => {
     const sentiment = parseBreadthSentiment(row.sentimentJson);
     return {
       ...row,
@@ -194,15 +222,53 @@ app.get("/api/breadth", async (c) => {
 
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
-  let maxDateRow = requestedDate
-    ? { asOfDate: requestedDate }
-    : await c.env.DB.prepare("SELECT MAX(as_of_date) as asOfDate FROM breadth_snapshots").first<{ asOfDate: string | null }>();
-  if (!maxDateRow?.asOfDate && !requestedDate) {
-    await ensureBreadthRowsSafe(c.env);
-    maxDateRow = await c.env.DB.prepare("SELECT MAX(as_of_date) as asOfDate FROM breadth_snapshots").first<{ asOfDate: string | null }>();
+  const selectCols =
+    "b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson";
+
+  const loadRowsByDate = async (asOfDate: string) =>
+    c.env.DB.prepare(`SELECT ${selectCols} FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id WHERE b.as_of_date = ? ORDER BY b.universe_id ASC`)
+      .bind(asOfDate)
+      .all();
+
+  const loadLatestRows = async () =>
+    c.env.DB.prepare(`SELECT ${selectCols} FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id ORDER BY b.universe_id ASC, b.as_of_date DESC`)
+      .all();
+
+  if (requestedDate) {
+    const rows = await loadRowsByDate(requestedDate);
+    const parsedRequestedRows = (rows.results ?? []).map((row: any) => {
+      const sentiment = parseBreadthSentiment(row.sentimentJson);
+      return {
+        ...row,
+        metrics: sentiment.metrics ?? null,
+        dataSource: sentiment.dataSource ?? null,
+      };
+    });
+    const usableRequestedRows = parsedRequestedRows.filter((row) => hasUsableBreadthRow(row));
+    const requestedRowById = new Map(usableRequestedRows.map((r: any) => [r.universeId, r]));
+    const requestedOrderedRows = [
+      requestedRowById.get("sp500-core") ?? requestedRowById.get("sp500-lite"),
+      requestedRowById.get("nasdaq-core"),
+      requestedRowById.get("nyse-core"),
+      requestedRowById.get("russell2000-core"),
+      requestedRowById.get("overall-market-proxy"),
+    ].filter(Boolean);
+
+    return c.json({
+      asOfDate: requestedDate,
+      rows: requestedOrderedRows,
+      unavailable: [
+        { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
+      ],
+    });
   }
-  const asOfDate = maxDateRow?.asOfDate ?? null;
-  if (!asOfDate) {
+
+  let rows = await loadLatestRows();
+  if ((rows.results ?? []).length === 0) {
+    await ensureBreadthRowsSafe(c.env);
+    rows = await loadLatestRows();
+  }
+  if ((rows.results ?? []).length === 0) {
     return c.json({
       asOfDate: null,
       rows: [],
@@ -213,21 +279,7 @@ app.get("/api/breadth/summary", async (c) => {
     });
   }
 
-  const rows = await c.env.DB.prepare(
-    "SELECT b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id WHERE b.as_of_date = ? ORDER BY b.universe_id ASC",
-  )
-    .bind(asOfDate)
-    .all();
-  let rowResults = rows.results ?? [];
-  if (rowResults.length === 0 && !requestedDate) {
-    await ensureBreadthRowsSafe(c.env);
-    const retried = await c.env.DB.prepare(
-      "SELECT b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id WHERE b.as_of_date = (SELECT MAX(as_of_date) FROM breadth_snapshots) ORDER BY b.universe_id ASC",
-    ).all();
-    rowResults = retried.results ?? [];
-  }
-
-  const parsedRows = rowResults.map((row: any) => {
+  const parsedRows = (rows.results ?? []).map((row: any) => {
     const sentiment = parseBreadthSentiment(row.sentimentJson);
     return {
       ...row,
@@ -235,13 +287,21 @@ app.get("/api/breadth/summary", async (c) => {
       dataSource: sentiment.dataSource ?? null,
     };
   });
-
-  const preferredUniverseIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
-  const rowById = new Map(parsedRows.map((r: any) => [r.universeId, r]));
-  const orderedRows = preferredUniverseIds.map((id) => rowById.get(id)).filter(Boolean);
-  if (orderedRows.length === 0 && rowById.has("sp500-lite")) {
-    orderedRows.push(rowById.get("sp500-lite"));
+  const rowById = new Map<string, any>();
+  for (const row of parsedRows) {
+    if (!hasUsableBreadthRow(row)) continue;
+    if (!rowById.has(row.universeId)) {
+      rowById.set(row.universeId, row);
+    }
   }
+
+  const orderedRows = [
+    rowById.get("sp500-core") ?? rowById.get("sp500-lite"),
+    rowById.get("nasdaq-core"),
+    rowById.get("nyse-core"),
+    rowById.get("russell2000-core"),
+    rowById.get("overall-market-proxy"),
+  ].filter(Boolean);
 
   const present = new Set(orderedRows.map((r: any) => r.universeId));
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
@@ -273,7 +333,11 @@ app.get("/api/breadth/summary", async (c) => {
   });
 
   return c.json({
-    asOfDate,
+    asOfDate: orderedRows.reduce<string | null>((acc, row: any) => {
+      if (!row?.asOfDate) return acc;
+      if (!acc) return row.asOfDate;
+      return row.asOfDate > acc ? row.asOfDate : acc;
+    }, null),
     rows: orderedRows,
     unavailable,
   });
