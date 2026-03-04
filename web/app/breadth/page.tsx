@@ -44,7 +44,7 @@ const coreUniverseSource: Record<string, string> = {
   "sp500-core": "S&P 500 constituents CSV (datasets/s-and-p-500-companies) + provider daily bars.",
   "nasdaq-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NASDAQ listings + provider daily bars.",
   "nyse-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NYSE listings + provider daily bars.",
-  "russell2000-core": "Russell 2000 constituent list (Disfold) filtered to NasdaqTrader common stocks + provider daily bars.",
+  "russell2000-core": "Russell 2000 constituent list (LSEG table) filtered to NasdaqTrader common stocks + provider daily bars.",
   "overall-market-proxy": "NasdaqTrader filtered US common-stock universe + provider daily bars.",
 };
 

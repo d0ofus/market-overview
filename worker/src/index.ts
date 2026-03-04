@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { computeAndStoreSnapshot, loadSnapshot, refreshSp500CoreBreadth } from "./eod";
+import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, refreshSp500CoreBreadth } from "./eod";
 import type { Env } from "./types";
 import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
@@ -883,6 +883,19 @@ app.post("/api/admin/run-eod", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-eod failed";
     console.error("admin run-eod failed", { date, configId, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/run-breadth", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const date = c.req.query("date");
+  try {
+    const result = await recomputeBreadthFromStoredBars(c.env, date);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "run-breadth failed";
+    console.error("admin run-breadth failed", { date, error });
     return c.json({ error: message }, 500);
   }
 });

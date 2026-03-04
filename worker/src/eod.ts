@@ -23,13 +23,13 @@ const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
-const MIN_BREADTH_COVERAGE_PCT = 30;
+const MIN_BREADTH_COVERAGE_PCT = 1;
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
 const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
 const NYSE_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange N) + provider daily bars";
 const RUSSELL2000_SOURCE_LABEL =
-  "Russell 2000 constituents (Disfold list, filtered to NasdaqTrader common stocks) + provider daily bars";
+  "Russell 2000 constituents (LSEG constituents table, filtered to NasdaqTrader common stocks) + provider daily bars";
 const OVERALL_SOURCE_LABEL = "NasdaqTrader all US common stocks (same filter set) + provider daily bars";
 
 type BreadthUniverseState = {
@@ -165,7 +165,7 @@ async function syncUniverseFromSource(
 ): Promise<void> {
   const existing = await loadUniverseTickers(env, def.id);
   const status = await loadUniverseSourceStatus(env, def.sourceKey);
-  const shouldRefresh = existing.length === 0 || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
+  const shouldRefresh = existing.length === 0 || status?.status !== "ok" || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
 
   let tickers = existing;
   let sourceLabel = def.sourceLabel;
@@ -472,6 +472,24 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     );
   }
   return { snapshotId, asOfDate };
+}
+
+export async function recomputeBreadthFromStoredBars(
+  env: Env,
+  asOfDateInput?: string,
+): Promise<{ asOfDate: string; universeCount: number; unavailable: Array<{ id: string; name: string; reason: string }> }> {
+  const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
+  const asOfDate = toISODate(previousWeekday(today));
+  const breadthState = await ensureBreadthUniverseMemberships(env);
+  const universeIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
+  for (const universeId of universeIds) {
+    await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null);
+  }
+  return {
+    asOfDate,
+    universeCount: universeIds.length,
+    unavailable: breadthState.unavailable,
+  };
 }
 
 export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string): Promise<{ asOfDate: string; barCount: number }> {

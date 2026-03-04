@@ -2,7 +2,8 @@ import { SP500_TICKERS } from "./sp500-tickers";
 
 const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
 const SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv";
-const RUSSELL2000_URL = "https://disfold.com/stock-index/stock-index/russell-2000/";
+const LSEG_CONSTITUENT_TABLE_URL =
+  "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/index-spotlights/data_table.constituentsandweights.json";
 
 const SAFE_TICKER_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
 const BANNED_NAME_TERMS = ["warrant", "preferred", "interest", "acquisition", "leveraged"];
@@ -21,11 +22,6 @@ export type NasdaqTraderCommonStock = {
   symbol: string;
   securityName: string;
   listingExchange: string;
-};
-
-type DisfoldParsed = {
-  tickers: string[];
-  maxPage: number;
 };
 
 function normalizeTicker(raw: string): string {
@@ -77,12 +73,15 @@ function csvSplit(line: string): string[] {
 }
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "market-command-centre/1.0",
-      Accept: "text/plain,text/html,text/csv;q=0.9,*/*;q=0.8",
-    },
-  });
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    Accept: "text/plain,text/html,text/csv;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+  if (url.includes("lseg.com")) {
+    headers.Referer = "https://www.lseg.com/";
+  }
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     throw new Error(`Source fetch failed (${res.status}) for ${url}`);
   }
@@ -118,39 +117,52 @@ export function parseNasdaqTradedCommonStocks(raw: string): NasdaqTraderCommonSt
 }
 
 export function parseSp500Csv(raw: string): string[] {
+  return parseTickerCsv(raw, ["Symbol"]);
+}
+
+function parseTickerCsv(raw: string, tickerColumnNames: string[]): string[] {
   const lines = raw
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   if (lines.length < 2) return [];
 
+  const header = csvSplit(lines[0] ?? "");
+  const normalizeHeader = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "");
+  const targetNames = new Set(tickerColumnNames.map((name) => normalizeHeader(name)));
+  let tickerCol = header.findIndex((cell) => targetNames.has(normalizeHeader(cell)));
+  if (tickerCol < 0) tickerCol = 0;
+
   const out: string[] = [];
   for (const line of lines.slice(1)) {
     const cells = csvSplit(line);
-    const ticker = normalizeTicker(cells[0] ?? "");
+    const ticker = normalizeTicker(cells[tickerCol] ?? "");
     if (!ticker || !SAFE_TICKER_RE.test(ticker)) continue;
     out.push(ticker);
   }
   return dedupeSorted(out);
 }
 
-export function parseDisfoldRussell2000Page(raw: string): DisfoldParsed {
-  const tickers: string[] = [];
-  const tickerRe = /\/stocks\/quote\/([A-Za-z0-9.\-]+)\//g;
-  for (const match of raw.matchAll(tickerRe)) {
-    const ticker = normalizeTicker(match[1] ?? "");
-    if (!ticker || !SAFE_TICKER_RE.test(ticker)) continue;
-    tickers.push(ticker);
+export function extractLsegConstituentFileUrl(rawJson: string, indexNamePattern: RegExp): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson) as unknown;
+  } catch {
+    return null;
   }
 
-  let maxPage = 1;
-  const pageRe = /[?&]page=(\d+)/g;
-  for (const match of raw.matchAll(pageRe)) {
-    const p = Number(match[1] ?? "1");
-    if (Number.isFinite(p) && p > maxPage) maxPage = p;
+  const data = (parsed as { data?: Array<Record<string, unknown>> })?.data ?? [];
+  for (const row of data) {
+    const indexName = String(row.Index_Name ?? "").trim();
+    if (!indexNamePattern.test(indexName)) continue;
+    const url = String(row.Constituent_file_url ?? "").trim();
+    if (!url) continue;
+    if (url.startsWith("http://") || url.startsWith("https://")) return url;
+    if (url.startsWith("/")) return `https://www.lseg.com${url}`;
+    return `https://www.lseg.com/${url}`;
   }
 
-  return { tickers: dedupeSorted(tickers), maxPage };
+  return null;
 }
 
 export async function loadNasdaqTraderUniverses(): Promise<{
@@ -183,18 +195,13 @@ export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Pr
 }
 
 export async function loadRussell2000Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
-  const first = await fetchText(RUSSELL2000_URL);
-  const firstParsed = parseDisfoldRussell2000Page(first);
-  const pageMax = Math.max(1, Math.min(firstParsed.maxPage, 120));
-  const collected = new Set(firstParsed.tickers);
-
-  for (let page = 2; page <= pageMax; page += 1) {
-    const raw = await fetchText(`${RUSSELL2000_URL}?page=${page}`);
-    const parsed = parseDisfoldRussell2000Page(raw);
-    for (const ticker of parsed.tickers) collected.add(ticker);
+  const tableRaw = await fetchText(LSEG_CONSTITUENT_TABLE_URL);
+  const constituentUrl = extractLsegConstituentFileUrl(tableRaw, /russell\s+2000/i);
+  if (!constituentUrl) {
+    throw new Error("Could not resolve Russell 2000 constituent file URL from LSEG table");
   }
-
-  let tickers = Array.from(collected).sort((a, b) => a.localeCompare(b));
+  const csvRaw = await fetchText(constituentUrl);
+  let tickers = parseTickerCsv(csvRaw, ["Ticker", "Symbol"]);
   if (allCommonUniverse && allCommonUniverse.size > 0) {
     const filtered = tickers.filter((ticker) => allCommonUniverse.has(ticker));
     // Keep the raw scrape if the intersection loses too many symbols due naming mismatches.

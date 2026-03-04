@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDisfoldRussell2000Page, parseNasdaqTradedCommonStocks, parseSp500Csv } from "../src/universe-constituents";
+import { extractLsegConstituentFileUrl, parseNasdaqTradedCommonStocks, parseSp500Csv } from "../src/universe-constituents";
 
 describe("universe constituent parsers", () => {
   it("applies NasdaqTrader common-stock filters", () => {
@@ -33,17 +33,19 @@ describe("universe constituent parsers", () => {
     expect(symbols).toEqual(["AAPL", "BF.B", "BRK.B"]);
   });
 
-  it("extracts Russell page tickers and page count from Disfold html", () => {
-    const html = `
-      <a href="/stocks/quote/AAON/">AAON</a>
-      <a href="/stocks/quote/ABUS/">ABUS</a>
-      <a href="/stocks/quote/AAON/">AAON</a>
-      <a href="https://disfold.com/stock-index/stock-index/russell-2000/?page=2">2</a>
-      <a href="https://disfold.com/stock-index/stock-index/russell-2000/?page=67">67</a>
-    `;
+  it("extracts Russell constituent file url from LSEG metadata json", () => {
+    const payload = JSON.stringify({
+      data: [
+        { Index_Name: "FTSE 100", Constituent_file_url: "https://example.com/ftse100.csv" },
+        {
+          Index_Name: "Russell 2000 Index",
+          Constituent_file_url:
+            "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/constituents/ftse-us-russell-2000-index.csv",
+        },
+      ],
+    });
 
-    const parsed = parseDisfoldRussell2000Page(html);
-    expect(parsed.tickers).toEqual(["AAON", "ABUS"]);
-    expect(parsed.maxPage).toBe(67);
+    const url = extractLsegConstituentFileUrl(payload, /russell\s+2000/i);
+    expect(url).toBe("https://www.lseg.com/content/dam/ftse-russell/en_us/documents/constituents/ftse-us-russell-2000-index.csv");
   });
 });
