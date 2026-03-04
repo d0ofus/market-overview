@@ -12,6 +12,7 @@
 - Remove the 'n' from  (n=xxxx)
 - Keep record of past 90 days historical data of all metrics to show in the chart
 - Color 'Other Breadth Indicators', 'Stocks making new highs' and Adv/Dec + Volume
+- Make Unavailable free data an alert panel on top of the page, make 'Data sources' and 'Metric Source Map' able to toggle close 
 
 ## 13F Tracker
 - Automatic weekly/monthly pull of data for 13F 
