@@ -265,7 +265,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     }
   })();
   const breadthTickers = Array.from(new Set([...breadthState.universeTickers.values()].flat()));
-  const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers]));
+  const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers, ...SP500_TICKERS]));
 
   const endDate = asOfDate;
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 420 * 86400_000));
@@ -355,10 +355,15 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
   }
   if (rowInserts.length > 0) await env.DB.batch(rowInserts);
   const breadthUniverseIds = Array.from(
-    new Set<string>([...breadthState.universeTickers.keys(), LEGACY_BREADTH_UNIVERSE_ID]),
+    new Set<string>([...breadthState.universeTickers.keys(), LEGACY_BREADTH_UNIVERSE_ID, "sp500-core"]),
   );
   for (const universeId of breadthUniverseIds) {
-    await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null);
+    await computeAndStoreBreadth(
+      env,
+      asOfDate,
+      universeId,
+      breadthState.sourceByUniverse.get(universeId) ?? (universeId === "sp500-core" ? "S&P 500 constituents (bundled list) + provider daily bars" : null),
+    );
   }
   return { snapshotId, asOfDate };
 }
@@ -372,7 +377,10 @@ export async function computeAndStoreBreadth(
   const members = await env.DB.prepare("SELECT ticker FROM universe_symbols WHERE universe_id = ?")
     .bind(universeId)
     .all<{ ticker: string }>();
-  const tickers = (members.results ?? []).map((r) => r.ticker);
+  let tickers = (members.results ?? []).map((r) => r.ticker);
+  if (tickers.length === 0 && universeId === "sp500-core") {
+    tickers = [...SP500_TICKERS];
+  }
   if (tickers.length === 0) return;
   const allRows = await env.DB.prepare(
     "SELECT ticker, date, c, volume FROM daily_bars WHERE ticker IN (SELECT ticker FROM universe_symbols WHERE universe_id = ?) AND date <= ? ORDER BY ticker, date",
