@@ -42,45 +42,50 @@ class StooqProvider implements MarketDataProvider {
   }
 
   private async fetchTickerBars(ticker: string): Promise<DailyBar[]> {
-    const symbol = this.symbolForStooq(ticker);
-    const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
-    let csv = "";
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "market-command-centre/1.0",
-        },
-      });
-      if (res.ok) {
-        csv = await res.text();
-        break;
+    try {
+      const symbol = this.symbolForStooq(ticker);
+      const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
+      let csv = "";
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": "market-command-centre/1.0",
+          },
+        });
+        if (res.ok) {
+          csv = await res.text();
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
       }
-      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      if (!csv) return [];
+      const lines = csv.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (lines.length <= 1) return [];
+      const out: DailyBar[] = [];
+      for (const line of lines.slice(1)) {
+        const [date, o, h, l, c, v] = line.split(",");
+        if (!date || c === "N/D") continue;
+        const open = Number(o);
+        const high = Number(h);
+        const low = Number(l);
+        const close = Number(c);
+        const volume = Number(v || "0");
+        if ([open, high, low, close].some((n) => Number.isNaN(n))) continue;
+        out.push({
+          ticker: ticker.toUpperCase(),
+          date,
+          o: open,
+          h: high,
+          l: low,
+          c: close,
+          volume: Number.isNaN(volume) ? 0 : volume,
+        });
+      }
+      return out;
+    } catch (error) {
+      console.error("stooq ticker fetch failed", { ticker, error });
+      return [];
     }
-    if (!csv) return [];
-    const lines = csv.split("\n").map((l) => l.trim()).filter(Boolean);
-    if (lines.length <= 1) return [];
-    const out: DailyBar[] = [];
-    for (const line of lines.slice(1)) {
-      const [date, o, h, l, c, v] = line.split(",");
-      if (!date || c === "N/D") continue;
-      const open = Number(o);
-      const high = Number(h);
-      const low = Number(l);
-      const close = Number(c);
-      const volume = Number(v || "0");
-      if ([open, high, low, close].some((n) => Number.isNaN(n))) continue;
-      out.push({
-        ticker: ticker.toUpperCase(),
-        date,
-        o: open,
-        h: high,
-        l: low,
-        c: close,
-        volume: Number.isNaN(volume) ? 0 : volume,
-      });
-    }
-    return out;
   }
 
   async getDailyBars(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
@@ -88,8 +93,10 @@ class StooqProvider implements MarketDataProvider {
     const batchSize = 4;
     for (let i = 0; i < tickers.length; i += batchSize) {
       const chunk = tickers.slice(i, i + batchSize);
-      const rows = await Promise.all(chunk.map((ticker) => this.fetchTickerBars(ticker)));
-      for (const tickerBars of rows) {
+      const settled = await Promise.allSettled(chunk.map((ticker) => this.fetchTickerBars(ticker)));
+      for (const item of settled) {
+        if (item.status !== "fulfilled") continue;
+        const tickerBars = item.value;
         all.push(
           ...tickerBars.filter((b) => b.date >= startDate && b.date <= endDate),
         );
@@ -191,8 +198,12 @@ class AlpacaProvider implements MarketDataProvider {
       const present = new Set(rows.map((r) => r.ticker.toUpperCase()));
       const missing = batch.filter((ticker) => !present.has(ticker.toUpperCase()));
       if (missing.length > 0) {
-        const fallbackRows = await this.stooqFallback.getDailyBars(missing, startDate, endDate);
-        all.push(...fallbackRows.map((row) => ({ ...row, ticker: row.ticker.toUpperCase() })));
+        try {
+          const fallbackRows = await this.stooqFallback.getDailyBars(missing, startDate, endDate);
+          all.push(...fallbackRows.map((row) => ({ ...row, ticker: row.ticker.toUpperCase() })));
+        } catch (error) {
+          console.error("stooq fallback failed for alpaca missing tickers", { missingCount: missing.length, error });
+        }
       }
     }
     return all;
