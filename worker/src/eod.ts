@@ -101,14 +101,19 @@ async function loadTickersWithBars(env: Env): Promise<string[]> {
 async function ensureUniverseMembership(env: Env, universeId: string, universeName: string, tickers: string[]): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return;
-  const statements = [
+  await env.DB.batch([
     env.DB.prepare("INSERT OR REPLACE INTO universes (id, name) VALUES (?, ?)").bind(universeId, universeName),
     env.DB.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
-    ...unique.map((ticker) =>
+  ]);
+
+  const chunkSize = 90;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const statements = chunk.map((ticker) =>
       env.DB.prepare("INSERT OR IGNORE INTO universe_symbols (universe_id, ticker) VALUES (?, ?)").bind(universeId, ticker),
-    ),
-  ];
-  await env.DB.batch(statements);
+    );
+    await env.DB.batch(statements);
+  }
 }
 
 async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
