@@ -38,8 +38,12 @@ export function getStatus(): Promise<{
   return getJson("/api/status");
 }
 
-export function getBreadth(universeId = "sp500-lite") {
-  return getJson<{ universeId: string; rows: any[] }>(`/api/breadth?universeId=${universeId}&limit=120`);
+export function getBreadth(universeId = "sp500-core") {
+  return getJson<{ requestedUniverseId: string; universeId: string; rows: any[] }>(`/api/breadth?universeId=${universeId}&limit=120`);
+}
+
+export function getBreadthSummary() {
+  return getJson<{ asOfDate: string | null; rows: any[]; unavailable: Array<{ id: string; name: string; reason: string }> }>("/api/breadth/summary");
 }
 
 export function getTicker(ticker: string) {

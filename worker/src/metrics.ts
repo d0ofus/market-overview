@@ -74,49 +74,141 @@ export function sma(values: number[], period: number): number {
   return window.reduce((a, b) => a + b, 0) / period;
 }
 
-export function computeBreadthStats(closesByTicker: Record<string, number[]>) {
-  const tickers = Object.keys(closesByTicker);
+type BreadthSeries = {
+  closes: number[];
+  volumes: number[];
+};
+
+type HighWindow = "d5" | "m1" | "m3" | "m6" | "y1";
+
+const highWindowPeriods: Array<{ key: HighWindow; period: number }> = [
+  { key: "d5", period: 5 },
+  { key: "m1", period: 21 },
+  { key: "m3", period: 63 },
+  { key: "m6", period: 126 },
+  { key: "y1", period: 252 },
+];
+
+const toPercent = (count: number, total: number): number => (total > 0 ? (count / total) * 100 : 0);
+
+export function computeBreadthStats(seriesByTicker: Record<string, BreadthSeries>) {
+  const tickers = Object.keys(seriesByTicker);
   let adv = 0;
   let dec = 0;
   let unc = 0;
+  let above5 = 0;
   let above20 = 0;
   let above50 = 0;
+  let above100 = 0;
   let above200 = 0;
   let highs20 = 0;
+  let highs5 = 0;
+  let highs21 = 0;
+  let highs63 = 0;
+  let highs126 = 0;
+  let highs252 = 0;
   let lows20 = 0;
+  let gtPos4 = 0;
+  let ltNeg4 = 0;
+  let gtPos25q = 0;
+  let ltNeg25q = 0;
+  let totalVolume = 0;
   const r1: number[] = [];
   const r5: number[] = [];
+
+  const highCounts: Record<HighWindow, number> = {
+    d5: 0,
+    m1: 0,
+    m3: 0,
+    m6: 0,
+    y1: 0,
+  };
+
   for (const ticker of tickers) {
-    const closes = closesByTicker[ticker];
+    const series = seriesByTicker[ticker];
+    const closes = series?.closes ?? [];
+    const volumes = series?.volumes ?? [];
     if (!closes || closes.length < 2) continue;
     const last = closes[closes.length - 1];
     const prev = closes[closes.length - 2];
     const d1 = ((last - prev) / prev) * 100;
     r1.push(d1);
-    if (d1 > 0.02) adv += 1;
-    else if (d1 < -0.02) dec += 1;
+    if (d1 > 0) adv += 1;
+    else if (d1 < 0) dec += 1;
     else unc += 1;
+
     if (closes.length >= 6) r5.push(((last - closes[closes.length - 6]) / closes[closes.length - 6]) * 100);
+
+    if (d1 > 4) gtPos4 += 1;
+    if (d1 < -4) ltNeg4 += 1;
+    if (closes.length >= 64) {
+      const qReturn = ((last - closes[closes.length - 64]) / closes[closes.length - 64]) * 100;
+      if (qReturn > 25) gtPos25q += 1;
+      if (qReturn < -25) ltNeg25q += 1;
+    }
+
+    if (last > sma(closes, 5)) above5 += 1;
     if (last > sma(closes, 20)) above20 += 1;
     if (last > sma(closes, 50)) above50 += 1;
+    if (last > sma(closes, 100)) above100 += 1;
     if (last > sma(closes, 200)) above200 += 1;
+
+    for (const window of highWindowPeriods) {
+      const lookback = closes.slice(Math.max(0, closes.length - window.period));
+      if (lookback.length === 0) continue;
+      if (last >= Math.max(...lookback)) {
+        highCounts[window.key] += 1;
+      }
+    }
+
     const last20 = closes.slice(Math.max(0, closes.length - 20));
     if (last >= Math.max(...last20)) highs20 += 1;
     if (last <= Math.min(...last20)) lows20 += 1;
+
+    totalVolume += volumes[volumes.length - 1] ?? 0;
   }
-  const total = Math.max(1, tickers.length);
+
+  highs5 = highCounts.d5;
+  highs21 = highCounts.m1;
+  highs63 = highCounts.m3;
+  highs126 = highCounts.m6;
+  highs252 = highCounts.y1;
+
+  const total = tickers.length;
   const median = (arr: number[]) => {
     if (arr.length === 0) return 0;
     const s = [...arr].sort((a, b) => a - b);
     return s[Math.floor(s.length / 2)];
   };
+
+  const advDecRatio = dec > 0 ? adv / dec : adv > 0 ? null : 0;
+
   return {
+    memberCount: total,
     advancers: adv,
     decliners: dec,
     unchanged: unc,
-    pctAbove20MA: (above20 / total) * 100,
-    pctAbove50MA: (above50 / total) * 100,
-    pctAbove200MA: (above200 / total) * 100,
+    advDecRatio,
+    totalVolume,
+    pctAbove5MA: toPercent(above5, total),
+    pctAbove20MA: toPercent(above20, total),
+    pctAbove50MA: toPercent(above50, total),
+    pctAbove100MA: toPercent(above100, total),
+    pctAbove200MA: toPercent(above200, total),
+    new5DHighs: highs5,
+    new1MHighs: highs21,
+    new3MHighs: highs63,
+    new6MHighs: highs126,
+    new52WHighs: highs252,
+    pctNew5DHighs: toPercent(highs5, total),
+    pctNew1MHighs: toPercent(highs21, total),
+    pctNew3MHighs: toPercent(highs63, total),
+    pctNew6MHighs: toPercent(highs126, total),
+    pctNew52WHighs: toPercent(highs252, total),
+    stocksGtPos4Pct: gtPos4,
+    stocksLtNeg4Pct: ltNeg4,
+    stocksGtPos25Q: gtPos25q,
+    stocksLtNeg25Q: ltNeg25q,
     new20DHighs: highs20,
     new20DLows: lows20,
     medianReturn1D: median(r1),

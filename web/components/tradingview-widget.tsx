@@ -4,6 +4,7 @@ import { useEffect, useId, useRef } from "react";
 
 export function TradingViewWidget({
   ticker,
+  compareSymbol,
   compact = false,
   size = "default",
   chartOnly = false,
@@ -11,6 +12,7 @@ export function TradingViewWidget({
   className = "",
 }: {
   ticker: string;
+  compareSymbol?: string;
   compact?: boolean;
   size?: "small" | "default";
   chartOnly?: boolean;
@@ -47,10 +49,18 @@ export function TradingViewWidget({
       volume_force_overlay: false,
       withdateranges: chartOnly ? false : true,
       save_image: false,
+      compareSymbols: compareSymbol
+        ? [
+            {
+              symbol: compareSymbol,
+              position: "SameScale",
+            },
+          ]
+        : [],
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, containerId, maxWidth, size, chartOnly, initialRange]);
+  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, initialRange]);
 
   return (
     <div className={`card p-2 ${className}`}>

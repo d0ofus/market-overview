@@ -36,6 +36,22 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
   return Date.now() - then > maxAgeDays * 86400_000;
 };
 
+type BreadthSentiment = {
+  fearGreed?: number | null;
+  putCall?: number | null;
+  metrics?: Record<string, unknown>;
+  dataSource?: string | null;
+};
+
+function parseBreadthSentiment(raw: unknown): BreadthSentiment {
+  if (typeof raw !== "string" || raw.trim().length === 0) return {};
+  try {
+    return JSON.parse(raw) as BreadthSentiment;
+  } catch {
+    return {};
+  }
+}
+
 async function getTicker1dStats(db: D1Database, ticker: string): Promise<{ change1d: number; lastPrice: number }> {
   const bars = await db.prepare("SELECT c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 2")
     .bind(ticker)
@@ -133,14 +149,106 @@ app.get("/api/dashboard", async (c) => {
 });
 
 app.get("/api/breadth", async (c) => {
-  const universeId = c.req.query("universeId") ?? "sp500-lite";
+  const requestedUniverseId = c.req.query("universeId") ?? "sp500-core";
   const limit = Number(c.req.query("limit") ?? 60);
+  const loadRows = async (universeId: string) =>
+    c.env.DB.prepare(
+      "SELECT as_of_date as asOfDate, universe_id as universeId, advancers, decliners, unchanged, pct_above_20ma as pctAbove20MA, pct_above_50ma as pctAbove50MA, pct_above_200ma as pctAbove200MA, new_20d_highs as new20DHighs, new_20d_lows as new20DLows, median_return_1d as medianReturn1D, median_return_5d as medianReturn5D, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC LIMIT ?",
+    )
+      .bind(universeId, limit)
+      .all();
+
+  let universeId = requestedUniverseId;
+  let rows = await loadRows(universeId);
+  if ((rows.results ?? []).length === 0 && requestedUniverseId === "sp500-core") {
+    universeId = "sp500-lite";
+    rows = await loadRows(universeId);
+  }
+
+  const parsedRows = (rows.results ?? []).reverse().map((row: any) => {
+    const sentiment = parseBreadthSentiment(row.sentimentJson);
+    return {
+      ...row,
+      metrics: sentiment.metrics ?? null,
+      dataSource: sentiment.dataSource ?? null,
+    };
+  });
+  return c.json({ requestedUniverseId, universeId, rows: parsedRows });
+});
+
+app.get("/api/breadth/summary", async (c) => {
+  const requestedDate = c.req.query("date");
+  const maxDateRow = requestedDate
+    ? { asOfDate: requestedDate }
+    : await c.env.DB.prepare("SELECT MAX(as_of_date) as asOfDate FROM breadth_snapshots").first<{ asOfDate: string | null }>();
+  const asOfDate = maxDateRow?.asOfDate ?? null;
+  if (!asOfDate) {
+    return c.json({
+      asOfDate: null,
+      rows: [],
+      unavailable: [
+        { id: "nyse-core", name: "NYSE", reason: "No complete free NYSE constituent feed is configured in this stack" },
+        { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
+      ],
+    });
+  }
+
   const rows = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, universe_id as universeId, advancers, decliners, unchanged, pct_above_20ma as pctAbove20MA, pct_above_50ma as pctAbove50MA, pct_above_200ma as pctAbove200MA, new_20d_highs as new20DHighs, new_20d_lows as new20DLows, median_return_1d as medianReturn1D, median_return_5d as medianReturn5D, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC LIMIT ?",
+    "SELECT b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson FROM breadth_snapshots b LEFT JOIN universes u ON u.id = b.universe_id WHERE b.as_of_date = ? ORDER BY b.universe_id ASC",
   )
-    .bind(universeId, limit)
+    .bind(asOfDate)
     .all();
-  return c.json({ universeId, rows: (rows.results ?? []).reverse() });
+
+  const parsedRows = (rows.results ?? []).map((row: any) => {
+    const sentiment = parseBreadthSentiment(row.sentimentJson);
+    return {
+      ...row,
+      metrics: sentiment.metrics ?? null,
+      dataSource: sentiment.dataSource ?? null,
+    };
+  });
+
+  const preferredUniverseIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
+  const rowById = new Map(parsedRows.map((r: any) => [r.universeId, r]));
+  const orderedRows = preferredUniverseIds.map((id) => rowById.get(id)).filter(Boolean);
+  if (orderedRows.length === 0 && rowById.has("sp500-lite")) {
+    orderedRows.push(rowById.get("sp500-lite"));
+  }
+
+  const present = new Set(orderedRows.map((r: any) => r.universeId));
+  const unavailable: Array<{ id: string; name: string; reason: string }> = [];
+  if (!present.has("sp500-core") && !present.has("sp500-lite")) {
+    unavailable.push({
+      id: "sp500-core",
+      name: "S&P 500",
+      reason: "SPY constituent proxy data has not synced yet",
+    });
+  }
+  if (!present.has("nasdaq-core")) {
+    unavailable.push({
+      id: "nasdaq-core",
+      name: "NASDAQ",
+      reason: "QQQ constituent proxy data has not synced yet",
+    });
+  }
+  if (!present.has("nyse-core")) {
+    unavailable.push({
+      id: "nyse-core",
+      name: "NYSE",
+      reason: "No complete free NYSE constituent feed is configured in this stack",
+    });
+  }
+  unavailable.push({
+    id: "worden-common-stock-universe",
+    name: "Overall Market (Worden Common Stock Universe)",
+    reason: "Proprietary universe; no free direct feed is available",
+  });
+
+  return c.json({
+    asOfDate,
+    rows: orderedRows,
+    unavailable,
+  });
 });
 
 app.get("/api/13f/overview", async (c) => {
