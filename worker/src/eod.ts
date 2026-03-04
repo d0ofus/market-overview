@@ -1,8 +1,8 @@
 import { computeBreadthStats, computeMetrics, rankValue } from "./metrics";
 import { loadConfig } from "./db";
 import { getProvider } from "./provider";
-import { syncEtfConstituents } from "./etf";
 import { SP500_TICKERS } from "./sp500-tickers";
+import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
 import type { Env, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
@@ -19,40 +19,18 @@ function previousWeekday(date: Date): Date {
   return d;
 }
 
-type BreadthUniverseDef = {
-  id: string;
-  name: string;
-  etfTicker: string;
-  sourceLabel: string;
-};
-
-const LEGACY_BREADTH_UNIVERSE_ID = "sp500-lite";
 const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const MIN_BREADTH_COVERAGE_PCT = 30;
 
-const BREADTH_PROXY_UNIVERSES: BreadthUniverseDef[] = [
-  {
-    id: "sp500-core",
-    name: "S&P 500",
-    etfTicker: "SPY",
-    sourceLabel: "SPY ETF holdings proxy (free holdings pages) + provider daily bars",
-  },
-  {
-    id: "nasdaq-core",
-    name: "NASDAQ",
-    etfTicker: "QQQ",
-    sourceLabel: "QQQ ETF holdings proxy (NASDAQ-100 subset) + provider daily bars",
-  },
-  {
-    id: "russell2000-core",
-    name: "Russell 2000",
-    etfTicker: "IWM",
-    sourceLabel: "IWM ETF holdings proxy (free holdings pages) + provider daily bars",
-  },
-];
+const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
+const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
+const NYSE_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange N) + provider daily bars";
+const RUSSELL2000_SOURCE_LABEL =
+  "Russell 2000 constituents (Disfold list, filtered to NasdaqTrader common stocks) + provider daily bars";
+const OVERALL_SOURCE_LABEL = "NasdaqTrader all US common stocks (same filter set) + provider daily bars";
 
 type BreadthUniverseState = {
   universeTickers: Map<string, string[]>;
@@ -60,20 +38,18 @@ type BreadthUniverseState = {
   unavailable: Array<{ id: string; name: string; reason: string }>;
 };
 
+type UniverseSourceStatus = {
+  lastSyncedAt: string | null;
+  status: string | null;
+  error: string | null;
+  recordsCount: number | null;
+};
+
 function isStatusStale(lastSyncedAt: string | null | undefined, maxAgeDays = 14): boolean {
   if (!lastSyncedAt) return true;
   const t = new Date(lastSyncedAt).getTime();
   if (Number.isNaN(t)) return true;
   return Date.now() - t > maxAgeDays * 86400_000;
-}
-
-async function loadConstituentTickers(env: Env, etfTicker: string): Promise<string[]> {
-  const rows = await env.DB.prepare(
-    "SELECT constituent_ticker as ticker FROM etf_constituents WHERE etf_ticker = ? ORDER BY constituent_ticker ASC",
-  )
-    .bind(etfTicker)
-    .all<{ ticker: string }>();
-  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
 }
 
 async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[], chunkSize = DB_BATCH_CHUNK_SIZE): Promise<void> {
@@ -123,20 +99,28 @@ async function loadUniverseTickers(env: Env, universeId: string): Promise<string
   return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
 }
 
-async function loadTickersByExchangeWithBars(env: Env, exchangeLike: string): Promise<string[]> {
-  const rows = await env.DB.prepare(
-    "SELECT s.ticker as ticker FROM symbols s JOIN daily_bars d ON d.ticker = s.ticker WHERE UPPER(COALESCE(s.exchange, '')) LIKE ? GROUP BY s.ticker HAVING COUNT(*) >= 2 ORDER BY s.ticker ASC",
+async function loadUniverseSourceStatus(env: Env, sourceKey: string): Promise<UniverseSourceStatus | null> {
+  return await env.DB.prepare(
+    "SELECT last_synced_at as lastSyncedAt, status, error, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ? LIMIT 1",
   )
-    .bind(exchangeLike.toUpperCase())
-    .all<{ ticker: string }>();
-  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+    .bind(sourceKey)
+    .first<UniverseSourceStatus>();
 }
 
-async function loadTickersWithBars(env: Env): Promise<string[]> {
-  const rows = await env.DB.prepare(
-    "SELECT ticker FROM daily_bars GROUP BY ticker HAVING COUNT(*) >= 2 ORDER BY ticker ASC",
-  ).all<{ ticker: string }>();
-  return Array.from(new Set((rows.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+async function saveUniverseSourceStatus(
+  env: Env,
+  sourceKey: string,
+  status: "ok" | "error",
+  source: string,
+  recordsCount: number,
+  errorMessage: string | null,
+): Promise<void> {
+  const errorText = errorMessage ? errorMessage.slice(0, 700) : null;
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+  )
+    .bind(sourceKey, new Date().toISOString(), status, errorText, source.slice(0, 120), recordsCount)
+    .run();
 }
 
 async function ensureUniverseMembership(env: Env, universeId: string, universeName: string, tickers: string[]): Promise<void> {
@@ -158,105 +142,186 @@ async function ensureUniverseMembership(env: Env, universeId: string, universeNa
   }
 }
 
+type UniverseSyncDef = {
+  id: string;
+  name: string;
+  sourceLabel: string;
+  sourceKey: string;
+  staleAfterDays: number;
+  unavailableReason: string;
+  fetchTickers: () => Promise<string[]>;
+};
+
+function dedupeTickers(tickers: string[]): string[] {
+  return Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
+async function syncUniverseFromSource(
+  env: Env,
+  def: UniverseSyncDef,
+  universeTickers: Map<string, string[]>,
+  sourceByUniverse: Map<string, string>,
+  unavailable: Array<{ id: string; name: string; reason: string }>,
+): Promise<void> {
+  const existing = await loadUniverseTickers(env, def.id);
+  const status = await loadUniverseSourceStatus(env, def.sourceKey);
+  const shouldRefresh = existing.length === 0 || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
+
+  let tickers = existing;
+  let sourceLabel = def.sourceLabel;
+
+  if (shouldRefresh) {
+    try {
+      const fetched = dedupeTickers(await def.fetchTickers());
+      if (fetched.length === 0) {
+        throw new Error(`No tickers returned for ${def.id}`);
+      }
+      await ensureUniverseMembership(env, def.id, def.name, fetched);
+      tickers = fetched;
+      await saveUniverseSourceStatus(env, def.sourceKey, "ok", def.sourceLabel, fetched.length, null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "constituent sync failed";
+      console.error("breadth universe source sync failed", { universeId: def.id, error: message });
+      await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message);
+      if (existing.length === 0) {
+        unavailable.push({
+          id: def.id,
+          name: def.name,
+          reason: def.unavailableReason,
+        });
+        return;
+      }
+      sourceLabel = `${def.sourceLabel} (cached universe reused; latest sync attempt failed)`;
+    }
+  }
+
+  if (tickers.length === 0) {
+    unavailable.push({
+      id: def.id,
+      name: def.name,
+      reason: def.unavailableReason,
+    });
+    return;
+  }
+
+  universeTickers.set(def.id, tickers);
+  sourceByUniverse.set(def.id, sourceLabel);
+}
+
 async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
   const universeTickers = new Map<string, string[]>();
   const sourceByUniverse = new Map<string, string>();
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
-
-  for (const def of BREADTH_PROXY_UNIVERSES) {
-    let tickers: string[] = [];
-    if (def.id === "sp500-core") {
-      tickers = [...SP500_TICKERS];
-      if (tickers.length > 0) {
-        sourceByUniverse.set(def.id, "S&P 500 constituents (bundled list) + provider daily bars");
+  let nasdaqUniverseCache:
+    | {
+        nasdaqTickers: string[];
+        nyseTickers: string[];
+        allCommonTickers: string[];
       }
+    | null = null;
+  const loadNasdaqUniverseCache = async () => {
+    if (!nasdaqUniverseCache) {
+      nasdaqUniverseCache = await loadNasdaqTraderUniverses();
     }
-    if (tickers.length === 0) {
-      tickers = await loadConstituentTickers(env, def.etfTicker);
-    }
-    const status = await env.DB.prepare(
-      "SELECT last_synced_at as lastSyncedAt FROM etf_constituent_sync_status WHERE etf_ticker = ? LIMIT 1",
-    )
-      .bind(def.etfTicker)
-      .first<{ lastSyncedAt: string | null }>();
+    return nasdaqUniverseCache;
+  };
 
-    const shouldSyncEtfHoldings = tickers.length === 0 || (def.id !== "sp500-core" && isStatusStale(status?.lastSyncedAt, 21));
-    if (shouldSyncEtfHoldings) {
-      try {
-        await syncEtfConstituents(env, def.etfTicker);
-      } catch (error) {
-        console.error("breadth universe constituent sync failed", { universeId: def.id, etfTicker: def.etfTicker, error });
-      }
-      tickers = await loadConstituentTickers(env, def.etfTicker);
-    }
+  await syncUniverseFromSource(
+    env,
+    {
+      id: "nasdaq-core",
+      name: "NASDAQ",
+      sourceLabel: NASDAQ_SOURCE_LABEL,
+      sourceKey: "universe:nasdaq-core",
+      staleAfterDays: 1,
+      unavailableReason: "NASDAQ constituent source fetch failed and no cached NASDAQ membership is available",
+      fetchTickers: async () => (await loadNasdaqUniverseCache()).nasdaqTickers,
+    },
+    universeTickers,
+    sourceByUniverse,
+    unavailable,
+  );
 
-    if (tickers.length === 0) {
-      if (def.id === "sp500-core") {
-        tickers = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
-      } else if (def.id === "nasdaq-core") {
-        tickers = await loadTickersByExchangeWithBars(env, "%NASDAQ%");
-      } else if (def.id === "russell2000-core") {
-        const nyseLike = await loadTickersByExchangeWithBars(env, "%NYSE%");
-        const legacy = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
-        tickers = nyseLike.length > 0 ? nyseLike : legacy;
-      }
-      if (tickers.length > 0) {
-        sourceByUniverse.set(def.id, `Fallback proxy from local symbols/daily bars (no ${def.etfTicker} constituent feed available)`);
-      } else {
-        unavailable.push({
-          id: def.id,
-          name: def.name,
-          reason: `No free constituent data available for ${def.etfTicker} holdings and no local fallback universe was found`,
-        });
-        continue;
-      }
-    }
-
-    await ensureUniverseMembership(env, def.id, def.name, tickers);
-    universeTickers.set(def.id, tickers);
-    if (!sourceByUniverse.has(def.id)) {
-      sourceByUniverse.set(def.id, def.sourceLabel);
-    }
-  }
-
-  const unionTickers = Array.from(new Set([...universeTickers.values()].flat()));
-  if (unionTickers.length > 0) {
-    await ensureUniverseMembership(env, OVERALL_BREADTH_UNIVERSE_ID, "Overall Market (Proxy)", unionTickers);
-    universeTickers.set(OVERALL_BREADTH_UNIVERSE_ID, unionTickers);
-    sourceByUniverse.set(
-      OVERALL_BREADTH_UNIVERSE_ID,
-      "Union of free proxy universes (SPY/QQQ/IWM constituent sets) + provider daily bars",
-    );
-  }
-
-  let nyseTickers = await loadTickersByExchangeWithBars(env, "%NYSE%");
-  if (nyseTickers.length === 0) {
-    nyseTickers = await loadUniverseTickers(env, LEGACY_BREADTH_UNIVERSE_ID);
-  }
-  if (nyseTickers.length > 0) {
-    await ensureUniverseMembership(env, NYSE_BREADTH_UNIVERSE_ID, "NYSE", nyseTickers);
-    universeTickers.set(NYSE_BREADTH_UNIVERSE_ID, nyseTickers);
-    sourceByUniverse.set(
-      NYSE_BREADTH_UNIVERSE_ID,
-      "Exchange-tagged symbols with local daily bars (NYSE proxy; falls back to SP500 proxy set when sparse)",
-    );
-  } else {
-    unavailable.push({
+  await syncUniverseFromSource(
+    env,
+    {
       id: NYSE_BREADTH_UNIVERSE_ID,
       name: "NYSE",
-      reason: "No complete free NYSE constituent feed is configured and no local fallback tickers were found",
-    });
-  }
+      sourceLabel: NYSE_SOURCE_LABEL,
+      sourceKey: "universe:nyse-core",
+      staleAfterDays: 1,
+      unavailableReason: "NYSE constituent source fetch failed and no cached NYSE membership is available",
+      fetchTickers: async () => (await loadNasdaqUniverseCache()).nyseTickers,
+    },
+    universeTickers,
+    sourceByUniverse,
+    unavailable,
+  );
+
+  await syncUniverseFromSource(
+    env,
+    {
+      id: "sp500-core",
+      name: "S&P 500",
+      sourceLabel: SP500_SOURCE_LABEL,
+      sourceKey: "universe:sp500-core",
+      staleAfterDays: 7,
+      unavailableReason: "S&P 500 constituent source fetch failed and no cached S&P 500 membership is available",
+      fetchTickers: async () => {
+        try {
+          const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
+          return await loadSp500Constituents(allCommon);
+        } catch {
+          return await loadSp500Constituents(undefined);
+        }
+      },
+    },
+    universeTickers,
+    sourceByUniverse,
+    unavailable,
+  );
+
+  await syncUniverseFromSource(
+    env,
+    {
+      id: "russell2000-core",
+      name: "Russell 2000",
+      sourceLabel: RUSSELL2000_SOURCE_LABEL,
+      sourceKey: "universe:russell2000-core",
+      staleAfterDays: 14,
+      unavailableReason: "Russell 2000 constituent source fetch failed and no cached Russell 2000 membership is available",
+      fetchTickers: async () => {
+        const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
+        return await loadRussell2000Constituents(allCommon);
+      },
+    },
+    universeTickers,
+    sourceByUniverse,
+    unavailable,
+  );
+
+  await syncUniverseFromSource(
+    env,
+    {
+      id: OVERALL_BREADTH_UNIVERSE_ID,
+      name: "Overall Market",
+      sourceLabel: OVERALL_SOURCE_LABEL,
+      sourceKey: "universe:overall-market-core",
+      staleAfterDays: 1,
+      unavailableReason: "Overall-market constituent source fetch failed and no cached overall-market membership is available",
+      fetchTickers: async () => (await loadNasdaqUniverseCache()).allCommonTickers,
+    },
+    universeTickers,
+    sourceByUniverse,
+    unavailable,
+  );
 
   if (!universeTickers.has(OVERALL_BREADTH_UNIVERSE_ID)) {
-    const allTickers = await loadTickersWithBars(env);
-    if (allTickers.length > 0) {
-      await ensureUniverseMembership(env, OVERALL_BREADTH_UNIVERSE_ID, "Overall Market (Proxy)", allTickers);
-      universeTickers.set(OVERALL_BREADTH_UNIVERSE_ID, allTickers);
-      sourceByUniverse.set(
-        OVERALL_BREADTH_UNIVERSE_ID,
-        "All locally available symbols with sufficient daily bars (overall free-data proxy)",
-      );
+    const unionTickers = dedupeTickers([...universeTickers.values()].flat());
+    if (unionTickers.length > 0) {
+      await ensureUniverseMembership(env, OVERALL_BREADTH_UNIVERSE_ID, "Overall Market", unionTickers);
+      universeTickers.set(OVERALL_BREADTH_UNIVERSE_ID, unionTickers);
+      sourceByUniverse.set(OVERALL_BREADTH_UNIVERSE_ID, "Union of available non-proxy universes + provider daily bars");
     }
   }
 
@@ -307,7 +372,7 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     }
   })();
   const breadthTickers = Array.from(new Set([...breadthState.universeTickers.values()].flat()));
-  const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers, ...SP500_TICKERS]));
+  const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers]));
 
   const endDate = asOfDate;
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
@@ -397,15 +462,13 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     }
   }
   if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
-  const breadthUniverseIds = Array.from(
-    new Set<string>([...breadthState.universeTickers.keys(), LEGACY_BREADTH_UNIVERSE_ID, "sp500-core"]),
-  );
+  const breadthUniverseIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
   for (const universeId of breadthUniverseIds) {
     await computeAndStoreBreadth(
       env,
       asOfDate,
       universeId,
-      breadthState.sourceByUniverse.get(universeId) ?? (universeId === "sp500-core" ? "S&P 500 constituents (bundled list) + provider daily bars" : null),
+      breadthState.sourceByUniverse.get(universeId) ?? null,
     );
   }
   return { snapshotId, asOfDate };
@@ -414,7 +477,26 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
 export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string): Promise<{ asOfDate: string; barCount: number }> {
   const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
   const asOfDate = toISODate(previousWeekday(today));
-  const tickers = [...SP500_TICKERS];
+  let tickers: string[] = [];
+  try {
+    const nasdaqUniverse = await loadNasdaqTraderUniverses();
+    tickers = await loadSp500Constituents(new Set(nasdaqUniverse.allCommonTickers));
+    await saveUniverseSourceStatus(env, "universe:sp500-core", "ok", SP500_SOURCE_LABEL, tickers.length, null);
+  } catch (error) {
+    console.error("sp500 constituent refresh failed; using cached membership fallback", error);
+    await saveUniverseSourceStatus(
+      env,
+      "universe:sp500-core",
+      "error",
+      SP500_SOURCE_LABEL,
+      0,
+      error instanceof Error ? error.message : "sp500 constituent refresh failed",
+    );
+    tickers = await loadUniverseTickers(env, "sp500-core");
+  }
+  if (tickers.length === 0) {
+    tickers = [...SP500_TICKERS];
+  }
   await ensureUniverseMembership(env, "sp500-core", "S&P 500", tickers);
   await ensureSymbolsExist(env, tickers);
 
@@ -437,7 +519,7 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
     console.error("sp500 core breadth refresh provider pull failed; using stored bars", error);
   }
 
-  await computeAndStoreBreadth(env, asOfDate, "sp500-core", "S&P 500 constituents (bundled list) + provider daily bars");
+  await computeAndStoreBreadth(env, asOfDate, "sp500-core", SP500_SOURCE_LABEL);
   return { asOfDate, barCount };
 }
 
@@ -450,10 +532,7 @@ export async function computeAndStoreBreadth(
   const members = await env.DB.prepare("SELECT ticker FROM universe_symbols WHERE universe_id = ?")
     .bind(universeId)
     .all<{ ticker: string }>();
-  let tickers = (members.results ?? []).map((r) => r.ticker);
-  if (universeId === "sp500-core") {
-    tickers = [...SP500_TICKERS];
-  }
+  const tickers = (members.results ?? []).map((r) => r.ticker);
   if (tickers.length === 0) return;
   const allRows = await loadBarsForTickers(env, tickers, asOfDate);
 

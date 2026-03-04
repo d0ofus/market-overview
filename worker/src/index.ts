@@ -313,7 +313,7 @@ app.get("/api/breadth/summary", async (c) => {
       asOfDate: null,
       rows: [],
       unavailable: [
-        { id: "nyse-core", name: "NYSE", reason: "No complete free NYSE constituent feed is configured in this stack" },
+        { id: "nyse-core", name: "NYSE", reason: "NYSE breadth data is currently unavailable from configured free sources" },
         { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
       ],
     });
@@ -349,21 +349,21 @@ app.get("/api/breadth/summary", async (c) => {
     unavailable.push({
       id: "sp500-core",
       name: "S&P 500",
-      reason: "S&P 500 breadth has insufficient live constituent coverage right now",
+      reason: "S&P 500 breadth data is currently unavailable from configured free sources",
     });
   }
   if (!present.has("nasdaq-core")) {
     unavailable.push({
       id: "nasdaq-core",
       name: "NASDAQ",
-      reason: "QQQ constituent proxy data has not synced yet",
+      reason: "NASDAQ breadth data is currently unavailable from configured free sources",
     });
   }
   if (!present.has("nyse-core")) {
     unavailable.push({
       id: "nyse-core",
       name: "NYSE",
-      reason: "No complete free NYSE constituent feed is configured in this stack",
+      reason: "NYSE breadth data is currently unavailable from configured free sources",
     });
   }
   unavailable.push({

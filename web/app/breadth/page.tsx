@@ -34,18 +34,18 @@ const universeOrder = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-co
 
 const universeNames: Record<string, string> = {
   "sp500-core": "S&P 500",
-  "nasdaq-core": "NASDAQ (QQQ Proxy)",
-  "nyse-core": "NYSE (Proxy)",
+  "nasdaq-core": "NASDAQ",
+  "nyse-core": "NYSE",
   "russell2000-core": "Russell 2000",
-  "overall-market-proxy": "Overall Market (Proxy)",
+  "overall-market-proxy": "Overall Market",
 };
 
 const coreUniverseSource: Record<string, string> = {
-  "sp500-core": "S&P 500 constituent list (bundled) + provider daily bars.",
-  "nasdaq-core": "QQQ ETF holdings proxy (NASDAQ-100 subset) + daily bars.",
-  "nyse-core": "Exchange-tagged NYSE equities from local symbols + daily bars (proxy).",
-  "russell2000-core": "IWM ETF holdings proxy + daily bars.",
-  "overall-market-proxy": "Union of SPY/QQQ/IWM proxy universes + daily bars.",
+  "sp500-core": "S&P 500 constituents CSV (datasets/s-and-p-500-companies) + provider daily bars.",
+  "nasdaq-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NASDAQ listings + provider daily bars.",
+  "nyse-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NYSE listings + provider daily bars.",
+  "russell2000-core": "Russell 2000 constituent list (Disfold) filtered to NasdaqTrader common stocks + provider daily bars.",
+  "overall-market-proxy": "NasdaqTrader filtered US common-stock universe + provider daily bars.",
 };
 
 function pickLatest(rows: BreadthRow[]): BreadthRow | null {
@@ -79,13 +79,13 @@ function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asO
     unavailable.push({ id: "sp500", name: "S&P 500", reason: "No breadth snapshots currently available from API host." });
   }
   if (!present.has("nasdaq-core")) {
-    unavailable.push({ id: "nasdaq-core", name: "NASDAQ", reason: "NASDAQ proxy breadth not available from API host." });
+    unavailable.push({ id: "nasdaq-core", name: "NASDAQ", reason: "NASDAQ breadth snapshots are not available from the API host." });
   }
   if (!present.has("nyse-core")) {
-    unavailable.push({ id: "nyse-core", name: "NYSE", reason: "NYSE constituent feed is not fully available in free sources." });
+    unavailable.push({ id: "nyse-core", name: "NYSE", reason: "NYSE breadth snapshots are not available from the API host." });
   }
   if (!present.has("russell2000-core")) {
-    unavailable.push({ id: "russell2000-core", name: "Russell 2000", reason: "Russell 2000 proxy breadth not available from API host." });
+    unavailable.push({ id: "russell2000-core", name: "Russell 2000", reason: "Russell 2000 breadth snapshots are not available from API host." });
   }
 
   const dated = summaryRows.find((r) => r.asOfDate)?.asOfDate ?? asOfDate;
