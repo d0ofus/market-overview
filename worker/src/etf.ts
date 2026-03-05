@@ -21,6 +21,20 @@ const SSGA_SELECT_SECTOR_SPDR_TICKERS = new Set([
   "XLP",
 ]);
 
+const SSGA_SPDR_PAGE_BY_TICKER: Record<string, string> = {
+  XLY: "https://www.ssga.com/us/en/intermediary/etfs/state-street-consumer-discretionary-select-sector-spdr-etf-xly",
+  XLK: "https://www.ssga.com/us/en/intermediary/etfs/state-street-technology-select-sector-spdr-etf-xlk",
+  XLC: "https://www.ssga.com/us/en/intermediary/etfs/state-street-communication-services-select-sector-spdr-etf-xlc",
+  XLF: "https://www.ssga.com/us/en/intermediary/etfs/state-street-financial-select-sector-spdr-etf-xlf",
+  XLU: "https://www.ssga.com/us/en/intermediary/etfs/state-street-utilities-select-sector-spdr-etf-xlu",
+  XLI: "https://www.ssga.com/us/en/intermediary/etfs/state-street-industrial-select-sector-spdr-etf-xli",
+  XLRE: "https://www.ssga.com/us/en/intermediary/etfs/state-street-real-estate-select-sector-spdr-etf-xlre",
+  XLV: "https://www.ssga.com/us/en/intermediary/etfs/state-street-health-care-select-sector-spdr-etf-xlv",
+  XLB: "https://www.ssga.com/us/en/intermediary/etfs/state-street-materials-select-sector-spdr-etf-xlb",
+  XLE: "https://www.ssga.com/us/en/intermediary/etfs/state-street-energy-select-sector-spdr-etf-xle",
+  XLP: "https://www.ssga.com/us/en/intermediary/etfs/state-street-consumer-staples-select-sector-spdr-etf-xlp",
+};
+
 function normalizeTicker(value: string | null | undefined): string | null {
   if (!value) return null;
   const t = value.trim().toUpperCase();
@@ -91,23 +105,73 @@ async function fetchSsgaSectorSpdrXlsxConstituents(etfTicker: string): Promise<E
   if (!SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) {
     throw new Error("SSGA Select Sector source not configured for this ETF");
   }
-  const url = `https://www.ssga.com/library-content/products/fund-data/etfs/us/pdhist-us-en-${etfTicker.toLowerCase()}.xlsx`;
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "market-command-centre/1.0",
-      Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*",
-      Referer: "https://www.ssga.com/",
-    },
+  const tickerLower = etfTicker.toLowerCase();
+  const directCandidates = [
+    `https://www.ssga.com/library-content/products/fund-data/etfs/us/pdhist-us-en-${tickerLower}.xlsx`,
+    `https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-${tickerLower}.xlsx`,
+    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-holdings-us-en-${tickerLower}.xlsx`,
+    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-data-us-en-${tickerLower}.xlsx`,
+  ];
+
+  const pageUrl = SSGA_SPDR_PAGE_BY_TICKER[etfTicker];
+  const pageCandidates: string[] = [];
+  if (pageUrl) {
+    try {
+      const pageRes = await fetch(pageUrl, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (pageRes.ok) {
+        const html = await pageRes.text();
+        const matches = html.match(/https?:\/\/[^"'\\s>]+\.xlsx/gi) ?? [];
+        for (const m of matches) pageCandidates.push(m);
+
+        const relMatches = html.match(/\/library-content\/[^"'\\s>]+\.xlsx/gi) ?? [];
+        for (const m of relMatches) pageCandidates.push(`https://www.ssga.com${m}`);
+      }
+    } catch {
+      // continue with direct candidates
+    }
+  }
+
+  const tried = new Set<string>();
+  const candidates = [...pageCandidates, ...directCandidates].filter((u) => {
+    const key = u.toLowerCase();
+    if (tried.has(key)) return false;
+    tried.add(key);
+    return true;
   });
-  if (!res.ok) {
-    throw new Error(`SSGA xlsx fetch failed (${res.status})`);
+
+  const errors: string[] = [];
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*",
+          Referer: pageUrl ?? "https://www.ssga.com/",
+        },
+      });
+      if (!res.ok) {
+        errors.push(`${new URL(url).pathname} (${res.status})`);
+        continue;
+      }
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!contentType.includes("sheet") && !contentType.includes("octet-stream") && !contentType.includes("zip")) {
+        errors.push(`${new URL(url).pathname} (non-xlsx content-type)`);
+        continue;
+      }
+      const buf = await res.arrayBuffer();
+      const rows = parseSsgaWorkbookRows(buf);
+      if (rows.length > 0) return rows;
+      errors.push(`${new URL(url).pathname} (parsed 0 rows)`);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "unknown");
+    }
   }
-  const buf = await res.arrayBuffer();
-  const rows = parseSsgaWorkbookRows(buf);
-  if (rows.length === 0) {
-    throw new Error("SSGA xlsx parse returned no holdings");
-  }
-  return rows;
+  throw new Error(`SSGA xlsx parse returned no holdings (${errors.slice(0, 5).join(" | ")})`);
 }
 
 async function fetchYahooConstituents(etfTicker: string): Promise<EtfConstituent[]> {
