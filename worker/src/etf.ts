@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import * as XLSX from "xlsx";
 
 export type EtfConstituent = {
   ticker: string;
@@ -6,11 +7,107 @@ export type EtfConstituent = {
   weight: number | null;
 };
 
+const SSGA_SELECT_SECTOR_SPDR_TICKERS = new Set([
+  "XLY",
+  "XLK",
+  "XLC",
+  "XLF",
+  "XLU",
+  "XLI",
+  "XLRE",
+  "XLV",
+  "XLB",
+  "XLE",
+  "XLP",
+]);
+
 function normalizeTicker(value: string | null | undefined): string | null {
   if (!value) return null;
   const t = value.trim().toUpperCase();
   if (!/^[A-Z.\-]{1,20}$/.test(t)) return null;
   return t;
+}
+
+function parseWeightCell(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 && value <= 1 ? value * 100 : value;
+  }
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/[%,$\s]/g, "");
+  const n = Number(normalized);
+  if (!Number.isFinite(n)) return null;
+  return n > 0 && n <= 1 ? n * 100 : n;
+}
+
+function parseSsgaWorkbookRows(buffer: ArrayBuffer): EtfConstituent[] {
+  const workbook = XLSX.read(buffer, { type: "array" });
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, blankrows: false });
+    if (rows.length < 2) continue;
+    const headerRowIndex = rows.findIndex((row) =>
+      row.some((cell) => {
+        if (typeof cell !== "string") return false;
+        const v = cell.toLowerCase();
+        return v.includes("ticker") || v.includes("symbol");
+      }),
+    );
+    if (headerRowIndex < 0) continue;
+    const header = rows[headerRowIndex] ?? [];
+    let tickerIdx = -1;
+    let weightIdx = -1;
+    let nameIdx = -1;
+    header.forEach((cell, i) => {
+      const v = String(cell ?? "").toLowerCase();
+      if (tickerIdx < 0 && (v.includes("ticker") || v.includes("symbol"))) tickerIdx = i;
+      if (weightIdx < 0 && (v.includes("weight") || v.includes("% net assets") || v.includes("portfolio weight"))) weightIdx = i;
+      if (nameIdx < 0 && (v.includes("security") || v.includes("name") || v.includes("holding"))) nameIdx = i;
+    });
+    if (tickerIdx < 0 || weightIdx < 0) continue;
+
+    const out: EtfConstituent[] = [];
+    for (const row of rows.slice(headerRowIndex + 1)) {
+      const ticker = normalizeTicker(String(row[tickerIdx] ?? ""));
+      if (!ticker) continue;
+      if (ticker === "CASH" || ticker === "USD") continue;
+      const weight = parseWeightCell(row[weightIdx]);
+      const nameCell = nameIdx >= 0 ? row[nameIdx] : null;
+      const name = typeof nameCell === "string" && nameCell.trim().length > 0 ? nameCell.trim() : null;
+      out.push({ ticker, name, weight });
+    }
+    const dedup = new Map<string, EtfConstituent>();
+    for (const row of out) {
+      if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+    }
+    if (dedup.size > 0) {
+      return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    }
+  }
+  return [];
+}
+
+async function fetchSsgaSectorSpdrXlsxConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+  if (!SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) {
+    throw new Error("SSGA Select Sector source not configured for this ETF");
+  }
+  const url = `https://www.ssga.com/library-content/products/fund-data/etfs/us/pdhist-us-en-${etfTicker.toLowerCase()}.xlsx`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "market-command-centre/1.0",
+      Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*",
+      Referer: "https://www.ssga.com/",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`SSGA xlsx fetch failed (${res.status})`);
+  }
+  const buf = await res.arrayBuffer();
+  const rows = parseSsgaWorkbookRows(buf);
+  if (rows.length === 0) {
+    throw new Error("SSGA xlsx parse returned no holdings");
+  }
+  return rows;
 }
 
 async function fetchYahooConstituents(etfTicker: string): Promise<EtfConstituent[]> {
@@ -115,14 +212,26 @@ async function fetchEtfDbConstituents(etfTicker: string): Promise<EtfConstituent
 export async function syncEtfConstituents(env: Env, etfTickerInput: string): Promise<{ count: number; source: string }> {
   const etfTicker = normalizeTicker(etfTickerInput);
   if (!etfTicker) throw new Error("Invalid ETF ticker");
-  let source = "yahoo:topHoldings";
+  let source = "ssga:fund-data-xlsx";
   let holdings: EtfConstituent[] = [];
   const errors: string[] = [];
-  try {
-    holdings = await fetchYahooConstituents(etfTicker);
-    if (holdings.length === 0) throw new Error("Yahoo returned no holdings");
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : "Yahoo sync failed");
+  if (SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) {
+    try {
+      holdings = await fetchSsgaSectorSpdrXlsxConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("SSGA returned no holdings");
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "SSGA sync failed");
+    }
+  }
+
+  if (holdings.length === 0) {
+    source = "yahoo:topHoldings";
+    try {
+      holdings = await fetchYahooConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("Yahoo returned no holdings");
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Yahoo sync failed");
+    }
   }
 
   if (holdings.length === 0) {
@@ -143,6 +252,11 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
     } catch (error) {
       errors.push(error instanceof Error ? error.message : "ETFdb sync failed");
     }
+  }
+
+  if (holdings.length > 0 && source !== "ssga:fund-data-xlsx" && SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) {
+    // Keep fallback source label explicit for visibility when SSGA is unavailable.
+    source = `${source} (ssga-fallback)`;
   }
 
   if (holdings.length === 0) {
