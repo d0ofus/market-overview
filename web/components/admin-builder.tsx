@@ -15,6 +15,8 @@ const refreshTimezoneOptions = [
 
 export function AdminBuilder() {
   const [data, setData] = useState<SnapshotResponse["config"] | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tickerInput, setTickerInput] = useState<Record<string, string>>({});
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [newGroupTitle, setNewGroupTitle] = useState<Record<string, string>>({});
@@ -53,23 +55,32 @@ export function AdminBuilder() {
   const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
 
   const load = async () => {
-    const [config, sectorRes, industryRes, syncRes] = await Promise.all([
-      adminFetch<SnapshotResponse["config"]>("/api/admin/config"),
-      adminFetch<{ rows: any[] }>("/api/etfs/sector"),
-      adminFetch<{ rows: any[] }>("/api/etfs/industry"),
-      adminFetch<{ rows: any[] }>("/api/admin/etf-sync-status?limit=200"),
-    ]);
-    setData(config);
-    setRefreshConfig({
-      id: config.id,
-      name: config.name,
-      timezone: config.timezone,
-      eodRunLocalTime: config.eodRunLocalTime || "08:15",
-      eodRunTimeLabel: config.eodRunTimeLabel || buildRefreshLabel(config.eodRunLocalTime || "08:15", config.timezone),
-    });
-    setSectorEtfs(sectorRes.rows ?? []);
-    setIndustryEtfs(industryRes.rows ?? []);
-    setEtfSyncStatus(syncRes.rows ?? []);
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
+      setData(config);
+      setRefreshConfig({
+        id: config.id,
+        name: config.name,
+        timezone: config.timezone,
+        eodRunLocalTime: config.eodRunLocalTime || "08:15",
+        eodRunTimeLabel: config.eodRunTimeLabel || buildRefreshLabel(config.eodRunLocalTime || "08:15", config.timezone),
+      });
+
+      const [sectorRes, industryRes, syncRes] = await Promise.allSettled([
+        adminFetch<{ rows: any[] }>("/api/etfs/sector"),
+        adminFetch<{ rows: any[] }>("/api/etfs/industry"),
+        adminFetch<{ rows: any[] }>("/api/admin/etf-sync-status?limit=200"),
+      ]);
+      setSectorEtfs(sectorRes.status === "fulfilled" ? (sectorRes.value.rows ?? []) : []);
+      setIndustryEtfs(industryRes.status === "fulfilled" ? (industryRes.value.rows ?? []) : []);
+      setEtfSyncStatus(syncRes.status === "fulfilled" ? (syncRes.value.rows ?? []) : []);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load admin config.");
+    } finally {
+      setIsLoading(false);
+    }
   };
   useEffect(() => {
     void load();
@@ -266,7 +277,18 @@ export function AdminBuilder() {
     await load();
   };
 
-  if (!data) return <div className="card p-4">Loading admin config...</div>;
+  if (isLoading) return <div className="card p-4">Loading admin config...</div>;
+  if (loadError) {
+    return (
+      <div className="card p-4">
+        <p className="text-sm text-rose-300">{loadError}</p>
+        <button className="mt-3 rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={() => void load()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (!data) return <div className="card p-4">Admin config unavailable.</div>;
 
   return (
     <div className="space-y-4">
