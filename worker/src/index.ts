@@ -799,7 +799,8 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
   const hasKnownError = status?.status === "error";
   const hasNoRecords = !status || (status.recordsCount ?? 0) === 0;
-  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || hasKnownError || hasNoRecords;
+  const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
+  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || ((hasKnownError || hasNoRecords) && !isRecentError);
   let warning: string | null = null;
   if (shouldSync) {
     try {
@@ -819,8 +820,10 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     .bind(ticker)
     .all();
   const baseRows = rows.results ?? [];
-  await refreshRecentBarsForTickers(c.env, baseRows.map((r: any) => r.ticker));
-  const statsMap = await get1dStatsMap(c.env, baseRows.map((r: any) => r.ticker));
+  // Limit per-request quote/bar fanout to avoid worker subrequest caps on large constituent sets.
+  const pricedTickers = baseRows.slice(0, 80).map((r: any) => r.ticker);
+  await refreshRecentBarsForTickers(c.env, pricedTickers, 80);
+  const statsMap = await get1dStatsMap(c.env, pricedTickers);
   const rowsWithStats = baseRows.map((row: any) => {
     const stats = statsMap.get(String(row.ticker).toUpperCase());
     return {
@@ -832,6 +835,9 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   });
   if (!warning && status?.status === "error" && status.error) {
     warning = status.error;
+  }
+  if (!warning && isRecentError && hasNoRecords) {
+    warning = "Constituent sync is temporarily throttled after a recent provider-limit error. Try again later or run monthly sync.";
   }
   return c.json({
     etf,

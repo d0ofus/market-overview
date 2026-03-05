@@ -41,6 +41,7 @@ export function AdminBuilder() {
     eodRunTimeLabel: "08:15 Australia/Melbourne",
   });
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
+  const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools">("overview");
 
   const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
 
@@ -139,6 +140,22 @@ export function AdminBuilder() {
       setRefreshConfigMsg(err instanceof Error ? err.message : "Failed to save refresh schedule.");
     } finally {
       setTimeout(() => setRefreshConfigMsg(null), 3000);
+    }
+  };
+
+  const runSchedulePageRefresh = async () => {
+    try {
+      setRefreshConfigMsg(null);
+      const res = await adminFetch<{ ok: boolean; refreshedTickers: number; notes?: string }>("/api/admin/refresh-page", {
+        method: "POST",
+        body: JSON.stringify({ page: schedulePageTarget }),
+      });
+      setRefreshConfigMsg(res.notes ?? `Ran ${schedulePageTarget} update: ${res.refreshedTickers} tickers refreshed.`);
+      await load();
+    } catch (err) {
+      setRefreshConfigMsg(err instanceof Error ? err.message : "Failed to run selected page refresh.");
+    } finally {
+      setTimeout(() => setRefreshConfigMsg(null), 4000);
     }
   };
 
@@ -252,6 +269,24 @@ export function AdminBuilder() {
           />
           <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={saveRefreshConfig}>
             Save Schedule
+          </button>
+        </div>
+        <div className="mt-2 grid gap-2 md:grid-cols-5">
+          <div className="text-xs text-slate-400 md:col-span-2">Page Scope</div>
+          <select
+            className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+            value={schedulePageTarget}
+            onChange={(e) => setSchedulePageTarget(e.target.value as "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools")}
+          >
+            <option value="overview">Overview</option>
+            <option value="breadth">Breadth</option>
+            <option value="sectors">Sector Tracker</option>
+            <option value="thirteenf">13F Tracker</option>
+            <option value="admin">Admin</option>
+            <option value="tools">Tools</option>
+          </select>
+          <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200 md:col-span-2" onClick={runSchedulePageRefresh}>
+            Run Selected Page Update Now
           </button>
         </div>
         <p className="mt-2 text-xs text-slate-300">

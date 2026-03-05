@@ -140,7 +140,7 @@ export function SectorTracker() {
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
-  const [addFormOpen, setAddFormOpen] = useState(true);
+  const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
   const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
   const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
@@ -430,7 +430,7 @@ export function SectorTracker() {
         <div className="mb-3 rounded-xl border border-borderSoft/70 bg-panelSoft/25 p-3">
           <button className="mb-2 inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-sm text-slate-200" onClick={() => setAddFormOpen((v) => !v)}>
             <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
-            Add Sector/Narrative
+            Add Entry
           </button>
           {addFormOpen && (
           <div className="grid gap-2 md:grid-cols-7">
