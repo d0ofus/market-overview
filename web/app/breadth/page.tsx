@@ -31,6 +31,15 @@ type SummaryPayload = {
   unavailable: Array<{ id: string; name: string; reason: string }>;
 };
 
+type StatusPayload = {
+  timezone: string;
+  autoRefreshLabel: string;
+  autoRefreshLocalTime?: string;
+  lastUpdated: string | null;
+  asOfDate: string | null;
+  providerLabel: string;
+};
+
 const universeOrder = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
 
 const universeNames: Record<string, string> = {
@@ -94,7 +103,16 @@ function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asO
 }
 
 export default async function BreadthPage() {
-  const statusPromise = getStatus();
+  const statusPromise = getStatus().catch(
+    (): StatusPayload => ({
+      timezone: "Australia/Melbourne",
+      autoRefreshLabel: "08:15 Australia/Melbourne",
+      autoRefreshLocalTime: "08:15",
+      lastUpdated: null,
+      asOfDate: null,
+      providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+    }),
+  );
   const summaryPromise = getBreadthSummary().catch(() => null);
   const universeRowsPromise = Promise.all(universeOrder.map(async (universeId) => [universeId, await loadUniverse(universeId)] as const));
 
@@ -106,11 +124,12 @@ export default async function BreadthPage() {
   const summary = summaryApi
     ? {
         ...summaryApi,
-        rows: (summaryApi.rows ?? []).map((row: any) => ({
+        rows: (Array.isArray(summaryApi.rows) ? summaryApi.rows : []).filter(Boolean).map((row: any) => ({
           ...row,
           universeName: universeNames[row.universeId] ?? row.universeName ?? row.universeId,
           dataSource: row.dataSource ?? coreUniverseSource[row.universeId] ?? null,
         })),
+        unavailable: Array.isArray(summaryApi.unavailable) ? summaryApi.unavailable : [],
       }
     : buildSummaryFromUniverseRows(historyByUniverse, status.asOfDate);
 
