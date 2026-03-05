@@ -115,14 +115,24 @@ async function fetchEtfDbConstituents(etfTicker: string): Promise<EtfConstituent
 export async function syncEtfConstituents(env: Env, etfTickerInput: string): Promise<{ count: number; source: string }> {
   const etfTicker = normalizeTicker(etfTickerInput);
   if (!etfTicker) throw new Error("Invalid ETF ticker");
-  let source = "stockanalysis:holdings-page";
+  let source = "yahoo:topHoldings";
   let holdings: EtfConstituent[] = [];
   const errors: string[] = [];
   try {
-    holdings = await fetchStockAnalysisConstituents(etfTicker);
-    if (holdings.length === 0) throw new Error("StockAnalysis returned no holdings");
+    holdings = await fetchYahooConstituents(etfTicker);
+    if (holdings.length === 0) throw new Error("Yahoo returned no holdings");
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : "StockAnalysis sync failed");
+    errors.push(error instanceof Error ? error.message : "Yahoo sync failed");
+  }
+
+  if (holdings.length === 0) {
+    source = "stockanalysis:holdings-page";
+    try {
+      holdings = await fetchStockAnalysisConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("StockAnalysis returned no holdings");
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "StockAnalysis sync failed");
+    }
   }
 
   if (holdings.length === 0) {
@@ -132,16 +142,6 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       if (holdings.length === 0) throw new Error("ETFdb returned no holdings");
     } catch (error) {
       errors.push(error instanceof Error ? error.message : "ETFdb sync failed");
-    }
-  }
-
-  if (holdings.length === 0) {
-    source = "yahoo:topHoldings";
-    try {
-      holdings = await fetchYahooConstituents(etfTicker);
-      if (holdings.length === 0) throw new Error("Yahoo returned no holdings");
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : "Yahoo sync failed");
     }
   }
 

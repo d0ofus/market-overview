@@ -91,12 +91,24 @@ function zonedParts(now: Date, timezone: string): { weekday: string; day: number
   };
 }
 
-function currentAsOfDate(now: Date): string {
-  const d = new Date(now);
+function previousWeekdayIso(isoDate: string): string {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
   while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
     d.setUTCDate(d.getUTCDate() - 1);
   }
   return d.toISOString().slice(0, 10);
+}
+
+function latestUsSessionAsOfDate(now: Date): string {
+  const ny = zonedParts(now, "America/New_York");
+  const hour = Math.floor(ny.minutesOfDay / 60);
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(ny.weekday);
+  if (!isWeekday) {
+    return previousWeekdayIso(ny.localDate);
+  }
+  // Use same-day NY session after regular close; otherwise use previous session.
+  return hour >= 16 ? ny.localDate : previousWeekdayIso(ny.localDate);
 }
 
 async function loadDefaultConfigRow(env: Env): Promise<{
@@ -800,7 +812,7 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   const hasKnownError = status?.status === "error";
   const hasNoRecords = !status || (status.recordsCount ?? 0) === 0;
   const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
-  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || ((hasKnownError || hasNoRecords) && !isRecentError);
+  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || hasNoRecords || (hasKnownError && !isRecentError);
   let warning: string | null = null;
   if (shouldSync) {
     try {
@@ -1105,7 +1117,7 @@ app.get("/api/admin/provider-check", async (c) => {
 
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const date = c.req.query("date");
+  const date = c.req.query("date") ?? latestUsSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
     const result = await computeAndStoreSnapshot(c.env, date, configId);
@@ -1369,7 +1381,7 @@ export default {
     const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(local.weekday);
     if (!isWeekday || !withinWindow) return;
 
-    const expectedAsOf = currentAsOfDate(now);
+    const expectedAsOf = latestUsSessionAsOfDate(now);
     const latest = await env.DB.prepare(
       "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
     )
@@ -1377,7 +1389,7 @@ export default {
       .first<{ asOfDate: string | null }>();
     if (latest?.asOfDate === expectedAsOf) return;
 
-    await computeAndStoreSnapshot(env, undefined, defaultConfig?.id ?? "default");
+    await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
     await syncMonthlyEtfSlice(env, local.day);
   },
 };

@@ -6,6 +6,12 @@ import type { SnapshotResponse } from "@/types/dashboard";
 
 const rankingOptions = ["1D", "5D", "1W", "YTD", "52W"] as const;
 const allColumns = ["ticker", "name", "price", "1D", "1W", "5D", "YTD", "pctFrom52WHigh", "sparkline"];
+const refreshTimezoneOptions = [
+  { label: "Melbourne", value: "Australia/Melbourne" },
+  { label: "Sydney", value: "Australia/Sydney" },
+  { label: "Singapore", value: "Asia/Singapore" },
+  { label: "New York", value: "America/New_York" },
+] as const;
 
 export function AdminBuilder() {
   const [data, setData] = useState<SnapshotResponse["config"] | null>(null);
@@ -255,12 +261,17 @@ export function AdminBuilder() {
             onChange={(e) => setRefreshConfig((s) => ({ ...s, name: e.target.value }))}
             placeholder="Dashboard config name"
           />
-          <input
+          <select
             className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
             value={refreshConfig.timezone}
             onChange={(e) => setRefreshConfig((s) => ({ ...s, timezone: e.target.value }))}
-            placeholder="IANA timezone (e.g. Australia/Sydney)"
-          />
+          >
+            {refreshTimezoneOptions.map((tz) => (
+              <option key={tz.value} value={tz.value}>
+                {tz.label}
+              </option>
+            ))}
+          </select>
           <input
             type="time"
             className="rounded border border-borderSoft bg-panelSoft px-2 py-1"

@@ -109,6 +109,18 @@ export function refreshPageData(page: string, ticker?: string | null) {
   return adminFetch<{ ok: boolean; page: string; refreshedTickers: number; notes?: string }>("/api/admin/refresh-page", {
     method: "POST",
     body: JSON.stringify({ page, ticker: ticker ?? null }),
+  }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message.includes("API /api/admin/refresh-page failed: 404")) throw error;
+
+    // Backward-compatible fallback for older worker deployments.
+    if (page === "breadth") {
+      await adminFetch<{ ok: boolean; asOfDate: string; universeCount: number }>("/api/admin/run-breadth", { method: "POST" });
+      return { ok: true, page, refreshedTickers: 0, notes: "Fallback breadth refresh completed (legacy API)." };
+    }
+
+    await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });
+    return { ok: true, page, refreshedTickers: 0, notes: "Fallback refresh completed (legacy API)." };
   });
 }
 
