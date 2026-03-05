@@ -182,7 +182,7 @@ export function AdminBuilder() {
       setEtfBackfillMsg(null);
       const res = await adminFetch<{ ok: boolean; attempted: number; synced: number; failed: Array<{ ticker: string; error: string }> }>("/api/admin/etf-sync-backfill", {
         method: "POST",
-        body: JSON.stringify({ limit: 12 }),
+        body: JSON.stringify({ limit: 3 }),
       });
       if (res.failed.length > 0) {
         setEtfBackfillMsg(`Synced ${res.synced}/${res.attempted}. Failed: ${res.failed.map((f) => f.ticker).join(", ")}`);

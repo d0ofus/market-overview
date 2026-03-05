@@ -1146,7 +1146,8 @@ app.post("/api/admin/run-eod", async (c) => {
 app.post("/api/admin/etf-sync-backfill", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
-  const limit = Math.max(1, Math.min(30, Number(body.limit ?? 12)));
+  // Keep this low to avoid Cloudflare subrequest caps in one request.
+  const limit = Math.max(1, Math.min(5, Number(body.limit ?? 3)));
   const rows = await c.env.DB.prepare(
     "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.records_count as recordsCount FROM etf_watchlists w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker ORDER BY w.ticker ASC",
   ).all<{ ticker: string; lastSyncedAt: string | null; status: string | null; recordsCount: number | null }>();
@@ -1396,11 +1397,16 @@ app.get("/api/admin/audit", async (c) => {
   return c.json({ rows: rows.results ?? [] });
 });
 
-async function syncMonthlyEtfSlice(env: Env, localDay: number): Promise<void> {
-  const totalBuckets = 8;
-  const targetBucket = ((Math.max(1, localDay) - 1) % totalBuckets);
-  const watchRows = await env.DB.prepare("SELECT DISTINCT ticker FROM etf_watchlists ORDER BY ticker ASC").all<{ ticker: string }>();
-  const selected = (watchRows.results ?? []).filter((_row, idx) => idx % totalBuckets === targetBucket);
+async function syncMonthlyEtfSlice(env: Env): Promise<void> {
+  // Process only a small stale slice per scheduled run to stay under worker subrequest budgets.
+  const maxPerRun = 3;
+  const staleDays = 28;
+  const staleRows = await env.DB.prepare(
+    "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt FROM etf_watchlists w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker WHERE s.last_synced_at IS NULL OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 ELSE 1 END, datetime(s.last_synced_at) ASC, w.ticker ASC LIMIT ?",
+  )
+    .bind(staleDays, maxPerRun)
+    .all<{ ticker: string; lastSyncedAt: string | null }>();
+  const selected = staleRows.results ?? [];
   for (const row of selected) {
     try {
       await syncEtfConstituents(env, row.ticker);
@@ -1430,9 +1436,9 @@ export default {
     )
       .bind(defaultConfig?.id ?? "default")
       .first<{ asOfDate: string | null }>();
-    if (latest?.asOfDate === expectedAsOf) return;
-
-    await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
-    await syncMonthlyEtfSlice(env, local.day);
+    if (latest?.asOfDate !== expectedAsOf) {
+      await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+    }
+    await syncMonthlyEtfSlice(env);
   },
 };

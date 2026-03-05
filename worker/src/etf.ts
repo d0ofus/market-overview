@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import * as XLSX from "xlsx";
 
 export type EtfConstituent = {
   ticker: string;
@@ -79,6 +80,46 @@ function parseWeightCell(value: unknown): number | null {
   return n > 0 && n <= 1 ? n * 100 : n;
 }
 
+function findSsgaHeaderIndexes(rows: unknown[][]): { headerRowIndex: number; tickerIdx: number; weightIdx: number; nameIdx: number } | null {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    let tickerIdx = -1;
+    let weightIdx = -1;
+    let nameIdx = -1;
+    row.forEach((cell, i) => {
+      const v = String(cell ?? "").toLowerCase().trim();
+      if (tickerIdx < 0 && (v === "ticker" || v === "symbol" || v.includes("ticker symbol"))) tickerIdx = i;
+      if (weightIdx < 0 && (v === "weight" || v.includes("% net assets") || v.includes("portfolio weight"))) weightIdx = i;
+      if (nameIdx < 0 && (v === "name" || v.includes("security") || v.includes("holding"))) nameIdx = i;
+    });
+    if (tickerIdx >= 0 && weightIdx >= 0) {
+      return { headerRowIndex: rowIndex, tickerIdx, weightIdx, nameIdx };
+    }
+  }
+  return null;
+}
+
+function parseSsgaRows(rows: unknown[][]): EtfConstituent[] {
+  if (rows.length < 2) return [];
+  const idx = findSsgaHeaderIndexes(rows);
+  if (!idx) return [];
+
+  const out: EtfConstituent[] = [];
+  for (const row of rows.slice(idx.headerRowIndex + 1)) {
+    const ticker = normalizeTicker(String(row[idx.tickerIdx] ?? ""));
+    if (!ticker || ticker === "CASH" || ticker === "USD") continue;
+    const weight = parseWeightCell(row[idx.weightIdx]);
+    const nameCell = idx.nameIdx >= 0 ? row[idx.nameIdx] : null;
+    const name = typeof nameCell === "string" && nameCell.trim().length > 0 ? nameCell.trim() : null;
+    out.push({ ticker, name, weight });
+  }
+  const dedup = new Map<string, EtfConstituent>();
+  for (const row of out) {
+    if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+  }
+  return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+}
+
 function splitDelimitedRow(line: string, delimiter: "," | "\t"): string[] {
   const out: string[] = [];
   let current = "";
@@ -115,40 +156,19 @@ function parseSsgaDelimitedRows(raw: string): EtfConstituent[] {
 
   const delimiter: "," | "\t" = lines.some((l) => l.includes("\t")) ? "\t" : ",";
   const rows = lines.map((l) => splitDelimitedRow(l, delimiter));
-  const headerRowIndex = rows.findIndex((row) =>
-    row.some((cell) => {
-      const v = String(cell ?? "").toLowerCase();
-      return v.includes("ticker") || v.includes("symbol");
-    }),
-  );
-  if (headerRowIndex < 0) return [];
+  return parseSsgaRows(rows as unknown[][]);
+}
 
-  const header = rows[headerRowIndex] ?? [];
-  let tickerIdx = -1;
-  let weightIdx = -1;
-  let nameIdx = -1;
-  header.forEach((cell, i) => {
-    const v = String(cell ?? "").toLowerCase();
-    if (tickerIdx < 0 && (v.includes("ticker") || v.includes("symbol"))) tickerIdx = i;
-    if (weightIdx < 0 && (v.includes("weight") || v.includes("% net assets") || v.includes("portfolio weight"))) weightIdx = i;
-    if (nameIdx < 0 && (v.includes("security") || v.includes("name") || v.includes("holding"))) nameIdx = i;
-  });
-  if (tickerIdx < 0 || weightIdx < 0) return [];
-
-  const out: EtfConstituent[] = [];
-  for (const row of rows.slice(headerRowIndex + 1)) {
-    const ticker = normalizeTicker(String(row[tickerIdx] ?? ""));
-    if (!ticker || ticker === "CASH" || ticker === "USD") continue;
-    const weight = parseWeightCell(row[weightIdx]);
-    const nameCell = nameIdx >= 0 ? row[nameIdx] : null;
-    const name = typeof nameCell === "string" && nameCell.trim().length > 0 ? nameCell.trim() : null;
-    out.push({ ticker, name, weight });
+function parseSsgaWorkbookRows(buffer: ArrayBuffer): EtfConstituent[] {
+  const workbook = XLSX.read(buffer, { type: "array" });
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, blankrows: false });
+    const parsed = parseSsgaRows(rows as unknown[][]);
+    if (parsed.length > 0) return parsed;
   }
-  const dedup = new Map<string, EtfConstituent>();
-  for (const row of out) {
-    if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
-  }
-  return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  return [];
 }
 
 async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<EtfConstituent[]> {
@@ -210,13 +230,19 @@ async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<EtfCons
         continue;
       }
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-      const textLike =
-        url.toLowerCase().endsWith(".csv") ||
-        contentType.includes("text/") ||
-        contentType.includes("csv") ||
-        contentType.includes("json");
-      const bodyText = textLike ? await res.text() : new TextDecoder().decode(await res.arrayBuffer());
-      const rows = parseSsgaDelimitedRows(bodyText);
+      const looksLikeXlsx =
+        url.toLowerCase().endsWith(".xlsx") ||
+        contentType.includes("sheet") ||
+        contentType.includes("zip") ||
+        contentType.includes("octet-stream");
+      let rows: EtfConstituent[] = [];
+      if (looksLikeXlsx) {
+        const body = await res.arrayBuffer();
+        rows = parseSsgaWorkbookRows(body);
+      } else {
+        const bodyText = await res.text();
+        rows = parseSsgaDelimitedRows(bodyText);
+      }
       if (rows.length > 0) return rows;
       errors.push(`${new URL(url).pathname} (parsed 0 rows from fund-data file)`);
     } catch (error) {
