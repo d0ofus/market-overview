@@ -47,6 +47,7 @@ export function AdminBuilder() {
     eodRunTimeLabel: "08:15 Australia/Melbourne",
   });
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
+  const [etfBackfillMsg, setEtfBackfillMsg] = useState<string | null>(null);
   const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools">("overview");
 
   const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
@@ -162,6 +163,26 @@ export function AdminBuilder() {
       setRefreshConfigMsg(err instanceof Error ? err.message : "Failed to run selected page refresh.");
     } finally {
       setTimeout(() => setRefreshConfigMsg(null), 4000);
+    }
+  };
+
+  const runEtfConstituentBackfill = async () => {
+    try {
+      setEtfBackfillMsg(null);
+      const res = await adminFetch<{ ok: boolean; attempted: number; synced: number; failed: Array<{ ticker: string; error: string }> }>("/api/admin/etf-sync-backfill", {
+        method: "POST",
+        body: JSON.stringify({ limit: 12 }),
+      });
+      if (res.failed.length > 0) {
+        setEtfBackfillMsg(`Synced ${res.synced}/${res.attempted}. Failed: ${res.failed.map((f) => f.ticker).join(", ")}`);
+      } else {
+        setEtfBackfillMsg(`Synced ${res.synced}/${res.attempted} ETFs.`);
+      }
+      await load();
+    } catch (err) {
+      setEtfBackfillMsg(err instanceof Error ? err.message : "Failed to run ETF constituent backfill.");
+    } finally {
+      setTimeout(() => setEtfBackfillMsg(null), 5000);
     }
   };
 
@@ -308,6 +329,12 @@ export function AdminBuilder() {
 
       <div className="card p-3">
         <h3 className="mb-2 text-base font-semibold">ETF Watchlists</h3>
+        <div className="mb-3 flex items-center gap-2">
+          <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={runEtfConstituentBackfill}>
+            Sync Missing ETF Constituents Now
+          </button>
+          {etfBackfillMsg && <span className="text-xs text-slate-300">{etfBackfillMsg}</span>}
+        </div>
         <div className="grid gap-3 md:grid-cols-2">
           <div className="rounded border border-borderSoft p-2">
             <p className="mb-2 text-sm font-semibold">Add Sector ETF</p>

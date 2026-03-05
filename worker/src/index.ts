@@ -804,15 +804,23 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     .first();
   if (!etf) return c.json({ error: "ETF ticker not found in watchlists" }, 404);
 
+  const rows = await c.env.DB.prepare(
+    "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
+  )
+    .bind(ticker)
+    .all();
+  const baseRows = rows.results ?? [];
+
   let status = await c.env.DB.prepare(
     "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
   )
     .bind(ticker)
     .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
   const hasKnownError = status?.status === "error";
-  const hasNoRecords = !status || (status.recordsCount ?? 0) === 0;
+  const hasNoRecords = baseRows.length === 0;
   const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
-  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || hasNoRecords || (hasKnownError && !isRecentError);
+  const hasCachedRows = baseRows.length > 0;
+  const shouldSync = forceSync || (hasCachedRows && isStaleDate(status?.lastSyncedAt, 45)) || (hasKnownError && !isRecentError && hasCachedRows);
   let warning: string | null = null;
   if (shouldSync) {
     try {
@@ -826,17 +834,20 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
       warning = error instanceof Error ? error.message : "Constituent pull failed";
     }
   }
-  const rows = await c.env.DB.prepare(
-    "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
-  )
-    .bind(ticker)
-    .all();
-  const baseRows = rows.results ?? [];
+
+  const finalRows = shouldSync
+    ? (await c.env.DB.prepare(
+      "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
+    )
+      .bind(ticker)
+      .all()).results ?? []
+    : baseRows;
+
   // Limit per-request quote/bar fanout to avoid worker subrequest caps on large constituent sets.
-  const pricedTickers = baseRows.slice(0, 80).map((r: any) => r.ticker);
+  const pricedTickers = finalRows.slice(0, 80).map((r: any) => r.ticker);
   await refreshRecentBarsForTickers(c.env, pricedTickers, 80);
   const statsMap = await get1dStatsMap(c.env, pricedTickers);
-  const rowsWithStats = baseRows.map((row: any) => {
+  const rowsWithStats = finalRows.map((row: any) => {
     const stats = statsMap.get(String(row.ticker).toUpperCase());
     return {
       ...row,
@@ -847,6 +858,9 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   });
   if (!warning && status?.status === "error" && status.error) {
     warning = status.error;
+  }
+  if (!warning && !forceSync && hasNoRecords) {
+    warning = "No cached constituents yet for this ETF. Constituents are loaded from the database and updated by scheduled/admin sync.";
   }
   if (!warning && isRecentError && hasNoRecords) {
     warning = "Constituent sync is temporarily throttled after a recent provider-limit error. Try again later or run monthly sync.";
@@ -1129,6 +1143,36 @@ app.post("/api/admin/run-eod", async (c) => {
   }
 });
 
+app.post("/api/admin/etf-sync-backfill", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
+  const limit = Math.max(1, Math.min(30, Number(body.limit ?? 12)));
+  const rows = await c.env.DB.prepare(
+    "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.records_count as recordsCount FROM etf_watchlists w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker ORDER BY w.ticker ASC",
+  ).all<{ ticker: string; lastSyncedAt: string | null; status: string | null; recordsCount: number | null }>();
+  const candidates = (rows.results ?? [])
+    .filter((r) => (r.recordsCount ?? 0) === 0 || r.status === "error" || isStaleDate(r.lastSyncedAt, 45))
+    .slice(0, limit);
+
+  let ok = 0;
+  const failed: Array<{ ticker: string; error: string }> = [];
+  for (const row of candidates) {
+    try {
+      await syncEtfConstituents(c.env, row.ticker);
+      ok += 1;
+    } catch (error) {
+      failed.push({ ticker: row.ticker, error: error instanceof Error ? error.message : "sync failed" });
+    }
+  }
+
+  return c.json({
+    ok: true,
+    attempted: candidates.length,
+    synced: ok,
+    failed,
+  });
+});
+
 app.post("/api/admin/run-breadth", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
@@ -1353,9 +1397,8 @@ app.get("/api/admin/audit", async (c) => {
 });
 
 async function syncMonthlyEtfSlice(env: Env, localDay: number): Promise<void> {
-  if (localDay < 1 || localDay > 8) return;
   const totalBuckets = 8;
-  const targetBucket = localDay - 1;
+  const targetBucket = ((Math.max(1, localDay) - 1) % totalBuckets);
   const watchRows = await env.DB.prepare("SELECT DISTINCT ticker FROM etf_watchlists ORDER BY ticker ASC").all<{ ticker: string }>();
   const selected = (watchRows.results ?? []).filter((_row, idx) => idx % totalBuckets === targetBucket);
   for (const row of selected) {
