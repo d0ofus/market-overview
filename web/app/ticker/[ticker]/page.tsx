@@ -1,6 +1,7 @@
 import { getTicker } from "@/lib/api";
 import { Sparkline } from "@/components/sparkline";
 import { TradingViewWidget } from "@/components/tradingview-widget";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 
 export default async function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker } = await params;
@@ -11,6 +12,9 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   const change = prev ? ((latest - prev) / prev) * 100 : 0;
   return (
     <div className="space-y-4">
+      <div className="flex justify-end">
+        <ManualRefreshButton page="ticker" ticker={data.symbol.ticker} />
+      </div>
       <div className="card p-4">
         <h2 className="text-2xl font-semibold">
           {data.symbol.ticker} <span className="text-base text-slate-400">{data.symbol.name}</span>

@@ -334,21 +334,36 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
   return { universeTickers, sourceByUniverse, unavailable };
 }
 
-export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, configId = "default"): Promise<{ snapshotId: string; asOfDate: string }> {
+type SnapshotComputeOptions = {
+  includeBreadth?: boolean;
+  pullProviderBars?: boolean;
+  providerTickers?: string[] | null;
+};
+
+export async function computeAndStoreSnapshot(
+  env: Env,
+  asOfDateInput?: string,
+  configId = "default",
+  options: SnapshotComputeOptions = {},
+): Promise<{ snapshotId: string; asOfDate: string }> {
+  const includeBreadth = options.includeBreadth ?? true;
+  const pullProviderBars = options.pullProviderBars ?? true;
   const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
   const asOfDate = toISODate(previousWeekday(today));
   const config = await loadConfig(env, configId);
   let providerLabel = "Stored Daily Bars";
-  const provider = (() => {
-    try {
-      const p = getProvider(env);
-      providerLabel = p.label;
-      return p;
-    } catch (error) {
-      console.error("provider init failed, using stored bars only", error);
-      return null;
-    }
-  })();
+  const provider = pullProviderBars
+    ? (() => {
+      try {
+        const p = getProvider(env);
+        providerLabel = p.label;
+        return p;
+      } catch (error) {
+        console.error("provider init failed, using stored bars only", error);
+        return null;
+      }
+    })()
+    : null;
 
   const dashboardTickers = Array.from(
     new Set(
@@ -359,20 +374,26 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
         .map((it) => it.ticker),
     ),
   );
-  const breadthState = await (async (): Promise<BreadthUniverseState> => {
-    try {
-      return await ensureBreadthUniverseMemberships(env);
-    } catch (error) {
-      console.error("breadth universe setup failed; continuing with existing memberships", error);
-      return {
-        universeTickers: new Map<string, string[]>(),
-        sourceByUniverse: new Map<string, string>(),
-        unavailable: [],
-      };
-    }
-  })();
+  const breadthState = includeBreadth
+    ? await (async (): Promise<BreadthUniverseState> => {
+      try {
+        return await ensureBreadthUniverseMemberships(env);
+      } catch (error) {
+        console.error("breadth universe setup failed; continuing with existing memberships", error);
+        return {
+          universeTickers: new Map<string, string[]>(),
+          sourceByUniverse: new Map<string, string>(),
+          unavailable: [],
+        };
+      }
+    })()
+    : {
+      universeTickers: new Map<string, string[]>(),
+      sourceByUniverse: new Map<string, string>(),
+      unavailable: [],
+    };
   const breadthTickers = Array.from(new Set([...breadthState.universeTickers.values()].flat()));
-  const tickers = Array.from(new Set([...dashboardTickers, ...breadthTickers]));
+  const tickers = Array.from(new Set(options.providerTickers ?? [...dashboardTickers, ...breadthTickers]));
 
   const endDate = asOfDate;
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
@@ -462,16 +483,29 @@ export async function computeAndStoreSnapshot(env: Env, asOfDateInput?: string, 
     }
   }
   if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
-  const breadthUniverseIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
-  for (const universeId of breadthUniverseIds) {
-    await computeAndStoreBreadth(
-      env,
-      asOfDate,
-      universeId,
-      breadthState.sourceByUniverse.get(universeId) ?? null,
-    );
+  if (includeBreadth) {
+    const breadthUniverseIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
+    for (const universeId of breadthUniverseIds) {
+      await computeAndStoreBreadth(
+        env,
+        asOfDate,
+        universeId,
+        breadthState.sourceByUniverse.get(universeId) ?? null,
+      );
+    }
   }
   return { snapshotId, asOfDate };
+}
+
+export async function recomputeDashboardFromStoredBars(
+  env: Env,
+  asOfDateInput?: string,
+  configId = "default",
+): Promise<{ snapshotId: string; asOfDate: string }> {
+  return computeAndStoreSnapshot(env, asOfDateInput, configId, {
+    includeBreadth: false,
+    pullProviderBars: false,
+  });
 }
 
 export async function recomputeBreadthFromStoredBars(

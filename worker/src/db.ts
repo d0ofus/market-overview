@@ -5,10 +5,10 @@ const defaultColumns = ["ticker", "name", "price", "1D", "1W", "YTD", "sparkline
 
 export async function loadConfig(env: Env, configId = "default"): Promise<DashboardConfigPayload> {
   const config = await env.DB.prepare(
-    "SELECT id, name, timezone, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE id = ?",
+    "SELECT id, name, timezone, eod_run_local_time as eodRunLocalTime, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE id = ?",
   )
     .bind(configId)
-    .first<{ id: string; name: string; timezone: string; eodRunTimeLabel: string }>();
+    .first<{ id: string; name: string; timezone: string; eodRunLocalTime: string; eodRunTimeLabel: string }>();
   if (!config) {
     throw new Error(`Missing dashboard config ${configId}`);
   }

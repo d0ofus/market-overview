@@ -1,5 +1,6 @@
 import { GroupPanel } from "@/components/group-panel";
 import { StatusBar } from "@/components/status-bar";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { getDashboard, getStatus } from "@/lib/api";
 
 export const revalidate = 0;
@@ -16,6 +17,9 @@ export default async function HomePage() {
         autoRefreshLabel={status.autoRefreshLabel}
         providerLabel={status.providerLabel}
       />
+      <div className="flex justify-end">
+        <ManualRefreshButton page="overview" />
+      </div>
       <div className="grid gap-3 md:grid-cols-2">
         {focusedSections.map((section) => (
           <div key={section.id} className="card p-4">

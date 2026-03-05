@@ -1,4 +1,5 @@
 import { AdminBuilder } from "@/components/admin-builder";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 
 export default function AdminPage() {
   return (
@@ -7,6 +8,9 @@ export default function AdminPage() {
       <p className="text-sm text-slate-400">
         Configure groups, ranking windows, visible columns, and tickers without code changes.
       </p>
+      <div className="flex justify-end">
+        <ManualRefreshButton page="admin" />
+      </div>
       <AdminBuilder />
     </div>
   );

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { BarChart3, RefreshCw } from "lucide-react";
-import { adminFetch } from "@/lib/api";
+import { refreshPageData } from "@/lib/api";
 import { useState } from "react";
 
 const links = [
@@ -20,6 +20,18 @@ export function Sidebar() {
   const router = useRouter();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshLabel, setRefreshLabel] = useState<string | null>(null);
+  const refreshTarget = (() => {
+    if (pathname.startsWith("/breadth")) return { page: "breadth" as const, ticker: null };
+    if (pathname.startsWith("/sectors")) return { page: "sectors" as const, ticker: null };
+    if (pathname.startsWith("/thirteenf")) return { page: "thirteenf" as const, ticker: null };
+    if (pathname.startsWith("/admin")) return { page: "admin" as const, ticker: null };
+    if (pathname.startsWith("/tools")) return { page: "tools" as const, ticker: null };
+    if (pathname.startsWith("/ticker/")) {
+      const ticker = pathname.split("/").filter(Boolean)[1] ?? null;
+      return { page: "ticker" as const, ticker };
+    }
+    return { page: "overview" as const, ticker: null };
+  })();
   return (
     <aside className="sticky top-0 h-screen w-64 border-r border-borderSoft/70 bg-[#0a1119]/90 p-4 backdrop-blur-xl">
       <div className="mb-6 rounded-2xl border border-accent/20 bg-gradient-to-br from-accent/20 to-sky-400/5 p-3">
@@ -50,8 +62,8 @@ export function Sidebar() {
           onClick={async () => {
             setRefreshing(true);
             try {
-              await adminFetch("/api/admin/run-eod", { method: "POST" });
-              setRefreshLabel("Data refreshed");
+              const res = await refreshPageData(refreshTarget.page, refreshTarget.ticker);
+              setRefreshLabel(res.notes ?? `Updated ${res.refreshedTickers} ticker${res.refreshedTickers === 1 ? "" : "s"}`);
               router.refresh();
             } catch {
               setRefreshLabel("Refresh failed");
@@ -62,7 +74,7 @@ export function Sidebar() {
           }}
         >
           <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          {refreshing ? "Refreshing..." : "Refresh Data"}
+          {refreshing ? "Refreshing..." : "Update Current Page"}
         </button>
         {refreshLabel && <p className="mt-2 text-center text-xs text-slate-400">{refreshLabel}</p>}
       </div>

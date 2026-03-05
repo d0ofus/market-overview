@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import * as Collapsible from "@radix-ui/react-collapsible";
+import { ChevronDown } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 type BreadthMetrics = {
@@ -64,6 +66,7 @@ type SummaryPayload = {
 
 type Lookback = 30 | 60 | 90;
 const lookbacks: Lookback[] = [30, 60, 90];
+const HISTORY_DAYS = 90;
 
 const metricOptions = [
   { key: "pctAbove20MA", label: "% > 20MA" },
@@ -76,6 +79,7 @@ const metricOptions = [
 
 const positive = "text-pos";
 const negative = "text-neg";
+const neutral = "text-slate-200";
 const numFmt = new Intl.NumberFormat("en-US");
 const metricSourceMap = [
   "Advancers/Decliners/Unchanged and A/D Ratio: computed from each member's latest 1D close change in the selected universe.",
@@ -95,6 +99,13 @@ function asNullableNumber(value: unknown): number | null {
 
 function colorForPercent(value: number, threshold = 0): string {
   return value >= threshold ? positive : negative;
+}
+
+function colorVsPrevious(current: number, previous: number | null | undefined): string {
+  if (previous == null || !Number.isFinite(previous)) return neutral;
+  if (current > previous) return positive;
+  if (current < previous) return negative;
+  return neutral;
 }
 
 function pct(value: number): string {
@@ -163,18 +174,35 @@ function highCell(count: number, pctValue: number): string {
   return `${count} (${pctValue.toFixed(1)}%)`;
 }
 
-function universeDisplayName(row: { universeName: string; metrics: BreadthMetrics }): string {
-  if (row.metrics.totalUniverseMembers > 0) {
-    return `${row.universeName} (n=${row.metrics.totalUniverseMembers})`;
-  }
-  return row.universeName;
+function CollapsibleInfoSection({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen} className="card overflow-hidden">
+      <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft/70 px-4 py-3 text-left">
+        <span className="text-sm font-semibold">{title}</span>
+        <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+      </Collapsible.Trigger>
+      <Collapsible.Content className="p-4">{children}</Collapsible.Content>
+    </Collapsible.Root>
+  );
 }
 
-export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summary: SummaryPayload }) {
-  const [lookback, setLookback] = useState<Lookback>(60);
+export function BreadthPanels({
+  rows,
+  summary,
+  histories,
+  footer,
+}: {
+  rows: HistoricalRow[];
+  summary: SummaryPayload;
+  histories: Record<string, HistoricalRow[]>;
+  footer?: React.ReactNode;
+}) {
+  const [lookback, setLookback] = useState<Lookback>(90);
   const [metricKey, setMetricKey] = useState<(typeof metricOptions)[number]["key"]>("pctAbove20MA");
 
-  const scoped = useMemo(() => rows.slice(-lookback), [rows, lookback]);
+  const historyRows = useMemo(() => rows.slice(-HISTORY_DAYS), [rows]);
+  const scoped = useMemo(() => historyRows.slice(-lookback), [historyRows, lookback]);
   const latest = scoped[scoped.length - 1];
   const latestMetrics = latest ? normalizeMetrics(latest) : null;
 
@@ -189,6 +217,16 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
       }),
     [scoped, metricKey],
   );
+
+  const previousByUniverse = useMemo(() => {
+    const map = new Map<string, BreadthMetrics>();
+    for (const [universeId, universeRows] of Object.entries(histories)) {
+      if ((universeRows ?? []).length < 2) continue;
+      const prevRow = universeRows[universeRows.length - 2];
+      if (prevRow) map.set(universeId, normalizeMetrics(prevRow));
+    }
+    return map;
+  }, [histories]);
 
   const summaryRows = useMemo(
     () =>
@@ -247,7 +285,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
             <tbody>
               {summaryRows.map((row) => (
                 <tr key={`ma-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
+                  <td className="px-3 py-2">{row.universeName}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove5MA, 50)}`}>{pct(row.metrics.pctAbove5MA)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove20MA, 50)}`}>{pct(row.metrics.pctAbove20MA)}</td>
                   <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove50MA, 50)}`}>{pct(row.metrics.pctAbove50MA)}</td>
@@ -274,16 +312,19 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
               </tr>
             </thead>
             <tbody>
-              {summaryRows.map((row) => (
-                <tr key={`highs-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
-                  <td className="px-3 py-2">{highCell(row.metrics.new5DHighs, row.metrics.pctNew5DHighs)}</td>
-                  <td className="px-3 py-2">{highCell(row.metrics.new1MHighs, row.metrics.pctNew1MHighs)}</td>
-                  <td className="px-3 py-2">{highCell(row.metrics.new3MHighs, row.metrics.pctNew3MHighs)}</td>
-                  <td className="px-3 py-2">{highCell(row.metrics.new6MHighs, row.metrics.pctNew6MHighs)}</td>
-                  <td className="px-3 py-2">{highCell(row.metrics.new52WHighs, row.metrics.pctNew52WHighs)}</td>
-                </tr>
-              ))}
+              {summaryRows.map((row) => {
+                const prev = previousByUniverse.get(row.universeId);
+                return (
+                  <tr key={`highs-${row.universeId}`} className="border-t border-borderSoft/60">
+                    <td className="px-3 py-2">{row.universeName}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new5DHighs, prev?.new5DHighs)}`}>{highCell(row.metrics.new5DHighs, row.metrics.pctNew5DHighs)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new1MHighs, prev?.new1MHighs)}`}>{highCell(row.metrics.new1MHighs, row.metrics.pctNew1MHighs)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new3MHighs, prev?.new3MHighs)}`}>{highCell(row.metrics.new3MHighs, row.metrics.pctNew3MHighs)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new6MHighs, prev?.new6MHighs)}`}>{highCell(row.metrics.new6MHighs, row.metrics.pctNew6MHighs)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new52WHighs, prev?.new52WHighs)}`}>{highCell(row.metrics.new52WHighs, row.metrics.pctNew52WHighs)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -303,16 +344,19 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
               </tr>
             </thead>
             <tbody>
-              {summaryRows.map((row) => (
-                <tr key={`ad-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.advancers - row.metrics.decliners, 0)}`}>{row.metrics.advancers}</td>
-                  <td className="px-3 py-2">{row.metrics.decliners}</td>
-                  <td className="px-3 py-2">{row.metrics.unchanged}</td>
-                  <td className={`px-3 py-2 ${colorForPercent((row.metrics.advDecRatio ?? 0) - 1, 0)}`}>{ratioText(row.metrics.advDecRatio)}</td>
-                  <td className="px-3 py-2">{numFmt.format(Math.round(row.metrics.totalVolume))}</td>
-                </tr>
-              ))}
+              {summaryRows.map((row) => {
+                const prev = previousByUniverse.get(row.universeId);
+                return (
+                  <tr key={`ad-${row.universeId}`} className="border-t border-borderSoft/60">
+                    <td className="px-3 py-2">{row.universeName}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advancers, prev?.advancers)}`}>{row.metrics.advancers}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.decliners, prev?.decliners)}`}>{row.metrics.decliners}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.unchanged, prev?.unchanged)}`}>{row.metrics.unchanged}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advDecRatio ?? 0, prev?.advDecRatio ?? null)}`}>{ratioText(row.metrics.advDecRatio)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.totalVolume, prev?.totalVolume)}`}>{numFmt.format(Math.round(row.metrics.totalVolume))}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -332,15 +376,18 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
               </tr>
             </thead>
             <tbody>
-              {summaryRows.map((row) => (
-                <tr key={`other-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{universeDisplayName(row)}</td>
-                  <td className="px-3 py-2">{row.metrics.stocksGtPos4Pct}</td>
-                  <td className="px-3 py-2">{row.metrics.stocksLtNeg4Pct}</td>
-                  <td className="px-3 py-2">{row.metrics.stocksGtPos25Q}</td>
-                  <td className="px-3 py-2">{row.metrics.stocksLtNeg25Q}</td>
-                </tr>
-              ))}
+              {summaryRows.map((row) => {
+                const prev = previousByUniverse.get(row.universeId);
+                return (
+                  <tr key={`other-${row.universeId}`} className="border-t border-borderSoft/60">
+                    <td className="px-3 py-2">{row.universeName}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos4Pct, prev?.stocksGtPos4Pct)}`}>{row.metrics.stocksGtPos4Pct}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg4Pct, prev?.stocksLtNeg4Pct)}`}>{row.metrics.stocksLtNeg4Pct}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos25Q, prev?.stocksGtPos25Q)}`}>{row.metrics.stocksGtPos25Q}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg25Q, prev?.stocksLtNeg25Q)}`}>{row.metrics.stocksLtNeg25Q}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -385,12 +432,12 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
       </div>
 
       <div className="card p-4">
-        <div className="mb-3 text-sm font-semibold">Historical Metrics Table ({lookback} days)</div>
+        <div className="mb-3 text-sm font-semibold">Historical Metrics Table (90 days)</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-900/70">
               <tr>
-                {["Date", "Adv", "Dec", "Unc", "A/D Ratio", "% > 20MA", "% > 50MA", "% > 200MA", "1M Highs", "52W Highs"].map((h) => (
+                {["Date", "Adv", "Dec", "Unc", "A/D", "%>5", "%>20", "%>50", "%>100", "%>200", "5D Highs", "1M Highs", "3M Highs", "6M Highs", "52W Highs", "Vol", "Med 1D", "Med 5D", ">+4%", "<-4%", ">+25Q", "<-25Q"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
                     {h}
                   </th>
@@ -398,7 +445,7 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
               </tr>
             </thead>
             <tbody>
-              {[...scoped].reverse().map((row) => {
+              {[...historyRows].reverse().map((row) => {
                 const metrics = normalizeMetrics(row);
                 return (
                   <tr key={row.asOfDate} className="border-t border-borderSoft/60">
@@ -407,11 +454,23 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
                     <td className="px-3 py-2">{metrics.decliners}</td>
                     <td className="px-3 py-2">{metrics.unchanged}</td>
                     <td className={`px-3 py-2 ${colorForPercent((metrics.advDecRatio ?? 0) - 1, 0)}`}>{ratioText(metrics.advDecRatio)}</td>
+                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove5MA, 50)}`}>{pct(metrics.pctAbove5MA)}</td>
                     <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove20MA, 50)}`}>{pct(metrics.pctAbove20MA)}</td>
                     <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove50MA, 50)}`}>{pct(metrics.pctAbove50MA)}</td>
+                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove100MA, 50)}`}>{pct(metrics.pctAbove100MA)}</td>
                     <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove200MA, 50)}`}>{pct(metrics.pctAbove200MA)}</td>
+                    <td className="px-3 py-2">{metrics.new5DHighs}</td>
                     <td className="px-3 py-2">{metrics.new1MHighs}</td>
+                    <td className="px-3 py-2">{metrics.new3MHighs}</td>
+                    <td className="px-3 py-2">{metrics.new6MHighs}</td>
                     <td className="px-3 py-2">{metrics.new52WHighs}</td>
+                    <td className="px-3 py-2">{numFmt.format(Math.round(metrics.totalVolume))}</td>
+                    <td className={`px-3 py-2 ${colorForPercent(metrics.medianReturn1D, 0)}`}>{metrics.medianReturn1D.toFixed(2)}%</td>
+                    <td className={`px-3 py-2 ${colorForPercent(metrics.medianReturn5D, 0)}`}>{metrics.medianReturn5D.toFixed(2)}%</td>
+                    <td className="px-3 py-2">{metrics.stocksGtPos4Pct}</td>
+                    <td className="px-3 py-2">{metrics.stocksLtNeg4Pct}</td>
+                    <td className="px-3 py-2">{metrics.stocksGtPos25Q}</td>
+                    <td className="px-3 py-2">{metrics.stocksLtNeg25Q}</td>
                   </tr>
                 );
               })}
@@ -420,22 +479,11 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
         </div>
       </div>
 
-      {summary.unavailable.length > 0 && (
-        <div className="card p-4">
-          <div className="mb-2 text-sm font-semibold">Unavailable Free Data</div>
-          <div className="space-y-2 text-sm text-slate-300">
-            {summary.unavailable.map((entry) => (
-              <p key={entry.id}>
-                <span className="font-medium text-slate-200">{entry.name}:</span> {entry.reason}
-              </p>
-            ))}
-          </div>
-        </div>
-      )}
+      {!latestMetrics && <p className="text-sm text-slate-400">No breadth history available yet. Run EOD refresh to populate.</p>}
+      {footer}
 
       {summaryRows.some((row) => row.dataSource) && (
-        <div className="card p-4">
-          <div className="mb-2 text-sm font-semibold">Data Sources</div>
+        <CollapsibleInfoSection title="Data Sources">
           <div className="space-y-1 text-sm text-slate-300">
             {summaryRows.map((row) => (
               <p key={`src-${row.universeId}`}>
@@ -443,19 +491,16 @@ export function BreadthPanels({ rows, summary }: { rows: HistoricalRow[]; summar
               </p>
             ))}
           </div>
-        </div>
+        </CollapsibleInfoSection>
       )}
 
-      <div className="card p-4">
-        <div className="mb-2 text-sm font-semibold">Metric Source Map</div>
+      <CollapsibleInfoSection title="Metric Source Map">
         <div className="space-y-1 text-sm text-slate-300">
           {metricSourceMap.map((line) => (
             <p key={line}>{line}</p>
           ))}
         </div>
-      </div>
-
-      {!latestMetrics && <p className="text-sm text-slate-400">No breadth history available yet. Run EOD refresh to populate.</p>}
+      </CollapsibleInfoSection>
     </div>
   );
 }

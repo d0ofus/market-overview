@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS dashboard_configs (
   name TEXT NOT NULL,
   is_default INTEGER NOT NULL DEFAULT 0,
   timezone TEXT NOT NULL,
+  eod_run_local_time TEXT NOT NULL DEFAULT '08:15',
   eod_run_time_label TEXT NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP

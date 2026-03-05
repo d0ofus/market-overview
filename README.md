@@ -113,7 +113,7 @@ npm run seed -w worker
 ## EOD Job
 
 Cron configured in `worker/wrangler.toml`:
-- `15 22 * * 1-5` (22:15 UTC schedule example)
+- `*/15 * * * 1-5` (worker wakes every 15 minutes on weekdays; runtime checks execute at configured local refresh time)
 
 Manual run:
 ```bash
@@ -138,6 +138,7 @@ wrangler d1 execute market_command --remote --file=worker/migrations/0001_init.s
 wrangler d1 execute market_command --remote --file=worker/migrations/0002_seed.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0003_trackers.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0005_market_leaders_timezone.sql
+wrangler d1 execute market_command --remote --file=worker/migrations/0007_config_refresh_local_time.sql
 ```
 
 4. Set worker secrets:

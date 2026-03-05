@@ -33,6 +33,16 @@ export function AdminBuilder() {
     industrySelect: "",
     industryNew: "",
   });
+  const [refreshConfig, setRefreshConfig] = useState({
+    id: "default",
+    name: "Default Swing Dashboard",
+    timezone: "Australia/Melbourne",
+    eodRunLocalTime: "08:15",
+    eodRunTimeLabel: "08:15 Australia/Melbourne",
+  });
+  const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
+
+  const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
 
   const load = async () => {
     const [config, sectorRes, industryRes, syncRes] = await Promise.all([
@@ -42,6 +52,13 @@ export function AdminBuilder() {
       adminFetch<{ rows: any[] }>("/api/admin/etf-sync-status?limit=200"),
     ]);
     setData(config);
+    setRefreshConfig({
+      id: config.id,
+      name: config.name,
+      timezone: config.timezone,
+      eodRunLocalTime: config.eodRunLocalTime || "08:15",
+      eodRunTimeLabel: config.eodRunTimeLabel || buildRefreshLabel(config.eodRunLocalTime || "08:15", config.timezone),
+    });
     setSectorEtfs(sectorRes.rows ?? []);
     setIndustryEtfs(industryRes.rows ?? []);
     setEtfSyncStatus(syncRes.rows ?? []);
@@ -99,6 +116,30 @@ export function AdminBuilder() {
     await adminFetch("/api/admin/section/" + sectionId + "/group", { method: "POST", body: JSON.stringify({ title }) });
     setNewGroupTitle((s) => ({ ...s, [sectionId]: "" }));
     await load();
+  };
+
+  const saveRefreshConfig = async () => {
+    try {
+      const nextLabel = buildRefreshLabel(refreshConfig.eodRunLocalTime, refreshConfig.timezone);
+      setRefreshConfigMsg(null);
+      await adminFetch("/api/admin/config", {
+        method: "PATCH",
+        body: JSON.stringify({
+          id: refreshConfig.id,
+          name: refreshConfig.name.trim() || "Default Swing Dashboard",
+          timezone: refreshConfig.timezone,
+          eodRunLocalTime: refreshConfig.eodRunLocalTime,
+          eodRunTimeLabel: nextLabel,
+        }),
+      });
+      setRefreshConfig((s) => ({ ...s, eodRunTimeLabel: nextLabel }));
+      setRefreshConfigMsg("Saved refresh schedule.");
+      await load();
+    } catch (err) {
+      setRefreshConfigMsg(err instanceof Error ? err.message : "Failed to save refresh schedule.");
+    } finally {
+      setTimeout(() => setRefreshConfigMsg(null), 3000);
+    }
   };
 
   const move = async (type: "group" | "item", ids: string[], index: number, dir: -1 | 1) => {
@@ -185,6 +226,40 @@ export function AdminBuilder() {
 
   return (
     <div className="space-y-4">
+      <div className="card p-3">
+        <h3 className="mb-2 text-base font-semibold">Daily Price Refresh Schedule</h3>
+        <p className="mb-3 text-xs text-slate-400">
+          Overview and Breadth refresh from the worker schedule at this configured local time each trading day.
+        </p>
+        <div className="grid gap-2 md:grid-cols-5">
+          <input
+            className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
+            value={refreshConfig.name}
+            onChange={(e) => setRefreshConfig((s) => ({ ...s, name: e.target.value }))}
+            placeholder="Dashboard config name"
+          />
+          <input
+            className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+            value={refreshConfig.timezone}
+            onChange={(e) => setRefreshConfig((s) => ({ ...s, timezone: e.target.value }))}
+            placeholder="IANA timezone (e.g. Australia/Sydney)"
+          />
+          <input
+            type="time"
+            className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+            value={refreshConfig.eodRunLocalTime}
+            onChange={(e) => setRefreshConfig((s) => ({ ...s, eodRunLocalTime: e.target.value }))}
+          />
+          <button className="rounded bg-accent/20 px-3 py-1 text-sm" onClick={saveRefreshConfig}>
+            Save Schedule
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-slate-300">
+          Current auto-refresh label: <span className="font-semibold">{refreshConfig.eodRunTimeLabel}</span>
+        </p>
+        {refreshConfigMsg && <p className="mt-2 text-xs text-slate-300">{refreshConfigMsg}</p>}
+      </div>
+
       <div className="card p-3">
         <h3 className="mb-2 text-base font-semibold">ETF Watchlists</h3>
         <div className="grid gap-3 md:grid-cols-2">

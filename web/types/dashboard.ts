@@ -8,6 +8,7 @@ export type SnapshotResponse = {
     id: string;
     name: string;
     timezone: string;
+    eodRunLocalTime: string;
     eodRunTimeLabel: string;
     sections: Array<{
       id: string;

@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { ChevronDown, Loader2, X } from "lucide-react";
-import { adminFetch, getEtfConstituents, getIndustryEtfs, getSectorCalendar, getSectorEntries, getSectorEtfs, getSectorSymbolOptions } from "@/lib/api";
+import { ChevronDown, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
+import { adminFetch, deleteSectorEntry, getEtfConstituents, getIndustryEtfs, getSectorCalendar, getSectorEntries, getSectorEtfs, getSectorSymbolOptions, updateSectorEntry } from "@/lib/api";
 import { TradingViewWidget } from "./tradingview-widget";
 
 const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -119,7 +119,7 @@ function CollapsibleSection({
 }
 
 export function SectorTracker() {
-  const [view, setView] = useState<"list" | "calendar">("list");
+  const [view, setView] = useState<"list" | "calendar">("calendar");
   const [month, setMonth] = useState(monthKey());
   const [entries, setEntries] = useState<SectorEntry[]>([]);
   const [calendarRows, setCalendarRows] = useState<SectorEntry[]>([]);
@@ -143,6 +143,13 @@ export function SectorTracker() {
   const [addFormOpen, setAddFormOpen] = useState(true);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
   const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
+  const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
+  const [editSectorName, setEditSectorName] = useState("");
+  const [editEventDate, setEditEventDate] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+  const [editTickerInput, setEditTickerInput] = useState("");
+  const [editTickers, setEditTickers] = useState<string[]>([]);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -195,6 +202,59 @@ export function SectorTracker() {
       .filter((s) => /^[A-Z.\-^]{1,20}$/.test(s));
     if (parsed.length === 0) return;
     setSelectedTickers((prev) => Array.from(new Set([...prev, ...parsed])));
+  };
+
+  const addEditTicker = (inputRaw: string) => {
+    const parsed = inputRaw
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+      .filter((s) => /^[A-Z.\-^]{1,20}$/.test(s));
+    if (parsed.length === 0) return;
+    setEditTickers((prev) => Array.from(new Set([...prev, ...parsed])));
+  };
+
+  const openEditEntry = (entry: SectorEntry) => {
+    setEditingEntry(entry);
+    setEditSectorName(entry.sectorName);
+    setEditEventDate(entry.eventDate);
+    setEditNotes(entry.notes ?? "");
+    setEditTickers((entry.symbols ?? []).map((s) => s.ticker.toUpperCase()));
+    setEditTickerInput("");
+    setEditError(null);
+  };
+
+  const saveEntryEdit = async () => {
+    if (!editingEntry) return;
+    if (!editSectorName.trim() || !editEventDate) {
+      setEditError("Sector/Narrative and date are required.");
+      return;
+    }
+    try {
+      await updateSectorEntry(editingEntry.id, {
+        sectorName: editSectorName.trim(),
+        eventDate: editEventDate,
+        trendScore: editingEntry.trendScore ?? 0,
+        notes: editNotes.trim() || null,
+        symbols: editTickers,
+      });
+      setEditingEntry(null);
+      setEditError(null);
+      await load();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Failed to update sector/narrative entry.");
+    }
+  };
+
+  const removeEntry = async (entryId: string) => {
+    if (!window.confirm("Delete this sector/narrative entry?")) return;
+    try {
+      await deleteSectorEntry(entryId);
+      if (editingEntry?.id === entryId) setEditingEntry(null);
+      await load();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Failed to delete entry.");
+    }
   };
 
   const daysInMonth = useMemo(() => {
@@ -281,6 +341,11 @@ export function SectorTracker() {
           </button>
         </div>
       </div>
+      <datalist id="sector-symbol-options">
+        {symbolOptions.map((s) => (
+          <option key={`sector-symbol-option-global-${s.ticker}`} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
+        ))}
+      </datalist>
 
       <div id="sector-etfs">
       <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
@@ -300,6 +365,13 @@ export function SectorTracker() {
                 </div>
               </div>
               <TradingViewWidget ticker={etf.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+              <button
+                className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                onClick={() => setActiveChartTicker(etf.ticker)}
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                Expand chart
+              </button>
             </div>
           ))}
         </div>
@@ -336,6 +408,13 @@ export function SectorTracker() {
                         </div>
                       </div>
                       <TradingViewWidget ticker={etf.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <button
+                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                        onClick={() => setActiveChartTicker(etf.ticker)}
+                      >
+                        <Maximize2 className="h-3.5 w-3.5" />
+                        Expand chart
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -384,11 +463,6 @@ export function SectorTracker() {
           )}
           {addFormOpen && (
             <>
-              <datalist id="sector-symbol-options">
-                {symbolOptions.map((s) => (
-                  <option key={s.ticker} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
-                ))}
-              </datalist>
               <div className="mt-2 flex flex-wrap gap-2">
                 {selectedTickers.map((ticker) => (
                   <span key={ticker} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
@@ -452,7 +526,7 @@ export function SectorTracker() {
             <table className="min-w-full text-sm">
               <thead className="bg-slate-900/60">
                 <tr>
-                  {["Date", "Sector/Narrative", "Tickers", "Notes"].map((h) => (
+                  {["Date", "Sector/Narrative", "Tickers", "Notes", "Actions"].map((h) => (
                     <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">{h}</th>
                   ))}
                 </tr>
@@ -478,6 +552,24 @@ export function SectorTracker() {
                       </div>
                     </td>
                     <td className="px-3 py-2 text-slate-300">{e.notes ?? "-"}</td>
+                    <td className="px-3 py-2">
+                      <div className="flex gap-2">
+                        <button
+                          className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/60"
+                          onClick={() => openEditEntry(e)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
+                        <button
+                          className="inline-flex items-center gap-1 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
+                          onClick={() => void removeEntry(e.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -505,7 +597,25 @@ export function SectorTracker() {
                     <div className="mt-1 space-y-1.5">
                       {items.slice(0, 3).map((it) => (
                         <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-xs text-slate-200">
-                          <div className="font-semibold">{it.sectorName}</div>
+                          <div className="flex items-start justify-between gap-1">
+                            <div className="font-semibold">{it.sectorName}</div>
+                            <div className="flex gap-1">
+                              <button
+                                className="rounded border border-borderSoft/80 px-1 py-0.5 text-[10px] text-slate-200 hover:bg-slate-800/70"
+                                onClick={() => openEditEntry(it)}
+                                title="Edit entry"
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                              <button
+                                className="rounded border border-red-500/40 px-1 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
+                                onClick={() => void removeEntry(it.id)}
+                                title="Delete entry"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
+                          </div>
                           <div className="mt-1 flex flex-wrap gap-1">
                             {(it.symbols ?? []).map((s) => (
                               <button
@@ -530,6 +640,78 @@ export function SectorTracker() {
         )}
       </CollapsibleSection>
       </div>
+
+      {editingEntry && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setEditingEntry(null)}>
+          <div className="w-full max-w-3xl rounded border border-borderSoft bg-panel p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h4 className="text-sm font-semibold text-slate-100">Edit Sector/Narrative Entry</h4>
+              <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setEditingEntry(null)}>
+                Close
+              </button>
+            </div>
+            <div className="grid gap-2 md:grid-cols-6">
+              <input
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
+                value={editSectorName}
+                onChange={(e) => setEditSectorName(e.target.value)}
+                placeholder="Sector/Narrative"
+              />
+              <input
+                type="date"
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+                value={editEventDate}
+                onChange={(e) => setEditEventDate(e.target.value)}
+              />
+              <input
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
+                placeholder="Add tickers (comma-separated)"
+                value={editTickerInput}
+                onChange={(e) => setEditTickerInput(e.target.value)}
+                list="sector-symbol-options"
+              />
+              <button
+                className="rounded border border-borderSoft px-2 py-1 text-sm text-slate-200"
+                onClick={() => {
+                  addEditTicker(editTickerInput);
+                  setEditTickerInput("");
+                }}
+              >
+                Add Tickers
+              </button>
+              <textarea
+                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-6"
+                placeholder="Notes"
+                value={editNotes}
+                onChange={(e) => setEditNotes(e.target.value)}
+              />
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {editTickers.map((ticker) => (
+                <span key={`edit-${ticker}`} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
+                  {ticker}
+                  <button
+                    className="rounded px-1 text-slate-400 hover:text-slate-100"
+                    onClick={() => setEditTickers((prev) => prev.filter((t) => t !== ticker))}
+                    aria-label={`Remove ${ticker}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+            {editError && <p className="mt-2 text-xs text-red-300">{editError}</p>}
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={() => setEditingEntry(null)}>
+                Cancel
+              </button>
+              <button className="rounded bg-accent/20 px-3 py-1 text-sm text-accent" onClick={() => void saveEntryEdit()}>
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {activeEtf && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-slate-950/70 p-4" onClick={() => setActiveEtf(null)}>
@@ -581,6 +763,13 @@ export function SectorTracker() {
                     </div>
                     <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
                     <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                    <button
+                      className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                      onClick={() => setActiveChartTicker(row.ticker)}
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      Expand chart
+                    </button>
                   </div>
                 ))}
                 {constituents.length === 0 && (

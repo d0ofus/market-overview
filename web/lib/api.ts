@@ -31,6 +31,7 @@ export function getDashboard(date?: string): Promise<SnapshotResponse> {
 export function getStatus(): Promise<{
   timezone: string;
   autoRefreshLabel: string;
+  autoRefreshLocalTime?: string;
   lastUpdated: string | null;
   asOfDate: string | null;
   providerLabel: string;
@@ -101,5 +102,28 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
   return getJson<T>(path, {
     ...init,
     headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
+  });
+}
+
+export function refreshPageData(page: string, ticker?: string | null) {
+  return adminFetch<{ ok: boolean; page: string; refreshedTickers: number; notes?: string }>("/api/admin/refresh-page", {
+    method: "POST",
+    body: JSON.stringify({ page, ticker: ticker ?? null }),
+  });
+}
+
+export function updateSectorEntry(
+  id: string,
+  payload: { sectorName: string; eventDate: string; trendScore?: number; notes?: string | null; narrativeId?: string | null; symbols?: string[] },
+) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/sectors/entries/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteSectorEntry(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/sectors/entries/${id}`, {
+    method: "DELETE",
   });
 }

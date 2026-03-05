@@ -1,5 +1,6 @@
 UPDATE dashboard_configs
 SET timezone = 'Australia/Melbourne',
+    eod_run_local_time = '08:15',
     eod_run_time_label = '08:15 AEST (prev US close)',
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 'default';

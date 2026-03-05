@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, refreshSp500CoreBreadth } from "./eod";
+import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
 import type { Env } from "./types";
 import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
@@ -43,6 +43,165 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
   if (Number.isNaN(then)) return true;
   return Date.now() - then > maxAgeDays * 86400_000;
 };
+
+function uniqueTickers(values: string[]): string[] {
+  return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
+}
+
+function parseLocalTime(value: string | null | undefined): { hour: number; minute: number } | null {
+  if (!value) return null;
+  const match = value.trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+  return {
+    hour: Number(match[1]),
+    minute: Number(match[2]),
+  };
+}
+
+function formatAutoRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
+  const safeTime = parseLocalTime(localTime ?? "") ? localTime!.trim() : "22:15";
+  const safeTz = timezone?.trim() || "UTC";
+  return `${safeTime} ${safeTz}`;
+}
+
+function zonedParts(now: Date, timezone: string): { weekday: string; day: number; minutesOfDay: number; localDate: string } {
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = dtf.formatToParts(now);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  const year = Number(get("year") || "1970");
+  const month = Number(get("month") || "1");
+  const day = Number(get("day") || "1");
+  const hour = Number(get("hour") || "0");
+  const minute = Number(get("minute") || "0");
+  const weekday = get("weekday");
+  return {
+    weekday,
+    day,
+    minutesOfDay: hour * 60 + minute,
+    localDate: `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+  };
+}
+
+function currentAsOfDate(now: Date): string {
+  const d = new Date(now);
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+async function loadDefaultConfigRow(env: Env): Promise<{
+  id: string;
+  timezone: string;
+  eodRunLocalTime: string;
+  eodRunTimeLabel: string;
+} | null> {
+  return await env.DB.prepare(
+    "SELECT id, timezone, eod_run_local_time as eodRunLocalTime, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
+  ).first<{
+    id: string;
+    timezone: string;
+    eodRunLocalTime: string;
+    eodRunTimeLabel: string;
+  }>();
+}
+
+async function loadOverviewTickers(env: Env): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT DISTINCT di.ticker as ticker FROM dashboard_items di JOIN dashboard_groups dg ON dg.id = di.group_id JOIN dashboard_sections ds ON ds.id = dg.section_id JOIN dashboard_configs dc ON dc.id = ds.config_id WHERE dc.is_default = 1 AND di.enabled = 1 AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%') ORDER BY di.ticker ASC",
+  ).all<{ ticker: string }>();
+  return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
+}
+
+async function loadSectorPageTickers(env: Env): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT DISTINCT ticker FROM (SELECT ticker as ticker FROM etf_watchlists UNION ALL SELECT ticker as ticker FROM sector_tracker_entry_symbols UNION ALL SELECT constituent_ticker as ticker FROM etf_constituents WHERE etf_ticker IN (SELECT ticker FROM etf_watchlists)) ORDER BY ticker ASC",
+  ).all<{ ticker: string }>();
+  return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
+}
+
+async function load13fTickers(env: Env): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT DISTINCT ticker FROM filings_13f_holdings WHERE report_id IN (SELECT id FROM filings_13f_reports WHERE report_quarter = (SELECT MAX(report_quarter) FROM filings_13f_reports)) ORDER BY ticker ASC",
+  ).all<{ ticker: string }>();
+  return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
+}
+
+async function loadAdminTickers(env: Env): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT DISTINCT ticker FROM (SELECT ticker as ticker FROM dashboard_items WHERE enabled = 1 UNION ALL SELECT ticker as ticker FROM etf_watchlists UNION ALL SELECT constituent_ticker as ticker FROM etf_constituents UNION ALL SELECT ticker as ticker FROM sector_tracker_entry_symbols) ORDER BY ticker ASC",
+  ).all<{ ticker: string }>();
+  return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
+}
+
+type RefreshPage =
+  | "overview"
+  | "breadth"
+  | "sectors"
+  | "thirteenf"
+  | "admin"
+  | "ticker"
+  | "tools";
+
+async function refreshPageScopedData(
+  env: Env,
+  page: RefreshPage,
+  tickerInput?: string | null,
+): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
+  if (page === "overview") {
+    const tickers = await loadOverviewTickers(env);
+    await refreshRecentBarsForTickers(env, tickers);
+    await recomputeDashboardFromStoredBars(env);
+    return { page, refreshedTickers: tickers.length };
+  }
+  if (page === "breadth") {
+    const breadth = await refreshSp500CoreBreadth(env);
+    const recompute = await recomputeBreadthFromStoredBars(env);
+    const sp500CountRow = await env.DB.prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
+      .bind("sp500-core")
+      .first<{ count: number }>();
+    return {
+      page,
+      refreshedTickers: sp500CountRow?.count ?? 0,
+      notes: `SP500 bars pulled: ${breadth.barCount}. Breadth recomputed for ${recompute.universeCount} universes.`,
+    };
+  }
+  if (page === "sectors") {
+    const tickers = await loadSectorPageTickers(env);
+    await refreshRecentBarsForTickers(env, tickers);
+    return { page, refreshedTickers: tickers.length };
+  }
+  if (page === "thirteenf") {
+    const tickers = await load13fTickers(env);
+    await refreshRecentBarsForTickers(env, tickers);
+    return { page, refreshedTickers: tickers.length };
+  }
+  if (page === "admin") {
+    const tickers = await loadAdminTickers(env);
+    await refreshRecentBarsForTickers(env, tickers);
+    await recomputeDashboardFromStoredBars(env);
+    await recomputeBreadthFromStoredBars(env);
+    return { page, refreshedTickers: tickers.length };
+  }
+  if (page === "ticker") {
+    const ticker = tickerInput?.trim().toUpperCase() ?? "";
+    if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
+      throw new Error("Valid ticker is required for ticker page refresh.");
+    }
+    await refreshRecentBarsForTickers(env, [ticker]);
+    return { page, refreshedTickers: 1 };
+  }
+  return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
+}
 
 type BreadthSentiment = {
   fearGreed?: number | null;
@@ -153,8 +312,8 @@ async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, {
   return map;
 }
 
-async function refreshRecentBarsForTickers(env: Env, tickers: string[]): Promise<void> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600): Promise<void> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean))).slice(0, Math.max(1, maxTickers));
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
   try {
@@ -182,8 +341,8 @@ app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/status", async (c) => {
   const config = await c.env.DB.prepare(
-    "SELECT id, name, timezone, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
-  ).first<{ id: string; name: string; timezone: string; eodRunTimeLabel: string }>();
+    "SELECT id, name, timezone, eod_run_local_time as eodRunLocalTime, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
+  ).first<{ id: string; name: string; timezone: string; eodRunLocalTime: string; eodRunTimeLabel: string }>();
   const latest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
@@ -197,7 +356,8 @@ app.get("/api/status", async (c) => {
   return c.json({
     configId: config?.id ?? "default",
     timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "Australia/Melbourne",
-    autoRefreshLabel: config?.eodRunTimeLabel ?? "22:15 ET",
+    autoRefreshLabel: config?.eodRunTimeLabel ?? formatAutoRefreshLabel(config?.eodRunLocalTime, config?.timezone),
+    autoRefreshLocalTime: config?.eodRunLocalTime ?? "22:15",
     lastUpdated: normalizedLastUpdated,
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider ?? "Alpaca (IEX Delayed Daily Bars)",
@@ -624,6 +784,7 @@ app.get("/api/etfs/industry", async (c) => {
 
 app.get("/api/etf/:ticker/constituents", async (c) => {
   const ticker = c.req.param("ticker").toUpperCase();
+  const forceSync = c.req.query("force") === "1";
   const etf = await c.env.DB.prepare(
     "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
   )
@@ -636,7 +797,9 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   )
     .bind(ticker)
     .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
-  const shouldSync = !status || isStaleDate(status.lastSyncedAt, 30);
+  const hasKnownError = status?.status === "error";
+  const hasNoRecords = !status || (status.recordsCount ?? 0) === 0;
+  const shouldSync = forceSync || !status || isStaleDate(status.lastSyncedAt, 30) || hasKnownError || hasNoRecords;
   let warning: string | null = null;
   if (shouldSync) {
     try {
@@ -719,6 +882,67 @@ app.post("/api/sectors/entries", async (c) => {
     const stmts = [...symbolUpserts, ...linkInserts];
     await c.env.DB.batch(stmts);
   }
+  return c.json({ ok: true, id });
+});
+
+app.patch("/api/sectors/entries/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare("SELECT id FROM sector_tracker_entries WHERE id = ?").bind(id).first<{ id: string }>();
+  if (!existing) return c.json({ error: "Sector tracker entry not found." }, 404);
+
+  const body = (await c.req.json()) as {
+    sectorName?: string;
+    eventDate?: string;
+    trendScore?: number;
+    notes?: string | null;
+    narrativeId?: string | null;
+    symbols?: string[];
+  };
+  const sectorName = body.sectorName?.trim();
+  const eventDate = body.eventDate?.trim();
+  if (!sectorName || !eventDate) return c.json({ error: "sectorName and eventDate are required" }, 400);
+
+  await c.env.DB.prepare(
+    "UPDATE sector_tracker_entries SET sector_name = ?, event_date = ?, trend_score = ?, notes = ?, narrative_id = ? WHERE id = ?",
+  )
+    .bind(sectorName, eventDate, body.trendScore ?? 0, body.notes ?? null, body.narrativeId ?? null, id)
+    .run();
+
+  const symbols = uniqueTickers(body.symbols ?? []).filter((s) => /^[A-Z.\-^]{1,20}$/.test(s));
+  const symbolUpserts = await Promise.all(
+    symbols.map(async (ticker) => {
+      const meta = await resolveTickerMeta(ticker, c.env).catch(() => null);
+      return c.env.DB.prepare(
+        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(
+        ticker,
+        meta?.name ?? ticker,
+        meta?.exchange ?? null,
+        meta?.assetClass ?? null,
+        null,
+        null,
+      );
+    }),
+  );
+  const deleteLinks = c.env.DB.prepare("DELETE FROM sector_tracker_entry_symbols WHERE entry_id = ?").bind(id);
+  const insertLinks = symbols.map((ticker) =>
+    c.env.DB.prepare("INSERT OR IGNORE INTO sector_tracker_entry_symbols (entry_id, ticker) VALUES (?, ?)")
+      .bind(id, ticker),
+  );
+  await c.env.DB.batch([deleteLinks, ...symbolUpserts, ...insertLinks]);
+  return c.json({ ok: true, id });
+});
+
+app.delete("/api/sectors/entries/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare("SELECT id FROM sector_tracker_entries WHERE id = ?").bind(id).first<{ id: string }>();
+  if (!existing) return c.json({ error: "Sector tracker entry not found." }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM sector_tracker_entry_symbols WHERE entry_id = ?").bind(id),
+    c.env.DB.prepare("DELETE FROM sector_tracker_entries WHERE id = ?").bind(id),
+  ]);
   return c.json({ ok: true, id });
 });
 
@@ -900,13 +1124,31 @@ app.post("/api/admin/run-breadth", async (c) => {
   }
 });
 
+app.post("/api/admin/refresh-page", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
+  const rawPage = String(body.page ?? "").trim().toLowerCase();
+  const page = (rawPage || "overview") as RefreshPage;
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools"].includes(page)) {
+    return c.json({ error: "Unsupported page key." }, 400);
+  }
+  try {
+    const result = await refreshPageScopedData(c.env, page, body.ticker ?? null);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "page refresh failed";
+    console.error("admin refresh-page failed", { page, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.patch("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = configPatchSchema.parse(await c.req.json());
   await c.env.DB.prepare(
-    "UPDATE dashboard_configs SET name = ?, timezone = ?, eod_run_time_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "UPDATE dashboard_configs SET name = ?, timezone = ?, eod_run_local_time = ?, eod_run_time_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   )
-    .bind(payload.name, payload.timezone, payload.eodRunTimeLabel, payload.id)
+    .bind(payload.name, payload.timezone, payload.eodRunLocalTime, payload.eodRunTimeLabel, payload.id)
     .run();
   await upsertAudit(c.env, payload.id, "CONFIG_PATCH", payload);
   await refreshSnapshotSafe(c.env);
@@ -1092,20 +1334,44 @@ app.get("/api/admin/audit", async (c) => {
   return c.json({ rows: rows.results ?? [] });
 });
 
+async function syncMonthlyEtfSlice(env: Env, localDay: number): Promise<void> {
+  if (localDay < 1 || localDay > 8) return;
+  const totalBuckets = 8;
+  const targetBucket = localDay - 1;
+  const watchRows = await env.DB.prepare("SELECT DISTINCT ticker FROM etf_watchlists ORDER BY ticker ASC").all<{ ticker: string }>();
+  const selected = (watchRows.results ?? []).filter((_row, idx) => idx % totalBuckets === targetBucket);
+  for (const row of selected) {
+    try {
+      await syncEtfConstituents(env, row.ticker);
+    } catch (error) {
+      console.error("monthly etf constituent sync failed", row.ticker, error);
+    }
+  }
+}
+
 export default {
   fetch: app.fetch,
-  scheduled: async (_event: ScheduledEvent, env: Env): Promise<void> => {
-    await computeAndStoreSnapshot(env, undefined, "default");
-    const utcDay = new Date().getUTCDate();
-    if (utcDay <= 3) {
-      const watchRows = await env.DB.prepare("SELECT DISTINCT ticker FROM etf_watchlists ORDER BY ticker ASC").all<{ ticker: string }>();
-      for (const row of watchRows.results ?? []) {
-        try {
-          await syncEtfConstituents(env, row.ticker);
-        } catch (error) {
-          console.error("monthly etf constituent sync failed", row.ticker, error);
-        }
-      }
-    }
+  scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
+    const defaultConfig = await loadDefaultConfigRow(env);
+    const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
+    const refreshTime = defaultConfig?.eodRunLocalTime ?? "22:15";
+    const target = parseLocalTime(refreshTime) ?? { hour: 22, minute: 15 };
+    const now = new Date(event.scheduledTime || Date.now());
+    const local = zonedParts(now, timezone);
+    const targetMinutes = target.hour * 60 + target.minute;
+    const withinWindow = local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;
+    const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(local.weekday);
+    if (!isWeekday || !withinWindow) return;
+
+    const expectedAsOf = currentAsOfDate(now);
+    const latest = await env.DB.prepare(
+      "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+    )
+      .bind(defaultConfig?.id ?? "default")
+      .first<{ asOfDate: string | null }>();
+    if (latest?.asOfDate === expectedAsOf) return;
+
+    await computeAndStoreSnapshot(env, undefined, defaultConfig?.id ?? "default");
+    await syncMonthlyEtfSlice(env, local.day);
   },
 };

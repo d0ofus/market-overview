@@ -1,4 +1,5 @@
 import { get13fManager, get13fOverview } from "@/lib/api";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 
 const money = (n?: number) => {
   if (!n) return "-";
@@ -21,6 +22,9 @@ export default async function ThirteenFPage() {
       <p className="text-sm text-slate-400">
         Top institutional holdings snapshot from recent 13F reports. Use as narrative context, not a timing signal.
       </p>
+      <div className="flex justify-end">
+        <ManualRefreshButton page="thirteenf" />
+      </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {managers.slice(0, 4).map((m: any) => (
           <div key={m.id} className="card p-4">

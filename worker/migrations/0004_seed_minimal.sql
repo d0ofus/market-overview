@@ -1,5 +1,5 @@
-INSERT OR IGNORE INTO dashboard_configs (id, name, is_default, timezone, eod_run_time_label)
-VALUES ('default', 'Default Swing Dashboard', 1, 'America/New_York', '22:15 ET');
+INSERT OR IGNORE INTO dashboard_configs (id, name, is_default, timezone, eod_run_local_time, eod_run_time_label)
+VALUES ('default', 'Default Swing Dashboard', 1, 'America/New_York', '22:15', '22:15 ET');
 
 INSERT OR IGNORE INTO dashboard_sections (id, config_id, sort_order, title, description, is_collapsible, default_collapsed) VALUES
 ('sec-macro', 'default', 1, '01 Macro Overview', 'Macro risk regime and cross-asset leadership', 1, 0),

@@ -8,6 +8,7 @@ export const configPatchSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   timezone: z.string().min(1),
+  eodRunLocalTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
   eodRunTimeLabel: z.string().min(1),
 });
 

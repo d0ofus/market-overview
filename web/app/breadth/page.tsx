@@ -1,5 +1,6 @@
 import { BreadthPanels } from "@/components/breadth-panels";
 import { EqualWeightComps } from "@/components/equal-weight-comps";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { getBreadth, getBreadthSummary, getStatus } from "@/lib/api";
 import { StatusBar } from "@/components/status-bar";
 
@@ -94,12 +95,13 @@ function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asO
 
 export default async function BreadthPage() {
   const statusPromise = getStatus();
-  const sp500PrimaryPromise = loadUniverse("sp500-core");
   const summaryPromise = getBreadthSummary().catch(() => null);
+  const universeRowsPromise = Promise.all(universeOrder.map(async (universeId) => [universeId, await loadUniverse(universeId)] as const));
 
-  const [status, sp500PrimaryRows, summaryApi] = await Promise.all([statusPromise, sp500PrimaryPromise, summaryPromise]);
+  const [status, summaryApi, universeRowsPairs] = await Promise.all([statusPromise, summaryPromise, universeRowsPromise]);
 
-  const historyRows = sp500PrimaryRows;
+  const historyByUniverse = Object.fromEntries(universeRowsPairs) as Record<string, BreadthRow[]>;
+  const historyRows = historyByUniverse["sp500-core"] ?? [];
 
   const summary = summaryApi
     ? {
@@ -110,16 +112,7 @@ export default async function BreadthPage() {
           dataSource: row.dataSource ?? coreUniverseSource[row.universeId] ?? null,
         })),
       }
-    : buildSummaryFromUniverseRows(
-        {
-          "sp500-core": sp500PrimaryRows,
-          "nasdaq-core": await loadUniverse("nasdaq-core"),
-          "nyse-core": await loadUniverse("nyse-core"),
-          "russell2000-core": await loadUniverse("russell2000-core"),
-          "overall-market-proxy": await loadUniverse("overall-market-proxy"),
-        },
-        status.asOfDate,
-      );
+    : buildSummaryFromUniverseRows(historyByUniverse, status.asOfDate);
 
   return (
     <div className="space-y-4">
@@ -130,9 +123,11 @@ export default async function BreadthPage() {
         autoRefreshLabel={status.autoRefreshLabel}
         providerLabel={status.providerLabel}
       />
+      <div className="flex justify-end">
+        <ManualRefreshButton page="breadth" />
+      </div>
       <h2 className="text-xl font-semibold">03 Market Breadth & Sentiment</h2>
-      <BreadthPanels rows={historyRows} summary={summary} />
-      <EqualWeightComps />
+      <BreadthPanels rows={historyRows} summary={summary} histories={historyByUniverse} footer={<EqualWeightComps />} />
     </div>
   );
 }
