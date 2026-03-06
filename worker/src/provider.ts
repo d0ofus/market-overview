@@ -31,6 +31,13 @@ class StooqProvider implements MarketDataProvider {
     VVIX: "^vvix",
     XOI: "^xoi",
   };
+  private readonly yahooAliases: Record<string, string> = {
+    VIX: "^VIX",
+    VXN: "^VXN",
+    VVIX: "^VVIX",
+    XOI: "^XOI",
+    NWX: "^NWX",
+  };
 
   private symbolForStooq(ticker: string): string {
     const t = ticker.trim().toLowerCase();
@@ -39,6 +46,67 @@ class StooqProvider implements MarketDataProvider {
     if (t.startsWith("^")) return t;
     if (t.includes(".")) return t;
     return `${t}.us`;
+  }
+
+  private yahooSymbolForTicker(ticker: string): string {
+    const upper = ticker.trim().toUpperCase();
+    if (this.yahooAliases[upper]) return this.yahooAliases[upper];
+    if (upper.startsWith("^")) return upper;
+    return upper;
+  }
+
+  private async fetchYahooIndexBars(ticker: string): Promise<DailyBar[]> {
+    const symbol = this.yahooSymbolForTicker(ticker);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "market-command-centre/1.0",
+      },
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      chart?: {
+        result?: Array<{
+          timestamp?: number[];
+          indicators?: {
+            quote?: Array<{
+              open?: Array<number | null>;
+              high?: Array<number | null>;
+              low?: Array<number | null>;
+              close?: Array<number | null>;
+              volume?: Array<number | null>;
+            }>;
+          };
+        }>;
+      };
+    };
+    const result = json.chart?.result?.[0];
+    const ts = result?.timestamp ?? [];
+    const quote = result?.indicators?.quote?.[0];
+    if (!quote || ts.length === 0) return [];
+    const opens = quote.open ?? [];
+    const highs = quote.high ?? [];
+    const lows = quote.low ?? [];
+    const closes = quote.close ?? [];
+    const volumes = quote.volume ?? [];
+    const out: DailyBar[] = [];
+    for (let i = 0; i < ts.length; i += 1) {
+      const open = opens[i];
+      const high = highs[i];
+      const low = lows[i];
+      const close = closes[i];
+      if (![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n as number))) continue;
+      out.push({
+        ticker: ticker.toUpperCase(),
+        date: new Date(ts[i] * 1000).toISOString().slice(0, 10),
+        o: open as number,
+        h: high as number,
+        l: low as number,
+        c: close as number,
+        volume: typeof volumes[i] === "number" && Number.isFinite(volumes[i] as number) ? (volumes[i] as number) : 0,
+      });
+    }
+    return out;
   }
 
   private async fetchTickerBars(ticker: string): Promise<DailyBar[]> {
@@ -58,9 +126,9 @@ class StooqProvider implements MarketDataProvider {
         }
         await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
       }
-      if (!csv) return [];
+      if (!csv) return await this.fetchYahooIndexBars(ticker);
       const lines = csv.split("\n").map((l) => l.trim()).filter(Boolean);
-      if (lines.length <= 1) return [];
+      if (lines.length <= 1) return await this.fetchYahooIndexBars(ticker);
       const out: DailyBar[] = [];
       for (const line of lines.slice(1)) {
         const [date, o, h, l, c, v] = line.split(",");
@@ -81,10 +149,17 @@ class StooqProvider implements MarketDataProvider {
           volume: Number.isNaN(volume) ? 0 : volume,
         });
       }
+      if (out.length === 0) {
+        return await this.fetchYahooIndexBars(ticker);
+      }
       return out;
     } catch (error) {
       console.error("stooq ticker fetch failed", { ticker, error });
-      return [];
+      try {
+        return await this.fetchYahooIndexBars(ticker);
+      } catch {
+        return [];
+      }
     }
   }
 

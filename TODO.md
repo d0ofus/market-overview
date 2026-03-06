@@ -4,6 +4,7 @@
 - Improve subtitles on Overview page
 - Add multiple chart view of commodities
 - Fix VIX data 
+- Add side by side column for equal weight sector ETFs
 - Add RS chart (like my google sheets dashboard)
 
 ## Breadth
@@ -22,6 +23,8 @@
 ## Sector Tracker
 - Add OHLCV in status line of charts
 - Add in tickers from ETF list and give codex the source to get the information from
+
+- Add another section for top 1W % Chg Industry ETFs
 
 ## General
 - See what other features in google sheets that is good

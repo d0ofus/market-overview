@@ -20,6 +20,8 @@ export default async function HomePage() {
         };
   const dashboardValue = dashboard.status === "fulfilled" ? dashboard.value : null;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
+  const sectionAnchorId = (sectionId: string) => `overview-section-${sectionId}`;
+
   return (
     <div className="space-y-4">
       <StatusBar
@@ -32,31 +34,82 @@ export default async function HomePage() {
       <div className="flex justify-end">
         <ManualRefreshButton page="overview" />
       </div>
+      {focusedSections.length > 0 && (
+        <div className="card p-3">
+          <div className="flex flex-wrap gap-2">
+            {focusedSections.map((section) => (
+              <a
+                key={`overview-jump-${section.id}`}
+                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-slate-300 hover:bg-accent/20 hover:text-accent"
+                href={`#${sectionAnchorId(section.id)}`}
+              >
+                {section.title.replace(/^\d+\s*/, "")}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
       )}
-      <div className="grid gap-3 md:grid-cols-2">
-        {focusedSections.map((section) => (
-          <div key={section.id} className="card p-4">
-            <div className="text-xs uppercase tracking-[0.16em] text-accent">{section.title.slice(0, 2)}</div>
-            <h2 className="mt-2 text-xl font-semibold">{section.title.replace(/^\d+\s*/, "")}</h2>
-            <p className="mt-1 text-sm text-slate-400">{section.description}</p>
-          </div>
-        ))}
-      </div>
       <div className="grid gap-4">
         {focusedSections.map((section) => (
-          <section key={section.id} className="space-y-3">
-            {section.groups.map((group) => (
-              <GroupPanel
-                key={group.id}
-                title={group.title}
-                rows={group.rows}
-                columns={group.columns}
-                defaultOpen
-                pinTop10={group.pinTop10}
-              />
-            ))}
+          <section key={section.id} id={sectionAnchorId(section.id)} className="space-y-3">
+            {(() => {
+              const groups = [...section.groups];
+              const thematic = groups.find((group) => group.title === "Thematic ETFs") ?? null;
+              const sector = groups.find((group) => group.title === "Sector ETFs") ?? null;
+              const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
+              const base = groups.filter((group) => group !== thematic && group !== sector && group !== sectorEq);
+              return (
+                <>
+                  {base.map((group) => (
+                    <GroupPanel
+                      key={group.id}
+                      title={group.title}
+                      rows={group.rows}
+                      columns={group.columns}
+                      defaultOpen
+                      pinTop10={group.pinTop10}
+                    />
+                  ))}
+                  {(sector || sectorEq) && (
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {sector && (
+                        <GroupPanel
+                          key={sector.id}
+                          title={sector.title}
+                          rows={sector.rows}
+                          columns={sector.columns}
+                          defaultOpen
+                          pinTop10={sector.pinTop10}
+                        />
+                      )}
+                      {sectorEq && (
+                        <GroupPanel
+                          key={sectorEq.id}
+                          title={sectorEq.title}
+                          rows={sectorEq.rows}
+                          columns={sectorEq.columns}
+                          defaultOpen
+                          pinTop10={sectorEq.pinTop10}
+                        />
+                      )}
+                    </div>
+                  )}
+                  {thematic && (
+                    <GroupPanel
+                      key={thematic.id}
+                      title={thematic.title}
+                      rows={thematic.rows}
+                      columns={thematic.columns}
+                      defaultOpen
+                      pinTop10={thematic.pinTop10}
+                    />
+                  )}
+                </>
+              );
+            })()}
           </section>
         ))}
       </div>

@@ -37,8 +37,53 @@ const titleCase = (value: string): string => {
 
 export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false }: Props) {
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
-  const selected = pinTop10 ? rows.slice(0, 10) : rows;
+  const defaultSortKey = columns.includes("1D")
+    ? "1D"
+    : columns.includes("ticker")
+      ? "ticker"
+      : columns[0] ?? "ticker";
+  const [sortKey, setSortKey] = useState<string>(defaultSortKey);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(defaultSortKey === "1D" ? "desc" : "asc");
+  const sortedRows = useMemo(() => {
+    const copy = [...rows];
+    const valueFor = (row: Row, key: string): number | string => {
+      if (key === "ticker") return row.ticker ?? "";
+      if (key === "name") return (row.displayName ?? row.ticker ?? "").toUpperCase();
+      if (key === "price") return row.price ?? Number.NEGATIVE_INFINITY;
+      if (key === "1D") return row.change1d ?? Number.NEGATIVE_INFINITY;
+      if (key === "1W") return row.change1w ?? Number.NEGATIVE_INFINITY;
+      if (key === "5D") return row.change5d ?? Number.NEGATIVE_INFINITY;
+      if (key === "YTD") return row.ytd ?? Number.NEGATIVE_INFINITY;
+      if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? Number.NEGATIVE_INFINITY;
+      if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? Number.NEGATIVE_INFINITY;
+      return row.ticker ?? "";
+    };
+    copy.sort((a, b) => {
+      const av = valueFor(a, sortKey);
+      const bv = valueFor(b, sortKey);
+      if (typeof av === "string" || typeof bv === "string") {
+        const cmp = String(av).localeCompare(String(bv));
+        return sortDir === "asc" ? cmp : -cmp;
+      }
+      const cmp = av - bv;
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return copy;
+  }, [rows, sortDir, sortKey]);
+  const selected = pinTop10 ? sortedRows.slice(0, 10) : sortedRows;
   const columnCount = useMemo(() => columns.length + 1, [columns.length]);
+  const sortGlyph = (col: string): string => {
+    if (sortKey !== col) return "";
+    return sortDir === "asc" ? " ▲" : " ▼";
+  };
+  const onSort = (col: string) => {
+    if (sortKey === col) {
+      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortKey(col);
+    setSortDir(col === "1D" ? "desc" : "asc");
+  };
   return (
     <Collapsible.Root defaultOpen={defaultOpen} className="card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)]">
       <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft px-4 py-3 text-left">
@@ -52,7 +97,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               <tr>
                 {columns.map((c) => (
                   <th key={c} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                    {titleCase(c)}
+                    <button className="inline-flex items-center gap-1 text-left hover:text-slate-100" onClick={() => onSort(c)}>
+                      {titleCase(c)}
+                      <span className="text-[10px] text-slate-400">{sortGlyph(c)}</span>
+                    </button>
                   </th>
                 ))}
                 <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">

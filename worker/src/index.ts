@@ -8,9 +8,13 @@ import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { syncEtfConstituents } from "./etf";
+import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-06-etf-sync-diagnostics";
+const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
+let lastEtfCatalogEnsureAt = 0;
+let lastOverviewCatalogEnsureAt = 0;
 
 app.use("/api/*", cors());
 
@@ -47,6 +51,131 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
 
 function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
+}
+
+function catalogAssetClass(exactUrl: string): "etf" | "index" {
+  const lower = exactUrl.toLowerCase();
+  if (
+    lower.includes("indexes.nasdaqomx.com") ||
+    lower.includes("investing.com/indices/") ||
+    lower.includes("finance.yahoo.com/quote/%5e") ||
+    lower.includes("finance.yahoo.com/quote/^")
+  ) {
+    return "index";
+  }
+  return "etf";
+}
+
+async function ensureEtfCatalogCoverage(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastEtfCatalogEnsureAt < CATALOG_ENSURE_INTERVAL_MS) return;
+  lastEtfCatalogEnsureAt = now;
+
+  const statements = ETF_CATALOG.flatMap((entry, idx) => {
+    const ticker = entry.ticker.toUpperCase();
+    const defaultName = `${ticker} ${catalogAssetClass(entry.exactUrl) === "index" ? "Index" : "ETF"}`;
+    return [
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, ?, ?, ?)",
+      ).bind(ticker, defaultName, catalogAssetClass(entry.exactUrl), entry.sector, entry.industry),
+      env.DB.prepare(
+        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order) VALUES ('industry', ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = CASE WHEN COALESCE(etf_watchlists.fund_name, '') = '' OR etf_watchlists.fund_name = etf_watchlists.ticker OR etf_watchlists.fund_name LIKE '% ETF' THEN excluded.fund_name ELSE etf_watchlists.fund_name END",
+      ).bind(entry.sector, entry.industry, ticker, defaultName, 2000 + idx),
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'catalog:import', 0, CURRENT_TIMESTAMP)",
+      ).bind(ticker),
+    ];
+  });
+  if (statements.length > 0) await env.DB.batch(statements);
+}
+
+async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastOverviewCatalogEnsureAt < CATALOG_ENSURE_INTERVAL_MS) return;
+  lastOverviewCatalogEnsureAt = now;
+  await ensureEtfCatalogCoverage(env);
+
+  const equitiesSection = await env.DB.prepare(
+    "SELECT id FROM dashboard_sections WHERE config_id = 'default' AND title LIKE '%Equities%' ORDER BY sort_order ASC LIMIT 1",
+  ).first<{ id: string }>();
+  if (!equitiesSection?.id) return;
+  const thematicGroup = await env.DB.prepare(
+    "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Thematic ETFs' LIMIT 1",
+  ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
+  const sectorGroup = await env.DB.prepare(
+    "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Sector ETFs' LIMIT 1",
+  ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
+  if (!thematicGroup?.id || !sectorGroup?.id) return;
+
+  const equalWeightGroupId = "g-sector-etf-eqwt";
+  const equalWeightGroup = await env.DB.prepare(
+    "SELECT id FROM dashboard_groups WHERE id = ? LIMIT 1",
+  ).bind(equalWeightGroupId).first<{ id: string }>();
+  const thematicTickers = uniqueTickers(ETF_CATALOG.map((row) => row.ticker));
+  const equalWeightTickers = uniqueTickers(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => row.ticker));
+  const allTickers = uniqueTickers([...thematicTickers, ...equalWeightTickers]);
+
+  const existingThematicRows = await env.DB.prepare(
+    "SELECT ticker FROM dashboard_items WHERE group_id = ?",
+  ).bind(thematicGroup.id).all<{ ticker: string }>();
+  const existingThematic = new Set((existingThematicRows.results ?? []).map((r) => r.ticker.toUpperCase()));
+  const missingThematic = thematicTickers.filter((ticker) => !existingThematic.has(ticker));
+
+  const existingEqRows = await env.DB.prepare(
+    "SELECT ticker FROM dashboard_items WHERE group_id = ?",
+  ).bind(equalWeightGroupId).all<{ ticker: string }>();
+  const existingEq = new Set((existingEqRows.results ?? []).map((r) => r.ticker.toUpperCase()));
+  const missingEq = equalWeightTickers.filter((ticker) => !existingEq.has(ticker));
+
+  const maxSortRow = await env.DB.prepare(
+    "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_groups WHERE section_id = ?",
+  ).bind(equitiesSection.id).first<{ maxSort: number }>();
+  const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
+  const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown;
+  const needsItemUpdate = missingThematic.length > 0 || missingEq.length > 0;
+  if (!needsStructureUpdate && !needsItemUpdate) return;
+
+  const structureStatements = [
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES (?, ?, ?, 'Sector ETFs (Equal Weight)', 'equities', '1W', 1, 1)",
+    ).bind(equalWeightGroupId, equitiesSection.id, sectorGroup.sortOrder + 1),
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES (?, COALESCE((SELECT columns_json FROM dashboard_columns WHERE group_id = 'g-sector-etf' LIMIT 1), '[\"ticker\",\"name\",\"price\",\"1D\",\"1W\",\"5D\",\"YTD\",\"sparkline\"]'))",
+    ).bind(equalWeightGroupId),
+  ];
+  if (shouldMoveThematicDown) {
+    structureStatements.push(
+      env.DB.prepare(
+        "UPDATE dashboard_groups SET sort_order = (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM dashboard_groups WHERE section_id = ? AND id <> ?) WHERE id = ?",
+      ).bind(equitiesSection.id, thematicGroup.id, thematicGroup.id),
+    );
+  }
+
+  const thematicBaseSortRow = await env.DB.prepare(
+    "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
+  ).bind(thematicGroup.id).first<{ maxSort: number }>();
+  const eqBaseSortRow = await env.DB.prepare(
+    "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
+  ).bind(equalWeightGroupId).first<{ maxSort: number }>();
+  const thematicItemStatements = missingThematic.map((ticker, idx) =>
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
+    ).bind(crypto.randomUUID(), thematicGroup.id, (thematicBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
+  );
+  const equalWeightItemStatements = missingEq.map((ticker, idx) =>
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
+    ).bind(crypto.randomUUID(), equalWeightGroupId, (eqBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
+  );
+  const symbolStatements = allTickers.map((ticker) =>
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, 'etf', 'Thematic', 'ETF')",
+    ).bind(ticker, `${ticker} ETF`),
+  );
+
+  await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...symbolStatements]);
+  await refreshRecentBarsForTickers(env, allTickers, 2000);
+  await recomputeDashboardFromStoredBars(env);
 }
 
 function parseLocalTime(value: string | null | undefined): { hour: number; minute: number } | null {
@@ -410,6 +539,7 @@ app.get("/api/status", async (c) => {
 app.get("/api/dashboard", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const date = c.req.query("date");
+  await ensureOverviewCatalogCoverage(c.env);
   const data = await loadSnapshot(c.env, configId, date);
   c.header("Cache-Control", "public, max-age=300");
   return c.json(data);
@@ -809,6 +939,7 @@ app.get("/api/etfs/sector", async (c) => {
 });
 
 app.get("/api/etfs/industry", async (c) => {
+  await ensureEtfCatalogCoverage(c.env);
   const rowsRes = await c.env.DB.prepare(
     "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'industry' ORDER BY parent_sector ASC, industry ASC, sort_order ASC, ticker ASC",
   ).all();
@@ -825,6 +956,7 @@ app.get("/api/etfs/industry", async (c) => {
 });
 
 app.get("/api/etf/:ticker/constituents", async (c) => {
+  await ensureEtfCatalogCoverage(c.env);
   const ticker = c.req.param("ticker").toUpperCase();
   const forceSync = c.req.query("force") === "1";
   const etf = await c.env.DB.prepare(
@@ -1086,6 +1218,7 @@ app.delete("/api/admin/etfs/:listType/:ticker", async (c) => {
 
 app.get("/api/admin/etf-sync-status", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await ensureEtfCatalogCoverage(c.env);
   const limit = Math.max(10, Math.min(500, Number(c.req.query("limit") ?? 200)));
   const autoSyncLimit = Math.max(0, Math.min(3, Number(c.req.query("autoSyncLimit") ?? 1)));
 
@@ -1215,6 +1348,7 @@ app.get("/api/admin/provider-check", async (c) => {
 
 app.get("/api/admin/etf-sync-diagnostics", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await ensureEtfCatalogCoverage(c.env);
   const ticker = (c.req.query("ticker") ?? "TAN").trim().toUpperCase();
   if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
     return c.json({ error: "Valid ticker is required." }, 400);
@@ -1305,6 +1439,7 @@ app.post("/api/admin/run-eod", async (c) => {
 
 app.post("/api/admin/etf-sync-backfill", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await ensureEtfCatalogCoverage(c.env);
   const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
   // Keep this low to avoid Cloudflare subrequest caps in one request.
   const limit = Math.max(1, Math.min(5, Number(body.limit ?? 3)));
