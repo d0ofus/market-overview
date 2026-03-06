@@ -55,6 +55,47 @@ class StooqProvider implements MarketDataProvider {
     return upper;
   }
 
+  private async fetchCboeVixBars(ticker: string): Promise<DailyBar[]> {
+    const upper = ticker.trim().toUpperCase();
+    if (upper !== "VIX" && upper !== "^VIX") return [];
+    const url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "market-command-centre/1.0",
+      },
+    });
+    if (!res.ok) return [];
+    const csv = await res.text();
+    const lines = csv.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (lines.length <= 1) return [];
+    const out: DailyBar[] = [];
+    for (const line of lines.slice(1)) {
+      const cols = line.split(",");
+      if (cols.length < 5) continue;
+      const dateRaw = cols[0]?.trim() ?? "";
+      const open = Number(cols[1]);
+      const high = Number(cols[2]);
+      const low = Number(cols[3]);
+      const close = Number(cols[4]);
+      if (!dateRaw || [open, high, low, close].some((n) => !Number.isFinite(n))) continue;
+      const mmddyyyy = dateRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      const isoDate = mmddyyyy
+        ? `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2, "0")}-${mmddyyyy[2].padStart(2, "0")}`
+        : dateRaw;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) continue;
+      out.push({
+        ticker: "VIX",
+        date: isoDate,
+        o: open,
+        h: high,
+        l: low,
+        c: close,
+        volume: 0,
+      });
+    }
+    return out;
+  }
+
   private async fetchYahooIndexBars(ticker: string): Promise<DailyBar[]> {
     const symbol = this.yahooSymbolForTicker(ticker);
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
@@ -111,6 +152,8 @@ class StooqProvider implements MarketDataProvider {
 
   private async fetchTickerBars(ticker: string): Promise<DailyBar[]> {
     try {
+      const cboeVix = await this.fetchCboeVixBars(ticker);
+      if (cboeVix.length > 0) return cboeVix;
       const symbol = this.symbolForStooq(ticker);
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
       let csv = "";
