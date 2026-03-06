@@ -20,13 +20,15 @@ describe("computeMetrics", () => {
       change1d: 1,
       change5d: 2,
       change1w: 3,
+      change3m: 4,
+      change6m: 5,
       change21d: 4,
-      ytd: 5,
+      ytd: 6,
       pctFrom52wHigh: -2,
       sparkline: [1, 2, 3],
     };
     expect(rankValue(sample, "1W")).toBe(3);
-    expect(rankValue(sample, "YTD")).toBe(5);
+    expect(rankValue(sample, "YTD")).toBe(6);
     expect(rankValue(sample, "52W")).toBe(-2);
   });
 });

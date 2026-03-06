@@ -13,6 +13,8 @@ type Row = {
   change1d: number;
   change1w: number;
   change5d: number;
+  change3m: number;
+  change6m: number;
   ytd: number;
   pctFrom52wHigh: number;
   sparkline: number[];
@@ -31,7 +33,7 @@ type Props = {
 const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 const titleCase = (value: string): string => {
-  if (value === "1D" || value === "5D" || value === "1W" || value === "YTD") return value;
+  if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD") return value;
   if (value === "pctFrom52WHigh") return "% From 52W High";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
@@ -54,6 +56,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       if (key === "1D") return row.change1d ?? Number.NEGATIVE_INFINITY;
       if (key === "1W") return row.change1w ?? Number.NEGATIVE_INFINITY;
       if (key === "5D") return row.change5d ?? Number.NEGATIVE_INFINITY;
+      if (key === "3M") return row.change3m ?? Number.NEGATIVE_INFINITY;
+      if (key === "6M") return row.change6m ?? Number.NEGATIVE_INFINITY;
       if (key === "YTD") return row.ytd ?? Number.NEGATIVE_INFINITY;
       if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? Number.NEGATIVE_INFINITY;
       if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? Number.NEGATIVE_INFINITY;
@@ -125,6 +129,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       {columns.includes("1D") && <td className={`px-3 py-2 ${cellClass(row.change1d)}`}>{pct(row.change1d)}</td>}
                       {columns.includes("1W") && <td className={`px-3 py-2 ${cellClass(row.change1w)}`}>{pct(row.change1w)}</td>}
                       {columns.includes("5D") && <td className={`px-3 py-2 ${cellClass(row.change5d)}`}>{pct(row.change5d)}</td>}
+                      {columns.includes("3M") && <td className={`px-3 py-2 ${cellClass(row.change3m)}`}>{pct(row.change3m)}</td>}
+                      {columns.includes("6M") && <td className={`px-3 py-2 ${cellClass(row.change6m)}`}>{pct(row.change6m)}</td>}
                       {columns.includes("YTD") && <td className={`px-3 py-2 ${cellClass(row.ytd)}`}>{pct(row.ytd)}</td>}
                       {columns.includes("pctFrom52WHigh") && (
                         <td className={`px-3 py-2 ${cellClass(row.pctFrom52wHigh)}`}>{pct(row.pctFrom52wHigh)}</td>

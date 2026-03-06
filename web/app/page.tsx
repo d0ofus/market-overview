@@ -16,7 +16,8 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   ordered: OverviewGroup[];
 } {
   const groups = [...section.groups];
-  const thematic = groups.find((group) => group.title === "Thematic ETFs") ?? null;
+  const thematic =
+    groups.find((group) => group.title === "Industry/Thematic ETFs" || group.title === "Thematic ETFs") ?? null;
   const sector = groups.find((group) => group.title === "Sector ETFs") ?? null;
   const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
   const base = groups.filter((group) => group !== thematic && group !== sector && group !== sectorEq);

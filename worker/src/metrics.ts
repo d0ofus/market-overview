@@ -14,6 +14,8 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
       change1d: 0,
       change5d: 0,
       change1w: 0,
+      change3m: 0,
+      change6m: 0,
       change21d: 0,
       ytd: 0,
       pctFrom52wHigh: 0,
@@ -25,6 +27,8 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
   const price = closes[last];
   const prev1d = closes[Math.max(0, last - 1)];
   const prev5d = closes[Math.max(0, last - 5)];
+  const prev63d = closes[Math.max(0, last - 63)];
+  const prev126d = closes[Math.max(0, last - 126)];
   const prev21d = closes[Math.max(0, last - 21)];
 
   const currentYear = Number(dates[last].slice(0, 4));
@@ -44,6 +48,8 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     change1d: pct(price, prev1d),
     change5d: pct(price, prev5d),
     change1w: pct(price, prev5d),
+    change3m: pct(price, prev63d),
+    change6m: pct(price, prev126d),
     change21d: pct(price, prev21d),
     ytd: pct(price, ytdAnchor),
     pctFrom52wHigh: pct(price, high52w),

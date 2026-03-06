@@ -11,6 +11,11 @@ function toISODate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+const pctChange = (now: number, then: number): number => {
+  if (!Number.isFinite(now) || !Number.isFinite(then) || then === 0) return 0;
+  return ((now - then) / then) * 100;
+};
+
 function previousWeekday(date: Date): Date {
   const d = new Date(date);
   while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
@@ -88,6 +93,50 @@ async function loadBarsForTickers(
     rows.push(...(result.results ?? []));
   }
   return rows;
+}
+
+async function loadWindowReturnsByTicker(
+  env: Env,
+  tickers: string[],
+  asOfDate: string,
+): Promise<Map<string, { change3m: number; change6m: number }>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  if (unique.length === 0) return new Map();
+  const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 420 * 86400_000));
+  const rows: Array<{ ticker: string; date: string; c: number; volume: number | null }> = [];
+  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const sql = `SELECT ticker, date, c, volume FROM daily_bars WHERE ticker IN (${placeholders}) AND date >= ? AND date <= ? ORDER BY ticker, date`;
+    const result = await env.DB.prepare(sql)
+      .bind(...chunk, startDate, asOfDate)
+      .all<{ ticker: string; date: string; c: number; volume: number | null }>();
+    rows.push(...(result.results ?? []));
+  }
+  const closesByTicker = new Map<string, number[]>();
+  for (const row of rows) {
+    const key = row.ticker.toUpperCase();
+    const values = closesByTicker.get(key) ?? [];
+    values.push(row.c);
+    closesByTicker.set(key, values);
+  }
+  const out = new Map<string, { change3m: number; change6m: number }>();
+  for (const ticker of unique) {
+    const closes = closesByTicker.get(ticker) ?? [];
+    if (closes.length === 0) {
+      out.set(ticker, { change3m: 0, change6m: 0 });
+      continue;
+    }
+    const last = closes.length - 1;
+    const price = closes[last];
+    const prev3m = closes[Math.max(0, last - 63)];
+    const prev6m = closes[Math.max(0, last - 126)];
+    out.set(ticker, {
+      change3m: pctChange(price, prev3m),
+      change6m: pctChange(price, prev6m),
+    });
+  }
+  return out;
 }
 
 async function loadUniverseTickers(env: Env, universeId: string): Promise<string[]> {
@@ -690,6 +739,11 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
     }>();
 
   const tableRows = rows.results ?? [];
+  const windowReturns = await loadWindowReturnsByTicker(
+    env,
+    Array.from(new Set(tableRows.map((row) => row.ticker))),
+    meta.asOfDate,
+  );
   return {
     asOfDate: meta.asOfDate,
     generatedAt: meta.generatedAt,
@@ -707,9 +761,10 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
         showSparkline: g.showSparkline,
         pinTop10: g.pinTop10,
         columns: g.columns,
-        rows: tableRows
+      rows: tableRows
           .filter((r) => r.sectionId === sec.id && r.groupId === g.id)
           .map((r) => ({
+            ...(windowReturns.get(r.ticker.toUpperCase()) ?? { change3m: 0, change6m: 0 }),
             ticker: r.ticker,
             displayName: r.displayName,
             price: r.price,

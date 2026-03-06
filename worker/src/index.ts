@@ -102,8 +102,8 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   ).first<{ id: string }>();
   if (!equitiesSection?.id) return;
   const thematicGroup = await env.DB.prepare(
-    "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Thematic ETFs' LIMIT 1",
-  ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
+    "SELECT id, sort_order as sortOrder, title FROM dashboard_groups WHERE section_id = ? AND title IN ('Thematic ETFs', 'Industry/Thematic ETFs') ORDER BY CASE WHEN title = 'Industry/Thematic ETFs' THEN 0 ELSE 1 END, sort_order ASC LIMIT 1",
+  ).bind(equitiesSection.id).first<{ id: string; sortOrder: number; title: string }>();
   const sectorGroup = await env.DB.prepare(
     "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Sector ETFs' LIMIT 1",
   ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
@@ -142,6 +142,7 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
     "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_groups WHERE section_id = ?",
   ).bind(equitiesSection.id).first<{ maxSort: number }>();
   const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
+  const needsThematicTitleUpdate = thematicGroup.title !== "Industry/Thematic ETFs";
   const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown;
   const needsItemUpdate = missingThematic.length > 0 || missingEq.length > 0;
   const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix;
@@ -151,7 +152,7 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
       "INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES (?, ?, ?, 'Sector ETFs (Equal Weight)', 'equities', '1W', 1, 1)",
     ).bind(equalWeightGroupId, equitiesSection.id, sectorGroup.sortOrder + 1),
     env.DB.prepare(
-      "INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES (?, COALESCE((SELECT columns_json FROM dashboard_columns WHERE group_id = 'g-sector-etf' LIMIT 1), '[\"ticker\",\"name\",\"price\",\"1D\",\"1W\",\"5D\",\"YTD\",\"sparkline\"]'))",
+      "INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES (?, COALESCE((SELECT columns_json FROM dashboard_columns WHERE group_id = 'g-sector-etf' LIMIT 1), '[\"ticker\",\"name\",\"price\",\"1D\",\"1W\",\"3M\",\"6M\",\"YTD\",\"sparkline\"]'))",
     ).bind(equalWeightGroupId),
   ];
   if (shouldMoveThematicDown) {
@@ -159,6 +160,13 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
       env.DB.prepare(
         "UPDATE dashboard_groups SET sort_order = (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM dashboard_groups WHERE section_id = ? AND id <> ?) WHERE id = ?",
       ).bind(equitiesSection.id, thematicGroup.id, thematicGroup.id),
+    );
+  }
+  if (needsThematicTitleUpdate) {
+    structureStatements.push(
+      env.DB.prepare(
+        "UPDATE dashboard_groups SET title = 'Industry/Thematic ETFs' WHERE id = ?",
+      ).bind(thematicGroup.id),
     );
   }
 

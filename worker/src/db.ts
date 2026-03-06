@@ -1,7 +1,32 @@
 import type { DashboardConfigPayload, Env } from "./types";
 
 const uid = () => crypto.randomUUID();
-const defaultColumns = ["ticker", "name", "price", "1D", "1W", "YTD", "sparkline"];
+const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline"];
+const overviewPerformanceColumns = new Set(["1D", "5D", "1W", "3M", "6M", "YTD"]);
+
+function normalizeOverviewColumns(columns: string[]): string[] {
+  const withoutPerf = columns.filter((col) => !overviewPerformanceColumns.has(col));
+  const insertAtPrice = withoutPerf.indexOf("price");
+  const insertAtName = withoutPerf.indexOf("name");
+  const insertAtTicker = withoutPerf.indexOf("ticker");
+  const insertAt = insertAtPrice >= 0
+    ? insertAtPrice + 1
+    : insertAtName >= 0
+      ? insertAtName + 1
+      : insertAtTicker >= 0
+        ? insertAtTicker + 1
+        : withoutPerf.length;
+  const normalized = [
+    ...withoutPerf.slice(0, insertAt),
+    "1D",
+    "1W",
+    "3M",
+    "6M",
+    "YTD",
+    ...withoutPerf.slice(insertAt),
+  ];
+  return Array.from(new Set(normalized));
+}
 
 function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
   if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
@@ -173,14 +198,18 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
           pinTop10: !!g.pinTop10,
           columns: (() => {
             const base = colMap.get(g.id) ?? defaultColumns;
-            if ((g.dataType === "macro" || g.dataType === "equities") && !base.includes("name")) {
-              const at = base.indexOf("ticker");
-              if (at >= 0) {
-                const next = [...base];
-                next.splice(at + 1, 0, "name");
-                return next;
-              }
-              return ["ticker", "name", ...base];
+            if (g.dataType === "macro" || g.dataType === "equities") {
+              const withName = (() => {
+                if (base.includes("name")) return base;
+                const at = base.indexOf("ticker");
+                if (at >= 0) {
+                  const next = [...base];
+                  next.splice(at + 1, 0, "name");
+                  return next;
+                }
+                return ["ticker", "name", ...base];
+              })();
+              return normalizeOverviewColumns(withName);
             }
             return base;
           })(),
