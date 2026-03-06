@@ -75,8 +75,8 @@ export function getIndustryEtfs() {
   return getJson<{ rows: any[] }>("/api/etfs/industry");
 }
 
-export function getEtfConstituents(ticker: string) {
-  return getJson<{ etf: any; rows: any[]; syncStatus: any; warning: string | null }>(`/api/etf/${ticker}/constituents`);
+export function getEtfConstituents(ticker: string, forceSync = false) {
+  return getJson<{ etf: any; rows: any[]; syncStatus: any; warning: string | null }>(`/api/etf/${ticker}/constituents${forceSync ? "?force=1" : ""}`);
 }
 
 export function getSectorEntries() {

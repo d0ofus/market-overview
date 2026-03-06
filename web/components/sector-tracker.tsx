@@ -184,7 +184,7 @@ export function SectorTracker() {
     setConstituents([]);
     setConstituentSort("weight");
     try {
-      const res = await getEtfConstituents(ticker);
+      const res = await getEtfConstituents(ticker, true);
       setConstituents((res.rows ?? []) as EtfConstituent[]);
       setConstituentWarning(res.warning ?? null);
     } catch (error) {

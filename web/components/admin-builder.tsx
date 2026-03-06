@@ -63,6 +63,11 @@ export function AdminBuilder() {
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
   const [etfBackfillMsg, setEtfBackfillMsg] = useState<string | null>(null);
   const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools">("overview");
+  const [diagTicker, setDiagTicker] = useState("TAN");
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagError, setDiagError] = useState<string | null>(null);
+  const [diagMsg, setDiagMsg] = useState<string | null>(null);
+  const [diagResult, setDiagResult] = useState<any | null>(null);
 
   const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
 
@@ -206,6 +211,41 @@ export function AdminBuilder() {
       setEtfBackfillMsg(err instanceof Error ? err.message : "Failed to run ETF constituent backfill.");
     } finally {
       setTimeout(() => setEtfBackfillMsg(null), 5000);
+    }
+  };
+
+  const runEtfDiagnostics = async (syncFirst = false) => {
+    const ticker = diagTicker.trim().toUpperCase();
+    if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
+      setDiagError("Enter a valid ticker symbol.");
+      return;
+    }
+    try {
+      setDiagLoading(true);
+      setDiagError(null);
+      setDiagMsg(null);
+      if (syncFirst) {
+        const syncRes = await adminFetch<{ ok: boolean; ticker: string; count: number; source: string }>(`/api/admin/etf/${ticker}/sync`, {
+          method: "POST",
+        });
+        setDiagMsg(`Synced ${syncRes.ticker}: ${syncRes.count} constituents from ${syncRes.source}.`);
+      }
+      const res = await adminFetch<{
+        backendRevision: string;
+        serverTimeUtc: string;
+        dataProvider: string;
+        ticker: string;
+        db: { ok: boolean; error: string | null };
+        watchlists: Array<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null }>;
+        syncStatus: { status: string | null; source: string | null; lastSyncedAt: string | null; updatedAt: string | null; recordsCount: number; error: string | null } | null;
+        constituentSummary: { count: number; latestAsOfDate: string | null; latestUpdatedAt: string | null };
+        topConstituents: Array<{ ticker: string; name: string | null; weight: number | null }>;
+      }>(`/api/admin/etf-sync-diagnostics?ticker=${encodeURIComponent(ticker)}`);
+      setDiagResult(res);
+    } catch (err) {
+      setDiagError(err instanceof Error ? err.message : "Failed to run ETF diagnostics.");
+    } finally {
+      setDiagLoading(false);
     }
   };
 
@@ -368,6 +408,85 @@ export function AdminBuilder() {
             Sync Missing ETF Constituents Now
           </button>
           {etfBackfillMsg && <span className="text-xs text-slate-300">{etfBackfillMsg}</span>}
+        </div>
+        <div className="mb-3 rounded border border-borderSoft p-2">
+          <p className="mb-2 text-sm font-semibold">ETF Sync Diagnostics</p>
+          <p className="mb-2 text-xs text-slate-400">
+            Use this to verify the live worker and D1 state for one ticker (source, last synced, cached rows) and optionally run a manual sync first.
+          </p>
+          <div className="grid gap-2 md:grid-cols-4">
+            <input
+              className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
+              placeholder="Ticker (e.g. TAN)"
+              value={diagTicker}
+              onChange={(e) => setDiagTicker(e.target.value.toUpperCase())}
+            />
+            <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={() => void runEtfDiagnostics(false)} disabled={diagLoading}>
+              {diagLoading ? "Checking..." : "Check Backend + DB"}
+            </button>
+            <button className="rounded border border-accent/40 px-3 py-1 text-sm text-accent" onClick={() => void runEtfDiagnostics(true)} disabled={diagLoading}>
+              {diagLoading ? "Syncing..." : "Sync Ticker + Verify"}
+            </button>
+          </div>
+          {diagMsg && <p className="mt-2 text-xs text-slate-300">{diagMsg}</p>}
+          {diagError && <p className="mt-2 text-xs text-red-300">{diagError}</p>}
+          {diagResult && (
+            <div className="mt-2 overflow-auto rounded border border-borderSoft/70">
+              <table className="min-w-full text-xs">
+                <tbody>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Backend Revision</td>
+                    <td className="px-2 py-1">{diagResult.backendRevision ?? "-"}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Server Time (UTC)</td>
+                    <td className="px-2 py-1">{formatDateTimeCompact(diagResult.serverTimeUtc)}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Database Connection</td>
+                    <td className="px-2 py-1">{diagResult.db?.ok ? "OK" : `ERROR: ${diagResult.db?.error ?? "unknown"}`}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Watchlist Membership</td>
+                    <td className="px-2 py-1">
+                      {(diagResult.watchlists ?? []).length > 0
+                        ? diagResult.watchlists.map((w: any) => w.listType).join(", ")
+                        : "Not found in watchlists"}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Sync Status</td>
+                    <td className="px-2 py-1">{diagResult.syncStatus?.status ?? "-"}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Sync Source</td>
+                    <td className="px-2 py-1">{diagResult.syncStatus?.source ?? "-"}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Last Synced</td>
+                    <td className="px-2 py-1">{formatDateTimeCompact(diagResult.syncStatus?.lastSyncedAt)}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Cached Constituents</td>
+                    <td className="px-2 py-1">{diagResult.constituentSummary?.count ?? 0}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Latest Constituents As-Of</td>
+                    <td className="px-2 py-1">{diagResult.constituentSummary?.latestAsOfDate ?? "-"}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Sync Error</td>
+                    <td className="px-2 py-1 text-red-300">{diagResult.syncStatus?.error ?? "-"}</td>
+                  </tr>
+                </tbody>
+              </table>
+              {(diagResult.topConstituents ?? []).length > 0 && (
+                <div className="border-t border-borderSoft/60 p-2 text-xs text-slate-300">
+                  Top constituents sample: {(diagResult.topConstituents ?? []).slice(0, 5).map((r: any) => `${r.ticker}${typeof r.weight === "number" ? ` (${r.weight.toFixed(2)}%)` : ""}`).join(", ")}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div className="grid gap-3 md:grid-cols-2">
           <div className="rounded border border-borderSoft p-2">
