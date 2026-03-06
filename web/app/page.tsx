@@ -118,7 +118,7 @@ export default async function HomePage() {
               <GroupPanel
                 key={thematic.id}
                 anchorId={groupAnchorId(thematic.id)}
-                title={thematic.title}
+                title={`${thematic.title} (${thematic.rows.length})`}
                 rows={thematic.rows}
                 columns={thematic.columns}
                 defaultOpen

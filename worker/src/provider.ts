@@ -84,7 +84,7 @@ class StooqProvider implements MarketDataProvider {
         : dateRaw;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) continue;
       out.push({
-        ticker: "VIX",
+        ticker: upper,
         date: isoDate,
         o: open,
         h: high,
