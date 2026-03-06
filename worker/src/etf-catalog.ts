@@ -80,18 +80,18 @@ export const ETF_CATALOG_BY_TICKER: Record<string, EtfCatalogEntry> = Object.fro
   ETF_CATALOG.map((row) => [row.ticker.toUpperCase(), row]),
 ) as Record<string, EtfCatalogEntry>;
 
-export const EQUAL_WEIGHT_SECTOR_ETFS: Array<{ ticker: string; benchmarkTicker: string }> = [
-  { ticker: "RSPC", benchmarkTicker: "XLK" },
-  { ticker: "RSPD", benchmarkTicker: "XLV" },
-  { ticker: "RSPS", benchmarkTicker: "XLF" },
-  { ticker: "RSPG", benchmarkTicker: "XLY" },
-  { ticker: "RSPF", benchmarkTicker: "XLP" },
-  { ticker: "RSPH", benchmarkTicker: "XLE" },
-  { ticker: "RSPN", benchmarkTicker: "XLI" },
-  { ticker: "RSPM", benchmarkTicker: "XLB" },
-  { ticker: "RSPR", benchmarkTicker: "XLRE" },
-  { ticker: "RSPT", benchmarkTicker: "XLU" },
-  { ticker: "RSPU", benchmarkTicker: "XLC" },
+export const EQUAL_WEIGHT_SECTOR_ETFS: Array<{ ticker: string; benchmarkTicker: string; instrumentName: string }> = [
+  { ticker: "RSPC", benchmarkTicker: "XLK", instrumentName: "Invesco S&P 500 Equal Weight Communication Services ETF" },
+  { ticker: "RSPD", benchmarkTicker: "XLV", instrumentName: "Invesco S&P 500 Equal Weight Consumer Discretionary ETF" },
+  { ticker: "RSPS", benchmarkTicker: "XLF", instrumentName: "Invesco S&P 500 Equal Weight Consumer Staples ETF" },
+  { ticker: "RSPG", benchmarkTicker: "XLY", instrumentName: "Invesco S&P 500 Equal Weight Energy ETF" },
+  { ticker: "RSPF", benchmarkTicker: "XLP", instrumentName: "Invesco S&P 500 Equal Weight Financials ETF" },
+  { ticker: "RSPH", benchmarkTicker: "XLE", instrumentName: "Invesco S&P 500 Equal Weight Health Care ETF" },
+  { ticker: "RSPN", benchmarkTicker: "XLI", instrumentName: "Invesco S&P 500 Equal Weight Industrials ETF" },
+  { ticker: "RSPM", benchmarkTicker: "XLB", instrumentName: "Invesco S&P 500 Equal Weight Materials ETF" },
+  { ticker: "RSPR", benchmarkTicker: "XLRE", instrumentName: "Invesco S&P 500 Equal Weight Real Estate ETF" },
+  { ticker: "RSPT", benchmarkTicker: "XLU", instrumentName: "Invesco S&P 500 Equal Weight Technology ETF" },
+  { ticker: "RSPU", benchmarkTicker: "XLC", instrumentName: "Invesco S&P 500 Equal Weight Utilities ETF" },
 ];
 
 export const ETF_CATALOG_TICKERS = ETF_CATALOG.map((row) => row.ticker);

@@ -13,8 +13,10 @@ import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-06-etf-sync-diagnostics";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
+const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
+let lastOverviewBarRefreshAt = 0;
 
 app.use("/api/*", cors());
 
@@ -112,7 +114,8 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
     "SELECT id FROM dashboard_groups WHERE id = ? LIMIT 1",
   ).bind(equalWeightGroupId).first<{ id: string }>();
   const thematicTickers = uniqueTickers(ETF_CATALOG.map((row) => row.ticker));
-  const equalWeightTickers = uniqueTickers(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => row.ticker));
+  const equalWeightNameByTicker = new Map(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]));
+  const equalWeightTickers = uniqueTickers(Array.from(equalWeightNameByTicker.keys()));
   const allTickers = uniqueTickers([...thematicTickers, ...equalWeightTickers]);
 
   const existingThematicRows = await env.DB.prepare(
@@ -127,13 +130,21 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const existingEq = new Set((existingEqRows.results ?? []).map((r) => r.ticker.toUpperCase()));
   const missingEq = equalWeightTickers.filter((ticker) => !existingEq.has(ticker));
 
+  const eqNameRows = await env.DB.prepare(
+    `SELECT ticker, name FROM symbols WHERE ticker IN (${equalWeightTickers.map(() => "?").join(",")})`,
+  )
+    .bind(...equalWeightTickers)
+    .all<{ ticker: string; name: string | null }>();
+  const eqNameMap = new Map((eqNameRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row.name ?? ""]));
+  const needsEqNameFix = equalWeightTickers.some((ticker) => (eqNameMap.get(ticker) ?? "") !== (equalWeightNameByTicker.get(ticker) ?? ""));
+
   const maxSortRow = await env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_groups WHERE section_id = ?",
   ).bind(equitiesSection.id).first<{ maxSort: number }>();
   const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
   const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown;
   const needsItemUpdate = missingThematic.length > 0 || missingEq.length > 0;
-  if (!needsStructureUpdate && !needsItemUpdate) return;
+  const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix;
 
   const structureStatements = [
     env.DB.prepare(
@@ -167,15 +178,19 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
       "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
     ).bind(crypto.randomUUID(), equalWeightGroupId, (eqBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
   );
-  const symbolStatements = allTickers.map((ticker) =>
-    env.DB.prepare(
-      "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, 'etf', 'Thematic', 'ETF')",
-    ).bind(ticker, `${ticker} ETF`),
-  );
+  const symbolStatements = allTickers.map((ticker) => {
+    const preferredName = equalWeightNameByTicker.get(ticker) ?? `${ticker} ETF`;
+    const isEqualWeight = equalWeightNameByTicker.has(ticker) ? 1 : 0;
+    return env.DB.prepare(
+      "INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, 'etf', 'Thematic', 'ETF') ON CONFLICT(ticker) DO UPDATE SET name = CASE WHEN ? = 1 THEN ? WHEN COALESCE(symbols.name, '') = '' OR symbols.name = symbols.ticker OR symbols.name LIKE '% ETF' THEN excluded.name ELSE symbols.name END, asset_class = COALESCE(symbols.asset_class, excluded.asset_class)",
+    ).bind(ticker, preferredName, isEqualWeight, preferredName);
+  });
 
   await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...symbolStatements]);
-  await refreshRecentBarsForTickers(env, allTickers, 2000);
-  await recomputeDashboardFromStoredBars(env);
+  if (needsSnapshotRefresh) {
+    await refreshRecentBarsForTickers(env, allTickers, 2000);
+    await recomputeDashboardFromStoredBars(env);
+  }
 }
 
 function parseLocalTime(value: string | null | undefined): { hour: number; minute: number } | null {
@@ -262,6 +277,38 @@ async function loadOverviewTickers(env: Env): Promise<string[]> {
     "SELECT DISTINCT di.ticker as ticker FROM dashboard_items di JOIN dashboard_groups dg ON dg.id = di.group_id JOIN dashboard_sections ds ON ds.id = dg.section_id JOIN dashboard_configs dc ON dc.id = ds.config_id WHERE dc.is_default = 1 AND di.enabled = 1 AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%') ORDER BY di.ticker ASC",
   ).all<{ ticker: string }>();
   return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
+}
+
+async function loadTickersMissingRecentBars(env: Env, tickers: string[], maxAgeDays = 14): Promise<string[]> {
+  const unique = uniqueTickers(tickers);
+  if (unique.length === 0) return [];
+  const thresholdDate = new Date(Date.now() - maxAgeDays * 86400_000).toISOString().slice(0, 10);
+  const lastDateByTicker = new Map<string, string | null>();
+  const chunkSize = 80;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const sql = `SELECT ticker, MAX(date) as lastDate FROM daily_bars WHERE ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
+    const rows = await env.DB.prepare(sql).bind(...chunk).all<{ ticker: string; lastDate: string | null }>();
+    for (const row of rows.results ?? []) {
+      lastDateByTicker.set(row.ticker.toUpperCase(), row.lastDate ?? null);
+    }
+  }
+  return unique.filter((ticker) => {
+    const lastDate = lastDateByTicker.get(ticker) ?? null;
+    return !lastDate || lastDate < thresholdDate;
+  });
+}
+
+async function maybeRefreshOverviewBars(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastOverviewBarRefreshAt < OVERVIEW_BAR_REFRESH_INTERVAL_MS) return;
+  lastOverviewBarRefreshAt = now;
+  const tickers = await loadOverviewTickers(env);
+  if (tickers.length === 0) return;
+  const staleTickers = await loadTickersMissingRecentBars(env, tickers, 14);
+  if (staleTickers.length === 0) return;
+  await refreshRecentBarsForTickers(env, staleTickers, 400);
+  await recomputeDashboardFromStoredBars(env);
 }
 
 async function loadSectorPageTickers(env: Env): Promise<string[]> {
@@ -540,6 +587,7 @@ app.get("/api/dashboard", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const date = c.req.query("date");
   await ensureOverviewCatalogCoverage(c.env);
+  await maybeRefreshOverviewBars(c.env);
   const data = await loadSnapshot(c.env, configId, date);
   c.header("Cache-Control", "public, max-age=300");
   return c.json(data);

@@ -5,6 +5,25 @@ import { getDashboard, getStatus } from "@/lib/api";
 
 export const revalidate = 0;
 
+type OverviewSection = Awaited<ReturnType<typeof getDashboard>>["sections"][number];
+type OverviewGroup = OverviewSection["groups"][number];
+
+function splitOverviewSectionGroups(section: OverviewSection): {
+  base: OverviewGroup[];
+  sector: OverviewGroup | null;
+  sectorEq: OverviewGroup | null;
+  thematic: OverviewGroup | null;
+  ordered: OverviewGroup[];
+} {
+  const groups = [...section.groups];
+  const thematic = groups.find((group) => group.title === "Thematic ETFs") ?? null;
+  const sector = groups.find((group) => group.title === "Sector ETFs") ?? null;
+  const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
+  const base = groups.filter((group) => group !== thematic && group !== sector && group !== sectorEq);
+  const ordered = [...base, ...(sector ? [sector] : []), ...(sectorEq ? [sectorEq] : []), ...(thematic ? [thematic] : [])];
+  return { base, sector, sectorEq, thematic, ordered };
+}
+
 export default async function HomePage() {
   const [status, dashboard] = await Promise.allSettled([getStatus(), getDashboard()]);
   const statusValue =
@@ -20,7 +39,9 @@ export default async function HomePage() {
         };
   const dashboardValue = dashboard.status === "fulfilled" ? dashboard.value : null;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
-  const sectionAnchorId = (sectionId: string) => `overview-section-${sectionId}`;
+  const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
+  const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
+  const jumpGroups = sectionLayouts.flatMap((entry) => entry.ordered.map((group) => ({ id: group.id, title: group.title })));
 
   return (
     <div className="space-y-4">
@@ -37,13 +58,13 @@ export default async function HomePage() {
       {focusedSections.length > 0 && (
         <div className="card p-3">
           <div className="flex flex-wrap gap-2">
-            {focusedSections.map((section) => (
+            {jumpGroups.map((group) => (
               <a
-                key={`overview-jump-${section.id}`}
+                key={`overview-jump-${group.id}`}
                 className="rounded bg-slate-800 px-3 py-1.5 text-sm text-slate-300 hover:bg-accent/20 hover:text-accent"
-                href={`#${sectionAnchorId(section.id)}`}
+                href={`#${groupAnchorId(group.id)}`}
               >
-                {section.title.replace(/^\d+\s*/, "")}
+                {group.title}
               </a>
             ))}
           </div>
@@ -53,63 +74,56 @@ export default async function HomePage() {
         <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
       )}
       <div className="grid gap-4">
-        {focusedSections.map((section) => (
-          <section key={section.id} id={sectionAnchorId(section.id)} className="space-y-3">
-            {(() => {
-              const groups = [...section.groups];
-              const thematic = groups.find((group) => group.title === "Thematic ETFs") ?? null;
-              const sector = groups.find((group) => group.title === "Sector ETFs") ?? null;
-              const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
-              const base = groups.filter((group) => group !== thematic && group !== sector && group !== sectorEq);
-              return (
-                <>
-                  {base.map((group) => (
-                    <GroupPanel
-                      key={group.id}
-                      title={group.title}
-                      rows={group.rows}
-                      columns={group.columns}
-                      defaultOpen
-                      pinTop10={group.pinTop10}
-                    />
-                  ))}
-                  {(sector || sectorEq) && (
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      {sector && (
-                        <GroupPanel
-                          key={sector.id}
-                          title={sector.title}
-                          rows={sector.rows}
-                          columns={sector.columns}
-                          defaultOpen
-                          pinTop10={sector.pinTop10}
-                        />
-                      )}
-                      {sectorEq && (
-                        <GroupPanel
-                          key={sectorEq.id}
-                          title={sectorEq.title}
-                          rows={sectorEq.rows}
-                          columns={sectorEq.columns}
-                          defaultOpen
-                          pinTop10={sectorEq.pinTop10}
-                        />
-                      )}
-                    </div>
-                  )}
-                  {thematic && (
-                    <GroupPanel
-                      key={thematic.id}
-                      title={thematic.title}
-                      rows={thematic.rows}
-                      columns={thematic.columns}
-                      defaultOpen
-                      pinTop10={thematic.pinTop10}
-                    />
-                  )}
-                </>
-              );
-            })()}
+        {sectionLayouts.map(({ section, base, sector, sectorEq, thematic }) => (
+          <section key={section.id} className="space-y-3">
+            {base.map((group) => (
+              <GroupPanel
+                key={group.id}
+                anchorId={groupAnchorId(group.id)}
+                title={group.title}
+                rows={group.rows}
+                columns={group.columns}
+                defaultOpen
+                pinTop10={group.pinTop10}
+              />
+            ))}
+            {(sector || sectorEq) && (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {sector && (
+                  <GroupPanel
+                    key={sector.id}
+                    anchorId={groupAnchorId(sector.id)}
+                    title={sector.title}
+                    rows={sector.rows}
+                    columns={sector.columns}
+                    defaultOpen
+                    pinTop10={sector.pinTop10}
+                  />
+                )}
+                {sectorEq && (
+                  <GroupPanel
+                    key={sectorEq.id}
+                    anchorId={groupAnchorId(sectorEq.id)}
+                    title={sectorEq.title}
+                    rows={sectorEq.rows}
+                    columns={sectorEq.columns}
+                    defaultOpen
+                    pinTop10={sectorEq.pinTop10}
+                  />
+                )}
+              </div>
+            )}
+            {thematic && (
+              <GroupPanel
+                key={thematic.id}
+                anchorId={groupAnchorId(thematic.id)}
+                title={thematic.title}
+                rows={thematic.rows}
+                columns={thematic.columns}
+                defaultOpen
+                pinTop10={false}
+              />
+            )}
           </section>
         ))}
       </div>

@@ -25,6 +25,7 @@ type Props = {
   columns: string[];
   defaultOpen?: boolean;
   pinTop10?: boolean;
+  anchorId?: string;
 };
 
 const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
@@ -35,7 +36,7 @@ const titleCase = (value: string): string => {
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
 
-export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false }: Props) {
+export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false, anchorId }: Props) {
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const defaultSortKey = columns.includes("1D")
     ? "1D"
@@ -85,7 +86,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setSortDir(col === "1D" ? "desc" : "asc");
   };
   return (
-    <Collapsible.Root defaultOpen={defaultOpen} className="card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)]">
+    <Collapsible.Root id={anchorId} defaultOpen={defaultOpen} className="card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)]">
       <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft px-4 py-3 text-left">
         <span className="font-medium tracking-wide">{title}</span>
         <ChevronDown className="h-4 w-4" />
