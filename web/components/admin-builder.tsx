@@ -607,7 +607,7 @@ export function AdminBuilder() {
             <table className="min-w-full text-xs">
               <thead className="bg-slate-900/60">
                 <tr>
-                  {["Ticker", "Status", "Records", "Source", "Last Synced", "Error"].map((h) => (
+                  {["Ticker", "Status", "Records", "Cached Data", "Source", "Last Synced", "Error"].map((h) => (
                     <th key={h} className="px-2 py-1 text-left font-semibold text-slate-300">{h}</th>
                   ))}
                 </tr>
@@ -618,6 +618,7 @@ export function AdminBuilder() {
                     <td className="px-2 py-1">{row.etfTicker}</td>
                     <td className="px-2 py-1">{row.status ?? "-"}</td>
                     <td className="px-2 py-1">{row.recordsCount ?? 0}</td>
+                    <td className="px-2 py-1">{(row.recordsCount ?? 0) > 0 ? "Yes" : "No"}</td>
                     <td className="px-2 py-1">{row.source ?? "-"}</td>
                     <td className="px-2 py-1">{formatDateTimeCompact(row.lastSyncedAt)}</td>
                     <td className="max-w-[420px] truncate px-2 py-1 text-red-300" title={row.error ?? ""}>{row.error ?? "-"}</td>
@@ -625,7 +626,7 @@ export function AdminBuilder() {
                 ))}
                 {etfSyncStatus.length === 0 && (
                   <tr>
-                    <td className="px-2 py-2 text-slate-400" colSpan={6}>No sync status rows found.</td>
+                    <td className="px-2 py-2 text-slate-400" colSpan={7}>No sync status rows found.</td>
                   </tr>
                 )}
               </tbody>

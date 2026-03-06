@@ -47,6 +47,10 @@ const INVESCO_ETF_DISCOVERY_URLS = [
   "https://www.invesco.com/us/en/financial-products/etfs.html?assetClass=Equity",
 ];
 
+const INVESCO_KNOWN_CUSIP_BY_TICKER: Record<string, string> = {
+  TAN: "46138G706",
+};
+
 function shouldPreferSsgaFundData(etfTicker: string): boolean {
   if (SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) return true;
   // Most SPDR funds use X* symbols and can often be resolved through SSGA fund-data files.
@@ -280,6 +284,97 @@ function extractCsvLinksFromHtml(html: string): string[] {
     urls.push(match[1]);
   }
   return urls;
+}
+
+function parseInvescoApiRows(rows: Array<{ ticker?: string | null; issuerName?: string | null; percentageOfTotalNetAssets?: number | null; securityTypeName?: string | null }>): EtfConstituent[] {
+  const out: EtfConstituent[] = [];
+  for (const row of rows) {
+    const securityType = String(row.securityTypeName ?? "").toLowerCase();
+    if (securityType.includes("currency") || securityType.includes("cash")) continue;
+    const ticker = normalizeTicker(row.ticker ?? undefined);
+    if (!ticker || ticker === "USD" || ticker === "CASH") continue;
+    const weightRaw = row.percentageOfTotalNetAssets;
+    const weight = typeof weightRaw === "number" && Number.isFinite(weightRaw) ? weightRaw : null;
+    out.push({
+      ticker,
+      name: row.issuerName?.trim() || null,
+      weight,
+    });
+  }
+  const dedup = new Map<string, EtfConstituent>();
+  for (const row of out) {
+    if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+  }
+  return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+}
+
+function extractInvescoHtmlMeta(html: string): { cusip: string | null; locale: string; idType: string } {
+  const decode = (value: string) => value.replace(/&#34;/g, "\"").replace(/&quot;/g, "\"");
+  const normalized = decode(html);
+  const find = (patterns: RegExp[]): string | null => {
+    for (const p of patterns) {
+      const m = normalized.match(p);
+      if (m?.[1]) return m[1].trim();
+    }
+    return null;
+  };
+  const cusip = find([
+    /"cusip"\s*:\s*"([A-Z0-9]{9})"/i,
+  ]);
+  const locale = find([
+    /"locale"\s*:\s*"([a-z]{2}_[A-Z]{2})"/,
+  ]) ?? "en_US";
+  const idType = (find([
+    /"uniqueIdentifier"\s*:\s*"([a-zA-Z0-9_-]+)"/,
+  ]) ?? "cusip").toLowerCase();
+  return { cusip, locale, idType };
+}
+
+async function fetchInvescoApiConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+  let cusip = INVESCO_KNOWN_CUSIP_BY_TICKER[etfTicker] ?? null;
+  let locale = "en_US";
+  let idType = "cusip";
+
+  if (!cusip) {
+    const pageUrl = INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker];
+    if (!pageUrl) {
+      throw new Error(`No known Invesco page metadata mapping for ${etfTicker}`);
+    }
+    const pageRes = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "market-command-centre/1.0",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (!pageRes.ok) {
+      throw new Error(`Invesco product page fetch failed (${pageRes.status})`);
+    }
+    const html = await pageRes.text();
+    const meta = extractInvescoHtmlMeta(html);
+    cusip = meta.cusip;
+    locale = meta.locale;
+    idType = meta.idType;
+  }
+
+  if (!cusip) throw new Error(`Could not resolve Invesco identifier for ${etfTicker}`);
+  const url = `https://dng-api.invesco.com/cache/v1/accounts/${encodeURIComponent(locale)}/shareclasses/${encodeURIComponent(cusip)}/holdings/fund?idType=${encodeURIComponent(idType)}&productType=ETF`;
+  const res = await fetch(url, { headers: { "User-Agent": "market-command-centre/1.0" } });
+  if (!res.ok) {
+    throw new Error(`Invesco holdings API failed (${res.status})`);
+  }
+  const json = (await res.json()) as {
+    holdings?: Array<{
+      ticker?: string | null;
+      issuerName?: string | null;
+      percentageOfTotalNetAssets?: number | null;
+      securityTypeName?: string | null;
+    }>;
+  };
+  const parsed = parseInvescoApiRows(json.holdings ?? []);
+  if (parsed.length === 0) {
+    throw new Error("Invesco holdings API returned no usable holdings");
+  }
+  return parsed;
 }
 
 async function fetchInvescoConstituents(etfTicker: string): Promise<EtfConstituent[]> {
@@ -564,21 +659,34 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   }
 
   if (holdings.length === 0 && invesco.prefer) {
-    source = "invesco:portfolio-csv";
+    source = "invesco:holdings-api";
     try {
-      holdings = await fetchInvescoConstituents(etfTicker);
-      if (holdings.length === 0) throw new Error("Invesco returned no holdings");
+      holdings = await fetchInvescoApiConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("Invesco holdings API returned no holdings");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Invesco sync failed";
+      const message = error instanceof Error ? error.message : "Invesco holdings API sync failed";
       errors.push(message);
       if (isTooManySubrequestsError(error)) {
         await persistSyncErrorAndThrow(env, etfTicker, source, errors);
       }
     }
+    if (holdings.length === 0) {
+      source = "invesco:portfolio-csv";
+      try {
+        holdings = await fetchInvescoConstituents(etfTicker);
+        if (holdings.length === 0) throw new Error("Invesco returned no holdings");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invesco CSV sync failed";
+        errors.push(message);
+        if (isTooManySubrequestsError(error)) {
+          await persistSyncErrorAndThrow(env, etfTicker, source, errors);
+        }
+      }
+    }
   }
 
   if (holdings.length === 0 && invesco.strict) {
-    await persistSyncErrorAndThrow(env, etfTicker, "invesco:portfolio-csv", errors.length > 0 ? errors : ["Invesco holdings sync failed"]);
+    await persistSyncErrorAndThrow(env, etfTicker, source.startsWith("invesco:") ? source : "invesco:holdings-api", errors.length > 0 ? errors : ["Invesco holdings sync failed"]);
   }
 
   if (holdings.length === 0) {
