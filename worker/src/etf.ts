@@ -35,10 +35,33 @@ const SSGA_SPDR_PAGE_BY_TICKER: Record<string, string> = {
   XLP: "https://www.ssga.com/us/en/intermediary/etfs/state-street-consumer-staples-select-sector-spdr-etf-xlp",
 };
 
+const INVESCO_KNOWN_PAGE_BY_TICKER: Record<string, string> = {
+  TAN: "https://www.invesco.com/us/en/financial-products/etfs/invesco-solar-etf.html",
+  PBW: "https://www.invesco.com/us/en/financial-products/etfs/invesco-wilderhill-clean-energy-etf.html",
+  PJP: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-pharmaceuticals-etf.html",
+  PSI: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-semiconductors-etf.html",
+  PNQI: "https://www.invesco.com/us/en/financial-products/etfs/invesco-nasdaq-internet-etf.html",
+};
+
+const INVESCO_ETF_DISCOVERY_URLS = [
+  "https://www.invesco.com/us/en/financial-products/etfs.html?assetClass=Equity",
+];
+
 function shouldPreferSsgaFundData(etfTicker: string): boolean {
   if (SSGA_SELECT_SECTOR_SPDR_TICKERS.has(etfTicker)) return true;
   // Most SPDR funds use X* symbols and can often be resolved through SSGA fund-data files.
   return /^X[A-Z]{1,5}$/.test(etfTicker);
+}
+
+async function shouldPreferInvescoData(env: Env, etfTicker: string): Promise<boolean> {
+  if (INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker]) return true;
+  const row = await env.DB.prepare(
+    "SELECT COALESCE((SELECT fund_name FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1), (SELECT name FROM symbols WHERE ticker = ? LIMIT 1)) as fundName",
+  )
+    .bind(etfTicker, etfTicker)
+    .first<{ fundName: string | null }>();
+  const name = (row?.fundName ?? "").toLowerCase();
+  return name.includes("invesco") || name.includes("powershares");
 }
 
 function isTooManySubrequestsError(error: unknown): boolean {
@@ -169,6 +192,167 @@ function parseSsgaWorkbookRows(buffer: ArrayBuffer): EtfConstituent[] {
     if (parsed.length > 0) return parsed;
   }
   return [];
+}
+
+function normalizeCsvUrl(raw: string, pageUrl: string): string | null {
+  const cleaned = raw.replace(/&amp;/g, "&").trim();
+  if (!cleaned) return null;
+  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  if (cleaned.startsWith("//")) return `https:${cleaned}`;
+  if (cleaned.startsWith("/")) return `https://www.invesco.com${cleaned}`;
+  try {
+    return new URL(cleaned, pageUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+function findInvescoHeaderIndexes(rows: string[][]): { headerRowIndex: number; tickerIdx: number; weightIdx: number; nameIdx: number } | null {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    let tickerIdx = -1;
+    let weightIdx = -1;
+    let nameIdx = -1;
+    row.forEach((cell, i) => {
+      const v = String(cell ?? "").toLowerCase().trim();
+      if (tickerIdx < 0 && (v === "ticker" || v === "symbol" || v.includes("holding ticker"))) tickerIdx = i;
+      if (weightIdx < 0 && (v === "weight" || v.includes("% net assets") || v.includes("portfolio weight") || v.includes("percent of fund"))) weightIdx = i;
+      if (nameIdx < 0 && (v === "name" || v.includes("holding") || v.includes("security"))) nameIdx = i;
+    });
+    if (tickerIdx >= 0 && weightIdx >= 0) return { headerRowIndex: rowIndex, tickerIdx, weightIdx, nameIdx };
+  }
+  return null;
+}
+
+function parseInvescoDelimitedRows(raw: string): EtfConstituent[] {
+  const lines = raw
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const delimiter: "," | "\t" = lines.some((l) => l.includes("\t")) ? "\t" : ",";
+  const rows = lines.map((l) => splitDelimitedRow(l, delimiter));
+  const header = findInvescoHeaderIndexes(rows);
+  if (!header) return [];
+
+  const out: EtfConstituent[] = [];
+  for (const row of rows.slice(header.headerRowIndex + 1)) {
+    const ticker = normalizeTicker(row[header.tickerIdx]);
+    if (!ticker || ticker === "CASH" || ticker === "USD") continue;
+    const weight = parseWeightCell(row[header.weightIdx]);
+    const nameCell = header.nameIdx >= 0 ? row[header.nameIdx] : null;
+    const name = typeof nameCell === "string" && nameCell.trim().length > 0 ? nameCell.trim() : null;
+    out.push({ ticker, name, weight });
+  }
+  const dedup = new Map<string, EtfConstituent>();
+  for (const row of out) {
+    if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+  }
+  return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+}
+
+function extractInvescoPageLinks(html: string, etfTicker: string): string[] {
+  const links: string[] = [];
+  const anchorRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const href = match[1];
+    const text = match[2]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() ?? "";
+    if (!/\/financial-products\/etfs\/.+\.html/i.test(href)) continue;
+    const haystack = `${href} ${text}`.toUpperCase();
+    if (!haystack.includes(etfTicker.toUpperCase())) continue;
+    links.push(href);
+  }
+  return links;
+}
+
+function extractCsvLinksFromHtml(html: string): string[] {
+  const urls: string[] = [];
+  const absolute = html.match(/https?:\/\/[^"'\\s>]+\.csv(?:\?[^"'\\s>]*)?/gi) ?? [];
+  urls.push(...absolute);
+  const hrefRegex = /href=["']([^"']+\.csv(?:\?[^"']*)?)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = hrefRegex.exec(html)) !== null) {
+    urls.push(match[1]);
+  }
+  return urls;
+}
+
+async function fetchInvescoConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+  const searchPages = [
+    ...INVESCO_ETF_DISCOVERY_URLS,
+    `https://www.invesco.com/us/en/financial-products/etfs.html?assetClass=Equity&query=${encodeURIComponent(etfTicker)}`,
+    `https://www.invesco.com/us/en/search.html?q=${encodeURIComponent(etfTicker)}`,
+  ];
+  const etfPageCandidates = new Set<string>();
+  if (INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker]) {
+    etfPageCandidates.add(INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker]);
+  }
+
+  for (const url of searchPages) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      for (const href of extractInvescoPageLinks(html, etfTicker)) {
+        const normalized = normalizeCsvUrl(href, url);
+        if (normalized) etfPageCandidates.add(normalized);
+      }
+    } catch {
+      // Continue with whatever URLs we already have.
+    }
+  }
+
+  const csvCandidates = new Set<string>();
+  for (const pageUrl of etfPageCandidates) {
+    try {
+      const pageRes = await fetch(pageUrl, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (!pageRes.ok) continue;
+      const html = await pageRes.text();
+      for (const raw of extractCsvLinksFromHtml(html)) {
+        const normalized = normalizeCsvUrl(raw, pageUrl);
+        if (normalized) csvCandidates.add(normalized);
+      }
+    } catch {
+      // Continue to other page candidates.
+    }
+  }
+
+  const errors: string[] = [];
+  for (const csvUrl of csvCandidates) {
+    try {
+      const res = await fetch(csvUrl, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "text/csv,application/octet-stream,*/*",
+          Referer: "https://www.invesco.com/us/en/financial-products/etfs.html",
+        },
+      });
+      if (!res.ok) {
+        errors.push(`${new URL(csvUrl).pathname} (${res.status})`);
+        continue;
+      }
+      const csv = await res.text();
+      const parsed = parseInvescoDelimitedRows(csv);
+      if (parsed.length > 0) return parsed;
+      errors.push(`${new URL(csvUrl).pathname} (parsed 0 rows)`);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "unknown");
+    }
+  }
+  throw new Error(`Invesco holdings CSV parse returned no holdings (${errors.slice(0, 5).join(" | ")})`);
 }
 
 async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<EtfConstituent[]> {
@@ -357,6 +541,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   let source = "unknown";
   let holdings: EtfConstituent[] = [];
   const errors: string[] = [];
+  const preferInvesco = await shouldPreferInvescoData(env, etfTicker);
   if (shouldPreferSsgaFundData(etfTicker)) {
     source = "ssga:fund-data";
     try {
@@ -364,6 +549,20 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       if (holdings.length === 0) throw new Error("SSGA returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "SSGA sync failed";
+      errors.push(message);
+      if (isTooManySubrequestsError(error)) {
+        await persistSyncErrorAndThrow(env, etfTicker, source, errors);
+      }
+    }
+  }
+
+  if (holdings.length === 0 && preferInvesco) {
+    source = "invesco:portfolio-csv";
+    try {
+      holdings = await fetchInvescoConstituents(etfTicker);
+      if (holdings.length === 0) throw new Error("Invesco returned no holdings");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invesco sync failed";
       errors.push(message);
       if (isTooManySubrequestsError(error)) {
         await persistSyncErrorAndThrow(env, etfTicker, source, errors);

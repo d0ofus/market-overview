@@ -849,7 +849,11 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   const hasNoRecords = baseRows.length === 0;
   const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
   const hasCachedRows = baseRows.length > 0;
-  const shouldSync = forceSync || (hasCachedRows && isStaleDate(status?.lastSyncedAt, 45)) || (hasKnownError && !isRecentError && hasCachedRows);
+  const shouldSync =
+    forceSync ||
+    (hasNoRecords && !isRecentError) ||
+    (hasCachedRows && isStaleDate(status?.lastSyncedAt, 45)) ||
+    (hasKnownError && !isRecentError && hasCachedRows);
   let warning: string | null = null;
   if (shouldSync) {
     try {
@@ -1052,6 +1056,9 @@ app.post("/api/admin/etfs", async (c) => {
     ),
     c.env.DB.prepare("INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(ticker, meta?.name ?? fundName, meta?.exchange ?? "NYSEARCA", "etf", body.parentSector ?? null, body.industry ?? null),
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'watchlist:add', 0, CURRENT_TIMESTAMP)",
+    ).bind(ticker),
   ]);
   await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry });
   return c.json({ ok: true, ticker });

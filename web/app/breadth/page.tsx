@@ -132,12 +132,13 @@ export default async function BreadthPage() {
         unavailable: Array.isArray(summaryApi.unavailable) ? summaryApi.unavailable : [],
       }
     : buildSummaryFromUniverseRows(historyByUniverse, status.asOfDate);
+  const statusAsOfDate = status.asOfDate ?? summary.asOfDate ?? null;
   const statusLastUpdated = status.lastUpdated ?? (summary.asOfDate ? `${summary.asOfDate}T00:00:00Z` : null);
 
   return (
     <div className="space-y-4">
       <StatusBar
-        asOfDate={status.asOfDate}
+        asOfDate={statusAsOfDate}
         lastUpdated={statusLastUpdated}
         timezone={status.timezone}
         autoRefreshLabel={status.autoRefreshLabel}
