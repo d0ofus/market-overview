@@ -132,12 +132,13 @@ export default async function BreadthPage() {
         unavailable: Array.isArray(summaryApi.unavailable) ? summaryApi.unavailable : [],
       }
     : buildSummaryFromUniverseRows(historyByUniverse, status.asOfDate);
+  const statusLastUpdated = status.lastUpdated ?? (summary.asOfDate ? `${summary.asOfDate}T00:00:00Z` : null);
 
   return (
     <div className="space-y-4">
       <StatusBar
         asOfDate={status.asOfDate}
-        lastUpdated={status.lastUpdated}
+        lastUpdated={statusLastUpdated}
         timezone={status.timezone}
         autoRefreshLabel={status.autoRefreshLabel}
         providerLabel={status.providerLabel}
@@ -145,7 +146,6 @@ export default async function BreadthPage() {
       <div className="flex justify-end">
         <ManualRefreshButton page="breadth" />
       </div>
-      <h2 className="text-xl font-semibold">03 Market Breadth & Sentiment</h2>
       <BreadthPanels rows={historyRows} summary={summary} histories={historyByUniverse} footer={<EqualWeightComps />} />
     </div>
   );

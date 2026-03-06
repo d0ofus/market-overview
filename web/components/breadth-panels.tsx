@@ -90,11 +90,15 @@ const metricSourceMap = [
 ];
 
 function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (Number.isFinite(parsed)) return parsed;
+  const fallbackParsed = typeof fallback === "number" ? fallback : Number(fallback);
+  return Number.isFinite(fallbackParsed) ? fallbackParsed : 0;
 }
 
 function asNullableNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function colorForPercent(value: number, threshold = 0): string {
@@ -241,6 +245,18 @@ export function BreadthPanels({
     return summaryRows.find((r) => r.universeId === "sp500-core") ?? summaryRows[0] ?? null;
   }, [summaryRows]);
 
+  const historicalRows = useMemo(
+    () =>
+      historyRows
+        .map((row, i) => ({
+          row,
+          metrics: normalizeMetrics(row),
+          prevMetrics: i > 0 ? normalizeMetrics(historyRows[i - 1]) : null,
+        }))
+        .reverse(),
+    [historyRows],
+  );
+
   return (
     <div className="space-y-4">
       {headline && (
@@ -283,16 +299,19 @@ export function BreadthPanels({
               </tr>
             </thead>
             <tbody>
-              {summaryRows.map((row) => (
-                <tr key={`ma-${row.universeId}`} className="border-t border-borderSoft/60">
-                  <td className="px-3 py-2">{row.universeName}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove5MA, 50)}`}>{pct(row.metrics.pctAbove5MA)}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove20MA, 50)}`}>{pct(row.metrics.pctAbove20MA)}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove50MA, 50)}`}>{pct(row.metrics.pctAbove50MA)}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove100MA, 50)}`}>{pct(row.metrics.pctAbove100MA)}</td>
-                  <td className={`px-3 py-2 ${colorForPercent(row.metrics.pctAbove200MA, 50)}`}>{pct(row.metrics.pctAbove200MA)}</td>
-                </tr>
-              ))}
+              {summaryRows.map((row) => {
+                const prev = previousByUniverse.get(row.universeId);
+                return (
+                  <tr key={`ma-${row.universeId}`} className="border-t border-borderSoft/60">
+                    <td className="px-3 py-2">{row.universeName}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove5MA, prev?.pctAbove5MA)}`}>{pct(row.metrics.pctAbove5MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove20MA, prev?.pctAbove20MA)}`}>{pct(row.metrics.pctAbove20MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove50MA, prev?.pctAbove50MA)}`}>{pct(row.metrics.pctAbove50MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove100MA, prev?.pctAbove100MA)}`}>{pct(row.metrics.pctAbove100MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove200MA, prev?.pctAbove200MA)}`}>{pct(row.metrics.pctAbove200MA)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -424,7 +443,19 @@ export function BreadthPanels({
             <LineChart data={chartData}>
               <XAxis dataKey="asOfDate" tick={{ fill: "#94A3B8", fontSize: 11 }} />
               <YAxis tick={{ fill: "#94A3B8", fontSize: 11 }} />
-              <Tooltip />
+              <Tooltip
+                content={({ active, payload, label }) => {
+                  if (!active || !payload?.length) return null;
+                  const raw = payload[0]?.value;
+                  const value = typeof raw === "number" ? raw : Number(raw ?? 0);
+                  return (
+                    <div className="rounded border border-slate-600/50 bg-slate-950/95 px-2 py-1 text-xs text-slate-100">
+                      <div>{label}</div>
+                      <div>{value.toFixed(2)}</div>
+                    </div>
+                  );
+                }}
+              />
               <Line type="monotone" dataKey="metricValue" stroke="#38BDF8" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -445,32 +476,31 @@ export function BreadthPanels({
               </tr>
             </thead>
             <tbody>
-              {[...historyRows].reverse().map((row) => {
-                const metrics = normalizeMetrics(row);
+              {historicalRows.map(({ row, metrics, prevMetrics }) => {
                 return (
                   <tr key={row.asOfDate} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{row.asOfDate}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.advancers - metrics.decliners, 0)}`}>{metrics.advancers}</td>
-                    <td className="px-3 py-2">{metrics.decliners}</td>
-                    <td className="px-3 py-2">{metrics.unchanged}</td>
-                    <td className={`px-3 py-2 ${colorForPercent((metrics.advDecRatio ?? 0) - 1, 0)}`}>{ratioText(metrics.advDecRatio)}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove5MA, 50)}`}>{pct(metrics.pctAbove5MA)}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove20MA, 50)}`}>{pct(metrics.pctAbove20MA)}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove50MA, 50)}`}>{pct(metrics.pctAbove50MA)}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove100MA, 50)}`}>{pct(metrics.pctAbove100MA)}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.pctAbove200MA, 50)}`}>{pct(metrics.pctAbove200MA)}</td>
-                    <td className="px-3 py-2">{metrics.new5DHighs}</td>
-                    <td className="px-3 py-2">{metrics.new1MHighs}</td>
-                    <td className="px-3 py-2">{metrics.new3MHighs}</td>
-                    <td className="px-3 py-2">{metrics.new6MHighs}</td>
-                    <td className="px-3 py-2">{metrics.new52WHighs}</td>
-                    <td className="px-3 py-2">{numFmt.format(Math.round(metrics.totalVolume))}</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.medianReturn1D, 0)}`}>{metrics.medianReturn1D.toFixed(2)}%</td>
-                    <td className={`px-3 py-2 ${colorForPercent(metrics.medianReturn5D, 0)}`}>{metrics.medianReturn5D.toFixed(2)}%</td>
-                    <td className="px-3 py-2">{metrics.stocksGtPos4Pct}</td>
-                    <td className="px-3 py-2">{metrics.stocksLtNeg4Pct}</td>
-                    <td className="px-3 py-2">{metrics.stocksGtPos25Q}</td>
-                    <td className="px-3 py-2">{metrics.stocksLtNeg25Q}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.advancers, prevMetrics?.advancers)}`}>{metrics.advancers}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.decliners, prevMetrics?.decliners)}`}>{metrics.decliners}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.unchanged, prevMetrics?.unchanged)}`}>{metrics.unchanged}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.advDecRatio ?? 0, prevMetrics?.advDecRatio ?? null)}`}>{ratioText(metrics.advDecRatio)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove5MA, prevMetrics?.pctAbove5MA)}`}>{pct(metrics.pctAbove5MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove20MA, prevMetrics?.pctAbove20MA)}`}>{pct(metrics.pctAbove20MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove50MA, prevMetrics?.pctAbove50MA)}`}>{pct(metrics.pctAbove50MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove100MA, prevMetrics?.pctAbove100MA)}`}>{pct(metrics.pctAbove100MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove200MA, prevMetrics?.pctAbove200MA)}`}>{pct(metrics.pctAbove200MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new5DHighs, prevMetrics?.new5DHighs)}`}>{metrics.new5DHighs}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new1MHighs, prevMetrics?.new1MHighs)}`}>{metrics.new1MHighs}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new3MHighs, prevMetrics?.new3MHighs)}`}>{metrics.new3MHighs}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new6MHighs, prevMetrics?.new6MHighs)}`}>{metrics.new6MHighs}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new52WHighs, prevMetrics?.new52WHighs)}`}>{metrics.new52WHighs}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.totalVolume, prevMetrics?.totalVolume)}`}>{numFmt.format(Math.round(metrics.totalVolume))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.medianReturn1D, prevMetrics?.medianReturn1D)}`}>{metrics.medianReturn1D.toFixed(2)}%</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.medianReturn5D, prevMetrics?.medianReturn5D)}`}>{metrics.medianReturn5D.toFixed(2)}%</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksGtPos4Pct, prevMetrics?.stocksGtPos4Pct)}`}>{metrics.stocksGtPos4Pct}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksLtNeg4Pct, prevMetrics?.stocksLtNeg4Pct)}`}>{metrics.stocksLtNeg4Pct}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksGtPos25Q, prevMetrics?.stocksGtPos25Q)}`}>{metrics.stocksGtPos25Q}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksLtNeg25Q, prevMetrics?.stocksLtNeg25Q)}`}>{metrics.stocksLtNeg25Q}</td>
                   </tr>
                 );
               })}

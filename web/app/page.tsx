@@ -6,20 +6,35 @@ import { getDashboard, getStatus } from "@/lib/api";
 export const revalidate = 0;
 
 export default async function HomePage() {
-  const [status, dashboard] = await Promise.all([getStatus(), getDashboard()]);
-  const focusedSections = dashboard.sections.filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
+  const [status, dashboard] = await Promise.allSettled([getStatus(), getDashboard()]);
+  const statusValue =
+    status.status === "fulfilled"
+      ? status.value
+      : {
+          timezone: "Australia/Melbourne",
+          autoRefreshLabel: "08:15 Australia/Melbourne",
+          autoRefreshLocalTime: "08:15",
+          lastUpdated: null,
+          asOfDate: null,
+          providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+        };
+  const dashboardValue = dashboard.status === "fulfilled" ? dashboard.value : null;
+  const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   return (
     <div className="space-y-4">
       <StatusBar
-        asOfDate={status.asOfDate}
-        lastUpdated={status.lastUpdated}
-        timezone={status.timezone}
-        autoRefreshLabel={status.autoRefreshLabel}
-        providerLabel={status.providerLabel}
+        asOfDate={statusValue.asOfDate}
+        lastUpdated={statusValue.lastUpdated}
+        timezone={statusValue.timezone}
+        autoRefreshLabel={statusValue.autoRefreshLabel}
+        providerLabel={statusValue.providerLabel}
       />
       <div className="flex justify-end">
         <ManualRefreshButton page="overview" />
       </div>
+      {!dashboardValue && (
+        <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
+      )}
       <div className="grid gap-3 md:grid-cols-2">
         {focusedSections.map((section) => (
           <div key={section.id} className="card p-4">

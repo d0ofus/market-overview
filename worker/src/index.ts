@@ -352,17 +352,46 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/status", async (c) => {
-  const config = await c.env.DB.prepare(
-    "SELECT id, name, timezone, eod_run_local_time as eodRunLocalTime, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
-  ).first<{ id: string; name: string; timezone: string; eodRunLocalTime: string; eodRunTimeLabel: string }>();
+  let config:
+    | {
+        id: string;
+        name: string;
+        timezone: string;
+        eodRunLocalTime: string;
+        eodRunTimeLabel: string;
+      }
+    | null = null;
+  try {
+    config = await c.env.DB.prepare(
+      "SELECT id, name, timezone, eod_run_local_time as eodRunLocalTime, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
+    ).first<{ id: string; name: string; timezone: string; eodRunLocalTime: string; eodRunTimeLabel: string }>();
+  } catch {
+    const legacy = await c.env.DB.prepare(
+      "SELECT id, name, timezone, eod_run_time_label as eodRunTimeLabel FROM dashboard_configs WHERE is_default = 1 LIMIT 1",
+    ).first<{ id: string; name: string; timezone: string; eodRunTimeLabel: string }>();
+    config = legacy
+      ? {
+          ...legacy,
+          eodRunLocalTime: "08:15",
+          eodRunTimeLabel: legacy.eodRunTimeLabel || formatAutoRefreshLabel("08:15", legacy.timezone),
+        }
+      : null;
+  }
+
   const latest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
     .bind(config?.id ?? "default")
     .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
+  let fallbackBreadthDate: string | null = null;
+  if (!latest?.generatedAt && !latest?.generated_at) {
+    const breadthLatest = await c.env.DB.prepare("SELECT as_of_date as asOfDate FROM breadth_snapshots ORDER BY as_of_date DESC LIMIT 1")
+      .first<{ asOfDate?: string; as_of_date?: string }>();
+    fallbackBreadthDate = breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null;
+  }
 
   const normalizedLastUpdated = latest?.generatedAt ?? latest?.generated_at ?? null;
-  const normalizedAsOf = latest?.asOfDate ?? latest?.as_of_date ?? null;
+  const normalizedAsOf = latest?.asOfDate ?? latest?.as_of_date ?? fallbackBreadthDate;
   const normalizedProvider = latest?.providerLabel ?? latest?.provider_label ?? null;
 
   return c.json({
@@ -370,7 +399,7 @@ app.get("/api/status", async (c) => {
     timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "Australia/Melbourne",
     autoRefreshLabel: config?.eodRunTimeLabel ?? formatAutoRefreshLabel(config?.eodRunLocalTime, config?.timezone),
     autoRefreshLocalTime: config?.eodRunLocalTime ?? "22:15",
-    lastUpdated: normalizedLastUpdated,
+    lastUpdated: normalizedLastUpdated ?? (fallbackBreadthDate ? `${fallbackBreadthDate}T00:00:00Z` : null),
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider ?? "Alpaca (IEX Delayed Daily Bars)",
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",

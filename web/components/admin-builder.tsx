@@ -13,6 +13,18 @@ const refreshTimezoneOptions = [
   { label: "New York", value: "America/New_York" },
 ] as const;
 
+function formatDateTimeCompact(value: string | null | undefined): string {
+  if (!value) return "-";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+}
+
 export function AdminBuilder() {
   const [data, setData] = useState<SnapshotResponse["config"] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -607,7 +619,7 @@ export function AdminBuilder() {
                     <td className="px-2 py-1">{row.status ?? "-"}</td>
                     <td className="px-2 py-1">{row.recordsCount ?? 0}</td>
                     <td className="px-2 py-1">{row.source ?? "-"}</td>
-                    <td className="px-2 py-1">{row.lastSyncedAt ?? "-"}</td>
+                    <td className="px-2 py-1">{formatDateTimeCompact(row.lastSyncedAt)}</td>
                     <td className="max-w-[420px] truncate px-2 py-1 text-red-300" title={row.error ?? ""}>{row.error ?? "-"}</td>
                   </tr>
                 ))}
