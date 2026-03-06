@@ -2,28 +2,22 @@ import type { DashboardConfigPayload, Env } from "./types";
 
 const uid = () => crypto.randomUUID();
 const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline"];
-const overviewPerformanceColumns = new Set(["1D", "5D", "1W", "3M", "6M", "YTD"]);
 
 function normalizeOverviewColumns(columns: string[]): string[] {
-  const withoutPerf = columns.filter((col) => !overviewPerformanceColumns.has(col));
-  const insertAtPrice = withoutPerf.indexOf("price");
-  const insertAtName = withoutPerf.indexOf("name");
-  const insertAtTicker = withoutPerf.indexOf("ticker");
-  const insertAt = insertAtPrice >= 0
-    ? insertAtPrice + 1
-    : insertAtName >= 0
-      ? insertAtName + 1
-      : insertAtTicker >= 0
-        ? insertAtTicker + 1
-        : withoutPerf.length;
+  const includeTicker = columns.includes("ticker");
+  const includeName = columns.includes("name");
+  const includePrice = columns.includes("price");
+  const includeSparkline = columns.includes("sparkline");
   const normalized = [
-    ...withoutPerf.slice(0, insertAt),
+    ...(includeTicker ? ["ticker"] : []),
+    ...(includeName ? ["name"] : []),
+    ...(includePrice ? ["price"] : []),
     "1D",
     "1W",
     "3M",
     "6M",
     "YTD",
-    ...withoutPerf.slice(insertAt),
+    ...(includeSparkline ? ["sparkline"] : []),
   ];
   return Array.from(new Set(normalized));
 }
