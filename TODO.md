@@ -1,19 +1,16 @@
 # TODO
 
 ## Overview
-- Improve subtitles on Overview page
 - Add multiple chart view of commodities
 - Fix VIX data 
-- Add side by side column for equal weight sector ETFs
 - Add RS chart (like my google sheets dashboard)
+- Add clickable links to the constituents and their charts too
 
 ## Breadth
 - Scoring for market breadth for overall 
 - Add other more bespoke breadth metrics
 - Make EOD timing after market but before Aus wake up
 - Add in Chart of S&P with mcllean oscillator
-- Add in all industry/thematic ETFs and show top 10 by 1W % Change
-- Color 'Other Breadth Indicators', 'Stocks making new highs' and Adv/Dec + Volume
 
 ## 13F Tracker
 - Automatic weekly/monthly pull of data for 13F 
@@ -24,14 +21,15 @@
 - Add OHLCV in status line of charts
 - Add in tickers from ETF list and give codex the source to get the information from
 
-- Add another section for top 1W % Chg Industry ETFs
-
 ## General
+- Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
 - See what other features in google sheets that is good
 - Add small logo on the webpage 
 - Light/Dark mode toggle
 - Add Calendar of US holidays
+- Add in alerts pulled from TV and multi-chart view
 
 ### 🔴 High Priority
 ### 🟡 Medium
 ### 🟢 Low / Future
+
