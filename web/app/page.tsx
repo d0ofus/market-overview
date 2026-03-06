@@ -25,6 +25,13 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   return { base, sector, sectorEq, thematic, ordered };
 }
 
+function overviewGroupLabel(title: string): string {
+  if (title === "Thematic ETFs" || title.startsWith("Industry/Thematic ETFs")) {
+    return "Industry/Thematic ETFs";
+  }
+  return title;
+}
+
 export default async function HomePage() {
   const [status, dashboard] = await Promise.allSettled([getStatus(), getDashboard()]);
   const statusValue =
@@ -42,7 +49,9 @@ export default async function HomePage() {
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
-  const jumpGroups = sectionLayouts.flatMap((entry) => entry.ordered.map((group) => ({ id: group.id, title: group.title })));
+  const jumpGroups = sectionLayouts.flatMap((entry) =>
+    entry.ordered.map((group) => ({ id: group.id, title: overviewGroupLabel(group.title) })),
+  );
 
   return (
     <div className="space-y-4">
@@ -118,7 +127,7 @@ export default async function HomePage() {
               <GroupPanel
                 key={thematic.id}
                 anchorId={groupAnchorId(thematic.id)}
-                title={`${thematic.title} (${thematic.rows.length})`}
+                title={`Industry/Thematic ETFs (${thematic.rows.length})`}
                 rows={thematic.rows}
                 columns={thematic.columns}
                 defaultOpen

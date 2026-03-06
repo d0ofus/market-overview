@@ -44,9 +44,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [activeEtf, setActiveEtf] = useState<{ ticker: string; name: string | null } | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
-  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null }>>([]);
+  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number }>>([]);
+  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
-  const showsEtfConstituents = title === "Sector ETFs" || title.startsWith("Industry/Thematic ETFs") || title.startsWith("Thematic ETFs");
+  const showsEtfConstituents = title === "Sector ETFs" || title.startsWith("Industry/Thematic ETFs");
   const defaultSortKey = columns.includes("1D")
     ? "1D"
     : columns.includes("ticker")
@@ -97,17 +98,30 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setSortDir(col === "1D" ? "desc" : "asc");
   };
 
+  const sortedConstituents = useMemo(() => {
+    const rowsCopy = [...constituents];
+    if (constituentSort === "change1d") {
+      rowsCopy.sort((a, b) => (b.change1d ?? 0) - (a.change1d ?? 0));
+      return rowsCopy;
+    }
+    rowsCopy.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
+    return rowsCopy;
+  }, [constituents, constituentSort]);
+
   const openEtfConstituents = async (ticker: string, name: string | null) => {
     setActiveEtf({ ticker, name });
     setConstituentLoading(true);
     setConstituentWarning(null);
     setConstituents([]);
+    setConstituentSort("weight");
     try {
       const res = await getEtfConstituents(ticker, true);
       setConstituents((res.rows ?? []).map((row) => ({
         ticker: String(row.ticker ?? "").toUpperCase(),
         name: typeof row.name === "string" ? row.name : null,
         weight: typeof row.weight === "number" ? row.weight : null,
+        change1d: typeof row.change1d === "number" ? row.change1d : undefined,
+        lastPrice: typeof row.lastPrice === "number" ? row.lastPrice : undefined,
       })));
       setConstituentWarning(res.warning ?? null);
     } catch (error) {
@@ -149,7 +163,15 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                     <Fragment key={row.ticker}>
                       <tr className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30">
                         {columns.includes("ticker") && (
-                          <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
+                          <td className="px-3 py-2 font-semibold text-accent">
+                            {showsEtfConstituents ? (
+                              <button className="text-left hover:underline" onClick={() => void openEtfConstituents(row.ticker, row.displayName)}>
+                                {row.ticker}
+                              </button>
+                            ) : (
+                              row.ticker
+                            )}
+                          </td>
                         )}
                         {columns.includes("name") && (
                           <td className="max-w-64 truncate px-3 py-2 text-slate-300">{row.displayName ?? row.ticker}</td>
@@ -178,14 +200,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                               <ChartNoAxesCombined className="h-3.5 w-3.5" />
                               {isOpen ? "Hide" : "Show"}
                             </button>
-                            {showsEtfConstituents && (
-                              <button
-                                onClick={() => void openEtfConstituents(row.ticker, row.displayName)}
-                                className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
-                              >
-                                Constituents
-                              </button>
-                            )}
                           </div>
                         </td>
                       </tr>
@@ -215,6 +229,21 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                 Close
               </button>
             </div>
+            <div className="mb-2 flex items-center gap-2 rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs">
+              <span className="text-slate-400">Sort constituents by:</span>
+              <button
+                className={`rounded px-2 py-1 ${constituentSort === "weight" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+                onClick={() => setConstituentSort("weight")}
+              >
+                Weight %
+              </button>
+              <button
+                className={`rounded px-2 py-1 ${constituentSort === "change1d" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+                onClick={() => setConstituentSort("change1d")}
+              >
+                1D %
+              </button>
+            </div>
             {constituentWarning && (
               <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
                 Constituent sync warning: {constituentWarning}
@@ -227,19 +256,24 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {constituents.map((row) => (
+                {sortedConstituents.map((row) => (
                   <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-2">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{row.ticker}</span>
                       <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
                     </div>
+                    <div className="mb-1 text-xs">
+                      <span className={cellClass(row.change1d ?? 0)}>{pct(row.change1d ?? 0)}</span>
+                      <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
+                    </div>
                     <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
+                    <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
                     <button
-                      className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                      className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
                       onClick={() => setActiveChartTicker(row.ticker)}
                     >
                       <Maximize2 className="h-3.5 w-3.5" />
-                      Show chart
+                      Expand chart
                     </button>
                   </div>
                 ))}

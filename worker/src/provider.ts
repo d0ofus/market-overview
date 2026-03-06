@@ -152,8 +152,16 @@ class StooqProvider implements MarketDataProvider {
 
   private async fetchTickerBars(ticker: string): Promise<DailyBar[]> {
     try {
-      const cboeVix = await this.fetchCboeVixBars(ticker);
-      if (cboeVix.length > 0) return cboeVix;
+      const upper = ticker.trim().toUpperCase();
+      if (upper === "VIX" || upper === "^VIX") {
+        const yahooVix = await this.fetchYahooIndexBars(ticker);
+        if (yahooVix.length > 0) return yahooVix;
+        const cboeVix = await this.fetchCboeVixBars(ticker);
+        if (cboeVix.length > 0) return cboeVix;
+      } else {
+        const cboeVix = await this.fetchCboeVixBars(ticker);
+        if (cboeVix.length > 0) return cboeVix;
+      }
       const symbol = this.symbolForStooq(ticker);
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
       let csv = "";
