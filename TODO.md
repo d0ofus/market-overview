@@ -4,7 +4,6 @@
 - Add multiple chart view of commodities
 - Fix VIX data 
 - Add RS chart (like my google sheets dashboard)
-- Add clickable links to the constituents and their charts too
 
 ## Breadth
 - Scoring for market breadth for overall 
@@ -23,11 +22,11 @@
 
 ## General
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
+- Add scanners compilation as a new page
 - See what other features in google sheets that is good
 - Add small logo on the webpage 
 - Light/Dark mode toggle
 - Add Calendar of US holidays
-- Add in alerts pulled from TV and multi-chart view
 
 ### 🔴 High Priority
 ### 🟡 Medium
