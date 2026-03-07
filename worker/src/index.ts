@@ -17,6 +17,7 @@ import {
   reconcileAlertsFromMailboxAdapters,
 } from "./alerts-service";
 import type { InboundEmailPayload } from "./alerts-types";
+import { handleInboundTradingViewEmail } from "./alerts-email";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -1870,6 +1871,9 @@ async function syncMonthlyEtfSlice(env: Env): Promise<void> {
 
 export default {
   fetch: app.fetch,
+  email: async (message: any, env: Env): Promise<void> => {
+    await handleInboundTradingViewEmail(message, env);
+  },
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
     await maybeRunAlertsHousekeeping(env);
     const defaultConfig = await loadDefaultConfigRow(env);

@@ -99,6 +99,7 @@ Worker (`worker/wrangler.toml` vars and secrets):
 - `ALERTS_MAILBOX_SYNC_URL` (optional mailbox sync endpoint for reconciliation)
 - `ALERTS_MAILBOX_SYNC_TOKEN` (optional bearer token for mailbox sync endpoint)
 - `ALERTS_ENABLE_YFINANCE_FALLBACK` (`true`/`false`; fallback only when higher-priority news providers are insufficient/unavailable)
+- `ALERTS_EMAIL_ALLOWED_FROM` (comma-separated sender allowlist for direct inbound email handling; default `tradingview.com`)
 - `IBKR_NEWS_ENABLED` (`true`/`false`; adapter-ready interface, default `false`)
 - `IBKR_NEWS_ENDPOINT` (optional phase-2 IBKR adapter endpoint)
 - `IBKR_NEWS_TOKEN` (optional phase-2 IBKR adapter token)
@@ -195,7 +196,9 @@ npm run test -w worker
 ## Alerts Email Ingestion Notes
 
 - Core ingestion is email-only, not TradingView webhooks.
-- Recommended production path is event-driven mailbox forwarding that posts normalized payloads to:
+- Worker supports direct Cloudflare Email Worker ingestion via native `email()` handler.
+- Recommended production path is event-driven mailbox routing directly to this worker (no polling needed).
+- Alternate fallback path is posting normalized payloads to:
   - `POST /api/admin/alerts/ingest-email`
 - Payload shape supports one or many normalized emails:
   - `{ "email": { ... } }` or `{ "emails": [{ ... }, ...] }`

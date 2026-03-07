@@ -11,6 +11,7 @@ export type Env = {
   ALERTS_MAILBOX_SYNC_URL?: string;
   ALERTS_MAILBOX_SYNC_TOKEN?: string;
   ALERTS_ENABLE_YFINANCE_FALLBACK?: string;
+  ALERTS_EMAIL_ALLOWED_FROM?: string;
   IBKR_NEWS_ENABLED?: string;
   IBKR_NEWS_ENDPOINT?: string;
   IBKR_NEWS_TOKEN?: string;
