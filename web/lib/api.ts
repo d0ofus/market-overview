@@ -2,6 +2,45 @@ import type { SnapshotResponse } from "@/types/dashboard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
+export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";
+
+export type AlertLogRow = {
+  id: string;
+  ticker: string;
+  alertType: string | null;
+  strategyName: string | null;
+  rawPayload: string | null;
+  rawEmailSubject: string | null;
+  rawEmailFrom: string | null;
+  rawEmailReceivedAt: string | null;
+  receivedAt: string;
+  marketSession: "premarket" | "regular" | "after-hours";
+  tradingDay: string;
+  source: string;
+  createdAt: string;
+};
+
+export type AlertNewsRow = {
+  id: string;
+  ticker: string;
+  tradingDay: string;
+  headline: string;
+  source: string;
+  url: string;
+  publishedAt: string | null;
+  snippet: string | null;
+  fetchedAt: string;
+};
+
+export type AlertTickerDayRow = {
+  ticker: string;
+  tradingDay: string;
+  latestReceivedAt: string;
+  alertCount: number;
+  marketSession: "premarket" | "regular" | "after-hours";
+  news: AlertNewsRow[];
+};
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -22,6 +61,17 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`API ${path} failed: ${res.status}${detail}`);
   }
   return (await res.json()) as T;
+}
+
+function appendQuery(path: string, query: Record<string, string | number | null | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value == null || value === "") continue;
+    params.set(key, String(value));
+  }
+  const encoded = params.toString();
+  if (!encoded) return path;
+  return `${path}?${encoded}`;
 }
 
 export function getDashboard(date?: string): Promise<SnapshotResponse> {
@@ -95,6 +145,34 @@ export function getSectorSymbolOptions(sector?: string) {
   return getJson<{ rows: any[] }>(`/api/sectors/symbol-options${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`);
 }
 
+export function getAlerts(params: {
+  startDate?: string;
+  endDate?: string;
+  session?: AlertsSessionFilter;
+  limit?: number;
+}) {
+  return getJson<{ filters: { startDate: string; endDate: string; session: AlertsSessionFilter; limit: number }; rows: AlertLogRow[] }>(
+    appendQuery("/api/alerts", params),
+  );
+}
+
+export function getAlertTickerDays(params: {
+  startDate?: string;
+  endDate?: string;
+  session?: AlertsSessionFilter;
+  limit?: number;
+}) {
+  return getJson<{ filters: { startDate: string; endDate: string; session: AlertsSessionFilter; limit: number }; rows: AlertTickerDayRow[] }>(
+    appendQuery("/api/alerts/unique-tickers", params),
+  );
+}
+
+export function getAlertNews(ticker: string, tradingDay: string) {
+  return getJson<{ ticker: string; tradingDay: string; rows: AlertNewsRow[] }>(
+    appendQuery("/api/alerts/news", { ticker, tradingDay }),
+  );
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
   const headers: Record<string, string> = {};
@@ -117,6 +195,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     if (page === "breadth") {
       await adminFetch<{ ok: boolean; asOfDate: string; universeCount: number }>("/api/admin/run-breadth", { method: "POST" });
       return { ok: true, page, refreshedTickers: 0, notes: "Fallback breadth refresh completed (legacy API)." };
+    }
+    if (page === "alerts") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support alerts refresh endpoint." };
     }
 
     await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });

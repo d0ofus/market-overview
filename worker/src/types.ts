@@ -7,6 +7,13 @@ export type Env = {
   ALPACA_FEED?: string;
   APP_TIMEZONE?: string;
   TRADINGVIEW_WIDGET_ENABLED?: string;
+  ALERTS_RECONCILE_ENABLED?: string;
+  ALERTS_MAILBOX_SYNC_URL?: string;
+  ALERTS_MAILBOX_SYNC_TOKEN?: string;
+  ALERTS_ENABLE_YFINANCE_FALLBACK?: string;
+  IBKR_NEWS_ENABLED?: string;
+  IBKR_NEWS_ENDPOINT?: string;
+  IBKR_NEWS_TOKEN?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

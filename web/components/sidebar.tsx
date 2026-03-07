@@ -11,6 +11,7 @@ const links = [
   { href: "/breadth", label: "Breadth" },
   { href: "/thirteenf", label: "13F Tracker" },
   { href: "/sectors", label: "Sector Tracker" },
+  { href: "/alerts", label: "Alerts" },
   { href: "/tools", label: "Tools" },
   { href: "/admin", label: "Admin" },
 ];
@@ -23,6 +24,7 @@ export function Sidebar() {
   const refreshTarget = (() => {
     if (pathname.startsWith("/breadth")) return { page: "breadth" as const, ticker: null };
     if (pathname.startsWith("/sectors")) return { page: "sectors" as const, ticker: null };
+    if (pathname.startsWith("/alerts")) return { page: "alerts" as const, ticker: null };
     if (pathname.startsWith("/thirteenf")) return { page: "thirteenf" as const, ticker: null };
     if (pathname.startsWith("/admin")) return { page: "admin" as const, ticker: null };
     if (pathname.startsWith("/tools")) return { page: "tools" as const, ticker: null };

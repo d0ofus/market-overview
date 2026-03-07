@@ -17,6 +17,7 @@ This is a research tool only. It is not investment advice.
 - New research modules:
   - `13F Tracker` (major hedge fund holdings snapshots)
   - `Key Sector Tracker` (trend list + calendar + narratives + linked stocks)
+  - `Alerts` (TradingView email-ingested alerts, session/date filtering, chart modes, and top news per ticker/day)
 - Top status bar: last updated timestamp, auto-refresh label, timezone, provider label
 - Ranked tables with configurable ranking windows (`1D`, `5D`, `1W`, `YTD`, `52W`)
 - Per-row trend sparklines (last ~60 closes)
@@ -40,6 +41,10 @@ This is a research tool only. It is not investment advice.
   - `GET /api/status`
   - `GET /api/breadth`
   - `GET /api/ticker/:ticker`
+  - `GET /api/alerts`
+  - `GET /api/alerts/unique-tickers`
+  - `POST /api/admin/alerts/ingest-email` (internal ingestion endpoint for normalized inbound email payloads)
+  - `POST /api/admin/alerts/reconcile` (optional mailbox reconciliation + retention cleanup)
   - Admin endpoints under `/api/admin/*` with Bearer auth
   - `scheduled()` cron handler for EOD run
 - Web:
@@ -90,6 +95,13 @@ Worker (`worker/wrangler.toml` vars and secrets):
 - `ALPACA_FEED` (`iex` default, optional)
 - `APP_TIMEZONE` (default `Australia/Melbourne`)
 - `TRADINGVIEW_WIDGET_ENABLED` (`true`/`false`)
+- `ALERTS_RECONCILE_ENABLED` (`true`/`false`; default `false`)
+- `ALERTS_MAILBOX_SYNC_URL` (optional mailbox sync endpoint for reconciliation)
+- `ALERTS_MAILBOX_SYNC_TOKEN` (optional bearer token for mailbox sync endpoint)
+- `ALERTS_ENABLE_YFINANCE_FALLBACK` (`true`/`false`; fallback only when higher-priority news providers are insufficient/unavailable)
+- `IBKR_NEWS_ENABLED` (`true`/`false`; adapter-ready interface, default `false`)
+- `IBKR_NEWS_ENDPOINT` (optional phase-2 IBKR adapter endpoint)
+- `IBKR_NEWS_TOKEN` (optional phase-2 IBKR adapter token)
 
 Worker secrets for Alpaca:
 - `ALPACA_API_KEY`
@@ -104,6 +116,7 @@ Web (`web/.env.local`):
 - Schema: `worker/migrations/0001_init.sql`
 - Seed: `worker/migrations/0002_seed.sql`
 - Tracker schema + sample seed: `worker/migrations/0003_trackers.sql`
+- Alerts schema: `worker/migrations/0008_alerts_email_ingestion.sql`
 
 Seed script:
 ```bash
@@ -139,6 +152,7 @@ wrangler d1 execute market_command --remote --file=worker/migrations/0002_seed.s
 wrangler d1 execute market_command --remote --file=worker/migrations/0003_trackers.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0005_market_leaders_timezone.sql
 wrangler d1 execute market_command --remote --file=worker/migrations/0007_config_refresh_local_time.sql
+wrangler d1 execute market_command --remote --file=worker/migrations/0008_alerts_email_ingestion.sql
 ```
 
 4. Set worker secrets:
@@ -177,3 +191,21 @@ npm run test -w worker
 - TradingView usage is embed-widget only. No TradingView scraping.
 - Designed as low-cost/free-first (D1 + Worker + Alpaca free IEX delayed feed path).
 - Include provider keys for production-quality refresh (Alpaca recommended in this repo).
+
+## Alerts Email Ingestion Notes
+
+- Core ingestion is email-only, not TradingView webhooks.
+- Recommended production path is event-driven mailbox forwarding that posts normalized payloads to:
+  - `POST /api/admin/alerts/ingest-email`
+- Payload shape supports one or many normalized emails:
+  - `{ "email": { ... } }` or `{ "emails": [{ ... }, ...] }`
+- Persisted records:
+  - raw email intake (`tv_alert_emails`)
+  - normalized alerts (`tv_alerts`)
+  - deduplicated ticker/day news (`ticker_news`)
+- News enrichment provider order:
+  - Alpaca first
+  - IBKR adapter interface (phase-2 ready)
+  - Yahoo/yfinance-style fallback only when higher-priority providers are unavailable/insufficient
+- Retention:
+  - automated 30-day cleanup for raw emails, alerts, and news

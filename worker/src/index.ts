@@ -9,14 +9,24 @@ import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
+import {
+  cleanupOldAlertsData,
+  ingestTradingViewAlertEmailsBatch,
+  queryAlertsByFilters,
+  queryUniqueTickerDaysByFilters,
+  reconcileAlertsFromMailboxAdapters,
+} from "./alerts-service";
+import type { InboundEmailPayload } from "./alerts-types";
 
 const app = new Hono<{ Bindings: Env }>();
-const API_REVISION = "2026-03-06-etf-sync-diagnostics";
+const API_REVISION = "2026-03-07-alerts-email-ingestion";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
+const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
+let lastAlertsHousekeepingAt = 0;
 
 app.use("/api/*", cors());
 
@@ -347,7 +357,8 @@ type RefreshPage =
   | "thirteenf"
   | "admin"
   | "ticker"
-  | "tools";
+  | "tools"
+  | "alerts";
 
 async function refreshPageScopedData(
   env: Env,
@@ -397,7 +408,33 @@ async function refreshPageScopedData(
     await refreshRecentBarsForTickers(env, [ticker]);
     return { page, refreshedTickers: 1 };
   }
+  if (page === "alerts") {
+    const reconcile = await reconcileAlertsFromMailboxAdapters(env, 25);
+    await cleanupOldAlertsData(env, 30);
+    return {
+      page,
+      refreshedTickers: reconcile.alertsIngested,
+      notes: `Alerts ingest: ${reconcile.alertsIngested} new, ${reconcile.duplicates} duplicate, ${reconcile.parseFailures} parse failures.`,
+    };
+  }
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
+}
+
+async function maybeRunAlertsHousekeeping(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastAlertsHousekeepingAt < ALERTS_HOUSEKEEPING_INTERVAL_MS) return;
+  lastAlertsHousekeepingAt = now;
+  try {
+    await cleanupOldAlertsData(env, 30);
+  } catch (error) {
+    console.error("alerts cleanup failed", error);
+  }
+  if ((env.ALERTS_RECONCILE_ENABLED ?? "false") !== "true") return;
+  try {
+    await reconcileAlertsFromMailboxAdapters(env, 30);
+  } catch (error) {
+    console.error("alerts reconcile failed", error);
+  }
 }
 
 type BreadthSentiment = {
@@ -1361,6 +1398,41 @@ app.get("/api/ticker/:ticker", async (c) => {
   });
 });
 
+app.get("/api/alerts", async (c) => {
+  await maybeRunAlertsHousekeeping(c.env);
+  const payload = await queryAlertsByFilters(c.env, {
+    startDate: c.req.query("startDate"),
+    endDate: c.req.query("endDate"),
+    session: c.req.query("session"),
+    limit: Number(c.req.query("limit") ?? 500),
+  });
+  return c.json(payload);
+});
+
+app.get("/api/alerts/unique-tickers", async (c) => {
+  await maybeRunAlertsHousekeeping(c.env);
+  const payload = await queryUniqueTickerDaysByFilters(c.env, {
+    startDate: c.req.query("startDate"),
+    endDate: c.req.query("endDate"),
+    session: c.req.query("session"),
+    limit: Number(c.req.query("limit") ?? 150),
+  });
+  return c.json(payload);
+});
+
+app.get("/api/alerts/news", async (c) => {
+  const ticker = (c.req.query("ticker") ?? "").trim().toUpperCase();
+  const tradingDay = (c.req.query("tradingDay") ?? "").trim();
+  if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Valid ticker is required." }, 400);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradingDay)) return c.json({ error: "Valid tradingDay is required." }, 400);
+  const rows = await c.env.DB.prepare(
+    "SELECT id, ticker, trading_day as tradingDay, headline, source, url, published_at as publishedAt, snippet, fetched_at as fetchedAt FROM ticker_news WHERE ticker = ? AND trading_day = ? ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC LIMIT 3",
+  )
+    .bind(ticker, tradingDay)
+    .all();
+  return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
+});
+
 app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
@@ -1479,6 +1551,35 @@ app.get("/api/admin/etf-sync-diagnostics", async (c) => {
   });
 });
 
+app.post("/api/admin/alerts/ingest-email", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as {
+    email?: InboundEmailPayload;
+    emails?: InboundEmailPayload[];
+    cleanup?: boolean;
+  };
+  const emails = Array.isArray(body.emails) ? body.emails : body.email ? [body.email] : [];
+  if (emails.length === 0) {
+    return c.json({ error: "Provide `email` or `emails` payload." }, 400);
+  }
+  const batch = await ingestTradingViewAlertEmailsBatch(c.env, emails);
+  const cleanup = body.cleanup ? await cleanupOldAlertsData(c.env, 30) : null;
+  return c.json({
+    ok: true,
+    ...batch,
+    cleanup,
+  });
+});
+
+app.post("/api/admin/alerts/reconcile", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { maxEmails?: number; cleanup?: boolean };
+  const maxEmails = Math.max(1, Math.min(200, Number(body.maxEmails ?? 50)));
+  const reconcile = await reconcileAlertsFromMailboxAdapters(c.env, maxEmails);
+  const cleanup = body.cleanup !== false ? await cleanupOldAlertsData(c.env, 30) : null;
+  return c.json({ ok: true, reconcile, cleanup });
+});
+
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsSessionAsOfDate(new Date());
@@ -1543,7 +1644,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -1770,6 +1871,7 @@ async function syncMonthlyEtfSlice(env: Env): Promise<void> {
 export default {
   fetch: app.fetch,
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
+    await maybeRunAlertsHousekeeping(env);
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "22:15";
