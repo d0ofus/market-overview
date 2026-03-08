@@ -10,7 +10,7 @@ import type {
   TickerNewsRow,
 } from "./alerts-types";
 import type { Env } from "./types";
-import { classifyAlertTimestamp, subtractDaysIso, todayNyIso } from "./alerts-time";
+import { classifyAlertTimestamp, defaultTradingDayNow, subtractDaysIso } from "./alerts-time";
 import { parseTradingViewAlertEmail } from "./alerts-parser";
 import { fetchTickerNews } from "./alerts-news";
 
@@ -397,7 +397,7 @@ export async function ingestTradingViewAlertEmailsBatch(env: Env, emails: Inboun
 
 export function normalizeAlertFilters(input: AlertFilterInput): NormalizedAlertFilters {
   const requestedEnd = toIsoDate(input.endDate ?? null);
-  const endDate = requestedEnd ?? todayNyIso();
+  const endDate = requestedEnd ?? defaultTradingDayNow();
   const requestedStart = toIsoDate(input.startDate ?? null);
   const defaultStart = subtractDaysIso(endDate, DEFAULT_RETENTION_DAYS - 1);
   const startDate = requestedStart ?? defaultStart;

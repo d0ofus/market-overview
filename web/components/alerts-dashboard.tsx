@@ -20,7 +20,43 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
   { value: "after-hours", label: "After-Hours" },
 ];
 
-const todayIso = () => new Date().toISOString().slice(0, 10);
+const nyParts = (value = new Date()) => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(value);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  const year = Number(get("year") || "1970");
+  const month = Number(get("month") || "1");
+  const day = Number(get("day") || "1");
+  return {
+    weekday: get("weekday"),
+    isoDate: `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+  };
+};
+const addDays = (isoDate: string, days: number) => {
+  const value = new Date(`${isoDate}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+};
+const nextWeekday = (isoDate: string) => {
+  let cursor = addDays(isoDate, 1);
+  for (let i = 0; i < 7; i += 1) {
+    const day = new Date(`${cursor}T00:00:00Z`).getUTCDay();
+    if (day >= 1 && day <= 5) return cursor;
+    cursor = addDays(cursor, 1);
+  }
+  return isoDate;
+};
+const defaultEndDate = () => {
+  const ny = nyParts();
+  if (ny.weekday === "Sat" || ny.weekday === "Sun") return nextWeekday(ny.isoDate);
+  return ny.isoDate;
+};
 const daysAgoIso = (days: number) => {
   const value = new Date();
   value.setDate(value.getDate() - days);
@@ -98,7 +134,7 @@ function NewsList({
 
 export function AlertsDashboard() {
   const [startDate, setStartDate] = useState(daysAgoIso(29));
-  const [endDate, setEndDate] = useState(todayIso());
+  const [endDate, setEndDate] = useState(defaultEndDate());
   const [session, setSession] = useState<AlertsSessionFilter>("all");
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [alerts, setAlerts] = useState<AlertLogRow[]>([]);

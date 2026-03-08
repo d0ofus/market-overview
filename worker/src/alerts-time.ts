@@ -111,3 +111,7 @@ export function subtractDaysIso(isoDate: string, days: number): string {
   return addDays(isoDate, -days);
 }
 
+export function defaultTradingDayNow(): string {
+  return tradingDayForAlert(new Date());
+}
+

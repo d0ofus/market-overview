@@ -28,5 +28,14 @@ describe("alerts parser", () => {
     const ticker = extractTickerSymbol("Alert fired for $NVDA crossing above VWAP");
     expect(ticker).toBe("NVDA");
   });
+
+  it("prefers trading symbol over exchange token in TradingView crypto emails", () => {
+    const parsed = parseTradingViewAlertEmail({
+      subject: "Alert: BTCUSDT Greater Than 60,572.94",
+      from: "TradingView <noreply@tradingview.com>",
+      text: "Your BTCUSDT alert was triggered. Open chart https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT",
+    });
+    expect(parsed?.ticker).toBe("BTCUSDT");
+  });
 });
 
