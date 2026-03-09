@@ -1,7 +1,6 @@
 import type { SnapshotResponse } from "@/types/dashboard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
-const PROXY_BASE = "/api/proxy";
 
 export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";
 
@@ -42,8 +41,8 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
-async function getJson<T>(path: string, init?: RequestInit, base = API_BASE): Promise<T> {
-  const res = await fetch(`${base}${path}`, {
+async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -181,7 +180,7 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
   return getJson<T>(path, {
     ...init,
     headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
-  }, PROXY_BASE);
+  });
 }
 
 export function refreshPageData(page: string, ticker?: string | null) {
