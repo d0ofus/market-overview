@@ -82,7 +82,6 @@ export function Sidebar() {
         </button>
         {refreshLabel && <p className="mt-2 text-center text-xs text-slate-400">{refreshLabel}</p>}
       </div>
-      <p className="mt-8 text-xs text-slate-500">Research tool only. Not investment advice.</p>
     </aside>
   );
 }

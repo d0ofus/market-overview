@@ -61,10 +61,8 @@ export default async function HomePage() {
         timezone={statusValue.timezone}
         autoRefreshLabel={statusValue.autoRefreshLabel}
         providerLabel={statusValue.providerLabel}
+        actions={<ManualRefreshButton page="overview" />}
       />
-      <div className="flex justify-end">
-        <ManualRefreshButton page="overview" />
-      </div>
       {focusedSections.length > 0 && (
         <div className="card p-3">
           <div className="flex flex-wrap gap-2">

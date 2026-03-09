@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 type Props = {
   asOfDate: string | null;
@@ -8,6 +9,7 @@ type Props = {
   timezone: string;
   autoRefreshLabel: string;
   providerLabel: string;
+  actions?: ReactNode;
 };
 
 const TZ_OPTIONS = [
@@ -35,7 +37,7 @@ function asOfToIso(asOfDate: string | null): string | null {
   return `${asOfDate}T00:00:00Z`;
 }
 
-export function StatusBar({ asOfDate, lastUpdated, timezone, autoRefreshLabel, providerLabel }: Props) {
+export function StatusBar({ asOfDate, lastUpdated, timezone, autoRefreshLabel, providerLabel, actions }: Props) {
   const [selectedTz, setSelectedTz] = useState("Australia/Melbourne");
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export function StatusBar({ asOfDate, lastUpdated, timezone, autoRefreshLabel, p
         </select>
       </label>
       <span className="rounded-xl bg-accent/15 px-2 py-1 text-accent">Source: {providerLabel}</span>
+      {actions && <div className="ml-auto">{actions}</div>}
     </div>
   );
 }

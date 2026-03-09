@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef } from "react";
+import { useState } from "react";
 
 export function TradingViewWidget({
   ticker,
@@ -22,10 +23,22 @@ export function TradingViewWidget({
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
   const maxWidth = size === "small" ? 420 : compact ? 640 : 880;
   const frameClass = size === "small" ? "w-full max-w-[420px] aspect-[4/3]" : compact ? "w-full max-w-[640px] aspect-[4/3]" : "w-full max-w-[880px] aspect-[4/3]";
+
+  useEffect(() => {
+    const syncTheme = () => {
+      setTheme(document.documentElement.classList.contains("light") ? "light" : "dark");
+    };
+    syncTheme();
+    const observer = new MutationObserver(syncTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     if (!ref.current) return;
     const minWidth = size === "small" ? 280 : 360;
@@ -42,7 +55,7 @@ export function TradingViewWidget({
       interval: "1D",
       range: initialRange,
       timezone: "Etc/UTC",
-      theme: "dark",
+      theme,
       style: "1",
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
@@ -62,7 +75,7 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange]);
+  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange, theme]);
 
   return (
     <div className={`card p-2 ${className}`}>

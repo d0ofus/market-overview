@@ -15,10 +15,10 @@
 
 html.light {
   color-scheme: light;
-  --bg-rgb: 242 246 251;
+  --bg-rgb: 245 248 252;
   --panel-rgb: 255 255 255;
-  --panel-soft-rgb: 234 240 247;
-  --border-soft-rgb: 194 208 224;
+  --panel-soft-rgb: 239 244 251;
+  --border-soft-rgb: 188 203 221;
   --text-rgb: 15 23 42;
   --pos-rgb: 22 163 74;
   --neg-rgb: 220 38 38;
@@ -40,6 +40,13 @@ body {
   letter-spacing: 0.01em;
 }
 
+html.light body {
+  background:
+    radial-gradient(900px 450px at 10% -25%, rgba(56, 189, 248, 0.2) 0%, rgba(245, 248, 252, 0) 62%),
+    radial-gradient(760px 420px at 95% -10%, rgba(99, 102, 241, 0.12) 0%, rgba(245, 248, 252, 0) 65%),
+    linear-gradient(180deg, rgb(250, 252, 255) 0%, rgb(244, 248, 253) 100%);
+}
+
 .card {
   @apply rounded-2xl border border-borderSoft/80 bg-panel/85 backdrop-blur;
   box-shadow: 0 10px 35px rgba(2, 6, 23, 0.18);
@@ -53,6 +60,14 @@ html.light .text-slate-200 { color: rgb(51 65 85); }
 html.light .text-slate-300 { color: rgb(71 85 105); }
 html.light .text-slate-400 { color: rgb(100 116 139); }
 html.light .text-slate-500 { color: rgb(100 116 139); }
+html.light .text-slate-100 { color: rgb(51 65 85); }
 html.light .bg-slate-800 { background-color: rgb(226 232 240); }
+html.light .bg-slate-800\/50 { background-color: rgba(226, 232, 240, 0.62); }
+html.light .bg-slate-800\/70 { background-color: rgba(226, 232, 240, 0.78); }
 html.light .bg-slate-900\/30 { background-color: rgba(203, 213, 225, 0.45); }
 html.light .bg-slate-900\/60 { background-color: rgba(203, 213, 225, 0.65); }
+html.light .hover\:bg-slate-900\/30:hover { background-color: rgba(203, 213, 225, 0.6); }
+html.light .border-slate-800 { border-color: rgb(203 213 225); }
+html.light .card {
+  box-shadow: 0 8px 26px rgba(30, 41, 59, 0.08);
+}
