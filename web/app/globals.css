@@ -2,24 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg-rgb: 11 17 24;
+  --panel-rgb: 15 23 34;
+  --panel-soft-rgb: 18 29 42;
+  --border-soft-rgb: 38 52 69;
+  --text-rgb: 232 237 244;
+  --pos-rgb: 34 197 94;
+  --neg-rgb: 239 68 68;
+  --accent-rgb: 56 189 248;
+}
+
+html.light {
+  color-scheme: light;
+  --bg-rgb: 242 246 251;
+  --panel-rgb: 255 255 255;
+  --panel-soft-rgb: 234 240 247;
+  --border-soft-rgb: 194 208 224;
+  --text-rgb: 15 23 42;
+  --pos-rgb: 22 163 74;
+  --neg-rgb: 220 38 38;
+  --accent-rgb: 3 105 161;
+}
+
 html,
 body {
   height: 100%;
 }
 
 body {
+  background-color: rgb(var(--bg-rgb));
   background:
-    radial-gradient(1000px 500px at 15% -20%, rgba(40, 110, 180, 0.22) 0%, rgba(11, 17, 24, 0) 60%),
-    radial-gradient(800px 450px at 90% 0%, rgba(10, 150, 120, 0.12) 0%, rgba(11, 17, 24, 0) 60%),
-    linear-gradient(180deg, #080d13 0%, #0b1118 48%, #090f16 100%);
-  color: #e8edf4;
+    radial-gradient(1000px 500px at 15% -20%, rgba(40, 110, 180, 0.22) 0%, rgb(var(--bg-rgb) / 0) 60%),
+    radial-gradient(800px 450px at 90% 0%, rgba(10, 150, 120, 0.12) 0%, rgb(var(--bg-rgb) / 0) 60%),
+    linear-gradient(180deg, rgb(var(--bg-rgb)) 0%, rgb(var(--bg-rgb)) 48%, rgb(var(--bg-rgb)) 100%);
+  color: rgb(var(--text-rgb));
   letter-spacing: 0.01em;
 }
 
 .card {
-  @apply rounded-2xl border border-borderSoft/80 bg-panel/85 shadow-[0_10px_35px_rgba(2,6,23,0.45)] backdrop-blur;
+  @apply rounded-2xl border border-borderSoft/80 bg-panel/85 backdrop-blur;
+  box-shadow: 0 10px 35px rgba(2, 6, 23, 0.18);
 }
 
 .muted {
   @apply text-slate-400;
 }
+
+html.light .text-slate-200 { color: rgb(51 65 85); }
+html.light .text-slate-300 { color: rgb(71 85 105); }
+html.light .text-slate-400 { color: rgb(100 116 139); }
+html.light .text-slate-500 { color: rgb(100 116 139); }
+html.light .bg-slate-800 { background-color: rgb(226 232 240); }
+html.light .bg-slate-900\/30 { background-color: rgba(203, 213, 225, 0.45); }
+html.light .bg-slate-900\/60 { background-color: rgba(203, 213, 225, 0.65); }

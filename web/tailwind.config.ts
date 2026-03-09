@@ -6,14 +6,14 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "#0B1118",
-        panel: "#0F1722",
-        panelSoft: "#121D2A",
-        borderSoft: "#263445",
-        text: "#E8EDF4",
-        pos: "#22C55E",
-        neg: "#EF4444",
-        accent: "#38BDF8",
+        bg: "rgb(var(--bg-rgb) / <alpha-value>)",
+        panel: "rgb(var(--panel-rgb) / <alpha-value>)",
+        panelSoft: "rgb(var(--panel-soft-rgb) / <alpha-value>)",
+        borderSoft: "rgb(var(--border-soft-rgb) / <alpha-value>)",
+        text: "rgb(var(--text-rgb) / <alpha-value>)",
+        pos: "rgb(var(--pos-rgb) / <alpha-value>)",
+        neg: "rgb(var(--neg-rgb) / <alpha-value>)",
+        accent: "rgb(var(--accent-rgb) / <alpha-value>)",
       },
       fontFamily: {
         sans: ["ui-sans-serif", "SF Pro Display", "Segoe UI", "sans-serif"],
