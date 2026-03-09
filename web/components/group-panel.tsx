@@ -141,7 +141,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
         <Collapsible.Content>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-slate-900/70">
+              <thead className="bg-slate-900/60">
                 <tr>
                   {columns.map((c) => (
                     <th key={c} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">

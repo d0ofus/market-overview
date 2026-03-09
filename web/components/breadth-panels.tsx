@@ -289,7 +289,7 @@ export function BreadthPanels({
         <div className="mb-3 text-sm font-semibold">Stocks Above Moving Average</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-900/70">
+            <thead className="bg-slate-900/60">
               <tr>
                 {["Universe", "% > 5MA", "% > 20MA", "% > 50MA", "% > 100MA", "% > 200MA"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
@@ -321,7 +321,7 @@ export function BreadthPanels({
         <div className="mb-3 text-sm font-semibold">Stocks Making New Highs (# / %)</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-900/70">
+            <thead className="bg-slate-900/60">
               <tr>
                 {["Universe", "5D", "1M", "3M", "6M", "52W"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
@@ -353,7 +353,7 @@ export function BreadthPanels({
         <div className="mb-3 text-sm font-semibold">Advance / Decline + Volume</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-900/70">
+            <thead className="bg-slate-900/60">
               <tr>
                 {["Universe", "Adv", "Dec", "Unchanged", "A/D Ratio", "Total Volume"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
@@ -385,7 +385,7 @@ export function BreadthPanels({
         <div className="mb-3 text-sm font-semibold">Other Breadth Indicators</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-900/70">
+            <thead className="bg-slate-900/60">
               <tr>
                 {["Universe", "# > +4% Today", "# < -4% Today", "# > +25% (Quarter)", "# < -25% (Quarter)"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
@@ -466,7 +466,7 @@ export function BreadthPanels({
         <div className="mb-3 text-sm font-semibold">Historical Metrics Table (90 days)</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-900/70">
+            <thead className="bg-slate-900/60">
               <tr>
                 {["Date", "Adv", "Dec", "Unc", "A/D", "%>5", "%>20", "%>50", "%>100", "%>200", "5D Highs", "1M Highs", "3M Highs", "6M Highs", "52W Highs", "Vol", "Med 1D", "Med 5D", ">+4%", "<-4%", ">+25Q", "<-25Q"].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
