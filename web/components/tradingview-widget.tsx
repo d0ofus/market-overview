@@ -8,6 +8,7 @@ export function TradingViewWidget({
   compact = false,
   size = "default",
   chartOnly = false,
+  showStatusLine = false,
   initialRange = "1M",
   className = "",
 }: {
@@ -16,6 +17,7 @@ export function TradingViewWidget({
   compact?: boolean;
   size?: "small" | "default";
   chartOnly?: boolean;
+  showStatusLine?: boolean;
   initialRange?: "1M" | "3M" | "6M" | "12M";
   className?: string;
 }) {
@@ -45,7 +47,7 @@ export function TradingViewWidget({
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
       hide_side_toolbar: chartOnly,
-      hide_legend: chartOnly,
+      hide_legend: chartOnly ? !showStatusLine : false,
       volume_force_overlay: false,
       withdateranges: chartOnly ? false : true,
       save_image: false,
@@ -60,7 +62,7 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, initialRange]);
+  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange]);
 
   return (
     <div className={`card p-2 ${className}`}>

@@ -75,6 +75,28 @@ function formatDateTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "-";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(parsed);
+}
+
+function summarizeDescription(row: AlertLogRow): string {
+  const fromSubject = (row.rawEmailSubject ?? "")
+    .replace(/^\s*(tradingview\s+alert\s*[-:]\s*|alert\s*:\s*)/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (fromSubject) return fromSubject.length > 120 ? `${fromSubject.slice(0, 117)}...` : fromSubject;
+  const fromPayload = (row.rawPayload ?? "").replace(/\s+/g, " ").trim();
+  if (fromPayload) return fromPayload.length > 120 ? `${fromPayload.slice(0, 117)}...` : fromPayload;
+  return row.alertType ?? row.strategyName ?? "-";
+}
+
 function keyFor(ticker: string, tradingDay: string): string {
   return `${ticker}|${tradingDay}`;
 }
@@ -189,6 +211,12 @@ export function AlertsDashboard() {
     if (existing) return existing;
     return { ticker, tradingDay, alertCount: 0, latestReceivedAt: "", marketSession: "regular" as const, news: [] };
   }, [selectedKey, tickerDays]);
+  const selectedLatestAlert = useMemo(() => {
+    if (!selectedTickerDay) return null;
+    return (
+      alerts.find((row) => row.ticker === selectedTickerDay.ticker && row.tradingDay === selectedTickerDay.tradingDay) ?? null
+    );
+  }, [alerts, selectedTickerDay]);
 
   useEffect(() => {
     const ticker = selectedTickerDay?.ticker;
@@ -277,7 +305,7 @@ export function AlertsDashboard() {
                 className={`rounded px-3 py-1.5 text-xs ${mode === "multi" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
                 onClick={() => setMode("multi")}
               >
-                Multi (3x3)
+                Multi Grid
               </button>
             </div>
           </div>
@@ -299,21 +327,21 @@ export function AlertsDashboard() {
 
       {error && <div className="card border border-red-500/40 p-3 text-sm text-red-300">{error}</div>}
 
-      <div className="grid gap-4 xl:grid-cols-[2fr,1fr]">
+      <div className={mode === "single" ? "grid gap-4 xl:grid-cols-[2fr,1fr]" : "grid gap-4"}>
         <section className="space-y-3">
           {mode === "single" ? (
             <div className="card p-3">
               <div className="mb-2 text-sm text-slate-300">
                 {selectedTickerDay ? (
                   <>
-                    <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> • {selectedTickerDay.tradingDay} • {selectedTickerDay.marketSession}
+                    <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> • {formatTime(selectedLatestAlert?.receivedAt ?? selectedTickerDay.latestReceivedAt)} • {selectedTickerDay.tradingDay} • {selectedTickerDay.marketSession}
                   </>
                 ) : (
                   "Select an alert to open a chart."
                 )}
               </div>
               {selectedTickerDay ? (
-                <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly initialRange="3M" />
+                <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly showStatusLine initialRange="3M" />
               ) : (
                 <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-4 text-sm text-slate-400">No ticker selected.</div>
               )}
@@ -337,7 +365,7 @@ export function AlertsDashboard() {
                   {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
                 </button>
               </div>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className={`grid gap-3 md:grid-cols-2 ${isFullscreen ? "xl:grid-cols-4" : "xl:grid-cols-3 2xl:grid-cols-4"}`}>
                 {tickerDays.slice(0, 9).map((row) => (
                   <div
                     key={keyFor(row.ticker, row.tradingDay)}
@@ -345,7 +373,7 @@ export function AlertsDashboard() {
                   >
                     <button className="mb-2 text-left" onClick={() => setSelectedKey(keyFor(row.ticker, row.tradingDay))}>
                       <div className="text-sm font-semibold text-accent">{row.ticker}</div>
-                      <div className="text-[11px] text-slate-400">{row.tradingDay} • {row.marketSession}</div>
+                      <div className="text-[11px] text-slate-400">{formatTime(row.latestReceivedAt)} • {row.tradingDay} • {row.marketSession}</div>
                     </button>
                     <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
                     <div className="mt-2">
@@ -361,7 +389,7 @@ export function AlertsDashboard() {
           )}
         </section>
 
-        <aside className="space-y-3">
+        {mode === "single" && <aside className="space-y-3">
           <div className="card p-3">
             <h3 className="mb-2 text-sm font-semibold text-slate-200">Top News (Ticker/Day)</h3>
             {selectedTickerDay && (
@@ -388,7 +416,7 @@ export function AlertsDashboard() {
                     <th className="px-2 py-1.5 text-left text-slate-300">Time</th>
                     <th className="px-2 py-1.5 text-left text-slate-300">Ticker</th>
                     <th className="px-2 py-1.5 text-left text-slate-300">Session</th>
-                    <th className="px-2 py-1.5 text-left text-slate-300">Type</th>
+                    <th className="px-2 py-1.5 text-left text-slate-300">Description</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -403,7 +431,7 @@ export function AlertsDashboard() {
                         <td className="px-2 py-1.5 text-slate-300">{formatDateTime(row.receivedAt)}</td>
                         <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
                         <td className="px-2 py-1.5 text-slate-300">{row.marketSession}</td>
-                        <td className="px-2 py-1.5 text-slate-300">{row.alertType ?? row.strategyName ?? "-"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{summarizeDescription(row)}</td>
                       </tr>
                     );
                   })}
@@ -418,7 +446,7 @@ export function AlertsDashboard() {
               </table>
             </div>
           </div>
-        </aside>
+        </aside>}
       </div>
     </div>
   );
