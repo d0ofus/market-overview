@@ -21,16 +21,16 @@
 - Add in tickers from ETF list and give codex the source to get the information from
 
 ## Alerts
-- Include column called description
-- Fix multi-chart mode. 6 alerts, showing only 3 charts. 
+- News is not accurate
+> Provider order is Alpaca -> IBKR adapter (if enabled) -> Yahoo Finance fallback, then deduped top 3.
 - Add exchange (E.g. NASDAQ:TSLA) 
 
 ## General
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
+- Add news impact page (on dashboard(?))
 - Add scanners compilation as a new page
 - See what other features in google sheets that is good
 - Add small logo on the webpage 
-- Light/Dark mode toggle
 - Add Calendar of US holidays
 
 ### 🔴 High Priority
