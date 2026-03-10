@@ -11,12 +11,16 @@ import type {
 } from "./alerts-types";
 import type { Env } from "./types";
 import { classifyAlertTimestamp, defaultTradingDayNow, subtractDaysIso } from "./alerts-time";
-import { parseTradingViewAlertEmail } from "./alerts-parser";
+import { isLikelyExchangeCode, parseTradingViewAlertEmail } from "./alerts-parser";
 import { fetchTickerNews } from "./alerts-news";
 
 const DEFAULT_RETENTION_DAYS = 30;
+const ALERT_TICKER_REPAIR_INTERVAL_MS = 5 * 60_000;
+const ALERT_TICKER_REPAIR_LOOKBACK_DAYS = 30;
+const ALERT_TICKER_REPAIR_SCAN_LIMIT = 150;
 
 const SESSION_VALUES: AlertsSessionFilter[] = ["all", "premarket", "regular", "after-hours"];
+let lastAlertTickerRepairAt = 0;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
@@ -52,6 +56,15 @@ function toJson(value: unknown): string | null {
     return JSON.stringify(value);
   } catch {
     return String(value);
+  }
+}
+
+function parseStoredRawPayloadJson(rawPayloadJson: string | null): unknown {
+  if (!rawPayloadJson) return null;
+  try {
+    return JSON.parse(rawPayloadJson);
+  } catch {
+    return rawPayloadJson;
   }
 }
 
@@ -295,6 +308,96 @@ async function enrichTickerNewsIfNeeded(env: Env, ticker: string, tradingDay: st
   return inserted;
 }
 
+async function repairMisparsedExchangeTickers(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastAlertTickerRepairAt < ALERT_TICKER_REPAIR_INTERVAL_MS) return;
+  lastAlertTickerRepairAt = now;
+
+  const cutoff = `${subtractDaysIso(defaultTradingDayNow(), ALERT_TICKER_REPAIR_LOOKBACK_DAYS - 1)}T00:00:00.000Z`;
+  const rows = await env.DB.prepare(
+    "SELECT a.id as alertId, a.email_id as emailId, a.ticker as alertTicker, a.alert_type as alertType, a.strategy_name as strategyName, a.raw_payload as rawPayload, a.received_at as receivedAt, a.market_session as marketSession, a.trading_day as tradingDay, e.message_id as messageId, e.raw_email_subject as subject, e.raw_email_from as emailFrom, e.raw_email_received_at as rawEmailReceivedAt, e.raw_text as rawText, e.raw_html as rawHtml, e.raw_payload_json as rawPayloadJson, e.parsed_ticker as parsedTicker FROM tv_alerts a LEFT JOIN tv_alert_emails e ON e.id = a.email_id WHERE a.received_at >= ? ORDER BY datetime(a.received_at) DESC LIMIT ?",
+  )
+    .bind(cutoff, ALERT_TICKER_REPAIR_SCAN_LIMIT)
+    .all<{
+      alertId: string;
+      emailId: string | null;
+      alertTicker: string;
+      alertType: string | null;
+      strategyName: string | null;
+      rawPayload: string | null;
+      receivedAt: string;
+      marketSession: "premarket" | "regular" | "after-hours";
+      tradingDay: string;
+      messageId: string | null;
+      subject: string | null;
+      emailFrom: string | null;
+      rawEmailReceivedAt: string | null;
+      rawText: string | null;
+      rawHtml: string | null;
+      rawPayloadJson: string | null;
+      parsedTicker: string | null;
+    }>();
+
+  for (const row of rows.results ?? []) {
+    if (!isLikelyExchangeCode(row.alertTicker) && !isLikelyExchangeCode(row.parsedTicker)) continue;
+    const reparsed = parseTradingViewAlertEmail({
+      messageId: row.messageId,
+      subject: row.subject,
+      from: row.emailFrom,
+      receivedAt: row.rawEmailReceivedAt ?? row.receivedAt,
+      text: row.rawText,
+      html: row.rawHtml,
+      rawPayload: parseStoredRawPayloadJson(row.rawPayloadJson),
+    });
+    const nextTicker = reparsed?.ticker?.toUpperCase() ?? null;
+    if (!nextTicker || isLikelyExchangeCode(nextTicker) || nextTicker === row.alertTicker) continue;
+
+    const messageId = row.messageId ?? `repair-${row.alertId}`;
+    const dedupeSeed = buildAlertDedupeSeed({
+      messageId,
+      ticker: nextTicker,
+      tradingDay: row.tradingDay,
+      marketSession: row.marketSession,
+      alertType: row.alertType,
+      strategyName: row.strategyName,
+      messageBody: row.rawPayload ?? reparsed?.messageBody ?? "",
+      receivedAtUtc: row.receivedAt,
+    });
+    const normalizedKey = `${nextTicker}|${row.tradingDay}|${simpleHash(dedupeSeed)}`;
+    const conflicting = await env.DB.prepare("SELECT id FROM tv_alerts WHERE normalized_key = ? AND id <> ? LIMIT 1")
+      .bind(normalizedKey, row.alertId)
+      .first<{ id: string }>();
+
+    if (conflicting?.id) {
+      await env.DB.prepare("DELETE FROM tv_alerts WHERE id = ?").bind(row.alertId).run();
+      if (row.emailId) {
+        await env.DB.prepare(
+          "UPDATE tv_alert_emails SET parsed_alert_id = ?, parsed_ticker = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+          .bind(conflicting.id, nextTicker, row.emailId)
+          .run();
+      }
+      continue;
+    }
+
+    await env.DB.prepare(
+      "UPDATE tv_alerts SET ticker = ?, normalized_key = ? WHERE id = ?",
+    )
+      .bind(nextTicker, normalizedKey, row.alertId)
+      .run();
+
+    if (row.emailId) {
+      await env.DB.prepare(
+        "UPDATE tv_alert_emails SET parsed_ticker = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      )
+        .bind(nextTicker, row.emailId)
+        .run();
+    }
+
+    await enrichTickerNewsIfNeeded(env, nextTicker, row.tradingDay);
+  }
+}
+
 export async function ingestTradingViewAlertEmail(env: Env, payload: InboundEmailPayload): Promise<IngestAlertResult> {
   const rawEmail = await ensureRawEmailStored(env, payload);
 
@@ -419,6 +522,7 @@ export async function queryAlertsByFilters(env: Env, filterInput: AlertFilterInp
   filters: NormalizedAlertFilters;
   rows: AlertLogRow[];
 }> {
+  await repairMisparsedExchangeTickers(env);
   const filters = normalizeAlertFilters(filterInput);
   const startReceivedAt = `${filters.startDate}T00:00:00.000Z`;
   const endReceivedAtExclusive = `${addDaysIso(filters.endDate, 1)}T00:00:00.000Z`;
@@ -463,6 +567,7 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
   filters: NormalizedAlertFilters;
   rows: AlertTickerDayRow[];
 }> {
+  await repairMisparsedExchangeTickers(env);
   const filters = normalizeAlertFilters(filterInput);
   const startReceivedAt = `${filters.startDate}T00:00:00.000Z`;
   const endReceivedAtExclusive = `${addDaysIso(filters.endDate, 1)}T00:00:00.000Z`;

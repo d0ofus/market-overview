@@ -82,7 +82,7 @@ function normalizeCandidate(raw: string): string | null {
   return upper;
 }
 
-function isLikelyExchangeCode(value: string | null): boolean {
+export function isLikelyExchangeCode(value: string | null): boolean {
   if (!value) return false;
   return EXCHANGE_CODES.has(value.toUpperCase());
 }
