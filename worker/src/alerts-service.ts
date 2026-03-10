@@ -524,13 +524,11 @@ export async function queryAlertsByFilters(env: Env, filterInput: AlertFilterInp
 }> {
   await repairMisparsedExchangeTickers(env);
   const filters = normalizeAlertFilters(filterInput);
-  const startReceivedAt = `${filters.startDate}T00:00:00.000Z`;
-  const endReceivedAtExclusive = `${addDaysIso(filters.endDate, 1)}T00:00:00.000Z`;
 
   const rows = await env.DB.prepare(
-    "SELECT id, ticker, alert_type as alertType, strategy_name as strategyName, raw_payload as rawPayload, raw_email_subject as rawEmailSubject, raw_email_from as rawEmailFrom, raw_email_received_at as rawEmailReceivedAt, received_at as receivedAt, market_session as marketSession, trading_day as tradingDay, source, created_at as createdAt FROM tv_alerts WHERE received_at >= ? AND received_at < ? AND (? = 'all' OR market_session = ?) ORDER BY datetime(received_at) DESC LIMIT ?",
+    "SELECT id, ticker, alert_type as alertType, strategy_name as strategyName, raw_payload as rawPayload, raw_email_subject as rawEmailSubject, raw_email_from as rawEmailFrom, raw_email_received_at as rawEmailReceivedAt, received_at as receivedAt, market_session as marketSession, trading_day as tradingDay, source, created_at as createdAt FROM tv_alerts WHERE trading_day >= ? AND trading_day <= ? AND (? = 'all' OR market_session = ?) ORDER BY datetime(received_at) DESC LIMIT ?",
   )
-    .bind(startReceivedAt, endReceivedAtExclusive, filters.session, filters.session, filters.limit)
+    .bind(filters.startDate, filters.endDate, filters.session, filters.session, filters.limit)
     .all<AlertLogRow>();
 
   return {
@@ -569,13 +567,11 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
 }> {
   await repairMisparsedExchangeTickers(env);
   const filters = normalizeAlertFilters(filterInput);
-  const startReceivedAt = `${filters.startDate}T00:00:00.000Z`;
-  const endReceivedAtExclusive = `${addDaysIso(filters.endDate, 1)}T00:00:00.000Z`;
 
   const grouped = await env.DB.prepare(
-    "SELECT t1.ticker as ticker, t1.trading_day as tradingDay, MAX(t1.received_at) as latestReceivedAt, COUNT(*) as alertCount, (SELECT t2.market_session FROM tv_alerts t2 WHERE t2.ticker = t1.ticker AND t2.trading_day = t1.trading_day ORDER BY datetime(t2.received_at) DESC LIMIT 1) as marketSession FROM tv_alerts t1 WHERE t1.received_at >= ? AND t1.received_at < ? AND (? = 'all' OR t1.market_session = ?) GROUP BY t1.ticker, t1.trading_day ORDER BY datetime(latestReceivedAt) DESC LIMIT ?",
+    "SELECT t1.ticker as ticker, t1.trading_day as tradingDay, MAX(t1.received_at) as latestReceivedAt, COUNT(*) as alertCount, (SELECT t2.market_session FROM tv_alerts t2 WHERE t2.ticker = t1.ticker AND t2.trading_day = t1.trading_day ORDER BY datetime(t2.received_at) DESC LIMIT 1) as marketSession FROM tv_alerts t1 WHERE t1.trading_day >= ? AND t1.trading_day <= ? AND (? = 'all' OR t1.market_session = ?) GROUP BY t1.ticker, t1.trading_day ORDER BY datetime(latestReceivedAt) DESC LIMIT ?",
   )
-    .bind(startReceivedAt, endReceivedAtExclusive, filters.session, filters.session, filters.limit)
+    .bind(filters.startDate, filters.endDate, filters.session, filters.session, filters.limit)
     .all<{
       ticker: string;
       tradingDay: string;
