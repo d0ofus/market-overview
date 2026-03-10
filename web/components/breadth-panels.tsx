@@ -69,12 +69,27 @@ const lookbacks: Lookback[] = [30, 60, 90];
 const HISTORY_DAYS = 90;
 
 const metricOptions = [
-  { key: "pctAbove20MA", label: "% > 20MA" },
-  { key: "pctAbove50MA", label: "% > 50MA" },
-  { key: "pctAbove200MA", label: "% > 200MA" },
-  { key: "new1MHighs", label: "New 1M Highs (#)" },
-  { key: "new52WHighs", label: "New 52W Highs (#)" },
-  { key: "medianReturn1D", label: "Median Return 1D (%)" },
+  { key: "advancers", label: "Advancers", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "decliners", label: "Decliners", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "unchanged", label: "Unchanged", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "advDecRatio", label: "A/D Ratio", format: (value: number) => value.toFixed(2) },
+  { key: "pctAbove5MA", label: "% > 5MA", format: (value: number) => pct(value) },
+  { key: "pctAbove20MA", label: "% > 20MA", format: (value: number) => pct(value) },
+  { key: "pctAbove50MA", label: "% > 50MA", format: (value: number) => pct(value) },
+  { key: "pctAbove100MA", label: "% > 100MA", format: (value: number) => pct(value) },
+  { key: "pctAbove200MA", label: "% > 200MA", format: (value: number) => pct(value) },
+  { key: "new5DHighs", label: "New 5D Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new1MHighs", label: "New 1M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new3MHighs", label: "New 3M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new6MHighs", label: "New 6M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new52WHighs", label: "New 52W Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "totalVolume", label: "Total Volume", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "medianReturn1D", label: "Median Return 1D (%)", format: (value: number) => `${value.toFixed(2)}%` },
+  { key: "medianReturn5D", label: "Median Return 5D (%)", format: (value: number) => `${value.toFixed(2)}%` },
+  { key: "stocksGtPos4Pct", label: "# > +4% Today", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "stocksLtNeg4Pct", label: "# < -4% Today", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "stocksGtPos25Q", label: "# > +25% Quarter", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "stocksLtNeg25Q", label: "# < -25% Quarter", format: (value: number) => numFmt.format(Math.round(value)) },
 ] as const;
 
 const positive = "text-pos";
@@ -164,9 +179,8 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
 }
 
 function metricValue(metrics: BreadthMetrics, key: (typeof metricOptions)[number]["key"]): number {
-  if (key === "new1MHighs") return metrics.new1MHighs;
-  if (key === "new52WHighs") return metrics.new52WHighs;
-  return metrics[key];
+  const value = metrics[key];
+  return typeof value === "number" ? value : 0;
 }
 
 function ratioText(value: number | null): string {
@@ -220,6 +234,10 @@ export function BreadthPanels({
         };
       }),
     [scoped, metricKey],
+  );
+  const selectedMetric = useMemo(
+    () => metricOptions.find((option) => option.key === metricKey) ?? metricOptions[0],
+    [metricKey],
   );
 
   const previousByUniverse = useMemo(() => {
@@ -451,7 +469,7 @@ export function BreadthPanels({
                   return (
                     <div className="rounded border border-slate-600/50 bg-slate-950/95 px-2 py-1 text-xs text-slate-100">
                       <div>{label}</div>
-                      <div>{value.toFixed(2)}</div>
+                      <div className="font-medium text-white">{selectedMetric.format(value)}</div>
                     </div>
                   );
                 }}
