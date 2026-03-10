@@ -72,6 +72,7 @@ export function extractTickerSymbol(input: string): string | null {
     /(?:ticker|symbol|instrument|tv symbol|stock)\s*[:=]\s*([$A-Za-z0-9:.\-^]{1,32})/gi,
     /\b([A-Z]{2,12}USDT|[A-Z]{2,12}USD|[A-Z]{2,12}BTC|[A-Z]{2,12}ETH)\b/g,
     /\b(?:NASDAQ|NYSE|NYSEARCA|AMEX|CBOE|OTC|BINANCE|COINBASE):([A-Z0-9.\-^]{1,20})\b/g,
+    /\b[A-Z][A-Z0-9._-]{1,15}:([A-Z][A-Z0-9.\-^]{0,19})\b/g,
     /\$([A-Z][A-Z0-9.\-^]{0,19})\b/g,
     /\b([A-Z][A-Z0-9.\-^]{0,19})\b(?=\s+(?:alert|signal|strategy|cross|crossing|breakout|breakdown|buy|sell)\b)/gi,
   ];

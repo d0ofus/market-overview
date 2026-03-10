@@ -37,5 +37,15 @@ describe("alerts parser", () => {
     });
     expect(parsed?.ticker).toBe("BTCUSDT");
   });
+
+  it("extracts the ticker instead of the exchange prefix from TradingView chart links", () => {
+    const parsed = parseTradingViewAlertEmail({
+      subject: "Alert: IPI Greater Than 38.63",
+      from: "TradingView <noreply@tradingview.com>",
+      text: "Your IPI alert was triggered. IPI Greater Than 38.63. Open chart https://www.tradingview.com/chart/?symbol=BATS:IPI",
+    });
+    expect(parsed?.ticker).toBe("IPI");
+    expect(parsed?.messageBody).toContain("IPI Greater Than 38.63");
+  });
 });
 
