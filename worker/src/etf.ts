@@ -361,6 +361,36 @@ function extractCsvLinksFromHtml(html: string): string[] {
   return urls;
 }
 
+export function extractInvescoDownloadLinksFromHtml(html: string): string[] {
+  const urls = new Set<string>();
+  for (const raw of extractCsvLinksFromHtml(html)) {
+    urls.add(raw);
+  }
+  for (const raw of extractDownloadLinksFromHtml(html)) {
+    urls.add(raw);
+  }
+
+  const anchorRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const href = match[1] ?? "";
+    const text = match[2]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+    const hrefLower = href.toLowerCase();
+    const looksLikeDownload =
+      text.includes("export data") ||
+      text.includes("holdings") ||
+      text.includes("portfolio") ||
+      text.includes("download") ||
+      hrefLower.includes("export") ||
+      hrefLower.includes("download") ||
+      hrefLower.includes("holding") ||
+      hrefLower.includes("portfolio");
+    if (looksLikeDownload) urls.add(href);
+  }
+
+  return [...urls];
+}
+
 function extractDownloadLinksFromHtml(html: string): string[] {
   const urls: string[] = [];
   const absolute = html.match(/https?:\/\/[^"'\\s>]+\.(?:csv|xlsx|xls|txt)(?:\?[^"'\\s>]*)?/gi) ?? [];
@@ -498,9 +528,9 @@ async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: st
   }
   if (domain.includes("invesco.com")) {
     try {
-      return await fetchInvescoApiConstituents(etfTicker);
+      return await fetchInvescoApiConstituents(etfTicker, sourceUrl);
     } catch {
-      return await fetchInvescoConstituents(etfTicker);
+      return await fetchInvescoConstituents(etfTicker, sourceUrl);
     }
   }
   if (domain.includes("ssga.com")) {
@@ -604,13 +634,13 @@ function extractInvescoHtmlMeta(html: string): { cusip: string | null; locale: s
   return { cusip, locale, idType };
 }
 
-async function fetchInvescoApiConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+async function fetchInvescoApiConstituents(etfTicker: string, pageUrlOverride?: string | null): Promise<EtfConstituent[]> {
   let cusip = INVESCO_KNOWN_CUSIP_BY_TICKER[etfTicker] ?? null;
   let locale = "en_US";
   let idType = "cusip";
 
   if (!cusip) {
-    const pageUrl = INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker];
+    const pageUrl = pageUrlOverride ?? INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker];
     if (!pageUrl) {
       throw new Error(`No known Invesco page metadata mapping for ${etfTicker}`);
     }
@@ -651,14 +681,14 @@ async function fetchInvescoApiConstituents(etfTicker: string): Promise<EtfConsti
   return parsed;
 }
 
-async function fetchInvescoConstituents(etfTicker: string): Promise<EtfConstituent[]> {
+async function fetchInvescoConstituents(etfTicker: string, pageUrlOverride?: string | null): Promise<EtfConstituent[]> {
   const searchPages = [
     ...INVESCO_ETF_DISCOVERY_URLS,
     `https://www.invesco.com/us/en/financial-products/etfs.html?assetClass=Equity&query=${encodeURIComponent(etfTicker)}`,
     `https://www.invesco.com/us/en/search.html?q=${encodeURIComponent(etfTicker)}`,
   ];
   const etfPageCandidates = new Set<string>();
-  const knownPage = INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker] ?? null;
+  const knownPage = pageUrlOverride ?? INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker] ?? null;
   if (knownPage) etfPageCandidates.add(knownPage);
 
   // If we already know the ETF page, skip broad discovery to preserve subrequest budget.
@@ -697,7 +727,7 @@ async function fetchInvescoConstituents(etfTicker: string): Promise<EtfConstitue
       });
       if (!pageRes.ok) continue;
       const html = await pageRes.text();
-      for (const raw of extractCsvLinksFromHtml(html)) {
+      for (const raw of extractInvescoDownloadLinksFromHtml(html)) {
         const normalized = normalizeCsvUrl(raw, pageUrl);
         if (normalized) csvCandidates.add(normalized);
       }
@@ -720,8 +750,12 @@ async function fetchInvescoConstituents(etfTicker: string): Promise<EtfConstitue
         errors.push(`${new URL(csvUrl).pathname} (${res.status})`);
         continue;
       }
-      const csv = await res.text();
-      const parsed = parseInvescoDelimitedRows(csv);
+      const contentType = res.headers.get("content-type") ?? "";
+      const lowerUrl = csvUrl.toLowerCase();
+      const shouldReadBinary = lowerUrl.endsWith(".xlsx") || lowerUrl.endsWith(".xls") || /sheet|excel|octet-stream|zip/i.test(contentType);
+      const parsed = shouldReadBinary
+        ? parseHoldingsFileByType(csvUrl, contentType, null, await res.arrayBuffer())
+        : parseHoldingsFileByType(csvUrl, contentType, await res.text(), null);
       if (parsed.length > 0) return parsed;
       errors.push(`${new URL(csvUrl).pathname} (parsed 0 rows)`);
     } catch (error) {
@@ -950,7 +984,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (holdings.length === 0 && invesco.prefer) {
     source = "invesco:holdings-api";
     try {
-      holdings = await fetchInvescoApiConstituents(etfTicker);
+      holdings = await fetchInvescoApiConstituents(etfTicker, officialUrl);
       if (holdings.length === 0) throw new Error("Invesco holdings API returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invesco holdings API sync failed";
@@ -962,7 +996,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
     if (holdings.length === 0) {
       source = "invesco:portfolio-csv";
       try {
-        holdings = await fetchInvescoConstituents(etfTicker);
+        holdings = await fetchInvescoConstituents(etfTicker, officialUrl);
         if (holdings.length === 0) throw new Error("Invesco returned no holdings");
       } catch (error) {
         const message = error instanceof Error ? error.message : "Invesco CSV sync failed";

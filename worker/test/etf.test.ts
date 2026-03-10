@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGlobalXDelimitedRows } from "../src/etf";
+import { extractInvescoDownloadLinksFromHtml, parseGlobalXDelimitedRows } from "../src/etf";
 
 describe("ETF constituent parsers", () => {
   it("parses Global X full holdings csv rows", () => {
@@ -30,5 +30,18 @@ describe("ETF constituent parsers", () => {
       { ticker: "BRK.B", name: "Berkshire Hathaway Inc Class B", weight: 3.2 },
       { ticker: "388", name: "Hong Kong Exchanges & Clearing Ltd", weight: 2.1 },
     ]);
+  });
+
+  it("extracts Invesco export-data style download links", () => {
+    const html = [
+      '<html><body>',
+      '<a href="/us/en/financial-products/etfs/holdings/main/holdings/0?audienceType=Investor&ticker=KBWB">Export Data</a>',
+      '<a href="/us/en/financial-products/etfs/invesco-kb-w-bank-etf.html">KBWB</a>',
+      "</body></html>",
+    ].join("");
+
+    expect(extractInvescoDownloadLinksFromHtml(html)).toContain(
+      "/us/en/financial-products/etfs/holdings/main/holdings/0?audienceType=Investor&ticker=KBWB",
+    );
   });
 });
