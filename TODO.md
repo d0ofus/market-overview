@@ -3,7 +3,8 @@
 ## Overview
 - Add multiple chart view of commodities
 - Add RS chart (like my google sheets dashboard)
-- Allow click of 
+- Allow click of row to open chart, not only on Hide/Show
+- Allow esc button to close popup windows of constituents
 
 ## Breadth
 - Scoring for market breadth for overall 
