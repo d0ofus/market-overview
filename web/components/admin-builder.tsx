@@ -72,6 +72,7 @@ export function AdminBuilder() {
   const [diagError, setDiagError] = useState<string | null>(null);
   const [diagMsg, setDiagMsg] = useState<string | null>(null);
   const [diagResult, setDiagResult] = useState<any | null>(null);
+  const [diagSourceUrl, setDiagSourceUrl] = useState("");
 
   const load = async () => {
     setIsLoading(true);
@@ -238,12 +239,14 @@ export function AdminBuilder() {
         dataProvider: string;
         ticker: string;
         db: { ok: boolean; error: string | null };
-        watchlists: Array<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null }>;
+        watchlists: Array<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null; sourceUrl?: string | null }>;
+        sourceUrl?: string | null;
         syncStatus: { status: string | null; source: string | null; lastSyncedAt: string | null; updatedAt: string | null; recordsCount: number; error: string | null } | null;
         constituentSummary: { count: number; latestAsOfDate: string | null; latestUpdatedAt: string | null };
         topConstituents: Array<{ ticker: string; name: string | null; weight: number | null }>;
       }>(`/api/admin/etf-sync-diagnostics?ticker=${encodeURIComponent(ticker)}`);
       setDiagResult(res);
+      setDiagSourceUrl(String(res.sourceUrl ?? res.watchlists?.[0]?.sourceUrl ?? ""));
     } catch (err) {
       setDiagError(err instanceof Error ? err.message : "Failed to run ETF diagnostics.");
     } finally {
@@ -326,6 +329,7 @@ export function AdminBuilder() {
         fundName: row.fundName ?? null,
         parentSector: parentSector || null,
         industry: industry || null,
+        sourceUrl: row.sourceUrl ?? null,
       }),
     });
     await load();
@@ -432,6 +436,54 @@ export function AdminBuilder() {
           </div>
           {diagMsg && <p className="mt-2 text-xs text-slate-300">{diagMsg}</p>}
           {diagError && <p className="mt-2 text-xs text-red-300">{diagError}</p>}
+          <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr),auto,auto]">
+            <input
+              className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+              placeholder="Official source URL override"
+              value={diagSourceUrl}
+              onChange={(e) => setDiagSourceUrl(e.target.value)}
+            />
+            <button
+              className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200"
+              onClick={async () => {
+                try {
+                  setDiagError(null);
+                  setDiagMsg(null);
+                  const ticker = diagTicker.trim().toUpperCase();
+                  await adminFetch(`/api/admin/etf-source/${ticker}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ sourceUrl: diagSourceUrl.trim() || null }),
+                  });
+                  setDiagMsg(`Saved source URL override for ${ticker}.`);
+                  await runEtfDiagnostics(false);
+                } catch (err) {
+                  setDiagError(err instanceof Error ? err.message : "Failed to save ETF source URL.");
+                }
+              }}
+            >
+              Save Source URL
+            </button>
+            <button
+              className="rounded border border-accent/40 px-3 py-1 text-sm text-accent"
+              onClick={async () => {
+                try {
+                  setDiagError(null);
+                  setDiagMsg(null);
+                  const ticker = diagTicker.trim().toUpperCase();
+                  await adminFetch(`/api/admin/etf-source/${ticker}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ sourceUrl: diagSourceUrl.trim() || null }),
+                  });
+                  await runEtfDiagnostics(true);
+                } catch (err) {
+                  setDiagError(err instanceof Error ? err.message : "Failed to save ETF source URL.");
+                }
+              }}
+              disabled={diagLoading}
+            >
+              Save + Sync
+            </button>
+          </div>
           {diagResult && (
             <div className="mt-2 overflow-auto rounded border border-borderSoft/70">
               <table className="min-w-full text-xs">
@@ -439,6 +491,10 @@ export function AdminBuilder() {
                   <tr className="border-t border-borderSoft/60">
                     <td className="px-2 py-1 text-slate-400">Backend Revision</td>
                     <td className="px-2 py-1">{diagResult.backendRevision ?? "-"}</td>
+                  </tr>
+                  <tr className="border-t border-borderSoft/60">
+                    <td className="px-2 py-1 text-slate-400">Configured Source URL</td>
+                    <td className="px-2 py-1 break-all">{diagResult.sourceUrl ?? "-"}</td>
                   </tr>
                   <tr className="border-t border-borderSoft/60">
                     <td className="px-2 py-1 text-slate-400">Server Time (UTC)</td>

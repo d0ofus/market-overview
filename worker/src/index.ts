@@ -66,6 +66,43 @@ function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
 }
 
+async function listEtfWatchlistRows(
+  env: Env,
+  listType: "sector" | "industry",
+): Promise<Array<{ listType: string; parentSector: string | null; industry: string | null; ticker: string; fundName: string | null; sortOrder: number; sourceUrl: string | null }>> {
+  const orderBy = listType === "sector"
+    ? "sort_order ASC, ticker ASC"
+    : "COALESCE(parent_sector, '') ASC, COALESCE(industry, '') ASC, sort_order ASC, ticker ASC";
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder, source_url as sourceUrl FROM etf_watchlists WHERE list_type = ? ORDER BY ${orderBy}`,
+    )
+      .bind(listType)
+      .all<{ listType: string; parentSector: string | null; industry: string | null; ticker: string; fundName: string | null; sortOrder: number; sourceUrl: string | null }>();
+    return rows.results ?? [];
+  } catch {
+    const rows = await env.DB.prepare(
+      `SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = ? ORDER BY ${orderBy}`,
+    )
+      .bind(listType)
+      .all<{ listType: string; parentSector: string | null; industry: string | null; ticker: string; fundName: string | null; sortOrder: number }>();
+    return (rows.results ?? []).map((row) => ({ ...row, sourceUrl: null }));
+  }
+}
+
+async function loadEtfSourceUrl(env: Env, ticker: string): Promise<string | null> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT source_url as sourceUrl FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
+    )
+      .bind(ticker)
+      .first<{ sourceUrl: string | null }>();
+    return row?.sourceUrl?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function catalogAssetClass(exactUrl: string): "etf" | "index" {
   const lower = exactUrl.toLowerCase();
   if (
@@ -1040,10 +1077,7 @@ app.get("/api/sectors/calendar", async (c) => {
 });
 
 app.get("/api/etfs/sector", async (c) => {
-  const rowsRes = await c.env.DB.prepare(
-    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'sector' ORDER BY sort_order ASC, ticker ASC",
-  ).all();
-  const rows = rowsRes.results ?? [];
+  const rows = await listEtfWatchlistRows(c.env, "sector");
   await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
   const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
@@ -1058,10 +1092,7 @@ app.get("/api/etfs/sector", async (c) => {
 
 app.get("/api/etfs/industry", async (c) => {
   await ensureEtfCatalogCoverage(c.env);
-  const rowsRes = await c.env.DB.prepare(
-    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE list_type = 'industry' ORDER BY parent_sector ASC, industry ASC, sort_order ASC, ticker ASC",
-  ).all();
-  const rows = rowsRes.results ?? [];
+  const rows = await listEtfWatchlistRows(c.env, "industry");
   await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
   const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
@@ -1077,11 +1108,21 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   await ensureEtfCatalogCoverage(c.env);
   const ticker = c.req.param("ticker").toUpperCase();
   const forceSync = c.req.query("force") === "1";
-  const etf = await c.env.DB.prepare(
-    "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
-  )
-    .bind(ticker)
-    .first();
+  const etf = await (async () => {
+    try {
+      return await c.env.DB.prepare(
+        "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder, source_url as sourceUrl FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
+      )
+        .bind(ticker)
+        .first();
+    } catch {
+      return await c.env.DB.prepare(
+        "SELECT list_type as listType, parent_sector as parentSector, industry, ticker, fund_name as fundName, sort_order as sortOrder FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
+      )
+        .bind(ticker)
+        .first();
+    }
+  })();
   if (!etf) return c.json({ error: "ETF ticker not found in watchlists" }, 404);
 
   const rows = await c.env.DB.prepare(
@@ -1284,36 +1325,58 @@ app.post("/api/admin/etfs", async (c) => {
     industry?: string | null;
     ticker: string;
     fundName?: string | null;
+    sourceUrl?: string | null;
   };
   const listType = body.listType === "industry" ? "industry" : "sector";
   const ticker = body.ticker?.trim().toUpperCase();
   if (!ticker) return c.json({ error: "ticker is required" }, 400);
   const meta = await resolveTickerMeta(ticker, c.env);
   const fundName = body.fundName?.trim() || meta?.name || ticker;
+  const sourceUrl = body.sourceUrl?.trim() || null;
   const order = await c.env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) + 1 as nextOrder FROM etf_watchlists WHERE list_type = ? AND COALESCE(parent_sector, '') = COALESCE(?, '') AND COALESCE(industry, '') = COALESCE(?, '')",
   )
     .bind(listType, body.parentSector ?? null, body.industry ?? null)
     .first<{ nextOrder: number }>();
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name",
-    ).bind(
-      listType,
-      body.parentSector ?? null,
-      body.industry ?? null,
-      ticker,
-      fundName,
-      order?.nextOrder ?? 1,
-    ),
+  const commonStatements = [
     c.env.DB.prepare("INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(ticker, meta?.name ?? fundName, meta?.exchange ?? "NYSEARCA", "etf", body.parentSector ?? null, body.industry ?? null),
     c.env.DB.prepare(
       "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'watchlist:add', 0, CURRENT_TIMESTAMP)",
     ).bind(ticker),
-  ]);
-  await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry });
-  return c.json({ ok: true, ticker });
+  ];
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order, source_url) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name, source_url = excluded.source_url",
+      ).bind(
+        listType,
+        body.parentSector ?? null,
+        body.industry ?? null,
+        ticker,
+        fundName,
+        order?.nextOrder ?? 1,
+        sourceUrl,
+      ),
+      ...commonStatements,
+    ]);
+  } catch {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name",
+      ).bind(
+        listType,
+        body.parentSector ?? null,
+        body.industry ?? null,
+        ticker,
+        fundName,
+        order?.nextOrder ?? 1,
+      ),
+      ...commonStatements,
+    ]);
+  }
+  await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry, sourceUrl });
+  return c.json({ ok: true, ticker, sourceUrl });
 });
 
 app.delete("/api/admin/etfs/:listType/:ticker", async (c) => {
@@ -1332,6 +1395,28 @@ app.delete("/api/admin/etfs/:listType/:ticker", async (c) => {
     .run();
   await upsertAudit(c.env, "default", "ETF_WATCHLIST_DELETE", { listType, ticker });
   return c.json({ ok: true, ticker, listType });
+});
+
+app.patch("/api/admin/etf-source/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = c.req.param("ticker").toUpperCase();
+  if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Valid ticker is required" }, 400);
+  const body = (await c.req.json().catch(() => ({}))) as { sourceUrl?: string | null };
+  const sourceUrl = body.sourceUrl?.trim() || null;
+  const existing = await c.env.DB.prepare("SELECT ticker FROM etf_watchlists WHERE ticker = ? LIMIT 1")
+    .bind(ticker)
+    .first<{ ticker: string }>();
+  if (!existing?.ticker) return c.json({ error: "ETF not found in watchlist" }, 404);
+  try {
+    await c.env.DB.prepare("UPDATE etf_watchlists SET source_url = ? WHERE ticker = ?")
+      .bind(sourceUrl, ticker)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "source_url update failed";
+    return c.json({ error: `Apply the latest D1 migration before using ETF source URL overrides. (${message})` }, 400);
+  }
+  await upsertAudit(c.env, "default", "ETF_SOURCE_URL_PATCH", { ticker, sourceUrl });
+  return c.json({ ok: true, ticker, sourceUrl });
 });
 
 app.get("/api/admin/etf-sync-status", async (c) => {
@@ -1523,11 +1608,22 @@ app.get("/api/admin/etf-sync-diagnostics", async (c) => {
     );
   }
 
-  const watchlists = await c.env.DB.prepare(
-    "SELECT list_type as listType, parent_sector as parentSector, industry, fund_name as fundName FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC",
-  )
-    .bind(ticker)
-    .all<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null }>();
+  const watchlists = await (async () => {
+    try {
+      return await c.env.DB.prepare(
+        "SELECT list_type as listType, parent_sector as parentSector, industry, fund_name as fundName, source_url as sourceUrl FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC",
+      )
+        .bind(ticker)
+        .all<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null; sourceUrl: string | null }>();
+    } catch {
+      return await c.env.DB.prepare(
+        "SELECT list_type as listType, parent_sector as parentSector, industry, fund_name as fundName FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC",
+      )
+        .bind(ticker)
+        .all<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null }>();
+    }
+  })();
+  const sourceUrl = await loadEtfSourceUrl(c.env, ticker);
   const syncStatus = await c.env.DB.prepare(
     "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount, updated_at as updatedAt FROM etf_constituent_sync_status WHERE etf_ticker = ?",
   )
@@ -1565,7 +1661,8 @@ app.get("/api/admin/etf-sync-diagnostics", async (c) => {
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
     ticker,
     db: { ok: true, error: null },
-    watchlists: watchlists.results ?? [],
+    watchlists: (watchlists.results ?? []).map((row: any) => ({ ...row, sourceUrl: row.sourceUrl ?? null })),
+    sourceUrl,
     syncStatus: syncStatus ?? null,
     constituentSummary: {
       count: constituentSummary?.count ?? 0,

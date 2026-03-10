@@ -40,8 +40,14 @@ const INVESCO_KNOWN_PAGE_BY_TICKER: Record<string, string> = {
   TAN: "https://www.invesco.com/us/en/financial-products/etfs/invesco-solar-etf.html",
   PBW: "https://www.invesco.com/us/en/financial-products/etfs/invesco-wilderhill-clean-energy-etf.html",
   PJP: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-pharmaceuticals-etf.html",
-  PSI: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-semiconductors-etf.html",
+  PPA: "https://www.invesco.com/us/en/financial-products/etfs/invesco-aerospace-defense-etf.html",
+  PSI: "https://www.invesco.com/us/en/financial-products/etfs/invesco-semiconductors-etf.html",
+  PEJ: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-leisure-and-entertainment-etf.html",
   PNQI: "https://www.invesco.com/us/en/financial-products/etfs/invesco-nasdaq-internet-etf.html",
+  PBJ: "https://www.invesco.com/us/en/financial-products/etfs/invesco-dynamic-food-and-beverage-etf.html",
+  DBA: "https://www.invesco.com/us/en/financial-products/etfs/invesco-db-agriculture-fund.html",
+  DBC: "https://www.invesco.com/us/en/financial-products/etfs/invesco-db-commodity-index-tracking-fund.html",
+  PPH: "https://www.invesco.com/us/en/financial-products/etfs/invesco-pharmaceuticals-etf.html",
 };
 
 const INVESCO_ETF_DISCOVERY_URLS = [
@@ -58,8 +64,18 @@ function shouldPreferSsgaFundData(etfTicker: string): boolean {
   return /^X[A-Z]{1,5}$/.test(etfTicker);
 }
 
-function officialUrlForTicker(etfTicker: string): string | null {
-  return ETF_CATALOG_BY_TICKER[etfTicker]?.exactUrl ?? null;
+async function officialUrlForTicker(env: Env, etfTicker: string): Promise<string | null> {
+  try {
+    const watchlistRow = await env.DB.prepare(
+      "SELECT source_url as sourceUrl FROM etf_watchlists WHERE ticker = ? ORDER BY list_type ASC LIMIT 1",
+    )
+      .bind(etfTicker)
+      .first<{ sourceUrl: string | null }>();
+    if (watchlistRow?.sourceUrl?.trim()) return watchlistRow.sourceUrl.trim();
+  } catch {
+    // Older schema without source_url can fall back to static mappings.
+  }
+  return ETF_CATALOG_BY_TICKER[etfTicker]?.exactUrl ?? INVESCO_KNOWN_PAGE_BY_TICKER[etfTicker] ?? null;
 }
 
 async function getInvescoPreference(env: Env, etfTicker: string): Promise<{ prefer: boolean; strict: boolean }> {
@@ -902,7 +918,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   let holdings: EtfConstituent[] = [];
   const errors: string[] = [];
   const invesco = await getInvescoPreference(env, etfTicker);
-  const officialUrl = officialUrlForTicker(etfTicker);
+  const officialUrl = await officialUrlForTicker(env, etfTicker);
 
   if (officialUrl) {
     source = `official:${new URL(officialUrl).hostname.replace(/^www\./i, "")}`;
