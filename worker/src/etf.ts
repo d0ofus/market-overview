@@ -97,9 +97,17 @@ async function persistSyncErrorAndThrow(
 
 function normalizeTicker(value: string | null | undefined): string | null {
   if (!value) return null;
-  const t = value.trim().toUpperCase();
-  if (!/^[A-Z.\-]{1,20}$/.test(t)) return null;
+  const t = value.trim().toUpperCase().replace(/\//g, ".");
+  if (!/^[A-Z0-9.\-]{1,20}$/.test(t)) return null;
   return t;
+}
+
+function normalizeGlobalXTickerCell(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(/["']/g, "").trim().toUpperCase();
+  if (!cleaned) return null;
+  const firstToken = cleaned.split(/\s+/).find(Boolean) ?? cleaned;
+  return normalizeTicker(firstToken);
 }
 
 function parseWeightCell(value: unknown): number | null {
@@ -263,6 +271,52 @@ function parseInvescoDelimitedRows(raw: string): EtfConstituent[] {
   return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
 }
 
+function findGlobalXHeaderIndexes(rows: string[][]): { headerRowIndex: number; tickerIdx: number; weightIdx: number; nameIdx: number } | null {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    let tickerIdx = -1;
+    let weightIdx = -1;
+    let nameIdx = -1;
+    row.forEach((cell, i) => {
+      const v = String(cell ?? "").toLowerCase().trim();
+      if (tickerIdx < 0 && (v === "ticker" || v === "symbol" || v.includes("ticker symbol"))) tickerIdx = i;
+      if (weightIdx < 0 && (v === "weightings" || v === "weight" || v.includes("portfolio weight") || v.includes("% net assets"))) weightIdx = i;
+      if (nameIdx < 0 && (v === "name" || v === "security name" || v.includes("holding"))) nameIdx = i;
+    });
+    if (tickerIdx >= 0 && weightIdx >= 0) return { headerRowIndex: rowIndex, tickerIdx, weightIdx, nameIdx };
+  }
+  return null;
+}
+
+export function parseGlobalXDelimitedRows(raw: string): EtfConstituent[] {
+  const lines = raw
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const rows = lines.map((l) => splitDelimitedRow(l, ","));
+  const header = findGlobalXHeaderIndexes(rows);
+  if (!header) return [];
+
+  const out: EtfConstituent[] = [];
+  for (const row of rows.slice(header.headerRowIndex + 1)) {
+    const ticker = normalizeGlobalXTickerCell(row[header.tickerIdx]);
+    if (!ticker || ticker === "USD" || ticker === "CASH") continue;
+    const weight = parseWeightCell(row[header.weightIdx]);
+    const nameCell = header.nameIdx >= 0 ? row[header.nameIdx] : null;
+    const name = typeof nameCell === "string" && nameCell.trim().length > 0 ? nameCell.trim() : null;
+    out.push({ ticker, name, weight });
+  }
+
+  const dedup = new Map<string, EtfConstituent>();
+  for (const row of out) {
+    if (!dedup.has(row.ticker)) dedup.set(row.ticker, row);
+  }
+  return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+}
+
 function extractInvescoPageLinks(html: string, etfTicker: string): string[] {
   const links: string[] = [];
   const anchorRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -350,6 +404,8 @@ function parseHoldingsFileByType(url: string, contentType: string, textBody: str
     return parseSsgaWorkbookRows(binaryBody);
   }
   const text = textBody ?? "";
+  const parsedGlobalX = parseGlobalXDelimitedRows(text);
+  if (parsedGlobalX.length > 0) return parsedGlobalX;
   const parsedInvesco = parseInvescoDelimitedRows(text);
   if (parsedInvesco.length > 0) return parsedInvesco;
   const parsedSsga = parseSsgaDelimitedRows(text);
@@ -357,8 +413,73 @@ function parseHoldingsFileByType(url: string, contentType: string, textBody: str
   return [];
 }
 
+function extractGlobalXCsvLinks(html: string): string[] {
+  const urls = new Set<string>();
+  const absolute = html.match(/https?:\/\/assets\.globalxetfs\.com\/funds\/holdings\/[^"'\\s>]+\.csv(?:\?[^"'\\s>]*)?/gi) ?? [];
+  for (const url of absolute) urls.add(url);
+
+  const hrefRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = hrefRegex.exec(html)) !== null) {
+    const href = match[1] ?? "";
+    const text = match[2]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+    if (!href.toLowerCase().includes(".csv")) continue;
+    if (!text.includes("holdings") && !href.toLowerCase().includes("full-holdings")) continue;
+    urls.add(href);
+  }
+
+  return [...urls];
+}
+
+async function fetchGlobalXConstituents(etfTicker: string, sourceUrl: string): Promise<EtfConstituent[]> {
+  const pageRes = await fetch(sourceUrl, {
+    headers: {
+      "User-Agent": "market-command-centre/1.0",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+  if (!pageRes.ok) {
+    throw new Error(`Global X fund page fetch failed (${pageRes.status})`);
+  }
+  const html = await pageRes.text();
+  const csvCandidates = extractGlobalXCsvLinks(html)
+    .map((raw) => normalizeCsvUrl(raw, sourceUrl))
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => {
+      const aPreferred = /assets\.globalxetfs\.com\/funds\/holdings\/.+full-holdings/i.test(a) ? 1 : 0;
+      const bPreferred = /assets\.globalxetfs\.com\/funds\/holdings\/.+full-holdings/i.test(b) ? 1 : 0;
+      return bPreferred - aPreferred;
+    });
+
+  const errors: string[] = [];
+  for (const csvUrl of csvCandidates) {
+    try {
+      const res = await fetch(csvUrl, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+          Accept: "text/csv,application/octet-stream,*/*",
+          Referer: sourceUrl,
+        },
+      });
+      if (!res.ok) {
+        errors.push(`${new URL(csvUrl).pathname} (${res.status})`);
+        continue;
+      }
+      const parsed = parseGlobalXDelimitedRows(await res.text());
+      if (parsed.length > 0) return parsed;
+      errors.push(`${new URL(csvUrl).pathname} (parsed 0 rows)`);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "unknown");
+    }
+  }
+  throw new Error(`Global X holdings CSV parse returned no holdings (${errors.slice(0, 5).join(" | ")})`);
+}
+
 async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: string): Promise<EtfConstituent[]> {
   const domain = new URL(sourceUrl).hostname.toLowerCase();
+  if (domain.includes("globalxetfs.com")) {
+    return await fetchGlobalXConstituents(etfTicker, sourceUrl);
+  }
   if (domain.includes("invesco.com")) {
     try {
       return await fetchInvescoApiConstituents(etfTicker);
