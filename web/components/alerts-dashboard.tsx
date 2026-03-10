@@ -341,25 +341,44 @@ export function AlertsDashboard() {
 
       {error && <div className="card border border-red-500/40 p-3 text-sm text-red-300">{error}</div>}
 
-      <div className={mode === "single" ? "grid gap-4 xl:grid-cols-[2fr,1fr]" : "grid gap-4"}>
+      <div className={mode === "single" ? "grid gap-4 xl:grid-cols-[minmax(0,1.45fr),minmax(22rem,1fr)]" : "grid gap-4"}>
         <section className="space-y-3">
           {mode === "single" ? (
-            <div className="card p-3">
-              <div className="mb-2 text-sm text-slate-300">
+            <>
+              <div className="card p-3">
+                <div className="mb-2 text-sm text-slate-300">
+                  {selectedTickerDay ? (
+                    <>
+                      <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> • {formatTime(selectedLatestAlert?.receivedAt ?? selectedTickerDay.latestReceivedAt)} • {selectedTickerDay.tradingDay} • {selectedTickerDay.marketSession}
+                    </>
+                  ) : (
+                    "Select an alert to open a chart."
+                  )}
+                </div>
                 {selectedTickerDay ? (
-                  <>
-                    <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> • {formatTime(selectedLatestAlert?.receivedAt ?? selectedTickerDay.latestReceivedAt)} • {selectedTickerDay.tradingDay} • {selectedTickerDay.marketSession}
-                  </>
+                  <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly showStatusLine initialRange="3M" />
                 ) : (
-                  "Select an alert to open a chart."
+                  <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-4 text-sm text-slate-400">No ticker selected.</div>
                 )}
               </div>
-              {selectedTickerDay ? (
-                <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly showStatusLine initialRange="3M" />
-              ) : (
-                <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-4 text-sm text-slate-400">No ticker selected.</div>
-              )}
-            </div>
+
+              <div className="card p-3">
+                <h3 className="mb-2 text-sm font-semibold text-slate-200">Top News (Ticker/Day)</h3>
+                {selectedTickerDay && (
+                  <div className="mb-2 text-xs text-slate-400">
+                    {selectedTickerDay.ticker} • {selectedTickerDay.tradingDay}
+                  </div>
+                )}
+                {newsLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading news...
+                  </div>
+                ) : (
+                  <NewsList items={singleNews ?? []} expanded={expandedNews} onToggle={onToggleNews} />
+                )}
+              </div>
+            </>
           ) : (
             <div className="card p-3" ref={gridRef}>
               <div className="mb-2 flex items-center justify-between">
@@ -405,23 +424,6 @@ export function AlertsDashboard() {
 
         {mode === "single" && <aside className="space-y-3">
           <div className="card p-3">
-            <h3 className="mb-2 text-sm font-semibold text-slate-200">Top News (Ticker/Day)</h3>
-            {selectedTickerDay && (
-              <div className="mb-2 text-xs text-slate-400">
-                {selectedTickerDay.ticker} • {selectedTickerDay.tradingDay}
-              </div>
-            )}
-            {newsLoading ? (
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading news...
-              </div>
-            ) : (
-              <NewsList items={singleNews ?? []} expanded={expandedNews} onToggle={onToggleNews} />
-            )}
-          </div>
-
-          <div className="card p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-200">Alerts Log (Last 30d Window)</h3>
               <button
@@ -431,7 +433,7 @@ export function AlertsDashboard() {
                 {showUniqueOnly ? "Show All Alerts" : "Show Unique Only"}
               </button>
             </div>
-            <div className="max-h-[42rem] overflow-auto">
+            <div className="max-h-[58rem] overflow-auto">
               <table className="min-w-full text-xs">
                 <thead className="bg-slate-900/60">
                   <tr>
