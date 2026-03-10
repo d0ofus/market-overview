@@ -75,3 +75,18 @@ CREATE INDEX IF NOT EXISTS idx_ticker_news_ticker_trading_day
 CREATE INDEX IF NOT EXISTS idx_ticker_news_fetched_at_desc
   ON ticker_news(fetched_at DESC);
 
+CREATE TABLE IF NOT EXISTS ticker_news_fetch_cache (
+  ticker TEXT NOT NULL,
+  trading_day TEXT NOT NULL,
+  last_attempt_at TEXT,
+  last_success_at TEXT,
+  status TEXT NOT NULL DEFAULT 'empty',
+  item_count INTEGER NOT NULL DEFAULT 0,
+  provider_trace_json TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (ticker, trading_day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticker_news_fetch_cache_attempt_desc
+  ON ticker_news_fetch_cache(last_attempt_at DESC);
+

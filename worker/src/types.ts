@@ -12,6 +12,10 @@ export type Env = {
   ALERTS_MAILBOX_SYNC_TOKEN?: string;
   ALERTS_ENABLE_YFINANCE_FALLBACK?: string;
   ALERTS_EMAIL_ALLOWED_FROM?: string;
+  FINNHUB_API_KEY?: string;
+  ALPHA_VANTAGE_API_KEY?: string;
+  FMP_API_KEY?: string;
+  SEC_USER_AGENT?: string;
   IBKR_NEWS_ENABLED?: string;
   IBKR_NEWS_ENDPOINT?: string;
   IBKR_NEWS_TOKEN?: string;

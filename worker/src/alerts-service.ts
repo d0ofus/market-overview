@@ -268,16 +268,7 @@ async function upsertAlert(env: Env, input: {
 }
 
 async function enrichTickerNewsIfNeeded(env: Env, ticker: string, tradingDay: string): Promise<number> {
-  const existingCountRow = await env.DB.prepare(
-    "SELECT COUNT(*) as count FROM ticker_news WHERE ticker = ? AND trading_day = ?",
-  )
-    .bind(ticker, tradingDay)
-    .first<{ count: number }>();
-  const existingCount = existingCountRow?.count ?? 0;
-  if (existingCount >= 3) return 0;
-
-  const needed = 3 - existingCount;
-  const fetched = await fetchTickerNews(env, ticker, tradingDay, needed);
+  const fetched = await fetchTickerNews(env, ticker, tradingDay, 3);
   if (fetched.rows.length === 0) return 0;
 
   let inserted = 0;
@@ -515,6 +506,11 @@ export async function cleanupOldAlertsData(env: Env, retentionDays = DEFAULT_RET
     .run();
   const deleteNews = await env.DB.prepare(
     "DELETE FROM ticker_news WHERE date(trading_day) < date('now', ?) OR datetime(fetched_at) < datetime('now', ?)",
+  )
+    .bind(window, window)
+    .run();
+  await env.DB.prepare(
+    "DELETE FROM ticker_news_fetch_cache WHERE date(trading_day) < date('now', ?) OR datetime(last_attempt_at) < datetime('now', ?)",
   )
     .bind(window, window)
     .run();

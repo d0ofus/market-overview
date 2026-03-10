@@ -108,6 +108,20 @@ Worker secrets for Alpaca:
 - `ALPACA_API_KEY`
 - `ALPACA_API_SECRET`
 
+Optional alerts-news provider vars:
+- `FINNHUB_API_KEY`
+- `ALPHA_VANTAGE_API_KEY`
+- `FMP_API_KEY`
+- `SEC_USER_AGENT` (required to enable SEC EDGAR fetches; use a descriptive contact string)
+
+Alerts news fallback order is:
+1. Finnhub
+2. SEC EDGAR
+3. Google News RSS
+4. Alpha Vantage
+5. FMP
+6. Yahoo Finance fallback
+
 Web (`web/.env.local`):
 - `NEXT_PUBLIC_API_BASE=http://127.0.0.1:8787`
 - `NEXT_PUBLIC_ADMIN_SECRET=<same-admin-secret-for-dev-testing>`
