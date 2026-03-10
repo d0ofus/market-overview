@@ -57,5 +57,14 @@ describe("alerts parser", () => {
     expect(parsed?.ticker).toBe("CBA");
     expect(parsed?.messageBody).toContain("ASX:CBA");
   });
+
+  it("ignores exchange-only metadata when the body contains the real ticker", () => {
+    const parsed = parseTradingViewAlertEmail({
+      subject: "Alert: CBA Greater Than 140.56",
+      from: "TradingView <noreply@tradingview.com>",
+      text: 'symbol: ASX\nYour CBA alert was triggered. CBA Greater Than 140.56. Open chart https://www.tradingview.com/chart/?symbol=ASX:CBA',
+    });
+    expect(parsed?.ticker).toBe("CBA");
+  });
 });
 

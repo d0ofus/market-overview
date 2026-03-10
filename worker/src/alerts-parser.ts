@@ -30,6 +30,22 @@ const STOPWORDS = new Set([
   "BITSTAMP",
 ]);
 
+const EXCHANGE_CODES = new Set([
+  "AMEX",
+  "ASX",
+  "BATS",
+  "BINANCE",
+  "BITSTAMP",
+  "BYBIT",
+  "CBOE",
+  "COINBASE",
+  "KRAKEN",
+  "NASDAQ",
+  "NYSE",
+  "NYSEARCA",
+  "OTC",
+]);
+
 function decodeHtml(value: string): string {
   return value
     .replace(/&nbsp;/gi, " ")
@@ -66,6 +82,11 @@ function normalizeCandidate(raw: string): string | null {
   return upper;
 }
 
+function isLikelyExchangeCode(value: string | null): boolean {
+  if (!value) return false;
+  return EXCHANGE_CODES.has(value.toUpperCase());
+}
+
 export function extractTickerSymbol(input: string): string | null {
   const normalized = normalizeWhitespace(input);
   const patterns = [
@@ -80,14 +101,16 @@ export function extractTickerSymbol(input: string): string | null {
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(normalized)) !== null) {
       const ticker = normalizeCandidate(match[1] ?? match[0] ?? "");
-      if (ticker) return ticker;
+      if (!ticker || isLikelyExchangeCode(ticker)) continue;
+      return ticker;
     }
   }
 
   const upperWords = normalized.match(/\b[$]?[A-Z][A-Z0-9.\-^]{0,19}\b/g) ?? [];
   for (const word of upperWords) {
     const ticker = normalizeCandidate(word);
-    if (ticker) return ticker;
+    if (!ticker || isLikelyExchangeCode(ticker)) continue;
+    return ticker;
   }
   return null;
 }
@@ -176,7 +199,8 @@ export function parseTradingViewAlertEmail(payload: InboundEmailPayload): Parsed
   };
 
   const metadataTicker = normalizeCandidate(selectFirst(metadata, ["ticker", "symbol", "instrument", "tv_symbol", "syminfo.ticker"]) ?? "");
-  const ticker = metadataTicker ?? extractTickerSymbol(`${subject}\n${messageBody}`);
+  const extractedTicker = extractTickerSymbol(`${subject}\n${messageBody}`);
+  const ticker = !isLikelyExchangeCode(metadataTicker) ? (metadataTicker ?? extractedTicker) : extractedTicker;
   if (!ticker) return null;
 
   return {
