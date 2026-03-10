@@ -43,7 +43,6 @@ export function Sidebar() {
       <div className="mt-6 space-y-3">
         <ThemeToggle />
       </div>
-      <p className="mt-8 text-xs text-slate-500">Research tool only. Not investment advice.</p>
     </aside>
   );
 }

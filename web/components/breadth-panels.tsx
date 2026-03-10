@@ -467,8 +467,8 @@ export function BreadthPanels({
                   const raw = payload[0]?.value;
                   const value = typeof raw === "number" ? raw : Number(raw ?? 0);
                   return (
-                    <div className="rounded border border-slate-600/50 bg-slate-950/95 px-2 py-1 text-xs text-slate-100">
-                      <div>{label}</div>
+                    <div className="rounded border border-slate-600/50 bg-slate-950/95 px-2 py-1 text-xs text-white">
+                      <div className="text-white">{label}</div>
                       <div className="font-medium text-white">{selectedMetric.format(value)}</div>
                     </div>
                   );
