@@ -124,16 +124,32 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const equalWeightGroup = await env.DB.prepare(
     "SELECT id FROM dashboard_groups WHERE id = ? LIMIT 1",
   ).bind(equalWeightGroupId).first<{ id: string }>();
-  const thematicTickers = uniqueTickers(ETF_CATALOG.map((row) => row.ticker));
+  const industryWatchlistRows = await env.DB.prepare(
+    "SELECT ticker, fund_name as fundName FROM etf_watchlists WHERE list_type = 'industry' ORDER BY COALESCE(parent_sector, '') ASC, COALESCE(industry, '') ASC, sort_order ASC, ticker ASC",
+  ).all<{ ticker: string; fundName: string | null }>();
+  const thematicSeedRows = (industryWatchlistRows.results ?? []).length > 0
+    ? (industryWatchlistRows.results ?? [])
+    : ETF_CATALOG.map((row) => ({ ticker: row.ticker, fundName: `${row.ticker.toUpperCase()} ${catalogAssetClass(row.exactUrl) === "index" ? "Index" : "ETF"}` }));
+  const thematicTickers = thematicSeedRows.map((row) => row.ticker.toUpperCase()).filter(Boolean);
+  const thematicNameByTicker = new Map(
+    thematicSeedRows.map((row) => [row.ticker.toUpperCase(), (row.fundName ?? "").trim()]).filter((entry) => Boolean(entry[0])),
+  );
   const equalWeightNameByTicker = new Map(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]));
   const equalWeightTickers = uniqueTickers(Array.from(equalWeightNameByTicker.keys()));
   const allTickers = uniqueTickers([...thematicTickers, ...equalWeightTickers]);
 
   const existingThematicRows = await env.DB.prepare(
-    "SELECT ticker FROM dashboard_items WHERE group_id = ?",
-  ).bind(thematicGroup.id).all<{ ticker: string }>();
-  const existingThematic = new Set((existingThematicRows.results ?? []).map((r) => r.ticker.toUpperCase()));
-  const missingThematic = thematicTickers.filter((ticker) => !existingThematic.has(ticker));
+    "SELECT id, ticker, display_name as displayName, sort_order as sortOrder FROM dashboard_items WHERE group_id = ? ORDER BY sort_order ASC, ticker ASC",
+  ).bind(thematicGroup.id).all<{ id: string; ticker: string; displayName: string | null; sortOrder: number }>();
+  const existingThematic = existingThematicRows.results ?? [];
+  const thematicNeedsRebuild =
+    existingThematic.length !== thematicTickers.length ||
+    thematicTickers.some((ticker, idx) => {
+      const existing = existingThematic[idx];
+      if (!existing) return true;
+      const desiredName = thematicNameByTicker.get(ticker) || null;
+      return existing.ticker.toUpperCase() !== ticker || (desiredName !== null && (existing.displayName ?? null) !== desiredName);
+    });
 
   const existingEqRows = await env.DB.prepare(
     "SELECT ticker FROM dashboard_items WHERE group_id = ?",
@@ -155,7 +171,7 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
   const needsThematicTitleUpdate = thematicGroup.title !== "Industry/Thematic ETFs";
   const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown;
-  const needsItemUpdate = missingThematic.length > 0 || missingEq.length > 0;
+  const needsItemUpdate = thematicNeedsRebuild || missingEq.length > 0;
   const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix;
 
   const structureStatements = [
@@ -181,24 +197,32 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
     );
   }
 
-  const thematicBaseSortRow = await env.DB.prepare(
-    "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
-  ).bind(thematicGroup.id).first<{ maxSort: number }>();
   const eqBaseSortRow = await env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
   ).bind(equalWeightGroupId).first<{ maxSort: number }>();
-  const thematicItemStatements = missingThematic.map((ticker, idx) =>
-    env.DB.prepare(
-      "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
-    ).bind(crypto.randomUUID(), thematicGroup.id, (thematicBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
-  );
+  const thematicItemStatements = thematicNeedsRebuild
+    ? [
+        env.DB.prepare("DELETE FROM dashboard_items WHERE group_id = ?").bind(thematicGroup.id),
+        ...thematicTickers.map((ticker, idx) =>
+          env.DB.prepare(
+            "INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, ?, 1, '[]', NULL)",
+          ).bind(
+            crypto.randomUUID(),
+            thematicGroup.id,
+            idx + 1,
+            ticker,
+            thematicNameByTicker.get(ticker) || null,
+          ),
+        ),
+      ]
+    : [];
   const equalWeightItemStatements = missingEq.map((ticker, idx) =>
     env.DB.prepare(
       "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
     ).bind(crypto.randomUUID(), equalWeightGroupId, (eqBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
   );
   const symbolStatements = allTickers.map((ticker) => {
-    const preferredName = equalWeightNameByTicker.get(ticker) ?? `${ticker} ETF`;
+    const preferredName = equalWeightNameByTicker.get(ticker) ?? thematicNameByTicker.get(ticker) ?? `${ticker} ETF`;
     const isEqualWeight = equalWeightNameByTicker.has(ticker) ? 1 : 0;
     return env.DB.prepare(
       "INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, 'etf', 'Thematic', 'ETF') ON CONFLICT(ticker) DO UPDATE SET name = CASE WHEN ? = 1 THEN ? WHEN COALESCE(symbols.name, '') = '' OR symbols.name = symbols.ticker OR symbols.name LIKE '% ETF' THEN excluded.name ELSE symbols.name END, asset_class = COALESCE(symbols.asset_class, excluded.asset_class)",
