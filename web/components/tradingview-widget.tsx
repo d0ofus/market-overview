@@ -56,7 +56,6 @@ export function TradingViewWidget({
       height,
       symbol: ticker,
       interval: DEFAULT_CHART_INTERVAL,
-      range: initialRange,
       timezone: "Etc/UTC",
       theme,
       style: DEFAULT_CHART_STYLE,
