@@ -159,6 +159,7 @@ export function AlertsDashboard() {
   const [endDate, setEndDate] = useState(defaultEndDate());
   const [session, setSession] = useState<AlertsSessionFilter>("all");
   const [mode, setMode] = useState<"single" | "multi">("single");
+  const [showUniqueOnly, setShowUniqueOnly] = useState(false);
   const [alerts, setAlerts] = useState<AlertLogRow[]>([]);
   const [tickerDays, setTickerDays] = useState<AlertTickerDayRow[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -239,6 +240,19 @@ export function AlertsDashboard() {
   }, []);
 
   const uniqueTickers = useMemo(() => Array.from(new Set(tickerDays.map((row) => row.ticker))), [tickerDays]);
+  const visibleAlerts = useMemo(() => {
+    if (!showUniqueOnly) return alerts;
+    const seen = new Set<string>();
+    const deduped: AlertLogRow[] = [];
+    for (const row of alerts) {
+      const description = summarizeDescription(row);
+      const key = [row.tradingDay, row.marketSession, row.ticker, description].join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(row);
+    }
+    return deduped;
+  }, [alerts, showUniqueOnly]);
 
   const onToggleNews = (key: string) => {
     setExpandedNews((current) => {
@@ -321,7 +335,7 @@ export function AlertsDashboard() {
           </div>
         </div>
         <div className="mt-3 text-xs text-slate-400">
-          {loading ? "Loading alerts..." : `${alerts.length} alerts, ${tickerDays.length} unique ticker-days, ${uniqueTickers.length} unique tickers`}
+          {loading ? "Loading alerts..." : `${visibleAlerts.length}${showUniqueOnly ? " visible unique" : ""} alerts, ${tickerDays.length} unique ticker-days, ${uniqueTickers.length} unique tickers`}
         </div>
       </div>
 
@@ -408,7 +422,15 @@ export function AlertsDashboard() {
           </div>
 
           <div className="card p-3">
-            <h3 className="mb-2 text-sm font-semibold text-slate-200">Alerts Log (Last 30d Window)</h3>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">Alerts Log (Last 30d Window)</h3>
+              <button
+                className={`rounded px-3 py-1.5 text-xs ${showUniqueOnly ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+                onClick={() => setShowUniqueOnly((current) => !current)}
+              >
+                {showUniqueOnly ? "Show All Alerts" : "Show Unique Only"}
+              </button>
+            </div>
             <div className="max-h-[42rem] overflow-auto">
               <table className="min-w-full text-xs">
                 <thead className="bg-slate-900/60">
@@ -420,7 +442,7 @@ export function AlertsDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {alerts.map((row) => {
+                  {visibleAlerts.map((row) => {
                     const isActive = selectedKey === keyFor(row.ticker, row.tradingDay);
                     return (
                       <tr
@@ -435,7 +457,7 @@ export function AlertsDashboard() {
                       </tr>
                     );
                   })}
-                  {alerts.length === 0 && (
+                  {visibleAlerts.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-2 py-4 text-center text-slate-400">
                         No alerts found for the selected filters.
