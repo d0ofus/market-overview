@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef } from "react";
 import { useState } from "react";
 
-const DEFAULT_CHART_INTERVAL = "1D";
+const DEFAULT_CHART_INTERVAL = "D";
 const DEFAULT_CHART_STYLE = "1";
 
 export function TradingViewWidget({
