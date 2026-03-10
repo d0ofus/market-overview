@@ -3,6 +3,9 @@
 import { useEffect, useId, useRef } from "react";
 import { useState } from "react";
 
+const DEFAULT_CHART_INTERVAL = "1D";
+const DEFAULT_CHART_STYLE = "1";
+
 export function TradingViewWidget({
   ticker,
   compareSymbol,
@@ -52,11 +55,11 @@ export function TradingViewWidget({
       width,
       height,
       symbol: ticker,
-      interval: "1D",
+      interval: DEFAULT_CHART_INTERVAL,
       range: initialRange,
       timezone: "Etc/UTC",
       theme,
-      style: "1",
+      style: DEFAULT_CHART_STYLE,
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
       hide_side_toolbar: chartOnly,

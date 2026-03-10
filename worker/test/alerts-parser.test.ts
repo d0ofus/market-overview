@@ -47,5 +47,15 @@ describe("alerts parser", () => {
     expect(parsed?.ticker).toBe("IPI");
     expect(parsed?.messageBody).toContain("IPI Greater Than 38.63");
   });
+
+  it("parses exchange-qualified non-US chart links without dropping the ticker", () => {
+    const parsed = parseTradingViewAlertEmail({
+      subject: "Alert: CBA Greater Than 140.56",
+      from: "TradingView <noreply@tradingview.com>",
+      text: "Your CBA alert was triggered. CBA Greater Than 140.56. Open chart https://www.tradingview.com/chart/?symbol=ASX:CBA",
+    });
+    expect(parsed?.ticker).toBe("CBA");
+    expect(parsed?.messageBody).toContain("ASX:CBA");
+  });
 });
 

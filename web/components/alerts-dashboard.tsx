@@ -176,8 +176,8 @@ export function AlertsDashboard() {
     setError(null);
     try {
       const [alertsRes, uniqueRes] = await Promise.all([
-        getAlerts({ startDate, endDate, session, limit: 500 }),
-        getAlertTickerDays({ startDate, endDate, session, limit: 250 }),
+        getAlerts({ startDate, endDate, session, limit: 2000 }),
+        getAlertTickerDays({ startDate, endDate, session, limit: 1000 }),
       ]);
       const rows = alertsRes.rows ?? [];
       const uniqueRows = uniqueRes.rows ?? [];

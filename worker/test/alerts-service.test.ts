@@ -12,7 +12,7 @@ describe("alerts service helpers", () => {
     expect(normalized.startDate).toBe("2026-03-01");
     expect(normalized.endDate).toBe("2026-03-10");
     expect(normalized.session).toBe("all");
-    expect(normalized.limit).toBe(1000);
+    expect(normalized.limit).toBe(3000);
   });
 
   it("builds deterministic dedupe seeds", () => {

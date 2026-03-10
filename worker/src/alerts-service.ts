@@ -405,7 +405,7 @@ export function normalizeAlertFilters(input: AlertFilterInput): NormalizedAlertF
     ? (sessionRaw as AlertsSessionFilter)
     : "all";
 
-  const limit = clamp(Number(input.limit ?? 300), 1, 1000);
+  const limit = clamp(Number(input.limit ?? 300), 1, 3000);
 
   return {
     startDate: sorted.startDate,
