@@ -62,6 +62,40 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
   return Date.now() - then > maxAgeDays * 86400_000;
 };
 
+type EtfSyncStatusRow = {
+  etfTicker: string;
+  lastSyncedAt: string | null;
+  status: string | null;
+  error: string | null;
+  source: string | null;
+  recordsCount: number;
+  updatedAt: string | null;
+  actualRecordsCount?: number | null;
+  latestConstituentUpdatedAt?: string | null;
+};
+
+function normalizeEtfSyncStatusRow<T extends EtfSyncStatusRow>(row: T): T {
+  const actualRecordsCount = Number(row.actualRecordsCount ?? row.recordsCount ?? 0);
+  const storedRecordsCount = Number(row.recordsCount ?? 0);
+  const effectiveRecordsCount = Math.max(actualRecordsCount, storedRecordsCount);
+  const hasCachedConstituents = effectiveRecordsCount > 0;
+  const hasStaleError = row.status === "error" && hasCachedConstituents;
+  const effectiveStatus = hasStaleError
+    ? "ok"
+    : (row.status ?? (hasCachedConstituents ? "ok" : "pending"));
+  const effectiveError = hasStaleError ? null : (row.error ?? null);
+  const effectiveUpdatedAt = row.latestConstituentUpdatedAt ?? row.updatedAt ?? null;
+  const effectiveLastSyncedAt = row.lastSyncedAt ?? row.latestConstituentUpdatedAt ?? null;
+  return {
+    ...row,
+    status: effectiveStatus,
+    error: effectiveError,
+    recordsCount: effectiveRecordsCount,
+    updatedAt: effectiveUpdatedAt,
+    lastSyncedAt: effectiveLastSyncedAt,
+  };
+}
+
 function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
 }
@@ -1427,18 +1461,29 @@ app.get("/api/admin/etf-sync-status", async (c) => {
 
   if (autoSyncLimit > 0) {
     const candidates = await c.env.DB.prepare(
-      "SELECT w.ticker as ticker, w.fundName as fundName, s.last_synced_at as lastSyncedAt, s.status as status, s.error as error, s.source as source, COALESCE(s.records_count, 0) as recordsCount FROM (SELECT ticker, MAX(fund_name) as fundName FROM etf_watchlists GROUP BY ticker) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker ORDER BY w.ticker ASC",
-    ).all<{ ticker: string; fundName: string | null; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+      "SELECT w.ticker as ticker, w.fundName as fundName, s.last_synced_at as lastSyncedAt, s.status as status, s.error as error, s.source as source, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT ticker, MAX(fund_name) as fundName FROM etf_watchlists GROUP BY ticker) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY w.ticker ASC",
+    ).all<Array<{ ticker: string; fundName: string | null } & EtfSyncStatusRow>[number]>();
 
     const ranked = (candidates.results ?? [])
       .map((row) => {
+        const normalized = normalizeEtfSyncStatusRow({
+          etfTicker: row.ticker,
+          lastSyncedAt: row.lastSyncedAt,
+          status: row.status,
+          error: row.error,
+          source: row.source,
+          recordsCount: row.recordsCount,
+          updatedAt: row.latestConstituentUpdatedAt ?? null,
+          actualRecordsCount: row.actualRecordsCount,
+          latestConstituentUpdatedAt: row.latestConstituentUpdatedAt,
+        });
         const source = String(row.source ?? "").toLowerCase();
-        const error = String(row.error ?? "");
+        const error = String(normalized.error ?? "");
         const fundName = String(row.fundName ?? "").toLowerCase();
-        const hasError = row.status === "error";
-        const hasNoRecords = (row.recordsCount ?? 0) === 0;
-        const noSyncYet = !row.lastSyncedAt;
-        const stale = isStaleDate(row.lastSyncedAt, 45);
+        const hasError = normalized.status === "error";
+        const hasNoRecords = (normalized.recordsCount ?? 0) === 0;
+        const noSyncYet = !normalized.lastSyncedAt;
+        const stale = isStaleDate(normalized.lastSyncedAt, 45);
         const tooManySubrequests = /too many subrequests/i.test(error);
         const looksInvesco = fundName.includes("invesco") || fundName.includes("powershares");
         let score = 0;
@@ -1449,7 +1494,7 @@ app.get("/api/admin/etf-sync-status", async (c) => {
         if (tooManySubrequests) score += 4;
         if (source.startsWith("yahoo:")) score += 1;
         if (looksInvesco) score += 1;
-        return { ...row, score };
+        return { ...row, ...normalized, score };
       })
       .filter((row) => row.score > 0)
       .sort((a, b) => {
@@ -1470,11 +1515,11 @@ app.get("/api/admin/etf-sync-status", async (c) => {
   }
 
   const rows = await c.env.DB.prepare(
-    "SELECT w.ticker as etfTicker, s.last_synced_at as lastSyncedAt, COALESCE(s.status, 'pending') as status, s.error as error, COALESCE(s.source, 'watchlist:add') as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker ORDER BY CASE WHEN COALESCE(s.records_count, 0) > 0 THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 ELSE 2 END, datetime(COALESCE(s.updated_at, s.last_synced_at, '1970-01-01 00:00:00')) DESC, w.ticker ASC LIMIT ?",
+    "SELECT w.ticker as etfTicker, s.last_synced_at as lastSyncedAt, COALESCE(s.status, 'pending') as status, s.error as error, COALESCE(s.source, 'watchlist:add') as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) > 0 THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 ELSE 2 END, datetime(COALESCE(cs.latestConstituentUpdatedAt, s.updated_at, s.last_synced_at, '1970-01-01 00:00:00')) DESC, w.ticker ASC LIMIT ?",
   )
     .bind(limit)
-    .all();
-  return c.json({ rows: rows.results ?? [] });
+    .all<EtfSyncStatusRow>();
+  return c.json({ rows: (rows.results ?? []).map(normalizeEtfSyncStatusRow) });
 });
 
 app.post("/api/admin/etf/:ticker/sync", async (c) => {
@@ -1624,24 +1669,29 @@ app.get("/api/admin/etf-sync-diagnostics", async (c) => {
     }
   })();
   const sourceUrl = await loadEtfSourceUrl(c.env, ticker);
-  const syncStatus = await c.env.DB.prepare(
-    "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount, updated_at as updatedAt FROM etf_constituent_sync_status WHERE etf_ticker = ?",
+  const syncStatusRaw = await c.env.DB.prepare(
+    "SELECT s.etf_ticker as etfTicker, s.last_synced_at as lastSyncedAt, s.status, s.error, s.source, s.records_count as recordsCount, s.updated_at as updatedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM etf_constituent_sync_status s LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = s.etf_ticker WHERE s.etf_ticker = ?",
   )
     .bind(ticker)
-    .first<{
-      etfTicker: string;
-      lastSyncedAt: string | null;
-      status: string | null;
-      error: string | null;
-      source: string | null;
-      recordsCount: number;
-      updatedAt: string | null;
-    }>();
+    .first<EtfSyncStatusRow>();
   const constituentSummary = await c.env.DB.prepare(
     "SELECT COUNT(*) as count, MAX(as_of_date) as latestAsOfDate, MAX(updated_at) as latestUpdatedAt FROM etf_constituents WHERE etf_ticker = ?",
   )
     .bind(ticker)
     .first<{ count: number; latestAsOfDate: string | null; latestUpdatedAt: string | null }>();
+  const syncStatus = syncStatusRaw
+    ? normalizeEtfSyncStatusRow(syncStatusRaw)
+    : ((constituentSummary?.count ?? 0) > 0
+      ? {
+          etfTicker: ticker,
+          lastSyncedAt: constituentSummary?.latestUpdatedAt ?? null,
+          status: "ok",
+          error: null,
+          source: null,
+          recordsCount: constituentSummary?.count ?? 0,
+          updatedAt: constituentSummary?.latestUpdatedAt ?? null,
+        }
+      : null);
   const topConstituents = await c.env.DB.prepare(
     "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, constituent_ticker ASC LIMIT 10",
   )
