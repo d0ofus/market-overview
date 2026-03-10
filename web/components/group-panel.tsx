@@ -97,6 +97,9 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setSortKey(col);
     setSortDir(col === "1D" ? "desc" : "asc");
   };
+  const toggleExpandedTicker = (ticker: string) => {
+    setExpandedTicker((current) => (current === ticker ? null : ticker));
+  };
 
   const sortedConstituents = useMemo(() => {
     const rowsCopy = [...constituents];
@@ -161,11 +164,20 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                   const isOpen = expandedTicker === row.ticker;
                   return (
                     <Fragment key={row.ticker}>
-                      <tr className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30">
+                      <tr
+                        className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
+                        onClick={() => toggleExpandedTicker(row.ticker)}
+                      >
                         {columns.includes("ticker") && (
                           <td className="px-3 py-2 font-semibold text-accent">
                             {showsEtfConstituents ? (
-                              <button className="text-left hover:underline" onClick={() => void openEtfConstituents(row.ticker, row.displayName)}>
+                              <button
+                                className="text-left hover:underline"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void openEtfConstituents(row.ticker, row.displayName);
+                                }}
+                              >
                                 {row.ticker}
                               </button>
                             ) : (
@@ -194,7 +206,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                         <td className="px-3 py-2">
                           <div className="flex flex-wrap items-center gap-1">
                             <button
-                              onClick={() => setExpandedTicker(isOpen ? null : row.ticker)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleExpandedTicker(row.ticker);
+                              }}
                               className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${isOpen ? "border-accent/60 bg-accent/10 text-accent" : "border-borderSoft text-slate-300"}`}
                             >
                               <ChartNoAxesCombined className="h-3.5 w-3.5" />
