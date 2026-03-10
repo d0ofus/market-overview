@@ -159,7 +159,7 @@ export function AlertsDashboard() {
   const [endDate, setEndDate] = useState(defaultEndDate());
   const [session, setSession] = useState<AlertsSessionFilter>("all");
   const [mode, setMode] = useState<"single" | "multi">("single");
-  const [showUniqueOnly, setShowUniqueOnly] = useState(false);
+  const [showUniqueOnly, setShowUniqueOnly] = useState(true);
   const [alerts, setAlerts] = useState<AlertLogRow[]>([]);
   const [tickerDays, setTickerDays] = useState<AlertTickerDayRow[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
