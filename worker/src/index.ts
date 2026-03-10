@@ -223,9 +223,9 @@ function parseLocalTime(value: string | null | undefined): { hour: number; minut
 }
 
 function formatAutoRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
-  const safeTime = parseLocalTime(localTime ?? "") ? localTime!.trim() : "22:15";
-  const safeTz = timezone?.trim() || "UTC";
-  return `${safeTime} ${safeTz}`;
+  const safeTime = parseLocalTime(localTime ?? "") ? localTime!.trim() : "08:15";
+  const safeTz = timezone?.trim() || "Australia/Melbourne";
+  return `${safeTime} ${safeTz} (prev US close)`;
 }
 
 function zonedParts(now: Date, timezone: string): { weekday: string; day: number; minutesOfDay: number; localDate: string } {
@@ -620,8 +620,8 @@ app.get("/api/status", async (c) => {
   return c.json({
     configId: config?.id ?? "default",
     timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "Australia/Melbourne",
-    autoRefreshLabel: config?.eodRunTimeLabel ?? formatAutoRefreshLabel(config?.eodRunLocalTime, config?.timezone),
-    autoRefreshLocalTime: config?.eodRunLocalTime ?? "22:15",
+    autoRefreshLabel: formatAutoRefreshLabel(config?.eodRunLocalTime, config?.timezone),
+    autoRefreshLocalTime: config?.eodRunLocalTime ?? "08:15",
     lastUpdated: normalizedLastUpdated ?? (fallbackBreadthDate ? `${fallbackBreadthDate}T00:00:00Z` : null),
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider ?? "Alpaca (IEX Delayed Daily Bars)",
@@ -1878,8 +1878,8 @@ export default {
     await maybeRunAlertsHousekeeping(env);
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
-    const refreshTime = defaultConfig?.eodRunLocalTime ?? "22:15";
-    const target = parseLocalTime(refreshTime) ?? { hour: 22, minute: 15 };
+    const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
+    const target = parseLocalTime(refreshTime) ?? { hour: 8, minute: 15 };
     const now = new Date(event.scheduledTime || Date.now());
     const local = zonedParts(now, timezone);
     const targetMinutes = target.hour * 60 + target.minute;

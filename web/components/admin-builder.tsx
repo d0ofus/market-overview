@@ -12,6 +12,10 @@ const refreshTimezoneOptions = [
   { label: "Singapore", value: "Asia/Singapore" },
   { label: "New York", value: "America/New_York" },
 ] as const;
+const DEFAULT_REFRESH_TIME = "08:15";
+const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
+
+const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone} (prev US close)`;
 
 function formatDateTimeCompact(value: string | null | undefined): string {
   if (!value) return "-";
@@ -56,9 +60,9 @@ export function AdminBuilder() {
   const [refreshConfig, setRefreshConfig] = useState({
     id: "default",
     name: "Default Swing Dashboard",
-    timezone: "Australia/Melbourne",
-    eodRunLocalTime: "08:15",
-    eodRunTimeLabel: "08:15 Australia/Melbourne",
+    timezone: DEFAULT_REFRESH_TIMEZONE,
+    eodRunLocalTime: DEFAULT_REFRESH_TIME,
+    eodRunTimeLabel: buildRefreshLabel(DEFAULT_REFRESH_TIME, DEFAULT_REFRESH_TIMEZONE),
   });
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
   const [etfBackfillMsg, setEtfBackfillMsg] = useState<string | null>(null);
@@ -68,8 +72,6 @@ export function AdminBuilder() {
   const [diagError, setDiagError] = useState<string | null>(null);
   const [diagMsg, setDiagMsg] = useState<string | null>(null);
   const [diagResult, setDiagResult] = useState<any | null>(null);
-
-  const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone}`;
 
   const load = async () => {
     setIsLoading(true);
@@ -81,8 +83,8 @@ export function AdminBuilder() {
         id: config.id,
         name: config.name,
         timezone: config.timezone,
-        eodRunLocalTime: config.eodRunLocalTime || "08:15",
-        eodRunTimeLabel: config.eodRunTimeLabel || buildRefreshLabel(config.eodRunLocalTime || "08:15", config.timezone),
+        eodRunLocalTime: config.eodRunLocalTime || DEFAULT_REFRESH_TIME,
+        eodRunTimeLabel: buildRefreshLabel(config.eodRunLocalTime || DEFAULT_REFRESH_TIME, config.timezone || DEFAULT_REFRESH_TIMEZONE),
       });
 
       const [sectorRes, industryRes, syncRes] = await Promise.allSettled([

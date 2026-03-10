@@ -106,7 +106,7 @@ export default async function BreadthPage() {
   const statusPromise = getStatus().catch(
     (): StatusPayload => ({
       timezone: "Australia/Melbourne",
-      autoRefreshLabel: "08:15 Australia/Melbourne",
+      autoRefreshLabel: "08:15 Australia/Melbourne (prev US close)",
       autoRefreshLocalTime: "08:15",
       lastUpdated: null,
       asOfDate: null,

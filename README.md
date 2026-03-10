@@ -127,7 +127,7 @@ npm run seed -w worker
 ## EOD Job
 
 Cron configured in `worker/wrangler.toml`:
-- `*/15 * * * 1-5` (worker wakes every 15 minutes on weekdays; runtime checks execute at configured local refresh time)
+- `*/15 * * * *` (worker wakes every 15 minutes; runtime checks still restrict actual refreshes to configured local weekdays/time)
 
 Manual run:
 ```bash

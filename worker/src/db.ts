@@ -2,6 +2,8 @@ import type { DashboardConfigPayload, Env } from "./types";
 
 const uid = () => crypto.randomUUID();
 const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline"];
+const DEFAULT_REFRESH_TIME = "08:15";
+const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 
 function normalizeOverviewColumns(columns: string[]): string[] {
   const includeTicker = columns.includes("ticker");
@@ -20,6 +22,12 @@ function normalizeOverviewColumns(columns: string[]): string[] {
     ...(includeSparkline ? ["sparkline"] : []),
   ];
   return Array.from(new Set(normalized));
+}
+
+function buildRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
+  const safeTime = typeof localTime === "string" && /^\d{2}:\d{2}$/.test(localTime.trim()) ? localTime.trim() : DEFAULT_REFRESH_TIME;
+  const safeTimezone = timezone?.trim() || DEFAULT_REFRESH_TIMEZONE;
+  return `${safeTime} ${safeTimezone} (prev US close)`;
 }
 
 function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
@@ -56,8 +64,8 @@ async function resolveConfigRow(
     if (legacyById) {
       return {
         ...legacyById,
-        eodRunLocalTime: "08:15",
-        eodRunTimeLabel: legacyById.eodRunTimeLabel || "08:15 Australia/Melbourne",
+        eodRunLocalTime: DEFAULT_REFRESH_TIME,
+        eodRunTimeLabel: buildRefreshLabel(DEFAULT_REFRESH_TIME, legacyById.timezone),
       };
     }
   } catch {
@@ -78,9 +86,9 @@ async function resolveConfigRow(
       return {
         id: String(row.id),
         name: String(row.name ?? "Default Swing Dashboard"),
-        timezone: String(row.timezone ?? "Australia/Melbourne"),
-        eodRunLocalTime: String(row.eodRunLocalTime ?? "08:15"),
-        eodRunTimeLabel: String(row.eodRunTimeLabel ?? "08:15 Australia/Melbourne"),
+        timezone: String(row.timezone ?? DEFAULT_REFRESH_TIMEZONE),
+        eodRunLocalTime: String(row.eodRunLocalTime ?? DEFAULT_REFRESH_TIME),
+        eodRunTimeLabel: buildRefreshLabel(String(row.eodRunLocalTime ?? DEFAULT_REFRESH_TIME), String(row.timezone ?? DEFAULT_REFRESH_TIMEZONE)),
       };
     } catch {
       // Try next fallback shape.
@@ -91,14 +99,14 @@ async function resolveConfigRow(
   await env.DB.prepare(
     "INSERT OR IGNORE INTO dashboard_configs (id, name, is_default, timezone, eod_run_local_time, eod_run_time_label) VALUES (?, ?, 1, ?, ?, ?)",
   )
-    .bind("default", "Default Swing Dashboard", "Australia/Melbourne", "08:15", "08:15 Australia/Melbourne")
+    .bind("default", "Default Swing Dashboard", DEFAULT_REFRESH_TIMEZONE, DEFAULT_REFRESH_TIME, buildRefreshLabel(DEFAULT_REFRESH_TIME, DEFAULT_REFRESH_TIMEZONE))
     .run();
   return {
     id: "default",
     name: "Default Swing Dashboard",
-    timezone: "Australia/Melbourne",
-    eodRunLocalTime: "08:15",
-    eodRunTimeLabel: "08:15 Australia/Melbourne",
+    timezone: DEFAULT_REFRESH_TIMEZONE,
+    eodRunLocalTime: DEFAULT_REFRESH_TIME,
+    eodRunTimeLabel: buildRefreshLabel(DEFAULT_REFRESH_TIME, DEFAULT_REFRESH_TIMEZONE),
   };
 }
 
