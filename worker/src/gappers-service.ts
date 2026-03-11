@@ -147,13 +147,12 @@ function parseTradingViewGapScan(
     const name = typeof data[0] === "string" ? data[0] : null;
     const prevClose = typeof data[1] === "number" && Number.isFinite(data[1]) ? data[1] : null;
     const marketCap = typeof data[3] === "number" && Number.isFinite(data[3]) ? data[3] : null;
-    const premarketChangePct = typeof data[4] === "number" && Number.isFinite(data[4]) ? data[4] : null;
     const premarketChangeAbs = typeof data[5] === "number" && Number.isFinite(data[5]) ? data[5] : null;
     const premarketVolume = typeof data[6] === "number" && Number.isFinite(data[6]) ? data[6] : 0;
-    const premarketGap = typeof data[7] === "number" && Number.isFinite(data[7]) ? data[7] : premarketChangePct;
-    if (!ticker || prevClose == null || premarketChangeAbs == null || premarketGap == null) continue;
+    if (!ticker || prevClose == null || premarketChangeAbs == null) continue;
     const premarketPrice = prevClose + premarketChangeAbs;
-    if (!Number.isFinite(premarketPrice) || premarketPrice <= 0 || premarketGap <= 0) continue;
+    const gapPct = ((premarketPrice - prevClose) / prevClose) * 100;
+    if (!Number.isFinite(premarketPrice) || premarketPrice <= 0 || !Number.isFinite(gapPct) || gapPct <= 0) continue;
     out.push({
       ticker,
       name,
@@ -162,7 +161,7 @@ function parseTradingViewGapScan(
       prevClose,
       premarketPrice,
       premarketVolume,
-      gapPct: premarketGap,
+      gapPct,
     });
   }
   return out

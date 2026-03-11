@@ -56,17 +56,16 @@ describe("gappers service helpers", () => {
       ],
     }, 10);
 
-    expect(rows).toEqual([
-      {
-        ticker: "DOMO",
-        name: "DOMO",
-        marketCap: 183077395,
-        price: 6.13,
-        prevClose: 4.38,
-        premarketPrice: 6.13,
-        premarketVolume: 2990842,
-        gapPct: 29.91,
-      },
-    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      ticker: "DOMO",
+      name: "DOMO",
+      marketCap: 183077395,
+      price: 6.13,
+      prevClose: 4.38,
+      premarketPrice: 6.13,
+      premarketVolume: 2990842,
+    });
+    expect(rows[0]?.gapPct ?? 0).toBeCloseTo(39.95, 2);
   });
 });
