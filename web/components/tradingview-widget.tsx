@@ -5,6 +5,7 @@ import { useState } from "react";
 
 const DEFAULT_CHART_INTERVAL = "D";
 const DEFAULT_CHART_STYLE = "1";
+const DEFAULT_CHART_TIMEZONE = "Etc/UTC";
 
 export function TradingViewWidget({
   ticker,
@@ -56,7 +57,8 @@ export function TradingViewWidget({
       height,
       symbol: ticker,
       interval: DEFAULT_CHART_INTERVAL,
-      timezone: "Etc/UTC",
+      timeframe: initialRange,
+      timezone: DEFAULT_CHART_TIMEZONE,
       theme,
       style: DEFAULT_CHART_STYLE,
       allow_symbol_change: chartOnly ? false : !chartOnly,
