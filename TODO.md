@@ -32,6 +32,7 @@
 - Remove ETFs, only stocks
 - Add news like how /alerts does it
 - Sign up for an LLM to test it out
+- Change the gray background when clicking into a row
 
 ## Admin
 - Daily Price Refresh schedule should show a dropdown menu of the pages to choose from.
