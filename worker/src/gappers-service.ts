@@ -8,6 +8,8 @@ const SNAPSHOT_FRESH_MS = 45_000;
 const RETENTION_DAYS = 1;
 const DEFAULT_LIMIT = 25;
 const MAX_UNIVERSE_SIZE = 2400;
+const TRADINGVIEW_SCAN_URL = "https://scanner.tradingview.com/america/scan";
+const TRADINGVIEW_FALLBACK_LABEL = "TradingView Screener (premarket fallback)";
 
 export type GapperNewsItem = {
   headline: string;
@@ -65,6 +67,11 @@ type RankedGapCandidate = {
   premarketPrice: number;
   premarketVolume: number;
   gapPct: number;
+};
+
+type TradingViewGapCandidate = RankedGapCandidate & {
+  name: string | null;
+  marketCap: number | null;
 };
 
 type LocalProfile = {
@@ -125,6 +132,82 @@ function buildRankedGapCandidates(
     .filter((row): row is RankedGapCandidate => Boolean(row))
     .sort((a, b) => b.gapPct - a.gapPct)
     .slice(0, clamp(limit, 1, 100));
+}
+
+function parseTradingViewGapScan(
+  payload: unknown,
+  limit = DEFAULT_LIMIT,
+): TradingViewGapCandidate[] {
+  const rows = (payload as { data?: Array<{ s?: string; d?: unknown[] }> } | null)?.data ?? [];
+  const out: TradingViewGapCandidate[] = [];
+  for (const row of rows) {
+    const symbol = String(row?.s ?? "").toUpperCase();
+    const ticker = symbol.includes(":") ? symbol.split(":").pop() ?? "" : symbol;
+    const data = Array.isArray(row?.d) ? row.d : [];
+    const name = typeof data[0] === "string" ? data[0] : null;
+    const prevClose = typeof data[1] === "number" && Number.isFinite(data[1]) ? data[1] : null;
+    const marketCap = typeof data[3] === "number" && Number.isFinite(data[3]) ? data[3] : null;
+    const premarketChangePct = typeof data[4] === "number" && Number.isFinite(data[4]) ? data[4] : null;
+    const premarketChangeAbs = typeof data[5] === "number" && Number.isFinite(data[5]) ? data[5] : null;
+    const premarketVolume = typeof data[6] === "number" && Number.isFinite(data[6]) ? data[6] : 0;
+    const premarketGap = typeof data[7] === "number" && Number.isFinite(data[7]) ? data[7] : premarketChangePct;
+    if (!ticker || prevClose == null || premarketChangeAbs == null || premarketGap == null) continue;
+    const premarketPrice = prevClose + premarketChangeAbs;
+    if (!Number.isFinite(premarketPrice) || premarketPrice <= 0 || premarketGap <= 0) continue;
+    out.push({
+      ticker,
+      name,
+      marketCap,
+      price: premarketPrice,
+      prevClose,
+      premarketPrice,
+      premarketVolume,
+      gapPct: premarketGap,
+    });
+  }
+  return out
+    .sort((a, b) => b.gapPct - a.gapPct)
+    .slice(0, clamp(limit, 1, 100));
+}
+
+async function fetchTradingViewPremarketGappers(limit = DEFAULT_LIMIT): Promise<TradingViewGapCandidate[]> {
+  const response = await fetch(TRADINGVIEW_SCAN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://www.tradingview.com",
+      Referer: "https://www.tradingview.com/",
+      "User-Agent": "market-command-centre/1.0",
+    },
+    body: JSON.stringify({
+      markets: ["america"],
+      symbols: {
+        query: { types: [] },
+        tickers: [],
+      },
+      options: { lang: "en" },
+      columns: [
+        "name",
+        "close",
+        "volume",
+        "market_cap_basic",
+        "premarket_change",
+        "premarket_change_abs",
+        "premarket_volume",
+        "premarket_gap",
+      ],
+      sort: {
+        sortBy: "premarket_gap",
+        sortOrder: "desc",
+      },
+      range: [0, clamp(limit * 3, 25, 200)],
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`TradingView premarket scan failed (${response.status}): ${body.slice(0, 180)}`);
+  }
+  return parseTradingViewGapScan(await response.json(), limit);
 }
 
 function fallbackAnalysis(row: {
@@ -389,9 +472,21 @@ export async function buildGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Pro
 
   const universe = await loadUniverseTickers(env);
   const snapshots = await provider.getPremarketSnapshot(universe);
-  const ranked = buildRankedGapCandidates(snapshots, limit);
+  let ranked = buildRankedGapCandidates(snapshots, limit);
+  let fallbackRows: TradingViewGapCandidate[] = [];
+  let providerLabel = provider.label;
+  if (ranked.length === 0) {
+    try {
+      fallbackRows = await fetchTradingViewPremarketGappers(limit);
+      ranked = fallbackRows.map(({ name: _name, marketCap: _marketCap, ...row }) => row);
+      if (fallbackRows.length > 0) providerLabel = `${provider.label} -> ${TRADINGVIEW_FALLBACK_LABEL}`;
+    } catch (error) {
+      console.error("tradingview premarket fallback failed", error);
+    }
+  }
   const profiles = await loadProfiles(env, ranked.map((row) => row.ticker));
   const marketCaps = await fetchYahooMarketCaps(ranked.map((row) => row.ticker));
+  const fallbackMeta = new Map(fallbackRows.map((row) => [row.ticker, row] as const));
   const tradingDay = todayNyIso();
   const rowsBase = await Promise.all(
     ranked.map(async (row) => {
@@ -403,6 +498,7 @@ export async function buildGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Pro
         marketCap: null,
       };
       const marketMeta = marketCaps.get(row.ticker);
+      const fallbackMetaRow = fallbackMeta.get(row.ticker);
       const newsRes = await fetchTickerNews(env, row.ticker, tradingDay, 3);
       const news: GapperNewsItem[] = (newsRes.rows ?? []).map((item) => ({
         headline: item.headline,
@@ -413,10 +509,10 @@ export async function buildGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Pro
       }));
       return {
         ticker: row.ticker,
-        name: marketMeta?.name ?? profile.name ?? row.ticker,
+        name: marketMeta?.name ?? profile.name ?? fallbackMetaRow?.name ?? row.ticker,
         sector: profile.sector ?? null,
         industry: profile.industry ?? null,
-        marketCap: marketMeta?.marketCap ?? profile.marketCap ?? null,
+        marketCap: marketMeta?.marketCap ?? fallbackMetaRow?.marketCap ?? profile.marketCap ?? null,
         price: row.price,
         prevClose: row.prevClose,
         premarketPrice: row.premarketPrice,
@@ -444,17 +540,21 @@ export async function buildGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Pro
   });
 
   const warning = rows.length > 0
-    ? marketSession !== GAPPERS_SESSION
-      ? `US market session is currently ${marketSession}; premarket ranking may be stale outside the premarket window.`
-      : analyses && Object.keys(analyses).length === 0 && !(env.OPENAI_API_KEY ?? "")
-        ? "OpenAI analysis is unavailable because OPENAI_API_KEY is not configured; rule-based scoring is shown."
-        : null
-    : null;
+    ? providerLabel !== provider.label
+      ? `Alpaca premarket snapshots returned no ranked rows, so ${TRADINGVIEW_FALLBACK_LABEL} is being used.`
+      : marketSession !== GAPPERS_SESSION
+        ? `US market session is currently ${marketSession}; premarket ranking may be stale outside the premarket window.`
+        : analyses && Object.keys(analyses).length === 0 && !(env.OPENAI_API_KEY ?? "")
+          ? "OpenAI analysis is unavailable because OPENAI_API_KEY is not configured; rule-based scoring is shown."
+          : null
+    : marketSession !== GAPPERS_SESSION
+      ? `US market session is currently ${marketSession}; premarket ranking may be unavailable outside the premarket window.`
+      : "No ranked premarket rows were returned from Alpaca or the TradingView fallback source.";
   const status = rows.length === 0 ? "empty" : warning ? "warning" : "ok";
   return {
     id: crypto.randomUUID(),
     marketSession: GAPPERS_SESSION,
-    providerLabel: provider.label,
+    providerLabel,
     generatedAt: new Date().toISOString(),
     rowCount: rows.length,
     status,
@@ -537,4 +637,4 @@ export async function refreshGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): P
   return getGappersSnapshot(env, { force: true, limit });
 }
 
-export { buildRankedGapCandidates, fallbackAnalysis, isSnapshotFresh };
+export { buildRankedGapCandidates, fallbackAnalysis, isSnapshotFresh, parseTradingViewGapScan };
