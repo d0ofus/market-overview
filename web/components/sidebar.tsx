@@ -11,6 +11,7 @@ const links = [
   { href: "/thirteenf", label: "13F Tracker" },
   { href: "/sectors", label: "Sector Tracker" },
   { href: "/alerts", label: "Alerts" },
+  { href: "/scanning", label: "Scanning" },
   { href: "/tools", label: "Tools" },
   { href: "/admin", label: "Admin" },
 ];

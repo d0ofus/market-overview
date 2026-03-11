@@ -18,16 +18,32 @@ import {
 } from "./alerts-service";
 import type { InboundEmailPayload } from "./alerts-types";
 import { handleInboundTradingViewEmail } from "./alerts-email";
+import {
+  cleanupOldScanningData,
+  compiledRowsToCsv,
+  ingestScan,
+  listScanDefinitions,
+  listScanRuns,
+  loadRunCompiledRows,
+  loadRunUniqueTickers,
+  loadScanCompiledRows,
+  loadScanUniqueTickers,
+  refreshActiveScans,
+  uniqueTickersToCsv,
+  upsertScanDefinition,
+} from "./scanning-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
+const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
+let lastScanningHousekeepingAt = 0;
 
 app.use("/api/*", cors());
 
@@ -454,7 +470,8 @@ type RefreshPage =
   | "admin"
   | "ticker"
   | "tools"
-  | "alerts";
+  | "alerts"
+  | "scanning";
 
 async function refreshPageScopedData(
   env: Env,
@@ -513,6 +530,14 @@ async function refreshPageScopedData(
       notes: `Alerts ingest: ${reconcile.alertsIngested} new, ${reconcile.duplicates} duplicate, ${reconcile.parseFailures} parse failures.`,
     };
   }
+  if (page === "scanning") {
+    const refreshed = await refreshActiveScans(env);
+    return {
+      page,
+      refreshedTickers: refreshed.refreshedRows,
+      notes: `Refreshed ${refreshed.refreshedScans} saved scans and stored ${refreshed.refreshedRows} compiled rows.`,
+    };
+  }
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
 }
 
@@ -530,6 +555,17 @@ async function maybeRunAlertsHousekeeping(env: Env): Promise<void> {
     await reconcileAlertsFromMailboxAdapters(env, 30);
   } catch (error) {
     console.error("alerts reconcile failed", error);
+  }
+}
+
+async function maybeRunScanningHousekeeping(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastScanningHousekeepingAt < SCANNING_HOUSEKEEPING_INTERVAL_MS) return;
+  lastScanningHousekeepingAt = now;
+  try {
+    await cleanupOldScanningData(env, 1);
+  } catch (error) {
+    console.error("scanning cleanup failed", error);
   }
 }
 
@@ -1588,6 +1624,96 @@ app.get("/api/alerts/news", async (c) => {
   return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
 });
 
+app.get("/api/scans", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await listScanDefinitions(c.env);
+  return c.json({ rows });
+});
+
+app.post("/api/scans", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const result = await upsertScanDefinition(c.env, body as any);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid scan payload." }, 400);
+  }
+});
+
+app.post("/api/scans/:id/ingest", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await maybeRunScanningHousekeeping(c.env);
+  try {
+    const run = await ingestScan(c.env, c.req.param("id"));
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Scan ingest failed." }, 400);
+  }
+});
+
+app.get("/api/scans/:id/runs", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await listScanRuns(c.env, c.req.param("id"), Number(c.req.query("limit") ?? 25));
+  return c.json({ rows });
+});
+
+app.get("/api/scans/:id/runs/:runId", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId"));
+  return c.json({ rows });
+});
+
+app.get("/api/scans/:id/runs/:runId/tickers", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId"));
+  return c.json({ rows });
+});
+
+app.get("/api/scans/:id/compiled", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await loadScanCompiledRows(c.env, c.req.param("id"));
+  return c.json({ rows });
+});
+
+app.get("/api/scans/:id/compiled/tickers", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await loadScanUniqueTickers(c.env, c.req.param("id"));
+  return c.json({ rows });
+});
+
+app.get("/api/scans/:id/runs/:runId/export.csv", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const csv = compiledRowsToCsv(await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId")));
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-run-${c.req.param("runId")}.csv"`);
+  return c.body(csv);
+});
+
+app.get("/api/scans/:id/runs/:runId/tickers.csv", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const csv = uniqueTickersToCsv(await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId")));
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-run-${c.req.param("runId")}-tickers.csv"`);
+  return c.body(csv);
+});
+
+app.get("/api/scans/:id/compiled/export.csv", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const csv = compiledRowsToCsv(await loadScanCompiledRows(c.env, c.req.param("id")));
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-compiled.csv"`);
+  return c.body(csv);
+});
+
+app.get("/api/scans/:id/compiled/tickers.csv", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const csv = uniqueTickersToCsv(await loadScanUniqueTickers(c.env, c.req.param("id")));
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-compiled-tickers.csv"`);
+  return c.body(csv);
+});
+
 app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
@@ -1816,7 +1942,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -2047,6 +2173,7 @@ export default {
   },
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
     await maybeRunAlertsHousekeeping(env);
+    await maybeRunScanningHousekeeping(env);
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";

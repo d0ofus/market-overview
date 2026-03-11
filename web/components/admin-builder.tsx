@@ -66,7 +66,7 @@ export function AdminBuilder() {
   });
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
   const [etfBackfillMsg, setEtfBackfillMsg] = useState<string | null>(null);
-  const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools">("overview");
+  const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools" | "scanning">("overview");
   const [diagTicker, setDiagTicker] = useState("TAN");
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagError, setDiagError] = useState<string | null>(null);
@@ -388,12 +388,13 @@ export function AdminBuilder() {
           <select
             className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
             value={schedulePageTarget}
-            onChange={(e) => setSchedulePageTarget(e.target.value as "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools")}
+            onChange={(e) => setSchedulePageTarget(e.target.value as "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools" | "scanning")}
           >
             <option value="overview">Overview</option>
             <option value="breadth">Breadth</option>
             <option value="sectors">Sector Tracker</option>
             <option value="thirteenf">13F Tracker</option>
+            <option value="scanning">Scanning</option>
             <option value="admin">Admin</option>
             <option value="tools">Tools</option>
           </select>

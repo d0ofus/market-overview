@@ -41,6 +41,69 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
+export type ScanSourceType = "tradingview-public-link" | "csv-text" | "ticker-list";
+export type ScanStatus = "ok" | "empty" | "error";
+
+export type ScanRunSummary = {
+  id: string;
+  scanId: string;
+  providerKey: string;
+  status: ScanStatus;
+  sourceType: ScanSourceType;
+  sourceValue: string;
+  fallbackUsed: boolean;
+  rawResultCount: number;
+  compiledRowCount: number;
+  uniqueTickerCount: number;
+  error: string | null;
+  providerTraceJson: string | null;
+  ingestedAt: string;
+};
+
+export type ScanDefinitionRow = {
+  id: string;
+  name: string;
+  providerKey: string;
+  sourceType: ScanSourceType;
+  sourceValue: string;
+  fallbackSourceType: ScanSourceType | null;
+  fallbackSourceValue: string | null;
+  isActive: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  latestRun: ScanRunSummary | null;
+};
+
+export type ScanCompiledRow = {
+  id: string;
+  runId: string;
+  scanId: string;
+  ticker: string;
+  displayName: string | null;
+  exchange: string | null;
+  providerRowKey: string | null;
+  rankValue: number | null;
+  rankLabel: string | null;
+  price: number | null;
+  change1d: number | null;
+  volume: number | null;
+  marketCap: number | null;
+  rawJson: string | null;
+  canonicalKey: string;
+  createdAt: string;
+};
+
+export type ScanUniqueTickerRow = {
+  ticker: string;
+  displayName: string | null;
+  occurrences: number;
+  latestRankValue: number | null;
+  latestRankLabel: string | null;
+  latestPrice: number | null;
+  latestChange1d: number | null;
+};
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -72,6 +135,10 @@ function appendQuery(path: string, query: Record<string, string | number | null 
   const encoded = params.toString();
   if (!encoded) return path;
   return `${path}?${encoded}`;
+}
+
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
 export function getDashboard(date?: string): Promise<SnapshotResponse> {
@@ -173,6 +240,60 @@ export function getAlertNews(ticker: string, tradingDay: string) {
   );
 }
 
+export function getScans() {
+  return getJson<{ rows: ScanDefinitionRow[] }>("/api/scans");
+}
+
+export function createOrUpdateScan(payload: {
+  id?: string | null;
+  name: string;
+  providerKey: string;
+  sourceType: ScanSourceType;
+  sourceValue: string;
+  fallbackSourceType?: ScanSourceType | null;
+  fallbackSourceValue?: string | null;
+  isActive?: boolean;
+  notes?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/scans", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function ingestScan(id: string) {
+  return adminFetch<{ ok: boolean; run: ScanRunSummary }>(`/api/scans/${id}/ingest`, {
+    method: "POST",
+  });
+}
+
+export function getScanRuns(id: string, limit = 25) {
+  return getJson<{ rows: ScanRunSummary[] }>(appendQuery(`/api/scans/${id}/runs`, { limit }));
+}
+
+export function getScanRunCompiledRows(id: string, runId: string) {
+  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scans/${id}/runs/${runId}`);
+}
+
+export function getScanRunUniqueTickers(id: string, runId: string) {
+  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scans/${id}/runs/${runId}/tickers`);
+}
+
+export function getScanCompiledRows(id: string) {
+  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scans/${id}/compiled`);
+}
+
+export function getScanCompiledUniqueTickers(id: string) {
+  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scans/${id}/compiled/tickers`);
+}
+
+export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?: string | null) {
+  if (runId) {
+    return apiUrl(mode === "compiled" ? `/api/scans/${id}/runs/${runId}/export.csv` : `/api/scans/${id}/runs/${runId}/tickers.csv`);
+  }
+  return apiUrl(mode === "compiled" ? `/api/scans/${id}/compiled/export.csv` : `/api/scans/${id}/compiled/tickers.csv`);
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
   const headers: Record<string, string> = {};
@@ -198,6 +319,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "alerts") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support alerts refresh endpoint." };
+    }
+    if (page === "scanning") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scanning refresh endpoint." };
     }
 
     await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });

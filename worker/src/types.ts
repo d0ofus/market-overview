@@ -19,6 +19,7 @@ export type Env = {
   IBKR_NEWS_ENABLED?: string;
   IBKR_NEWS_ENDPOINT?: string;
   IBKR_NEWS_TOKEN?: string;
+  SCANNING_TRADINGVIEW_ENABLED?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
