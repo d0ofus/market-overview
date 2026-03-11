@@ -16,7 +16,7 @@
 
 ## 13F Tracker
 - Automatic weekly/monthly pull of data for 13F 
-- Add dropdown list for 13F filings to choose hedge funds
+- Add dropdown list for 13F filings to choose hedge fund
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
