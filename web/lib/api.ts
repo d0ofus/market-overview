@@ -153,6 +153,26 @@ export type GappersSnapshot = {
   rows: GapperRow[];
 };
 
+export type LlmProvider = "openai" | "anthropic";
+
+export type GappersLlmConfig = {
+  provider: LlmProvider;
+  apiKey: string;
+  model: string;
+  baseUrl?: string | null;
+};
+
+export type GappersScanFilters = {
+  limit: number;
+  minMarketCap?: number | null;
+  maxMarketCap?: number | null;
+  industries?: string[];
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  minGapPct?: number | null;
+  maxGapPct?: number | null;
+};
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -343,8 +363,42 @@ export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?
   return apiUrl(mode === "compiled" ? `/api/scans/${id}/compiled/export.csv` : `/api/scans/${id}/compiled/tickers.csv`);
 }
 
-export function getGappers(limit = 25, force = false) {
-  return getJson<GappersSnapshot>(appendQuery("/api/gappers", { limit, force: force ? 1 : undefined }));
+export function getGappers(limit = 50, force = false, filters?: GappersScanFilters | null) {
+  return getJson<GappersSnapshot>(appendQuery("/api/gappers", {
+    limit,
+    force: force ? 1 : undefined,
+    minMarketCap: filters?.minMarketCap,
+    maxMarketCap: filters?.maxMarketCap,
+    industries: filters?.industries?.join(","),
+    minPrice: filters?.minPrice,
+    maxPrice: filters?.maxPrice,
+    minGapPct: filters?.minGapPct,
+    maxGapPct: filters?.maxGapPct,
+  }));
+}
+
+export function getGappersWithConfig(
+  limit = 50,
+  force = false,
+  llmConfig?: GappersLlmConfig | null,
+  filters?: GappersScanFilters | null,
+) {
+  const headers: Record<string, string> = {};
+  if (llmConfig?.provider) headers["x-llm-provider"] = llmConfig.provider;
+  if (llmConfig?.apiKey) headers["x-llm-api-key"] = llmConfig.apiKey;
+  if (llmConfig?.model) headers["x-llm-model"] = llmConfig.model;
+  if (llmConfig?.baseUrl) headers["x-llm-base-url"] = llmConfig.baseUrl;
+  return getJson<GappersSnapshot>(appendQuery("/api/gappers", {
+    limit,
+    force: force ? 1 : undefined,
+    minMarketCap: filters?.minMarketCap,
+    maxMarketCap: filters?.maxMarketCap,
+    industries: filters?.industries?.join(","),
+    minPrice: filters?.minPrice,
+    maxPrice: filters?.maxPrice,
+    minGapPct: filters?.minGapPct,
+    maxGapPct: filters?.maxGapPct,
+  }), { headers });
 }
 
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {

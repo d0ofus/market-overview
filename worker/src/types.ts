@@ -20,6 +20,11 @@ export type Env = {
   IBKR_NEWS_ENDPOINT?: string;
   IBKR_NEWS_TOKEN?: string;
   SCANNING_TRADINGVIEW_ENABLED?: string;
+  LLM_PROVIDER?: string;
+  LLM_API_KEY?: string;
+  LLM_MODEL?: string;
+  LLM_BASE_URL?: string;
+  ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
 };

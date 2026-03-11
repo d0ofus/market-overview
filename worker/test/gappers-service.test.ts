@@ -1,16 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { buildRankedGapCandidates, fallbackAnalysis, isSnapshotFresh, parseTradingViewGapScan } from "../src/gappers-service";
+import {
+  buildTradingViewPremarketPayload,
+  fallbackAnalysis,
+  isSnapshotFresh,
+  normalizeGappersScanFilters,
+  resolveLlmConfig,
+} from "../src/gappers-service";
 
 describe("gappers service helpers", () => {
-  it("ranks positive premarket gappers by gap percent", () => {
-    const rows = buildRankedGapCandidates({
-      NVDA: { price: 121, prevClose: 100, premarketPrice: 121, premarketVolume: 500000 },
-      PLTR: { price: 33, prevClose: 30, premarketPrice: 33, premarketVolume: 250000 },
-      MSFT: { price: 395, prevClose: 400, premarketPrice: 395, premarketVolume: 900000 },
-    }, 5);
+  it("builds a tradingview premarket payload with numeric filters", () => {
+    const payload = buildTradingViewPremarketPayload({
+      limit: 100,
+      minMarketCap: 1_000_000_000,
+      maxMarketCap: 10_000_000_000,
+      minPrice: 2,
+      maxPrice: 20,
+      minGapPct: 5,
+      maxGapPct: 25,
+    });
 
-    expect(rows.map((row) => row.ticker)).toEqual(["NVDA", "PLTR"]);
-    expect(rows[0]?.gapPct).toBeGreaterThan(rows[1]?.gapPct ?? 0);
+    expect(payload.range).toEqual([0, 100]);
+    expect(payload.sort).toEqual({ sortBy: "premarket_gap", sortOrder: "desc" });
+    expect(payload.filter).toEqual([
+      { left: "premarket_gap", operation: "greater", right: 0 },
+      { left: "market_cap_basic", operation: "in_range", right: [1_000_000_000, 10_000_000_000] },
+      { left: "close", operation: "in_range", right: [2, 20] },
+      { left: "premarket_gap", operation: "in_range", right: [5, 25] },
+    ]);
+  });
+
+  it("normalizes scan filters and caps the list size at 100", () => {
+    const filters = normalizeGappersScanFilters({
+      limit: 250,
+      industries: ["Semiconductors", "Semiconductors", "Biotechnology"],
+      minGapPct: 4,
+    });
+
+    expect(filters.limit).toBe(100);
+    expect(filters.industries).toEqual(["Semiconductors", "Biotechnology"]);
+    expect(filters.minGapPct).toBe(4);
   });
 
   it("builds rule-based analysis when llm data is unavailable", () => {
@@ -42,30 +70,32 @@ describe("gappers service helpers", () => {
     expect(isSnapshotFresh(staleAt)).toBe(false);
   });
 
-  it("parses TradingView premarket scan rows into ranked candidates", () => {
-    const rows = parseTradingViewGapScan({
-      data: [
-        {
-          s: "NASDAQ:DOMO",
-          d: ["DOMO", 4.38, 5914957, 183077395, 39.95, 1.75, 2990842, 29.91],
-        },
-        {
-          s: "NYSE:ABC",
-          d: ["ABC", 10, 120000, 50000000, -2.4, -0.24, 10000, -2.4],
-        },
-      ],
-    }, 10);
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      ticker: "DOMO",
-      name: "DOMO",
-      marketCap: 183077395,
-      price: 6.13,
-      prevClose: 4.38,
-      premarketPrice: 6.13,
-      premarketVolume: 2990842,
+  it("resolves anthropic and openai llm settings from overrides and env", () => {
+    const anthropic = resolveLlmConfig({
+      DB: {} as D1Database,
+      ANTHROPIC_API_KEY: "env-ant",
+    }, {
+      provider: "anthropic",
+      apiKey: "override-ant",
+      model: "claude-3-7-sonnet-latest",
+      baseUrl: "https://api.anthropic.com/v1",
     });
-    expect(rows[0]?.gapPct ?? 0).toBeCloseTo(39.95, 2);
+    const openai = resolveLlmConfig({
+      DB: {} as D1Database,
+      OPENAI_API_KEY: "env-openai",
+      LLM_MODEL: "gpt-4.1-mini",
+    }, {
+      provider: "openai",
+    });
+
+    expect(anthropic).toEqual({
+      provider: "anthropic",
+      apiKey: "override-ant",
+      model: "claude-3-7-sonnet-latest",
+      baseUrl: "https://api.anthropic.com/v1",
+    });
+    expect(openai?.provider).toBe("openai");
+    expect(openai?.apiKey).toBe("env-openai");
+    expect(openai?.model).toBe("gpt-4.1-mini");
   });
 });

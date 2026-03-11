@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { getGappers, type GapperRow, type GappersSnapshot } from "@/lib/api";
+import { getGappersWithConfig, type GapperRow, type GappersLlmConfig, type GappersScanFilters, type GappersSnapshot, type LlmProvider } from "@/lib/api";
 import { TradingViewWidget } from "./tradingview-widget";
 
 type SortKey =
@@ -16,10 +16,29 @@ type SortKey =
   | "premarketPrice"
   | "gapPct"
   | "premarketVolume"
-  | "newsCount"
   | "compositeScore";
 
+type DraftLlmConfig = {
+  provider: LlmProvider;
+  apiKey: string;
+  model: string;
+  baseUrl: string;
+};
+
+type DraftScanFilters = {
+  limit: string;
+  minMarketCap: string;
+  maxMarketCap: string;
+  industries: string;
+  minPrice: string;
+  maxPrice: string;
+  minGapPct: string;
+  maxGapPct: string;
+};
+
 const POLL_MS = 45_000;
+const STORAGE_KEY = "gappers-llm-config";
+const FILTERS_STORAGE_KEY = "gappers-scan-filters";
 
 function fmtNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "-";
@@ -47,42 +66,160 @@ function fmtDateTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function normalizeDraftConfig(config: DraftLlmConfig): GappersLlmConfig | null {
+  const apiKey = config.apiKey.trim();
+  const model = config.model.trim();
+  if (!apiKey || !model) return null;
+  return {
+    provider: config.provider,
+    apiKey,
+    model,
+    baseUrl: config.baseUrl.trim() || null,
+  };
+}
+
+function readStoredFilters(): DraftScanFilters {
+  const fallback: DraftScanFilters = {
+    limit: "50",
+    minMarketCap: "",
+    maxMarketCap: "",
+    industries: "",
+    minPrice: "",
+    maxPrice: "",
+    minGapPct: "",
+    maxGapPct: "",
+  };
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<DraftScanFilters>;
+    return {
+      limit: typeof parsed.limit === "string" && parsed.limit.trim() ? parsed.limit : fallback.limit,
+      minMarketCap: typeof parsed.minMarketCap === "string" ? parsed.minMarketCap : "",
+      maxMarketCap: typeof parsed.maxMarketCap === "string" ? parsed.maxMarketCap : "",
+      industries: typeof parsed.industries === "string" ? parsed.industries : "",
+      minPrice: typeof parsed.minPrice === "string" ? parsed.minPrice : "",
+      maxPrice: typeof parsed.maxPrice === "string" ? parsed.maxPrice : "",
+      minGapPct: typeof parsed.minGapPct === "string" ? parsed.minGapPct : "",
+      maxGapPct: typeof parsed.maxGapPct === "string" ? parsed.maxGapPct : "",
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeDraftFilters(filters: DraftScanFilters): GappersScanFilters {
+  const toNumber = (value: string): number | null => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    limit: Math.max(1, Math.min(100, Number(filters.limit) || 50)),
+    minMarketCap: toNumber(filters.minMarketCap),
+    maxMarketCap: toNumber(filters.maxMarketCap),
+    industries: filters.industries.split(",").map((value) => value.trim()).filter(Boolean),
+    minPrice: toNumber(filters.minPrice),
+    maxPrice: toNumber(filters.maxPrice),
+    minGapPct: toNumber(filters.minGapPct),
+    maxGapPct: toNumber(filters.maxGapPct),
+  };
+}
+
+function defaultModelFor(provider: LlmProvider): string {
+  return provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1-mini";
+}
+
+function readStoredConfig(): DraftLlmConfig {
+  if (typeof window === "undefined") {
+    return { provider: "openai", apiKey: "", model: defaultModelFor("openai"), baseUrl: "" };
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return { provider: "openai", apiKey: "", model: defaultModelFor("openai"), baseUrl: "" };
+    }
+    const parsed = JSON.parse(raw) as Partial<DraftLlmConfig>;
+    const provider = parsed.provider === "anthropic" ? "anthropic" : "openai";
+    return {
+      provider,
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
+      model: typeof parsed.model === "string" && parsed.model.trim() ? parsed.model : defaultModelFor(provider),
+      baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : "",
+    };
+  } catch {
+    return { provider: "openai", apiKey: "", model: defaultModelFor("openai"), baseUrl: "" };
+  }
+}
+
 const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
 
 export function GappersDashboard() {
   const [snapshot, setSnapshot] = useState<GappersSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("gapPct");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [draftConfig, setDraftConfig] = useState<DraftLlmConfig>(() => readStoredConfig());
+  const [activeConfig, setActiveConfig] = useState<DraftLlmConfig>(() => readStoredConfig());
+  const [draftFilters, setDraftFilters] = useState<DraftScanFilters>(() => readStoredFilters());
+  const [activeFilters, setActiveFilters] = useState<DraftScanFilters>(() => readStoredFilters());
+
+  const activeModelLabel = snapshot?.rows.find((row) => row.analysis?.model)?.analysis?.model ?? "rules";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draftConfig));
+  }, [draftConfig]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(draftFilters));
+  }, [draftFilters]);
 
   useEffect(() => {
     let cancelled = false;
 
-    const load = async () => {
+    const load = async (force = false) => {
       try {
-        const next = await getGappers(25, false);
+        setRefreshing(true);
+        const next = await getGappersWithConfig(
+          normalizeDraftFilters(force ? draftFilters : activeFilters).limit,
+          force,
+          normalizeDraftConfig(force ? draftConfig : activeConfig),
+          normalizeDraftFilters(force ? draftFilters : activeFilters),
+        );
         if (cancelled) return;
         setSnapshot(next);
         setError(null);
+        if (force) {
+          setActiveConfig(draftConfig);
+          setActiveFilters(draftFilters);
+        }
       } catch (loadError) {
         if (cancelled) return;
         setError(loadError instanceof Error ? loadError.message : "Failed to load gappers.");
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     };
 
     const tick = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      void load();
+      void load(false);
     };
 
-    void load();
+    void load(false);
     const interval = window.setInterval(tick, POLL_MS);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load(false);
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -90,7 +227,7 @@ export function GappersDashboard() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [activeConfig, activeFilters, draftConfig, draftFilters]);
 
   const rows = snapshot?.rows ?? [];
   const sortedRows = useMemo(() => {
@@ -106,7 +243,6 @@ export function GappersDashboard() {
       if (key === "premarketPrice") return row.premarketPrice ?? Number.NEGATIVE_INFINITY;
       if (key === "gapPct") return row.gapPct ?? Number.NEGATIVE_INFINITY;
       if (key === "premarketVolume") return row.premarketVolume ?? Number.NEGATIVE_INFINITY;
-      if (key === "newsCount") return row.news.length;
       return row.compositeScore ?? Number.NEGATIVE_INFINITY;
     };
     copy.sort((a, b) => {
@@ -131,6 +267,27 @@ export function GappersDashboard() {
     setSortDir(key === "ticker" || key === "name" || key === "sector" || key === "industry" ? "asc" : "desc");
   };
 
+  const applySettings = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const next = await getGappersWithConfig(
+        normalizeDraftFilters(draftFilters).limit,
+        true,
+        normalizeDraftConfig(draftConfig),
+        normalizeDraftFilters(draftFilters),
+      );
+      setSnapshot(next);
+      setActiveConfig(draftConfig);
+      setActiveFilters(draftFilters);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to refresh gappers.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
   if (loading && !snapshot) {
     return (
       <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
@@ -143,16 +300,163 @@ export function GappersDashboard() {
   return (
     <div className="space-y-4">
       <div className="card p-3 text-sm">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="rounded-xl bg-slate-800/70 px-2 py-1">
-            Last updated: <b>{fmtDateTime(snapshot?.generatedAt)}</b>
-          </span>
-          <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Session: {snapshot?.marketSession ?? "premarket"}</span>
-          <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Tracked: {snapshot?.rowCount ?? 0}</span>
-          <span className="rounded-xl bg-accent/15 px-2 py-1 text-accent">Source: {snapshot?.providerLabel ?? "-"}</span>
-          <span className={`rounded-xl px-2 py-1 ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : "bg-slate-800/50 text-slate-300"}`}>
-            Status: {snapshot?.status ?? "-"}
-          </span>
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr),auto]">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="rounded-xl bg-slate-800/70 px-2 py-1">
+                Last updated: <b>{fmtDateTime(snapshot?.generatedAt)}</b>
+              </span>
+              <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Session: {snapshot?.marketSession ?? "premarket"}</span>
+              <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Tracked: {snapshot?.rowCount ?? 0}</span>
+              <span className="rounded-xl bg-accent/15 px-2 py-1 text-accent">Source: {snapshot?.providerLabel ?? "-"}</span>
+              <span className="rounded-xl bg-slate-800/50 px-2 py-1 text-slate-300">Analysis: {activeModelLabel}</span>
+              <span className={`rounded-xl px-2 py-1 ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : snapshot?.status === "warning" ? "bg-yellow-500/15 text-yellow-200" : "bg-slate-800/50 text-slate-300"}`}>
+                Status: {snapshot?.status ?? "-"}
+              </span>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Limit</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="numeric"
+                  value={draftFilters.limit}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, limit: event.target.value }))}
+                  placeholder="50"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Industries</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  value={draftFilters.industries}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, industries: event.target.value }))}
+                  placeholder="Semiconductors, Biotechnology"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Market Cap</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.minMarketCap}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, minMarketCap: event.target.value }))}
+                  placeholder="1000000000"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Market Cap</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.maxMarketCap}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, maxMarketCap: event.target.value }))}
+                  placeholder="100000000000"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Price</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.minPrice}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, minPrice: event.target.value }))}
+                  placeholder="1"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Price</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.maxPrice}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, maxPrice: event.target.value }))}
+                  placeholder="50"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Gap %</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.minGapPct}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, minGapPct: event.target.value }))}
+                  placeholder="5"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Gap %</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  inputMode="decimal"
+                  value={draftFilters.maxGapPct}
+                  onChange={(event) => setDraftFilters((current) => ({ ...current, maxGapPct: event.target.value }))}
+                  placeholder="40"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">LLM Provider</span>
+                <select
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  value={draftConfig.provider}
+                  onChange={(event) => {
+                    const provider = event.target.value === "anthropic" ? "anthropic" : "openai";
+                    setDraftConfig((current) => ({
+                      ...current,
+                      provider,
+                      model: current.model.trim() === "" || current.model === defaultModelFor(current.provider)
+                        ? defaultModelFor(provider)
+                        : current.model,
+                    }));
+                  }}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Model</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  value={draftConfig.model}
+                  onChange={(event) => setDraftConfig((current) => ({ ...current, model: event.target.value }))}
+                  placeholder={defaultModelFor(draftConfig.provider)}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">API Key</span>
+                <input
+                  type="password"
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  value={draftConfig.apiKey}
+                  onChange={(event) => setDraftConfig((current) => ({ ...current, apiKey: event.target.value }))}
+                  placeholder={draftConfig.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Base URL</span>
+                <input
+                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  value={draftConfig.baseUrl}
+                  onChange={(event) => setDraftConfig((current) => ({ ...current, baseUrl: event.target.value }))}
+                  placeholder={draftConfig.provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"}
+                />
+              </label>
+            </div>
+          </div>
+          <div className="flex flex-col items-stretch justify-end gap-2">
+            <button
+              className="inline-flex items-center justify-center gap-2 rounded border border-accent/50 bg-accent/15 px-3 py-2 text-sm font-medium text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void applySettings()}
+              disabled={refreshing}
+            >
+              {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Apply And Refresh
+            </button>
+            <p className="max-w-xs text-xs text-slate-400">
+              TradingView is the only scan source. Keys stay in this browser only and are sent on `/api/gappers` requests.
+            </p>
+          </div>
         </div>
         {snapshot?.warning && <p className="mt-2 text-xs text-yellow-200">{snapshot.warning}</p>}
         {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
@@ -174,7 +478,6 @@ export function GappersDashboard() {
                   ["premarketPrice", "Pre Price"],
                   ["gapPct", "Gap %"],
                   ["premarketVolume", "Pre Vol"],
-                  ["newsCount", "News"],
                   ["compositeScore", "Score"],
                 ].map(([key, label]) => (
                   <th key={key} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
@@ -204,12 +507,11 @@ export function GappersDashboard() {
                       <td className="px-3 py-2 text-slate-300">{fmtNumber(row.premarketPrice)}</td>
                       <td className={`px-3 py-2 ${cellClass(row.gapPct)}`}>{fmtPct(row.gapPct)}</td>
                       <td className="px-3 py-2 text-slate-300">{fmtCompact(row.premarketVolume)}</td>
-                      <td className="px-3 py-2 text-slate-300">{row.news.length}</td>
                       <td className="px-3 py-2 text-slate-300">{fmtNumber(row.compositeScore, 0)}</td>
                     </tr>
                     {isOpen && (
                       <tr className="border-t border-borderSoft/60 bg-slate-950/40">
-                        <td colSpan={12} className="px-3 py-3">
+                        <td colSpan={11} className="px-3 py-3">
                           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
                             <div className="space-y-3">
                               <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-3">
@@ -239,6 +541,7 @@ export function GappersDashboard() {
                                       <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">Impact: {row.analysis.impactLabel} ({fmtNumber(row.analysis.impactScore, 0)})</span>
                                       <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">Liquidity risk: {row.analysis.liquidityRiskLabel} ({fmtNumber(row.analysis.liquidityRiskScore, 0)})</span>
                                       <span className="rounded bg-accent/15 px-2 py-1 text-accent">Composite: {fmtNumber(row.analysis.compositeScore, 0)}</span>
+                                      <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">Model: {row.analysis.model}</span>
                                     </div>
                                     <ul className="list-disc pl-4 text-xs text-slate-300">
                                       {row.analysis.reasoningBullets.map((item, idx) => (
@@ -264,7 +567,7 @@ export function GappersDashboard() {
               })}
               {sortedRows.length === 0 && (
                 <tr>
-                  <td colSpan={12} className="px-3 py-6 text-center text-sm text-slate-400">
+                  <td colSpan={11} className="px-3 py-6 text-center text-sm text-slate-400">
                     No valid premarket gappers are available right now.
                   </td>
                 </tr>

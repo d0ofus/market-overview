@@ -62,6 +62,59 @@ const isAuthed = (req: Request, env: Env): boolean => {
   return auth.slice(7) === secret;
 };
 
+function readGappersLlmOverride(req: Request): {
+  provider?: "openai" | "anthropic";
+  apiKey?: string;
+  model?: string;
+  baseUrl?: string | null;
+} | null {
+  const providerRaw = req.headers.get("x-llm-provider")?.trim().toLowerCase();
+  const provider = providerRaw === "openai" || providerRaw === "anthropic"
+    ? providerRaw
+    : undefined;
+  const apiKey = req.headers.get("x-llm-api-key")?.trim() || undefined;
+  const model = req.headers.get("x-llm-model")?.trim() || undefined;
+  const baseUrl = req.headers.get("x-llm-base-url")?.trim() || undefined;
+  if (!provider && !apiKey && !model && !baseUrl) return null;
+  return { provider, apiKey, model, baseUrl: baseUrl ?? null };
+}
+
+function readGappersFilters(req: Request): {
+  limit?: number;
+  minMarketCap?: number | null;
+  maxMarketCap?: number | null;
+  industries?: string[];
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  minGapPct?: number | null;
+  maxGapPct?: number | null;
+} | null {
+  const url = new URL(req.url);
+  const toNumber = (key: string): number | null | undefined => {
+    const raw = url.searchParams.get(key);
+    if (raw == null || raw.trim() === "") return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const industriesRaw = url.searchParams.get("industries");
+  const industries = industriesRaw
+    ? industriesRaw.split(",").map((value) => value.trim()).filter(Boolean)
+    : undefined;
+  const filters = {
+    limit: toNumber("limit") ?? undefined,
+    minMarketCap: toNumber("minMarketCap"),
+    maxMarketCap: toNumber("maxMarketCap"),
+    industries,
+    minPrice: toNumber("minPrice"),
+    maxPrice: toNumber("maxPrice"),
+    minGapPct: toNumber("minGapPct"),
+    maxGapPct: toNumber("maxGapPct"),
+  };
+  return Object.values(filters).some((value) => value != null && (!(Array.isArray(value)) || value.length > 0))
+    ? filters
+    : null;
+}
+
 async function refreshSnapshotSafe(env: Env): Promise<void> {
   try {
     await computeAndStoreSnapshot(env, undefined, "default");
@@ -1620,8 +1673,10 @@ app.get("/api/gappers", async (c) => {
   await maybeRunGappersHousekeeping(c.env);
   const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
   const force = c.req.query("force") === "1";
+  const llmConfig = readGappersLlmOverride(c.req.raw);
+  const filters = readGappersFilters(c.req.raw);
   try {
-    const snapshot = await getGappersSnapshot(c.env, { force, limit });
+    const snapshot = await getGappersSnapshot(c.env, { force, limit, llmConfig, filters });
     return c.json(snapshot);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to build gappers snapshot.";
@@ -1774,8 +1829,10 @@ app.get("/api/admin/config", async (c) => {
 app.post("/api/admin/gappers/refresh", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+  const llmConfig = readGappersLlmOverride(c.req.raw);
+  const filters = readGappersFilters(c.req.raw);
   try {
-    const snapshot = await refreshGappersSnapshot(c.env, limit);
+    const snapshot = await refreshGappersSnapshot(c.env, limit, llmConfig, filters);
     return c.json({ ok: true, snapshot });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh gappers." }, 500);
