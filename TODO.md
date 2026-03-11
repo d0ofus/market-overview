@@ -26,6 +26,13 @@
 ## Alerts
 - Remove backlog to keep database sustainable
 
+## Gappers
+- Find out what the current filters are and add more scanning filters or use a preset 
+- Add $ on gap = Pre Vol * Price
+- Remove ETFs, only stocks
+- Add news like how /alerts does it
+- Sign up for an LLM to test it out
+
 ## Admin
 - Daily Price Refresh schedule should show a dropdown menu of the pages to choose from.
 
