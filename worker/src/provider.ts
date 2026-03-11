@@ -24,6 +24,39 @@ export interface MarketDataProvider {
   getPremarketSnapshot?(tickers: string[]): Promise<Record<string, PremarketSnapshot>>;
 }
 
+type AlpacaPremarketSnapshotInput = {
+  latestTrade?: { p?: number };
+  minuteBar?: { c?: number; v?: number };
+  dailyBar?: { c?: number; v?: number };
+  prevDailyBar?: { c?: number };
+};
+
+export function extractPremarketSnapshotFromAlpacaSnapshot(
+  snap: AlpacaPremarketSnapshotInput,
+): PremarketSnapshot | null {
+  const prevClose = snap.prevDailyBar?.c;
+  const premarketPrice = snap.minuteBar?.c ?? snap.latestTrade?.p;
+  const price = snap.minuteBar?.c ?? snap.latestTrade?.p ?? snap.dailyBar?.c;
+  const premarketVolume = snap.minuteBar?.v ?? 0;
+  if (
+    typeof premarketPrice !== "number" ||
+    typeof prevClose !== "number" ||
+    typeof price !== "number" ||
+    !Number.isFinite(premarketPrice) ||
+    !Number.isFinite(prevClose) ||
+    !Number.isFinite(price) ||
+    prevClose <= 0
+  ) {
+    return null;
+  }
+  return {
+    price,
+    prevClose,
+    premarketPrice,
+    premarketVolume: typeof premarketVolume === "number" && Number.isFinite(premarketVolume) ? premarketVolume : 0,
+  };
+}
+
 class SyntheticProvider implements MarketDataProvider {
   label = "Synthetic Seeded EOD";
   async getDailyBars(): Promise<DailyBar[]> {
@@ -413,32 +446,15 @@ class AlpacaProvider implements MarketDataProvider {
       const json = (await res.json()) as {
         snapshots?: Record<string, {
           latestTrade?: { p?: number };
+          minuteBar?: { c?: number; v?: number };
           dailyBar?: { c?: number; v?: number };
           prevDailyBar?: { c?: number };
         }>;
       };
       for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
-        const premarketPrice = snap.latestTrade?.p;
-        const prevClose = snap.prevDailyBar?.c;
-        const price = snap.dailyBar?.c ?? snap.latestTrade?.p;
-        const premarketVolume = snap.dailyBar?.v ?? 0;
-        if (
-          typeof premarketPrice !== "number" ||
-          typeof prevClose !== "number" ||
-          typeof price !== "number" ||
-          !Number.isFinite(premarketPrice) ||
-          !Number.isFinite(prevClose) ||
-          !Number.isFinite(price) ||
-          prevClose <= 0
-        ) {
-          continue;
-        }
-        out[ticker.toUpperCase()] = {
-          price,
-          prevClose,
-          premarketPrice,
-          premarketVolume: typeof premarketVolume === "number" && Number.isFinite(premarketVolume) ? premarketVolume : 0,
-        };
+        const parsed = extractPremarketSnapshotFromAlpacaSnapshot(snap);
+        if (!parsed) continue;
+        out[ticker.toUpperCase()] = parsed;
       }
     }
     return out;

@@ -443,11 +443,13 @@ export async function buildGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Pro
     };
   });
 
-  const warning = marketSession !== GAPPERS_SESSION
-    ? `US market session is currently ${marketSession}; premarket ranking may be stale outside the premarket window.`
-    : analyses && Object.keys(analyses).length === 0 && !(env.OPENAI_API_KEY ?? "")
-      ? "OpenAI analysis is unavailable because OPENAI_API_KEY is not configured; rule-based scoring is shown."
-      : null;
+  const warning = rows.length > 0
+    ? marketSession !== GAPPERS_SESSION
+      ? `US market session is currently ${marketSession}; premarket ranking may be stale outside the premarket window.`
+      : analyses && Object.keys(analyses).length === 0 && !(env.OPENAI_API_KEY ?? "")
+        ? "OpenAI analysis is unavailable because OPENAI_API_KEY is not configured; rule-based scoring is shown."
+        : null
+    : null;
   const status = rows.length === 0 ? "empty" : warning ? "warning" : "ok";
   return {
     id: crypto.randomUUID(),
