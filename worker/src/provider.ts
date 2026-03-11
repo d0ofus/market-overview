@@ -10,10 +10,18 @@ export type DailyBar = {
   volume: number;
 };
 
+export type PremarketSnapshot = {
+  price: number;
+  prevClose: number;
+  premarketPrice: number;
+  premarketVolume: number;
+};
+
 export interface MarketDataProvider {
   label: string;
   getDailyBars(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]>;
   getQuoteSnapshot?(tickers: string[]): Promise<Record<string, { price: number; prevClose: number }>>;
+  getPremarketSnapshot?(tickers: string[]): Promise<Record<string, PremarketSnapshot>>;
 }
 
 class SyntheticProvider implements MarketDataProvider {
@@ -377,6 +385,60 @@ class AlpacaProvider implements MarketDataProvider {
         const prevClose = snap.prevDailyBar?.c;
         if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
         out[ticker.toUpperCase()] = { price, prevClose };
+      }
+    }
+    return out;
+  }
+
+  async getPremarketSnapshot(tickers: string[]): Promise<Record<string, PremarketSnapshot>> {
+    const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
+    const out: Record<string, PremarketSnapshot> = {};
+    const chunks = this.chunk(unique, 80);
+    for (const chunk of chunks) {
+      const params = new URLSearchParams({
+        symbols: chunk.join(","),
+        feed: this.feed,
+      });
+      const res = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+        headers: {
+          "APCA-API-KEY-ID": this.key,
+          "APCA-API-SECRET-KEY": this.secret,
+          "User-Agent": "market-command-centre/1.0",
+        },
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Alpaca premarket snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
+      }
+      const json = (await res.json()) as {
+        snapshots?: Record<string, {
+          latestTrade?: { p?: number };
+          dailyBar?: { c?: number; v?: number };
+          prevDailyBar?: { c?: number };
+        }>;
+      };
+      for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
+        const premarketPrice = snap.latestTrade?.p;
+        const prevClose = snap.prevDailyBar?.c;
+        const price = snap.dailyBar?.c ?? snap.latestTrade?.p;
+        const premarketVolume = snap.dailyBar?.v ?? 0;
+        if (
+          typeof premarketPrice !== "number" ||
+          typeof prevClose !== "number" ||
+          typeof price !== "number" ||
+          !Number.isFinite(premarketPrice) ||
+          !Number.isFinite(prevClose) ||
+          !Number.isFinite(price) ||
+          prevClose <= 0
+        ) {
+          continue;
+        }
+        out[ticker.toUpperCase()] = {
+          price,
+          prevClose,
+          premarketPrice,
+          premarketVolume: typeof premarketVolume === "number" && Number.isFinite(premarketVolume) ? premarketVolume : 0,
+        };
       }
     }
     return out;

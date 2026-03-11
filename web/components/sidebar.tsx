@@ -12,6 +12,7 @@ const links = [
   { href: "/sectors", label: "Sector Tracker" },
   { href: "/alerts", label: "Alerts" },
   { href: "/scanning", label: "Scanning" },
+  { href: "/gappers", label: "Gappers" },
   { href: "/tools", label: "Tools" },
   { href: "/admin", label: "Admin" },
 ];

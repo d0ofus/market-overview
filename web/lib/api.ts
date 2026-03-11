@@ -104,6 +104,55 @@ export type ScanUniqueTickerRow = {
   latestChange1d: number | null;
 };
 
+export type GapperNewsItem = {
+  headline: string;
+  source: string;
+  url: string;
+  publishedAt: string | null;
+  snippet: string | null;
+};
+
+export type GapperAnalysis = {
+  summary: string;
+  freshnessLabel: "fresh" | "stale" | "unclear";
+  freshnessScore: number;
+  impactLabel: "high" | "medium" | "low" | "noise";
+  impactScore: number;
+  liquidityRiskLabel: "normal" | "thin" | "likely-order-driven";
+  liquidityRiskScore: number;
+  compositeScore: number;
+  reasoningBullets: string[];
+  model: string;
+};
+
+export type GapperRow = {
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
+  price: number;
+  prevClose: number;
+  premarketPrice: number;
+  gapPct: number;
+  premarketVolume: number;
+  news: GapperNewsItem[];
+  analysis: GapperAnalysis | null;
+  compositeScore: number | null;
+};
+
+export type GappersSnapshot = {
+  id: string;
+  marketSession: string;
+  providerLabel: string;
+  generatedAt: string;
+  rowCount: number;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+  warning: string | null;
+  rows: GapperRow[];
+};
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -294,6 +343,10 @@ export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?
   return apiUrl(mode === "compiled" ? `/api/scans/${id}/compiled/export.csv` : `/api/scans/${id}/compiled/tickers.csv`);
 }
 
+export function getGappers(limit = 25, force = false) {
+  return getJson<GappersSnapshot>(appendQuery("/api/gappers", { limit, force: force ? 1 : undefined }));
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
   const headers: Record<string, string> = {};
@@ -322,6 +375,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "scanning") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scanning refresh endpoint." };
+    }
+    if (page === "gappers") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support gappers refresh endpoint." };
     }
 
     await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });

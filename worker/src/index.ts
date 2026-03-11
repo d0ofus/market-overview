@@ -32,6 +32,11 @@ import {
   uniqueTickersToCsv,
   upsertScanDefinition,
 } from "./scanning-service";
+import {
+  cleanupOldGappersData,
+  getGappersSnapshot,
+  refreshGappersSnapshot,
+} from "./gappers-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -39,11 +44,13 @@ const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
+const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
 let lastScanningHousekeepingAt = 0;
+let lastGappersHousekeepingAt = 0;
 
 app.use("/api/*", cors());
 
@@ -471,7 +478,8 @@ type RefreshPage =
   | "ticker"
   | "tools"
   | "alerts"
-  | "scanning";
+  | "scanning"
+  | "gappers";
 
 async function refreshPageScopedData(
   env: Env,
@@ -538,6 +546,14 @@ async function refreshPageScopedData(
       notes: `Refreshed ${refreshed.refreshedScans} saved scans and stored ${refreshed.refreshedRows} compiled rows.`,
     };
   }
+  if (page === "gappers") {
+    const snapshot = await refreshGappersSnapshot(env, 25);
+    return {
+      page,
+      refreshedTickers: snapshot.rowCount,
+      notes: `Refreshed gappers snapshot with ${snapshot.rowCount} ranked rows.`,
+    };
+  }
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
 }
 
@@ -566,6 +582,17 @@ async function maybeRunScanningHousekeeping(env: Env): Promise<void> {
     await cleanupOldScanningData(env, 1);
   } catch (error) {
     console.error("scanning cleanup failed", error);
+  }
+}
+
+async function maybeRunGappersHousekeeping(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastGappersHousekeepingAt < GAPPERS_HOUSEKEEPING_INTERVAL_MS) return;
+  lastGappersHousekeepingAt = now;
+  try {
+    await cleanupOldGappersData(env, 1);
+  } catch (error) {
+    console.error("gappers cleanup failed", error);
   }
 }
 
@@ -1589,6 +1616,29 @@ app.get("/api/ticker/:ticker", async (c) => {
   });
 });
 
+app.get("/api/gappers", async (c) => {
+  await maybeRunGappersHousekeeping(c.env);
+  const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+  const force = c.req.query("force") === "1";
+  try {
+    const snapshot = await getGappersSnapshot(c.env, { force, limit });
+    return c.json(snapshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to build gappers snapshot.";
+    return c.json({
+      id: crypto.randomUUID(),
+      marketSession: "premarket",
+      providerLabel: c.env.DATA_PROVIDER ?? "alpaca",
+      generatedAt: new Date().toISOString(),
+      rowCount: 0,
+      status: "error",
+      error: message,
+      warning: null,
+      rows: [],
+    }, 500);
+  }
+});
+
 app.get("/api/alerts", async (c) => {
   await maybeRunAlertsHousekeeping(c.env);
   const payload = await queryAlertsByFilters(c.env, {
@@ -1719,6 +1769,17 @@ app.get("/api/admin/config", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const config = await loadConfig(c.env, configId);
   return c.json(config);
+});
+
+app.post("/api/admin/gappers/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+  try {
+    const snapshot = await refreshGappersSnapshot(c.env, limit);
+    return c.json({ ok: true, snapshot });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to refresh gappers." }, 500);
+  }
 });
 
 app.get("/api/admin/provider-check", async (c) => {
@@ -1942,7 +2003,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -2174,6 +2235,7 @@ export default {
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
     await maybeRunAlertsHousekeeping(env);
     await maybeRunScanningHousekeeping(env);
+    await maybeRunGappersHousekeeping(env);
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
