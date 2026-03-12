@@ -1,7 +1,7 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Maximize2, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Loader2, RefreshCw } from "lucide-react";
 import {
   getAlertNews,
   getAlerts,
@@ -12,6 +12,7 @@ import {
   type AlertsSessionFilter,
 } from "@/lib/api";
 import { TradingViewWidget } from "./tradingview-widget";
+import { TickerMultiGrid } from "./ticker-multi-grid";
 
 const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
   { value: "all", label: "All Sessions" },
@@ -142,8 +143,6 @@ export function AlertsDashboard() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const gridRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -206,12 +205,6 @@ export function AlertsDashboard() {
       .catch(() => setSelectedNews([]))
       .finally(() => setNewsLoading(false));
   }, [selectedTickerDay?.ticker, selectedTickerDay?.tradingDay]);
-
-  useEffect(() => {
-    const onFullChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener("fullscreenchange", onFullChange);
-    return () => document.removeEventListener("fullscreenchange", onFullChange);
-  }, []);
 
   const uniqueTickers = useMemo(() => Array.from(new Set(tickerDays.map((row) => row.ticker))), [tickerDays]);
   const visibleAlerts = useMemo(() => {
@@ -355,45 +348,19 @@ export function AlertsDashboard() {
               </div>
             </>
           ) : (
-            <div className="card p-3" ref={gridRef}>
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-200">Multi-Chart Grid (Top 9)</h3>
-                <button
-                  className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
-                  onClick={async () => {
-                    if (!gridRef.current) return;
-                    if (!document.fullscreenElement) {
-                      await gridRef.current.requestFullscreen().catch(() => undefined);
-                    } else {
-                      await document.exitFullscreen().catch(() => undefined);
-                    }
-                  }}
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                  {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                </button>
-              </div>
-              <div className={`grid gap-3 md:grid-cols-2 ${isFullscreen ? "xl:grid-cols-4" : "xl:grid-cols-3 2xl:grid-cols-4"}`}>
-                {tickerDays.slice(0, 9).map((row) => (
-                  <div
-                    key={keyFor(row.ticker, row.tradingDay)}
-                    className={`rounded border p-2 ${selectedKey === keyFor(row.ticker, row.tradingDay) ? "border-accent/60" : "border-borderSoft/60"}`}
-                  >
-                    <button className="mb-2 text-left" onClick={() => setSelectedKey(keyFor(row.ticker, row.tradingDay))}>
-                      <div className="text-sm font-semibold text-accent">{row.ticker}</div>
-                      <div className="text-[11px] text-slate-400">{formatAlertStamp(row.latestReceivedAt, row.marketSession)}</div>
-                    </button>
-                    <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                    <div className="mt-2">
-                      <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />
-                    </div>
-                  </div>
-                ))}
-                {tickerDays.length === 0 && (
-                  <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-3 text-sm text-slate-400">No tickers match current filters.</div>
-                )}
-              </div>
-            </div>
+            <TickerMultiGrid
+              title="Multi-Chart Grid (Top 9)"
+              selectedKey={selectedKey}
+              onSelect={setSelectedKey}
+              emptyMessage="No tickers match current filters."
+              items={tickerDays.slice(0, 9).map((row) => ({
+                key: keyFor(row.ticker, row.tradingDay),
+                ticker: row.ticker,
+                title: row.ticker,
+                subtitle: formatAlertStamp(row.latestReceivedAt, row.marketSession),
+                detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
+              }))}
+            />
           )}
         </section>
 

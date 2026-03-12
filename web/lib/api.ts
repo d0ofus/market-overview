@@ -173,6 +173,60 @@ export type GappersScanFilters = {
   maxGapPct?: number | null;
 };
 
+export type PeerGroupType = "fundamental" | "technical" | "custom";
+export type PeerMembershipSource = "manual" | "fmp_seed" | "finnhub_seed" | "system";
+
+export type PeerGroupRow = {
+  id: string;
+  slug: string;
+  name: string;
+  groupType: PeerGroupType;
+  description: string | null;
+  priority: number;
+  isActive: boolean;
+  memberCount?: number;
+};
+
+export type PeerDirectoryRow = {
+  ticker: string;
+  name: string | null;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  groups: PeerGroupRow[];
+};
+
+export type PeerTickerMember = {
+  ticker: string;
+  name: string | null;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  source: PeerMembershipSource;
+  confidence: number | null;
+};
+
+export type PeerTickerDetail = {
+  symbol: {
+    ticker: string;
+    name: string | null;
+    exchange: string | null;
+    sector: string | null;
+    industry: string | null;
+    sharesOutstanding: number | null;
+  };
+  groups: Array<PeerGroupRow & { members: PeerTickerMember[] }>;
+};
+
+export type PeerMetricRow = {
+  ticker: string;
+  price: number | null;
+  marketCap: number | null;
+  avgVolume: number | null;
+  asOf: string;
+  source: string;
+};
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -399,6 +453,108 @@ export function getGappersWithConfig(
     minGapPct: filters?.minGapPct,
     maxGapPct: filters?.maxGapPct,
   }), { headers });
+}
+
+export function getPeerGroups(includeInactive = false) {
+  return getJson<{ rows: PeerGroupRow[] }>(appendQuery("/api/peer-groups/groups", { includeInactive: includeInactive ? 1 : undefined }));
+}
+
+export function getPeerDirectory(params: {
+  q?: string;
+  groupId?: string;
+  groupType?: PeerGroupType | "";
+  active?: "1" | "0" | "";
+  limit?: number;
+  offset?: number;
+}) {
+  return getJson<{ rows: PeerDirectoryRow[]; total: number; limit: number; offset: number }>(
+    appendQuery("/api/peer-groups/directory", params),
+  );
+}
+
+export function getPeerTickerDetail(ticker: string) {
+  return getJson<PeerTickerDetail>(`/api/peer-groups/ticker/${encodeURIComponent(ticker)}`);
+}
+
+export function getPeerTickerMetrics(ticker: string) {
+  return getJson<{ ticker: string; rows: PeerMetricRow[]; error: string | null }>(
+    `/api/peer-groups/ticker/${encodeURIComponent(ticker)}/metrics`,
+  );
+}
+
+export function getAdminPeerGroups() {
+  return adminFetch<{ rows: PeerGroupRow[] }>("/api/admin/peer-groups");
+}
+
+export function createAdminPeerGroup(payload: {
+  name: string;
+  slug?: string | null;
+  groupType?: PeerGroupType;
+  description?: string | null;
+  priority?: number;
+  isActive?: boolean;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/peer-groups", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminPeerGroup(id: string, payload: {
+  name?: string;
+  slug?: string | null;
+  groupType?: PeerGroupType;
+  description?: string | null;
+  priority?: number | null;
+  isActive?: boolean;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/peer-groups/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAdminPeerGroup(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/peer-groups/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export function searchAdminPeerTickers(q: string) {
+  return adminFetch<{ rows: Array<{ ticker: string; name: string | null; exchange: string | null; sector: string | null; industry: string | null }> }>(
+    appendQuery("/api/admin/peer-groups/ticker-search", { q }),
+  );
+}
+
+export function getAdminPeerTickerDetail(ticker: string) {
+  return adminFetch<PeerTickerDetail>(`/api/admin/peer-groups/ticker/${encodeURIComponent(ticker)}`);
+}
+
+export function addAdminPeerGroupMember(groupId: string, payload: {
+  ticker: string;
+  source?: PeerMembershipSource;
+  confidence?: number | null;
+}) {
+  return adminFetch<{ ok: boolean; ticker: string }>(`/api/admin/peer-groups/${groupId}/members`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function removeAdminPeerGroupMember(groupId: string, ticker: string) {
+  return adminFetch<{ ok: boolean; ticker: string }>(`/api/admin/peer-groups/${groupId}/members/${encodeURIComponent(ticker)}`, {
+    method: "DELETE",
+  });
+}
+
+export function seedAdminPeerGroup(ticker: string) {
+  return adminFetch<{ ok: boolean; groupId: string; ticker: string; insertedTickers: string[]; sourceBreakdown: Record<string, number> }>(
+    "/api/admin/peer-groups/seed",
+    {
+      method: "POST",
+      body: JSON.stringify({ ticker }),
+    },
+  );
 }
 
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {

@@ -25,3 +25,33 @@ export const itemCreateSchema = z.object({
   displayName: z.string().nullable().optional(),
   tags: z.array(z.string()).optional().default([]),
 });
+
+export const peerGroupTypeSchema = z.enum(["fundamental", "technical", "custom"]);
+
+export const peerGroupCreateSchema = z.object({
+  name: z.string().min(1),
+  slug: z.string().nullable().optional(),
+  groupType: peerGroupTypeSchema.optional().default("fundamental"),
+  description: z.string().nullable().optional(),
+  priority: z.number().int().optional().default(0),
+  isActive: z.boolean().optional().default(true),
+});
+
+export const peerGroupPatchSchema = z.object({
+  name: z.string().min(1).optional(),
+  slug: z.string().nullable().optional(),
+  groupType: peerGroupTypeSchema.optional(),
+  description: z.string().nullable().optional(),
+  priority: z.number().int().nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export const peerMembershipCreateSchema = z.object({
+  ticker: z.string().min(1).transform((v) => v.toUpperCase()),
+  source: z.enum(["manual", "fmp_seed", "finnhub_seed", "system"]).optional().default("manual"),
+  confidence: z.number().nullable().optional(),
+});
+
+export const peerSeedSchema = z.object({
+  ticker: z.string().min(1).transform((v) => v.toUpperCase()),
+});

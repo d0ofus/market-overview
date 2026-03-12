@@ -1,5 +1,6 @@
 import { AdminBuilder } from "@/components/admin-builder";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
+import { PeerGroupsAdminPanel } from "@/components/peer-groups-admin-panel";
 
 export default function AdminPage() {
   return (
@@ -12,6 +13,7 @@ export default function AdminPage() {
         <ManualRefreshButton page="admin" />
       </div>
       <AdminBuilder />
+      <PeerGroupsAdminPanel />
     </div>
   );
 }

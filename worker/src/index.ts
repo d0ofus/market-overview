@@ -2,7 +2,15 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
 import type { Env } from "./types";
-import { configPatchSchema, groupPatchSchema, itemCreateSchema } from "./validation";
+import {
+  configPatchSchema,
+  groupPatchSchema,
+  itemCreateSchema,
+  peerGroupCreateSchema,
+  peerGroupPatchSchema,
+  peerMembershipCreateSchema,
+  peerSeedSchema,
+} from "./validation";
 import { loadConfig, upsertAudit } from "./db";
 import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
@@ -38,6 +46,18 @@ import {
   refreshGappersSnapshot,
 } from "./gappers-service";
 import { isOverviewSnapshotStale } from "./overview-snapshot";
+import {
+  createPeerGroup,
+  deletePeerGroup,
+  listPeerGroups,
+  loadPeerTickerDetail,
+  queryPeerDirectory,
+  removeTickerPeerMembership,
+  updatePeerGroup,
+  upsertTickerPeerMembership,
+} from "./peer-groups-service";
+import { loadPeerMetrics } from "./peer-metrics-service";
+import { seedPeerGroupForTicker } from "./peer-seed-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -1722,6 +1742,45 @@ app.get("/api/gappers", async (c) => {
   }
 });
 
+app.get("/api/peer-groups/groups", async (c) => {
+  const includeInactive = c.req.query("includeInactive") === "1";
+  const rows = await listPeerGroups(c.env, includeInactive);
+  return c.json({ rows });
+});
+
+app.get("/api/peer-groups/directory", async (c) => {
+  const result = await queryPeerDirectory(c.env, {
+    q: c.req.query("q"),
+    groupId: c.req.query("groupId"),
+    groupType: c.req.query("groupType"),
+    active: c.req.query("active"),
+    limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
+  });
+  return c.json(result);
+});
+
+app.get("/api/peer-groups/ticker/:ticker", async (c) => {
+  const detail = await loadPeerTickerDetail(c.env, c.req.param("ticker"));
+  if (!detail) return c.json({ error: "Ticker not found." }, 404);
+  return c.json(detail);
+});
+
+app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
+  const detail = await loadPeerTickerDetail(c.env, c.req.param("ticker"));
+  if (!detail) return c.json({ error: "Ticker not found." }, 404);
+  const tickers = Array.from(new Set([
+    detail.symbol.ticker,
+    ...detail.groups.flatMap((group) => group.members.map((member) => member.ticker)),
+  ]));
+  const metrics = await loadPeerMetrics(c.env, tickers);
+  return c.json({
+    ticker: detail.symbol.ticker,
+    rows: metrics.rows,
+    error: metrics.error,
+  });
+});
+
 app.get("/api/alerts", async (c) => {
   await maybeRunAlertsHousekeeping(c.env);
   const payload = await queryAlertsByFilters(c.env, {
@@ -1852,6 +1911,140 @@ app.get("/api/admin/config", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const config = await loadConfig(c.env, configId);
   return c.json(config);
+});
+
+app.get("/api/admin/peer-groups", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await listPeerGroups(c.env, true);
+  return c.json({ rows });
+});
+
+app.post("/api/admin/peer-groups", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = peerGroupCreateSchema.parse(await c.req.json());
+  const created = await createPeerGroup(c.env, payload);
+  await upsertAudit(c.env, "default", "PEER_GROUP_CREATE", { id: created.id, payload });
+  return c.json({ ok: true, id: created.id });
+});
+
+app.patch("/api/admin/peer-groups/:groupId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const groupId = c.req.param("groupId");
+  const payload = peerGroupPatchSchema.parse(await c.req.json());
+  await updatePeerGroup(c.env, groupId, payload);
+  await upsertAudit(c.env, "default", "PEER_GROUP_PATCH", { groupId, payload });
+  return c.json({ ok: true, id: groupId });
+});
+
+app.delete("/api/admin/peer-groups/:groupId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const groupId = c.req.param("groupId");
+  await deletePeerGroup(c.env, groupId);
+  await upsertAudit(c.env, "default", "PEER_GROUP_DELETE", { groupId });
+  return c.json({ ok: true, id: groupId });
+});
+
+app.get("/api/admin/peer-groups/ticker-search", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const q = String(c.req.query("q") ?? "").trim();
+  if (!q) return c.json({ rows: [] });
+  const qUpper = q.toUpperCase();
+  const rows = await c.env.DB.prepare(
+    `SELECT ticker, name, exchange, sector, industry
+     FROM symbols
+     WHERE asset_class = 'equity' AND (ticker = ? OR ticker LIKE ? OR name LIKE ? COLLATE NOCASE)
+     ORDER BY
+       CASE
+         WHEN ticker = ? THEN 0
+         WHEN ticker LIKE ? THEN 1
+         ELSE 2
+       END,
+       ticker ASC
+     LIMIT 25`,
+  )
+    .bind(qUpper, `${qUpper}%`, `%${q}%`, qUpper, `${qUpper}%`)
+    .all<{ ticker: string; name: string | null; exchange: string | null; sector: string | null; industry: string | null }>();
+  const existing = rows.results ?? [];
+  if (existing.length === 0 && /^[A-Z.\-^]{1,20}$/.test(qUpper)) {
+    const resolved = await resolveTickerMeta(qUpper, c.env);
+    if (resolved) {
+      return c.json({
+        rows: [{
+          ticker: resolved.ticker,
+          name: resolved.name,
+          exchange: resolved.exchange,
+          sector: null,
+          industry: null,
+        }],
+      });
+    }
+  }
+  return c.json({ rows: existing });
+});
+
+app.get("/api/admin/peer-groups/ticker/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const detail = await loadPeerTickerDetail(c.env, c.req.param("ticker"));
+  if (!detail) {
+    const resolved = await resolveTickerMeta(c.req.param("ticker"), c.env);
+    if (!resolved) return c.json({ error: "Ticker not found." }, 404);
+    return c.json({
+      symbol: {
+        ticker: resolved.ticker,
+        name: resolved.name,
+        exchange: resolved.exchange,
+        sector: null,
+        industry: null,
+        sharesOutstanding: null,
+      },
+      groups: [],
+    });
+  }
+  return c.json(detail);
+});
+
+app.post("/api/admin/peer-groups/:groupId/members", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const groupId = c.req.param("groupId");
+  const payload = peerMembershipCreateSchema.parse(await c.req.json());
+  const resolved = await resolveTickerMeta(payload.ticker, c.env);
+  if (!resolved) return c.json({ error: "Ticker not found." }, 400);
+  await c.env.DB.prepare(
+    `INSERT INTO symbols (ticker, name, exchange, asset_class, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(ticker) DO UPDATE SET
+       name = COALESCE(excluded.name, symbols.name),
+       exchange = COALESCE(excluded.exchange, symbols.exchange),
+       asset_class = COALESCE(symbols.asset_class, excluded.asset_class),
+       updated_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(resolved.ticker, resolved.name, resolved.exchange ?? null, resolved.assetClass)
+    .run();
+  await upsertTickerPeerMembership(c.env, {
+    ticker: resolved.ticker,
+    peerGroupId: groupId,
+    source: payload.source,
+    confidence: payload.confidence ?? null,
+  });
+  await upsertAudit(c.env, "default", "PEER_GROUP_MEMBER_ADD", { groupId, ticker: resolved.ticker, payload });
+  return c.json({ ok: true, ticker: resolved.ticker });
+});
+
+app.delete("/api/admin/peer-groups/:groupId/members/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const groupId = c.req.param("groupId");
+  const ticker = c.req.param("ticker");
+  await removeTickerPeerMembership(c.env, groupId, ticker);
+  await upsertAudit(c.env, "default", "PEER_GROUP_MEMBER_DELETE", { groupId, ticker });
+  return c.json({ ok: true, ticker: ticker.toUpperCase() });
+});
+
+app.post("/api/admin/peer-groups/seed", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = peerSeedSchema.parse(await c.req.json());
+  const result = await seedPeerGroupForTicker(c.env, payload.ticker);
+  await upsertAudit(c.env, "default", "PEER_GROUP_SEED", result);
+  return c.json({ ok: true, ...result });
 });
 
 app.post("/api/admin/gappers/refresh", async (c) => {
