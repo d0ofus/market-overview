@@ -32,6 +32,7 @@ const EMPTY_FORM = {
 export function PeerGroupsAdminPanel() {
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [targetGroupId, setTargetGroupId] = useState<string>("");
   const [form, setForm] = useState(EMPTY_FORM);
   const [tickerQuery, setTickerQuery] = useState("");
   const [tickerResults, setTickerResults] = useState<Array<{ ticker: string; name: string | null; exchange: string | null }>>([]);
@@ -53,6 +54,10 @@ export function PeerGroupsAdminPanel() {
       setGroups(rows);
       const nextId = preferredGroupId ?? selectedGroupId ?? rows[0]?.id ?? null;
       setSelectedGroupId(nextId);
+      setTargetGroupId((current) => {
+        if (current && rows.some((row) => row.id === current)) return current;
+        return nextId ?? rows[0]?.id ?? "";
+      });
       const selected = rows.find((row) => row.id === nextId) ?? null;
       setForm(selected ? {
         name: selected.name,
@@ -92,6 +97,15 @@ export function PeerGroupsAdminPanel() {
     });
     void getPeerDirectory({ groupId: next.id, limit: 100, offset: 0 }).then((res) => setGroupMembers(res.rows ?? []));
   }, [selectedGroupId, groups]);
+
+  useEffect(() => {
+    if (!targetGroupId && selectedGroupId) {
+      setTargetGroupId(selectedGroupId);
+      return;
+    }
+    if (targetGroupId && groups.some((row) => row.id === targetGroupId)) return;
+    setTargetGroupId(selectedGroupId ?? groups[0]?.id ?? "");
+  }, [groups, selectedGroupId, targetGroupId]);
 
   const onSearchTicker = async () => {
     if (!tickerQuery.trim()) return;
@@ -345,19 +359,32 @@ export function PeerGroupsAdminPanel() {
                     ))}
                     {selectedTickerDetail.groups.length === 0 && <span className="text-xs text-slate-500">No peer-group memberships yet.</span>}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),auto]">
+                    <select
+                      className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-xs"
+                      value={targetGroupId}
+                      onChange={(event) => setTargetGroupId(event.target.value)}
+                    >
+                      <option value="" disabled>Select target group</option>
+                      {groups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {group.name} ({group.groupType})
+                        </option>
+                      ))}
+                    </select>
                     <button
                       className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent"
-                      disabled={!selectedGroupId || !selectedTickerDetail.symbol.ticker}
+                      disabled={!targetGroupId || !selectedTickerDetail.symbol.ticker || selectedTickerDetail.groups.some((group) => group.id === targetGroupId)}
                       onClick={async () => {
-                        if (!selectedGroupId || !selectedTickerDetail.symbol.ticker) return;
-                        await addAdminPeerGroupMember(selectedGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
-                        await load(selectedGroupId);
+                        if (!targetGroupId || !selectedTickerDetail.symbol.ticker) return;
+                        const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
+                        await addAdminPeerGroupMember(targetGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
+                        await load(targetGroupId);
                         await onSelectTicker(selectedTickerDetail.symbol.ticker);
-                        setMessage(`Added ${selectedTickerDetail.symbol.ticker} to the selected peer group.`);
+                        setMessage(`Added ${selectedTickerDetail.symbol.ticker} to ${targetGroup?.name ?? "the selected peer group"}.`);
                       }}
                     >
-                      Add To Selected Group
+                      {selectedTickerDetail.groups.some((group) => group.id === targetGroupId) ? "Already In Group" : "Add To Group"}
                     </button>
                   </div>
                 </div>
