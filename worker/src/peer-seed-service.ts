@@ -1,6 +1,8 @@
 import { resolveTickerMeta } from "./symbol-resolver";
 import {
   createPeerGroup,
+  isUsEquityExchange,
+  isValidBootstrapRootTicker,
   loadPeerTickerDetail,
   mergeMembershipSource,
   slugifyPeerGroupName,
@@ -20,6 +22,7 @@ type SeedProfile = {
 
 type SeedCandidate = {
   ticker: string;
+  exchange: string | null;
   confidence: number | null;
   sources: Set<PeerMembershipSource>;
 };
@@ -35,6 +38,10 @@ function parseNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function isUsPeerTicker(value: string): boolean {
+  return isValidBootstrapRootTicker(value);
 }
 
 async function loadExistingSymbolProfile(env: Env, ticker: string): Promise<SeedProfile | null> {
@@ -261,8 +268,8 @@ export async function seedPeerGroupForTicker(
   const register = (symbols: string[], source: PeerMembershipSource) => {
     for (const symbol of symbols) {
       const nextTicker = normalizeTicker(symbol);
-      if (!/^[A-Z.\-^]{1,20}$/.test(nextTicker) || nextTicker === ticker) continue;
-      const current = candidates.get(nextTicker) ?? { ticker: nextTicker, confidence: null, sources: new Set<PeerMembershipSource>() };
+      if (!isUsPeerTicker(nextTicker) || nextTicker === ticker) continue;
+      const current = candidates.get(nextTicker) ?? { ticker: nextTicker, exchange: null, confidence: null, sources: new Set<PeerMembershipSource>() };
       current.sources.add(source);
       current.confidence = current.sources.size > 1 ? 1 : 0.6;
       candidates.set(nextTicker, current);
@@ -299,6 +306,7 @@ export async function seedPeerGroupForTicker(
       providers,
     });
     if (!profile) continue;
+    if (!isUsPeerTicker(profile.ticker) || !isUsEquityExchange(profile.exchange)) continue;
     await upsertSeedSymbol(env, profile);
     const source = Array.from(candidate.sources).reduce<PeerMembershipSource | null>((current, next) => mergeMembershipSource(current, next), null) ?? "system";
     await upsertTickerPeerMembership(env, {

@@ -51,12 +51,24 @@ function normalizeTicker(value: string): string {
   return String(value ?? "").trim().toUpperCase();
 }
 
+const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "NYSE ARCA", "NYSEARCA", "NYSE AMERICAN", "AMEX", "ARCA", "BATS", "IEX"]);
+
 export function isValidBootstrapRootTicker(value: string): boolean {
   const ticker = normalizeTicker(value);
   if (!ticker) return false;
   if (!/^[A-Z][A-Z0-9.\-^]{0,19}$/.test(ticker)) return false;
   if (ticker === "CASH" || ticker === "USD") return false;
+  const dotIndex = ticker.indexOf(".");
+  if (dotIndex >= 0) {
+    const suffix = ticker.slice(dotIndex + 1);
+    if (suffix.length > 1) return false;
+  }
   return true;
+}
+
+export function isUsEquityExchange(exchange: string | null | undefined): boolean {
+  if (!exchange) return true;
+  return US_EXCHANGES.has(String(exchange).trim().toUpperCase());
 }
 
 type TableExistsRow = { count: number };
@@ -119,7 +131,7 @@ export async function listPeerBootstrapCandidates(
     q?: string | null;
     onlyUnseeded?: boolean | null;
   } = {},
-): Promise<Array<{ ticker: string; name: string | null }>> {
+): Promise<Array<{ ticker: string; name: string | null; exchange: string | null }>> {
   if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   const limit = Math.max(1, Math.min(100, Number(input.limit ?? 10)));
   const offset = Math.max(0, Number(input.offset ?? 0));
@@ -137,14 +149,14 @@ export async function listPeerBootstrapCandidates(
   const orderParams = q
     ? [qUpper, qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
     : ["", "", "", "", "", ""];
-  const accepted: Array<{ ticker: string; name: string | null }> = [];
+  const accepted: Array<{ ticker: string; name: string | null; exchange: string | null }> = [];
   const seen = new Set<string>();
   let rawOffset = offset;
   const scanLimit = Math.max(50, Math.min(500, limit * 5));
 
   while (accepted.length < limit) {
     const rows = await env.DB.prepare(
-      `SELECT s.ticker, s.name
+      `SELECT s.ticker, s.name, s.exchange
        FROM symbols s
        WHERE ${where.join(" AND ")}
        ORDER BY
@@ -158,17 +170,18 @@ export async function listPeerBootstrapCandidates(
        LIMIT ? OFFSET ?`,
     )
       .bind(...params, ...orderParams, scanLimit, rawOffset)
-      .all<{ ticker: string; name: string | null }>();
+      .all<{ ticker: string; name: string | null; exchange: string | null }>();
 
     const rawRows = rows.results ?? [];
     if (rawRows.length === 0) break;
 
     for (const row of rawRows) {
       const ticker = normalizeTicker(row.ticker);
-      if (!isValidBootstrapRootTicker(ticker) || seen.has(ticker)) continue;
+      if (!isValidBootstrapRootTicker(ticker) || !isUsEquityExchange(row.exchange) || seen.has(ticker)) continue;
       accepted.push({
         ticker,
         name: row.name ?? null,
+        exchange: row.exchange ?? null,
       });
       seen.add(ticker);
       if (accepted.length >= limit) break;

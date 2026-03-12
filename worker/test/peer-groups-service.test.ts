@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isValidBootstrapRootTicker, mergeMembershipSource, normalizePeerGroupType, slugifyPeerGroupName } from "../src/peer-groups-service";
+import { isUsEquityExchange, isValidBootstrapRootTicker, mergeMembershipSource, normalizePeerGroupType, slugifyPeerGroupName } from "../src/peer-groups-service";
 
 describe("peer groups service helpers", () => {
   it("slugifies peer group names", () => {
@@ -22,8 +22,16 @@ describe("peer groups service helpers", () => {
   it("rejects malformed bootstrap root tickers", () => {
     expect(isValidBootstrapRootTicker("AAPL")).toBe(true);
     expect(isValidBootstrapRootTicker("BRK.B")).toBe(true);
+    expect(isValidBootstrapRootTicker("AEM.TO")).toBe(false);
     expect(isValidBootstrapRootTicker("-")).toBe(false);
     expect(isValidBootstrapRootTicker("24.21")).toBe(false);
     expect(isValidBootstrapRootTicker("40.47")).toBe(false);
+  });
+
+  it("recognizes US exchanges for bootstrap filtering", () => {
+    expect(isUsEquityExchange("NASDAQ")).toBe(true);
+    expect(isUsEquityExchange("NYSE")).toBe(true);
+    expect(isUsEquityExchange("TSX")).toBe(false);
+    expect(isUsEquityExchange("TSXV")).toBe(false);
   });
 });
