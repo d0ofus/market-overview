@@ -51,7 +51,22 @@ function normalizeTicker(value: string): string {
   return String(value ?? "").trim().toUpperCase();
 }
 
-const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "NYSE ARCA", "NYSEARCA", "NYSE AMERICAN", "AMEX", "ARCA", "BATS", "IEX"]);
+const US_EXCHANGES = new Set([
+  "NASDAQ",
+  "NASDAQ NMS - GLOBAL MARKET",
+  "NASDAQ CAPITAL MARKET",
+  "NASDAQ GLOBAL SELECT",
+  "NEW YORK STOCK EXCHANGE, INC.",
+  "NYSE",
+  "NYSE ARCA",
+  "NYSEARCA",
+  "NYSE AMERICAN",
+  "NYSE MKT LLC",
+  "AMEX",
+  "ARCA",
+  "BATS",
+  "IEX",
+]);
 
 export function isValidBootstrapRootTicker(value: string): boolean {
   const ticker = normalizeTicker(value);

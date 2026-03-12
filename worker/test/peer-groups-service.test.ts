@@ -33,7 +33,11 @@ describe("peer groups service helpers", () => {
   it("recognizes US exchanges for bootstrap filtering", () => {
     expect(isUsEquityExchange("NASDAQ")).toBe(true);
     expect(isUsEquityExchange("NYSE")).toBe(true);
+    expect(isUsEquityExchange("NASDAQ NMS - GLOBAL MARKET")).toBe(true);
+    expect(isUsEquityExchange("NEW YORK STOCK EXCHANGE, INC.")).toBe(true);
+    expect(isUsEquityExchange("NYSE MKT LLC")).toBe(true);
     expect(isUsEquityExchange("TSX")).toBe(false);
     expect(isUsEquityExchange("TSXV")).toBe(false);
+    expect(isUsEquityExchange("SWISS EXCHANGE")).toBe(false);
   });
 });
