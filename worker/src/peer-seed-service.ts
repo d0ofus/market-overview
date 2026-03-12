@@ -188,12 +188,43 @@ async function upsertSeedSymbol(env: Env, profile: SeedProfile): Promise<void> {
     .run();
 }
 
+async function ensureSeedGroup(
+  env: Env,
+  ticker: string,
+  existingDetailGroups: Array<{ id: string; slug: string }> | undefined,
+): Promise<string> {
+  const slug = slugifyPeerGroupName(`${ticker}-fundamental-peers`);
+  const fromDetail = existingDetailGroups?.find((group) => group.slug === slug)?.id ?? null;
+  if (fromDetail) return fromDetail;
+
+  const existing = await env.DB.prepare("SELECT id FROM peer_groups WHERE slug = ? LIMIT 1").bind(slug).first<{ id: string }>();
+  if (existing?.id) return existing.id;
+
+  try {
+    return (await createPeerGroup(env, {
+      name: `${ticker} Fundamental Peers`,
+      slug,
+      groupType: "fundamental",
+      description: `Seeded peer group for ${ticker}.`,
+      priority: 100,
+      isActive: true,
+    })).id;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message.includes("UNIQUE constraint failed: peer_groups.slug")) throw error;
+    const retry = await env.DB.prepare("SELECT id FROM peer_groups WHERE slug = ? LIMIT 1").bind(slug).first<{ id: string }>();
+    if (!retry?.id) throw error;
+    return retry.id;
+  }
+}
+
 export async function seedPeerGroupForTicker(
   env: Env,
   tickerInput: string,
   options?: {
     providerMode?: "both" | "finnhub" | "fmp";
     enrichPeers?: boolean;
+    fallbackOnEmpty?: boolean;
   },
 ): Promise<{
   groupId: string;
@@ -211,6 +242,7 @@ export async function seedPeerGroupForTicker(
     ? (["finnhub", "fmp"] as Array<"finnhub" | "fmp">)
     : ([providerMode] as Array<"finnhub" | "fmp">);
   const enrichPeers = options?.enrichPeers === true;
+  const fallbackOnEmpty = options?.fallbackOnEmpty !== false;
   if (providers.includes("finnhub") && !env.FINNHUB_API_KEY && providerMode !== "fmp") {
     throw new Error("FINNHUB_API_KEY is required for Finnhub peer seeding.");
   }
@@ -238,24 +270,19 @@ export async function seedPeerGroupForTicker(
   };
   register(finnhubPeers, "finnhub_seed");
   register(fmpPeers, "fmp_seed");
-  if (candidates.size === 0) throw new Error(`No seed peers were returned for ${ticker}.`);
+
+  if (candidates.size === 0 && fallbackOnEmpty) {
+    if (providerMode === "finnhub" && env.FMP_API_KEY) {
+      register(await fetchFmpPeers(ticker, env.FMP_API_KEY).catch(() => []), "fmp_seed");
+    } else if (providerMode === "fmp" && env.FINNHUB_API_KEY) {
+      register(await fetchFinnhubPeers(ticker, env.FINNHUB_API_KEY).catch(() => []), "finnhub_seed");
+    }
+  }
 
   await upsertSeedSymbol(env, rootProfile);
 
   const detail = await loadPeerTickerDetail(env, ticker);
-  const slug = slugifyPeerGroupName(`${ticker}-fundamental-peers`);
-  let groupId = detail?.groups.find((group) => group.slug === slug)?.id ?? null;
-  if (!groupId) {
-    const existing = await env.DB.prepare("SELECT id FROM peer_groups WHERE slug = ? LIMIT 1").bind(slug).first<{ id: string }>();
-    groupId = existing?.id ?? (await createPeerGroup(env, {
-      name: `${ticker} Fundamental Peers`,
-      slug,
-      groupType: "fundamental",
-      description: `Seeded peer group for ${ticker}.`,
-      priority: 100,
-      isActive: true,
-    })).id;
-  }
+  const groupId = await ensureSeedGroup(env, ticker, detail?.groups);
 
   await upsertTickerPeerMembership(env, {
     ticker,
