@@ -43,6 +43,8 @@ const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
+const OVERVIEW_SPARKLINE_MIN_POINTS = 63;
+const OVERVIEW_HISTORY_LOOKBACK_DAYS = 140;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
@@ -490,6 +492,24 @@ async function loadTickersMissingRecentBars(env: Env, tickers: string[], maxAgeD
   });
 }
 
+async function loadTickersMissingBarHistory(env: Env, tickers: string[], minBars = OVERVIEW_SPARKLINE_MIN_POINTS): Promise<string[]> {
+  const unique = uniqueTickers(tickers);
+  if (unique.length === 0) return [];
+  const barCountByTicker = new Map<string, number>();
+  const chunkSize = 80;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const sql = `SELECT ticker, COUNT(*) as barCount FROM daily_bars WHERE ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
+    const rows = await env.DB.prepare(sql).bind(...chunk).all<{ ticker: string; barCount: number }>();
+    for (const row of rows.results ?? []) {
+      barCountByTicker.set(row.ticker.toUpperCase(), Number(row.barCount ?? 0));
+    }
+  }
+  return unique.filter((ticker) => (barCountByTicker.get(ticker) ?? 0) < minBars);
+}
+
+export { loadTickersMissingBarHistory };
+
 async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   const now = Date.now();
   if (now - lastOverviewBarRefreshAt < OVERVIEW_BAR_REFRESH_INTERVAL_MS) return;
@@ -497,8 +517,10 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   const tickers = await loadOverviewTickers(env);
   if (tickers.length === 0) return;
   const staleTickers = await loadTickersMissingRecentBars(env, tickers, 14);
-  if (staleTickers.length === 0) return;
-  await refreshRecentBarsForTickers(env, staleTickers, 400, 140);
+  const shortHistoryTickers = await loadTickersMissingBarHistory(env, tickers, OVERVIEW_SPARKLINE_MIN_POINTS);
+  const refreshTickers = uniqueTickers([...staleTickers, ...shortHistoryTickers]);
+  if (refreshTickers.length === 0) return;
+  await refreshRecentBarsForTickers(env, refreshTickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
   await recomputeDashboardFromStoredBars(env);
 }
 
@@ -847,7 +869,7 @@ app.get("/api/dashboard", async (c) => {
   await ensureOverviewCatalogCoverage(c.env);
   if (!date && await isOverviewSnapshotStale(c.env, configId)) {
     const tickers = await loadOverviewTickers(c.env);
-    await refreshRecentBarsForTickers(c.env, tickers, 400, 140);
+    await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
     await recomputeDashboardFromStoredBars(c.env, undefined, configId);
   }
   await maybeRefreshOverviewBars(c.env);
