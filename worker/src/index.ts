@@ -37,6 +37,7 @@ import {
   getGappersSnapshot,
   refreshGappersSnapshot,
 } from "./gappers-service";
+import { isOverviewSnapshotStale } from "./overview-snapshot";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -844,6 +845,9 @@ app.get("/api/dashboard", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const date = c.req.query("date");
   await ensureOverviewCatalogCoverage(c.env);
+  if (!date && await isOverviewSnapshotStale(c.env, configId)) {
+    await recomputeDashboardFromStoredBars(c.env, undefined, configId);
+  }
   await maybeRefreshOverviewBars(c.env);
   const data = await loadSnapshot(c.env, configId, date);
   c.header("Cache-Control", "public, max-age=300");
