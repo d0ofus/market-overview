@@ -81,9 +81,26 @@ export function isValidBootstrapRootTicker(value: string): boolean {
   return true;
 }
 
+function hasNonUsTickerSuffix(value: string): boolean {
+  const ticker = normalizeTicker(value);
+  const match = ticker.match(/[.-]([A-Z]+)$/);
+  if (!match) return false;
+  const suffix = match[1];
+  return suffix.length !== 1 || !["A", "B"].includes(suffix);
+}
+
 export function isUsEquityExchange(exchange: string | null | undefined): boolean {
   if (!exchange) return true;
   return US_EXCHANGES.has(String(exchange).trim().toUpperCase());
+}
+
+export function isUsBootstrapTickerCandidate(tickerInput: string, exchange: string | null | undefined): boolean {
+  const ticker = normalizeTicker(tickerInput);
+  if (!isValidBootstrapRootTicker(ticker)) return false;
+  if (hasNonUsTickerSuffix(ticker)) return false;
+  if (!isUsEquityExchange(exchange)) return false;
+  if ((ticker.includes(".") || ticker.includes("-")) && !exchange) return false;
+  return true;
 }
 
 type TableExistsRow = { count: number };
@@ -192,7 +209,7 @@ export async function listPeerBootstrapCandidates(
 
     for (const row of rawRows) {
       const ticker = normalizeTicker(row.ticker);
-      if (!isValidBootstrapRootTicker(ticker) || !isUsEquityExchange(row.exchange) || seen.has(ticker)) continue;
+      if (!isUsBootstrapTickerCandidate(ticker, row.exchange) || seen.has(ticker)) continue;
       accepted.push({
         ticker,
         name: row.name ?? null,
