@@ -22,7 +22,9 @@ describe("peer groups service helpers", () => {
   it("rejects malformed bootstrap root tickers", () => {
     expect(isValidBootstrapRootTicker("AAPL")).toBe(true);
     expect(isValidBootstrapRootTicker("BRK.B")).toBe(true);
+    expect(isValidBootstrapRootTicker("BF.B")).toBe(true);
     expect(isValidBootstrapRootTicker("AEM.TO")).toBe(false);
+    expect(isValidBootstrapRootTicker("BOZ6")).toBe(false);
     expect(isValidBootstrapRootTicker("-")).toBe(false);
     expect(isValidBootstrapRootTicker("24.21")).toBe(false);
     expect(isValidBootstrapRootTicker("40.47")).toBe(false);

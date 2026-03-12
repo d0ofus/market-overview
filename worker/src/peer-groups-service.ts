@@ -56,7 +56,7 @@ const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "NYSE ARCA", "NYSEARCA", "NYSE A
 export function isValidBootstrapRootTicker(value: string): boolean {
   const ticker = normalizeTicker(value);
   if (!ticker) return false;
-  if (!/^[A-Z][A-Z0-9.\-^]{0,19}$/.test(ticker)) return false;
+  if (!/^[A-Z]{1,5}([.-][A-Z])?$/.test(ticker)) return false;
   if (ticker === "CASH" || ticker === "USD") return false;
   const dotIndex = ticker.indexOf(".");
   if (dotIndex >= 0) {
