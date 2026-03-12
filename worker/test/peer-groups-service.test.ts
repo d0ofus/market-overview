@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeMembershipSource, normalizePeerGroupType, slugifyPeerGroupName } from "../src/peer-groups-service";
+import { isValidBootstrapRootTicker, mergeMembershipSource, normalizePeerGroupType, slugifyPeerGroupName } from "../src/peer-groups-service";
 
 describe("peer groups service helpers", () => {
   it("slugifies peer group names", () => {
@@ -18,5 +18,12 @@ describe("peer groups service helpers", () => {
     expect(mergeMembershipSource("fmp_seed", "finnhub_seed")).toBe("system");
     expect(mergeMembershipSource(undefined, "finnhub_seed")).toBe("finnhub_seed");
   });
-});
 
+  it("rejects malformed bootstrap root tickers", () => {
+    expect(isValidBootstrapRootTicker("AAPL")).toBe(true);
+    expect(isValidBootstrapRootTicker("BRK.B")).toBe(true);
+    expect(isValidBootstrapRootTicker("-")).toBe(false);
+    expect(isValidBootstrapRootTicker("24.21")).toBe(false);
+    expect(isValidBootstrapRootTicker("40.47")).toBe(false);
+  });
+});

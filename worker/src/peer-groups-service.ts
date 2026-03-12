@@ -51,6 +51,14 @@ function normalizeTicker(value: string): string {
   return String(value ?? "").trim().toUpperCase();
 }
 
+export function isValidBootstrapRootTicker(value: string): boolean {
+  const ticker = normalizeTicker(value);
+  if (!ticker) return false;
+  if (!/^[A-Z][A-Z0-9.\-^]{0,19}$/.test(ticker)) return false;
+  if (ticker === "CASH" || ticker === "USD") return false;
+  return true;
+}
+
 type TableExistsRow = { count: number };
 type ColumnExistsRow = { count: number };
 
@@ -129,27 +137,47 @@ export async function listPeerBootstrapCandidates(
   const orderParams = q
     ? [qUpper, qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
     : ["", "", "", "", "", ""];
-  const rows = await env.DB.prepare(
-    `SELECT s.ticker, s.name
-     FROM symbols s
-     WHERE ${where.join(" AND ")}
-     ORDER BY
-       CASE
-         WHEN ? <> '' AND s.ticker = ? THEN 0
-         WHEN ? <> '' AND s.ticker LIKE ? THEN 1
-         WHEN ? <> '' AND s.name LIKE ? COLLATE NOCASE THEN 2
-         ELSE 3
-       END,
-       s.ticker ASC
-     LIMIT ? OFFSET ?`,
-  )
-    .bind(...params, ...orderParams, limit, offset)
-    .all<{ ticker: string; name: string | null }>();
+  const accepted: Array<{ ticker: string; name: string | null }> = [];
+  const seen = new Set<string>();
+  let rawOffset = offset;
+  const scanLimit = Math.max(50, Math.min(500, limit * 5));
 
-  return (rows.results ?? []).map((row) => ({
-    ticker: row.ticker.toUpperCase(),
-    name: row.name ?? null,
-  }));
+  while (accepted.length < limit) {
+    const rows = await env.DB.prepare(
+      `SELECT s.ticker, s.name
+       FROM symbols s
+       WHERE ${where.join(" AND ")}
+       ORDER BY
+         CASE
+           WHEN ? <> '' AND s.ticker = ? THEN 0
+           WHEN ? <> '' AND s.ticker LIKE ? THEN 1
+           WHEN ? <> '' AND s.name LIKE ? COLLATE NOCASE THEN 2
+           ELSE 3
+         END,
+         s.ticker ASC
+       LIMIT ? OFFSET ?`,
+    )
+      .bind(...params, ...orderParams, scanLimit, rawOffset)
+      .all<{ ticker: string; name: string | null }>();
+
+    const rawRows = rows.results ?? [];
+    if (rawRows.length === 0) break;
+
+    for (const row of rawRows) {
+      const ticker = normalizeTicker(row.ticker);
+      if (!isValidBootstrapRootTicker(ticker) || seen.has(ticker)) continue;
+      accepted.push({
+        ticker,
+        name: row.name ?? null,
+      });
+      seen.add(ticker);
+      if (accepted.length >= limit) break;
+    }
+
+    rawOffset += rawRows.length;
+  }
+
+  return accepted;
 }
 
 export async function listPeerGroups(env: Env, includeInactive = true): Promise<PeerGroupRecord[]> {
