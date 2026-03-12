@@ -51,6 +51,9 @@ function normalizeTicker(value: string): string {
   return String(value ?? "").trim().toUpperCase();
 }
 
+type TableExistsRow = { count: number };
+type ColumnExistsRow = { count: number };
+
 export function normalizePeerGroupType(value: string | null | undefined): PeerGroupType {
   if (value === "technical" || value === "custom") return value;
   return "fundamental";
@@ -73,7 +76,84 @@ export function mergeMembershipSource(existing: PeerMembershipSource | null | un
   return incoming;
 }
 
+async function tableExists(env: Env, tableName: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).bind(tableName).first<TableExistsRow>();
+  return Number(row?.count ?? 0) > 0;
+}
+
+async function columnExists(env: Env, tableName: string, columnName: string): Promise<boolean> {
+  const safeTable = tableName === "symbols" ? "symbols" : tableName;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count FROM pragma_table_info('${safeTable}') WHERE name = ?`,
+  ).bind(columnName).first<ColumnExistsRow>();
+  return Number(row?.count ?? 0) > 0;
+}
+
+export async function hasPeerGroupSchema(env: Env): Promise<boolean> {
+  const [groupsTable, membershipsTable] = await Promise.all([
+    tableExists(env, "peer_groups"),
+    tableExists(env, "ticker_peer_groups"),
+  ]);
+  return groupsTable && membershipsTable;
+}
+
+export async function hasSharesOutstandingColumn(env: Env): Promise<boolean> {
+  return columnExists(env, "symbols", "shares_outstanding");
+}
+
+export async function listPeerBootstrapCandidates(
+  env: Env,
+  input: {
+    limit?: number | null;
+    offset?: number | null;
+    q?: string | null;
+    onlyUnseeded?: boolean | null;
+  } = {},
+): Promise<Array<{ ticker: string; name: string | null }>> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
+  const limit = Math.max(1, Math.min(25, Number(input.limit ?? 5)));
+  const offset = Math.max(0, Number(input.offset ?? 0));
+  const q = String(input.q ?? "").trim();
+  const qUpper = q.toUpperCase();
+  const params: Array<string | number> = [];
+  const where = ["(s.asset_class IS NULL OR s.asset_class IN ('equity', 'stock'))"];
+  if (input.onlyUnseeded !== false) {
+    where.push("NOT EXISTS (SELECT 1 FROM ticker_peer_groups tpg WHERE tpg.ticker = s.ticker)");
+  }
+  if (q) {
+    where.push("(s.ticker = ? OR s.ticker LIKE ? OR s.name LIKE ? COLLATE NOCASE)");
+    params.push(qUpper, `${qUpper}%`, `%${q}%`);
+  }
+  const orderParams = q
+    ? [qUpper, qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
+    : ["", "", "", "", "", ""];
+  const rows = await env.DB.prepare(
+    `SELECT s.ticker, s.name
+     FROM symbols s
+     WHERE ${where.join(" AND ")}
+     ORDER BY
+       CASE
+         WHEN ? <> '' AND s.ticker = ? THEN 0
+         WHEN ? <> '' AND s.ticker LIKE ? THEN 1
+         WHEN ? <> '' AND s.name LIKE ? COLLATE NOCASE THEN 2
+         ELSE 3
+       END,
+       s.ticker ASC
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(...params, ...orderParams, limit, offset)
+    .all<{ ticker: string; name: string | null }>();
+
+  return (rows.results ?? []).map((row) => ({
+    ticker: row.ticker.toUpperCase(),
+    name: row.name ?? null,
+  }));
+}
+
 export async function listPeerGroups(env: Env, includeInactive = true): Promise<PeerGroupRecord[]> {
+  if (!(await hasPeerGroupSchema(env))) return [];
   const rows = await env.DB.prepare(
     `SELECT
       pg.id,
@@ -136,23 +216,24 @@ export async function queryPeerDirectory(
   const active = input.active === "0" ? 0 : input.active === "1" ? 1 : null;
   const limit = Math.max(1, Math.min(100, Number(input.limit ?? 50)));
   const offset = Math.max(0, Number(input.offset ?? 0));
+  const schemaReady = await hasPeerGroupSchema(env);
 
-  const where: string[] = ["s.asset_class = 'equity'"];
+  const where: string[] = ["(s.asset_class IS NULL OR s.asset_class IN ('equity', 'stock'))"];
   const params: Array<string | number> = [];
 
   if (q) {
     where.push("(s.ticker = ? OR s.ticker LIKE ? OR s.name LIKE ? COLLATE NOCASE)");
     params.push(qUpper, `${qUpper}%`, `%${q}%`);
   }
-  if (groupId) {
+  if (schemaReady && groupId) {
     where.push("EXISTS (SELECT 1 FROM ticker_peer_groups tpg WHERE tpg.ticker = s.ticker AND tpg.peer_group_id = ?)");
     params.push(groupId);
   }
-  if (groupType) {
+  if (schemaReady && groupType) {
     where.push("EXISTS (SELECT 1 FROM ticker_peer_groups tpg JOIN peer_groups pg ON pg.id = tpg.peer_group_id WHERE tpg.ticker = s.ticker AND pg.group_type = ?)");
     params.push(groupType);
   }
-  if (active != null) {
+  if (schemaReady && active != null) {
     where.push("EXISTS (SELECT 1 FROM ticker_peer_groups tpg JOIN peer_groups pg ON pg.id = tpg.peer_group_id WHERE tpg.ticker = s.ticker AND pg.is_active = ?)");
     params.push(active);
   }
@@ -163,8 +244,8 @@ export async function queryPeerDirectory(
     .first<{ count: number }>();
 
   const orderParams = q
-    ? [qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
-    : ["", "", "", "", ""];
+    ? [qUpper, qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
+    : ["", "", "", "", "", ""];
   const symbolRows = await env.DB.prepare(
     `SELECT s.ticker, s.name, s.exchange, s.sector, s.industry
      FROM symbols s
@@ -190,7 +271,7 @@ export async function queryPeerDirectory(
 
   const tickers = (symbolRows.results ?? []).map((row) => row.ticker.toUpperCase());
   const groupsByTicker = new Map<string, PeerGroupRecord[]>();
-  if (tickers.length > 0) {
+  if (schemaReady && tickers.length > 0) {
     const memberships = await env.DB.prepare(
       `SELECT
         tpg.ticker,
@@ -250,8 +331,9 @@ export async function queryPeerDirectory(
 export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promise<PeerTickerDetail | null> {
   const ticker = normalizeTicker(tickerInput);
   if (!ticker) return null;
+  const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
   const symbol = await env.DB.prepare(
-    "SELECT ticker, name, exchange, sector, industry, shares_outstanding as sharesOutstanding FROM symbols WHERE ticker = ? LIMIT 1",
+    `SELECT ticker, name, exchange, sector, industry${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker = ? LIMIT 1`,
   )
     .bind(ticker)
     .first<{
@@ -261,8 +343,22 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
       sector: string | null;
       industry: string | null;
       sharesOutstanding: number | null;
-    }>();
+  }>();
   if (!symbol) return null;
+  const schemaReady = await hasPeerGroupSchema(env);
+  if (!schemaReady) {
+    return {
+      symbol: {
+        ticker: symbol.ticker.toUpperCase(),
+        name: symbol.name ?? null,
+        exchange: symbol.exchange ?? null,
+        sector: symbol.sector ?? null,
+        industry: symbol.industry ?? null,
+        sharesOutstanding: typeof symbol.sharesOutstanding === "number" ? symbol.sharesOutstanding : null,
+      },
+      groups: [],
+    };
+  }
 
   const groupRows = await env.DB.prepare(
     `SELECT
@@ -387,6 +483,7 @@ export async function createPeerGroup(
     isActive?: boolean | null;
   },
 ): Promise<{ id: string }> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   const name = payload.name.trim();
   const slug = slugifyPeerGroupName(payload.slug?.trim() || name);
   const id = crypto.randomUUID();
@@ -418,6 +515,7 @@ export async function updatePeerGroup(
     isActive?: boolean | null;
   },
 ): Promise<void> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   const existing = await env.DB.prepare("SELECT id, name, slug, group_type as groupType, description, priority, is_active as isActive FROM peer_groups WHERE id = ?")
     .bind(groupId)
     .first<{
@@ -446,6 +544,7 @@ export async function updatePeerGroup(
 }
 
 export async function deletePeerGroup(env: Env, groupId: string): Promise<void> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   await env.DB.batch([
     env.DB.prepare("DELETE FROM ticker_peer_groups WHERE peer_group_id = ?").bind(groupId),
     env.DB.prepare("DELETE FROM peer_groups WHERE id = ?").bind(groupId),
@@ -461,6 +560,7 @@ export async function upsertTickerPeerMembership(
     confidence?: number | null;
   },
 ): Promise<void> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   const ticker = normalizeTicker(input.ticker);
   const existing = await env.DB.prepare(
     "SELECT source, confidence FROM ticker_peer_groups WHERE ticker = ? AND peer_group_id = ?",
@@ -488,8 +588,8 @@ export async function upsertTickerPeerMembership(
 }
 
 export async function removeTickerPeerMembership(env: Env, peerGroupId: string, tickerInput: string): Promise<void> {
+  if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
   await env.DB.prepare("DELETE FROM ticker_peer_groups WHERE peer_group_id = ? AND ticker = ?")
     .bind(peerGroupId, normalizeTicker(tickerInput))
     .run();
 }
-

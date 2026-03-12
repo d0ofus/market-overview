@@ -557,6 +557,30 @@ export function seedAdminPeerGroup(ticker: string) {
   );
 }
 
+export function bootstrapAdminPeerGroups(payload?: {
+  limit?: number;
+  offset?: number;
+  q?: string;
+  onlyUnseeded?: boolean;
+}) {
+  return adminFetch<{
+    ok: boolean;
+    requested: number;
+    attempted: number;
+    rows: Array<{
+      ticker: string;
+      ok: boolean;
+      groupId?: string;
+      insertedTickers?: string[];
+      sourceBreakdown?: Record<string, number>;
+      error?: string;
+    }>;
+  }>("/api/admin/peer-groups/bootstrap", {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
   const headers: Record<string, string> = {};

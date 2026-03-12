@@ -55,3 +55,10 @@ export const peerMembershipCreateSchema = z.object({
 export const peerSeedSchema = z.object({
   ticker: z.string().min(1).transform((v) => v.toUpperCase()),
 });
+
+export const peerBootstrapSchema = z.object({
+  limit: z.number().int().min(1).max(10).optional().default(3),
+  offset: z.number().int().min(0).optional().default(0),
+  q: z.string().trim().optional().default(""),
+  onlyUnseeded: z.boolean().optional().default(true),
+});

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import {
   addAdminPeerGroupMember,
+  bootstrapAdminPeerGroups,
   createAdminPeerGroup,
   deleteAdminPeerGroup,
   getAdminPeerGroups,
@@ -39,6 +40,8 @@ export function PeerGroupsAdminPanel() {
   const [groupMembers, setGroupMembers] = useState<PeerDirectoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapLimit, setBootstrapLimit] = useState("3");
   const [message, setMessage] = useState<string | null>(null);
 
   const load = async (preferredGroupId?: string | null) => {
@@ -236,6 +239,42 @@ export function PeerGroupsAdminPanel() {
         <div className="space-y-4">
           <div className="card p-3">
             <div className="mb-3 text-sm font-semibold text-slate-200">Ticker Search</div>
+            <div className="mb-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Bootstrap Seed Batch</div>
+              <div className="flex gap-2">
+                <input
+                  className="w-24 rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
+                  value={bootstrapLimit}
+                  onChange={(event) => setBootstrapLimit(event.target.value)}
+                  placeholder="3"
+                />
+                <button
+                  className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:opacity-50"
+                  disabled={bootstrapping}
+                  onClick={async () => {
+                    setBootstrapping(true);
+                    setMessage(null);
+                    try {
+                      const res = await bootstrapAdminPeerGroups({
+                        limit: Number(bootstrapLimit || 3),
+                        onlyUnseeded: true,
+                      });
+                      await load(selectedGroupId);
+                      const okCount = (res.rows ?? []).filter((row) => row.ok).length;
+                      const errorCount = (res.rows ?? []).filter((row) => !row.ok).length;
+                      setMessage(`Bootstrap seeded ${okCount} ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`);
+                    } catch (error) {
+                      setMessage(error instanceof Error ? error.message : "Failed to bootstrap peer groups.");
+                    } finally {
+                      setBootstrapping(false);
+                    }
+                  }}
+                >
+                  {bootstrapping ? "Bootstrapping..." : "Bootstrap Batch"}
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-400">Seeds the next unassigned equity tickers from Finnhub/FMP into self-managed peer groups.</p>
+            </div>
             <div className="flex gap-2">
               <input
                 className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
@@ -348,4 +387,3 @@ export function PeerGroupsAdminPanel() {
     </section>
   );
 }
-

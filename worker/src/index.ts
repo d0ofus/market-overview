@@ -6,6 +6,7 @@ import {
   configPatchSchema,
   groupPatchSchema,
   itemCreateSchema,
+  peerBootstrapSchema,
   peerGroupCreateSchema,
   peerGroupPatchSchema,
   peerMembershipCreateSchema,
@@ -49,6 +50,7 @@ import { isOverviewSnapshotStale } from "./overview-snapshot";
 import {
   createPeerGroup,
   deletePeerGroup,
+  listPeerBootstrapCandidates,
   listPeerGroups,
   loadPeerTickerDetail,
   queryPeerDirectory,
@@ -1952,7 +1954,7 @@ app.get("/api/admin/peer-groups/ticker-search", async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT ticker, name, exchange, sector, industry
      FROM symbols
-     WHERE asset_class = 'equity' AND (ticker = ? OR ticker LIKE ? OR name LIKE ? COLLATE NOCASE)
+     WHERE (asset_class IS NULL OR asset_class IN ('equity', 'stock')) AND (ticker = ? OR ticker LIKE ? OR name LIKE ? COLLATE NOCASE)
      ORDER BY
        CASE
          WHEN ticker = ? THEN 0
@@ -2045,6 +2047,45 @@ app.post("/api/admin/peer-groups/seed", async (c) => {
   const result = await seedPeerGroupForTicker(c.env, payload.ticker);
   await upsertAudit(c.env, "default", "PEER_GROUP_SEED", result);
   return c.json({ ok: true, ...result });
+});
+
+app.post("/api/admin/peer-groups/bootstrap", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = peerBootstrapSchema.parse(await c.req.json().catch(() => ({})));
+  const candidates = await listPeerBootstrapCandidates(c.env, payload);
+  const rows: Array<{
+    ticker: string;
+    ok: boolean;
+    groupId?: string;
+    insertedTickers?: string[];
+    sourceBreakdown?: Record<string, number>;
+    error?: string;
+  }> = [];
+  for (const candidate of candidates) {
+    try {
+      const result = await seedPeerGroupForTicker(c.env, candidate.ticker);
+      rows.push({
+        ticker: candidate.ticker,
+        ok: true,
+        groupId: result.groupId,
+        insertedTickers: result.insertedTickers,
+        sourceBreakdown: result.sourceBreakdown,
+      });
+      await upsertAudit(c.env, "default", "PEER_GROUP_BOOTSTRAP_SEED", result);
+    } catch (error) {
+      rows.push({
+        ticker: candidate.ticker,
+        ok: false,
+        error: error instanceof Error ? error.message : "Peer bootstrap seed failed.",
+      });
+    }
+  }
+  return c.json({
+    ok: true,
+    requested: payload.limit,
+    attempted: candidates.length,
+    rows,
+  });
 });
 
 app.post("/api/admin/gappers/refresh", async (c) => {
