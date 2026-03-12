@@ -46,6 +46,22 @@ function isUsPeerTicker(value: string): boolean {
   return isValidBootstrapRootTicker(value);
 }
 
+function hasRegionalTickerSuffix(value: string): boolean {
+  const ticker = normalizeTicker(value);
+  const match = ticker.match(/[.-]([A-Z]+)$/);
+  if (!match) return false;
+  const suffix = match[1];
+  return suffix.length !== 1 || !["A", "B"].includes(suffix);
+}
+
+export function shouldKeepUsPeerCandidate(ticker: string, exchange: string | null | undefined): boolean {
+  if (!isUsPeerTicker(ticker)) return false;
+  if (hasRegionalTickerSuffix(ticker)) return false;
+  if (!isUsEquityExchange(exchange)) return false;
+  if ((ticker.includes(".") || ticker.includes("-")) && !exchange) return false;
+  return true;
+}
+
 function cleanGroupLabel(value: string | null | undefined): string | null {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -327,7 +343,7 @@ export async function seedPeerGroupForTicker(
       providers,
     });
     if (!profile) continue;
-    if (!isUsPeerTicker(profile.ticker) || !isUsEquityExchange(profile.exchange)) continue;
+    if (!shouldKeepUsPeerCandidate(profile.ticker, profile.exchange)) continue;
     await upsertSeedSymbol(env, profile);
     const source = Array.from(candidate.sources).reduce<PeerMembershipSource | null>((current, next) => mergeMembershipSource(current, next), null) ?? "system";
     await upsertTickerPeerMembership(env, {
