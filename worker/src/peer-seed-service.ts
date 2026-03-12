@@ -221,7 +221,7 @@ export async function seedPeerGroupForTicker(
   const [finnhubPeers, fmpPeers, rootProfile] = await Promise.all([
     providers.includes("finnhub") && env.FINNHUB_API_KEY ? fetchFinnhubPeers(ticker, env.FINNHUB_API_KEY).catch(() => []) : Promise.resolve([]),
     providers.includes("fmp") && env.FMP_API_KEY ? fetchFmpPeers(ticker, env.FMP_API_KEY).catch(() => []) : Promise.resolve([]),
-    loadSeedProfile(ticker, env, { allowExternalLookup: true, providers }),
+    loadSeedProfile(ticker, env, { allowExternalLookup: enrichPeers, providers }),
   ]);
   if (!rootProfile) throw new Error(`Unable to resolve metadata for ${ticker}.`);
 
