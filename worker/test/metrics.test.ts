@@ -11,7 +11,7 @@ describe("computeMetrics", () => {
     expect(m.change5d).toBeGreaterThan(0);
     expect(m.ytd).toBeGreaterThan(0);
     expect(m.pctFrom52wHigh).toBeLessThanOrEqual(0);
-    expect(m.sparkline.length).toBeLessThanOrEqual(60);
+    expect(m.sparkline.length).toBeLessThanOrEqual(63);
   });
 
   it("ranks based on requested window", () => {

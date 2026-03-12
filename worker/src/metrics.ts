@@ -5,7 +5,10 @@ const pct = (now: number, then: number): number => {
   return ((now - then) / then) * 100;
 };
 
-const dailySparkline = (values: number[], lookback = 60): number[] => values.slice(Math.max(0, values.length - lookback));
+const THREE_MONTH_TRADING_DAYS = 63;
+
+const dailySparkline = (values: number[], lookback = THREE_MONTH_TRADING_DAYS): number[] =>
+  values.slice(Math.max(0, values.length - lookback));
 
 export function computeMetrics(dates: string[], closes: number[]): MetricBundle {
   if (dates.length === 0 || closes.length === 0) {
