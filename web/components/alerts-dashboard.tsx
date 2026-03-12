@@ -86,6 +86,12 @@ function formatTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function formatAlertStamp(value: string | null | undefined, marketSession?: string | null): string {
+  const timestamp = formatDateTime(value);
+  if (!marketSession) return timestamp;
+  return `${timestamp} • ${marketSession}`;
+}
+
 function summarizeDescription(row: AlertLogRow): string {
   const fromSubject = (row.rawEmailSubject ?? "")
     .replace(/^\s*(tradingview\s+alert\s*[-:]\s*|alert\s*:\s*)/i, "")
@@ -349,7 +355,8 @@ export function AlertsDashboard() {
                 <div className="mb-2 text-sm text-slate-300">
                   {selectedTickerDay ? (
                     <>
-                      <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> • {formatTime(selectedLatestAlert?.receivedAt ?? selectedTickerDay.latestReceivedAt)} • {selectedTickerDay.tradingDay} • {selectedTickerDay.marketSession}
+                      <span className="font-semibold text-accent">{selectedTickerDay.ticker}</span> •{" "}
+                      {formatAlertStamp(selectedLatestAlert?.receivedAt ?? selectedTickerDay.latestReceivedAt, selectedTickerDay.marketSession)}
                     </>
                   ) : (
                     "Select an alert to open a chart."
@@ -406,7 +413,7 @@ export function AlertsDashboard() {
                   >
                     <button className="mb-2 text-left" onClick={() => setSelectedKey(keyFor(row.ticker, row.tradingDay))}>
                       <div className="text-sm font-semibold text-accent">{row.ticker}</div>
-                      <div className="text-[11px] text-slate-400">{formatTime(row.latestReceivedAt)} • {row.tradingDay} • {row.marketSession}</div>
+                      <div className="text-[11px] text-slate-400">{formatAlertStamp(row.latestReceivedAt, row.marketSession)}</div>
                     </button>
                     <TradingViewWidget ticker={row.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
                     <div className="mt-2">
