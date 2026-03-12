@@ -39,6 +39,9 @@ type DraftScanFilters = {
 const POLL_MS = 45_000;
 const STORAGE_KEY = "gappers-llm-config";
 const FILTERS_STORAGE_KEY = "gappers-scan-filters";
+const FILTER_INPUT_CLASS =
+  "w-full rounded border border-slate-600/80 bg-[#0b1220] px-3 py-2 text-sm text-slate-50 placeholder:text-slate-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
+const DETAIL_PANEL_CLASS = "rounded border border-slate-700/80 bg-[#0e1728] p-3";
 
 function fmtNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "-";
@@ -90,14 +93,22 @@ function readStoredFilters(): DraftScanFilters {
     maxGapPct: "",
   };
   if (typeof window === "undefined") return fallback;
+  const normalizeLegacyMarketCap = (value: unknown): string => {
+    if (typeof value !== "string") return "";
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return trimmed;
+    return parsed >= 1_000_000 ? String(parsed / 1_000_000) : trimmed;
+  };
   try {
     const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<DraftScanFilters>;
     return {
       limit: typeof parsed.limit === "string" && parsed.limit.trim() ? parsed.limit : fallback.limit,
-      minMarketCap: typeof parsed.minMarketCap === "string" ? parsed.minMarketCap : "",
-      maxMarketCap: typeof parsed.maxMarketCap === "string" ? parsed.maxMarketCap : "",
+      minMarketCap: normalizeLegacyMarketCap(parsed.minMarketCap),
+      maxMarketCap: normalizeLegacyMarketCap(parsed.maxMarketCap),
       industries: typeof parsed.industries === "string" ? parsed.industries : "",
       minPrice: typeof parsed.minPrice === "string" ? parsed.minPrice : "",
       maxPrice: typeof parsed.maxPrice === "string" ? parsed.maxPrice : "",
@@ -116,10 +127,12 @@ function normalizeDraftFilters(filters: DraftScanFilters): GappersScanFilters {
     const parsed = Number(trimmed);
     return Number.isFinite(parsed) ? parsed : null;
   };
+  const minMarketCapMillions = toNumber(filters.minMarketCap);
+  const maxMarketCapMillions = toNumber(filters.maxMarketCap);
   return {
     limit: Math.max(1, Math.min(100, Number(filters.limit) || 50)),
-    minMarketCap: toNumber(filters.minMarketCap),
-    maxMarketCap: toNumber(filters.maxMarketCap),
+    minMarketCap: minMarketCapMillions == null ? null : minMarketCapMillions * 1_000_000,
+    maxMarketCap: maxMarketCapMillions == null ? null : maxMarketCapMillions * 1_000_000,
     industries: filters.industries.split(",").map((value) => value.trim()).filter(Boolean),
     minPrice: toNumber(filters.minPrice),
     maxPrice: toNumber(filters.maxPrice),
@@ -318,7 +331,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Limit</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="numeric"
                   value={draftFilters.limit}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, limit: event.target.value }))}
@@ -328,36 +341,36 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Industries</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   value={draftFilters.industries}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, industries: event.target.value }))}
                   placeholder="Semiconductors, Biotechnology"
                 />
               </label>
               <label className="space-y-1">
-                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Market Cap</span>
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Market Cap (USD MM)</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.minMarketCap}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, minMarketCap: event.target.value }))}
-                  placeholder="1000000000"
+                  placeholder="1000"
                 />
               </label>
               <label className="space-y-1">
-                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Market Cap</span>
+                <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Market Cap (USD MM)</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.maxMarketCap}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, maxMarketCap: event.target.value }))}
-                  placeholder="100000000000"
+                  placeholder="100000"
                 />
               </label>
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Price</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.minPrice}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, minPrice: event.target.value }))}
@@ -367,7 +380,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Price</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.maxPrice}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, maxPrice: event.target.value }))}
@@ -377,7 +390,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Min Gap %</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.minGapPct}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, minGapPct: event.target.value }))}
@@ -387,7 +400,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Max Gap %</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   inputMode="decimal"
                   value={draftFilters.maxGapPct}
                   onChange={(event) => setDraftFilters((current) => ({ ...current, maxGapPct: event.target.value }))}
@@ -397,7 +410,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">LLM Provider</span>
                 <select
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   value={draftConfig.provider}
                   onChange={(event) => {
                     const provider = event.target.value === "anthropic" ? "anthropic" : "openai";
@@ -417,7 +430,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Model</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   value={draftConfig.model}
                   onChange={(event) => setDraftConfig((current) => ({ ...current, model: event.target.value }))}
                   placeholder={defaultModelFor(draftConfig.provider)}
@@ -427,7 +440,7 @@ export function GappersDashboard() {
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">API Key</span>
                 <input
                   type="password"
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   value={draftConfig.apiKey}
                   onChange={(event) => setDraftConfig((current) => ({ ...current, apiKey: event.target.value }))}
                   placeholder={draftConfig.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
@@ -436,7 +449,7 @@ export function GappersDashboard() {
               <label className="space-y-1">
                 <span className="text-[11px] uppercase tracking-[0.12em] text-slate-400">Base URL</span>
                 <input
-                  className="w-full rounded border border-borderSoft/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100"
+                  className={FILTER_INPUT_CLASS}
                   value={draftConfig.baseUrl}
                   onChange={(event) => setDraftConfig((current) => ({ ...current, baseUrl: event.target.value }))}
                   placeholder={draftConfig.provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"}
@@ -453,9 +466,6 @@ export function GappersDashboard() {
               {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Apply And Refresh
             </button>
-            <p className="max-w-xs text-xs text-slate-400">
-              TradingView is the only scan source. Keys stay in this browser only and are sent on `/api/gappers` requests.
-            </p>
           </div>
         </div>
         {snapshot?.warning && <p className="mt-2 text-xs text-yellow-200">{snapshot.warning}</p>}
@@ -510,15 +520,15 @@ export function GappersDashboard() {
                       <td className="px-3 py-2 text-slate-300">{fmtNumber(row.compositeScore, 0)}</td>
                     </tr>
                     {isOpen && (
-                      <tr className="border-t border-borderSoft/60 bg-slate-950/40">
+                      <tr className="border-t border-slate-700/80 bg-[#08101d]">
                         <td colSpan={11} className="px-3 py-3">
                           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
                             <div className="space-y-3">
-                              <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-3">
+                              <div className={DETAIL_PANEL_CLASS}>
                                 <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
                                 <div className="space-y-2">
                                   {row.news.map((item, idx) => (
-                                    <article key={`${row.ticker}-${idx}`} className="rounded border border-borderSoft/50 bg-panelSoft/25 p-2">
+                                    <article key={`${row.ticker}-${idx}`} className="rounded border border-slate-700/70 bg-[#132035] p-2">
                                       <a href={item.url} target="_blank" rel="noreferrer" className="text-sm font-medium text-accent hover:underline">
                                         {item.headline}
                                       </a>
@@ -531,7 +541,7 @@ export function GappersDashboard() {
                                   {row.news.length === 0 && <p className="text-xs text-slate-400">No ranked news items were found for this ticker.</p>}
                                 </div>
                               </div>
-                              <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-3">
+                              <div className={DETAIL_PANEL_CLASS}>
                                 <h4 className="mb-2 text-sm font-semibold text-slate-100">Analysis</h4>
                                 {row.analysis ? (
                                   <div className="space-y-2 text-sm">
@@ -554,7 +564,7 @@ export function GappersDashboard() {
                                 )}
                               </div>
                             </div>
-                            <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-3">
+                            <div className={DETAIL_PANEL_CLASS}>
                               <h4 className="mb-2 text-sm font-semibold text-slate-100">Chart</h4>
                               <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine initialRange="3M" />
                             </div>
