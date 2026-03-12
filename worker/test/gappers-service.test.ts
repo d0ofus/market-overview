@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildTradingViewPremarketPayload,
+  fetchTradingViewGapCandidates,
   fallbackAnalysis,
   isSnapshotFresh,
   normalizeGappersScanFilters,
@@ -39,6 +40,28 @@ describe("gappers service helpers", () => {
     expect(filters.limit).toBe(100);
     expect(filters.industries).toEqual(["Semiconductors", "Biotechnology"]);
     expect(filters.minGapPct).toBe(4);
+  });
+
+  it("enforces min price after upstream rows are parsed", async () => {
+    const response = {
+      data: [
+        { s: "NASDAQ:LOW", d: ["Low Inc", "Tech", "Software", 1_000_000_000, 9.5, 0, 1, 10.5, 12, 500_000] },
+        { s: "NASDAQ:HIGH", d: ["High Inc", "Tech", "Software", 2_000_000_000, 12, 0, 1, 13, 8, 900_000] },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => response,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const rows = await fetchTradingViewGapCandidates({
+      limit: 10,
+      minPrice: 10,
+    });
+
+    expect(rows.map((row) => row.ticker)).toEqual(["HIGH"]);
+    vi.unstubAllGlobals();
   });
 
   it("builds rule-based analysis when llm data is unavailable", () => {

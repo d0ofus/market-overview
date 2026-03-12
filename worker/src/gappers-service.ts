@@ -222,6 +222,27 @@ function rowMatchesIndustry(row: { industry: string | null }, industries: string
   return current.length > 0 && industries.some((value) => value.toLowerCase() === current);
 }
 
+function matchesNumberRange(value: number | null | undefined, min: number | null, max: number | null): boolean {
+  if (value == null || !Number.isFinite(value)) return false;
+  if (min != null && value < min) return false;
+  if (max != null && value > max) return false;
+  return true;
+}
+
+function rowMatchesScanFilters(row: TradingViewGapCandidate, filters: GappersScanFilters): boolean {
+  if (!rowMatchesIndustry(row, filters.industries)) return false;
+  if (!matchesNumberRange(row.marketCap, filters.minMarketCap, filters.maxMarketCap)) {
+    if (filters.minMarketCap != null || filters.maxMarketCap != null) return false;
+  }
+  if (!matchesNumberRange(row.price, filters.minPrice, filters.maxPrice)) {
+    if (filters.minPrice != null || filters.maxPrice != null) return false;
+  }
+  if (!matchesNumberRange(row.gapPct, filters.minGapPct, filters.maxGapPct)) {
+    if (filters.minGapPct != null || filters.maxGapPct != null) return false;
+  }
+  return row.gapPct > 0;
+}
+
 async function fetchTradingViewGapCandidates(filtersInput?: Partial<GappersScanFilters> | null): Promise<TradingViewGapCandidate[]> {
   const filters = normalizeGappersScanFilters(filtersInput);
   const payload = buildTradingViewPremarketPayload(filters);
@@ -270,8 +291,7 @@ async function fetchTradingViewGapCandidates(filtersInput?: Partial<GappersScanF
       } satisfies TradingViewGapCandidate;
     })
     .filter((row): row is TradingViewGapCandidate => Boolean(row))
-    .filter((row) => row.gapPct > 0)
-    .filter((row) => rowMatchesIndustry(row, filters.industries))
+    .filter((row) => rowMatchesScanFilters(row, filters))
     .slice(0, filters.limit);
 }
 
