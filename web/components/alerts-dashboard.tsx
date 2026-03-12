@@ -20,28 +20,15 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
   { value: "after-hours", label: "After-Hours" },
 ];
 
-const nyParts = (value = new Date()) => {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const parts = formatter.formatToParts(value);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  const year = Number(get("year") || "1970");
-  const month = Number(get("month") || "1");
-  const day = Number(get("day") || "1");
-  return {
-    isoDate: `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
-  };
-};
+const localIsoDate = (value = new Date()) =>
+  `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+
 const addDays = (isoDate: string, days: number) => {
   const value = new Date(`${isoDate}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
 };
-const defaultEndDate = () => nyParts().isoDate;
+const defaultEndDate = () => localIsoDate();
 const defaultStartDate = () => addDays(defaultEndDate(), -1);
 
 function formatDateTime(value: string | null | undefined): string {
