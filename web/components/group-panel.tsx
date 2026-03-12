@@ -118,7 +118,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setConstituents([]);
     setConstituentSort("weight");
     try {
-      const res = await getEtfConstituents(ticker, true);
+      const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []).map((row) => ({
         ticker: String(row.ticker ?? "").toUpperCase(),
         name: typeof row.name === "string" ? row.name : null,

@@ -18,6 +18,7 @@ import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
+import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
 import {
   cleanupOldAlertsData,
   ingestTradingViewAlertEmailsBatch,
@@ -162,40 +163,6 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
   if (Number.isNaN(then)) return true;
   return Date.now() - then > maxAgeDays * 86400_000;
 };
-
-type EtfSyncStatusRow = {
-  etfTicker: string;
-  lastSyncedAt: string | null;
-  status: string | null;
-  error: string | null;
-  source: string | null;
-  recordsCount: number;
-  updatedAt: string | null;
-  actualRecordsCount?: number | null;
-  latestConstituentUpdatedAt?: string | null;
-};
-
-function normalizeEtfSyncStatusRow<T extends EtfSyncStatusRow>(row: T): T {
-  const actualRecordsCount = Number(row.actualRecordsCount ?? row.recordsCount ?? 0);
-  const storedRecordsCount = Number(row.recordsCount ?? 0);
-  const effectiveRecordsCount = Math.max(actualRecordsCount, storedRecordsCount);
-  const hasCachedConstituents = effectiveRecordsCount > 0;
-  const hasStaleError = row.status === "error" && hasCachedConstituents;
-  const effectiveStatus = hasStaleError
-    ? "ok"
-    : (row.status ?? (hasCachedConstituents ? "ok" : "pending"));
-  const effectiveError = hasStaleError ? null : (row.error ?? null);
-  const effectiveUpdatedAt = row.latestConstituentUpdatedAt ?? row.updatedAt ?? null;
-  const effectiveLastSyncedAt = row.lastSyncedAt ?? row.latestConstituentUpdatedAt ?? null;
-  return {
-    ...row,
-    status: effectiveStatus,
-    error: effectiveError,
-    recordsCount: effectiveRecordsCount,
-    updatedAt: effectiveUpdatedAt,
-    lastSyncedAt: effectiveLastSyncedAt,
-  };
-}
 
 function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
@@ -1332,11 +1299,12 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     .all();
   const baseRows = rows.results ?? [];
 
-  let status = await c.env.DB.prepare(
+  let statusRaw = await c.env.DB.prepare(
     "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
   )
     .bind(ticker)
     .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+  let status = statusRaw ? normalizeEtfSyncStatusRow(statusRaw) : null;
   const hasKnownError = status?.status === "error";
   const hasNoRecords = baseRows.length === 0;
   const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
@@ -1350,13 +1318,22 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   if (shouldSync) {
     try {
       await syncEtfConstituents(c.env, ticker);
-      status = await c.env.DB.prepare(
+      statusRaw = await c.env.DB.prepare(
         "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
       )
         .bind(ticker)
         .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+      status = statusRaw ? normalizeEtfSyncStatusRow(statusRaw) : null;
     } catch (error) {
-      warning = error instanceof Error ? error.message : "Constituent pull failed";
+      if (!hasCachedRows) {
+        warning = error instanceof Error ? error.message : "Constituent pull failed";
+      }
+      statusRaw = await c.env.DB.prepare(
+        "SELECT etf_ticker as etfTicker, last_synced_at as lastSyncedAt, status, error, source, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ?",
+      )
+        .bind(ticker)
+        .first<{ etfTicker: string; lastSyncedAt: string | null; status: string | null; error: string | null; source: string | null; recordsCount: number }>();
+      status = statusRaw ? normalizeEtfSyncStatusRow(statusRaw) : status;
     }
   }
 
