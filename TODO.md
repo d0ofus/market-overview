@@ -31,6 +31,7 @@
 ## Gappers
 - Find out what the current filters are and add more scanning filters or use a preset 
 - Add $ on gap = Pre Vol * Price
+- Add Average $ traded filter
 - Remove ETFs, only stocks
 - Add news like how /alerts does it
 - Sign up for an LLM to test it out
@@ -41,6 +42,7 @@
 
 ## General
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
+- Add in search function for leveraged ETFs
 - Remove whitespaces and use more space for charts
 - Add news impact page (on dashboard(?))
 - Add scanners compilation as a new page --> Use share screen and link (e.g. https://www.tradingview.com/screener/DH50xwYA/) to get watchlist
