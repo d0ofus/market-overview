@@ -73,6 +73,23 @@ describe("overview snapshot staleness", () => {
     expect(stale).toBe(true);
   });
 
+  it("marks snapshot stale when a mature ticker has fewer than 63 sparkline points", async () => {
+    const stale = await isOverviewSnapshotStale(createEnv({
+      snapshotId: "snap-1",
+      equalWeightRows: [
+        {
+          ticker: "RSPS",
+          displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
+        },
+      ],
+      sparklineRows: {
+        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 21 }, (_, i) => i + 1)) },
+      },
+    }) as never);
+
+    expect(stale).toBe(true);
+  });
+
   it("keeps snapshot fresh when equal-weight names match and sparkline length is 63", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
@@ -90,4 +107,3 @@ describe("overview snapshot staleness", () => {
     expect(stale).toBe(false);
   });
 });
-

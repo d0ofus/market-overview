@@ -498,7 +498,7 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   if (tickers.length === 0) return;
   const staleTickers = await loadTickersMissingRecentBars(env, tickers, 14);
   if (staleTickers.length === 0) return;
-  await refreshRecentBarsForTickers(env, staleTickers, 400);
+  await refreshRecentBarsForTickers(env, staleTickers, 400, 140);
   await recomputeDashboardFromStoredBars(env);
 }
 
@@ -759,7 +759,7 @@ async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, {
   return map;
 }
 
-async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600): Promise<void> {
+async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600, lookbackDays = 21): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean))).slice(0, Math.max(1, maxTickers));
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
@@ -770,7 +770,7 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
   }
   try {
     const end = new Date().toISOString().slice(0, 10);
-    const start = new Date(Date.now() - 21 * 86400_000).toISOString().slice(0, 10);
+    const start = new Date(Date.now() - Math.max(1, lookbackDays) * 86400_000).toISOString().slice(0, 10);
     const bars = await provider.getDailyBars(unique, start, end);
     if (bars.length === 0) return;
     const stmts = bars.map((b) =>
@@ -846,6 +846,8 @@ app.get("/api/dashboard", async (c) => {
   const date = c.req.query("date");
   await ensureOverviewCatalogCoverage(c.env);
   if (!date && await isOverviewSnapshotStale(c.env, configId)) {
+    const tickers = await loadOverviewTickers(c.env);
+    await refreshRecentBarsForTickers(c.env, tickers, 400, 140);
     await recomputeDashboardFromStoredBars(c.env, undefined, configId);
   }
   await maybeRefreshOverviewBars(c.env);
