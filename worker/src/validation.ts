@@ -64,3 +64,7 @@ export const peerBootstrapSchema = z.object({
   providerMode: z.enum(["both", "finnhub", "fmp"]).optional().default("both"),
   enrichPeers: z.boolean().optional().default(false),
 });
+
+export const peerNormalizeSchema = z.object({
+  limit: z.number().int().min(1).max(1000).optional().default(250),
+});

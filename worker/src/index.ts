@@ -10,6 +10,7 @@ import {
   peerGroupCreateSchema,
   peerGroupPatchSchema,
   peerMembershipCreateSchema,
+  peerNormalizeSchema,
   peerSeedSchema,
 } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
@@ -60,7 +61,7 @@ import {
   upsertTickerPeerMembership,
 } from "./peer-groups-service";
 import { loadPeerMetrics } from "./peer-metrics-service";
-import { seedPeerGroupForTicker } from "./peer-seed-service";
+import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -2066,6 +2067,14 @@ app.post("/api/admin/peer-groups/bootstrap", async (c) => {
     attempted: candidates.length,
     rows,
   });
+});
+
+app.post("/api/admin/peer-groups/normalize-labels", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = peerNormalizeSchema.parse(await c.req.json().catch(() => ({})));
+  const result = await normalizeSeededPeerGroupLabels(c.env, payload);
+  await upsertAudit(c.env, "default", "PEER_GROUP_NORMALIZE_LABELS", result);
+  return c.json({ ok: true, ...result });
 });
 
 app.post("/api/admin/gappers/refresh", async (c) => {

@@ -5,7 +5,9 @@ import {
   isValidBootstrapRootTicker,
   loadPeerTickerDetail,
   mergeMembershipSource,
+  removeTickerPeerMembership,
   slugifyPeerGroupName,
+  updatePeerGroup,
   upsertTickerPeerMembership,
   type PeerMembershipSource,
 } from "./peer-groups-service";
@@ -42,6 +44,23 @@ function parseNumber(value: unknown): number | null {
 
 function isUsPeerTicker(value: string): boolean {
   return isValidBootstrapRootTicker(value);
+}
+
+function cleanGroupLabel(value: string | null | undefined): string | null {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  if (/fundamental peers$/i.test(text)) return null;
+  return text;
+}
+
+export function deriveSeedGroupTitle(profile: SeedProfile, fallbackTicker: string): string {
+  return cleanGroupLabel(profile.industry)
+    ?? cleanGroupLabel(profile.sector)
+    ?? `${fallbackTicker} Fundamental Peers`;
+}
+
+export function deriveSeedGroupSlug(title: string, groupType: "fundamental" | "technical" | "custom" = "fundamental"): string {
+  return slugifyPeerGroupName(`${groupType}-${title}`);
 }
 
 async function loadExistingSymbolProfile(env: Env, ticker: string): Promise<SeedProfile | null> {
@@ -198,9 +217,11 @@ async function upsertSeedSymbol(env: Env, profile: SeedProfile): Promise<void> {
 async function ensureSeedGroup(
   env: Env,
   ticker: string,
+  profile: SeedProfile,
   existingDetailGroups: Array<{ id: string; slug: string }> | undefined,
 ): Promise<string> {
-  const slug = slugifyPeerGroupName(`${ticker}-fundamental-peers`);
+  const title = deriveSeedGroupTitle(profile, ticker);
+  const slug = deriveSeedGroupSlug(title, "fundamental");
   const fromDetail = existingDetailGroups?.find((group) => group.slug === slug)?.id ?? null;
   if (fromDetail) return fromDetail;
 
@@ -209,10 +230,10 @@ async function ensureSeedGroup(
 
   try {
     return (await createPeerGroup(env, {
-      name: `${ticker} Fundamental Peers`,
+      name: title,
       slug,
       groupType: "fundamental",
-      description: `Seeded peer group for ${ticker}.`,
+      description: `Seeded fundamental peer group for ${title}.`,
       priority: 100,
       isActive: true,
     })).id;
@@ -289,7 +310,7 @@ export async function seedPeerGroupForTicker(
   await upsertSeedSymbol(env, rootProfile);
 
   const detail = await loadPeerTickerDetail(env, ticker);
-  const groupId = await ensureSeedGroup(env, ticker, detail?.groups);
+  const groupId = await ensureSeedGroup(env, ticker, rootProfile, detail?.groups);
 
   await upsertTickerPeerMembership(env, {
     ticker,
@@ -325,4 +346,98 @@ export async function seedPeerGroupForTicker(
     insertedTickers,
     sourceBreakdown,
   };
+}
+
+export async function normalizeSeededPeerGroupLabels(
+  env: Env,
+  input?: { limit?: number | null },
+): Promise<{ processed: number; renamed: number; merged: number; skipped: number }> {
+  const limit = Math.max(1, Math.min(1000, Number(input?.limit ?? 250)));
+  const rows = await env.DB.prepare(
+    `SELECT id, slug, name
+     FROM peer_groups
+     WHERE group_type = 'fundamental'
+       AND slug LIKE '%-fundamental-peers'
+     ORDER BY created_at ASC, name ASC
+     LIMIT ?`,
+  ).bind(limit).all<{ id: string; slug: string; name: string }>();
+
+  let processed = 0;
+  let renamed = 0;
+  let merged = 0;
+  let skipped = 0;
+
+  for (const group of rows.results ?? []) {
+    processed += 1;
+    const root = await env.DB.prepare(
+      `SELECT ticker
+       FROM ticker_peer_groups
+       WHERE peer_group_id = ? AND source = 'system' AND confidence = 1
+       ORDER BY created_at ASC, ticker ASC
+       LIMIT 1`,
+    ).bind(group.id).first<{ ticker: string }>();
+    const rootTicker = root?.ticker?.toUpperCase() ?? group.slug.replace(/-fundamental-peers$/i, "").toUpperCase();
+    if (!isValidBootstrapRootTicker(rootTicker)) {
+      skipped += 1;
+      continue;
+    }
+
+    const profile = await loadSeedProfile(rootTicker, env, {
+      allowExternalLookup: true,
+      providers: ["finnhub", "fmp"],
+    });
+    if (!profile) {
+      skipped += 1;
+      continue;
+    }
+
+    await upsertSeedSymbol(env, profile);
+    const title = deriveSeedGroupTitle(profile, rootTicker);
+    const targetSlug = deriveSeedGroupSlug(title, "fundamental");
+
+    if (targetSlug === group.slug) {
+      if (group.name !== title) {
+        await updatePeerGroup(env, group.id, {
+          name: title,
+          slug: targetSlug,
+          description: `Seeded fundamental peer group for ${title}.`,
+        });
+        renamed += 1;
+      } else {
+        skipped += 1;
+      }
+      continue;
+    }
+
+    const targetGroup = await env.DB.prepare(
+      "SELECT id FROM peer_groups WHERE slug = ? LIMIT 1",
+    ).bind(targetSlug).first<{ id: string }>();
+    const targetGroupId = targetGroup?.id ?? (await createPeerGroup(env, {
+      name: title,
+      slug: targetSlug,
+      groupType: "fundamental",
+      description: `Seeded fundamental peer group for ${title}.`,
+      priority: 100,
+      isActive: true,
+    })).id;
+
+    const memberships = await env.DB.prepare(
+      "SELECT ticker, source, confidence FROM ticker_peer_groups WHERE peer_group_id = ?",
+    ).bind(group.id).all<{ ticker: string; source: PeerMembershipSource; confidence: number | null }>();
+
+    for (const membership of memberships.results ?? []) {
+      await upsertTickerPeerMembership(env, {
+        ticker: membership.ticker,
+        peerGroupId: targetGroupId,
+        source: membership.source,
+        confidence: typeof membership.confidence === "number" ? membership.confidence : null,
+      });
+      await removeTickerPeerMembership(env, group.id, membership.ticker);
+    }
+
+    await env.DB.prepare("DELETE FROM peer_groups WHERE id = ?").bind(group.id).run();
+    merged += 1;
+  }
+
+  return { processed, renamed, merged, skipped };
 }
