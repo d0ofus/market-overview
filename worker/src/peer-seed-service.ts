@@ -37,6 +37,33 @@ function parseNumber(value: unknown): number | null {
   return null;
 }
 
+async function loadExistingSymbolProfile(env: Env, ticker: string): Promise<SeedProfile | null> {
+  const row = await env.DB.prepare(
+    `SELECT
+      ticker,
+      name,
+      exchange,
+      sector,
+      industry,
+      shares_outstanding as sharesOutstanding
+     FROM symbols
+     WHERE ticker = ?
+     LIMIT 1`,
+  )
+    .bind(ticker)
+    .first<SeedProfile>();
+  return row
+    ? {
+        ticker: row.ticker.toUpperCase(),
+        name: row.name ?? null,
+        exchange: row.exchange ?? null,
+        sector: row.sector ?? null,
+        industry: row.industry ?? null,
+        sharesOutstanding: typeof row.sharesOutstanding === "number" ? row.sharesOutstanding : null,
+      }
+    : null;
+}
+
 async function fetchFinnhubPeers(ticker: string, token: string): Promise<string[]> {
   const res = await fetch(`https://finnhub.io/api/v1/stock/peers?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(token)}`, {
     headers: { "User-Agent": "market-command-centre/1.0" },
@@ -109,19 +136,32 @@ async function fetchFmpProfile(ticker: string, apiKey: string): Promise<SeedProf
   return null;
 }
 
-async function loadSeedProfile(ticker: string, env: Env): Promise<SeedProfile | null> {
+async function loadSeedProfile(
+  ticker: string,
+  env: Env,
+  options?: {
+    allowExternalLookup?: boolean;
+    providers?: Array<"finnhub" | "fmp">;
+  },
+): Promise<SeedProfile | null> {
+  const existing = await loadExistingSymbolProfile(env, ticker);
+  const allowExternalLookup = options?.allowExternalLookup !== false;
+  const providers = options?.providers ?? ["finnhub", "fmp"];
+  const shouldFetchFinnhub = allowExternalLookup && providers.includes("finnhub") && Boolean(env.FINNHUB_API_KEY);
+  const shouldFetchFmp = allowExternalLookup && providers.includes("fmp") && Boolean(env.FMP_API_KEY);
+
   const [finnhubProfile, fmpProfile, resolvedMeta] = await Promise.all([
-    env.FINNHUB_API_KEY ? fetchFinnhubProfile(ticker, env.FINNHUB_API_KEY).catch(() => null) : Promise.resolve(null),
-    env.FMP_API_KEY ? fetchFmpProfile(ticker, env.FMP_API_KEY).catch(() => null) : Promise.resolve(null),
+    shouldFetchFinnhub ? fetchFinnhubProfile(ticker, env.FINNHUB_API_KEY!).catch(() => null) : Promise.resolve(null),
+    shouldFetchFmp ? fetchFmpProfile(ticker, env.FMP_API_KEY!).catch(() => null) : Promise.resolve(null),
     resolveTickerMeta(ticker, env).catch(() => null),
   ]);
   return {
     ticker,
-    name: fmpProfile?.name ?? finnhubProfile?.name ?? resolvedMeta?.name ?? ticker,
-    exchange: fmpProfile?.exchange ?? finnhubProfile?.exchange ?? resolvedMeta?.exchange ?? null,
-    sector: fmpProfile?.sector ?? finnhubProfile?.sector ?? null,
-    industry: fmpProfile?.industry ?? finnhubProfile?.industry ?? null,
-    sharesOutstanding: fmpProfile?.sharesOutstanding ?? finnhubProfile?.sharesOutstanding ?? null,
+    name: existing?.name ?? fmpProfile?.name ?? finnhubProfile?.name ?? resolvedMeta?.name ?? ticker,
+    exchange: existing?.exchange ?? fmpProfile?.exchange ?? finnhubProfile?.exchange ?? resolvedMeta?.exchange ?? null,
+    sector: existing?.sector ?? fmpProfile?.sector ?? finnhubProfile?.sector ?? null,
+    industry: existing?.industry ?? fmpProfile?.industry ?? finnhubProfile?.industry ?? null,
+    sharesOutstanding: existing?.sharesOutstanding ?? fmpProfile?.sharesOutstanding ?? finnhubProfile?.sharesOutstanding ?? null,
   };
 }
 
@@ -148,7 +188,14 @@ async function upsertSeedSymbol(env: Env, profile: SeedProfile): Promise<void> {
     .run();
 }
 
-export async function seedPeerGroupForTicker(env: Env, tickerInput: string): Promise<{
+export async function seedPeerGroupForTicker(
+  env: Env,
+  tickerInput: string,
+  options?: {
+    providerMode?: "both" | "finnhub" | "fmp";
+    enrichPeers?: boolean;
+  },
+): Promise<{
   groupId: string;
   ticker: string;
   insertedTickers: string[];
@@ -159,11 +206,22 @@ export async function seedPeerGroupForTicker(env: Env, tickerInput: string): Pro
   if (!env.FINNHUB_API_KEY && !env.FMP_API_KEY) {
     throw new Error("FINNHUB_API_KEY or FMP_API_KEY is required for peer seeding.");
   }
+  const providerMode = options?.providerMode ?? "both";
+  const providers = providerMode === "both"
+    ? (["finnhub", "fmp"] as Array<"finnhub" | "fmp">)
+    : ([providerMode] as Array<"finnhub" | "fmp">);
+  const enrichPeers = options?.enrichPeers === true;
+  if (providers.includes("finnhub") && !env.FINNHUB_API_KEY && providerMode !== "fmp") {
+    throw new Error("FINNHUB_API_KEY is required for Finnhub peer seeding.");
+  }
+  if (providers.includes("fmp") && !env.FMP_API_KEY && providerMode !== "finnhub") {
+    throw new Error("FMP_API_KEY is required for FMP peer seeding.");
+  }
 
   const [finnhubPeers, fmpPeers, rootProfile] = await Promise.all([
-    env.FINNHUB_API_KEY ? fetchFinnhubPeers(ticker, env.FINNHUB_API_KEY).catch(() => []) : Promise.resolve([]),
-    env.FMP_API_KEY ? fetchFmpPeers(ticker, env.FMP_API_KEY).catch(() => []) : Promise.resolve([]),
-    loadSeedProfile(ticker, env),
+    providers.includes("finnhub") && env.FINNHUB_API_KEY ? fetchFinnhubPeers(ticker, env.FINNHUB_API_KEY).catch(() => []) : Promise.resolve([]),
+    providers.includes("fmp") && env.FMP_API_KEY ? fetchFmpPeers(ticker, env.FMP_API_KEY).catch(() => []) : Promise.resolve([]),
+    loadSeedProfile(ticker, env, { allowExternalLookup: true, providers }),
   ]);
   if (!rootProfile) throw new Error(`Unable to resolve metadata for ${ticker}.`);
 
@@ -209,7 +267,10 @@ export async function seedPeerGroupForTicker(env: Env, tickerInput: string): Pro
   const insertedTickers: string[] = [];
   const sourceBreakdown: Record<string, number> = {};
   for (const candidate of candidates.values()) {
-    const profile = await loadSeedProfile(candidate.ticker, env);
+    const profile = await loadSeedProfile(candidate.ticker, env, {
+      allowExternalLookup: enrichPeers,
+      providers,
+    });
     if (!profile) continue;
     await upsertSeedSymbol(env, profile);
     const source = Array.from(candidate.sources).reduce<PeerMembershipSource | null>((current, next) => mergeMembershipSource(current, next), null) ?? "system";
@@ -230,4 +291,3 @@ export async function seedPeerGroupForTicker(env: Env, tickerInput: string): Pro
     sourceBreakdown,
   };
 }
-

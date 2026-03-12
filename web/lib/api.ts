@@ -562,6 +562,8 @@ export function bootstrapAdminPeerGroups(payload?: {
   offset?: number;
   q?: string;
   onlyUnseeded?: boolean;
+  providerMode?: "both" | "finnhub" | "fmp";
+  enrichPeers?: boolean;
 }) {
   return adminFetch<{
     ok: boolean;

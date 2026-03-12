@@ -41,7 +41,8 @@ export function PeerGroupsAdminPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(false);
-  const [bootstrapLimit, setBootstrapLimit] = useState("3");
+  const [bootstrapLimit, setBootstrapLimit] = useState("25");
+  const [bootstrapProviderMode, setBootstrapProviderMode] = useState<"both" | "finnhub" | "fmp">("finnhub");
   const [message, setMessage] = useState<string | null>(null);
 
   const load = async (preferredGroupId?: string | null) => {
@@ -241,13 +242,22 @@ export function PeerGroupsAdminPanel() {
             <div className="mb-3 text-sm font-semibold text-slate-200">Ticker Search</div>
             <div className="mb-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Bootstrap Seed Batch</div>
-              <div className="flex gap-2">
+              <div className="grid gap-2 md:grid-cols-[6rem,12rem,auto]">
                 <input
-                  className="w-24 rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
+                  className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
                   value={bootstrapLimit}
                   onChange={(event) => setBootstrapLimit(event.target.value)}
-                  placeholder="3"
+                  placeholder="25"
                 />
+                <select
+                  className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
+                  value={bootstrapProviderMode}
+                  onChange={(event) => setBootstrapProviderMode(event.target.value as "both" | "finnhub" | "fmp")}
+                >
+                  <option value="finnhub">Finnhub only</option>
+                  <option value="both">Both providers</option>
+                  <option value="fmp">FMP only</option>
+                </select>
                 <button
                   className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:opacity-50"
                   disabled={bootstrapping}
@@ -258,6 +268,8 @@ export function PeerGroupsAdminPanel() {
                       const res = await bootstrapAdminPeerGroups({
                         limit: Number(bootstrapLimit || 3),
                         onlyUnseeded: true,
+                        providerMode: bootstrapProviderMode,
+                        enrichPeers: false,
                       });
                       await load(selectedGroupId);
                       const okCount = (res.rows ?? []).filter((row) => row.ok).length;
@@ -273,7 +285,7 @@ export function PeerGroupsAdminPanel() {
                   {bootstrapping ? "Bootstrapping..." : "Bootstrap Batch"}
                 </button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-400">Seeds the next unassigned equity tickers from Finnhub/FMP into self-managed peer groups.</p>
+              <p className="mt-2 text-[11px] text-slate-400">Defaults to Finnhub-only for speed. Use Both providers sparingly because FMP free-tier calls are the bottleneck.</p>
             </div>
             <div className="flex gap-2">
               <input

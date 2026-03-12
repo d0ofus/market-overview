@@ -57,8 +57,10 @@ export const peerSeedSchema = z.object({
 });
 
 export const peerBootstrapSchema = z.object({
-  limit: z.number().int().min(1).max(10).optional().default(3),
+  limit: z.number().int().min(1).max(100).optional().default(10),
   offset: z.number().int().min(0).optional().default(0),
   q: z.string().trim().optional().default(""),
   onlyUnseeded: z.boolean().optional().default(true),
+  providerMode: z.enum(["both", "finnhub", "fmp"]).optional().default("both"),
+  enrichPeers: z.boolean().optional().default(false),
 });

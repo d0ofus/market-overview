@@ -34,13 +34,18 @@ Broad `company name contains` searches still scale with more rows read because w
 
 ## Seed / Import Workflow
 - Admin can trigger a seed import for a ticker from the Peer Groups admin panel.
+- Admin can also trigger batch bootstrap imports, or use the local `npm run bootstrap:peers -w worker` script to keep seeding in repeated batches.
 - The worker:
   - fetches peer candidates from Finnhub and FMP
   - normalizes and deduplicates symbols
-  - resolves/upserts ticker metadata into `symbols`
-  - stores `shares_outstanding` when returned by seed providers
+  - upserts ticker metadata into `symbols`
+  - stores `shares_outstanding` when already known or when fetched for the root ticker
   - creates or reuses a deterministic group like `<ticker>-fundamental-peers`
   - upserts memberships into `ticker_peer_groups`
+- Batch bootstrap defaults to a low-call mode:
+  - `finnhub` provider mode by default for throughput
+  - no per-peer profile enrichment unless explicitly enabled
+  - this keeps external calls close to one peer lookup per root ticker instead of one lookup per peer member
 - Provenance values:
   - `fmp_seed`
   - `finnhub_seed`
@@ -63,6 +68,7 @@ Broad `company name contains` searches still scale with more rows read because w
 ## /peer-groups Flow
 - Initial page load:
   - fetches only D1-backed directory rows and peer-group filters
+  - defaults to showing seeded peer-group tickers, not every equity in `symbols`
   - no charts
   - no runtime metrics
 - Search/select:
@@ -92,4 +98,3 @@ Broad `company name contains` searches still scale with more rows read because w
 - blended ranking/scoring models
 - more explicit peer confidence weighting
 - richer seeded fundamental metadata if needed later
-

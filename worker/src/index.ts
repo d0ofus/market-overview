@@ -2063,7 +2063,10 @@ app.post("/api/admin/peer-groups/bootstrap", async (c) => {
   }> = [];
   for (const candidate of candidates) {
     try {
-      const result = await seedPeerGroupForTicker(c.env, candidate.ticker);
+      const result = await seedPeerGroupForTicker(c.env, candidate.ticker, {
+        providerMode: payload.providerMode,
+        enrichPeers: payload.enrichPeers,
+      });
       rows.push({
         ticker: candidate.ticker,
         ok: true,

@@ -113,7 +113,7 @@ export async function listPeerBootstrapCandidates(
   } = {},
 ): Promise<Array<{ ticker: string; name: string | null }>> {
   if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
-  const limit = Math.max(1, Math.min(25, Number(input.limit ?? 5)));
+  const limit = Math.max(1, Math.min(100, Number(input.limit ?? 10)));
   const offset = Math.max(0, Number(input.offset ?? 0));
   const q = String(input.q ?? "").trim();
   const qUpper = q.toUpperCase();
@@ -220,6 +220,10 @@ export async function queryPeerDirectory(
 
   const where: string[] = ["(s.asset_class IS NULL OR s.asset_class IN ('equity', 'stock'))"];
   const params: Array<string | number> = [];
+
+  if (schemaReady && !q && !groupId && !groupType && active == null) {
+    where.push("EXISTS (SELECT 1 FROM ticker_peer_groups tpg WHERE tpg.ticker = s.ticker)");
+  }
 
   if (q) {
     where.push("(s.ticker = ? OR s.ticker LIKE ? OR s.name LIKE ? COLLATE NOCASE)");
