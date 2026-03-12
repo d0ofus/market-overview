@@ -7,3 +7,7 @@ npx wrangler d1 execute market_command --remote --command "SELECT etf_ticker, co
 
 # Compare latest two stored bars for a ticker (example: NEE)
 npx wrangler d1 execute market_command --remote --command "SELECT ticker, date, c FROM daily_bars WHERE ticker='NEE' ORDER BY date DESC LIMIT 2"
+
+# Redeploy worker
+Set-Location "c:\Users\ErvinLieu\Documents\Projects\market-overview\worker"
+npx wrangler deploy

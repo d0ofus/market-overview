@@ -24,7 +24,9 @@
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 
 ## Alerts
+- Fix news items not being accurate
 - Remove backlog to keep database sustainable
+- For each alert, clickable link to show industry peers and have a multi-chart view
 
 ## Gappers
 - Find out what the current filters are and add more scanning filters or use a preset 
