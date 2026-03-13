@@ -1,6 +1,7 @@
 import { AdminBuilder } from "@/components/admin-builder";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { PeerGroupsAdminPanel } from "@/components/peer-groups-admin-panel";
+import { WatchlistCompilerAdminPanel } from "@/components/watchlist-compiler-admin-panel";
 
 export default function AdminPage() {
   return (
@@ -14,6 +15,7 @@ export default function AdminPage() {
       </div>
       <AdminBuilder />
       <PeerGroupsAdminPanel />
+      <WatchlistCompilerAdminPanel />
     </div>
   );
 }

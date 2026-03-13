@@ -104,6 +104,37 @@ export type ScanUniqueTickerRow = {
   latestChange1d: number | null;
 };
 
+export type WatchlistCompilerRunSummary = ScanRunSummary;
+
+export type WatchlistCompilerSetRow = {
+  id: string;
+  scanDefinitionId: string;
+  name: string;
+  slug: string;
+  isActive: boolean;
+  compileDaily: boolean;
+  dailyCompileTimeLocal: string | null;
+  dailyCompileTimezone: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sourceCount: number;
+  latestRun: WatchlistCompilerRunSummary | null;
+};
+
+export type WatchlistCompilerSourceRow = {
+  id: string;
+  setId: string;
+  sourceUrl: string;
+  sortOrder: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
+  sources: WatchlistCompilerSourceRow[];
+};
+
 export type GapperNewsItem = {
   headline: string;
   source: string;
@@ -418,6 +449,112 @@ export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?
   return apiUrl(mode === "compiled" ? `/api/scans/${id}/compiled/export.csv` : `/api/scans/${id}/compiled/tickers.csv`);
 }
 
+export function getWatchlistCompilerSets(includeInactive = false) {
+  return getJson<{ rows: WatchlistCompilerSetRow[] }>(
+    appendQuery("/api/watchlist-compiler/sets", { includeInactive: includeInactive ? 1 : undefined }),
+  );
+}
+
+export function getWatchlistCompilerSet(id: string) {
+  return getJson<WatchlistCompilerSetDetail>(`/api/watchlist-compiler/sets/${encodeURIComponent(id)}`);
+}
+
+export function getWatchlistCompilerRuns(id: string, limit = 25) {
+  return getJson<{ rows: WatchlistCompilerRunSummary[] }>(
+    appendQuery(`/api/watchlist-compiler/sets/${encodeURIComponent(id)}/runs`, { limit }),
+  );
+}
+
+export function getWatchlistCompilerCompiled(id: string, runId?: string | null) {
+  return getJson<{ set: WatchlistCompilerSetDetail; runId: string | null; rows: ScanCompiledRow[] }>(
+    appendQuery(`/api/watchlist-compiler/sets/${encodeURIComponent(id)}/compiled`, { runId: runId ?? undefined }),
+  );
+}
+
+export function getWatchlistCompilerUnique(id: string, runId?: string | null) {
+  return getJson<{ set: WatchlistCompilerSetDetail; runId: string | null; rows: ScanUniqueTickerRow[] }>(
+    appendQuery(`/api/watchlist-compiler/sets/${encodeURIComponent(id)}/unique`, { runId: runId ?? undefined }),
+  );
+}
+
+export function getWatchlistCompilerExportUrl(
+  id: string,
+  format: "csv" | "txt",
+  mode: "compiled" | "unique",
+  options?: { runId?: string | null; dateSuffix?: string | null },
+) {
+  return apiUrl(appendQuery(`/api/watchlist-compiler/sets/${encodeURIComponent(id)}/export.${format}`, {
+    mode,
+    runId: options?.runId ?? undefined,
+    dateSuffix: options?.dateSuffix ?? undefined,
+  }));
+}
+
+export function getAdminWatchlistCompilerSets() {
+  return adminFetch<{ rows: WatchlistCompilerSetRow[] }>("/api/admin/watchlist-compiler/sets");
+}
+
+export function createAdminWatchlistCompilerSet(payload: {
+  name: string;
+  slug?: string | null;
+  isActive?: boolean;
+  compileDaily?: boolean;
+  dailyCompileTimeLocal?: string | null;
+  dailyCompileTimezone?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/watchlist-compiler/sets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminWatchlistCompilerSet(id: string, payload: {
+  name?: string;
+  slug?: string | null;
+  isActive?: boolean;
+  compileDaily?: boolean;
+  dailyCompileTimeLocal?: string | null;
+  dailyCompileTimezone?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAdminWatchlistCompilerSet(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function createAdminWatchlistCompilerSource(setId: string, payload: { sourceUrl: string; isActive?: boolean }) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(setId)}/sources`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminWatchlistCompilerSource(id: string, payload: { sourceUrl?: string; sortOrder?: number; isActive?: boolean }) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sources/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAdminWatchlistCompilerSource(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sources/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function compileAdminWatchlistCompilerSet(id: string) {
+  return adminFetch<{ ok: boolean; run: WatchlistCompilerRunSummary; set: WatchlistCompilerSetDetail }>(
+    `/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}/compile`,
+    { method: "POST" },
+  );
+}
+
 export function getGappers(limit = 50, force = false, filters?: GappersScanFilters | null) {
   return getJson<GappersSnapshot>(appendQuery("/api/gappers", {
     limit,
@@ -612,6 +749,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "scanning") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scanning refresh endpoint." };
+    }
+    if (page === "watchlist-compiler") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support watchlist compiler refresh endpoint." };
     }
     if (page === "gappers") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support gappers refresh endpoint." };

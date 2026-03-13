@@ -68,3 +68,44 @@ export const peerBootstrapSchema = z.object({
 export const peerNormalizeSchema = z.object({
   limit: z.number().int().min(1).max(1000).optional().default(250),
 });
+
+const timezoneStringSchema = z.string().min(1);
+const localTimeSchema = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/);
+const urlSchema = z.string().url().refine((value) => {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./i, "");
+    return /tradingview\.com$/i.test(host);
+  } catch {
+    return false;
+  }
+}, "TradingView public watchlist URL is required.");
+
+export const watchlistSetCreateSchema = z.object({
+  name: z.string().min(1),
+  slug: z.string().nullable().optional(),
+  isActive: z.boolean().optional().default(true),
+  compileDaily: z.boolean().optional().default(false),
+  dailyCompileTimeLocal: localTimeSchema.nullable().optional(),
+  dailyCompileTimezone: timezoneStringSchema.nullable().optional(),
+});
+
+export const watchlistSetPatchSchema = z.object({
+  name: z.string().min(1).optional(),
+  slug: z.string().nullable().optional(),
+  isActive: z.boolean().optional(),
+  compileDaily: z.boolean().optional(),
+  dailyCompileTimeLocal: localTimeSchema.nullable().optional(),
+  dailyCompileTimezone: timezoneStringSchema.nullable().optional(),
+});
+
+export const watchlistSourceCreateSchema = z.object({
+  sourceUrl: urlSchema,
+  isActive: z.boolean().optional().default(true),
+});
+
+export const watchlistSourcePatchSchema = z.object({
+  sourceUrl: urlSchema.optional(),
+  sortOrder: z.number().int().min(1).max(9999).optional(),
+  isActive: z.boolean().optional(),
+});

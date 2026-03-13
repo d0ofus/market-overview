@@ -12,6 +12,10 @@ import {
   peerMembershipCreateSchema,
   peerNormalizeSchema,
   peerSeedSchema,
+  watchlistSetCreateSchema,
+  watchlistSetPatchSchema,
+  watchlistSourceCreateSchema,
+  watchlistSourcePatchSchema,
 } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
 import { getProvider } from "./provider";
@@ -62,6 +66,25 @@ import {
 } from "./peer-groups-service";
 import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
+import {
+  compileActiveWatchlistSets,
+  compileWatchlistSet,
+  createWatchlistSet,
+  createWatchlistSource,
+  deleteWatchlistSet,
+  deleteWatchlistSource,
+  listWatchlistSetRuns,
+  listWatchlistSets,
+  loadWatchlistCompiledRows,
+  loadWatchlistSet,
+  loadWatchlistUniqueRows,
+  resolveExportFileName,
+  runDueWatchlistCompiles,
+  tickersToSingleColumnCsv,
+  tickersToTxt,
+  updateWatchlistSet,
+  updateWatchlistSource,
+} from "./watchlist-compiler-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -545,6 +568,7 @@ type RefreshPage =
   | "tools"
   | "alerts"
   | "scanning"
+  | "watchlist-compiler"
   | "gappers";
 
 async function refreshPageScopedData(
@@ -610,6 +634,14 @@ async function refreshPageScopedData(
       page,
       refreshedTickers: refreshed.refreshedRows,
       notes: `Refreshed ${refreshed.refreshedScans} saved scans and stored ${refreshed.refreshedRows} compiled rows.`,
+    };
+  }
+  if (page === "watchlist-compiler") {
+    const refreshed = await compileActiveWatchlistSets(env);
+    return {
+      page,
+      refreshedTickers: refreshed.compiledRows,
+      notes: `Compiled ${refreshed.compiledSets} watchlist set${refreshed.compiledSets === 1 ? "" : "s"} and stored ${refreshed.compiledRows} compiled rows.`,
     };
   }
   if (page === "gappers") {
@@ -1886,11 +1918,134 @@ app.get("/api/scans/:id/compiled/tickers.csv", async (c) => {
   return c.body(csv);
 });
 
+app.get("/api/watchlist-compiler/sets", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await listWatchlistSets(c.env, c.req.query("includeInactive") === "1");
+  return c.json({ rows });
+});
+
+app.get("/api/watchlist-compiler/sets/:id", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const detail = await loadWatchlistSet(c.env, c.req.param("id"));
+  if (!detail) return c.json({ error: "Watchlist set not found." }, 404);
+  return c.json(detail);
+});
+
+app.get("/api/watchlist-compiler/sets/:id/runs", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const rows = await listWatchlistSetRuns(c.env, c.req.param("id"), Number(c.req.query("limit") ?? 25));
+  return c.json({ rows });
+});
+
+app.get("/api/watchlist-compiler/sets/:id/compiled", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const result = await loadWatchlistCompiledRows(c.env, c.req.param("id"), c.req.query("runId") ?? null);
+  return c.json({ set: result.set, runId: result.runId, rows: result.rows });
+});
+
+app.get("/api/watchlist-compiler/sets/:id/unique", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const result = await loadWatchlistUniqueRows(c.env, c.req.param("id"), c.req.query("runId") ?? null);
+  return c.json({ set: result.set, runId: result.runId, rows: result.rows });
+});
+
+app.get("/api/watchlist-compiler/sets/:id/export.txt", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const mode = c.req.query("mode") === "compiled" ? "compiled" : "unique";
+  const runId = c.req.query("runId") ?? null;
+  const dateSuffix = c.req.query("dateSuffix");
+  const payload = mode === "compiled"
+    ? await loadWatchlistCompiledRows(c.env, c.req.param("id"), runId)
+    : await loadWatchlistUniqueRows(c.env, c.req.param("id"), runId);
+  const tickers = mode === "compiled"
+    ? payload.rows.map((row: any) => row.ticker)
+    : payload.rows.map((row: any) => row.ticker);
+  c.header("Content-Type", "text/plain; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, mode, extension: "txt", dateSuffix })}"`);
+  return c.body(tickersToTxt(tickers));
+});
+
+app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
+  await maybeRunScanningHousekeeping(c.env);
+  const mode = c.req.query("mode") === "compiled" ? "compiled" : "unique";
+  const runId = c.req.query("runId") ?? null;
+  const dateSuffix = c.req.query("dateSuffix");
+  const payload = mode === "compiled"
+    ? await loadWatchlistCompiledRows(c.env, c.req.param("id"), runId)
+    : await loadWatchlistUniqueRows(c.env, c.req.param("id"), runId);
+  const tickers = mode === "compiled"
+    ? payload.rows.map((row: any) => row.ticker)
+    : payload.rows.map((row: any) => row.ticker);
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, mode, extension: "csv", dateSuffix })}"`);
+  return c.body(tickersToSingleColumnCsv(tickers));
+});
+
 app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
   const config = await loadConfig(c.env, configId);
   return c.json(config);
+});
+
+app.get("/api/admin/watchlist-compiler/sets", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await listWatchlistSets(c.env, true);
+  return c.json({ rows });
+});
+
+app.post("/api/admin/watchlist-compiler/sets", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistSetCreateSchema.parse(await c.req.json());
+  const created = await createWatchlistSet(c.env, payload);
+  await upsertAudit(c.env, "default", "WATCHLIST_SET_CREATE", { id: created.id, payload });
+  return c.json({ ok: true, id: created.id });
+});
+
+app.patch("/api/admin/watchlist-compiler/sets/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistSetPatchSchema.parse(await c.req.json());
+  await updateWatchlistSet(c.env, c.req.param("id"), payload);
+  await upsertAudit(c.env, "default", "WATCHLIST_SET_PATCH", { id: c.req.param("id"), payload });
+  return c.json({ ok: true, id: c.req.param("id") });
+});
+
+app.delete("/api/admin/watchlist-compiler/sets/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await deleteWatchlistSet(c.env, c.req.param("id"));
+  await upsertAudit(c.env, "default", "WATCHLIST_SET_DELETE", { id: c.req.param("id") });
+  return c.json({ ok: true, id: c.req.param("id") });
+});
+
+app.post("/api/admin/watchlist-compiler/sets/:id/sources", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistSourceCreateSchema.parse(await c.req.json());
+  const created = await createWatchlistSource(c.env, c.req.param("id"), payload);
+  await upsertAudit(c.env, "default", "WATCHLIST_SOURCE_CREATE", { setId: c.req.param("id"), id: created.id, payload });
+  return c.json({ ok: true, id: created.id });
+});
+
+app.patch("/api/admin/watchlist-compiler/sources/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistSourcePatchSchema.parse(await c.req.json());
+  await updateWatchlistSource(c.env, c.req.param("id"), payload);
+  await upsertAudit(c.env, "default", "WATCHLIST_SOURCE_PATCH", { id: c.req.param("id"), payload });
+  return c.json({ ok: true, id: c.req.param("id") });
+});
+
+app.delete("/api/admin/watchlist-compiler/sources/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await deleteWatchlistSource(c.env, c.req.param("id"));
+  await upsertAudit(c.env, "default", "WATCHLIST_SOURCE_DELETE", { id: c.req.param("id") });
+  return c.json({ ok: true, id: c.req.param("id") });
+});
+
+app.post("/api/admin/watchlist-compiler/sets/:id/compile", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await maybeRunScanningHousekeeping(c.env);
+  const result = await compileWatchlistSet(c.env, c.req.param("id"));
+  await upsertAudit(c.env, "default", "WATCHLIST_SET_COMPILE", { id: c.req.param("id"), runId: result.run.id });
+  return c.json({ ok: true, run: result.run, set: result.set });
 });
 
 app.get("/api/admin/peer-groups", async (c) => {
@@ -2311,7 +2466,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -2544,11 +2699,12 @@ export default {
     await maybeRunAlertsHousekeeping(env);
     await maybeRunScanningHousekeeping(env);
     await maybeRunGappersHousekeeping(env);
+    const now = new Date(event.scheduledTime || Date.now());
+    await runDueWatchlistCompiles(env, now);
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
     const target = parseLocalTime(refreshTime) ?? { hour: 8, minute: 15 };
-    const now = new Date(event.scheduledTime || Date.now());
     const local = zonedParts(now, timezone);
     const targetMinutes = target.hour * 60 + target.minute;
     const withinWindow = local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;

@@ -223,7 +223,7 @@ async function latestRunMap(env: Env): Promise<Map<string, ScanRunSummary>> {
 export async function listScanDefinitions(env: Env): Promise<ScanDefinitionRow[]> {
   const latestByScan = await latestRunMap(env);
   const rows = await env.DB.prepare(
-    "SELECT id, name, provider_key as providerKey, source_type as sourceType, source_value as sourceValue, fallback_source_type as fallbackSourceType, fallback_source_value as fallbackSourceValue, is_active as isActive, notes, created_at as createdAt, updated_at as updatedAt FROM scan_definitions ORDER BY updated_at DESC, created_at DESC",
+    "SELECT id, name, provider_key as providerKey, source_type as sourceType, source_value as sourceValue, fallback_source_type as fallbackSourceType, fallback_source_value as fallbackSourceValue, is_active as isActive, notes, created_at as createdAt, updated_at as updatedAt FROM scan_definitions WHERE provider_key <> 'watchlist-compiler' ORDER BY updated_at DESC, created_at DESC",
   ).all<any>();
   return (rows.results ?? []).map((row) => ({
     ...row,
