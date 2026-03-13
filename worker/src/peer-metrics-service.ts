@@ -1,4 +1,5 @@
 import { getProvider } from "./provider";
+import { hasSharesOutstandingColumn } from "./peer-groups-service";
 import type { Env } from "./types";
 
 export type PeerMetricRow = {
@@ -78,8 +79,9 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
     providerError = error instanceof Error ? error.message : "Failed to load Alpaca metrics.";
   }
 
+  const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
   const shareRows = await env.DB.prepare(
-    `SELECT ticker, shares_outstanding as sharesOutstanding FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
+    `SELECT ticker${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
   )
     .bind(...tickers)
     .all<{ ticker: string; sharesOutstanding: number | null }>();
