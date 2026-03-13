@@ -30,9 +30,30 @@ describe("peer metrics service", () => {
     expect(rows[1]).toMatchObject({
       ticker: "MSFT",
       price: 300,
+      change1d: null,
       marketCap: null,
       avgVolume: 300,
       source: "alpaca",
+    });
+  });
+
+  it("falls back to daily bars for 1D change when snapshot prev close is unavailable", () => {
+    const rows = buildPeerMetricRows(
+      ["MSFT"],
+      "2026-03-12T00:00:00.000Z",
+      {},
+      [
+        { ticker: "MSFT", date: "2026-03-10", c: 290, volume: 100 },
+        { ticker: "MSFT", date: "2026-03-11", c: 300, volume: 200 },
+      ],
+      new Map([["MSFT", null]]),
+    );
+
+    expect(rows[0]).toMatchObject({
+      ticker: "MSFT",
+      price: 300,
+      change1d: (300 - 290) / 290 * 100,
+      avgVolume: 150,
     });
   });
 

@@ -35,22 +35,35 @@ export function buildPeerMetricRows(
   sharesByTicker: Map<string, number | null>,
 ): PeerMetricRow[] {
   const barsByTicker = new Map<string, number[]>();
+  const closesByTicker = new Map<string, number[]>();
   for (const row of recentBars) {
-    const current = barsByTicker.get(row.ticker.toUpperCase()) ?? [];
+    const ticker = row.ticker.toUpperCase();
+    const current = barsByTicker.get(ticker) ?? [];
     current.push(Number(row.volume ?? 0));
-    barsByTicker.set(row.ticker.toUpperCase(), current);
+    barsByTicker.set(ticker, current);
+
+    const closes = closesByTicker.get(ticker) ?? [];
+    closes.push(Number(row.c ?? 0));
+    closesByTicker.set(ticker, closes);
   }
 
   return tickers.map((ticker) => {
     const latestSnapshot = snapshotRows[ticker];
-    const fallbackPrice = recentBars.filter((row) => row.ticker.toUpperCase() === ticker).slice(-1)[0]?.c;
+    const closes = (closesByTicker.get(ticker) ?? []).filter((value) => Number.isFinite(value) && value > 0);
+    const fallbackPrice = closes.at(-1);
+    const fallbackPrevClose = closes.length >= 2 ? closes.at(-2) ?? null : null;
     const price = typeof latestSnapshot?.price === "number"
       ? latestSnapshot.price
       : typeof fallbackPrice === "number"
         ? fallbackPrice
         : null;
-    const change1d = typeof latestSnapshot?.price === "number" && typeof latestSnapshot?.prevClose === "number" && latestSnapshot.prevClose > 0
-      ? ((latestSnapshot.price - latestSnapshot.prevClose) / latestSnapshot.prevClose) * 100
+    const prevClose = typeof latestSnapshot?.prevClose === "number" && latestSnapshot.prevClose > 0
+      ? latestSnapshot.prevClose
+      : typeof fallbackPrevClose === "number" && fallbackPrevClose > 0
+        ? fallbackPrevClose
+        : null;
+    const change1d = typeof price === "number" && typeof prevClose === "number" && prevClose > 0
+      ? ((price - prevClose) / prevClose) * 100
       : null;
     const sharesOutstanding = sharesByTicker.get(ticker);
     const avgVolume = mean((barsByTicker.get(ticker) ?? []).slice(-30).filter((value) => Number.isFinite(value)));
