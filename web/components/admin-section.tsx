@@ -7,14 +7,15 @@ type Props = {
   title: string;
   description?: string;
   defaultOpen?: boolean;
+  anchorId?: string;
   children: React.ReactNode;
 };
 
-export function AdminSection({ title, description, defaultOpen = true, children }: Props) {
+export function AdminSection({ title, description, defaultOpen = true, anchorId, children }: Props) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <section className="card overflow-hidden">
+    <section className="card overflow-hidden scroll-mt-24" id={anchorId}>
       <button
         className="flex w-full items-center justify-between border-b border-borderSoft px-4 py-3 text-left"
         onClick={() => setIsOpen((value) => !value)}

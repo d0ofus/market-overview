@@ -14,6 +14,11 @@ const refreshTimezoneOptions = [
 ] as const;
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
+const ADMIN_SECTION_ANCHORS: Record<string, string> = {
+  "Macro Overview": "admin-macro-overview",
+  "Equities Overview": "admin-equities-overview",
+  "Market Breadth & Sentiment": "admin-market-breadth-sentiment",
+};
 
 const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone} (prev US close)`;
 
@@ -415,7 +420,7 @@ export function AdminBuilder() {
         {refreshConfigMsg && <p className="mt-2 text-xs text-slate-300">{refreshConfigMsg}</p>}
       </div>
 
-      <div className="card p-3">
+      <div className="card p-3" id="admin-etf-watchlists">
         <h3 className="mb-2 text-base font-semibold">ETF Watchlists</h3>
         <div className="mb-3 flex items-center gap-2">
           <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={runEtfConstituentBackfill}>
@@ -826,7 +831,7 @@ export function AdminBuilder() {
         </button>
       </div>
       {data.sections.map((section) => (
-        <div key={section.id} className="card p-4">
+        <div key={section.id} className="card scroll-mt-24 p-4" id={ADMIN_SECTION_ANCHORS[section.title]}>
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold">{section.title}</h3>
