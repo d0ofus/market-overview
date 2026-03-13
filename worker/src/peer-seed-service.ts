@@ -69,10 +69,18 @@ function cleanGroupLabel(value: string | null | undefined): string | null {
   return text;
 }
 
-export function deriveSeedGroupTitle(profile: SeedProfile, fallbackTicker: string): string {
-  return cleanGroupLabel(profile.industry)
-    ?? cleanGroupLabel(profile.sector)
-    ?? `${fallbackTicker} Fundamental Peers`;
+export function deriveSeedGroupTitle(profile: Pick<SeedProfile, "industry">): string | null {
+  return cleanGroupLabel(profile.industry);
+}
+
+async function loadSeedIndustryTitle(env: Env, ticker: string): Promise<string | null> {
+  if (env.FINNHUB_API_KEY) {
+    const finnhubProfile = await fetchFinnhubProfile(ticker, env.FINNHUB_API_KEY).catch(() => null);
+    const finnhubTitle = deriveSeedGroupTitle({ industry: finnhubProfile?.industry ?? null });
+    if (finnhubTitle) return finnhubTitle;
+  }
+  const existing = await loadExistingSymbolProfile(env, ticker);
+  return deriveSeedGroupTitle({ industry: existing?.industry ?? null });
 }
 
 export function deriveSeedGroupSlug(title: string, groupType: "fundamental" | "technical" | "custom" = "fundamental"): string {
@@ -232,11 +240,9 @@ async function upsertSeedSymbol(env: Env, profile: SeedProfile): Promise<void> {
 
 async function ensureSeedGroup(
   env: Env,
-  ticker: string,
-  profile: SeedProfile,
+  title: string,
   existingDetailGroups: Array<{ id: string; slug: string }> | undefined,
 ): Promise<string> {
-  const title = deriveSeedGroupTitle(profile, ticker);
   const slug = deriveSeedGroupSlug(title, "fundamental");
   const fromDetail = existingDetailGroups?.find((group) => group.slug === slug)?.id ?? null;
   if (fromDetail) return fromDetail;
@@ -297,9 +303,11 @@ export async function seedPeerGroupForTicker(
   const [finnhubPeers, fmpPeers, rootProfile] = await Promise.all([
     providers.includes("finnhub") && env.FINNHUB_API_KEY ? fetchFinnhubPeers(ticker, env.FINNHUB_API_KEY).catch(() => []) : Promise.resolve([]),
     providers.includes("fmp") && env.FMP_API_KEY ? fetchFmpPeers(ticker, env.FMP_API_KEY).catch(() => []) : Promise.resolve([]),
-    loadSeedProfile(ticker, env, { allowExternalLookup: enrichPeers, providers }),
+    loadSeedProfile(ticker, env, { allowExternalLookup: true, providers: ["finnhub", ...providers.filter((provider) => provider !== "finnhub")] }),
   ]);
   if (!rootProfile) throw new Error(`Unable to resolve metadata for ${ticker}.`);
+  const title = await loadSeedIndustryTitle(env, ticker);
+  if (!title) throw new Error(`Finnhub industry label is required for ${ticker}.`);
 
   const candidates = new Map<string, SeedCandidate>();
   const register = (symbols: string[], source: PeerMembershipSource) => {
@@ -326,7 +334,7 @@ export async function seedPeerGroupForTicker(
   await upsertSeedSymbol(env, rootProfile);
 
   const detail = await loadPeerTickerDetail(env, ticker);
-  const groupId = await ensureSeedGroup(env, ticker, rootProfile, detail?.groups);
+  const groupId = await ensureSeedGroup(env, title, detail?.groups);
 
   await upsertTickerPeerMembership(env, {
     ticker,
@@ -402,28 +410,29 @@ export async function normalizeSeededPeerGroupLabels(
       allowExternalLookup: true,
       providers: ["finnhub", "fmp"],
     });
-    if (!profile) {
+    if (profile) await upsertSeedSymbol(env, profile);
+
+    const title = await loadSeedIndustryTitle(env, rootTicker);
+    const hasOtherLabelsRow = await env.DB.prepare(
+      `SELECT COUNT(*) as count
+       FROM ticker_peer_groups tpg
+       JOIN peer_groups pg ON pg.id = tpg.peer_group_id
+       WHERE tpg.ticker = ?
+         AND pg.id <> ?
+         AND NOT (pg.group_type = 'fundamental' AND LOWER(pg.name) LIKE '% fundamental peers')`,
+    ).bind(rootTicker, group.id).first<{ count: number }>();
+    const hasOtherLabels = Number(hasOtherLabelsRow?.count ?? 0) > 0;
+
+    if (!title || hasOtherLabels) {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM ticker_peer_groups WHERE peer_group_id = ?").bind(group.id),
+        env.DB.prepare("DELETE FROM peer_groups WHERE id = ?").bind(group.id),
+      ]);
       skipped += 1;
       continue;
     }
 
-    await upsertSeedSymbol(env, profile);
-    const title = deriveSeedGroupTitle(profile, rootTicker);
     const targetSlug = deriveSeedGroupSlug(title, "fundamental");
-
-    if (targetSlug === group.slug) {
-      if (group.name !== title) {
-        await updatePeerGroup(env, group.id, {
-          name: title,
-          slug: targetSlug,
-          description: `Seeded fundamental peer group for ${title}.`,
-        });
-        renamed += 1;
-      } else {
-        skipped += 1;
-      }
-      continue;
-    }
 
     const targetGroup = await env.DB.prepare(
       "SELECT id FROM peer_groups WHERE slug = ? LIMIT 1",

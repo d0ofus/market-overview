@@ -4,33 +4,14 @@ import { deriveSeedGroupSlug, deriveSeedGroupTitle, shouldKeepUsPeerCandidate } 
 describe("peer seed service helpers", () => {
   it("prefers industry-based titles for seeded groups", () => {
     expect(deriveSeedGroupTitle({
-      ticker: "AA",
-      name: "Alcoa Corp",
-      exchange: "NYSE",
-      sector: "Materials",
       industry: "Aluminium",
-      sharesOutstanding: null,
-    }, "AA")).toBe("Aluminium");
+    })).toBe("Aluminium");
   });
 
-  it("falls back to sector and then ticker when source labels are missing", () => {
+  it("does not fall back to sector or ticker-based labels", () => {
     expect(deriveSeedGroupTitle({
-      ticker: "XYZ",
-      name: "XYZ",
-      exchange: "NYSE",
-      sector: "Industrials",
       industry: null,
-      sharesOutstanding: null,
-    }, "XYZ")).toBe("Industrials");
-
-    expect(deriveSeedGroupTitle({
-      ticker: "XYZ",
-      name: "XYZ",
-      exchange: "NYSE",
-      sector: null,
-      industry: null,
-      sharesOutstanding: null,
-    }, "XYZ")).toBe("XYZ Fundamental Peers");
+    })).toBeNull();
   });
 
   it("builds shared industry slugs for seeded groups", () => {
