@@ -307,7 +307,12 @@ export async function seedPeerGroupForTicker(
   ]);
   if (!rootProfile) throw new Error(`Unable to resolve metadata for ${ticker}.`);
   const title = await loadSeedIndustryTitle(env, ticker);
-  if (!title) throw new Error(`Finnhub industry label is required for ${ticker}.`);
+  if (!title) {
+    await env.DB.prepare(
+      "UPDATE symbols SET asset_class = 'unsupported', updated_at = CURRENT_TIMESTAMP WHERE ticker = ?",
+    ).bind(ticker).run();
+    throw new Error(`Finnhub industry label is required for ${ticker}.`);
+  }
 
   const candidates = new Map<string, SeedCandidate>();
   const register = (symbols: string[], source: PeerMembershipSource) => {
