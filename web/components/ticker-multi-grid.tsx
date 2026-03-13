@@ -10,6 +10,7 @@ export type TickerMultiGridItem = {
   title?: string;
   subtitle?: string | null;
   detail?: ReactNode;
+  onTitleClick?: () => void;
 };
 
 export function TickerMultiGrid({
@@ -61,14 +62,27 @@ export function TickerMultiGrid({
               key={item.key}
               className={`rounded border p-2 ${isSelected ? "border-accent/60" : "border-borderSoft/60"}`}
             >
-              <button
-                className={`mb-2 block w-full text-left ${onSelect ? "" : "cursor-default"}`}
-                onClick={() => onSelect?.(item.key)}
-                disabled={!onSelect}
-              >
-                <div className="text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
-                {item.subtitle && <div className="text-[11px] text-slate-400">{item.subtitle}</div>}
-              </button>
+              <div className="mb-2">
+                {item.onTitleClick ? (
+                  <button
+                    className="block text-left text-sm font-semibold text-accent hover:underline"
+                    onClick={item.onTitleClick}
+                  >
+                    {item.title ?? item.ticker}
+                  </button>
+                ) : (
+                  <div className="text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
+                )}
+                {item.subtitle && (
+                  <button
+                    className={`mt-0.5 block w-full text-left text-[11px] text-slate-400 ${onSelect ? "" : "cursor-default"}`}
+                    onClick={() => onSelect?.(item.key)}
+                    disabled={!onSelect}
+                  >
+                    {item.subtitle}
+                  </button>
+                )}
+              </div>
               <TradingViewWidget
                 ticker={item.ticker}
                 size="small"
@@ -87,4 +101,3 @@ export function TickerMultiGrid({
     </div>
   );
 }
-

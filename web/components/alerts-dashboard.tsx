@@ -7,10 +7,12 @@ import {
   getAlerts,
   getAlertTickerDays,
   getPeerTickerDetail,
+  getPeerTickerMetrics,
   type AlertLogRow,
   type AlertNewsRow,
   type AlertTickerDayRow,
   type AlertsSessionFilter,
+  type PeerMetricRow,
   type PeerTickerDetail,
 } from "@/lib/api";
 import { TradingViewWidget } from "./tradingview-widget";
@@ -150,6 +152,7 @@ export function AlertsDashboard() {
   const [activePeerLoading, setActivePeerLoading] = useState(false);
   const [activePeerError, setActivePeerError] = useState<string | null>(null);
   const [activePeerChartTicker, setActivePeerChartTicker] = useState<string | null>(null);
+  const [activePeerMetrics, setActivePeerMetrics] = useState<Record<string, PeerMetricRow>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -245,11 +248,18 @@ export function AlertsDashboard() {
   const openPeerGroupModal = useCallback(async (ticker: string) => {
     setActivePeerTicker(ticker);
     setActivePeerDetail(null);
+    setActivePeerMetrics({});
     setActivePeerError(null);
     setActivePeerLoading(true);
     try {
-      const detail = await getPeerTickerDetail(ticker);
+      const [detail, metrics] = await Promise.all([
+        getPeerTickerDetail(ticker),
+        getPeerTickerMetrics(ticker),
+      ]);
       setActivePeerDetail(detail);
+      setActivePeerMetrics(
+        Object.fromEntries((metrics.rows ?? []).map((row) => [row.ticker, row])),
+      );
     } catch (loadError) {
       setActivePeerError(loadError instanceof Error ? loadError.message : "Failed to load peer group.");
     } finally {
@@ -262,11 +272,12 @@ export function AlertsDashboard() {
   const sortedPeerMembers = useMemo(() => {
     if (!activePeerGroup) return [];
     return [...activePeerGroup.members].sort((a, b) => {
-      if (a.ticker === activePeerDetail?.symbol.ticker) return -1;
-      if (b.ticker === activePeerDetail?.symbol.ticker) return 1;
+      const aChange = activePeerMetrics[a.ticker]?.change1d ?? Number.NEGATIVE_INFINITY;
+      const bChange = activePeerMetrics[b.ticker]?.change1d ?? Number.NEGATIVE_INFINITY;
+      if (aChange !== bChange) return bChange - aChange;
       return a.ticker.localeCompare(b.ticker);
     });
-  }, [activePeerDetail?.symbol.ticker, activePeerGroup]);
+  }, [activePeerGroup, activePeerMetrics]);
 
   return (
     <div className="space-y-4">
@@ -394,6 +405,7 @@ export function AlertsDashboard() {
                 key: keyFor(row.ticker, row.tradingDay),
                 ticker: row.ticker,
                 title: row.ticker,
+                onTitleClick: () => void openPeerGroupModal(row.ticker),
                 subtitle: formatAlertStamp(row.latestReceivedAt, row.marketSession),
                 detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
               }))}
@@ -495,12 +507,18 @@ export function AlertsDashboard() {
                   <div key={`${activePeerTicker}-${member.ticker}`} className="card p-2">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{member.ticker}</span>
-                      <span className="text-xs text-slate-400">
-                        {member.source.replace("_", " ")}
+                      <span className={`text-xs ${(activePeerMetrics[member.ticker]?.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>
+                        {typeof activePeerMetrics[member.ticker]?.change1d === "number"
+                          ? `${activePeerMetrics[member.ticker]!.change1d!.toFixed(2)}%`
+                          : "-"}
                       </span>
                     </div>
                     <div className="mb-1 text-xs text-slate-300">
-                      {member.confidence != null ? `${(member.confidence * 100).toFixed(0)}% confidence` : "Peer member"}
+                      <span className="text-slate-400">
+                        {typeof activePeerMetrics[member.ticker]?.price === "number"
+                          ? activePeerMetrics[member.ticker]!.price!.toFixed(2)
+                          : "-"}
+                      </span>
                     </div>
                     <p className="mb-2 line-clamp-2 text-xs text-slate-400">{member.name ?? member.ticker}</p>
                     <TradingViewWidget ticker={member.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />

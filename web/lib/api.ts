@@ -221,6 +221,7 @@ export type PeerTickerDetail = {
 export type PeerMetricRow = {
   ticker: string;
   price: number | null;
+  change1d: number | null;
   marketCap: number | null;
   avgVolume: number | null;
   asOf: string;

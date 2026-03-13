@@ -4,6 +4,7 @@ import type { Env } from "./types";
 export type PeerMetricRow = {
   ticker: string;
   price: number | null;
+  change1d: number | null;
   marketCap: number | null;
   avgVolume: number | null;
   asOf: string;
@@ -37,11 +38,15 @@ export function buildPeerMetricRows(
       : typeof fallbackPrice === "number"
         ? fallbackPrice
         : null;
+    const change1d = typeof latestSnapshot?.price === "number" && typeof latestSnapshot?.prevClose === "number" && latestSnapshot.prevClose > 0
+      ? ((latestSnapshot.price - latestSnapshot.prevClose) / latestSnapshot.prevClose) * 100
+      : null;
     const sharesOutstanding = sharesByTicker.get(ticker);
     const avgVolume = mean((barsByTicker.get(ticker) ?? []).slice(-30).filter((value) => Number.isFinite(value)));
     return {
       ticker,
       price,
+      change1d,
       marketCap: typeof price === "number" && typeof sharesOutstanding === "number" ? price * sharesOutstanding : null,
       avgVolume,
       asOf,
