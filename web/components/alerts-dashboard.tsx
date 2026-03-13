@@ -241,6 +241,15 @@ export function AlertsDashboard() {
     }
     return deduped;
   }, [alerts, showUniqueOnly]);
+  const alertDescriptionByTickerDay = useMemo(() => {
+    const descriptions = new Map<string, string>();
+    for (const row of alerts) {
+      const compoundKey = keyFor(row.ticker, row.tradingDay);
+      if (descriptions.has(compoundKey)) continue;
+      descriptions.set(compoundKey, summarizeDescription(row));
+    }
+    return descriptions;
+  }, [alerts]);
 
   const onToggleNews = (key: string) => {
     setExpandedNews((current) => {
@@ -419,7 +428,7 @@ export function AlertsDashboard() {
                 ticker: row.ticker,
                 title: row.ticker,
                 onTitleClick: () => void openPeerGroupModal(row.ticker),
-                subtitle: formatAlertStamp(row.latestReceivedAt, row.marketSession),
+                subtitle: `${formatAlertStamp(row.latestReceivedAt, row.marketSession)} • ${alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}`,
                 detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
               }))}
             />
