@@ -48,6 +48,27 @@ describe("scanning providers", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("extracts tradingview watchlist symbols from embedded symbols array", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        `<html><script>{"list":{"id":34128913,"symbols":["###LIVE ORDERS","NYSE:OIS","NASDAQ:RKLB","###FOCUS LIST - READY FOR EXECUTION","NYSE:AA","NYSE:MOG.A"]}}</script></html>`,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    );
+
+    const provider = new TradingViewPublicLinkProvider();
+    const rows = await provider.fetch({
+      providerKey: "tradingview-public-link",
+      sourceType: "tradingview-public-link",
+      sourceValue: "https://www.tradingview.com/watchlists/34128913/",
+    });
+
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => row.ticker)).toEqual(["OIS", "RKLB", "AA", "MOG.A"]);
+    expect(rows[0]).toMatchObject({ exchange: "NYSE", rankLabel: "LIVE ORDERS", rankValue: 1 });
+    expect(rows[2]).toMatchObject({ exchange: "NYSE", rankLabel: "FOCUS LIST - READY FOR EXECUTION", rankValue: 3 });
+  });
+
   it("normalizes supported source types", () => {
     expect(normalizeScanSourceType("csv-text")).toBe("csv-text");
     expect(normalizeScanSourceType("bad-type")).toBeNull();

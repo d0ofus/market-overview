@@ -121,6 +121,86 @@ export class TickerListProvider implements ScanProvider {
   }
 }
 
+function extractJsonArray(source: string, marker: string): string | null {
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) return null;
+  const arrayStart = source.indexOf("[", markerIndex + marker.length);
+  if (arrayStart < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = arrayStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") inString = false;
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) return source.slice(arrayStart, index + 1);
+    }
+  }
+  return null;
+}
+
+function tryExtractTradingViewWatchlistSymbols(html: string): ScanCandidate[] {
+  const arrayText = extractJsonArray(html, "\"symbols\":");
+  if (!arrayText) return [];
+
+  let values: unknown;
+  try {
+    values = JSON.parse(arrayText);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(values)) return [];
+
+  const out: ScanCandidate[] = [];
+  let currentSection: string | null = null;
+  values.forEach((entry, index) => {
+    const value = String(entry ?? "").trim();
+    if (!value) return;
+    if (value.startsWith("###")) {
+      currentSection = value.replace(/^#+/, "").trim() || null;
+      return;
+    }
+    const ticker = normalizeTicker(value);
+    if (!ticker) return;
+    const exchange = value.includes(":") ? value.split(":")[0]?.trim().toUpperCase() ?? null : null;
+    out.push({
+      ticker,
+      exchange,
+      providerRowKey: `watchlist:${index}:${value}`,
+      rankValue: out.length + 1,
+      rankLabel: currentSection,
+      raw: {
+        source: "tradingview-watchlist-symbols",
+        symbol: value,
+        section: currentSection,
+        position: index,
+      },
+    });
+  });
+  return out;
+}
+
 function tryExtractTickersFromHtml(html: string): ScanCandidate[] {
   const out: ScanCandidate[] = [];
   const seen = new Set<string>();
@@ -187,6 +267,8 @@ export class TradingViewPublicLinkProvider implements ScanProvider {
       throw new Error(`TradingView fetch failed (${response.status}): ${body.slice(0, 160)}`);
     }
     const html = await response.text();
+    const fromWatchlist = tryExtractTradingViewWatchlistSymbols(html);
+    if (fromWatchlist.length > 0) return fromWatchlist;
     return tryExtractTickersFromHtml(html);
   }
 }
