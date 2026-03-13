@@ -2,6 +2,8 @@ import { getProvider } from "./provider";
 import { hasSharesOutstandingColumn } from "./peer-groups-service";
 import type { Env } from "./types";
 
+const SHARE_QUERY_CHUNK_SIZE = 50;
+
 export type PeerMetricRow = {
   ticker: string;
   price: number | null;
@@ -15,6 +17,14 @@ export type PeerMetricRow = {
 function mean(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 export function buildPeerMetricRows(
@@ -56,6 +66,29 @@ export function buildPeerMetricRows(
   });
 }
 
+export async function loadSharesOutstandingMap(env: Env, tickers: string[]): Promise<Map<string, number | null>> {
+  const normalized = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
+  if (normalized.length === 0) return new Map();
+
+  const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
+  if (!sharesOutstandingColumn) return new Map();
+
+  const rows = await Promise.all(
+    chunk(normalized, SHARE_QUERY_CHUNK_SIZE).map(async (tickerChunk) => {
+      const result = await env.DB.prepare(
+        `SELECT ticker, shares_outstanding as sharesOutstanding FROM symbols WHERE ticker IN (${tickerChunk.map(() => "?").join(",")})`,
+      )
+        .bind(...tickerChunk)
+        .all<{ ticker: string; sharesOutstanding: number | null }>();
+      return result.results ?? [];
+    }),
+  );
+
+  return new Map(
+    rows.flat().map((row) => [String(row.ticker ?? "").toUpperCase(), row.sharesOutstanding]),
+  );
+}
+
 export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
   const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
   if (tickers.length === 0) return { rows: [], error: null };
@@ -81,13 +114,7 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
   }
 
   try {
-    const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
-    const shareRows = await env.DB.prepare(
-      `SELECT ticker${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
-    )
-      .bind(...tickers)
-      .all<{ ticker: string; sharesOutstanding: number | null }>();
-    sharesByTicker = new Map((shareRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row.sharesOutstanding]));
+    sharesByTicker = await loadSharesOutstandingMap(env, tickers);
   } catch (error) {
     errorMessages.push(error instanceof Error ? error.message : "Failed to load seeded share counts.");
   }

@@ -59,6 +59,16 @@ function formatTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function formatPrice(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return value.toFixed(2);
+}
+
+function formatCompact(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+}
+
 function formatAlertStamp(value: string | null | undefined, marketSession?: string | null): string {
   const timestamp = formatDateTime(value);
   if (!marketSession) return timestamp;
@@ -153,6 +163,7 @@ export function AlertsDashboard() {
   const [activePeerError, setActivePeerError] = useState<string | null>(null);
   const [activePeerChartTicker, setActivePeerChartTicker] = useState<string | null>(null);
   const [activePeerMetrics, setActivePeerMetrics] = useState<Record<string, PeerMetricRow>>({});
+  const [activePeerMetricsError, setActivePeerMetricsError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -250,6 +261,7 @@ export function AlertsDashboard() {
     setActivePeerDetail(null);
     setActivePeerMetrics({});
     setActivePeerError(null);
+    setActivePeerMetricsError(null);
     setActivePeerLoading(true);
     try {
       const [detail, metrics] = await Promise.all([
@@ -260,6 +272,7 @@ export function AlertsDashboard() {
       setActivePeerMetrics(
         Object.fromEntries((metrics.rows ?? []).map((row) => [row.ticker, row])),
       );
+      setActivePeerMetricsError(metrics.error ?? null);
     } catch (loadError) {
       setActivePeerError(loadError instanceof Error ? loadError.message : "Failed to load peer group.");
     } finally {
@@ -496,6 +509,11 @@ export function AlertsDashboard() {
                 {activePeerError}
               </div>
             )}
+            {activePeerMetricsError && !activePeerError && (
+              <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
+                Metrics warning: {activePeerMetricsError}
+              </div>
+            )}
             {activePeerLoading ? (
               <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -514,11 +532,11 @@ export function AlertsDashboard() {
                       </span>
                     </div>
                     <div className="mb-1 text-xs text-slate-300">
-                      <span className="text-slate-400">
-                        {typeof activePeerMetrics[member.ticker]?.price === "number"
-                          ? activePeerMetrics[member.ticker]!.price!.toFixed(2)
-                          : "-"}
-                      </span>
+                      <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
+                        <div>Price: <span className="text-slate-200">{formatPrice(activePeerMetrics[member.ticker]?.price)}</span></div>
+                        <div>Mkt Cap: <span className="text-slate-200">{formatCompact(activePeerMetrics[member.ticker]?.marketCap)}</span></div>
+                        <div>Avg Vol: <span className="text-slate-200">{formatCompact(activePeerMetrics[member.ticker]?.avgVolume)}</span></div>
+                      </div>
                     </div>
                     <p className="mb-2 line-clamp-2 text-xs text-slate-400">{member.name ?? member.ticker}</p>
                     <TradingViewWidget ticker={member.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />

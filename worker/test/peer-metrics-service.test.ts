@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPeerMetricRows } from "../src/peer-metrics-service";
+import { buildPeerMetricRows, loadSharesOutstandingMap } from "../src/peer-metrics-service";
 
 describe("peer metrics service", () => {
   it("builds market cap and average volume from Alpaca-backed inputs", () => {
@@ -35,5 +35,44 @@ describe("peer metrics service", () => {
       source: "alpaca",
     });
   });
-});
 
+  it("loads seeded share counts in chunks for large peer groups", async () => {
+    const prepareCalls: string[] = [];
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          prepareCalls.push(sql);
+          if (sql.includes("pragma_table_info")) {
+            return {
+              bind() {
+                return {
+                  async first() {
+                    return { count: 1 };
+                  },
+                };
+              },
+            };
+          }
+          return {
+            bind(...tickers: string[]) {
+              return {
+                async all() {
+                  return {
+                    results: tickers.map((ticker) => ({ ticker, sharesOutstanding: 1000 })),
+                  };
+                },
+              };
+            },
+          };
+        },
+      },
+    } as any;
+
+    const tickers = Array.from({ length: 401 }, (_, index) => `T${String(index + 1).padStart(3, "0")}`);
+    const sharesByTicker = await loadSharesOutstandingMap(env, tickers);
+
+    expect(sharesByTicker.size).toBe(401);
+    expect(sharesByTicker.get("T001")).toBe(1000);
+    expect(prepareCalls.filter((sql) => sql.includes("shares_outstanding")).length).toBe(9);
+  });
+});
