@@ -359,33 +359,39 @@ export function PeerGroupsAdminPanel() {
                     ))}
                     {selectedTickerDetail.groups.length === 0 && <span className="text-xs text-slate-500">No peer-group memberships yet.</span>}
                   </div>
-                  <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),auto]">
-                    <select
-                      className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-xs"
-                      value={targetGroupId}
-                      onChange={(event) => setTargetGroupId(event.target.value)}
-                    >
-                      <option value="" disabled>Select target group</option>
-                      {groups.map((group) => (
-                        <option key={group.id} value={group.id}>
-                          {group.name} ({group.groupType})
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent"
-                      disabled={!targetGroupId || !selectedTickerDetail.symbol.ticker || selectedTickerDetail.groups.some((group) => group.id === targetGroupId)}
-                      onClick={async () => {
-                        if (!targetGroupId || !selectedTickerDetail.symbol.ticker) return;
-                        const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
-                        await addAdminPeerGroupMember(targetGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
-                        await load(targetGroupId);
-                        await onSelectTicker(selectedTickerDetail.symbol.ticker);
-                        setMessage(`Added ${selectedTickerDetail.symbol.ticker} to ${targetGroup?.name ?? "the selected peer group"}.`);
-                      }}
-                    >
-                      {selectedTickerDetail.groups.some((group) => group.id === targetGroupId) ? "Already In Group" : "Add To Group"}
-                    </button>
+                  <div className="rounded border border-borderSoft/60 bg-slate-900/30 p-3">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Assign To Peer Group</div>
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),auto]">
+                      <select
+                        className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-xs"
+                        value={targetGroupId}
+                        onChange={(event) => setTargetGroupId(event.target.value)}
+                      >
+                        <option value="" disabled>Select target group</option>
+                        {groups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.name} ({group.groupType})
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent"
+                        disabled={!targetGroupId || !selectedTickerDetail.symbol.ticker || selectedTickerDetail.groups.some((group) => group.id === targetGroupId)}
+                        onClick={async () => {
+                          if (!targetGroupId || !selectedTickerDetail.symbol.ticker) return;
+                          const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
+                          await addAdminPeerGroupMember(targetGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
+                          await load(targetGroupId);
+                          await onSelectTicker(selectedTickerDetail.symbol.ticker);
+                          setMessage(`Added ${selectedTickerDetail.symbol.ticker} to ${targetGroup?.name ?? "the selected peer group"}.`);
+                        }}
+                      >
+                        {selectedTickerDetail.groups.some((group) => group.id === targetGroupId) ? "Already In Group" : "Add Ticker To Group"}
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-400">
+                      Choose any peer group here to manually assign the selected ticker.
+                    </p>
                   </div>
                 </div>
               ) : (
