@@ -73,6 +73,7 @@ export function AdminBuilder() {
   const [diagMsg, setDiagMsg] = useState<string | null>(null);
   const [diagResult, setDiagResult] = useState<any | null>(null);
   const [diagSourceUrl, setDiagSourceUrl] = useState("");
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
 
   const load = async () => {
     setIsLoading(true);
@@ -333,6 +334,10 @@ export function AdminBuilder() {
       }),
     });
     await load();
+  };
+
+  const toggleSection = (sectionId: string) => {
+    setCollapsedSections((current) => ({ ...current, [sectionId]: !current[sectionId] }));
   };
 
   if (isLoading) return <div className="card p-4">Loading admin config...</div>;
@@ -823,14 +828,28 @@ export function AdminBuilder() {
       {data.sections.map((section) => (
         <div key={section.id} className="card p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-lg font-semibold">{section.title}</h3>
-            <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
-              await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
-              await load();
-            }}>
-              Delete section
-            </button>
+            <div>
+              <h3 className="text-lg font-semibold">{section.title}</h3>
+              {section.description ? <p className="text-xs text-slate-400">{section.description}</p> : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded border border-borderSoft px-2 py-1 text-xs"
+                onClick={() => toggleSection(section.id)}
+                type="button"
+              >
+                {collapsedSections[section.id] ? "Expand" : "Collapse"}
+              </button>
+              <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
+                await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
+                await load();
+              }}>
+                Delete section
+              </button>
+            </div>
           </div>
+          {collapsedSections[section.id] ? null : (
+            <>
           <div className="mb-3 flex gap-2">
             <input
               className="flex-1 rounded border border-borderSoft bg-panelSoft px-2 py-1"
@@ -939,6 +958,8 @@ export function AdminBuilder() {
               </div>
             ))}
           </div>
+            </>
+          )}
         </div>
       ))}
     </div>
