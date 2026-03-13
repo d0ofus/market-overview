@@ -228,32 +228,37 @@ export function WatchlistCompilerAdminPanel() {
 
           <div className="card p-3">
             <div className="mb-2 text-sm font-semibold text-slate-200">Source URLs</div>
-            {detail ? (
-              <div className="space-y-3">
-                <div className="flex gap-2">
-                  <input
-                    className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
-                    value={newSourceUrl}
-                    onChange={(event) => setNewSourceUrl(event.target.value)}
-                    placeholder="https://www.tradingview.com/watchlists/34128913/"
-                  />
-                  <button
-                    className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent"
-                    onClick={async () => {
-                      if (!selectedSetId || !newSourceUrl.trim()) return;
-                      try {
-                        await createAdminWatchlistCompilerSource(selectedSetId, { sourceUrl: newSourceUrl.trim(), isActive: true });
-                        setNewSourceUrl("");
-                        await load(selectedSetId);
-                        setMessage("Watchlist URL added.");
-                      } catch (error) {
-                        setMessage(error instanceof Error ? error.message : "Failed to add source URL.");
-                      }
-                    }}
-                  >
-                    Add URL
-                  </button>
-                </div>
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <input
+                  className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  value={newSourceUrl}
+                  onChange={(event) => setNewSourceUrl(event.target.value)}
+                  placeholder="https://www.tradingview.com/watchlists/34128913/"
+                  disabled={!selectedSetId}
+                />
+                <button
+                  className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!selectedSetId || !newSourceUrl.trim()}
+                  onClick={async () => {
+                    if (!selectedSetId || !newSourceUrl.trim()) return;
+                    try {
+                      await createAdminWatchlistCompilerSource(selectedSetId, { sourceUrl: newSourceUrl.trim(), isActive: true });
+                      setNewSourceUrl("");
+                      await load(selectedSetId);
+                      setMessage("Watchlist URL added.");
+                    } catch (error) {
+                      setMessage(error instanceof Error ? error.message : "Failed to add source URL.");
+                    }
+                  }}
+                >
+                  Add URL
+                </button>
+              </div>
+              {!selectedSetId && (
+                <p className="text-sm text-slate-400">Create or select a watchlist set first, then add its TradingView URLs here.</p>
+              )}
+              {detail ? (
                 <div className="space-y-2">
                   {detail.sources.map((source, index) => (
                     <div key={source.id} className="rounded border border-borderSoft/60 p-3">
@@ -327,10 +332,8 @@ export function WatchlistCompilerAdminPanel() {
                   ))}
                   {detail.sources.length === 0 && <p className="text-sm text-slate-400">No source URLs added yet.</p>}
                 </div>
-              </div>
-            ) : (
-              <p className="text-sm text-slate-400">Select a set to manage its watchlist URLs.</p>
-            )}
+              ) : null}
+            </div>
           </div>
         </div>
       </div>

@@ -14,11 +14,12 @@ const refreshTimezoneOptions = [
 ] as const;
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
-const ADMIN_SECTION_ANCHORS: Record<string, string> = {
-  "Macro Overview": "admin-macro-overview",
-  "Equities Overview": "admin-equities-overview",
-  "Market Breadth & Sentiment": "admin-market-breadth-sentiment",
-};
+function adminSectionAnchor(title: string): string | undefined {
+  if (title.includes("Macro Overview")) return "admin-macro-overview";
+  if (title.includes("Equities Overview")) return "admin-equities-overview";
+  if (title.includes("Market Breadth & Sentiment")) return "admin-market-breadth-sentiment";
+  return undefined;
+}
 
 const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone} (prev US close)`;
 
@@ -831,7 +832,7 @@ export function AdminBuilder() {
         </button>
       </div>
       {data.sections.map((section) => (
-        <div key={section.id} className="card scroll-mt-24 p-4" id={ADMIN_SECTION_ANCHORS[section.title]}>
+        <div key={section.id} className="card scroll-mt-24 p-4" id={adminSectionAnchor(section.title)}>
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold">{section.title}</h3>
