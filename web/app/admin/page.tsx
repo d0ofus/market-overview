@@ -42,7 +42,6 @@ export default function AdminPage() {
       <AdminSection
         title="Peer Groups"
         description="Manage peer groups, assign tickers, and run peer seeding workflows."
-        defaultOpen={false}
         anchorId="admin-peer-groups"
       >
         <PeerGroupsAdminPanel />
@@ -50,7 +49,6 @@ export default function AdminPage() {
       <AdminSection
         title="Watchlist Compiler"
         description="Manage saved public TradingView watchlists and daily compile schedules."
-        defaultOpen={false}
         anchorId="admin-watchlist-compiler"
       >
         <WatchlistCompilerAdminPanel />
