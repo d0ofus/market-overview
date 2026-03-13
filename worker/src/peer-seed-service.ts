@@ -393,6 +393,12 @@ export async function normalizeSeededPeerGroupLabels(
 
   for (const group of rows.results ?? []) {
     processed += 1;
+    const deleteLegacyGroup = async () => {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM ticker_peer_groups WHERE peer_group_id = ?").bind(group.id),
+        env.DB.prepare("DELETE FROM peer_groups WHERE id = ?").bind(group.id),
+      ]);
+    };
     const root = await env.DB.prepare(
       `SELECT ticker
        FROM ticker_peer_groups
@@ -402,6 +408,7 @@ export async function normalizeSeededPeerGroupLabels(
     ).bind(group.id).first<{ ticker: string }>();
     const rootTicker = root?.ticker?.toUpperCase() ?? group.slug.replace(/-fundamental-peers$/i, "").toUpperCase();
     if (!isValidBootstrapRootTicker(rootTicker)) {
+      await deleteLegacyGroup();
       skipped += 1;
       continue;
     }
@@ -424,10 +431,7 @@ export async function normalizeSeededPeerGroupLabels(
     const hasOtherLabels = Number(hasOtherLabelsRow?.count ?? 0) > 0;
 
     if (!title || hasOtherLabels) {
-      await env.DB.batch([
-        env.DB.prepare("DELETE FROM ticker_peer_groups WHERE peer_group_id = ?").bind(group.id),
-        env.DB.prepare("DELETE FROM peer_groups WHERE id = ?").bind(group.id),
-      ]);
+      await deleteLegacyGroup();
       skipped += 1;
       continue;
     }
