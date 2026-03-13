@@ -61,9 +61,10 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
   if (tickers.length === 0) return { rows: [], error: null };
 
   const asOf = new Date().toISOString();
-  let providerError: string | null = null;
+  const errorMessages: string[] = [];
   let snapshotRows: Record<string, { price: number; prevClose: number }> = {};
   let recentBars: Array<{ ticker: string; date: string; c: number; volume: number }> = [];
+  let sharesByTicker = new Map<string, number | null>();
 
   try {
     const provider = getProvider(env);
@@ -76,19 +77,23 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
     snapshotRows = snapshots;
     recentBars = bars.map((row) => ({ ...row, ticker: row.ticker.toUpperCase(), volume: Number(row.volume ?? 0) }));
   } catch (error) {
-    providerError = error instanceof Error ? error.message : "Failed to load Alpaca metrics.";
+    errorMessages.push(error instanceof Error ? error.message : "Failed to load Alpaca metrics.");
   }
 
-  const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
-  const shareRows = await env.DB.prepare(
-    `SELECT ticker${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
-  )
-    .bind(...tickers)
-    .all<{ ticker: string; sharesOutstanding: number | null }>();
-  const sharesByTicker = new Map((shareRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row.sharesOutstanding]));
+  try {
+    const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
+    const shareRows = await env.DB.prepare(
+      `SELECT ticker${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
+    )
+      .bind(...tickers)
+      .all<{ ticker: string; sharesOutstanding: number | null }>();
+    sharesByTicker = new Map((shareRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row.sharesOutstanding]));
+  } catch (error) {
+    errorMessages.push(error instanceof Error ? error.message : "Failed to load seeded share counts.");
+  }
 
   return {
     rows: buildPeerMetricRows(tickers, asOf, snapshotRows, recentBars, sharesByTicker),
-    error: providerError,
+    error: errorMessages.length > 0 ? errorMessages.join(" | ") : null,
   };
 }
