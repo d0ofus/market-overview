@@ -124,6 +124,7 @@ export type WatchlistCompilerSetRow = {
 export type WatchlistCompilerSourceRow = {
   id: string;
   setId: string;
+  sourceName: string | null;
   sourceUrl: string;
   sortOrder: number;
   isActive: boolean;
@@ -528,14 +529,14 @@ export function deleteAdminWatchlistCompilerSet(id: string) {
   });
 }
 
-export function createAdminWatchlistCompilerSource(setId: string, payload: { sourceUrl: string; isActive?: boolean }) {
+export function createAdminWatchlistCompilerSource(setId: string, payload: { sourceName?: string | null; sourceUrl: string; isActive?: boolean }) {
   return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(setId)}/sources`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function updateAdminWatchlistCompilerSource(id: string, payload: { sourceUrl?: string; sortOrder?: number; isActive?: boolean }) {
+export function updateAdminWatchlistCompilerSource(id: string, payload: { sourceName?: string | null; sourceUrl?: string; sortOrder?: number; isActive?: boolean }) {
   return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sources/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(payload),

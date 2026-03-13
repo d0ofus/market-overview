@@ -37,6 +37,7 @@ export function WatchlistCompilerAdminPanel() {
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WatchlistCompilerSetDetail | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -231,6 +232,13 @@ export function WatchlistCompilerAdminPanel() {
             <div className="space-y-3">
               <div className="flex gap-2">
                 <input
+                  className="w-64 rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  value={newSourceName}
+                  onChange={(event) => setNewSourceName(event.target.value)}
+                  placeholder="Scan name"
+                  disabled={!selectedSetId}
+                />
+                <input
                   className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                   value={newSourceUrl}
                   onChange={(event) => setNewSourceUrl(event.target.value)}
@@ -243,7 +251,12 @@ export function WatchlistCompilerAdminPanel() {
                   onClick={async () => {
                     if (!selectedSetId || !newSourceUrl.trim()) return;
                     try {
-                      await createAdminWatchlistCompilerSource(selectedSetId, { sourceUrl: newSourceUrl.trim(), isActive: true });
+                      await createAdminWatchlistCompilerSource(selectedSetId, {
+                        sourceName: newSourceName.trim() || null,
+                        sourceUrl: newSourceUrl.trim(),
+                        isActive: true,
+                      });
+                      setNewSourceName("");
                       setNewSourceUrl("");
                       await load(selectedSetId);
                       setMessage("Watchlist URL added.");
@@ -262,7 +275,27 @@ export function WatchlistCompilerAdminPanel() {
                 <div className="space-y-2">
                   {detail.sources.map((source, index) => (
                     <div key={source.id} className="rounded border border-borderSoft/60 p-3">
-                      <div className="mb-2 text-[11px] text-slate-500">Source {index + 1}</div>
+                      <div className="mb-2 text-[11px] text-slate-500">{source.sourceName?.trim() || `Source ${index + 1}`}</div>
+                      <input
+                        className="mb-2 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                        value={source.sourceName ?? ""}
+                        onChange={async (event) => {
+                          const nextName = event.target.value;
+                          setDetail((current) => current ? {
+                            ...current,
+                            sources: current.sources.map((row) => row.id === source.id ? { ...row, sourceName: nextName } : row),
+                          } : current);
+                        }}
+                        onBlur={async (event) => {
+                          try {
+                            await updateAdminWatchlistCompilerSource(source.id, { sourceName: event.target.value.trim() || null });
+                            await load(selectedSetId);
+                          } catch (error) {
+                            setMessage(error instanceof Error ? error.message : "Failed to update source name.");
+                          }
+                        }}
+                        placeholder={`Source ${index + 1} name`}
+                      />
                       <input
                         className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
                         value={source.sourceUrl}

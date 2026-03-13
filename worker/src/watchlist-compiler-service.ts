@@ -25,6 +25,7 @@ export type WatchlistSetRecord = {
 export type WatchlistSourceRecord = {
   id: string;
   setId: string;
+  sourceName: string | null;
   sourceUrl: string;
   sortOrder: number;
   isActive: boolean;
@@ -259,7 +260,7 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
 
 export async function listWatchlistSources(env: Env, setId: string): Promise<WatchlistSourceRecord[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, set_id as setId, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive, created_at as createdAt, updated_at as updatedAt FROM tv_watchlist_sources WHERE set_id = ? ORDER BY sort_order ASC, created_at ASC",
+    "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive, created_at as createdAt, updated_at as updatedAt FROM tv_watchlist_sources WHERE set_id = ? ORDER BY sort_order ASC, created_at ASC",
   ).bind(setId).all<any>();
   return (rows.results ?? []).map((row) => ({ ...row, isActive: Boolean(row.isActive) }));
 }
@@ -374,7 +375,7 @@ export async function deleteWatchlistSet(env: Env, setId: string): Promise<void>
   ]);
 }
 
-export async function createWatchlistSource(env: Env, setId: string, input: { sourceUrl: string; isActive?: boolean }): Promise<{ id: string }> {
+export async function createWatchlistSource(env: Env, setId: string, input: { sourceName?: string | null; sourceUrl: string; isActive?: boolean }): Promise<{ id: string }> {
   const set = await loadWatchlistSet(env, setId);
   if (!set) throw new Error("Watchlist set not found.");
   const id = crypto.randomUUID();
@@ -382,21 +383,22 @@ export async function createWatchlistSource(env: Env, setId: string, input: { so
     "SELECT COALESCE(MAX(sort_order), 0) + 1 as nextOrder FROM tv_watchlist_sources WHERE set_id = ?",
   ).bind(setId).first<{ nextOrder: number }>();
   await env.DB.prepare(
-    "INSERT INTO tv_watchlist_sources (id, set_id, source_url, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-  ).bind(id, setId, input.sourceUrl.trim(), nextOrder?.nextOrder ?? 1, input.isActive === false ? 0 : 1).run();
+    "INSERT INTO tv_watchlist_sources (id, set_id, source_name, source_url, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+  ).bind(id, setId, input.sourceName?.trim() || null, input.sourceUrl.trim(), nextOrder?.nextOrder ?? 1, input.isActive === false ? 0 : 1).run();
   await env.DB.prepare("UPDATE tv_watchlist_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(setId).run();
   return { id };
 }
 
-export async function updateWatchlistSource(env: Env, sourceId: string, input: { sourceUrl?: string; sortOrder?: number; isActive?: boolean }): Promise<void> {
+export async function updateWatchlistSource(env: Env, sourceId: string, input: { sourceName?: string | null; sourceUrl?: string; sortOrder?: number; isActive?: boolean }): Promise<void> {
   const existing = await env.DB.prepare(
-    "SELECT id, set_id as setId, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive FROM tv_watchlist_sources WHERE id = ? LIMIT 1",
-  ).bind(sourceId).first<{ id: string; setId: string; sourceUrl: string; sortOrder: number; isActive: number }>();
+    "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive FROM tv_watchlist_sources WHERE id = ? LIMIT 1",
+  ).bind(sourceId).first<{ id: string; setId: string; sourceName: string | null; sourceUrl: string; sortOrder: number; isActive: number }>();
   if (!existing) throw new Error("Watchlist source not found.");
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE tv_watchlist_sources SET source_url = ?, sort_order = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      "UPDATE tv_watchlist_sources SET source_name = ?, source_url = ?, sort_order = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).bind(
+      input.sourceName === undefined ? existing.sourceName : (input.sourceName?.trim() || null),
       input.sourceUrl?.trim() || existing.sourceUrl,
       input.sortOrder == null ? existing.sortOrder : input.sortOrder,
       input.isActive == null ? existing.isActive : (input.isActive ? 1 : 0),
@@ -563,5 +565,5 @@ export function resolveExportFileName(input: {
   dateSuffix?: string | null;
 }): string {
   const dateSuffix = input.dateSuffix?.trim() || localDateString();
-  return `watchlist-compiler-${input.slug}-${input.mode}-${dateSuffix}.${input.extension}`;
+  return `${input.slug}-${dateSuffix}.${input.extension}`;
 }

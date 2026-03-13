@@ -18,7 +18,7 @@ describe("watchlist compiler service helpers", () => {
       mode: "unique",
       extension: "txt",
       dateSuffix: "2026-03-13",
-    })).toBe("watchlist-compiler-growth-watchlists-unique-2026-03-13.txt");
+    })).toBe("growth-watchlists-2026-03-13.txt");
   });
 
   it("runs a scheduled compile only once per local day inside the configured window", () => {
