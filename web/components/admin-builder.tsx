@@ -85,6 +85,7 @@ export function AdminBuilder() {
   const [diagSourceUrl, setDiagSourceUrl] = useState("");
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [itemDisplayNames, setItemDisplayNames] = useState<Record<string, string>>({});
+  const [itemDisplayNameStatus, setItemDisplayNameStatus] = useState<Record<string, string | null>>({});
 
   const load = async () => {
     setIsLoading(true);
@@ -169,11 +170,24 @@ export function AdminBuilder() {
     await load();
   };
   const updateItemDisplayName = async (itemId: string) => {
-    await adminFetch("/api/admin/item/" + itemId, {
-      method: "PATCH",
-      body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
-    });
-    await load();
+    try {
+      setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
+      await adminFetch("/api/admin/item/" + itemId, {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
+      });
+      setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved." }));
+      await load();
+    } catch (error) {
+      setItemDisplayNameStatus((current) => ({
+        ...current,
+        [itemId]: error instanceof Error ? error.message : "Failed to save name.",
+      }));
+    } finally {
+      setTimeout(() => {
+        setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
+      }, 3000);
+    }
   };
   const addSection = async () => {
     if (!newSectionTitle.trim()) return;
@@ -983,6 +997,11 @@ export function AdminBuilder() {
                       <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => void updateItemDisplayName(item.id)}>
                         Save Name
                       </button>
+                      {itemDisplayNameStatus[item.id] ? (
+                        <span className={`text-[11px] ${itemDisplayNameStatus[item.id] === "Saved." ? "text-emerald-300" : "text-red-300"}`}>
+                          {itemDisplayNameStatus[item.id]}
+                        </span>
+                      ) : null}
                       <button
                         className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
                         onClick={() => move("item", group.items.map((i) => i.id), ii, -1)}
