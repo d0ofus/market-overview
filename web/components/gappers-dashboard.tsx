@@ -40,8 +40,8 @@ const POLL_MS = 45_000;
 const STORAGE_KEY = "gappers-llm-config";
 const FILTERS_STORAGE_KEY = "gappers-scan-filters";
 const FILTER_INPUT_CLASS =
-  "w-full rounded border border-slate-600/80 bg-[#0b1220] px-3 py-2 text-sm text-slate-50 placeholder:text-slate-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
-const DETAIL_PANEL_CLASS = "rounded border border-slate-700/80 bg-[#0e1728] p-3";
+  "w-full rounded border border-borderSoft/80 bg-panelSoft/85 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
+const DETAIL_PANEL_CLASS = "rounded border border-borderSoft/70 bg-panelSoft/70 p-3";
 
 function fmtNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "-";
@@ -520,7 +520,7 @@ export function GappersDashboard() {
                       <td className="px-3 py-2 text-slate-300">{fmtNumber(row.compositeScore, 0)}</td>
                     </tr>
                     {isOpen && (
-                      <tr className="border-t border-slate-700/80 bg-[#08101d]">
+                      <tr className="border-t border-borderSoft/60 bg-panel/50">
                         <td colSpan={11} className="px-3 py-3">
                           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
                             <div className="space-y-3">
@@ -528,7 +528,7 @@ export function GappersDashboard() {
                                 <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
                                 <div className="space-y-2">
                                   {row.news.map((item, idx) => (
-                                    <article key={`${row.ticker}-${idx}`} className="rounded border border-slate-700/70 bg-[#132035] p-2">
+                                    <article key={`${row.ticker}-${idx}`} className="rounded border border-borderSoft/60 bg-panel/70 p-2">
                                       <a href={item.url} target="_blank" rel="noreferrer" className="text-sm font-medium text-accent hover:underline">
                                         {item.headline}
                                       </a>
