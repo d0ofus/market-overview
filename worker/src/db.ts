@@ -126,7 +126,7 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
       sort_order: number;
     }>();
 
-  const sectionRows = sections.results ?? [];
+  const sectionRows = (sections.results ?? []).filter((section) => section.id !== "sec-tools");
   const groups = await env.DB.prepare(
     "SELECT id, section_id as sectionId, title, sort_order, data_type as dataType, ranking_window_default as rankingWindowDefault, show_sparkline as showSparkline, pin_top10 as pinTop10 FROM dashboard_groups WHERE section_id IN (SELECT id FROM dashboard_sections WHERE config_id = ?) ORDER BY sort_order ASC",
   )

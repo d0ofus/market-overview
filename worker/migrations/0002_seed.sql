@@ -4,8 +4,7 @@ VALUES ('default', 'Default Swing Dashboard', 1, 'Australia/Melbourne', '08:15 A
 INSERT OR IGNORE INTO dashboard_sections (id, config_id, sort_order, title, description, is_collapsible, default_collapsed) VALUES
 ('sec-macro', 'default', 1, '01 Macro Overview', 'Macro risk regime and cross-asset leadership', 1, 0),
 ('sec-equities', 'default', 2, '02 Equities Overview', 'ETF and sector leadership', 1, 0),
-('sec-breadth', 'default', 3, '03 Market Breadth & Sentiment', 'Internals and participation', 1, 0),
-('sec-tools', 'default', 4, '04 Position Sizing Calculator', 'Risk based trade sizing', 1, 0);
+('sec-breadth', 'default', 3, '03 Market Breadth & Sentiment', 'Internals and participation', 1, 0);
 
 INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES
 ('g-us-index', 'sec-macro', 1, 'US Index Futures', 'macro', '1W', 1, 1),

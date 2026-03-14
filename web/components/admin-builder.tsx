@@ -72,7 +72,7 @@ export function AdminBuilder() {
   });
   const [refreshConfigMsg, setRefreshConfigMsg] = useState<string | null>(null);
   const [etfBackfillMsg, setEtfBackfillMsg] = useState<string | null>(null);
-  const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools" | "scanning" | "watchlist-compiler" | "gappers">("overview");
+  const [schedulePageTarget, setSchedulePageTarget] = useState<"overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "scanning" | "watchlist-compiler" | "gappers">("overview");
   const [diagTicker, setDiagTicker] = useState("TAN");
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagError, setDiagError] = useState<string | null>(null);
@@ -399,7 +399,7 @@ export function AdminBuilder() {
           <select
             className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
             value={schedulePageTarget}
-            onChange={(e) => setSchedulePageTarget(e.target.value as "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "tools" | "scanning" | "watchlist-compiler" | "gappers")}
+            onChange={(e) => setSchedulePageTarget(e.target.value as "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "scanning" | "watchlist-compiler" | "gappers")}
           >
             <option value="overview">Overview</option>
             <option value="breadth">Breadth</option>
@@ -409,7 +409,6 @@ export function AdminBuilder() {
             <option value="watchlist-compiler">Watchlist Compiler</option>
             <option value="gappers">Gappers</option>
             <option value="admin">Admin</option>
-            <option value="tools">Tools</option>
           </select>
           <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200 md:col-span-2" onClick={runSchedulePageRefresh}>
             Run Selected Page Update Now

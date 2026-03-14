@@ -613,7 +613,6 @@ type RefreshPage =
   | "thirteenf"
   | "admin"
   | "ticker"
-  | "tools"
   | "alerts"
   | "scanning"
   | "watchlist-compiler"
@@ -2514,7 +2513,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "tools", "alerts", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {

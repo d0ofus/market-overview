@@ -15,7 +15,6 @@ const links = [
   { href: "/scanning", label: "Scanning" },
   { href: "/watchlist-compiler", label: "Watchlist Compiler" },
   { href: "/gappers", label: "Gappers" },
-  { href: "/tools", label: "Tools" },
   { href: "/admin", label: "Admin" },
 ];
 
