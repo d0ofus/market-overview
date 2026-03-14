@@ -171,7 +171,7 @@ export function WatchlistCompilerDashboard() {
               <div className="rounded border border-borderSoft/60 bg-panelSoft/30 p-2 text-xs text-slate-400">
                 {detail.sources.map((source) => (
                   <div key={source.id} className="truncate">
-                    {source.sortOrder}. {source.sourceUrl}
+                    {source.sortOrder}. {(source.sourceName?.trim() || `Source ${source.sortOrder}`)} - {source.sourceUrl}
                   </div>
                 ))}
                 {detail.sources.length === 0 && <div>No source URLs configured.</div>}
