@@ -10,6 +10,8 @@ type OverviewGroup = OverviewSection["groups"][number];
 
 function splitOverviewSectionGroups(section: OverviewSection): {
   base: OverviewGroup[];
+  usIndex: OverviewGroup | null;
+  usIndexEq: OverviewGroup | null;
   sector: OverviewGroup | null;
   sectorEq: OverviewGroup | null;
   thematic: OverviewGroup | null;
@@ -18,11 +20,20 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   const groups = [...section.groups];
   const thematic =
     groups.find((group) => group.title === "Industry/Thematic ETFs" || group.title === "Thematic ETFs") ?? null;
+  const usIndex = groups.find((group) => group.title === "US Index Futures") ?? null;
+  const usIndexEq = groups.find((group) => group.title === "US Index Futures (Equal Weight)") ?? null;
   const sector = groups.find((group) => group.title === "Sector ETFs") ?? null;
   const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
-  const base = groups.filter((group) => group !== thematic && group !== sector && group !== sectorEq);
-  const ordered = [...base, ...(sector ? [sector] : []), ...(sectorEq ? [sectorEq] : []), ...(thematic ? [thematic] : [])];
-  return { base, sector, sectorEq, thematic, ordered };
+  const base = groups.filter((group) => group !== thematic && group !== usIndex && group !== usIndexEq && group !== sector && group !== sectorEq);
+  const ordered = [
+    ...base,
+    ...(usIndex ? [usIndex] : []),
+    ...(usIndexEq ? [usIndexEq] : []),
+    ...(sector ? [sector] : []),
+    ...(sectorEq ? [sectorEq] : []),
+    ...(thematic ? [thematic] : []),
+  ];
+  return { base, usIndex, usIndexEq, sector, sectorEq, thematic, ordered };
 }
 
 function overviewGroupLabel(title: string): string {
@@ -82,7 +93,7 @@ export default async function HomePage() {
         <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
       )}
       <div className="grid gap-4">
-        {sectionLayouts.map(({ section, base, sector, sectorEq, thematic }) => (
+        {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">
             {base.map((group) => (
               <GroupPanel
@@ -95,6 +106,32 @@ export default async function HomePage() {
                 pinTop10={group.pinTop10}
               />
             ))}
+            {(usIndex || usIndexEq) && (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {usIndex && (
+                  <GroupPanel
+                    key={usIndex.id}
+                    anchorId={groupAnchorId(usIndex.id)}
+                    title={usIndex.title}
+                    rows={usIndex.rows}
+                    columns={usIndex.columns}
+                    defaultOpen
+                    pinTop10={usIndex.pinTop10}
+                  />
+                )}
+                {usIndexEq && (
+                  <GroupPanel
+                    key={usIndexEq.id}
+                    anchorId={groupAnchorId(usIndexEq.id)}
+                    title={usIndexEq.title}
+                    rows={usIndexEq.rows}
+                    columns={usIndexEq.columns}
+                    defaultOpen
+                    pinTop10={usIndexEq.pinTop10}
+                  />
+                )}
+              </div>
+            )}
             {(sector || sectorEq) && (
               <div className="grid gap-3 lg:grid-cols-2">
                 {sector && (

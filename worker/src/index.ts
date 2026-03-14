@@ -192,6 +192,13 @@ function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
 }
 
+const EQUAL_WEIGHT_US_INDEX_ETFS = [
+  { ticker: "RSP", instrumentName: "Invesco S&P 500 Equal Weight ETF" },
+  { ticker: "QQQE", instrumentName: "Direxion NASDAQ-100 Equal Weighted Index Shares" },
+  { ticker: "EQAL", instrumentName: "Invesco Russell 1000 Equal Weight ETF" },
+  { ticker: "EDOW", instrumentName: "First Trust Dow 30 Equal Weight ETF" },
+] as const;
+
 async function listEtfWatchlistRows(
   env: Env,
   listType: "sector" | "industry",
@@ -274,6 +281,14 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const equitiesSection = await env.DB.prepare(
     "SELECT id FROM dashboard_sections WHERE config_id = 'default' AND title LIKE '%Equities%' ORDER BY sort_order ASC LIMIT 1",
   ).first<{ id: string }>();
+  const macroSection = await env.DB.prepare(
+    "SELECT id FROM dashboard_sections WHERE config_id = 'default' AND title LIKE '%Macro%' ORDER BY sort_order ASC LIMIT 1",
+  ).first<{ id: string }>();
+  const usIndexGroup = macroSection
+    ? await env.DB.prepare(
+      "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'US Index Futures' LIMIT 1",
+    ).bind(macroSection.id).first<{ id: string; sortOrder: number }>()
+    : null;
   if (!equitiesSection?.id) return;
   const thematicGroup = await env.DB.prepare(
     "SELECT id, sort_order as sortOrder, title FROM dashboard_groups WHERE section_id = ? AND title IN ('Thematic ETFs', 'Industry/Thematic ETFs') ORDER BY CASE WHEN title = 'Industry/Thematic ETFs' THEN 0 ELSE 1 END, sort_order ASC LIMIT 1",
@@ -284,9 +299,13 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   if (!thematicGroup?.id || !sectorGroup?.id) return;
 
   const equalWeightGroupId = "g-sector-etf-eqwt";
+  const usIndexEqualWeightGroupId = "g-us-index-eqwt";
   const equalWeightGroup = await env.DB.prepare(
     "SELECT id FROM dashboard_groups WHERE id = ? LIMIT 1",
   ).bind(equalWeightGroupId).first<{ id: string }>();
+  const usIndexEqualWeightGroup = await env.DB.prepare(
+    "SELECT id FROM dashboard_groups WHERE id = ? LIMIT 1",
+  ).bind(usIndexEqualWeightGroupId).first<{ id: string }>();
   const industryWatchlistRows = await env.DB.prepare(
     "SELECT ticker, fund_name as fundName FROM etf_watchlists WHERE list_type = 'industry' ORDER BY COALESCE(parent_sector, '') ASC, COALESCE(industry, '') ASC, sort_order ASC, ticker ASC",
   ).all<{ ticker: string; fundName: string | null }>();
@@ -299,7 +318,9 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   );
   const equalWeightNameByTicker = new Map(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]));
   const equalWeightTickers = uniqueTickers(Array.from(equalWeightNameByTicker.keys()));
-  const allTickers = uniqueTickers([...thematicTickers, ...equalWeightTickers]);
+  const usIndexEqualWeightNameByTicker = new Map(EQUAL_WEIGHT_US_INDEX_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]));
+  const usIndexEqualWeightTickers = uniqueTickers(Array.from(usIndexEqualWeightNameByTicker.keys()));
+  const allTickers = uniqueTickers([...thematicTickers, ...equalWeightTickers, ...usIndexEqualWeightTickers]);
 
   const existingThematicRows = await env.DB.prepare(
     "SELECT id, ticker, display_name as displayName, sort_order as sortOrder FROM dashboard_items WHERE group_id = ? ORDER BY sort_order ASC, ticker ASC",
@@ -319,23 +340,29 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   ).bind(equalWeightGroupId).all<{ ticker: string }>();
   const existingEq = new Set((existingEqRows.results ?? []).map((r) => r.ticker.toUpperCase()));
   const missingEq = equalWeightTickers.filter((ticker) => !existingEq.has(ticker));
+  const existingUsIndexEqRows = await env.DB.prepare(
+    "SELECT ticker FROM dashboard_items WHERE group_id = ?",
+  ).bind(usIndexEqualWeightGroupId).all<{ ticker: string }>();
+  const existingUsIndexEq = new Set((existingUsIndexEqRows.results ?? []).map((r) => r.ticker.toUpperCase()));
+  const missingUsIndexEq = usIndexEqualWeightTickers.filter((ticker) => !existingUsIndexEq.has(ticker));
 
   const eqNameRows = await env.DB.prepare(
-    `SELECT ticker, name FROM symbols WHERE ticker IN (${equalWeightTickers.map(() => "?").join(",")})`,
+    `SELECT ticker, name FROM symbols WHERE ticker IN (${[...equalWeightTickers, ...usIndexEqualWeightTickers].map(() => "?").join(",")})`,
   )
-    .bind(...equalWeightTickers)
+    .bind(...equalWeightTickers, ...usIndexEqualWeightTickers)
     .all<{ ticker: string; name: string | null }>();
   const eqNameMap = new Map((eqNameRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row.name ?? ""]));
   const needsEqNameFix = equalWeightTickers.some((ticker) => (eqNameMap.get(ticker) ?? "") !== (equalWeightNameByTicker.get(ticker) ?? ""));
+  const needsUsIndexEqNameFix = usIndexEqualWeightTickers.some((ticker) => (eqNameMap.get(ticker) ?? "") !== (usIndexEqualWeightNameByTicker.get(ticker) ?? ""));
 
   const maxSortRow = await env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_groups WHERE section_id = ?",
   ).bind(equitiesSection.id).first<{ maxSort: number }>();
   const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
   const needsThematicTitleUpdate = thematicGroup.title !== "Industry/Thematic ETFs";
-  const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown;
-  const needsItemUpdate = thematicNeedsRebuild || missingEq.length > 0;
-  const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix;
+  const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown || (Boolean(usIndexGroup?.id) && !usIndexEqualWeightGroup);
+  const needsItemUpdate = thematicNeedsRebuild || missingEq.length > 0 || missingUsIndexEq.length > 0;
+  const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix || needsUsIndexEqNameFix;
 
   const structureStatements = [
     env.DB.prepare(
@@ -345,6 +372,19 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
       "INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES (?, COALESCE((SELECT columns_json FROM dashboard_columns WHERE group_id = 'g-sector-etf' LIMIT 1), '[\"ticker\",\"name\",\"price\",\"1D\",\"1W\",\"3M\",\"6M\",\"YTD\",\"sparkline\"]'))",
     ).bind(equalWeightGroupId),
   ];
+  if (macroSection?.id && usIndexGroup?.id && !usIndexEqualWeightGroup) {
+    structureStatements.push(
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES (?, ?, ?, 'US Index Futures (Equal Weight)', 'macro', '1W', 1, 1)",
+      ).bind(usIndexEqualWeightGroupId, macroSection.id, usIndexGroup.sortOrder + 1),
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES (?, COALESCE((SELECT columns_json FROM dashboard_columns WHERE group_id = 'g-us-index' LIMIT 1), '[\"ticker\",\"name\",\"price\",\"1D\",\"1W\",\"5D\",\"YTD\",\"pctFrom52WHigh\",\"sparkline\"]'))",
+      ).bind(usIndexEqualWeightGroupId),
+      env.DB.prepare(
+        "UPDATE dashboard_groups SET sort_order = sort_order + 1 WHERE section_id = ? AND sort_order > ? AND id <> ?",
+      ).bind(macroSection.id, usIndexGroup.sortOrder, usIndexEqualWeightGroupId),
+    );
+  }
   if (shouldMoveThematicDown) {
     structureStatements.push(
       env.DB.prepare(
@@ -363,6 +403,9 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const eqBaseSortRow = await env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
   ).bind(equalWeightGroupId).first<{ maxSort: number }>();
+  const usIndexEqBaseSortRow = await env.DB.prepare(
+    "SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM dashboard_items WHERE group_id = ?",
+  ).bind(usIndexEqualWeightGroupId).first<{ maxSort: number }>();
   const thematicItemStatements = thematicNeedsRebuild
     ? [
         env.DB.prepare("DELETE FROM dashboard_items WHERE group_id = ?").bind(thematicGroup.id),
@@ -384,15 +427,20 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
       "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
     ).bind(crypto.randomUUID(), equalWeightGroupId, (eqBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
   );
+  const usIndexEqualWeightItemStatements = missingUsIndexEq.map((ticker, idx) =>
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES (?, ?, ?, ?, NULL, 1, '[]', NULL)",
+    ).bind(crypto.randomUUID(), usIndexEqualWeightGroupId, (usIndexEqBaseSortRow?.maxSort ?? 0) + idx + 1, ticker),
+  );
   const symbolStatements = allTickers.map((ticker) => {
-    const preferredName = equalWeightNameByTicker.get(ticker) ?? thematicNameByTicker.get(ticker) ?? `${ticker} ETF`;
-    const isEqualWeight = equalWeightNameByTicker.has(ticker) ? 1 : 0;
+    const preferredName = usIndexEqualWeightNameByTicker.get(ticker) ?? equalWeightNameByTicker.get(ticker) ?? thematicNameByTicker.get(ticker) ?? `${ticker} ETF`;
+    const isEqualWeight = equalWeightNameByTicker.has(ticker) || usIndexEqualWeightNameByTicker.has(ticker) ? 1 : 0;
     return env.DB.prepare(
       "INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, 'etf', 'Thematic', 'ETF') ON CONFLICT(ticker) DO UPDATE SET name = CASE WHEN ? = 1 THEN ? WHEN COALESCE(symbols.name, '') = '' OR symbols.name = symbols.ticker OR symbols.name LIKE '% ETF' THEN excluded.name ELSE symbols.name END, asset_class = COALESCE(symbols.asset_class, excluded.asset_class)",
     ).bind(ticker, preferredName, isEqualWeight, preferredName);
   });
 
-  await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...symbolStatements]);
+  await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...usIndexEqualWeightItemStatements, ...symbolStatements]);
   if (needsSnapshotRefresh) {
     await refreshRecentBarsForTickers(env, allTickers, 2000);
     await recomputeDashboardFromStoredBars(env);

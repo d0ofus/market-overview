@@ -1,8 +1,8 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { ChevronDown, ChartNoAxesCombined, Loader2, Maximize2, X } from "lucide-react";
+import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
 import { Sparkline } from "./sparkline";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
@@ -40,7 +40,6 @@ const titleCase = (value: string): string => {
 };
 
 export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false, anchorId }: Props) {
-  const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [activeEtf, setActiveEtf] = useState<{ ticker: string; name: string | null } | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
@@ -84,7 +83,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     return copy;
   }, [rows, sortDir, sortKey]);
   const selected = pinTop10 ? sortedRows.slice(0, 10) : sortedRows;
-  const columnCount = useMemo(() => columns.length + 1, [columns.length]);
   const sortGlyph = (col: string): string => {
     if (sortKey !== col) return "";
     return sortDir === "asc" ? " ▲" : " ▼";
@@ -97,10 +95,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setSortKey(col);
     setSortDir(col === "1D" ? "desc" : "asc");
   };
-  const toggleExpandedTicker = (ticker: string) => {
-    setExpandedTicker((current) => (current === ticker ? null : ticker));
-  };
-
   const sortedConstituents = useMemo(() => {
     const rowsCopy = [...constituents];
     if (constituentSort === "change1d") {
@@ -154,20 +148,12 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       </button>
                     </th>
                   ))}
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                    Chart
-                  </th>
                 </tr>
               </thead>
               <tbody>
                 {selected.map((row) => {
-                  const isOpen = expandedTicker === row.ticker;
                   return (
-                    <Fragment key={row.ticker}>
-                      <tr
-                        className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
-                        onClick={() => toggleExpandedTicker(row.ticker)}
-                      >
+                      <tr key={row.ticker} className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30">
                         {columns.includes("ticker") && (
                           <td className="px-3 py-2 font-semibold text-accent">
                             {showsEtfConstituents ? (
@@ -203,29 +189,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                             <Sparkline values={row.sparkline} />
                           </td>
                         )}
-                        <td className="px-3 py-2">
-                          <div className="flex flex-wrap items-center gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleExpandedTicker(row.ticker);
-                              }}
-                              className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${isOpen ? "border-accent/60 bg-accent/10 text-accent" : "border-borderSoft text-slate-300"}`}
-                            >
-                              <ChartNoAxesCombined className="h-3.5 w-3.5" />
-                              {isOpen ? "Hide" : "Show"}
-                            </button>
-                          </div>
-                        </td>
                       </tr>
-                      {isOpen && (
-                        <tr className="border-t border-borderSoft/60 bg-slate-950/40">
-                          <td colSpan={columnCount} className="px-3 py-3">
-                            <TradingViewWidget ticker={row.ticker} compact />
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
                   );
                 })}
               </tbody>

@@ -9,10 +9,11 @@ INSERT OR IGNORE INTO dashboard_sections (id, config_id, sort_order, title, desc
 
 INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_type, ranking_window_default, show_sparkline, pin_top10) VALUES
 ('g-us-index', 'sec-macro', 1, 'US Index Futures', 'macro', '1W', 1, 1),
-('g-vol-dollar', 'sec-macro', 2, 'Volatility & Dollar', 'macro', '1W', 1, 0),
-('g-crypto', 'sec-macro', 3, 'Crypto Proxies', 'macro', '1W', 1, 0),
-('g-metals-energy', 'sec-macro', 4, 'Metals & Energy', 'macro', '5D', 1, 0),
-('g-global', 'sec-macro', 5, 'Global Indices', 'macro', '1W', 1, 0),
+('g-us-index-eqwt', 'sec-macro', 2, 'US Index Futures (Equal Weight)', 'macro', '1W', 1, 1),
+('g-vol-dollar', 'sec-macro', 3, 'Volatility & Dollar', 'macro', '1W', 1, 0),
+('g-crypto', 'sec-macro', 4, 'Crypto Proxies', 'macro', '1W', 1, 0),
+('g-metals-energy', 'sec-macro', 5, 'Metals & Energy', 'macro', '5D', 1, 0),
+('g-global', 'sec-macro', 6, 'Global Indices', 'macro', '1W', 1, 0),
 ('g-major-etf', 'sec-equities', 1, 'Major ETF Stats', 'equities', '1W', 1, 1),
 ('g-sector-etf', 'sec-equities', 2, 'Sector ETFs', 'equities', '1W', 1, 1),
 ('g-thematic', 'sec-equities', 3, 'Thematic ETFs', 'equities', '5D', 1, 1),
@@ -22,6 +23,7 @@ INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_
 
 INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES
 ('g-us-index', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
+('g-us-index-eqwt', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
 ('g-vol-dollar', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
 ('g-crypto', '["ticker","name","price","1D","1W","5D","sparkline"]'),
 ('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline"]'),
@@ -37,6 +39,10 @@ INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, indu
 ('QQQ', 'Invesco QQQ Trust', 'NASDAQ', 'etf', 'Broad Market', 'Large Growth'),
 ('IWM', 'iShares Russell 2000 ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Small Blend'),
 ('DIA', 'SPDR Dow Jones ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Value'),
+('RSP', 'Invesco S&P 500 Equal Weight ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Blend'),
+('QQQE', 'Direxion NASDAQ-100 Equal Weighted Index Shares', 'NASDAQ', 'etf', 'Broad Market', 'Large Growth'),
+('EQAL', 'Invesco Russell 1000 Equal Weight ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Blend'),
+('EDOW', 'First Trust Dow 30 Equal Weight ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Value'),
 ('VIXY', 'ProShares VIX Short-Term Futures ETF', 'NYSEARCA', 'etf', 'Volatility', 'Alternatives'),
 ('UUP', 'Invesco DB US Dollar Index Bullish Fund', 'NYSEARCA', 'etf', 'FX', 'Currency'),
 ('GLD', 'SPDR Gold Shares', 'NYSEARCA', 'etf', 'Commodities', 'Metals'),
@@ -70,6 +76,7 @@ INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, indu
 
 INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES
 ('i1','g-us-index',1,'SPY',NULL,1,'[]',NULL),('i2','g-us-index',2,'QQQ',NULL,1,'[]',NULL),('i3','g-us-index',3,'IWM',NULL,1,'[]',NULL),('i4','g-us-index',4,'DIA',NULL,1,'[]',NULL),
+('i1eq','g-us-index-eqwt',1,'RSP',NULL,1,'[]',NULL),('i2eq','g-us-index-eqwt',2,'QQQE',NULL,1,'[]',NULL),('i3eq','g-us-index-eqwt',3,'EQAL',NULL,1,'[]',NULL),('i4eq','g-us-index-eqwt',4,'EDOW',NULL,1,'[]',NULL),
 ('i5','g-vol-dollar',1,'VIXY',NULL,1,'[]',NULL),('i6','g-vol-dollar',2,'UUP',NULL,1,'[]',NULL),
 ('i7','g-crypto',1,'BITO',NULL,1,'[]',NULL),
 ('i8','g-metals-energy',1,'GLD',NULL,1,'[]',NULL),('i9','g-metals-energy',2,'SLV',NULL,1,'[]',NULL),('i10','g-metals-energy',3,'USO',NULL,1,'[]',NULL),
