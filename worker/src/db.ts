@@ -172,6 +172,18 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
     }>();
   }
   const itemRows = items.results ?? [];
+  const tickers = Array.from(new Set(itemRows.map((item) => item.ticker).filter(Boolean)));
+  const symbolNameMap = tickers.length > 0
+    ? new Map(
+      (
+        await env.DB.prepare(
+          `SELECT ticker, name FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
+        )
+          .bind(...tickers)
+          .all<{ ticker: string; name: string | null }>()
+      ).results?.map((row) => [row.ticker, row.name ?? ""]) ?? [],
+    )
+    : new Map<string, string>();
 
   const columns = await env.DB.prepare("SELECT group_id as groupId, columns_json as columnsJson FROM dashboard_columns").all<{
     groupId: string;
@@ -220,7 +232,7 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
             .map((it) => ({
               id: it.id,
               ticker: it.ticker,
-              displayName: it.displayName,
+              displayName: it.displayName ?? symbolNameMap.get(it.ticker) ?? it.ticker,
               order: it.sort_order,
               enabled: !!it.enabled,
               tags: parseJsonSafe<string[]>(it.tagsJson, []),
