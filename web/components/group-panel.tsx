@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
 import { Sparkline } from "./sparkline";
@@ -132,6 +132,20 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       setConstituentLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!activeEtf && !activeChartTicker) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (activeChartTicker) {
+        setActiveChartTicker(null);
+        return;
+      }
+      setActiveEtf(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeChartTicker, activeEtf]);
 
   return (
     <>
