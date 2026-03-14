@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
 import { Sparkline } from "./sparkline";
@@ -40,6 +40,7 @@ const titleCase = (value: string): string => {
 };
 
 export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false, anchorId }: Props) {
+  const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [activeEtf, setActiveEtf] = useState<{ ticker: string; name: string | null } | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
@@ -83,6 +84,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     return copy;
   }, [rows, sortDir, sortKey]);
   const selected = pinTop10 ? sortedRows.slice(0, 10) : sortedRows;
+  const columnCount = columns.length;
   const sortGlyph = (col: string): string => {
     if (sortKey !== col) return "";
     return sortDir === "asc" ? " ▲" : " ▼";
@@ -94,6 +96,9 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     }
     setSortKey(col);
     setSortDir(col === "1D" ? "desc" : "asc");
+  };
+  const toggleExpandedTicker = (ticker: string) => {
+    setExpandedTicker((current) => (current === ticker ? null : ticker));
   };
   const sortedConstituents = useMemo(() => {
     const rowsCopy = [...constituents];
@@ -152,8 +157,13 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               </thead>
               <tbody>
                 {selected.map((row) => {
+                  const isOpen = expandedTicker === row.ticker;
                   return (
-                      <tr key={row.ticker} className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30">
+                    <Fragment key={row.ticker}>
+                      <tr
+                        className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
+                        onClick={() => toggleExpandedTicker(row.ticker)}
+                      >
                         {columns.includes("ticker") && (
                           <td className="px-3 py-2 font-semibold text-accent">
                             {showsEtfConstituents ? (
@@ -190,6 +200,14 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                           </td>
                         )}
                       </tr>
+                      {isOpen && (
+                        <tr className="border-t border-borderSoft/60 bg-slate-950/40">
+                          <td colSpan={columnCount} className="px-3 py-3">
+                            <TradingViewWidget ticker={row.ticker} compact />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
