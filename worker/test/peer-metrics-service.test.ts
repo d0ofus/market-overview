@@ -18,14 +18,17 @@ describe("peer metrics service", () => {
         ["AAPL", 1000],
         ["MSFT", null],
       ]),
+      new Map([
+        ["AAPL", { marketCap: 3_100_000_000_000, avgVolume: 55_000_000 }],
+      ]),
     );
 
     expect(rows[0]).toMatchObject({
       ticker: "AAPL",
       price: 200,
-      marketCap: 200000,
-      avgVolume: 150,
-      source: "alpaca+seeded-shares",
+      marketCap: 3_100_000_000_000,
+      avgVolume: 55_000_000,
+      source: "alpaca+yahoo-quote",
     });
     expect(rows[1]).toMatchObject({
       ticker: "MSFT",
@@ -34,6 +37,32 @@ describe("peer metrics service", () => {
       marketCap: null,
       avgVolume: 300,
       source: "alpaca",
+    });
+  });
+
+  it("falls back to seeded shares and non-zero recent bars when quote fundamentals are unavailable", () => {
+    const rows = buildPeerMetricRows(
+      ["AAPL"],
+      "2026-03-12T00:00:00.000Z",
+      {
+        AAPL: { price: 200, prevClose: 198 },
+      },
+      [
+        { ticker: "AAPL", date: "2026-03-07", c: 195, volume: 0 },
+        { ticker: "AAPL", date: "2026-03-10", c: 199, volume: 100 },
+        { ticker: "AAPL", date: "2026-03-11", c: 200, volume: 200 },
+      ],
+      new Map([
+        ["AAPL", 1000],
+      ]),
+    );
+
+    expect(rows[0]).toMatchObject({
+      ticker: "AAPL",
+      price: 200,
+      marketCap: 200000,
+      avgVolume: 150,
+      source: "alpaca+seeded-shares",
     });
   });
 
