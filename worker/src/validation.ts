@@ -115,3 +115,41 @@ export const watchlistSourcePatchSchema = z.object({
   sortOrder: z.number().int().min(1).max(9999).optional(),
   isActive: z.boolean().optional(),
 });
+
+const scanRuleValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.array(z.union([z.string(), z.number(), z.boolean()])),
+]);
+
+export const scanPresetRuleSchema = z.object({
+  id: z.string().min(1),
+  field: z.string().min(1),
+  operator: z.enum(["gt", "gte", "lt", "lte", "eq", "neq", "in", "not_in"]),
+  value: scanRuleValueSchema,
+});
+
+export const scanPresetCreateSchema = z.object({
+  name: z.string().min(1),
+  isDefault: z.boolean().optional().default(false),
+  isActive: z.boolean().optional().default(true),
+  rules: z.array(scanPresetRuleSchema).min(1),
+  sortField: z.string().min(1).optional().default("change"),
+  sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
+  rowLimit: z.number().int().min(1).max(250).optional().default(100),
+});
+
+export const scanPresetPatchSchema = z.object({
+  name: z.string().min(1).optional(),
+  isDefault: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+  rules: z.array(scanPresetRuleSchema).min(1).optional(),
+  sortField: z.string().min(1).optional(),
+  sortDirection: z.enum(["asc", "desc"]).optional(),
+  rowLimit: z.number().int().min(1).max(250).optional(),
+});
+
+export const scanRefreshSchema = z.object({
+  presetId: z.string().min(1).nullable().optional(),
+});

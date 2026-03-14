@@ -104,6 +104,53 @@ export type ScanUniqueTickerRow = {
   latestChange1d: number | null;
 };
 
+export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
+
+export type ScanRule = {
+  id: string;
+  field: string;
+  operator: ScanRuleOperator;
+  value: string | number | boolean | Array<string | number | boolean>;
+};
+
+export type ScanPreset = {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isActive: boolean;
+  rules: ScanRule[];
+  sortField: string;
+  sortDirection: "asc" | "desc";
+  rowLimit: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ScanRow = {
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  change1d: number | null;
+  marketCap: number | null;
+  price: number | null;
+  avgVolume: number | null;
+  priceAvgVolume: number | null;
+  rawJson: string | null;
+};
+
+export type ScanSnapshot = {
+  id: string;
+  presetId: string;
+  presetName: string;
+  providerLabel: string;
+  generatedAt: string;
+  rowCount: number;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+  rows: ScanRow[];
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
 export type WatchlistCompilerSetRow = {
@@ -396,8 +443,17 @@ export function getAlertNews(ticker: string, tradingDay: string) {
   );
 }
 
+export function getTickerNews(ticker: string, tradingDay?: string | null, limit = 5) {
+  return getJson<{ ticker: string; tradingDay: string; providersTried?: string[]; rows: AlertNewsRow[] }>(
+    appendQuery(`/api/ticker/${encodeURIComponent(ticker)}/news`, {
+      tradingDay: tradingDay ?? undefined,
+      limit,
+    }),
+  );
+}
+
 export function getScans() {
-  return getJson<{ rows: ScanDefinitionRow[] }>("/api/scans");
+  return getJson<{ rows: ScanDefinitionRow[] }>("/api/scanning");
 }
 
 export function createOrUpdateScan(payload: {
@@ -411,43 +467,94 @@ export function createOrUpdateScan(payload: {
   isActive?: boolean;
   notes?: string | null;
 }) {
-  return adminFetch<{ ok: boolean; id: string }>("/api/scans", {
+  return adminFetch<{ ok: boolean; id: string }>("/api/scanning", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export function ingestScan(id: string) {
-  return adminFetch<{ ok: boolean; run: ScanRunSummary }>(`/api/scans/${id}/ingest`, {
+  return adminFetch<{ ok: boolean; run: ScanRunSummary }>(`/api/scanning/${id}/ingest`, {
     method: "POST",
   });
 }
 
 export function getScanRuns(id: string, limit = 25) {
-  return getJson<{ rows: ScanRunSummary[] }>(appendQuery(`/api/scans/${id}/runs`, { limit }));
+  return getJson<{ rows: ScanRunSummary[] }>(appendQuery(`/api/scanning/${id}/runs`, { limit }));
 }
 
 export function getScanRunCompiledRows(id: string, runId: string) {
-  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scans/${id}/runs/${runId}`);
+  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scanning/${id}/runs/${runId}`);
 }
 
 export function getScanRunUniqueTickers(id: string, runId: string) {
-  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scans/${id}/runs/${runId}/tickers`);
+  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scanning/${id}/runs/${runId}/tickers`);
 }
 
 export function getScanCompiledRows(id: string) {
-  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scans/${id}/compiled`);
+  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scanning/${id}/compiled`);
 }
 
 export function getScanCompiledUniqueTickers(id: string) {
-  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scans/${id}/compiled/tickers`);
+  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scanning/${id}/compiled/tickers`);
 }
 
 export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?: string | null) {
   if (runId) {
-    return apiUrl(mode === "compiled" ? `/api/scans/${id}/runs/${runId}/export.csv` : `/api/scans/${id}/runs/${runId}/tickers.csv`);
+    return apiUrl(mode === "compiled" ? `/api/scanning/${id}/runs/${runId}/export.csv` : `/api/scanning/${id}/runs/${runId}/tickers.csv`);
   }
-  return apiUrl(mode === "compiled" ? `/api/scans/${id}/compiled/export.csv` : `/api/scans/${id}/compiled/tickers.csv`);
+  return apiUrl(mode === "compiled" ? `/api/scanning/${id}/compiled/export.csv` : `/api/scanning/${id}/compiled/tickers.csv`);
+}
+
+export function getScansSnapshot(presetId?: string | null) {
+  return getJson<ScanSnapshot>(appendQuery("/api/scans", { presetId: presetId ?? undefined }));
+}
+
+export function getScanPresets() {
+  return getJson<{ rows: ScanPreset[] }>("/api/scans/presets");
+}
+
+export function refreshScansSnapshot(presetId?: string | null) {
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot }>("/api/admin/scans/refresh", {
+    method: "POST",
+    body: JSON.stringify({ presetId: presetId ?? null }),
+  });
+}
+
+export function createScanPreset(payload: {
+  name: string;
+  isDefault?: boolean;
+  isActive?: boolean;
+  rules: ScanRule[];
+  sortField?: string;
+  sortDirection?: "asc" | "desc";
+  rowLimit?: number;
+}) {
+  return adminFetch<{ ok: boolean; preset: ScanPreset }>("/api/admin/scans/presets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateScanPreset(id: string, payload: {
+  name?: string;
+  isDefault?: boolean;
+  isActive?: boolean;
+  rules?: ScanRule[];
+  sortField?: string;
+  sortDirection?: "asc" | "desc";
+  rowLimit?: number;
+}) {
+  return adminFetch<{ ok: boolean; preset: ScanPreset }>(`/api/admin/scans/presets/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteScanPreset(id: string) {
+  return adminFetch<{ ok: boolean; presetId: string }>(`/api/admin/scans/presets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function getWatchlistCompilerSets(includeInactive = false) {
@@ -747,6 +854,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "alerts") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support alerts refresh endpoint." };
+    }
+    if (page === "scans") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scans refresh endpoint." };
     }
     if (page === "scanning") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scanning refresh endpoint." };

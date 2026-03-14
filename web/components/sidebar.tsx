@@ -12,6 +12,7 @@ const links = [
   { href: "/sectors", label: "Sector Tracker" },
   { href: "/alerts", label: "Alerts" },
   { href: "/peer-groups", label: "Peer Groups" },
+  { href: "/scans", label: "Scans" },
   { href: "/scanning", label: "Scanning" },
   { href: "/watchlist-compiler", label: "Watchlist Compiler" },
   { href: "/gappers", label: "Gappers" },

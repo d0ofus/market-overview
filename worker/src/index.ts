@@ -7,6 +7,9 @@ import {
   groupPatchSchema,
   itemCreateSchema,
   itemPatchSchema,
+  scanPresetCreateSchema,
+  scanPresetPatchSchema,
+  scanRefreshSchema,
   peerBootstrapSchema,
   peerGroupCreateSchema,
   peerGroupPatchSchema,
@@ -34,6 +37,7 @@ import {
 } from "./alerts-service";
 import type { InboundEmailPayload } from "./alerts-types";
 import { handleInboundTradingViewEmail } from "./alerts-email";
+import { fetchTickerNews } from "./alerts-news";
 import {
   cleanupOldScanningData,
   compiledRowsToCsv,
@@ -53,6 +57,16 @@ import {
   getGappersSnapshot,
   refreshGappersSnapshot,
 } from "./gappers-service";
+import {
+  cleanupOldScansPageData,
+  deleteScanPreset,
+  listScanPresets,
+  loadDefaultScanPreset,
+  loadLatestScansSnapshot,
+  loadScanPreset,
+  refreshScansSnapshot,
+  upsertScanPreset,
+} from "./scans-page-service";
 import { isOverviewSnapshotStale } from "./overview-snapshot";
 import {
   createPeerGroup,
@@ -96,12 +110,14 @@ const OVERVIEW_HISTORY_LOOKBACK_DAYS = 140;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
+const SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
 let lastScanningHousekeepingAt = 0;
 let lastGappersHousekeepingAt = 0;
+let lastScansPageHousekeepingAt = 0;
 
 app.use("/api/*", cors());
 
@@ -615,6 +631,7 @@ type RefreshPage =
   | "admin"
   | "ticker"
   | "alerts"
+  | "scans"
   | "scanning"
   | "watchlist-compiler"
   | "gappers";
@@ -674,6 +691,14 @@ async function refreshPageScopedData(
       page,
       refreshedTickers: reconcile.alertsIngested,
       notes: `Alerts ingest: ${reconcile.alertsIngested} new, ${reconcile.duplicates} duplicate, ${reconcile.parseFailures} parse failures.`,
+    };
+  }
+  if (page === "scans") {
+    const snapshot = await refreshScansSnapshot(env);
+    return {
+      page,
+      refreshedTickers: snapshot.rowCount,
+      notes: `Refreshed ${snapshot.presetName} scan snapshot with ${snapshot.rowCount} ranked rows.`,
     };
   }
   if (page === "scanning") {
@@ -739,6 +764,17 @@ async function maybeRunGappersHousekeeping(env: Env): Promise<void> {
     await cleanupOldGappersData(env, 1);
   } catch (error) {
     console.error("gappers cleanup failed", error);
+  }
+}
+
+async function maybeRunScansPageHousekeeping(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastScansPageHousekeepingAt < SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS) return;
+  lastScansPageHousekeepingAt = now;
+  try {
+    await cleanupOldScansPageData(env, 7);
+  } catch (error) {
+    console.error("scans page cleanup failed", error);
   }
 }
 
@@ -1876,13 +1912,112 @@ app.get("/api/alerts/news", async (c) => {
   return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
 });
 
+app.get("/api/ticker/:ticker/news", async (c) => {
+  const ticker = c.req.param("ticker").trim().toUpperCase();
+  const tradingDay = (c.req.query("tradingDay") ?? latestUsSessionAsOfDate(new Date())).trim();
+  const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 5)));
+  if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Valid ticker is required." }, 400);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradingDay)) return c.json({ error: "Valid tradingDay is required." }, 400);
+  try {
+    const payload = await fetchTickerNews(c.env, ticker, tradingDay, limit);
+    return c.json({ ticker, tradingDay, rows: payload.rows, providersTried: payload.providersTried });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load ticker news." }, 500);
+  }
+});
+
 app.get("/api/scans", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const presetId = c.req.query("presetId") ?? null;
+  const preset = presetId ? await loadScanPreset(c.env, presetId) : await loadDefaultScanPreset(c.env);
+  if (!preset) {
+    return c.json({
+      id: crypto.randomUUID(),
+      presetId: "",
+      presetName: "",
+      providerLabel: "TradingView Screener (Python)",
+      generatedAt: new Date().toISOString(),
+      rowCount: 0,
+      status: "empty",
+      error: "No scan preset configured.",
+      rows: [],
+    });
+  }
+  const snapshot = await loadLatestScansSnapshot(c.env, preset.id);
+  return c.json(snapshot ?? {
+    id: crypto.randomUUID(),
+    presetId: preset.id,
+    presetName: preset.name,
+    providerLabel: "TradingView Screener (Python)",
+    generatedAt: new Date().toISOString(),
+    rowCount: 0,
+    status: "empty",
+    error: null,
+    rows: [],
+  });
+});
+
+app.get("/api/scans/presets", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const rows = await listScanPresets(c.env);
+  return c.json({ rows });
+});
+
+app.post("/api/admin/scans/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await maybeRunScansPageHousekeeping(c.env);
+  const payload = scanRefreshSchema.parse(await c.req.json().catch(() => ({})));
+  try {
+    const snapshot = await refreshScansSnapshot(c.env, payload.presetId ?? null);
+    return c.json({ ok: true, snapshot });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to refresh scans." }, 500);
+  }
+});
+
+app.post("/api/admin/scans/presets", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = scanPresetCreateSchema.parse(await c.req.json());
+  const preset = await upsertScanPreset(c.env, payload);
+  return c.json({ ok: true, preset });
+});
+
+app.patch("/api/admin/scans/presets/:presetId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const presetId = c.req.param("presetId");
+  const existing = await loadScanPreset(c.env, presetId);
+  if (!existing) return c.json({ error: "Scan preset not found." }, 404);
+  const payload = scanPresetPatchSchema.parse(await c.req.json());
+  const preset = await upsertScanPreset(c.env, {
+    id: presetId,
+    name: payload.name ?? existing.name,
+    isDefault: payload.isDefault ?? existing.isDefault,
+    isActive: payload.isActive ?? existing.isActive,
+    rules: payload.rules ?? existing.rules,
+    sortField: payload.sortField ?? existing.sortField,
+    sortDirection: payload.sortDirection ?? existing.sortDirection,
+    rowLimit: payload.rowLimit ?? existing.rowLimit,
+  });
+  return c.json({ ok: true, preset });
+});
+
+app.delete("/api/admin/scans/presets/:presetId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    await deleteScanPreset(c.env, c.req.param("presetId"));
+    return c.json({ ok: true, presetId: c.req.param("presetId") });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to delete scan preset." }, 400);
+  }
+});
+
+app.get("/api/scanning", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await listScanDefinitions(c.env);
   return c.json({ rows });
 });
 
-app.post("/api/scans", async (c) => {
+app.post("/api/scanning", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const body = await c.req.json().catch(() => ({}));
   try {
@@ -1893,7 +2028,7 @@ app.post("/api/scans", async (c) => {
   }
 });
 
-app.post("/api/scans/:id/ingest", async (c) => {
+app.post("/api/scanning/:id/ingest", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   await maybeRunScanningHousekeeping(c.env);
   try {
@@ -1904,37 +2039,37 @@ app.post("/api/scans/:id/ingest", async (c) => {
   }
 });
 
-app.get("/api/scans/:id/runs", async (c) => {
+app.get("/api/scanning/:id/runs", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await listScanRuns(c.env, c.req.param("id"), Number(c.req.query("limit") ?? 25));
   return c.json({ rows });
 });
 
-app.get("/api/scans/:id/runs/:runId", async (c) => {
+app.get("/api/scanning/:id/runs/:runId", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId"));
   return c.json({ rows });
 });
 
-app.get("/api/scans/:id/runs/:runId/tickers", async (c) => {
+app.get("/api/scanning/:id/runs/:runId/tickers", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId"));
   return c.json({ rows });
 });
 
-app.get("/api/scans/:id/compiled", async (c) => {
+app.get("/api/scanning/:id/compiled", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await loadScanCompiledRows(c.env, c.req.param("id"));
   return c.json({ rows });
 });
 
-app.get("/api/scans/:id/compiled/tickers", async (c) => {
+app.get("/api/scanning/:id/compiled/tickers", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await loadScanUniqueTickers(c.env, c.req.param("id"));
   return c.json({ rows });
 });
 
-app.get("/api/scans/:id/runs/:runId/export.csv", async (c) => {
+app.get("/api/scanning/:id/runs/:runId/export.csv", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const csv = compiledRowsToCsv(await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId")));
   c.header("Content-Type", "text/csv; charset=utf-8");
@@ -1942,7 +2077,7 @@ app.get("/api/scans/:id/runs/:runId/export.csv", async (c) => {
   return c.body(csv);
 });
 
-app.get("/api/scans/:id/runs/:runId/tickers.csv", async (c) => {
+app.get("/api/scanning/:id/runs/:runId/tickers.csv", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const csv = uniqueTickersToCsv(await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId")));
   c.header("Content-Type", "text/csv; charset=utf-8");
@@ -1950,7 +2085,7 @@ app.get("/api/scans/:id/runs/:runId/tickers.csv", async (c) => {
   return c.body(csv);
 });
 
-app.get("/api/scans/:id/compiled/export.csv", async (c) => {
+app.get("/api/scanning/:id/compiled/export.csv", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const csv = compiledRowsToCsv(await loadScanCompiledRows(c.env, c.req.param("id")));
   c.header("Content-Type", "text/csv; charset=utf-8");
@@ -1958,7 +2093,7 @@ app.get("/api/scans/:id/compiled/export.csv", async (c) => {
   return c.body(csv);
 });
 
-app.get("/api/scans/:id/compiled/tickers.csv", async (c) => {
+app.get("/api/scanning/:id/compiled/tickers.csv", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const csv = uniqueTickersToCsv(await loadScanUniqueTickers(c.env, c.req.param("id")));
   c.header("Content-Type", "text/csv; charset=utf-8");
@@ -2520,7 +2655,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -2765,6 +2900,7 @@ export default {
   },
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
     await maybeRunAlertsHousekeeping(env);
+    await maybeRunScansPageHousekeeping(env);
     await maybeRunScanningHousekeeping(env);
     await maybeRunGappersHousekeeping(env);
     const now = new Date(event.scheduledTime || Date.now());

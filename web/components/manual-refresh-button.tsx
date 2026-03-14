@@ -6,7 +6,7 @@ import { RefreshCw } from "lucide-react";
 import { refreshPageData } from "@/lib/api";
 
 type Props = {
-  page: "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "ticker" | "alerts" | "scanning" | "watchlist-compiler" | "gappers";
+  page: "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "ticker" | "alerts" | "scans" | "scanning" | "watchlist-compiler" | "gappers";
   ticker?: string | null;
   className?: string;
 };
