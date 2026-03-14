@@ -309,8 +309,26 @@ export async function seedPeerGroupForTicker(
   const title = await loadSeedIndustryTitle(env, ticker);
   if (!title) {
     await env.DB.prepare(
-      "UPDATE symbols SET asset_class = 'unsupported', updated_at = CURRENT_TIMESTAMP WHERE ticker = ?",
-    ).bind(ticker).run();
+      `INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry, shares_outstanding, updated_at)
+       VALUES (?, ?, ?, 'unsupported', ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(ticker) DO UPDATE SET
+         name = COALESCE(excluded.name, symbols.name),
+         exchange = COALESCE(excluded.exchange, symbols.exchange),
+         sector = COALESCE(excluded.sector, symbols.sector),
+         industry = COALESCE(excluded.industry, symbols.industry),
+         shares_outstanding = COALESCE(excluded.shares_outstanding, symbols.shares_outstanding),
+         asset_class = 'unsupported',
+         updated_at = CURRENT_TIMESTAMP`,
+    )
+      .bind(
+        rootProfile.ticker,
+        rootProfile.name ?? rootProfile.ticker,
+        rootProfile.exchange ?? null,
+        rootProfile.sector ?? null,
+        rootProfile.industry ?? null,
+        rootProfile.sharesOutstanding,
+      )
+      .run();
     throw new Error(`Finnhub industry label is required for ${ticker}.`);
   }
 
