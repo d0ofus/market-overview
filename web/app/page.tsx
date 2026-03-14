@@ -26,9 +26,9 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   const sectorEq = groups.find((group) => group.title === "Sector ETFs (Equal Weight)") ?? null;
   const base = groups.filter((group) => group !== thematic && group !== usIndex && group !== usIndexEq && group !== sector && group !== sectorEq);
   const ordered = [
-    ...base,
     ...(usIndex ? [usIndex] : []),
     ...(usIndexEq ? [usIndexEq] : []),
+    ...base,
     ...(sector ? [sector] : []),
     ...(sectorEq ? [sectorEq] : []),
     ...(thematic ? [thematic] : []),
@@ -95,17 +95,6 @@ export default async function HomePage() {
       <div className="grid gap-4">
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">
-            {base.map((group) => (
-              <GroupPanel
-                key={group.id}
-                anchorId={groupAnchorId(group.id)}
-                title={group.title}
-                rows={group.rows}
-                columns={group.columns}
-                defaultOpen
-                pinTop10={group.pinTop10}
-              />
-            ))}
             {(usIndex || usIndexEq) && (
               <div className="grid gap-3 lg:grid-cols-2">
                 {usIndex && (
@@ -132,6 +121,17 @@ export default async function HomePage() {
                 )}
               </div>
             )}
+            {base.map((group) => (
+              <GroupPanel
+                key={group.id}
+                anchorId={groupAnchorId(group.id)}
+                title={group.title}
+                rows={group.rows}
+                columns={group.columns}
+                defaultOpen
+                pinTop10={group.pinTop10}
+              />
+            ))}
             {(sector || sectorEq) && (
               <div className="grid gap-3 lg:grid-cols-2">
                 {sector && (
