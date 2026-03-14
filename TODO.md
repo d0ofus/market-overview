@@ -27,6 +27,8 @@
 
 ## Peer Groups
 - Continue the seeding of tickers
+- Remove XYZ._ tickers
+- Add paging feature for peer groups with more than 12 members. For example, pharmaceuticals has 191 members but the multi-chart view shows only 9 charts
 
 ## Scanning
 
@@ -43,8 +45,13 @@
 
 ## Admin
 - Daily Price Refresh schedule should show a dropdown menu of the pages to choose from.
+- Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 
+- Shows pending for ETFs like JETS, but ETF consituent sync status shows 'pending', 0 records and No cached data. Clicking on it shows contituents, and checking the DB shows all ok.
+- Add confirmation note when saving a new name for ETFs
 
 ## General
+- Add small logo on the webpage for each page. For e.g. Gappers can show 'G'
+- Make it such that hover over the tab in the browser would show which page it is
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
 - Add in search function for leveraged ETFs
 - Add in top gainers section (with certain filters - Use same scanner as gappers) and linked to peer groups 
@@ -52,5 +59,4 @@
 - Add news impact page (on dashboard(?))
 - Add scanners compilation as a new page --> Use share screen and link (e.g. https://www.tradingview.com/screener/DH50xwYA/) to get watchlist
 - See what other features in google sheets that is good
-- Add small logo on the webpage for each page. For e.g. Gappers can show 'G'
 - Add Calendar of US holidays
