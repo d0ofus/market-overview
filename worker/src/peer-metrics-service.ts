@@ -107,6 +107,23 @@ function parseNullableNumber(value: unknown): number | null {
   return value;
 }
 
+function mergeQuoteFundamentals(
+  primary: Map<string, QuoteFundamentals>,
+  secondary: Map<string, QuoteFundamentals>,
+): Map<string, QuoteFundamentals> {
+  const merged = new Map<string, QuoteFundamentals>();
+  const tickers = new Set([...primary.keys(), ...secondary.keys()]);
+  for (const ticker of tickers) {
+    const primaryRow = primary.get(ticker);
+    const secondaryRow = secondary.get(ticker);
+    merged.set(ticker, {
+      marketCap: primaryRow?.marketCap ?? secondaryRow?.marketCap ?? null,
+      avgVolume: primaryRow?.avgVolume ?? secondaryRow?.avgVolume ?? null,
+    });
+  }
+  return merged;
+}
+
 export async function loadYahooQuoteFundamentals(tickersInput: string[]): Promise<Map<string, QuoteFundamentals>> {
   const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
   if (tickers.length === 0) return new Map();
@@ -151,6 +168,47 @@ export async function loadYahooQuoteFundamentals(tickersInput: string[]): Promis
   );
 }
 
+export async function loadFmpQuoteFundamentals(env: Env, tickersInput: string[]): Promise<Map<string, QuoteFundamentals>> {
+  if (!env.FMP_API_KEY) return new Map();
+  const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
+  if (tickers.length === 0) return new Map();
+
+  const rows = await Promise.all(
+    chunk(tickers, YAHOO_QUOTE_CHUNK_SIZE).map(async (tickerChunk) => {
+      const urls = [
+        `https://financialmodelingprep.com/stable/profile?symbol=${encodeURIComponent(tickerChunk.join(","))}&apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
+        `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(tickerChunk.join(","))}?apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
+      ];
+      for (const url of urls) {
+        const response = await fetch(url, {
+          headers: {
+            "User-Agent": "market-command-centre/1.0",
+          },
+        });
+        if (!response.ok) continue;
+        const json = await response.json() as unknown;
+        if (Array.isArray(json)) return json;
+      }
+      throw new Error("FMP profile fetch failed.");
+    }),
+  );
+
+  return new Map(
+    rows
+      .flat()
+      .map((row) => {
+        const item = row as Record<string, unknown>;
+        const ticker = String(item.symbol ?? "").trim().toUpperCase();
+        if (!ticker) return null;
+        return [ticker, {
+          marketCap: parseNullableNumber(item.marketCap ?? item.mktCap),
+          avgVolume: parseNullableNumber(item.volAvg ?? item.avgVolume ?? item.averageVolume),
+        }] as const;
+      })
+      .filter((row): row is readonly [string, QuoteFundamentals] => row !== null),
+  );
+}
+
 export async function loadSharesOutstandingMap(env: Env, tickers: string[]): Promise<Map<string, number | null>> {
   const normalized = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
   if (normalized.length === 0) return new Map();
@@ -184,6 +242,8 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
   let recentBars: Array<{ ticker: string; date: string; c: number; volume: number }> = [];
   let sharesByTicker = new Map<string, number | null>();
   let quoteFundamentalsByTicker = new Map<string, QuoteFundamentals>();
+  let yahooFundamentalsError: string | null = null;
+  let fmpFundamentalsError: string | null = null;
 
   try {
     const provider = getProvider(env);
@@ -208,7 +268,22 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
   try {
     quoteFundamentalsByTicker = await loadYahooQuoteFundamentals(tickers);
   } catch (error) {
-    errorMessages.push(error instanceof Error ? error.message : "Failed to load Yahoo quote fundamentals.");
+    yahooFundamentalsError = error instanceof Error ? error.message : "Failed to load Yahoo quote fundamentals.";
+  }
+
+  try {
+    const fmpFundamentalsByTicker = await loadFmpQuoteFundamentals(env, tickers);
+    quoteFundamentalsByTicker = mergeQuoteFundamentals(quoteFundamentalsByTicker, fmpFundamentalsByTicker);
+  } catch (error) {
+    fmpFundamentalsError = error instanceof Error ? error.message : "Failed to load FMP quote fundamentals.";
+  }
+
+  const fundamentalsAvailable = Array.from(quoteFundamentalsByTicker.values()).some(
+    (row) => typeof row.marketCap === "number" || typeof row.avgVolume === "number",
+  );
+  if (!fundamentalsAvailable) {
+    if (yahooFundamentalsError) errorMessages.push(yahooFundamentalsError);
+    if (fmpFundamentalsError) errorMessages.push(fmpFundamentalsError);
   }
 
   return {
