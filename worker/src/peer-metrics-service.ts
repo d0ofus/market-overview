@@ -242,8 +242,6 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
   let recentBars: Array<{ ticker: string; date: string; c: number; volume: number }> = [];
   let sharesByTicker = new Map<string, number | null>();
   let quoteFundamentalsByTicker = new Map<string, QuoteFundamentals>();
-  let yahooFundamentalsError: string | null = null;
-  let fmpFundamentalsError: string | null = null;
 
   try {
     const provider = getProvider(env);
@@ -267,24 +265,12 @@ export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise
 
   try {
     quoteFundamentalsByTicker = await loadYahooQuoteFundamentals(tickers);
-  } catch (error) {
-    yahooFundamentalsError = error instanceof Error ? error.message : "Failed to load Yahoo quote fundamentals.";
-  }
+  } catch {}
 
   try {
     const fmpFundamentalsByTicker = await loadFmpQuoteFundamentals(env, tickers);
     quoteFundamentalsByTicker = mergeQuoteFundamentals(quoteFundamentalsByTicker, fmpFundamentalsByTicker);
-  } catch (error) {
-    fmpFundamentalsError = error instanceof Error ? error.message : "Failed to load FMP quote fundamentals.";
-  }
-
-  const fundamentalsAvailable = Array.from(quoteFundamentalsByTicker.values()).some(
-    (row) => typeof row.marketCap === "number" || typeof row.avgVolume === "number",
-  );
-  if (!fundamentalsAvailable) {
-    if (yahooFundamentalsError) errorMessages.push(yahooFundamentalsError);
-    if (fmpFundamentalsError) errorMessages.push(fmpFundamentalsError);
-  }
+  } catch {}
 
   return {
     rows: buildPeerMetricRows(tickers, asOf, snapshotRows, recentBars, sharesByTicker, quoteFundamentalsByTicker),
