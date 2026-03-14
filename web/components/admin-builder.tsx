@@ -21,6 +21,10 @@ function adminSectionAnchor(title: string): string | undefined {
   return undefined;
 }
 
+function isOverviewAdminSection(title: string): boolean {
+  return title.includes("Macro Overview") || title.includes("Equities Overview") || title.includes("Market Breadth & Sentiment");
+}
+
 const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone} (prev US close)`;
 
 function formatDateTimeCompact(value: string | null | undefined): string {
@@ -80,6 +84,7 @@ export function AdminBuilder() {
   const [diagResult, setDiagResult] = useState<any | null>(null);
   const [diagSourceUrl, setDiagSourceUrl] = useState("");
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+  const [itemDisplayNames, setItemDisplayNames] = useState<Record<string, string>>({});
 
   const load = async () => {
     setIsLoading(true);
@@ -112,6 +117,19 @@ export function AdminBuilder() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (!data) return;
+    const next: Record<string, string> = {};
+    for (const section of data.sections) {
+      for (const group of section.groups) {
+        for (const item of group.items) {
+          next[item.id] = item.displayName ?? "";
+        }
+      }
+    }
+    setItemDisplayNames(next);
+  }, [data]);
 
   const patchGroup = async (groupId: string, patch: any) => {
     await adminFetch("/api/admin/group/" + groupId, { method: "PATCH", body: JSON.stringify(patch) });
@@ -148,6 +166,13 @@ export function AdminBuilder() {
 
   const removeItem = async (itemId: string) => {
     await adminFetch("/api/admin/item/" + itemId, { method: "DELETE" });
+    await load();
+  };
+  const updateItemDisplayName = async (itemId: string) => {
+    await adminFetch("/api/admin/item/" + itemId, {
+      method: "PATCH",
+      body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
+    });
     await load();
   };
   const addSection = async () => {
@@ -358,6 +383,9 @@ export function AdminBuilder() {
     );
   }
   if (!data) return <div className="card p-4">Admin config unavailable.</div>;
+
+  const overviewSections = data.sections.filter((section) => isOverviewAdminSection(section.title));
+  const otherSections = data.sections.filter((section) => !isOverviewAdminSection(section.title));
 
   return (
     <div className="space-y-4">
@@ -830,30 +858,34 @@ export function AdminBuilder() {
           Add section
         </button>
       </div>
-      {data.sections.map((section) => (
+      {[...overviewSections, ...otherSections].map((section) => {
+        const hideSectionChrome = isOverviewAdminSection(section.title);
+        return (
         <div key={section.id} className="card scroll-mt-24 p-4" id={adminSectionAnchor(section.title)}>
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <h3 className="text-lg font-semibold">{section.title}</h3>
-              {section.description ? <p className="text-xs text-slate-400">{section.description}</p> : null}
+          {hideSectionChrome ? null : (
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold">{section.title}</h3>
+                {section.description ? <p className="text-xs text-slate-400">{section.description}</p> : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded border border-borderSoft px-2 py-1 text-xs"
+                  onClick={() => toggleSection(section.id)}
+                  type="button"
+                >
+                  {collapsedSections[section.id] ? "Expand" : "Collapse"}
+                </button>
+                <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
+                  await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
+                  await load();
+                }}>
+                  Delete section
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="rounded border border-borderSoft px-2 py-1 text-xs"
-                onClick={() => toggleSection(section.id)}
-                type="button"
-              >
-                {collapsedSections[section.id] ? "Expand" : "Collapse"}
-              </button>
-              <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
-                await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
-                await load();
-              }}>
-                Delete section
-              </button>
-            </div>
-          </div>
-          {collapsedSections[section.id] ? null : (
+          )}
+          {hideSectionChrome || !collapsedSections[section.id] ? (
             <>
           <div className="mb-3 flex gap-2">
             <input
@@ -938,35 +970,44 @@ export function AdminBuilder() {
                 {tickerErrors[group.id] && (
                   <p className="mb-2 text-xs text-red-300">{tickerErrors[group.id]}</p>
                 )}
-                <div className="flex flex-wrap gap-2">
+                <div className="space-y-2">
                   {group.items.map((item, ii) => (
-                    <span key={item.id} className="rounded bg-panelSoft px-2 py-1 text-xs">
-                      {item.ticker}
-                      <button className="ml-2 text-red-400" onClick={() => removeItem(item.id)}>
-                        x
+                    <div key={item.id} className="flex flex-wrap items-center gap-2 rounded bg-panelSoft px-2 py-2 text-xs">
+                      <span className="min-w-12 font-semibold text-slate-100">{item.ticker}</span>
+                      <input
+                        className="min-w-[16rem] flex-1 rounded border border-borderSoft bg-panel px-2 py-1 text-xs"
+                        value={itemDisplayNames[item.id] ?? ""}
+                        onChange={(e) => setItemDisplayNames((current) => ({ ...current, [item.id]: e.target.value }))}
+                        placeholder="Current display name"
+                      />
+                      <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => void updateItemDisplayName(item.id)}>
+                        Save Name
                       </button>
                       <button
-                        className="ml-2 text-slate-400"
+                        className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
                         onClick={() => move("item", group.items.map((i) => i.id), ii, -1)}
                       >
-                        ^
+                        Up
                       </button>
                       <button
-                        className="ml-1 text-slate-400"
+                        className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
                         onClick={() => move("item", group.items.map((i) => i.id), ii, 1)}
                       >
-                        v
+                        Down
                       </button>
-                    </span>
+                      <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={() => removeItem(item.id)}>
+                        Delete
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
             ))}
           </div>
             </>
-          )}
-        </div>
-      ))}
+          ) : null}
+          </div>
+      );})}
     </div>
   );
 }

@@ -7,9 +7,7 @@ import { WatchlistCompilerAdminPanel } from "@/components/watchlist-compiler-adm
 export default function AdminPage() {
   const jumpTargets = [
     { href: "#admin-etf-watchlists", label: "ETF Watchlists" },
-    { href: "#admin-macro-overview", label: "Macro Overview" },
-    { href: "#admin-equities-overview", label: "Equities Overview" },
-    { href: "#admin-market-breadth-sentiment", label: "Market Breadth & Sentiment" },
+    { href: "#admin-overview", label: "Overview" },
     { href: "#admin-peer-groups", label: "Peer Groups" },
     { href: "#admin-watchlist-compiler", label: "Watchlist Compiler" },
   ];
@@ -33,9 +31,9 @@ export default function AdminPage() {
         </div>
       </div>
       <AdminSection
-        title="Dashboard Builder"
-        description="Configure groups, ranking windows, visible columns, and tickers without code changes."
-        anchorId="admin-dashboard-builder"
+        title="Overview"
+        description="Configure the /overview groups, ranking windows, visible columns, tickers, and ticker display names."
+        anchorId="admin-overview"
       >
         <AdminBuilder />
       </AdminSection>

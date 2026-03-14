@@ -26,6 +26,10 @@ export const itemCreateSchema = z.object({
   tags: z.array(z.string()).optional().default([]),
 });
 
+export const itemPatchSchema = z.object({
+  displayName: z.string().trim().max(240).nullable().optional(),
+});
+
 export const peerGroupTypeSchema = z.enum(["fundamental", "technical", "custom"]);
 
 export const peerGroupCreateSchema = z.object({

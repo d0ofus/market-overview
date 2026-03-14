@@ -6,6 +6,7 @@ import {
   configPatchSchema,
   groupPatchSchema,
   itemCreateSchema,
+  itemPatchSchema,
   peerBootstrapSchema,
   peerGroupCreateSchema,
   peerGroupPatchSchema,
@@ -2680,6 +2681,20 @@ app.delete("/api/admin/item/:itemId", async (c) => {
   await upsertAudit(c.env, "default", "ITEM_DELETE", { itemId });
   await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
+});
+
+app.patch("/api/admin/item/:itemId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const itemId = c.req.param("itemId");
+  const payload = itemPatchSchema.parse(await c.req.json());
+  await c.env.DB.prepare(
+    "UPDATE dashboard_items SET display_name = ? WHERE id = ?",
+  )
+    .bind(payload.displayName?.trim() || null, itemId)
+    .run();
+  await upsertAudit(c.env, "default", "ITEM_PATCH", { itemId, payload });
+  await refreshSnapshotSafe(c.env);
+  return c.json({ ok: true, itemId });
 });
 
 app.post("/api/admin/upload-bars", async (c) => {
