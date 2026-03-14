@@ -18,6 +18,7 @@ export type PeerMetricRow = {
 type QuoteFundamentals = {
   marketCap: number | null;
   avgVolume: number | null;
+  source: "yahoo-quote" | "fmp-quote";
 };
 
 function mean(values: number[]): number | null {
@@ -86,7 +87,7 @@ export function buildPeerMetricRows(
     const avgVolume = quoteFundamentals?.avgVolume ?? avgVolumeFromBars;
     const sourceParts = ["alpaca"];
     if (typeof quoteFundamentals?.marketCap === "number" || typeof quoteFundamentals?.avgVolume === "number") {
-      sourceParts.push("yahoo-quote");
+      sourceParts.push(quoteFundamentals?.source ?? "fmp-quote");
     } else if (marketCapFromShares != null) {
       sourceParts.push("seeded-shares");
     }
@@ -119,6 +120,7 @@ function mergeQuoteFundamentals(
     merged.set(ticker, {
       marketCap: primaryRow?.marketCap ?? secondaryRow?.marketCap ?? null,
       avgVolume: primaryRow?.avgVolume ?? secondaryRow?.avgVolume ?? null,
+      source: primaryRow?.source ?? secondaryRow?.source ?? "fmp-quote",
     });
   }
   return merged;
@@ -162,7 +164,7 @@ export async function loadYahooQuoteFundamentals(tickersInput: string[]): Promis
         if (!ticker) return null;
         const marketCap = parseNullableNumber(row.marketCap);
         const avgVolume = parseNullableNumber(row.averageDailyVolume3Month);
-        return [ticker, { marketCap, avgVolume }] as const;
+        return [ticker, { marketCap, avgVolume, source: "yahoo-quote" }] as const;
       })
       .filter((row): row is readonly [string, QuoteFundamentals] => row !== null),
   );
@@ -176,8 +178,8 @@ export async function loadFmpQuoteFundamentals(env: Env, tickersInput: string[])
   const rows = await Promise.all(
     chunk(tickers, YAHOO_QUOTE_CHUNK_SIZE).map(async (tickerChunk) => {
       const urls = [
-        `https://financialmodelingprep.com/stable/profile?symbol=${encodeURIComponent(tickerChunk.join(","))}&apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
-        `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(tickerChunk.join(","))}?apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
+        `https://financialmodelingprep.com/stable/quote?symbol=${encodeURIComponent(tickerChunk.join(","))}&apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
+        `https://financialmodelingprep.com/api/v3/quote/${encodeURIComponent(tickerChunk.join(","))}?apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
       ];
       for (const url of urls) {
         const response = await fetch(url, {
@@ -187,9 +189,9 @@ export async function loadFmpQuoteFundamentals(env: Env, tickersInput: string[])
         });
         if (!response.ok) continue;
         const json = await response.json() as unknown;
-        if (Array.isArray(json)) return json;
+        if (Array.isArray(json) && json.length > 0) return json;
       }
-      throw new Error("FMP profile fetch failed.");
+      throw new Error("FMP quote fetch failed.");
     }),
   );
 
@@ -202,7 +204,8 @@ export async function loadFmpQuoteFundamentals(env: Env, tickersInput: string[])
         if (!ticker) return null;
         return [ticker, {
           marketCap: parseNullableNumber(item.marketCap ?? item.mktCap),
-          avgVolume: parseNullableNumber(item.volAvg ?? item.avgVolume ?? item.averageVolume),
+          avgVolume: parseNullableNumber(item.avgVolume ?? item.volumeAverage ?? item.volAvg ?? item.averageVolume),
+          source: "fmp-quote",
         }] as const;
       })
       .filter((row): row is readonly [string, QuoteFundamentals] => row !== null),

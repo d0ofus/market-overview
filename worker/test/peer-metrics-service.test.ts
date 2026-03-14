@@ -19,7 +19,7 @@ describe("peer metrics service", () => {
         ["MSFT", null],
       ]),
       new Map([
-        ["AAPL", { marketCap: 3_100_000_000_000, avgVolume: 55_000_000 }],
+        ["AAPL", { marketCap: 3_100_000_000_000, avgVolume: 55_000_000, source: "fmp-quote" }],
       ]),
     );
 
@@ -28,7 +28,7 @@ describe("peer metrics service", () => {
       price: 200,
       marketCap: 3_100_000_000_000,
       avgVolume: 55_000_000,
-      source: "alpaca+yahoo-quote",
+      source: "alpaca+fmp-quote",
     });
     expect(rows[1]).toMatchObject({
       ticker: "MSFT",
