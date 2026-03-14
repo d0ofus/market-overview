@@ -2032,8 +2032,14 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
 app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
-  const config = await loadConfig(c.env, configId);
-  return c.json(config);
+  try {
+    const config = await loadConfig(c.env, configId);
+    return c.json(config);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load admin config.";
+    console.error("admin config load failed", { configId, error });
+    return c.json({ error: message }, 500);
+  }
 });
 
 app.get("/api/admin/watchlist-compiler/sets", async (c) => {

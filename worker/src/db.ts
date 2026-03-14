@@ -4,6 +4,7 @@ const uid = () => crypto.randomUUID();
 const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline"];
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
+const SYMBOL_LOOKUP_CHUNK_SIZE = 50;
 
 function normalizeOverviewColumns(columns: string[]): string[] {
   const includeTicker = columns.includes("ticker");
@@ -116,7 +117,7 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
   const sections = await env.DB.prepare(
     "SELECT id, title, description, is_collapsible as isCollapsible, default_collapsed as defaultCollapsed, sort_order FROM dashboard_sections WHERE config_id = ? ORDER BY sort_order ASC",
   )
-    .bind(configId)
+    .bind(config.id)
     .all<{
       id: string;
       title: string;
@@ -130,7 +131,7 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
   const groups = await env.DB.prepare(
     "SELECT id, section_id as sectionId, title, sort_order, data_type as dataType, ranking_window_default as rankingWindowDefault, show_sparkline as showSparkline, pin_top10 as pinTop10 FROM dashboard_groups WHERE section_id IN (SELECT id FROM dashboard_sections WHERE config_id = ?) ORDER BY sort_order ASC",
   )
-    .bind(configId)
+    .bind(config.id)
     .all<{
       id: string;
       sectionId: string;
@@ -173,17 +174,19 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
   }
   const itemRows = items.results ?? [];
   const tickers = Array.from(new Set(itemRows.map((item) => item.ticker).filter(Boolean)));
-  const symbolNameMap = tickers.length > 0
-    ? new Map(
-      (
-        await env.DB.prepare(
-          `SELECT ticker, name FROM symbols WHERE ticker IN (${tickers.map(() => "?").join(",")})`,
-        )
-          .bind(...tickers)
-          .all<{ ticker: string; name: string | null }>()
-      ).results?.map((row) => [row.ticker, row.name ?? ""]) ?? [],
+  const symbolNameMap = new Map<string, string>();
+  for (let index = 0; index < tickers.length; index += SYMBOL_LOOKUP_CHUNK_SIZE) {
+    const batch = tickers.slice(index, index + SYMBOL_LOOKUP_CHUNK_SIZE);
+    if (batch.length === 0) continue;
+    const rows = await env.DB.prepare(
+      `SELECT ticker, name FROM symbols WHERE ticker IN (${batch.map(() => "?").join(",")})`,
     )
-    : new Map<string, string>();
+      .bind(...batch)
+      .all<{ ticker: string; name: string | null }>();
+    for (const row of rows.results ?? []) {
+      symbolNameMap.set(row.ticker, row.name ?? "");
+    }
+  }
 
   const columns = await env.DB.prepare("SELECT group_id as groupId, columns_json as columnsJson FROM dashboard_columns").all<{
     groupId: string;
