@@ -44,6 +44,7 @@ const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
 const FIELD_SUGGESTIONS = [
   "close",
   "change",
+  "market_cap_basic",
   "type",
   "exchange",
   "volume",
@@ -51,6 +52,8 @@ const FIELD_SUGGESTIONS = [
   "industry",
   "average_day_range_14",
 ];
+
+const CUSTOM_FIELD_OPTION = "__custom__";
 
 const emptyDraftRule = (): ScanRule => ({
   id: crypto.randomUUID(),
@@ -117,6 +120,10 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
     ...rule,
     value: Number.isFinite(parsed) && !/[A-Za-z]/.test(trimmed) ? parsed : trimmed,
   };
+}
+
+function isSuggestedField(field: string): boolean {
+  return FIELD_SUGGESTIONS.includes(field);
 }
 
 function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): ScanRow[] {
@@ -481,15 +488,25 @@ export function ScansPageDashboard() {
                   <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1fr),8rem]">
                     <label className="block">
                       Field
-                      <input
-                        list="scan-field-suggestions"
+                      <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                        value={rule.field}
+                        value={isSuggestedField(rule.field) ? rule.field : CUSTOM_FIELD_OPTION}
                         onChange={(event) => setDraftPreset((current) => ({
                           ...current,
-                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
+                          rules: current.rules.map((row) => {
+                            if (row.id !== rule.id) return row;
+                            return {
+                              ...row,
+                              field: event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value,
+                            };
+                          }),
                         }))}
-                      />
+                      >
+                        {FIELD_SUGGESTIONS.map((field) => (
+                          <option key={field} value={field}>{field}</option>
+                        ))}
+                        <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
+                      </select>
                     </label>
                     <label className="block">
                       Operator
@@ -507,6 +524,20 @@ export function ScansPageDashboard() {
                       </select>
                     </label>
                   </div>
+                  {!isSuggestedField(rule.field) ? (
+                    <label className="mb-2 block">
+                      Custom field
+                      <input
+                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                        value={rule.field}
+                        onChange={(event) => setDraftPreset((current) => ({
+                          ...current,
+                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
+                        }))}
+                        placeholder="Enter TradingView field name"
+                      />
+                    </label>
+                  ) : null}
                   <label className="block">
                     Value
                     <input
@@ -538,9 +569,6 @@ export function ScansPageDashboard() {
                   ) : null}
                 </div>
               ))}
-              <datalist id="scan-field-suggestions">
-                {FIELD_SUGGESTIONS.map((field) => <option key={field} value={field} />)}
-              </datalist>
             </div>
           </div>
         </section>
