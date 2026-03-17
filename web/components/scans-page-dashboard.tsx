@@ -17,7 +17,6 @@ import {
   type ScanRuleOperator,
   type ScanSnapshot,
 } from "@/lib/api";
-import { TRADINGVIEW_STOCK_FIELDS } from "@/lib/tradingview-stock-fields";
 import { TradingViewWidget } from "./tradingview-widget";
 import { PeerGroupModal } from "./peer-group-modal";
 
@@ -43,6 +42,12 @@ type ResultColumnKey =
   | "price"
   | "priceAvgVolume";
 
+type TradingViewFieldOption = {
+  value: string;
+  label: string;
+  type: string;
+};
+
 const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "gt", label: ">" },
   { value: "gte", label: ">=" },
@@ -53,8 +58,6 @@ const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "in", label: "in" },
   { value: "not_in", label: "not in" },
 ];
-
-const FIELD_OPTIONS: Array<{ value: string; label: string }> = TRADINGVIEW_STOCK_FIELDS;
 
 const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
   { key: "ticker", label: "Ticker" },
@@ -82,11 +85,11 @@ const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
 
 const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = RESULT_COLUMNS.map((column) => column.key);
 const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
+const DEFAULT_FIELD_SEARCH_LIMIT = 50;
 
 const CUSTOM_FIELD_OPTION = "__custom__";
 
 const FIELD_LABELS: Record<string, string> = {
-  ...Object.fromEntries(TRADINGVIEW_STOCK_FIELDS.map((field) => [field.value, field.label])),
   marketCap: "Market Capitalization",
   market_cap: "Market Capitalization",
   valueTraded: "Volume*Price",
@@ -180,8 +183,8 @@ function getFieldLabel(field: string): string {
   return FIELD_LABELS[trimmed] ?? humanizeFieldName(trimmed || "Custom field");
 }
 
-function isSuggestedField(field: string): boolean {
-  return FIELD_OPTIONS.some((option) => option.value === field);
+function isSuggestedField(field: string, options: TradingViewFieldOption[]): boolean {
+  return options.some((option) => option.value === field);
 }
 
 function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): ScanRow[] {
@@ -246,6 +249,8 @@ export function ScansPageDashboard() {
   const [sortKey, setSortKey] = useState<SortKey>("change1d");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [visibleColumns, setVisibleColumns] = useState<ResultColumnKey[]>(DEFAULT_VISIBLE_COLUMNS);
+  const [fieldOptionsByQuery, setFieldOptionsByQuery] = useState<Record<string, TradingViewFieldOption[]>>({});
+  const [fieldLabelMap, setFieldLabelMap] = useState<Record<string, string>>(FIELD_LABELS);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -264,6 +269,30 @@ export function ScansPageDashboard() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(RESULTS_COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumns));
   }, [visibleColumns]);
+
+  useEffect(() => {
+    const queries = Array.from(new Set(["", ...draftPreset.rules.map((rule) => rule.field.trim())]));
+    for (const query of queries) {
+      const key = query.toLowerCase();
+      if (fieldOptionsByQuery[key]) continue;
+      void (async () => {
+        try {
+          const params = new URLSearchParams({ limit: String(DEFAULT_FIELD_SEARCH_LIMIT) });
+          if (query) params.set("q", query);
+          const response = await fetch(`/api/tradingview-stock-fields?${params.toString()}`);
+          if (!response.ok) return;
+          const payload = await response.json() as { rows?: TradingViewFieldOption[] };
+          const rows = payload.rows ?? [];
+          setFieldOptionsByQuery((current) => current[key] ? current : { ...current, [key]: rows });
+          if (rows.length > 0) {
+            setFieldLabelMap((current) => ({ ...current, ...Object.fromEntries(rows.map((row) => [row.value, row.label])) }));
+          }
+        } catch {
+          // Keep the editor usable even if the catalog lookup fails.
+        }
+      })();
+    }
+  }, [draftPreset.rules, fieldOptionsByQuery]);
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -607,14 +636,18 @@ export function ScansPageDashboard() {
                   Add Rule
                 </button>
               </div>
-              {draftPreset.rules.map((rule, index) => (
+              {draftPreset.rules.map((rule) => {
+                const fieldQuery = rule.field.trim().toLowerCase();
+                const fieldOptions = fieldOptionsByQuery[fieldQuery] ?? fieldOptionsByQuery[""] ?? [];
+                const selectedFieldLabel = fieldLabelMap[rule.field.trim()] ?? getFieldLabel(rule.field);
+                return (
                 <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
                   <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
                     <label className="block">
                       Field
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                        value={isSuggestedField(rule.field) ? rule.field : CUSTOM_FIELD_OPTION}
+                        value={isSuggestedField(rule.field, fieldOptions) ? rule.field : CUSTOM_FIELD_OPTION}
                         onChange={(event) => setDraftPreset((current) => ({
                           ...current,
                           rules: current.rules.map((row) => {
@@ -626,9 +659,12 @@ export function ScansPageDashboard() {
                           }),
                         }))}
                       >
-                        {FIELD_OPTIONS.map((field) => (
+                        {fieldOptions.map((field) => (
                           <option key={field.value} value={field.value}>{field.label}</option>
                         ))}
+                        {!isSuggestedField(rule.field, fieldOptions) && rule.field.trim() ? (
+                          <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedFieldLabel})</option>
+                        ) : null}
                         <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
                       </select>
                     </label>
@@ -641,6 +677,7 @@ export function ScansPageDashboard() {
                           ...current,
                           rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
                         }))}
+                        placeholder="Field ID"
                       />
                     </label>
                     <label className="block">
@@ -683,13 +720,8 @@ export function ScansPageDashboard() {
                       Remove Rule
                     </button>
                   </div>
-                  {index === 0 ? (
-                    <p className="mt-2 text-[11px] text-slate-500">
-                      Suggestions: {FIELD_OPTIONS.map((field) => `${field.label} (${field.value})`).join(", ")}
-                    </p>
-                  ) : null}
                 </div>
-              ))}
+              )})}
             </div>
           </div>
         </section>
