@@ -18,6 +18,7 @@ const DEFAULT_RETENTION_DAYS = 30;
 const ALERT_TICKER_REPAIR_INTERVAL_MS = 5 * 60_000;
 const ALERT_TICKER_REPAIR_LOOKBACK_DAYS = 30;
 const ALERT_TICKER_REPAIR_SCAN_LIMIT = 150;
+const ALERTS_TICKER_DAY_NEWS_BATCH_SIZE = 100;
 
 const SESSION_VALUES: AlertsSessionFilter[] = ["all", "premarket", "regular", "after-hours"];
 let lastAlertTickerRepairAt = 0;
@@ -541,21 +542,24 @@ async function loadNewsForTickerDays(env: Env, pairs: Array<{ ticker: string; tr
   const newsByKey = new Map<string, TickerNewsRow[]>();
   if (pairs.length === 0) return newsByKey;
 
-  const whereClause = pairs.map(() => "(ticker = ? AND trading_day = ?)").join(" OR ");
-  const binds = pairs.flatMap((pair) => [pair.ticker, pair.tradingDay]);
+  for (let index = 0; index < pairs.length; index += ALERTS_TICKER_DAY_NEWS_BATCH_SIZE) {
+    const batch = pairs.slice(index, index + ALERTS_TICKER_DAY_NEWS_BATCH_SIZE);
+    const whereClause = batch.map(() => "(ticker = ? AND trading_day = ?)").join(" OR ");
+    const binds = batch.flatMap((pair) => [pair.ticker, pair.tradingDay]);
 
-  const rows = await env.DB.prepare(
-    `SELECT id, ticker, trading_day as tradingDay, headline, source, url, published_at as publishedAt, snippet, fetched_at as fetchedAt FROM ticker_news WHERE ${whereClause} ORDER BY ticker ASC, trading_day ASC, datetime(COALESCE(published_at, fetched_at)) DESC`,
-  )
-    .bind(...binds)
-    .all<TickerNewsRow>();
+    const rows = await env.DB.prepare(
+      `SELECT id, ticker, trading_day as tradingDay, headline, source, url, published_at as publishedAt, snippet, fetched_at as fetchedAt FROM ticker_news WHERE ${whereClause} ORDER BY ticker ASC, trading_day ASC, datetime(COALESCE(published_at, fetched_at)) DESC`,
+    )
+      .bind(...binds)
+      .all<TickerNewsRow>();
 
-  for (const row of rows.results ?? []) {
-    const key = `${row.ticker}|${row.tradingDay}`;
-    const current = newsByKey.get(key) ?? [];
-    if (current.length >= 3) continue;
-    current.push(row);
-    newsByKey.set(key, current);
+    for (const row of rows.results ?? []) {
+      const key = `${row.ticker}|${row.tradingDay}`;
+      const current = newsByKey.get(key) ?? [];
+      if (current.length >= 3) continue;
+      current.push(row);
+      newsByKey.set(key, current);
+    }
   }
 
   return newsByKey;
