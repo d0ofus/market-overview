@@ -27,6 +27,11 @@ function fmtPrice(value: number | null | undefined): string {
   return value.toFixed(2);
 }
 
+function fmtPct(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
 export function PeerGroupsDashboard() {
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [directory, setDirectory] = useState<PeerDirectoryRow[]>([]);
@@ -166,14 +171,16 @@ export function PeerGroupsDashboard() {
     const startIndex = (chartPage - 1) * chartsPerPage;
     const paged = ordered.slice(startIndex, startIndex + chartsPerPage);
     return paged.map(({ ticker, name, metric }) => {
+      const change1d = metric?.change1d ?? null;
       return {
         key: ticker,
         ticker,
         title: ticker,
         subtitle: name,
         detail: (
-          <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
+          <div className="grid grid-cols-4 gap-2 text-[11px] text-slate-400">
             <div>Price: <span className="text-slate-200">{fmtPrice(metric?.price)}</span></div>
+            <div>1D: <span className={change1d != null && change1d < 0 ? "text-neg" : "text-pos"}>{fmtPct(change1d)}</span></div>
             <div>Mkt Cap: <span className="text-slate-200">{fmtCompact(metric?.marketCap)}</span></div>
             <div>Avg Vol: <span className="text-slate-200">{fmtCompact(metric?.avgVolume)}</span></div>
           </div>

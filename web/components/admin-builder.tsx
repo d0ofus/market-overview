@@ -188,7 +188,7 @@ export function AdminBuilder() {
       });
       setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved." }));
       await load();
-      showConfirmationNote("Configuration updated.");
+      showConfirmationNote("Name saved to the database.");
     } catch (error) {
       setItemDisplayNameStatus((current) => ({
         ...current,
@@ -420,7 +420,7 @@ export function AdminBuilder() {
   return (
     <div className="space-y-4">
       {confirmationNote && (
-        <div className="card border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-200">
+        <div className="fixed right-4 top-4 z-50 max-w-sm rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-100 shadow-xl backdrop-blur">
           {confirmationNote}
         </div>
       )}
