@@ -27,6 +27,18 @@ type SortKey =
   | "industry"
   | "change1d"
   | "marketCap"
+  | "relativeVolume"
+  | "price"
+  | "priceAvgVolume";
+
+type ResultColumnKey =
+  | "ticker"
+  | "name"
+  | "sector"
+  | "industry"
+  | "change1d"
+  | "marketCap"
+  | "relativeVolume"
   | "price"
   | "priceAvgVolume";
 
@@ -53,6 +65,21 @@ const FIELD_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "ADR", label: "Average Day Range (14)" },
   { value: "relative_volume", label: "Relative Volume" },
 ];
+
+const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
+  { key: "ticker", label: "Ticker" },
+  { key: "name", label: "Company" },
+  { key: "sector", label: "Sector" },
+  { key: "industry", label: "Industry" },
+  { key: "change1d", label: "1D Change %" },
+  { key: "marketCap", label: "Market Cap" },
+  { key: "relativeVolume", label: "Relative Volume" },
+  { key: "price", label: "Price" },
+  { key: "priceAvgVolume", label: "Price * Avg Vol" },
+];
+
+const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = RESULT_COLUMNS.map((column) => column.key);
+const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 
 const CUSTOM_FIELD_OPTION = "__custom__";
 
@@ -121,6 +148,11 @@ function formatCompact(value: number | null | undefined): string {
   return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
 }
 
+function formatRatio(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return value.toFixed(2);
+}
+
 function valueToInput(rule: ScanRule): string {
   return Array.isArray(rule.value) ? rule.value.join(", ") : String(rule.value ?? "");
 }
@@ -168,6 +200,7 @@ function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): S
       if (sortKey === "industry") return row.industry ?? "";
       if (sortKey === "change1d") return row.change1d ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "marketCap") return row.marketCap ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "relativeVolume") return row.relativeVolume ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "price") return row.price ?? Number.NEGATIVE_INFINITY;
       return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
     };
@@ -218,6 +251,25 @@ export function ScansPageDashboard() {
   const [peerTicker, setPeerTicker] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("change1d");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [visibleColumns, setVisibleColumns] = useState<ResultColumnKey[]>(DEFAULT_VISIBLE_COLUMNS);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(RESULTS_COLUMNS_STORAGE_KEY);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as ResultColumnKey[];
+      const normalized = DEFAULT_VISIBLE_COLUMNS.filter((key) => parsed.includes(key));
+      if (normalized.length > 0) setVisibleColumns(normalized);
+    } catch {
+      // Ignore malformed saved column preferences.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(RESULTS_COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumns));
+  }, [visibleColumns]);
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -227,6 +279,10 @@ export function ScansPageDashboard() {
   const sortedRows = useMemo(
     () => sortRows(snapshot?.rows ?? [], sortKey, sortDir),
     [snapshot?.rows, sortDir, sortKey],
+  );
+  const orderedVisibleColumns = useMemo(
+    () => RESULT_COLUMNS.filter((column) => visibleColumns.includes(column.key)),
+    [visibleColumns],
   );
 
   const loadAll = async (preferredPresetId?: string | null) => {
@@ -373,6 +429,44 @@ export function ScansPageDashboard() {
     }
     setSortKey(key);
     setSortDir(key === "ticker" || key === "name" || key === "sector" || key === "industry" ? "asc" : "desc");
+  };
+
+  const toggleColumn = (key: ResultColumnKey) => {
+    setVisibleColumns((current) => {
+      if (current.includes(key)) {
+        if (current.length === 1) return current;
+        return current.filter((column) => column !== key);
+      }
+      return DEFAULT_VISIBLE_COLUMNS.filter((column) => current.includes(column) || column === key);
+    });
+  };
+
+  const renderCell = (row: ScanRow, key: ResultColumnKey) => {
+    if (key === "ticker") {
+      return (
+        <td className="px-3 py-2 font-semibold text-accent">
+          <button
+            className="hover:underline"
+            onClick={(event) => {
+              event.stopPropagation();
+              setPeerTicker(row.ticker);
+            }}
+          >
+            {row.ticker}
+          </button>
+        </td>
+      );
+    }
+    if (key === "name") return <td className="max-w-48 truncate px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>;
+    if (key === "sector") return <td className="px-3 py-2 text-slate-300">{row.sector ?? "-"}</td>;
+    if (key === "industry") return <td className="px-3 py-2 text-slate-300">{row.industry ?? "-"}</td>;
+    if (key === "change1d") {
+      return <td className={`px-3 py-2 ${(row.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.change1d)}</td>;
+    }
+    if (key === "marketCap") return <td className="px-3 py-2 text-slate-300">{formatCompact(row.marketCap)}</td>;
+    if (key === "relativeVolume") return <td className="px-3 py-2 text-slate-300">{formatRatio(row.relativeVolume)}</td>;
+    if (key === "price") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.price)}</td>;
+    return <td className="px-3 py-2 text-slate-300">{formatCompact(row.priceAvgVolume)}</td>;
   };
 
   if (loading) {
@@ -630,24 +724,37 @@ export function ScansPageDashboard() {
           {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
         </div>
 
+        <div className="card p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">Visible Columns</h3>
+              <p className="text-xs text-slate-400">Choose which columns to show in the scan results table.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {RESULT_COLUMNS.map((column) => (
+                <label key={column.key} className="inline-flex items-center gap-2 rounded border border-borderSoft/70 px-2 py-1 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={visibleColumns.includes(column.key)}
+                    onChange={() => toggleColumn(column.key)}
+                    disabled={visibleColumns.length === 1 && visibleColumns.includes(column.key)}
+                  />
+                  {column.label}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-slate-900/60">
                 <tr>
-                  {[
-                    ["ticker", "Ticker"],
-                    ["name", "Company"],
-                    ["sector", "Sector"],
-                    ["industry", "Industry"],
-                    ["change1d", "1D Change %"],
-                    ["marketCap", "Market Cap"],
-                    ["price", "Price"],
-                    ["priceAvgVolume", "Price * Avg Vol"],
-                  ].map(([key, label]) => (
-                    <th key={key} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                      <button className="inline-flex items-center gap-1 text-left hover:text-slate-100" onClick={() => onSort(key as SortKey)}>
-                        {label}
+                  {orderedVisibleColumns.map((column) => (
+                    <th key={column.key} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                      <button className="inline-flex items-center gap-1 text-left hover:text-slate-100" onClick={() => onSort(column.key as SortKey)}>
+                        {column.label}
                       </button>
                     </th>
                   ))}
@@ -660,28 +767,13 @@ export function ScansPageDashboard() {
                   return (
                     <Fragment key={row.ticker}>
                       <tr className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30" onClick={() => onToggleRow(row.ticker)}>
-                        <td className="px-3 py-2 font-semibold text-accent">
-                          <button
-                            className="hover:underline"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setPeerTicker(row.ticker);
-                            }}
-                          >
-                            {row.ticker}
-                          </button>
-                        </td>
-                        <td className="max-w-48 truncate px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>
-                        <td className="px-3 py-2 text-slate-300">{row.sector ?? "-"}</td>
-                        <td className="px-3 py-2 text-slate-300">{row.industry ?? "-"}</td>
-                        <td className={`px-3 py-2 ${(row.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.change1d)}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatCompact(row.marketCap)}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatNumber(row.price)}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatCompact(row.priceAvgVolume)}</td>
+                        {orderedVisibleColumns.map((column) => (
+                          <Fragment key={column.key}>{renderCell(row, column.key)}</Fragment>
+                        ))}
                       </tr>
                       {isOpen && (
                         <tr className="border-t border-borderSoft/60 bg-panel/50">
-                          <td colSpan={8} className="px-3 py-3">
+                          <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-3">
                             <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
                               <div className="rounded border border-borderSoft/70 bg-panelSoft/70 p-3">
                                 <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
@@ -707,7 +799,7 @@ export function ScansPageDashboard() {
                 })}
                 {sortedRows.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-400">
+                    <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-6 text-center text-sm text-slate-400">
                       No scan rows are available yet. Save a preset and run a refresh to populate this table.
                     </td>
                   </tr>

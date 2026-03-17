@@ -47,6 +47,7 @@ describe("scans page service", () => {
         industry: "Software",
         change1d: 4.2,
         marketCap: 3_000_000_000_000,
+        relativeVolume: 1.3,
         price: 420,
         avgVolume: 20_000_000,
       },
@@ -57,6 +58,7 @@ describe("scans page service", () => {
         industry: "Machinery",
         change1d: 8.5,
         marketCap: "1200000000",
+        relativeVolume: "2.75",
         price: "12.5",
         avgVolume: "2500000",
         raw: { source: "tv" },
@@ -76,11 +78,13 @@ describe("scans page service", () => {
       marketCap: 1_200_000_000,
       price: 12.5,
       avgVolume: 2_500_000,
+      relativeVolume: 2.75,
       priceAvgVolume: 31_250_000,
     });
     expect(rows[1]).toMatchObject({
       ticker: "MSFT",
       name: "Microsoft",
+      relativeVolume: 1.3,
       priceAvgVolume: 8_400_000_000,
     });
   });
@@ -105,15 +109,15 @@ describe("scans page service", () => {
         data: [
           {
             s: "NASDAQ:NVDA",
-            d: ["NVIDIA", "Technology", "Semiconductors", 5.7, 2_000_000_000_000, 910, 45_000_000, 40_950_000_000, 60_000_000, "NASDAQ", "stock"],
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.7, 2_000_000_000_000, 1.8, 910, 45_000_000, 40_950_000_000, 60_000_000, "NASDAQ", "stock"],
           },
           {
             s: "NASDAQ:BIOX",
-            d: ["Bio X", "Health Care", "Biotechnology", 2_500_000_000, 6.2, 9.4, 4_000_000, 37_600_000, 8_000_000, "NASDAQ", "stock"],
+            d: ["Bio X", "Health Care", "Biotechnology", 2_500_000_000, 1.1, 6.2, 9.4, 4_000_000, 37_600_000, 8_000_000, "NASDAQ", "stock"],
           },
           {
             s: "OTC:OTCC",
-            d: ["OTC Co", "Technology", "Software", 8.2, 900_000_000, 5.5, 2_000_000, 11_000_000, 3_000_000, "OTC", "stock"],
+            d: ["OTC Co", "Technology", "Software", 8.2, 900_000_000, 0.8, 5.5, 2_000_000, 11_000_000, 3_000_000, "OTC", "stock"],
           },
         ],
       }),
@@ -124,6 +128,7 @@ describe("scans page service", () => {
 
     expect(result.status).toBe("ok");
     expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(result.rows[0]?.relativeVolume).toBe(1.8);
     vi.unstubAllGlobals();
   });
 });

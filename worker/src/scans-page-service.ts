@@ -31,6 +31,7 @@ export type ScanSnapshotRow = {
   industry: string | null;
   change1d: number | null;
   marketCap: number | null;
+  relativeVolume: number | null;
   price: number | null;
   avgVolume: number | null;
   priceAvgVolume: number | null;
@@ -72,6 +73,7 @@ type TradingViewScanRow = {
   industry?: string | null;
   change1d?: number | string | null;
   marketCap?: number | string | null;
+  relativeVolume?: number | string | null;
   price?: number | string | null;
   avgVolume?: number | string | null;
   priceAvgVolume?: number | string | null;
@@ -98,6 +100,8 @@ const FIELD_ALIASES: Record<string, string> = {
   change1d: "change",
   marketCap: "market_cap_basic",
   market_cap: "market_cap_basic",
+  relative_volume: "relative_volume_10d_calc",
+  relativeVolume: "relative_volume_10d_calc",
   price: "close",
   close: "close",
   avgVolume: "average_volume_30d_calc",
@@ -233,6 +237,7 @@ function rowValueForField(row: TradingViewScanRow, field: string): unknown {
   if (normalized === "industry") return row.industry;
   if (normalized === "change") return row.change1d;
   if (normalized === "market_cap_basic") return row.marketCap;
+  if (normalized === "relative_volume_10d_calc") return row.relativeVolume;
   if (normalized === "close") return row.price;
   if (normalized === "average_volume_30d_calc") return row.avgVolume;
   if (normalized === "Value.Traded") return row.priceAvgVolume;
@@ -261,6 +266,7 @@ function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
     industry: typeof row.industry === "string" && row.industry.trim() ? row.industry.trim() : null,
     change1d: asFiniteNumber(row.change1d),
     marketCap: asFiniteNumber(row.marketCap),
+    relativeVolume: asFiniteNumber(row.relativeVolume),
     price,
     avgVolume,
     priceAvgVolume,
@@ -427,6 +433,7 @@ function buildTradingViewScanPayload(preset: ScanPreset): TradingViewScanPayload
     "industry",
     "change",
     "market_cap_basic",
+    "relative_volume_10d_calc",
     "close",
     "average_volume_30d_calc",
     "Value.Traded",
@@ -474,6 +481,7 @@ function mapTradingViewResponse(payload: TradingViewScanPayload, body: {
       industry: typeof raw.industry === "string" ? raw.industry : null,
       change1d: raw.change,
       marketCap: raw.market_cap_basic,
+      relativeVolume: raw.relative_volume_10d_calc,
       price: raw.close,
       avgVolume: raw.average_volume_30d_calc,
       priceAvgVolume: raw["Value.Traded"],
@@ -600,6 +608,17 @@ export async function loadLatestScansSnapshot(env: Env, presetId?: string | null
   )
     .bind(snapshot.id)
     .all<ScanSnapshotRow>();
+  const normalizedRows = (rows.results ?? []).map((row) => {
+    let relativeVolume: number | null = null;
+    try {
+      const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+      const candidate = raw?.relative_volume_10d_calc ?? raw?.relative_volume;
+      relativeVolume = asFiniteNumber(candidate);
+    } catch {
+      relativeVolume = null;
+    }
+    return { ...row, relativeVolume };
+  });
   return {
     id: snapshot.id,
     presetId: preset.id,
@@ -609,7 +628,7 @@ export async function loadLatestScansSnapshot(env: Env, presetId?: string | null
     rowCount: snapshot.rowCount,
     status: snapshot.status,
     error: snapshot.error,
-    rows: rows.results ?? [],
+    rows: normalizedRows,
   };
 }
 

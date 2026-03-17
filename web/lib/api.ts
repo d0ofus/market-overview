@@ -133,6 +133,7 @@ export type ScanRow = {
   industry: string | null;
   change1d: number | null;
   marketCap: number | null;
+  relativeVolume: number | null;
   price: number | null;
   avgVolume: number | null;
   priceAvgVolume: number | null;
