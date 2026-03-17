@@ -11,3 +11,6 @@ npx wrangler d1 execute market_command --remote --command "SELECT ticker, date, 
 # Redeploy worker
 Set-Location "c:\Users\ErvinLieu\Documents\Projects\market-overview\worker"
 npx wrangler deploy
+
+# TradingView Screener Python Library Documentation
+https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html
