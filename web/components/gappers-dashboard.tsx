@@ -2,7 +2,16 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { getGappersWithConfig, type GapperRow, type GappersLlmConfig, type GappersScanFilters, type GappersSnapshot, type LlmProvider } from "@/lib/api";
+import {
+  getGappersWithConfig,
+  getTickerNews,
+  type AlertNewsRow,
+  type GapperRow,
+  type GappersLlmConfig,
+  type GappersScanFilters,
+  type GappersSnapshot,
+  type LlmProvider,
+} from "@/lib/api";
 import { TradingViewWidget } from "./tradingview-widget";
 
 type SortKey =
@@ -175,6 +184,8 @@ export function GappersDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
+  const [newsByTicker, setNewsByTicker] = useState<Record<string, AlertNewsRow[]>>({});
+  const [newsLoadingTicker, setNewsLoadingTicker] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("gapPct");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [draftConfig, setDraftConfig] = useState<DraftLlmConfig>(() => readStoredConfig());
@@ -299,6 +310,27 @@ export function GappersDashboard() {
       setLoading(false);
       setRefreshing(false);
     }
+  };
+
+  const loadTickerNews = async (ticker: string) => {
+    if (newsByTicker[ticker]) return;
+    setNewsLoadingTicker(ticker);
+    try {
+      const payload = await getTickerNews(ticker, null, 5);
+      setNewsByTicker((current) => ({ ...current, [ticker]: payload.rows ?? [] }));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load ticker news.");
+    } finally {
+      setNewsLoadingTicker((current) => (current === ticker ? null : current));
+    }
+  };
+
+  const toggleExpandedTicker = (ticker: string) => {
+    setExpandedTicker((current) => {
+      const next = current === ticker ? null : ticker;
+      if (next) void loadTickerNews(next);
+      return next;
+    });
   };
 
   if (loading && !snapshot) {
@@ -501,11 +533,12 @@ export function GappersDashboard() {
             <tbody>
               {sortedRows.map((row) => {
                 const isOpen = expandedTicker === row.ticker;
+                const news = newsByTicker[row.ticker] ?? [];
                 return (
                   <Fragment key={row.ticker}>
                     <tr
                       className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
-                      onClick={() => setExpandedTicker((current) => (current === row.ticker ? null : row.ticker))}
+                      onClick={() => toggleExpandedTicker(row.ticker)}
                     >
                       <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
                       <td className="max-w-48 truncate px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>
@@ -527,7 +560,13 @@ export function GappersDashboard() {
                               <div className={DETAIL_PANEL_CLASS}>
                                 <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
                                 <div className="space-y-2">
-                                  {row.news.map((item, idx) => (
+                                  {newsLoadingTicker === row.ticker ? (
+                                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                      Loading news...
+                                    </div>
+                                  ) : null}
+                                  {news.map((item, idx) => (
                                     <article key={`${row.ticker}-${idx}`} className="rounded border border-borderSoft/60 bg-panel/70 p-2">
                                       <a href={item.url} target="_blank" rel="noreferrer" className="text-sm font-medium text-accent hover:underline">
                                         {item.headline}
@@ -535,10 +574,10 @@ export function GappersDashboard() {
                                       <div className="mt-1 text-[11px] text-slate-400">
                                         {item.source} {item.publishedAt ? `• ${fmtDateTime(item.publishedAt)}` : ""}
                                       </div>
-                                      <div className="mt-1 text-xs text-slate-300">{item.snippet ?? "No summary available."}</div>
+                                      {item.snippet ? <div className="mt-1 text-xs text-slate-300">{item.snippet}</div> : null}
                                     </article>
                                   ))}
-                                  {row.news.length === 0 && <p className="text-xs text-slate-400">No ranked news items were found for this ticker.</p>}
+                                  {newsLoadingTicker !== row.ticker && news.length === 0 && <p className="text-xs text-slate-400">No news found for this ticker.</p>}
                                 </div>
                               </div>
                               <div className={DETAIL_PANEL_CLASS}>
