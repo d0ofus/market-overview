@@ -86,6 +86,14 @@ export function AdminBuilder() {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [itemDisplayNames, setItemDisplayNames] = useState<Record<string, string>>({});
   const [itemDisplayNameStatus, setItemDisplayNameStatus] = useState<Record<string, string | null>>({});
+  const [confirmationNote, setConfirmationNote] = useState<string | null>(null);
+
+  const showConfirmationNote = (message: string, timeoutMs = 3000) => {
+    setConfirmationNote(message);
+    setTimeout(() => {
+      setConfirmationNote((current) => current === message ? null : current);
+    }, timeoutMs);
+  };
 
   const load = async () => {
     setIsLoading(true);
@@ -135,6 +143,7 @@ export function AdminBuilder() {
   const patchGroup = async (groupId: string, patch: any) => {
     await adminFetch("/api/admin/group/" + groupId, { method: "PATCH", body: JSON.stringify(patch) });
     await load();
+    showConfirmationNote("Configuration updated.");
   };
 
   const addTicker = async (groupId: string) => {
@@ -168,6 +177,7 @@ export function AdminBuilder() {
   const removeItem = async (itemId: string) => {
     await adminFetch("/api/admin/item/" + itemId, { method: "DELETE" });
     await load();
+    showConfirmationNote("Configuration updated.");
   };
   const updateItemDisplayName = async (itemId: string) => {
     try {
@@ -178,6 +188,7 @@ export function AdminBuilder() {
       });
       setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved." }));
       await load();
+      showConfirmationNote("Configuration updated.");
     } catch (error) {
       setItemDisplayNameStatus((current) => ({
         ...current,
@@ -194,6 +205,7 @@ export function AdminBuilder() {
     await adminFetch("/api/admin/section", { method: "POST", body: JSON.stringify({ title: newSectionTitle.trim() }) });
     setNewSectionTitle("");
     await load();
+    showConfirmationNote("Configuration updated.");
   };
   const addGroup = async (sectionId: string) => {
     const title = (newGroupTitle[sectionId] ?? "").trim();
@@ -201,6 +213,7 @@ export function AdminBuilder() {
     await adminFetch("/api/admin/section/" + sectionId + "/group", { method: "POST", body: JSON.stringify({ title }) });
     setNewGroupTitle((s) => ({ ...s, [sectionId]: "" }));
     await load();
+    showConfirmationNote("Configuration updated.");
   };
 
   const saveRefreshConfig = async () => {
@@ -220,6 +233,7 @@ export function AdminBuilder() {
       setRefreshConfig((s) => ({ ...s, eodRunTimeLabel: nextLabel }));
       setRefreshConfigMsg("Saved refresh schedule.");
       await load();
+      showConfirmationNote("Configuration updated.");
     } catch (err) {
       setRefreshConfigMsg(err instanceof Error ? err.message : "Failed to save refresh schedule.");
     } finally {
@@ -345,6 +359,7 @@ export function AdminBuilder() {
   const deleteEtf = async (listType: "sector" | "industry", ticker: string) => {
     await adminFetch(`/api/admin/etfs/${listType}/${ticker}`, { method: "DELETE" });
     await load();
+    showConfirmationNote("Configuration updated.");
   };
 
   const industryCategoryGroups = useMemo(() => {
@@ -379,6 +394,7 @@ export function AdminBuilder() {
       }),
     });
     await load();
+    showConfirmationNote("Configuration updated.");
   };
 
   const toggleSection = (sectionId: string) => {
@@ -403,6 +419,11 @@ export function AdminBuilder() {
 
   return (
     <div className="space-y-4">
+      {confirmationNote && (
+        <div className="card border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-200">
+          {confirmationNote}
+        </div>
+      )}
       <div className="card p-3">
         <h3 className="mb-2 text-base font-semibold">Daily Price Refresh Schedule</h3>
         <p className="mb-3 text-xs text-slate-400">
@@ -511,6 +532,7 @@ export function AdminBuilder() {
                     body: JSON.stringify({ sourceUrl: diagSourceUrl.trim() || null }),
                   });
                   setDiagMsg(`Saved source URL override for ${ticker}.`);
+                  showConfirmationNote("Configuration updated.");
                   await runEtfDiagnostics(false);
                 } catch (err) {
                   setDiagError(err instanceof Error ? err.message : "Failed to save ETF source URL.");
@@ -530,6 +552,7 @@ export function AdminBuilder() {
                     method: "PATCH",
                     body: JSON.stringify({ sourceUrl: diagSourceUrl.trim() || null }),
                   });
+                  showConfirmationNote("Configuration updated.");
                   await runEtfDiagnostics(true);
                 } catch (err) {
                   setDiagError(err instanceof Error ? err.message : "Failed to save ETF source URL.");
@@ -637,6 +660,7 @@ export function AdminBuilder() {
                   });
                   setSectorEtfForm({ ticker: "", fundName: "", parentSectorSelect: "", parentSectorNew: "" });
                   await load();
+                  showConfirmationNote("Configuration updated.");
                 } catch (err) {
                   setEtfError(err instanceof Error ? err.message : "Failed to add sector ETF.");
                 }
@@ -694,6 +718,7 @@ export function AdminBuilder() {
                     industryNew: "",
                   });
                   await load();
+                  showConfirmationNote("Configuration updated.");
                 } catch (err) {
                   setEtfError(err instanceof Error ? err.message : "Failed to add industry ETF.");
                 }
