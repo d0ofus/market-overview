@@ -186,7 +186,7 @@ export function AdminBuilder() {
         method: "PATCH",
         body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
       });
-      setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved." }));
+      setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
       await load();
       showConfirmationNote("Name saved to the database.");
     } catch (error) {
@@ -197,7 +197,7 @@ export function AdminBuilder() {
     } finally {
       setTimeout(() => {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
-      }, 3000);
+      }, 6000);
     }
   };
   const addSection = async () => {
@@ -420,7 +420,11 @@ export function AdminBuilder() {
   return (
     <div className="space-y-4">
       {confirmationNote && (
-        <div className="fixed right-4 top-4 z-50 max-w-sm rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-100 shadow-xl backdrop-blur">
+        <div
+          className="fixed bottom-4 right-4 z-[100] max-w-sm rounded-lg border border-emerald-400 bg-emerald-600 px-4 py-3 text-sm font-medium text-white shadow-2xl"
+          role="status"
+          aria-live="polite"
+        >
           {confirmationNote}
         </div>
       )}
@@ -1024,7 +1028,7 @@ export function AdminBuilder() {
                         Save Name
                       </button>
                       {itemDisplayNameStatus[item.id] ? (
-                        <span className={`text-[11px] ${itemDisplayNameStatus[item.id] === "Saved." ? "text-emerald-300" : "text-red-300"}`}>
+                        <span className={`rounded px-2 py-1 text-[11px] font-medium ${itemDisplayNameStatus[item.id] === "Saved to database." ? "bg-emerald-500/20 text-emerald-200" : "bg-red-500/15 text-red-300"}`}>
                           {itemDisplayNameStatus[item.id]}
                         </span>
                       ) : null}
