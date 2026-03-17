@@ -41,21 +41,22 @@ const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "not_in", label: "not in" },
 ];
 
-const FIELD_OPTIONS: Array<{ value: string; displayName: string }> = [
-  { value: "close", displayName: "Price" },
-  { value: "change", displayName: "Change %" },
-  { value: "market_cap_basic", displayName: "Market Capitalization" },
-  { value: "type", displayName: "Symbol Type" },
-  { value: "exchange", displayName: "Exchange" },
-  { value: "volume", displayName: "Volume" },
-  { value: "Value.Traded", displayName: "Volume*Price" },
-  { value: "industry", displayName: "Industry" },
-  { value: "ADR", displayName: "Average Day Range (14)" },
+const FIELD_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "close", label: "Price" },
+  { value: "change", label: "Change %" },
+  { value: "market_cap_basic", label: "Market Capitalization" },
+  { value: "type", label: "Symbol Type" },
+  { value: "exchange", label: "Exchange" },
+  { value: "volume", label: "Volume" },
+  { value: "Value.Traded", label: "Volume*Price" },
+  { value: "industry", label: "Industry" },
+  { value: "ADR", label: "Average Day Range (14)" },
+  { value: "relative_volume", label: "Relative Volume" },
 ];
 
 const CUSTOM_FIELD_OPTION = "__custom__";
 
-const FIELD_DISPLAY_NAMES: Record<string, string> = {
+const FIELD_LABELS: Record<string, string> = {
   close: "Price",
   change: "Change %",
   market_cap_basic: "Market Capitalization",
@@ -70,6 +71,7 @@ const FIELD_DISPLAY_NAMES: Record<string, string> = {
   ADR: "Average Day Range (14)",
   average_day_range_14: "Average Day Range (14)",
   averageDayRange14: "Average Day Range (14)",
+  relative_volume: "Relative Volume",
 };
 
 const emptyDraftRule = (): ScanRule => ({
@@ -139,9 +141,17 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
   };
 }
 
-function getFieldDisplayName(field: string): string {
+function humanizeFieldName(field: string): string {
+  return field
+    .replace(/[._]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getFieldLabel(field: string): string {
   const trimmed = field.trim();
-  return FIELD_DISPLAY_NAMES[trimmed] ?? trimmed;
+  return FIELD_LABELS[trimmed] ?? humanizeFieldName(trimmed || "Custom field");
 }
 
 function isSuggestedField(field: string): boolean {
@@ -525,17 +535,20 @@ export function ScansPageDashboard() {
                         }))}
                       >
                         {FIELD_OPTIONS.map((field) => (
-                          <option key={field.value} value={field.value}>{field.displayName} ({field.value})</option>
+                          <option key={field.value} value={field.value}>{field.label}</option>
                         ))}
                         <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
                       </select>
                     </label>
                     <label className="block">
-                      Display Name
+                      <span className="sr-only">Field ID</span>
                       <input
                         className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
-                        value={getFieldDisplayName(rule.field)}
-                        readOnly
+                        value={rule.field}
+                        onChange={(event) => setDraftPreset((current) => ({
+                          ...current,
+                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
+                        }))}
                       />
                     </label>
                     <label className="block">
@@ -554,20 +567,6 @@ export function ScansPageDashboard() {
                       </select>
                     </label>
                   </div>
-                  {!isSuggestedField(rule.field) ? (
-                    <label className="mb-2 block">
-                      Field Name
-                      <input
-                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                        value={rule.field}
-                        onChange={(event) => setDraftPreset((current) => ({
-                          ...current,
-                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
-                        }))}
-                        placeholder="Enter TradingView field name"
-                      />
-                    </label>
-                  ) : null}
                   <label className="block">
                     Value
                     <input
@@ -594,7 +593,7 @@ export function ScansPageDashboard() {
                   </div>
                   {index === 0 ? (
                     <p className="mt-2 text-[11px] text-slate-500">
-                      Suggestions: {FIELD_OPTIONS.map((field) => `${field.displayName} (${field.value})`).join(", ")}
+                      Suggestions: {FIELD_OPTIONS.map((field) => `${field.label} (${field.value})`).join(", ")}
                     </p>
                   ) : null}
                 </div>
