@@ -88,6 +88,38 @@ describe("alerts news orchestration", () => {
     expect(rows[0]?.snippet).toBeNull();
   });
 
+  it("returns deduped news newest first by default", () => {
+    const rows = rankAndDedupeNews(
+      "AAPL",
+      "2026-03-02",
+      "Apple Inc",
+      [
+        {
+          provider: "finnhub",
+          headline: "Apple announces services event and raises guidance",
+          source: "Reuters",
+          url: "https://example.com/apple-old",
+          publishedAt: "2026-03-02T10:00:00Z",
+          snippet: "Apple Inc said demand improved and management raised guidance for services revenue.",
+        },
+        {
+          provider: "google-news-rss",
+          headline: "Apple supplier update points to stronger iPhone shipments",
+          source: "MarketWatch",
+          url: "https://example.com/apple-new",
+          publishedAt: "2026-03-02T15:30:00Z",
+          snippet: "Apple Inc and its suppliers are seeing stronger iPhone demand according to the latest channel checks.",
+        },
+      ],
+      5,
+      "2026-03-02T16:00:00Z",
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.url).toBe("https://example.com/apple-new");
+    expect(rows[1]?.url).toBe("https://example.com/apple-old");
+  });
+
   it("scores exact company-specific news above generic market stories", () => {
     const specific = scoreNewsCandidate(
       { ticker: "AAPL", companyName: "Apple Inc" },

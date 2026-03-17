@@ -211,6 +211,11 @@ function titleSimilarity(a: string, b: string): number {
   return overlap / Math.max(left.size, right.size);
 }
 
+function newsTimestampValue(publishedAt: string | null | undefined, fetchedAt: string | null | undefined): number {
+  const timestamp = Date.parse(publishedAt ?? fetchedAt ?? "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
 function sourceQuality(provider: string): number {
   switch (provider) {
     case "sec-edgar":
@@ -340,7 +345,16 @@ export function rankAndDedupeNews(
     if (replace) deduped[existingIndex] = row;
   }
 
-  return deduped.slice(0, maxItems).map((row) => ({
+  return deduped
+    .sort((a, b) => {
+      const timeComparison = newsTimestampValue(b.publishedAt, b.fetchedAt) - newsTimestampValue(a.publishedAt, a.fetchedAt);
+      if (timeComparison !== 0) return timeComparison;
+      if (b.relevanceScore !== a.relevanceScore) return b.relevanceScore - a.relevanceScore;
+      if (b.providerPriority !== a.providerPriority) return b.providerPriority - a.providerPriority;
+      return a.headline.localeCompare(b.headline);
+    })
+    .slice(0, maxItems)
+    .map((row) => ({
     ticker: row.ticker,
     tradingDay: row.tradingDay,
     headline: row.headline,
