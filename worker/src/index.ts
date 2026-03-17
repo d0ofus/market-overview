@@ -1866,11 +1866,14 @@ app.get("/api/peer-groups/ticker/:ticker", async (c) => {
 app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
   const detail = await loadPeerTickerDetail(c.env, c.req.param("ticker"));
   if (!detail) return c.json({ error: "Ticker not found." }, 404);
-  const tickers = Array.from(new Set([
-    detail.symbol.ticker,
-    ...detail.groups.flatMap((group) => group.members.map((member) => member.ticker)),
-  ]));
-  const metrics = await loadPeerMetrics(c.env, tickers);
+  const inputs = Array.from(new Map([
+    [detail.symbol.ticker, { ticker: detail.symbol.ticker, exchange: detail.symbol.exchange ?? null }],
+    ...detail.groups.flatMap((group) => group.members.map((member) => [
+      member.ticker,
+      { ticker: member.ticker, exchange: member.exchange ?? null },
+    ] as const)),
+  ]).values());
+  const metrics = await loadPeerMetrics(c.env, inputs);
   return c.json({
     ticker: detail.symbol.ticker,
     rows: metrics.rows,

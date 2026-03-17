@@ -1,9 +1,11 @@
-import { getProvider } from "./provider";
 import { hasSharesOutstandingColumn } from "./peer-groups-service";
 import type { Env } from "./types";
 
+const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
+const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
+const REQUEST_CHUNK_SIZE = 100;
 const SHARE_QUERY_CHUNK_SIZE = 50;
-const YAHOO_QUOTE_CHUNK_SIZE = 50;
+const COMMON_TV_PREFIXES = ["NASDAQ", "NYSE", "AMEX"] as const;
 
 export type PeerMetricRow = {
   ticker: string;
@@ -15,16 +17,21 @@ export type PeerMetricRow = {
   source: string;
 };
 
+export type PeerMetricInput = {
+  ticker: string;
+  exchange: string | null;
+};
+
+type TradingViewResponseRow = {
+  s?: string;
+  d?: unknown[];
+};
+
 type QuoteFundamentals = {
   marketCap: number | null;
   avgVolume: number | null;
   source: "yahoo-quote" | "fmp-quote";
 };
-
-function mean(values: number[]): number | null {
-  if (values.length === 0) return null;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -32,6 +39,76 @@ function chunk<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function mean(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function normalizeTicker(value: string | null | undefined): string | null {
+  const text = String(value ?? "").trim().toUpperCase();
+  if (!text) return null;
+  const candidate = text.includes(":") ? text.split(":").pop() ?? text : text;
+  return /^[A-Z0-9.\-^]{1,20}$/.test(candidate) ? candidate : null;
+}
+
+function normalizeExchangePrefix(exchange: string | null | undefined): string | null {
+  const normalized = String(exchange ?? "").trim().toUpperCase();
+  if (!normalized) return null;
+  if (normalized.includes("NASDAQ")) return "NASDAQ";
+  if (
+    normalized === "NYSE"
+    || normalized.includes("NEW YORK STOCK EXCHANGE")
+  ) return "NYSE";
+  if (
+    normalized === "AMEX"
+    || normalized.includes("NYSE AMERICAN")
+    || normalized.includes("NYSE MKT")
+    || normalized.includes("ARCA")
+  ) return "AMEX";
+  return null;
+}
+
+function buildTradingViewTickers(input: PeerMetricInput): string[] {
+  const ticker = normalizeTicker(input.ticker);
+  if (!ticker) return [];
+  const preferredPrefix = normalizeExchangePrefix(input.exchange);
+  const orderedPrefixes = preferredPrefix
+    ? [preferredPrefix, ...COMMON_TV_PREFIXES.filter((prefix) => prefix !== preferredPrefix)]
+    : [...COMMON_TV_PREFIXES];
+  return orderedPrefixes.map((prefix) => `${prefix}:${ticker}`);
+}
+
+function mapTradingViewRows(
+  rows: TradingViewResponseRow[] | null | undefined,
+  asOf: string,
+): Map<string, PeerMetricRow> {
+  const result = new Map<string, PeerMetricRow>();
+  for (const row of rows ?? []) {
+    const ticker = normalizeTicker(row.s);
+    if (!ticker || result.has(ticker)) continue;
+    const data = Array.isArray(row.d) ? row.d : [];
+    result.set(ticker, {
+      ticker,
+      price: asFiniteNumber(data[0]),
+      change1d: asFiniteNumber(data[1]),
+      marketCap: asFiniteNumber(data[2]),
+      avgVolume: asFiniteNumber(data[3]),
+      asOf,
+      source: TV_PROVIDER_LABEL,
+    });
+  }
+  return result;
 }
 
 export function buildPeerMetricRows(
@@ -45,7 +122,7 @@ export function buildPeerMetricRows(
   const barsByTicker = new Map<string, number[]>();
   const closesByTicker = new Map<string, number[]>();
   for (const row of recentBars) {
-    const ticker = row.ticker.toUpperCase();
+    const ticker = String(row.ticker ?? "").trim().toUpperCase();
     const current = barsByTicker.get(ticker) ?? [];
     current.push(Number(row.volume ?? 0));
     barsByTicker.set(ticker, current);
@@ -55,7 +132,8 @@ export function buildPeerMetricRows(
     closesByTicker.set(ticker, closes);
   }
 
-  return tickers.map((ticker) => {
+  return tickers.map((tickerInput) => {
+    const ticker = String(tickerInput ?? "").trim().toUpperCase();
     const latestSnapshot = snapshotRows[ticker];
     const quoteFundamentals = quoteFundamentalsByTicker.get(ticker);
     const closes = (closesByTicker.get(ticker) ?? []).filter((value) => Number.isFinite(value) && value > 0);
@@ -87,7 +165,7 @@ export function buildPeerMetricRows(
     const avgVolume = quoteFundamentals?.avgVolume ?? avgVolumeFromBars;
     const sourceParts = ["alpaca"];
     if (typeof quoteFundamentals?.marketCap === "number" || typeof quoteFundamentals?.avgVolume === "number") {
-      sourceParts.push(quoteFundamentals?.source ?? "fmp-quote");
+      sourceParts.push(quoteFundamentals.source);
     } else if (marketCapFromShares != null) {
       sourceParts.push("seeded-shares");
     }
@@ -101,115 +179,6 @@ export function buildPeerMetricRows(
       source: sourceParts.join("+"),
     };
   });
-}
-
-function parseNullableNumber(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return value;
-}
-
-function mergeQuoteFundamentals(
-  primary: Map<string, QuoteFundamentals>,
-  secondary: Map<string, QuoteFundamentals>,
-): Map<string, QuoteFundamentals> {
-  const merged = new Map<string, QuoteFundamentals>();
-  const tickers = new Set([...primary.keys(), ...secondary.keys()]);
-  for (const ticker of tickers) {
-    const primaryRow = primary.get(ticker);
-    const secondaryRow = secondary.get(ticker);
-    merged.set(ticker, {
-      marketCap: primaryRow?.marketCap ?? secondaryRow?.marketCap ?? null,
-      avgVolume: primaryRow?.avgVolume ?? secondaryRow?.avgVolume ?? null,
-      source: primaryRow?.source ?? secondaryRow?.source ?? "fmp-quote",
-    });
-  }
-  return merged;
-}
-
-export async function loadYahooQuoteFundamentals(tickersInput: string[]): Promise<Map<string, QuoteFundamentals>> {
-  const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
-  if (tickers.length === 0) return new Map();
-
-  const rows = await Promise.all(
-    chunk(tickers, YAHOO_QUOTE_CHUNK_SIZE).map(async (tickerChunk) => {
-      const params = new URLSearchParams({
-        symbols: tickerChunk.join(","),
-      });
-      const response = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?${params.toString()}`, {
-        headers: {
-          "User-Agent": "market-command-centre/1.0",
-        },
-      });
-      if (!response.ok) {
-        throw new Error(`Yahoo quote fetch failed (${response.status})`);
-      }
-      const json = await response.json() as {
-        quoteResponse?: {
-          result?: Array<{
-            symbol?: string;
-            marketCap?: number | null;
-            averageDailyVolume3Month?: number | null;
-          }>;
-        };
-      };
-      return json.quoteResponse?.result ?? [];
-    }),
-  );
-
-  return new Map(
-    rows
-      .flat()
-      .map((row) => {
-        const ticker = String(row.symbol ?? "").trim().toUpperCase();
-        if (!ticker) return null;
-        const marketCap = parseNullableNumber(row.marketCap);
-        const avgVolume = parseNullableNumber(row.averageDailyVolume3Month);
-        return [ticker, { marketCap, avgVolume, source: "yahoo-quote" }] as const;
-      })
-      .filter((row): row is readonly [string, QuoteFundamentals] => row !== null),
-  );
-}
-
-export async function loadFmpQuoteFundamentals(env: Env, tickersInput: string[]): Promise<Map<string, QuoteFundamentals>> {
-  if (!env.FMP_API_KEY) return new Map();
-  const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
-  if (tickers.length === 0) return new Map();
-
-  const rows = await Promise.all(
-    chunk(tickers, YAHOO_QUOTE_CHUNK_SIZE).map(async (tickerChunk) => {
-      const urls = [
-        `https://financialmodelingprep.com/stable/quote?symbol=${encodeURIComponent(tickerChunk.join(","))}&apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
-        `https://financialmodelingprep.com/api/v3/quote/${encodeURIComponent(tickerChunk.join(","))}?apikey=${encodeURIComponent(env.FMP_API_KEY!)}`,
-      ];
-      for (const url of urls) {
-        const response = await fetch(url, {
-          headers: {
-            "User-Agent": "market-command-centre/1.0",
-          },
-        });
-        if (!response.ok) continue;
-        const json = await response.json() as unknown;
-        if (Array.isArray(json) && json.length > 0) return json;
-      }
-      throw new Error("FMP quote fetch failed.");
-    }),
-  );
-
-  return new Map(
-    rows
-      .flat()
-      .map((row) => {
-        const item = row as Record<string, unknown>;
-        const ticker = String(item.symbol ?? "").trim().toUpperCase();
-        if (!ticker) return null;
-        return [ticker, {
-          marketCap: parseNullableNumber(item.marketCap ?? item.mktCap),
-          avgVolume: parseNullableNumber(item.avgVolume ?? item.volumeAverage ?? item.volAvg ?? item.averageVolume),
-          source: "fmp-quote",
-        }] as const;
-      })
-      .filter((row): row is readonly [string, QuoteFundamentals] => row !== null),
-  );
 }
 
 export async function loadSharesOutstandingMap(env: Env, tickers: string[]): Promise<Map<string, number | null>> {
@@ -235,48 +204,97 @@ export async function loadSharesOutstandingMap(env: Env, tickers: string[]): Pro
   );
 }
 
-export async function loadPeerMetrics(env: Env, tickersInput: string[]): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
-  const tickers = Array.from(new Set(tickersInput.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
-  if (tickers.length === 0) return { rows: [], error: null };
+async function fetchTradingViewPeerMetricMap(inputs: PeerMetricInput[], asOf: string): Promise<Map<string, PeerMetricRow>> {
+  const requestedSymbols = Array.from(new Set(inputs.flatMap(buildTradingViewTickers)));
+  if (requestedSymbols.length === 0) return new Map();
+
+  const chunks = chunk(requestedSymbols, REQUEST_CHUNK_SIZE);
+  const maps = await Promise.all(chunks.map(async (symbolChunk) => {
+    const payload = {
+      markets: ["america"],
+      symbols: {
+        query: { types: [] },
+        tickers: symbolChunk,
+      },
+      options: { lang: "en" },
+      columns: ["close", "change", "market_cap_basic", "average_volume_30d_calc"],
+      sort: { sortBy: "change", sortOrder: "desc" as const },
+      range: [0, symbolChunk.length],
+    };
+    const response = await fetch(TV_SCAN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "market-command-centre/1.0",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`TradingView peer metrics request failed (${response.status}): ${body.slice(0, 180)}`);
+    }
+    const body = await response.json() as { data?: TradingViewResponseRow[] };
+    return mapTradingViewRows(body.data, asOf);
+  }));
+
+  const merged = new Map<string, PeerMetricRow>();
+  for (const map of maps) {
+    for (const [ticker, row] of map.entries()) {
+      if (!merged.has(ticker)) merged.set(ticker, row);
+    }
+  }
+  return merged;
+}
+
+export async function loadPeerMetrics(
+  _env: Env,
+  inputs: PeerMetricInput[],
+): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
+  const dedupedInputs = Array.from(
+    new Map(
+      inputs
+        .map((input) => {
+          const ticker = normalizeTicker(input.ticker);
+          if (!ticker) return null;
+          return [ticker, { ticker, exchange: input.exchange ?? null }] as const;
+        })
+        .filter((entry): entry is readonly [string, PeerMetricInput] => Boolean(entry)),
+    ).values(),
+  );
+  if (dedupedInputs.length === 0) return { rows: [], error: null };
 
   const asOf = new Date().toISOString();
-  const errorMessages: string[] = [];
-  let snapshotRows: Record<string, { price: number; prevClose: number }> = {};
-  let recentBars: Array<{ ticker: string; date: string; c: number; volume: number }> = [];
-  let sharesByTicker = new Map<string, number | null>();
-  let quoteFundamentalsByTicker = new Map<string, QuoteFundamentals>();
-
   try {
-    const provider = getProvider(env);
-    const end = asOf.slice(0, 10);
-    const start = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
-    const [snapshots, bars] = await Promise.all([
-      provider.getQuoteSnapshot ? provider.getQuoteSnapshot(tickers) : Promise.resolve({}),
-      provider.getDailyBars(tickers, start, end),
-    ]);
-    snapshotRows = snapshots;
-    recentBars = bars.map((row) => ({ ...row, ticker: row.ticker.toUpperCase(), volume: Number(row.volume ?? 0) }));
+    const rowsByTicker = await fetchTradingViewPeerMetricMap(dedupedInputs, asOf);
+    const rows = dedupedInputs.map(({ ticker }) => rowsByTicker.get(ticker) ?? {
+      ticker,
+      price: null,
+      change1d: null,
+      marketCap: null,
+      avgVolume: null,
+      asOf,
+      source: TV_PROVIDER_LABEL,
+    });
+    const missingTickers = rows.filter((row) => row.price == null && row.change1d == null && row.marketCap == null && row.avgVolume == null);
+    return {
+      rows,
+      error: missingTickers.length > 0
+        ? `TradingView did not return live metrics for ${missingTickers.length} ticker${missingTickers.length === 1 ? "" : "s"}.`
+        : null,
+    };
   } catch (error) {
-    errorMessages.push(error instanceof Error ? error.message : "Failed to load Alpaca metrics.");
+    const message = error instanceof Error ? error.message : "Failed to load TradingView peer metrics.";
+    return {
+      rows: dedupedInputs.map(({ ticker }) => ({
+        ticker,
+        price: null,
+        change1d: null,
+        marketCap: null,
+        avgVolume: null,
+        asOf,
+        source: TV_PROVIDER_LABEL,
+      })),
+      error: message,
+    };
   }
-
-  try {
-    sharesByTicker = await loadSharesOutstandingMap(env, tickers);
-  } catch (error) {
-    errorMessages.push(error instanceof Error ? error.message : "Failed to load seeded share counts.");
-  }
-
-  try {
-    quoteFundamentalsByTicker = await loadYahooQuoteFundamentals(tickers);
-  } catch {}
-
-  try {
-    const fmpFundamentalsByTicker = await loadFmpQuoteFundamentals(env, tickers);
-    quoteFundamentalsByTicker = mergeQuoteFundamentals(quoteFundamentalsByTicker, fmpFundamentalsByTicker);
-  } catch {}
-
-  return {
-    rows: buildPeerMetricRows(tickers, asOf, snapshotRows, recentBars, sharesByTicker, quoteFundamentalsByTicker),
-    error: errorMessages.length > 0 ? errorMessages.join(" | ") : null,
-  };
 }
