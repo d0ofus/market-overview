@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { ZodError } from "zod";
 import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
 import type { Env } from "./types";
 import {
@@ -1977,9 +1978,16 @@ app.post("/api/admin/scans/refresh", async (c) => {
 
 app.post("/api/admin/scans/presets", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const payload = scanPresetCreateSchema.parse(await c.req.json());
-  const preset = await upsertScanPreset(c.env, payload);
-  return c.json({ ok: true, preset });
+  try {
+    const payload = scanPresetCreateSchema.parse(await c.req.json());
+    const preset = await upsertScanPreset(c.env, payload);
+    return c.json({ ok: true, preset });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid scan preset payload." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to save scan preset." }, 500);
+  }
 });
 
 app.patch("/api/admin/scans/presets/:presetId", async (c) => {
@@ -1987,18 +1995,25 @@ app.patch("/api/admin/scans/presets/:presetId", async (c) => {
   const presetId = c.req.param("presetId");
   const existing = await loadScanPreset(c.env, presetId);
   if (!existing) return c.json({ error: "Scan preset not found." }, 404);
-  const payload = scanPresetPatchSchema.parse(await c.req.json());
-  const preset = await upsertScanPreset(c.env, {
-    id: presetId,
-    name: payload.name ?? existing.name,
-    isDefault: payload.isDefault ?? existing.isDefault,
-    isActive: payload.isActive ?? existing.isActive,
-    rules: payload.rules ?? existing.rules,
-    sortField: payload.sortField ?? existing.sortField,
-    sortDirection: payload.sortDirection ?? existing.sortDirection,
-    rowLimit: payload.rowLimit ?? existing.rowLimit,
-  });
-  return c.json({ ok: true, preset });
+  try {
+    const payload = scanPresetPatchSchema.parse(await c.req.json());
+    const preset = await upsertScanPreset(c.env, {
+      id: presetId,
+      name: payload.name ?? existing.name,
+      isDefault: payload.isDefault ?? existing.isDefault,
+      isActive: payload.isActive ?? existing.isActive,
+      rules: payload.rules ?? existing.rules,
+      sortField: payload.sortField ?? existing.sortField,
+      sortDirection: payload.sortDirection ?? existing.sortDirection,
+      rowLimit: payload.rowLimit ?? existing.rowLimit,
+    });
+    return c.json({ ok: true, preset });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid scan preset payload." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to save scan preset." }, 500);
+  }
 });
 
 app.delete("/api/admin/scans/presets/:presetId", async (c) => {

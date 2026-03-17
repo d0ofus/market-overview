@@ -255,15 +255,27 @@ export function ScansPageDashboard() {
   };
 
   const onSavePreset = async () => {
+    const trimmedName = draftPreset.name.trim();
+    const rules = draftPreset.rules.filter((rule) => rule.field.trim());
+    if (!trimmedName) {
+      setError("Preset name is required.");
+      setMessage(null);
+      return;
+    }
+    if (rules.length === 0) {
+      setError("Add at least one scan rule before saving.");
+      setMessage(null);
+      return;
+    }
     setSaving(true);
     setError(null);
     setMessage(null);
     try {
       const payload = {
-        name: draftPreset.name.trim(),
+        name: trimmedName,
         isDefault: draftPreset.isDefault,
         isActive: draftPreset.isActive,
-        rules: draftPreset.rules.filter((rule) => rule.field.trim()),
+        rules,
         sortField: draftPreset.sortField.trim() || "change",
         sortDirection: draftPreset.sortDirection,
         rowLimit: draftPreset.rowLimit,
