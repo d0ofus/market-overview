@@ -724,8 +724,8 @@ export function SectorTracker() {
                 Close
               </button>
             </div>
-            <div className="mb-2 flex items-center gap-2 rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs">
-              <span className="text-slate-400">Sort constituents by:</span>
+            <div className="mb-2 flex items-center gap-2 rounded border border-slate-300/70 bg-slate-100/95 px-3 py-2 text-xs text-slate-700 dark:border-borderSoft/70 dark:bg-panelSoft/30 dark:text-slate-200">
+              <span className="text-slate-700 dark:text-slate-400">Sort constituents by:</span>
               <button
                 className={`rounded px-2 py-1 ${constituentSort === "weight" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
                 onClick={() => setConstituentSort("weight")}
@@ -738,6 +738,9 @@ export function SectorTracker() {
               >
                 1D %
               </button>
+              <span className="ml-auto rounded bg-white/90 px-2 py-1 text-slate-700 shadow-sm dark:bg-slate-800/80 dark:text-slate-200 dark:shadow-none">
+                {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
+              </span>
             </div>
             {constituentWarning && (
               <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">

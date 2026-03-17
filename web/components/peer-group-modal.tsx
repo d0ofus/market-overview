@@ -99,6 +99,9 @@ export function PeerGroupModal({
           <div className="mb-2 flex items-center gap-2 rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs">
             <span className="text-slate-400">Source:</span>
             <span className="rounded bg-accent/20 px-2 py-1 text-accent">{activeGroup?.name ?? "Peer database"}</span>
+            <span className="ml-auto rounded bg-slate-800/80 px-2 py-1 text-slate-200">
+              {sortedMembers.length} ticker{sortedMembers.length === 1 ? "" : "s"}
+            </span>
           </div>
           {error && (
             <div className="mb-2 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
