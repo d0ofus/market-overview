@@ -308,6 +308,14 @@ export type PeerMetricRow = {
   source: string;
 };
 
+function sortNewsNewestFirst<T extends { publishedAt: string | null; fetchedAt?: string | null }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    const left = Date.parse(a.publishedAt ?? a.fetchedAt ?? "") || 0;
+    const right = Date.parse(b.publishedAt ?? b.fetchedAt ?? "") || 0;
+    return right - left;
+  });
+}
+
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -450,7 +458,10 @@ export function getTickerNews(ticker: string, tradingDay?: string | null, limit 
       tradingDay: tradingDay ?? undefined,
       limit,
     }),
-  );
+  ).then((payload) => ({
+    ...payload,
+    rows: sortNewsNewestFirst(payload.rows ?? []),
+  }));
 }
 
 export function getScans() {
