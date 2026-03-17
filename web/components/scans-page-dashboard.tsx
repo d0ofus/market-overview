@@ -41,19 +41,36 @@ const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "not_in", label: "not in" },
 ];
 
-const FIELD_SUGGESTIONS = [
-  "close",
-  "change",
-  "market_cap_basic",
-  "type",
-  "exchange",
-  "volume",
-  "Value.Traded",
-  "industry",
-  "average_day_range_14",
+const FIELD_OPTIONS: Array<{ value: string; displayName: string }> = [
+  { value: "close", displayName: "Price" },
+  { value: "change", displayName: "Change %" },
+  { value: "market_cap_basic", displayName: "Market Capitalization" },
+  { value: "type", displayName: "Symbol Type" },
+  { value: "exchange", displayName: "Exchange" },
+  { value: "volume", displayName: "Volume" },
+  { value: "Value.Traded", displayName: "Volume*Price" },
+  { value: "industry", displayName: "Industry" },
+  { value: "ADR", displayName: "Average Day Range (14)" },
 ];
 
 const CUSTOM_FIELD_OPTION = "__custom__";
+
+const FIELD_DISPLAY_NAMES: Record<string, string> = {
+  close: "Price",
+  change: "Change %",
+  market_cap_basic: "Market Capitalization",
+  marketCap: "Market Capitalization",
+  market_cap: "Market Capitalization",
+  type: "Symbol Type",
+  exchange: "Exchange",
+  volume: "Volume",
+  "Value.Traded": "Volume*Price",
+  valueTraded: "Volume*Price",
+  industry: "Industry",
+  ADR: "Average Day Range (14)",
+  average_day_range_14: "Average Day Range (14)",
+  averageDayRange14: "Average Day Range (14)",
+};
 
 const emptyDraftRule = (): ScanRule => ({
   id: crypto.randomUUID(),
@@ -122,8 +139,13 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
   };
 }
 
+function getFieldDisplayName(field: string): string {
+  const trimmed = field.trim();
+  return FIELD_DISPLAY_NAMES[trimmed] ?? trimmed;
+}
+
 function isSuggestedField(field: string): boolean {
-  return FIELD_SUGGESTIONS.includes(field);
+  return FIELD_OPTIONS.some((option) => option.value === field);
 }
 
 function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): ScanRow[] {
@@ -485,7 +507,7 @@ export function ScansPageDashboard() {
               </div>
               {draftPreset.rules.map((rule, index) => (
                 <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
-                  <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1fr),8rem]">
+                  <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
                     <label className="block">
                       Field
                       <select
@@ -502,11 +524,19 @@ export function ScansPageDashboard() {
                           }),
                         }))}
                       >
-                        {FIELD_SUGGESTIONS.map((field) => (
-                          <option key={field} value={field}>{field}</option>
+                        {FIELD_OPTIONS.map((field) => (
+                          <option key={field.value} value={field.value}>{field.displayName} ({field.value})</option>
                         ))}
                         <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
                       </select>
+                    </label>
+                    <label className="block">
+                      Display Name
+                      <input
+                        className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
+                        value={getFieldDisplayName(rule.field)}
+                        readOnly
+                      />
                     </label>
                     <label className="block">
                       Operator
@@ -526,7 +556,7 @@ export function ScansPageDashboard() {
                   </div>
                   {!isSuggestedField(rule.field) ? (
                     <label className="mb-2 block">
-                      Custom field
+                      Field Name
                       <input
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                         value={rule.field}
@@ -564,7 +594,7 @@ export function ScansPageDashboard() {
                   </div>
                   {index === 0 ? (
                     <p className="mt-2 text-[11px] text-slate-500">
-                      Suggestions: {FIELD_SUGGESTIONS.join(", ")}
+                      Suggestions: {FIELD_OPTIONS.map((field) => `${field.displayName} (${field.value})`).join(", ")}
                     </p>
                   ) : null}
                 </div>
