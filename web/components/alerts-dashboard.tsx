@@ -22,6 +22,8 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
   { value: "after-hours", label: "After-Hours" },
 ];
 
+const QUICK_RANGE_OPTIONS = [3, 5, 10, 30] as const;
+
 const localIsoDate = (value = new Date()) =>
   `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 
@@ -32,6 +34,8 @@ const addDays = (isoDate: string, days: number) => {
 };
 const defaultEndDate = () => localIsoDate();
 const defaultStartDate = () => addDays(defaultEndDate(), -1);
+
+const rangeStartDate = (endDate: string, days: number) => addDays(endDate, -(days - 1));
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
@@ -246,6 +250,12 @@ export function AlertsDashboard() {
     setMode("single");
   };
 
+  const applyQuickRange = (days: number) => {
+    setStartDate(rangeStartDate(endDate, days));
+  };
+
+  const isQuickRangeActive = (days: number) => startDate === rangeStartDate(endDate, days);
+
   const singleNews = selectedTickerDay?.news?.length ? selectedTickerDay.news : selectedNews;
 
   return (
@@ -260,6 +270,20 @@ export function AlertsDashboard() {
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
             />
+            <div className="mt-2 flex flex-wrap gap-2">
+              {QUICK_RANGE_OPTIONS.map((days) => (
+                <button
+                  key={days}
+                  type="button"
+                  className={`rounded px-2 py-1 text-[11px] ${
+                    isQuickRangeActive(days) ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"
+                  }`}
+                  onClick={() => applyQuickRange(days)}
+                >
+                  {days}d
+                </button>
+              ))}
+            </div>
           </label>
           <label className="text-xs text-slate-300">
             End date
