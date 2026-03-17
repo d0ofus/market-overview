@@ -17,6 +17,7 @@ import {
   type ScanRuleOperator,
   type ScanSnapshot,
 } from "@/lib/api";
+import { TRADINGVIEW_STOCK_FIELDS } from "@/lib/tradingview-stock-fields";
 import { TradingViewWidget } from "./tradingview-widget";
 import { PeerGroupModal } from "./peer-group-modal";
 
@@ -53,18 +54,7 @@ const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "not_in", label: "not in" },
 ];
 
-const FIELD_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "close", label: "Price" },
-  { value: "change", label: "Change %" },
-  { value: "market_cap_basic", label: "Market Capitalization" },
-  { value: "type", label: "Symbol Type" },
-  { value: "exchange", label: "Exchange" },
-  { value: "volume", label: "Volume" },
-  { value: "Value.Traded", label: "Volume*Price" },
-  { value: "industry", label: "Industry" },
-  { value: "ADR", label: "Average Day Range (14)" },
-  { value: "relative_volume", label: "Relative Volume" },
-];
+const FIELD_OPTIONS: Array<{ value: string; label: string }> = TRADINGVIEW_STOCK_FIELDS;
 
 const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
   { key: "ticker", label: "Ticker" },
@@ -96,21 +86,12 @@ const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 const CUSTOM_FIELD_OPTION = "__custom__";
 
 const FIELD_LABELS: Record<string, string> = {
-  close: "Price",
-  change: "Change %",
-  market_cap_basic: "Market Capitalization",
+  ...Object.fromEntries(TRADINGVIEW_STOCK_FIELDS.map((field) => [field.value, field.label])),
   marketCap: "Market Capitalization",
   market_cap: "Market Capitalization",
-  type: "Symbol Type",
-  exchange: "Exchange",
-  volume: "Volume",
-  "Value.Traded": "Volume*Price",
   valueTraded: "Volume*Price",
-  industry: "Industry",
-  ADR: "Average Day Range (14)",
   average_day_range_14: "Average Day Range (14)",
   averageDayRange14: "Average Day Range (14)",
-  relative_volume: "Relative Volume",
   relative_volume_10d_calc: "Relative Volume",
 };
 
