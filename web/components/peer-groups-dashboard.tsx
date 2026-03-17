@@ -14,6 +14,9 @@ import {
 } from "@/lib/api";
 import { TickerMultiGrid } from "./ticker-multi-grid";
 
+type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
+type MultiChartSortKey = "change1d" | "marketCap";
+
 function fmtCompact(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
@@ -41,6 +44,11 @@ export function PeerGroupsDashboard() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
+  const [chartSortKey, setChartSortKey] = useState<MultiChartSortKey>("change1d");
+  const [chartsPerPage, setChartsPerPage] = useState(9);
+  const [chartPage, setChartPage] = useState(1);
+  const [memberSortKey, setMemberSortKey] = useState<PeerMemberSortKey>("ticker");
+  const [memberSortDir, setMemberSortDir] = useState<"asc" | "desc">("asc");
   const deferredQuery = useDeferredValue(query);
   const pageSize = 50;
 
@@ -113,17 +121,56 @@ export function PeerGroupsDashboard() {
     [detail, selectedGroupId],
   );
   const metricsByTicker = useMemo(() => new Map(metrics.map((row) => [row.ticker.toUpperCase(), row])), [metrics]);
-  const chartItems = useMemo(() => {
+  const sortedMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
-    const ordered = Array.from(new Set([detail.symbol.ticker, ...activeGroup.members.map((member) => member.ticker)])).slice(0, 9);
-    return ordered.map((ticker) => {
+    const rows = Array.from(new Set([detail.symbol.ticker, ...activeGroup.members.map((member) => member.ticker)])).map((ticker) => {
       const member = activeGroup.members.find((row) => row.ticker === ticker);
       const metric = metricsByTicker.get(ticker);
+      return {
+        ticker,
+        name: member?.name ?? (ticker === detail.symbol.ticker ? detail.symbol.name : null),
+        metric,
+      };
+    });
+    rows.sort((a, b) => {
+      const getValue = (row: typeof rows[number]) => {
+        if (memberSortKey === "ticker") return row.ticker;
+        if (memberSortKey === "name") return row.name ?? row.ticker;
+        if (memberSortKey === "price") return row.metric?.price ?? Number.NEGATIVE_INFINITY;
+        if (memberSortKey === "marketCap") return row.metric?.marketCap ?? Number.NEGATIVE_INFINITY;
+        return row.metric?.avgVolume ?? Number.NEGATIVE_INFINITY;
+      };
+      const left = getValue(a);
+      const right = getValue(b);
+      if (typeof left === "string" || typeof right === "string") {
+        const comparison = String(left).localeCompare(String(right));
+        return memberSortDir === "asc" ? comparison : -comparison;
+      }
+      const comparison = left - right;
+      return memberSortDir === "asc" ? comparison : -comparison;
+    });
+    return rows;
+  }, [activeGroup, detail, memberSortDir, memberSortKey, metricsByTicker]);
+  const chartItems = useMemo(() => {
+    if (!detail || !activeGroup) return [];
+    const ordered = [...sortedMemberRows].sort((a, b) => {
+      const left = chartSortKey === "change1d"
+        ? a.metric?.change1d ?? Number.NEGATIVE_INFINITY
+        : a.metric?.marketCap ?? Number.NEGATIVE_INFINITY;
+      const right = chartSortKey === "change1d"
+        ? b.metric?.change1d ?? Number.NEGATIVE_INFINITY
+        : b.metric?.marketCap ?? Number.NEGATIVE_INFINITY;
+      if (right !== left) return right - left;
+      return a.ticker.localeCompare(b.ticker);
+    });
+    const startIndex = (chartPage - 1) * chartsPerPage;
+    const paged = ordered.slice(startIndex, startIndex + chartsPerPage);
+    return paged.map(({ ticker, name, metric }) => {
       return {
         key: ticker,
         ticker,
         title: ticker,
-        subtitle: member?.name ?? (ticker === detail.symbol.ticker ? detail.symbol.name : null),
+        subtitle: name,
         detail: (
           <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
             <div>Price: <span className="text-slate-200">{fmtPrice(metric?.price)}</span></div>
@@ -133,7 +180,29 @@ export function PeerGroupsDashboard() {
         ),
       };
     });
-  }, [activeGroup, detail, metricsByTicker]);
+  }, [activeGroup, chartPage, chartSortKey, chartsPerPage, detail, sortedMemberRows]);
+  const totalChartPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedMemberRows.length / chartsPerPage)),
+    [chartsPerPage, sortedMemberRows.length],
+  );
+
+  useEffect(() => {
+    setChartPage(1);
+  }, [activeGroup?.id, chartSortKey, chartsPerPage]);
+
+  useEffect(() => {
+    if (chartPage <= totalChartPages) return;
+    setChartPage(totalChartPages);
+  }, [chartPage, totalChartPages]);
+
+  const onMemberSort = (key: PeerMemberSortKey) => {
+    if (memberSortKey === key) {
+      setMemberSortDir((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setMemberSortKey(key);
+    setMemberSortDir(key === "ticker" || key === "name" ? "asc" : "desc");
+  };
 
   return (
     <div className="space-y-4">
@@ -310,19 +379,27 @@ export function PeerGroupsDashboard() {
                     <table className="min-w-full text-xs">
                       <thead className="bg-slate-900/60">
                         <tr>
-                          {["Ticker", "Company", "Price", "Mkt Cap", "Avg Vol"].map((label) => (
-                            <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>
+                          {[
+                            ["ticker", "Ticker"],
+                            ["name", "Company"],
+                            ["price", "Price"],
+                            ["marketCap", "Mkt Cap"],
+                            ["avgVolume", "Avg Vol"],
+                          ].map(([key, label]) => (
+                            <th key={key} className="px-2 py-1.5 text-left text-slate-300">
+                              <button className="hover:text-slate-100" onClick={() => onMemberSort(key as PeerMemberSortKey)}>
+                                {label}
+                              </button>
+                            </th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {Array.from(new Set([detail.symbol.ticker, ...activeGroup.members.map((member) => member.ticker)])).map((ticker) => {
-                          const metric = metricsByTicker.get(ticker);
-                          const member = activeGroup.members.find((row) => row.ticker === ticker);
+                        {sortedMemberRows.map(({ ticker, metric, name }) => {
                           return (
                             <tr key={`${activeGroup.id}-${ticker}`} className="border-t border-borderSoft/60">
                               <td className="px-2 py-1.5 font-semibold text-accent">{ticker}</td>
-                              <td className="px-2 py-1.5 text-slate-300">{member?.name ?? (ticker === detail.symbol.ticker ? detail.symbol.name : "-")}</td>
+                              <td className="px-2 py-1.5 text-slate-300">{name ?? "-"}</td>
                               <td className="px-2 py-1.5 text-slate-300">{fmtPrice(metric?.price)}</td>
                               <td className="px-2 py-1.5 text-slate-300">{fmtCompact(metric?.marketCap)}</td>
                               <td className="px-2 py-1.5 text-slate-300">{fmtCompact(metric?.avgVolume)}</td>
@@ -340,13 +417,60 @@ export function PeerGroupsDashboard() {
       </div>
 
       {detail && (
-        <TickerMultiGrid
-          title={activeGroup ? `${activeGroup.name} Multi-Chart` : "Peer Group Multi-Chart"}
-          items={chartItems}
-          selectedKey={selectedTicker}
-          onSelect={(ticker) => void loadTicker(ticker)}
-          emptyMessage="No peer charts available for the current selection."
-        />
+        <div className="space-y-3">
+          <div className="card p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
+                <label className="flex items-center gap-2">
+                  <span>Sort multi-chart by</span>
+                  <select
+                    className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                    value={chartSortKey}
+                    onChange={(event) => setChartSortKey(event.target.value as MultiChartSortKey)}
+                  >
+                    <option value="change1d">1D % Change</option>
+                    <option value="marketCap">Market Capitalization</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2">
+                  <span>Charts per page</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={48}
+                    className="w-20 rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                    value={chartsPerPage}
+                    onChange={(event) => setChartsPerPage(Math.max(1, Math.min(48, Number(event.target.value) || 9)))}
+                  />
+                </label>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <span>Page {chartPage} of {totalChartPages}</span>
+                <button
+                  className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+                  onClick={() => setChartPage((current) => Math.max(1, current - 1))}
+                  disabled={chartPage === 1}
+                >
+                  Previous
+                </button>
+                <button
+                  className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+                  onClick={() => setChartPage((current) => Math.min(totalChartPages, current + 1))}
+                  disabled={chartPage >= totalChartPages}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+          <TickerMultiGrid
+            title={activeGroup ? `${activeGroup.name} Multi-Chart` : "Peer Group Multi-Chart"}
+            items={chartItems}
+            selectedKey={selectedTicker}
+            onSelect={(ticker) => void loadTicker(ticker)}
+            emptyMessage="No peer charts available for the current selection."
+          />
+        </div>
       )}
     </div>
   );
