@@ -78,6 +78,18 @@ const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
   { key: "priceAvgVolume", label: "Price * Avg Vol" },
 ];
 
+const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "ticker", label: "Ticker" },
+  { value: "name", label: "Company" },
+  { value: "sector", label: "Sector" },
+  { value: "industry", label: "Industry" },
+  { value: "change", label: "1D Change %" },
+  { value: "market_cap_basic", label: "Market Cap" },
+  { value: "relative_volume_10d_calc", label: "Relative Volume" },
+  { value: "close", label: "Price" },
+  { value: "Value.Traded", label: "Price * Avg Vol" },
+];
+
 const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = RESULT_COLUMNS.map((column) => column.key);
 const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 
@@ -99,6 +111,7 @@ const FIELD_LABELS: Record<string, string> = {
   average_day_range_14: "Average Day Range (14)",
   averageDayRange14: "Average Day Range (14)",
   relative_volume: "Relative Volume",
+  relative_volume_10d_calc: "Relative Volume",
 };
 
 const emptyDraftRule = (): ScanRule => ({
@@ -551,11 +564,15 @@ export function ScansPageDashboard() {
             <div className="grid gap-2 md:grid-cols-2">
               <label className="block">
                 Sort Field
-                <input
+                <select
                   className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
                   value={draftPreset.sortField}
                   onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value }))}
-                />
+                >
+                  {SORT_FIELD_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
               </label>
               <label className="block">
                 Sort Direction
