@@ -99,14 +99,45 @@ function decodeHtml(value: string): string {
     .replace(/&quot;/gi, '"');
 }
 
+function stripHtmlTags(value: string): string {
+  return value
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(p|div|li|ul|ol)>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+}
+
 function normalizeHeadline(value: string | null | undefined): string {
   return decodeHtml(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function normalizeSnippet(value: string | null | undefined): string | null {
-  const normalized = decodeHtml(value ?? "").replace(/\s+/g, " ").trim();
+  const normalized = stripHtmlTags(decodeHtml(value ?? ""))
+    .replace(/\s*-{5,}\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!normalized) return null;
   return normalized.slice(0, 800);
+}
+
+function cleanSnippetForDisplay(
+  snippet: string | null | undefined,
+  headline: string,
+  source: string | null | undefined,
+): string | null {
+  const normalized = normalizeSnippet(snippet);
+  if (!normalized) return null;
+  const normalizedSnippet = normalizeTitleForDedupe(normalized);
+  const normalizedHeadline = normalizeTitleForDedupe(headline);
+  const normalizedSource = normalizeTitleForDedupe(source ?? "");
+  if (!normalizedSnippet) return null;
+  if (normalizedHeadline && titleSimilarity(normalizedSnippet, normalizedHeadline) >= 0.88) return null;
+  if (normalizedHeadline && normalizedSnippet.startsWith(normalizedHeadline)) {
+    const remainder = normalizeTitleForDedupe(normalized.slice(headline.length));
+    if (!remainder || remainder === normalizedSource) return null;
+  }
+  if (normalizedSource && normalizedSnippet === normalizedSource) return null;
+  if (normalizedSource && normalizedSnippet.endsWith(` ${normalizedSource}`) && normalizedSnippet.length <= normalizedSource.length + 8) return null;
+  return normalized;
 }
 
 function normalizeTitleForDedupe(value: string): string {
@@ -272,7 +303,7 @@ export function rankAndDedupeNews(
         source: normalizeHeadline(candidate.source ?? "") || candidate.provider,
         url: canonicalUrl,
         publishedAt: toIso(candidate.publishedAt),
-        snippet: normalizeSnippet(candidate.snippet),
+        snippet: cleanSnippetForDisplay(candidate.snippet, headline, candidate.source ?? candidate.provider),
         fetchedAt,
         canonicalKey,
         provider: candidate.provider,
@@ -348,7 +379,7 @@ export function normalizeNewsCandidates(
       source: normalizeHeadline(candidate.source ?? "") || candidate.provider || "Unknown",
       url: canonicalUrl,
       publishedAt: toIso(candidate.publishedAt),
-      snippet: normalizeSnippet(candidate.snippet),
+      snippet: cleanSnippetForDisplay(candidate.snippet, headline, candidate.source ?? candidate.provider),
       fetchedAt,
       canonicalKey: dedupeKey,
     });

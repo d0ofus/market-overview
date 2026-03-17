@@ -66,6 +66,28 @@ describe("alerts news orchestration", () => {
     expect(rows[0].canonicalKey).not.toBe(rows[1].canonicalKey);
   });
 
+  it("strips rss html snippets and hides boilerplate duplicates", () => {
+    const rows = normalizeNewsCandidates(
+      "TOI",
+      "2026-03-16",
+      [
+        {
+          provider: "google-news-rss",
+          headline: "B. Riley Ups TOI Price Target Amidst Positive Earnings Outlook",
+          source: "timothysykes.com",
+          url: "https://example.com/toi-story",
+          publishedAt: "2026-03-16T03:11:00Z",
+          snippet: '<a href="https://news.google.com/rss/articles/example">B. Riley Ups TOI Price Target Amidst Positive Earnings Outlook</a> <font color="#6f6f6f">timothysykes.com</font> -------------',
+        },
+      ],
+      3,
+      "2026-03-16T03:20:00Z",
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.snippet).toBeNull();
+  });
+
   it("scores exact company-specific news above generic market stories", () => {
     const specific = scoreNewsCandidate(
       { ticker: "AAPL", companyName: "Apple Inc" },
