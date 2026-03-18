@@ -1985,8 +1985,17 @@ app.get("/api/scans/compiled/export.txt", async (c) => {
     .filter(Boolean);
   const dateSuffix = (c.req.query("dateSuffix") ?? "").trim() || new Date().toISOString().slice(0, 10);
   const payload = await loadCompiledScansSnapshot(c.env, presetIds);
+  const formattedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateSuffix)
+    ? dateSuffix.slice(5)
+    : dateSuffix;
+  const safePresetNames = payload.presetNames
+    .map((name) => name.replace(/[<>:"/\\|?*]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const fileName = safePresetNames.length > 0
+    ? `compiled-scans-${formattedDate}-[${safePresetNames.join(", ")}].txt`
+    : `compiled-scans-${formattedDate}.txt`;
   c.header("Content-Type", "text/plain; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="scans-compiled-${dateSuffix}.txt"`);
+  c.header("Content-Disposition", `attachment; filename="${fileName}"`);
   return c.body(payload.rows.map((row) => row.ticker).join("\n"));
 });
 

@@ -18,7 +18,6 @@
 
 ## Sector Tracker
 - Add number of constituents when clicking pop up
-- Add OHLCV in status line of charts
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -29,10 +28,8 @@
 - Continue the seeding of tickers
 - Remove XYZ._ tickers
 - Show % change and market cap on each chart
-- Make default charts per page 12
 
 ## Scans
-- Create multi-chart view with news
 - Colour by industry
 
 ## Scanning
@@ -54,6 +51,7 @@
 - ETFs that need to be checked
 > IBIT
 > WGMI
+> ARKK: More than 25 components (https://www.ark-funds.com/funds/arkk#hold)
 
 ## General
 - Change default of pop ups to sort by 1D% change
