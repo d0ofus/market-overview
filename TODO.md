@@ -3,6 +3,7 @@
 ## Overview
 - Add multiple chart view of commodities
 - Add RS chart (like my google sheets dashboard)
+- Check on EW sectors column data
 
 ## Breadth
 - Scoring for market breadth for overall 
