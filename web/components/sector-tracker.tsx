@@ -349,7 +349,7 @@ export function SectorTracker() {
 
       <div id="sector-etfs">
       <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {sectorEtfs.map((etf) => (
             <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-2">
               <div className="mb-2 flex items-start justify-between gap-2">
@@ -392,7 +392,7 @@ export function SectorTracker() {
                   </div>
                   <div className={`text-xs ${pctCls(maxChange)}`}>Top: {maxChange.toFixed(2)}%</div>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {rows.map((etf) => (
                     <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-2">
                       <div className="mb-2 flex items-start justify-between gap-2">
@@ -753,7 +753,7 @@ export function SectorTracker() {
                 Loading constituents...
               </div>
             ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
                 {sortedConstituents.map((row) => (
                   <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-2">
                     <div className="mb-2 flex items-center justify-between">
