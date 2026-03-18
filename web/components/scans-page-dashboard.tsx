@@ -166,6 +166,9 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
     };
   }
   if (trimmed === "") return { ...rule, value: "" };
+  if (trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) {
+    return { ...rule, value: trimmed };
+  }
   const parsed = Number(trimmed);
   return {
     ...rule,
