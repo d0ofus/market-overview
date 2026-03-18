@@ -6,7 +6,7 @@ const EQUAL_WEIGHT_GROUP_ID = "g-sector-etf-eqwt";
 const REQUIRED_THREE_MONTH_POINTS = 63;
 const MATURE_SPARKLINE_CANDIDATES: Array<{ ticker: string; groupId: string }> = [
   { ticker: "AAPL", groupId: "g-market-leaders" },
-  { ticker: "SPY", groupId: "g-major-etf" },
+  { ticker: "SPY", groupId: "g-us-index" },
 ];
 
 function parseSparklineLength(raw: string | null | undefined): number | null {

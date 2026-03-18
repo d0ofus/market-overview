@@ -90,6 +90,23 @@ describe("overview snapshot staleness", () => {
     expect(stale).toBe(true);
   });
 
+  it("falls back to the US index group when the market leaders sparkline is missing", async () => {
+    const stale = await isOverviewSnapshotStale(createEnv({
+      snapshotId: "snap-1",
+      equalWeightRows: [
+        {
+          ticker: "RSPS",
+          displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
+        },
+      ],
+      sparklineRows: {
+        "g-us-index|SPY": { sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
+      },
+    }) as never);
+
+    expect(stale).toBe(true);
+  });
+
   it("keeps snapshot fresh when equal-weight names match and sparkline length is 63", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",

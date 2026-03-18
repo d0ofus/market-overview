@@ -309,13 +309,33 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
     ).bind(macroSection.id).first<{ id: string; sortOrder: number }>()
     : null;
   if (!equitiesSection?.id) return;
+  const majorEtfGroup = await env.DB.prepare(
+    "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Major ETF Stats' LIMIT 1",
+  ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
+  let removedDuplicateMajorEtf = false;
+  if (majorEtfGroup?.id) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM dashboard_items WHERE group_id = ?").bind(majorEtfGroup.id),
+      env.DB.prepare("DELETE FROM dashboard_columns WHERE group_id = ?").bind(majorEtfGroup.id),
+      env.DB.prepare("DELETE FROM dashboard_groups WHERE id = ?").bind(majorEtfGroup.id),
+      env.DB.prepare(
+        "UPDATE dashboard_groups SET sort_order = sort_order - 1 WHERE section_id = ? AND sort_order > ?",
+      ).bind(equitiesSection.id, majorEtfGroup.sortOrder),
+    ]);
+    removedDuplicateMajorEtf = true;
+  }
   const thematicGroup = await env.DB.prepare(
     "SELECT id, sort_order as sortOrder, title FROM dashboard_groups WHERE section_id = ? AND title IN ('Thematic ETFs', 'Industry/Thematic ETFs') ORDER BY CASE WHEN title = 'Industry/Thematic ETFs' THEN 0 ELSE 1 END, sort_order ASC LIMIT 1",
   ).bind(equitiesSection.id).first<{ id: string; sortOrder: number; title: string }>();
   const sectorGroup = await env.DB.prepare(
     "SELECT id, sort_order as sortOrder FROM dashboard_groups WHERE section_id = ? AND title = 'Sector ETFs' LIMIT 1",
   ).bind(equitiesSection.id).first<{ id: string; sortOrder: number }>();
-  if (!thematicGroup?.id || !sectorGroup?.id) return;
+  if (!thematicGroup?.id || !sectorGroup?.id) {
+    if (removedDuplicateMajorEtf) {
+      await recomputeDashboardFromStoredBars(env);
+    }
+    return;
+  }
 
   const equalWeightGroupId = "g-sector-etf-eqwt";
   const usIndexEqualWeightGroupId = "g-us-index-eqwt";
@@ -379,8 +399,14 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   ).bind(equitiesSection.id).first<{ maxSort: number }>();
   const shouldMoveThematicDown = thematicGroup.sortOrder < (maxSortRow?.maxSort ?? thematicGroup.sortOrder);
   const needsThematicTitleUpdate = thematicGroup.title !== "Industry/Thematic ETFs";
-  const needsStructureUpdate = !equalWeightGroup || shouldMoveThematicDown || (Boolean(usIndexGroup?.id) && !usIndexEqualWeightGroup);
+  const needsStructureUpdate =
+    removedDuplicateMajorEtf ||
+    !equalWeightGroup ||
+    shouldMoveThematicDown ||
+    needsThematicTitleUpdate ||
+    (Boolean(usIndexGroup?.id) && !usIndexEqualWeightGroup);
   const needsItemUpdate = thematicNeedsRebuild || missingEq.length > 0 || missingUsIndexEq.length > 0;
+  const needsBarRefresh = needsItemUpdate || needsEqNameFix || needsUsIndexEqNameFix;
   const needsSnapshotRefresh = needsStructureUpdate || needsItemUpdate || needsEqNameFix || needsUsIndexEqNameFix;
 
   const structureStatements = [
@@ -460,8 +486,10 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   });
 
   await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...usIndexEqualWeightItemStatements, ...symbolStatements]);
-  if (needsSnapshotRefresh) {
+  if (needsBarRefresh) {
     await refreshRecentBarsForTickers(env, allTickers, 2000);
+  }
+  if (needsSnapshotRefresh) {
     await recomputeDashboardFromStoredBars(env);
   }
 }
@@ -2218,6 +2246,7 @@ app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
   try {
+    await ensureOverviewCatalogCoverage(c.env);
     const config = await loadConfig(c.env, configId);
     return c.json(config);
   } catch (error) {

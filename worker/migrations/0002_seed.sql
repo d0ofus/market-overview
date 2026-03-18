@@ -13,11 +13,10 @@ INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_
 ('g-crypto', 'sec-macro', 4, 'Crypto Proxies', 'macro', '1W', 1, 0),
 ('g-metals-energy', 'sec-macro', 5, 'Metals & Energy', 'macro', '5D', 1, 0),
 ('g-global', 'sec-macro', 6, 'Global Indices', 'macro', '1W', 1, 0),
-('g-major-etf', 'sec-equities', 1, 'Major ETF Stats', 'equities', '1W', 1, 1),
-('g-sector-etf', 'sec-equities', 2, 'Sector ETFs', 'equities', '1W', 1, 1),
-('g-thematic', 'sec-equities', 3, 'Thematic ETFs', 'equities', '5D', 1, 1),
-('g-country', 'sec-equities', 4, 'Country ETFs', 'equities', '1W', 1, 0),
-('g-market-leaders', 'sec-equities', 5, 'Market Leaders (FAANG)', 'equities', '1W', 1, 1),
+('g-sector-etf', 'sec-equities', 1, 'Sector ETFs', 'equities', '1W', 1, 1),
+('g-thematic', 'sec-equities', 2, 'Thematic ETFs', 'equities', '5D', 1, 1),
+('g-country', 'sec-equities', 3, 'Country ETFs', 'equities', '1W', 1, 0),
+('g-market-leaders', 'sec-equities', 4, 'Market Leaders (FAANG)', 'equities', '1W', 1, 1),
 ('g-breadth', 'sec-breadth', 1, 'Market Internals Dashboard', 'breadth', '1D', 0, 0);
 
 INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES
@@ -27,7 +26,6 @@ INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES
 ('g-crypto', '["ticker","name","price","1D","1W","5D","sparkline"]'),
 ('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline"]'),
 ('g-global', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
-('g-major-etf', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
 ('g-sector-etf', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]'),
 ('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline"]'),
 ('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
@@ -80,7 +78,6 @@ INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display
 ('i7','g-crypto',1,'BITO',NULL,1,'[]',NULL),
 ('i8','g-metals-energy',1,'GLD',NULL,1,'[]',NULL),('i9','g-metals-energy',2,'SLV',NULL,1,'[]',NULL),('i10','g-metals-energy',3,'USO',NULL,1,'[]',NULL),
 ('i11','g-global',1,'EWJ',NULL,1,'[]',NULL),('i12','g-global',2,'EEM',NULL,1,'[]',NULL),('i13','g-global',3,'VGK',NULL,1,'[]',NULL),('i14','g-global',4,'INDA',NULL,1,'[]',NULL),
-('i15','g-major-etf',1,'SPY',NULL,1,'[]',NULL),('i16','g-major-etf',2,'QQQ',NULL,1,'[]',NULL),('i17','g-major-etf',3,'IWM',NULL,1,'[]',NULL),('i18','g-major-etf',4,'DIA',NULL,1,'[]',NULL),
 ('i19','g-sector-etf',1,'XLK',NULL,1,'[]',NULL),('i20','g-sector-etf',2,'XLF',NULL,1,'[]',NULL),('i21','g-sector-etf',3,'XLE',NULL,1,'[]',NULL),('i22','g-sector-etf',4,'XLV',NULL,1,'[]',NULL),('i23','g-sector-etf',5,'XLY',NULL,1,'[]',NULL),('i24','g-sector-etf',6,'XLI',NULL,1,'[]',NULL),('i25','g-sector-etf',7,'XLP',NULL,1,'[]',NULL),('i26','g-sector-etf',8,'XLU',NULL,1,'[]',NULL),('i27','g-sector-etf',9,'XLB',NULL,1,'[]',NULL),('i28','g-sector-etf',10,'XLRE',NULL,1,'[]',NULL),
 ('i29','g-thematic',1,'ARKK',NULL,1,'["high-beta"]','["TSLA","ROKU","COIN","CRSP","PATH"]'),
 ('i30','g-thematic',2,'SMH',NULL,1,'["semis"]','["NVDA","TSM","AVGO","AMD","ASML"]'),

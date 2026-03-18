@@ -17,7 +17,7 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   thematic: OverviewGroup | null;
   ordered: OverviewGroup[];
 } {
-  const groups = [...section.groups];
+  const groups = section.groups.filter((group) => group.title !== "Major ETF Stats");
   const thematic =
     groups.find((group) => group.title === "Industry/Thematic ETFs" || group.title === "Thematic ETFs") ?? null;
   const usIndex = groups.find((group) => group.title === "US Index Futures") ?? null;
