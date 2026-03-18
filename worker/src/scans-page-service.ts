@@ -50,6 +50,27 @@ export type ScanSnapshot = {
   rows: ScanSnapshotRow[];
 };
 
+export type CompiledScanUniqueTickerRow = {
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  occurrences: number;
+  presetIds: string[];
+  presetNames: string[];
+  latestPrice: number | null;
+  latestChange1d: number | null;
+  latestMarketCap: number | null;
+  latestRelativeVolume: number | null;
+};
+
+export type CompiledScansSnapshot = {
+  presetIds: string[];
+  presetNames: string[];
+  generatedAt: string;
+  rows: CompiledScanUniqueTickerRow[];
+};
+
 type TradingViewFilter = {
   left: string;
   operation: string;
@@ -473,19 +494,19 @@ function mapTradingViewResponse(payload: TradingViewScanPayload, body: {
   const columns = payload.columns;
   return (body.data ?? []).map((entry) => {
     const data = Array.isArray(entry.d) ? entry.d : [];
-    const raw = Object.fromEntries(columns.map((column, index) => [column, data[index] ?? null]));
+    const raw = Object.fromEntries(columns.map((column, index) => [column, data[index] ?? null])) as Record<string, unknown>;
     return {
       ticker: entry.s ?? null,
       name: typeof raw.name === "string" ? raw.name : null,
       sector: typeof raw.sector === "string" ? raw.sector : null,
       industry: typeof raw.industry === "string" ? raw.industry : null,
-      change1d: raw.change,
-      marketCap: raw.market_cap_basic,
-      relativeVolume: raw.relative_volume_10d_calc,
-      price: raw.close,
-      avgVolume: raw.average_volume_30d_calc,
-      priceAvgVolume: raw["Value.Traded"],
-      volume: raw.volume,
+      change1d: typeof raw.change === "string" || typeof raw.change === "number" ? raw.change : null,
+      marketCap: typeof raw.market_cap_basic === "string" || typeof raw.market_cap_basic === "number" ? raw.market_cap_basic : null,
+      relativeVolume: typeof raw.relative_volume_10d_calc === "string" || typeof raw.relative_volume_10d_calc === "number" ? raw.relative_volume_10d_calc : null,
+      price: typeof raw.close === "string" || typeof raw.close === "number" ? raw.close : null,
+      avgVolume: typeof raw.average_volume_30d_calc === "string" || typeof raw.average_volume_30d_calc === "number" ? raw.average_volume_30d_calc : null,
+      priceAvgVolume: typeof raw["Value.Traded"] === "string" || typeof raw["Value.Traded"] === "number" ? raw["Value.Traded"] : null,
+      volume: typeof raw.volume === "string" || typeof raw.volume === "number" ? raw.volume : null,
       exchange: typeof raw.exchange === "string" ? raw.exchange : null,
       type: typeof raw.type === "string" ? raw.type : null,
       raw,
@@ -629,6 +650,74 @@ export async function loadLatestScansSnapshot(env: Env, presetId?: string | null
     status: snapshot.status,
     error: snapshot.error,
     rows: normalizedRows,
+  };
+}
+
+export async function loadCompiledScansSnapshot(env: Env, presetIds: string[]): Promise<CompiledScansSnapshot> {
+  const uniquePresetIds = Array.from(new Set(
+    presetIds
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ));
+  const presets = (await Promise.all(uniquePresetIds.map((presetId) => loadScanPreset(env, presetId))))
+    .filter((preset): preset is ScanPreset => Boolean(preset));
+  const snapshots = await Promise.all(presets.map((preset) => loadLatestScansSnapshot(env, preset.id)));
+  const rowMap = new Map<string, CompiledScanUniqueTickerRow>();
+  const rowTimestampMap = new Map<string, string>();
+  let latestGeneratedAt = "";
+
+  snapshots.forEach((snapshot, index) => {
+    if (!snapshot) return;
+    const preset = presets[index];
+    if (!preset) return;
+    if (snapshot.generatedAt > latestGeneratedAt) latestGeneratedAt = snapshot.generatedAt;
+    for (const row of snapshot.rows) {
+      const existing = rowMap.get(row.ticker);
+      if (!existing) {
+        rowMap.set(row.ticker, {
+          ticker: row.ticker,
+          name: row.name,
+          sector: row.sector,
+          industry: row.industry,
+          occurrences: 1,
+          presetIds: [preset.id],
+          presetNames: [preset.name],
+          latestPrice: row.price,
+          latestChange1d: row.change1d,
+          latestMarketCap: row.marketCap,
+          latestRelativeVolume: row.relativeVolume,
+        });
+        rowTimestampMap.set(row.ticker, snapshot.generatedAt);
+        continue;
+      }
+      existing.occurrences += 1;
+      if (!existing.name && row.name) existing.name = row.name;
+      if (!existing.sector && row.sector) existing.sector = row.sector;
+      if (!existing.industry && row.industry) existing.industry = row.industry;
+      if (!existing.presetIds.includes(preset.id)) existing.presetIds.push(preset.id);
+      if (!existing.presetNames.includes(preset.name)) existing.presetNames.push(preset.name);
+      const currentTimestamp = rowTimestampMap.get(row.ticker) ?? "";
+      if (snapshot.generatedAt >= currentTimestamp) {
+        existing.latestPrice = row.price;
+        existing.latestChange1d = row.change1d;
+        existing.latestMarketCap = row.marketCap;
+        existing.latestRelativeVolume = row.relativeVolume;
+        rowTimestampMap.set(row.ticker, snapshot.generatedAt);
+      }
+    }
+  });
+
+  return {
+    presetIds: presets.map((preset) => preset.id),
+    presetNames: presets.map((preset) => preset.name),
+    generatedAt: latestGeneratedAt || new Date().toISOString(),
+    rows: Array.from(rowMap.values()).sort((a, b) => {
+      if (b.occurrences !== a.occurrences) return b.occurrences - a.occurrences;
+      const left = a.latestChange1d ?? Number.NEGATIVE_INFINITY;
+      const right = b.latestChange1d ?? Number.NEGATIVE_INFINITY;
+      if (right !== left) return right - left;
+      return a.ticker.localeCompare(b.ticker);
+    }),
   };
 }
 

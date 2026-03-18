@@ -60,6 +60,7 @@ import {
 } from "./gappers-service";
 import {
   cleanupOldScansPageData,
+  loadCompiledScansSnapshot,
   deleteScanPreset,
   listScanPresets,
   loadDefaultScanPreset,
@@ -1965,6 +1966,28 @@ app.get("/api/scans/presets", async (c) => {
   await maybeRunScansPageHousekeeping(c.env);
   const rows = await listScanPresets(c.env);
   return c.json({ rows });
+});
+
+app.get("/api/scans/compiled", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const presetIds = (c.req.query("presetIds") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return c.json(await loadCompiledScansSnapshot(c.env, presetIds));
+});
+
+app.get("/api/scans/compiled/export.txt", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const presetIds = (c.req.query("presetIds") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const dateSuffix = (c.req.query("dateSuffix") ?? "").trim() || new Date().toISOString().slice(0, 10);
+  const payload = await loadCompiledScansSnapshot(c.env, presetIds);
+  c.header("Content-Type", "text/plain; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="scans-compiled-${dateSuffix}.txt"`);
+  return c.body(payload.rows.map((row) => row.ticker).join("\n"));
 });
 
 app.post("/api/admin/scans/refresh", async (c) => {

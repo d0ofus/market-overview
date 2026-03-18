@@ -152,6 +152,27 @@ export type ScanSnapshot = {
   rows: ScanRow[];
 };
 
+export type CompiledScanUniqueTickerRow = {
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  occurrences: number;
+  presetIds: string[];
+  presetNames: string[];
+  latestPrice: number | null;
+  latestChange1d: number | null;
+  latestMarketCap: number | null;
+  latestRelativeVolume: number | null;
+};
+
+export type CompiledScansSnapshot = {
+  presetIds: string[];
+  presetNames: string[];
+  generatedAt: string;
+  rows: CompiledScanUniqueTickerRow[];
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
 export type WatchlistCompilerSetRow = {
@@ -524,6 +545,19 @@ export function getScansSnapshot(presetId?: string | null) {
 
 export function getScanPresets() {
   return getJson<{ rows: ScanPreset[] }>("/api/scans/presets");
+}
+
+export function getCompiledScansSnapshot(presetIds: string[]) {
+  return getJson<CompiledScansSnapshot>(appendQuery("/api/scans/compiled", {
+    presetIds: presetIds.join(","),
+  }));
+}
+
+export function getCompiledScansExportUrl(presetIds: string[], dateSuffix?: string | null) {
+  return apiUrl(appendQuery("/api/scans/compiled/export.txt", {
+    presetIds: presetIds.join(","),
+    dateSuffix: dateSuffix ?? undefined,
+  }));
 }
 
 export function refreshScansSnapshot(presetId?: string | null) {

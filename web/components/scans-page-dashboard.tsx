@@ -1,16 +1,19 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   createScanPreset,
   deleteScanPreset,
+  getCompiledScansExportUrl,
+  getCompiledScansSnapshot,
   getScanPresets,
   getScansSnapshot,
   getTickerNews,
   refreshScansSnapshot,
   updateScanPreset,
   type AlertNewsRow,
+  type CompiledScansSnapshot,
   type ScanPreset,
   type ScanRow,
   type ScanRule,
@@ -235,12 +238,16 @@ function NewsList({ items }: { items: AlertNewsRow[] }) {
 export function ScansPageDashboard() {
   const [presets, setPresets] = useState<ScanPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [compiledPresetIds, setCompiledPresetIds] = useState<string[]>([]);
   const [draftPreset, setDraftPreset] = useState<ScanPreset>(emptyDraftPreset);
   const [snapshot, setSnapshot] = useState<ScanSnapshot | null>(null);
+  const [compiledSnapshot, setCompiledSnapshot] = useState<CompiledScansSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compiledError, setCompiledError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [newsByTicker, setNewsByTicker] = useState<Record<string, AlertNewsRow[]>>({});
@@ -307,6 +314,14 @@ export function ScansPageDashboard() {
     () => RESULT_COLUMNS.filter((column) => visibleColumns.includes(column.key)),
     [visibleColumns],
   );
+  const compiledExportUrl = useMemo(
+    () => (
+      compiledPresetIds.length > 0
+        ? getCompiledScansExportUrl(compiledPresetIds, new Date().toISOString().slice(0, 10))
+        : null
+    ),
+    [compiledPresetIds],
+  );
 
   const loadAll = async (preferredPresetId?: string | null) => {
     setLoading(true);
@@ -317,6 +332,12 @@ export function ScansPageDashboard() {
       setPresets(rows);
       const nextPresetId = preferredPresetId ?? selectedPresetId ?? rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null;
       setSelectedPresetId(nextPresetId);
+      setCompiledPresetIds((current) => {
+        const available = new Set(rows.map((row) => row.id));
+        const filtered = current.filter((id) => available.has(id));
+        if (filtered.length > 0) return filtered;
+        return nextPresetId ? [nextPresetId] : [];
+      });
       if (nextPresetId) {
         const nextSnapshot = await getScansSnapshot(nextPresetId);
         setSnapshot(nextSnapshot);
@@ -327,6 +348,24 @@ export function ScansPageDashboard() {
       setError(loadError instanceof Error ? loadError.message : "Failed to load scans.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadCompiled = async (presetIds: string[]) => {
+    if (presetIds.length === 0) {
+      setCompiledSnapshot(null);
+      setCompiledError(null);
+      return;
+    }
+    setCompiledLoading(true);
+    setCompiledError(null);
+    try {
+      setCompiledSnapshot(await getCompiledScansSnapshot(presetIds));
+    } catch (loadError) {
+      setCompiledError(loadError instanceof Error ? loadError.message : "Failed to compile selected scans.");
+      setCompiledSnapshot(null);
+    } finally {
+      setCompiledLoading(false);
     }
   };
 
@@ -350,6 +389,10 @@ export function ScansPageDashboard() {
       }
     })();
   }, [selectedPresetId]);
+
+  useEffect(() => {
+    void loadCompiled(compiledPresetIds);
+  }, [compiledPresetIds]);
 
   const loadTickerNews = async (ticker: string) => {
     if (newsByTicker[ticker]) return;
@@ -435,6 +478,9 @@ export function ScansPageDashboard() {
     try {
       const response = await refreshScansSnapshot(selectedPresetId);
       setSnapshot(response.snapshot);
+      if (compiledPresetIds.includes(selectedPresetId)) {
+        await loadCompiled(compiledPresetIds);
+      }
       setExpandedTicker(null);
       setNewsByTicker({});
       setMessage(`Refreshed ${response.snapshot.rowCount} rows.`);
@@ -462,6 +508,14 @@ export function ScansPageDashboard() {
       }
       return DEFAULT_VISIBLE_COLUMNS.filter((column) => current.includes(column) || column === key);
     });
+  };
+
+  const toggleCompiledPreset = (presetId: string) => {
+    setCompiledPresetIds((current) => (
+      current.includes(presetId)
+        ? current.filter((id) => id !== presetId)
+        : [...current, presetId]
+    ));
   };
 
   const renderCell = (row: ScanRow, key: ResultColumnKey) => {
@@ -525,7 +579,20 @@ export function ScansPageDashboard() {
                 className={`w-full rounded border px-3 py-2 text-left ${preset.id === selectedPresetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
                 onClick={() => setSelectedPresetId(preset.id)}
               >
-                <div className="text-sm font-semibold text-accent">{preset.name}</div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="text-sm font-semibold text-accent">{preset.name}</div>
+                  <label
+                    className="inline-flex items-center gap-1 text-[11px] text-slate-400"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={compiledPresetIds.includes(preset.id)}
+                      onChange={() => toggleCompiledPreset(preset.id)}
+                    />
+                    Compile
+                  </label>
+                </div>
                 <div className="text-[11px] text-slate-400">
                   {preset.rules.length} rule{preset.rules.length === 1 ? "" : "s"} - {preset.rowLimit} rows - {preset.sortField} {preset.sortDirection}
                 </div>
@@ -535,6 +602,20 @@ export function ScansPageDashboard() {
               </button>
             ))}
             {presets.length === 0 && <p className="text-xs text-slate-400">No scan presets saved yet.</p>}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+              onClick={() => setCompiledPresetIds(presets.map((preset) => preset.id))}
+            >
+              Select All
+            </button>
+            <button
+              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+              onClick={() => setCompiledPresetIds([])}
+            >
+              Clear
+            </button>
           </div>
         </section>
 
@@ -757,6 +838,48 @@ export function ScansPageDashboard() {
         <div className="card p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
+              <h3 className="text-sm font-semibold text-slate-200">Compiled Unique Tickers</h3>
+              <p className="text-xs text-slate-400">
+                Combine the latest saved results from multiple presets and export a TradingView-ready watchlist file.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {compiledExportUrl && (
+                <a
+                  className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
+                  href={compiledExportUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Export TXT
+                </a>
+              )}
+              <button
+                className="inline-flex items-center gap-2 rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 disabled:opacity-50 hover:bg-slate-800/60"
+                disabled={(compiledSnapshot?.rows.length ?? 0) === 0}
+                onClick={async () => {
+                  await navigator.clipboard.writeText((compiledSnapshot?.rows ?? []).map((row) => row.ticker).join("\n"));
+                  setMessage("Compiled tickers copied.");
+                }}
+              >
+                <Copy className="h-4 w-4" />
+                Copy Tickers
+              </button>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            {compiledPresetIds.length === 0
+              ? "Select one or more saved presets with the Compile checkbox."
+              : `${compiledPresetIds.length} preset${compiledPresetIds.length === 1 ? "" : "s"} selected`}
+            {compiledSnapshot ? ` - ${compiledSnapshot.rows.length} unique ticker${compiledSnapshot.rows.length === 1 ? "" : "s"}` : ""}
+            {compiledSnapshot?.generatedAt ? ` - latest snapshot ${formatDateTime(compiledSnapshot.generatedAt)}` : ""}
+          </p>
+          {compiledError && <p className="mt-2 text-xs text-red-300">{compiledError}</p>}
+        </div>
+
+        <div className="card p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
               <h3 className="text-sm font-semibold text-slate-200">Visible Columns</h3>
               <p className="text-xs text-slate-400">Choose which columns to show in the scan results table.</p>
             </div>
@@ -774,6 +897,53 @@ export function ScansPageDashboard() {
               ))}
             </div>
           </div>
+        </div>
+
+        <div className="card overflow-hidden">
+          <div className="border-b border-borderSoft/70 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+            Compiled Unique List
+          </div>
+          {compiledLoading ? (
+            <div className="flex items-center gap-2 p-4 text-sm text-slate-300">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Compiling selected scan snapshots...
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-900/60">
+                  <tr>
+                    {["Ticker", "Company", "Hits", "1D Change %", "Price", "Preset Matches"].map((label) => (
+                      <th key={label} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                        {label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(compiledSnapshot?.rows ?? []).map((row) => (
+                    <tr key={row.ticker} className="border-t border-borderSoft/80 hover:bg-slate-900/30">
+                      <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
+                      <td className="px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>
+                      <td className="px-3 py-2 text-slate-300">{row.occurrences}</td>
+                      <td className={`px-3 py-2 ${(row.latestChange1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.latestChange1d)}</td>
+                      <td className="px-3 py-2 text-slate-300">{formatNumber(row.latestPrice)}</td>
+                      <td className="px-3 py-2 text-slate-300">{row.presetNames.join(", ") || "-"}</td>
+                    </tr>
+                  ))}
+                  {(compiledSnapshot?.rows.length ?? 0) === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-400">
+                        {compiledPresetIds.length === 0
+                          ? "Choose saved presets with the Compile checkbox to build a combined watchlist."
+                          : "No compiled tickers are available yet for the selected presets."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         <div className="card overflow-hidden">

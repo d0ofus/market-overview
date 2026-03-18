@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildTradingViewScanPayload,
   fetchTradingViewScanRows,
+  loadCompiledScansSnapshot,
   normalizeScanRows,
   type ScanPreset,
 } from "../src/scans-page-service";
@@ -130,5 +131,70 @@ describe("scans page service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
     expect(result.rows[0]?.relativeVolume).toBe(1.8);
     vi.unstubAllGlobals();
+  });
+
+  it("compiles unique tickers across the latest snapshots of multiple presets", async () => {
+    const presetRows = [
+      { id: "preset-a", name: "Leaders", isDefault: 1, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+      { id: "preset-b", name: "Breakouts", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+    ];
+    const snapshotRows = {
+      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 2, status: "ok", error: null },
+      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 2, status: "ok", error: null },
+    } as const;
+    const scanRows = {
+      "snap-a": [
+        { ticker: "NVDA", name: "NVIDIA", sector: "Technology", industry: "Semiconductors", change1d: 4.5, marketCap: 1, price: 100, avgVolume: 10, priceAvgVolume: 1000, rawJson: JSON.stringify({ relative_volume_10d_calc: 2.1 }) },
+        { ticker: "PLTR", name: "Palantir", sector: "Technology", industry: "Software", change1d: 2.2, marketCap: 1, price: 20, avgVolume: 10, priceAvgVolume: 200, rawJson: JSON.stringify({ relative_volume_10d_calc: 1.4 }) },
+      ],
+      "snap-b": [
+        { ticker: "NVDA", name: "NVIDIA", sector: "Technology", industry: "Semiconductors", change1d: 5.1, marketCap: 1, price: 101, avgVolume: 10, priceAvgVolume: 1010, rawJson: JSON.stringify({ relative_volume_10d_calc: 2.3 }) },
+        { ticker: "SNOW", name: "Snowflake", sector: "Technology", industry: "Software", change1d: 3.1, marketCap: 1, price: 30, avgVolume: 10, priceAvgVolume: 300, rawJson: JSON.stringify({ relative_volume_10d_calc: 1.8 }) },
+      ],
+    } as const;
+
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(value: string) {
+              return {
+                async first() {
+                  if (query.includes("FROM scan_presets WHERE id = ?")) {
+                    return presetRows.find((row) => row.id === value) ?? null;
+                  }
+                  if (query.includes("FROM scan_snapshots WHERE preset_id = ?")) {
+                    return snapshotRows[value as keyof typeof snapshotRows] ?? null;
+                  }
+                  return null;
+                },
+                async all() {
+                  if (query.includes("FROM scan_rows WHERE snapshot_id = ?")) {
+                    return { results: scanRows[value as keyof typeof scanRows] ?? [] };
+                  }
+                  return { results: [] };
+                },
+              };
+            },
+          };
+        },
+      },
+    } as any;
+
+    const result = await loadCompiledScansSnapshot(env, ["preset-a", "preset-b"]);
+
+    expect(result.presetNames).toEqual(["Leaders", "Breakouts"]);
+    expect(result.generatedAt).toBe("2026-03-18T02:00:00.000Z");
+    expect(result.rows.map((row) => [row.ticker, row.occurrences])).toEqual([
+      ["NVDA", 2],
+      ["SNOW", 1],
+      ["PLTR", 1],
+    ]);
+    expect(result.rows[0]).toMatchObject({
+      ticker: "NVDA",
+      presetNames: ["Leaders", "Breakouts"],
+      latestPrice: 101,
+      latestRelativeVolume: 2.3,
+    });
   });
 });
