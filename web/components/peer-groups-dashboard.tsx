@@ -50,7 +50,7 @@ export function PeerGroupsDashboard() {
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [chartSortKey, setChartSortKey] = useState<MultiChartSortKey>("change1d");
-  const [chartsPerPage, setChartsPerPage] = useState(9);
+  const [chartsPerPage, setChartsPerPage] = useState(12);
   const [chartPage, setChartPage] = useState(1);
   const [memberSortKey, setMemberSortKey] = useState<PeerMemberSortKey>("ticker");
   const [memberSortDir, setMemberSortDir] = useState<"asc" | "desc">("asc");
@@ -447,7 +447,7 @@ export function PeerGroupsDashboard() {
                     max={48}
                     className="w-20 rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
                     value={chartsPerPage}
-                    onChange={(event) => setChartsPerPage(Math.max(1, Math.min(48, Number(event.target.value) || 9)))}
+                    onChange={(event) => setChartsPerPage(Math.max(1, Math.min(48, Number(event.target.value) || 12)))}
                   />
                 </label>
               </div>
