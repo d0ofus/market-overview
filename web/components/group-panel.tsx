@@ -45,7 +45,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number }>>([]);
-  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
+  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const showsEtfConstituents = title === "Sector ETFs" || title.startsWith("Industry/Thematic ETFs");
   const defaultSortKey = columns.includes("1D")
@@ -115,7 +115,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setConstituentLoading(true);
     setConstituentWarning(null);
     setConstituents([]);
-    setConstituentSort("weight");
+    setConstituentSort("change1d");
     try {
       const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []).map((row) => ({

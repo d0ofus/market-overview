@@ -141,7 +141,7 @@ export function SectorTracker() {
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const [addFormOpen, setAddFormOpen] = useState(false);
-  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("weight");
+  const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
   const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
   const [editSectorName, setEditSectorName] = useState("");
@@ -182,7 +182,7 @@ export function SectorTracker() {
     setConstituentLoading(true);
     setConstituentWarning(null);
     setConstituents([]);
-    setConstituentSort("weight");
+    setConstituentSort("change1d");
     try {
       const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []) as EtfConstituent[]);
