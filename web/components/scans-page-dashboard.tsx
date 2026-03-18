@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   createScanPreset,
   deleteScanPreset,
@@ -246,6 +246,8 @@ export function ScansPageDashboard() {
   const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [compiledListCollapsed, setCompiledListCollapsed] = useState(false);
+  const [resultsTableCollapsed, setResultsTableCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compiledError, setCompiledError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -900,10 +902,23 @@ export function ScansPageDashboard() {
         </div>
 
         <div className="card overflow-hidden">
-          <div className="border-b border-borderSoft/70 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-            Compiled Unique List
+          <div className="flex items-center justify-between border-b border-borderSoft/70 px-3 py-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+              Compiled Unique List
+            </div>
+            <button
+              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+              onClick={() => setCompiledListCollapsed((current) => !current)}
+            >
+              {compiledListCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+              {compiledListCollapsed ? "Expand" : "Collapse"}
+            </button>
           </div>
-          {compiledLoading ? (
+          {compiledListCollapsed ? (
+            <div className="px-3 py-4 text-sm text-slate-400">
+              Compiled unique ticker rows are hidden.
+            </div>
+          ) : compiledLoading ? (
             <div className="flex items-center gap-2 p-4 text-sm text-slate-300">
               <Loader2 className="h-4 w-4 animate-spin" />
               Compiling selected scan snapshots...
@@ -947,6 +962,23 @@ export function ScansPageDashboard() {
         </div>
 
         <div className="card overflow-hidden">
+          <div className="flex items-center justify-between border-b border-borderSoft/70 px-3 py-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+              Scan Results Table
+            </div>
+            <button
+              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+              onClick={() => setResultsTableCollapsed((current) => !current)}
+            >
+              {resultsTableCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+              {resultsTableCollapsed ? "Expand" : "Collapse"}
+            </button>
+          </div>
+          {resultsTableCollapsed ? (
+            <div className="px-3 py-4 text-sm text-slate-400">
+              Scan result rows are hidden.
+            </div>
+          ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-slate-900/60">
@@ -1007,6 +1039,7 @@ export function ScansPageDashboard() {
               </tbody>
             </table>
           </div>
+          )}
         </div>
       </section>
 
