@@ -19,12 +19,14 @@ export function TickerMultiGrid({
   selectedKey,
   onSelect,
   emptyMessage,
+  showChartStatusLine = false,
 }: {
   title: string;
   items: TickerMultiGridItem[];
   selectedKey?: string | null;
   onSelect?: (key: string) => void;
   emptyMessage: string;
+  showChartStatusLine?: boolean;
 }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -87,6 +89,7 @@ export function TickerMultiGrid({
                 ticker={item.ticker}
                 size="small"
                 chartOnly
+                showStatusLine={showChartStatusLine}
                 initialRange="3M"
                 className="!border-0 !bg-transparent !shadow-none !p-0"
               />

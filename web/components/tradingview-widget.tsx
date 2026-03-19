@@ -66,6 +66,13 @@ export function TradingViewWidget({
       hide_side_toolbar: chartOnly,
       hide_legend: chartOnly ? !showStatusLine : false,
       volume_force_overlay: false,
+      overrides: showStatusLine
+        ? {
+            "paneProperties.legendProperties.showSeriesOHLC": true,
+            "paneProperties.legendProperties.showBarChange": true,
+            "paneProperties.legendProperties.showVolume": true,
+          }
+        : undefined,
       withdateranges: chartOnly ? false : true,
       save_image: false,
       compareSymbols: compareSymbol

@@ -394,6 +394,7 @@ export function AlertsDashboard() {
               selectedKey={selectedKey}
               onSelect={setSelectedKey}
               emptyMessage="No tickers match current filters."
+              showChartStatusLine
               items={tickerDays.slice(0, 9).map((row) => ({
                 key: keyFor(row.ticker, row.tradingDay),
                 ticker: row.ticker,
