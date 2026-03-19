@@ -30,8 +30,15 @@ export function TradingViewWidget({
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
-  const maxWidth = size === "small" ? 420 : compact ? 640 : 880;
-  const frameClass = size === "small" ? "w-full max-w-[420px] aspect-[4/3]" : compact ? "w-full max-w-[640px] aspect-[4/3]" : "w-full max-w-[880px] aspect-[4/3]";
+  const denseStatusLayout = chartOnly && showStatusLine;
+  const maxWidth = size === "small" ? (denseStatusLayout ? 560 : 420) : compact ? 640 : 880;
+  const frameClass = size === "small"
+    ? denseStatusLayout
+      ? "w-full max-w-[560px] aspect-[7/5]"
+      : "w-full max-w-[420px] aspect-[4/3]"
+    : compact
+      ? "w-full max-w-[640px] aspect-[4/3]"
+      : "w-full max-w-[880px] aspect-[4/3]";
 
   useEffect(() => {
     const syncTheme = () => {
@@ -71,6 +78,8 @@ export function TradingViewWidget({
             "paneProperties.legendProperties.showSeriesOHLC": true,
             "paneProperties.legendProperties.showBarChange": true,
             "paneProperties.legendProperties.showVolume": true,
+            "mainSeriesProperties.statusViewStyle.showExchange": false,
+            "mainSeriesProperties.statusViewStyle.showInterval": false,
           }
         : undefined,
       withdateranges: chartOnly ? false : true,
@@ -89,7 +98,7 @@ export function TradingViewWidget({
   }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange, theme]);
 
   return (
-    <div className={`card p-2 ${className}`}>
+    <div className={`card ${denseStatusLayout ? "p-1" : "p-2"} ${className}`}>
       <div className={`tradingview-widget-container mx-auto ${frameClass}`} ref={ref}>
         <div id={containerId} className="h-full" />
       </div>

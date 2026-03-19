@@ -351,7 +351,7 @@ export function SectorTracker() {
       <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {sectorEtfs.map((etf) => (
-            <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-2">
+            <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-1.5">
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div>
                 <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
@@ -384,7 +384,7 @@ export function SectorTracker() {
           {industryGroups.map(({ key, rows, maxChange }) => {
             const [parentSector, industry] = key.split(" :: ");
             return (
-              <div key={key} className="rounded-xl border border-borderSoft/70 p-2">
+              <div key={key} className="rounded-xl border border-borderSoft/70 p-1.5">
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <div>
                   <h4 className="text-sm font-semibold text-slate-200">{industry}</h4>
@@ -394,7 +394,7 @@ export function SectorTracker() {
                 </div>
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {rows.map((etf) => (
-                    <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-2">
+                    <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-1.5">
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <div>
                         <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
@@ -755,7 +755,7 @@ export function SectorTracker() {
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
                 {sortedConstituents.map((row) => (
-                  <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-2">
+                  <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-1.5">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{row.ticker}</span>
                       <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>

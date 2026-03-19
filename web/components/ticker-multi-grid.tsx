@@ -62,7 +62,7 @@ export function TickerMultiGrid({
           return (
             <div
               key={item.key}
-              className={`rounded border p-2 ${isSelected ? "border-accent/60" : "border-borderSoft/60"}`}
+              className={`rounded border ${showChartStatusLine ? "p-1.5" : "p-2"} ${isSelected ? "border-accent/60" : "border-borderSoft/60"}`}
             >
               <div className="mb-2">
                 {item.onTitleClick ? (
