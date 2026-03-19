@@ -4,8 +4,11 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
 import { Sparkline } from "./sparkline";
+import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
+
+const CHARTS_PER_PAGE = 20;
 
 type Row = {
   ticker: string;
@@ -47,6 +50,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number }>>([]);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [constituentPage, setConstituentPage] = useState(1);
   const showsEtfConstituents = title === "Sector ETFs" || title.startsWith("Industry/Thematic ETFs");
   const defaultSortKey = columns.includes("1D")
     ? "1D"
@@ -109,6 +113,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     rowsCopy.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
     return rowsCopy;
   }, [constituents, constituentSort]);
+  const pagedConstituents = useMemo(
+    () => sortedConstituents.slice((constituentPage - 1) * CHARTS_PER_PAGE, constituentPage * CHARTS_PER_PAGE),
+    [constituentPage, sortedConstituents],
+  );
 
   const openEtfConstituents = async (ticker: string, name: string | null) => {
     setActiveEtf({ ticker, name });
@@ -116,6 +124,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setConstituentWarning(null);
     setConstituents([]);
     setConstituentSort("change1d");
+    setConstituentPage(1);
     try {
       const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []).map((row) => ({
@@ -146,6 +155,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeChartTicker, activeEtf]);
+
+  useEffect(() => {
+    setConstituentPage(1);
+  }, [activeEtf?.ticker, constituentSort, sortedConstituents.length]);
 
   return (
     <>
@@ -263,6 +276,13 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                 Constituent sync warning: {constituentWarning}
               </div>
             )}
+            <ChartGridPager
+              totalItems={sortedConstituents.length}
+              page={constituentPage}
+              pageSize={CHARTS_PER_PAGE}
+              itemLabel="tickers"
+              onPageChange={setConstituentPage}
+            />
             {constituentLoading ? (
               <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -270,7 +290,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {sortedConstituents.map((row) => (
+                {pagedConstituents.map((row) => (
                   <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-2">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{row.ticker}</span>

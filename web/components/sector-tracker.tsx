@@ -4,10 +4,12 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import { adminFetch, deleteSectorEntry, getEtfConstituents, getIndustryEtfs, getSectorCalendar, getSectorEntries, getSectorEtfs, getSectorSymbolOptions, updateSectorEntry } from "@/lib/api";
+import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 
 const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 const pctCls = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
+const CHARTS_PER_PAGE = 20;
 
 type EntrySymbol = { ticker: string; name: string | null };
 type SectorEntry = {
@@ -142,6 +144,7 @@ export function SectorTracker() {
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
+  const [constituentPage, setConstituentPage] = useState(1);
   const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
   const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
   const [editSectorName, setEditSectorName] = useState("");
@@ -183,6 +186,7 @@ export function SectorTracker() {
     setConstituentWarning(null);
     setConstituents([]);
     setConstituentSort("change1d");
+    setConstituentPage(1);
     try {
       const res = await getEtfConstituents(ticker);
       setConstituents((res.rows ?? []) as EtfConstituent[]);
@@ -299,6 +303,10 @@ export function SectorTracker() {
     rows.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
     return rows;
   }, [constituents, constituentSort]);
+  const pagedConstituents = useMemo(
+    () => sortedConstituents.slice((constituentPage - 1) * CHARTS_PER_PAGE, constituentPage * CHARTS_PER_PAGE),
+    [constituentPage, sortedConstituents],
+  );
 
   const sectorNarrativeOptions = useMemo(() => {
     const options = new Set<string>();
@@ -316,6 +324,10 @@ export function SectorTracker() {
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+
+  useEffect(() => {
+    setConstituentPage(1);
+  }, [activeEtf?.ticker, constituentSort, sortedConstituents.length]);
 
   return (
     <div className="space-y-4">
@@ -747,6 +759,13 @@ export function SectorTracker() {
                 Constituent sync warning: {constituentWarning}
               </div>
             )}
+            <ChartGridPager
+              totalItems={sortedConstituents.length}
+              page={constituentPage}
+              pageSize={CHARTS_PER_PAGE}
+              itemLabel="tickers"
+              onPageChange={setConstituentPage}
+            />
             {constituentLoading ? (
               <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -754,7 +773,7 @@ export function SectorTracker() {
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
-                {sortedConstituents.map((row) => (
+                {pagedConstituents.map((row) => (
                   <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-1.5">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-semibold text-accent">{row.ticker}</span>

@@ -8,7 +8,10 @@ import {
   type PeerMetricRow,
   type PeerTickerDetail,
 } from "@/lib/api";
+import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
+
+const CHARTS_PER_PAGE = 20;
 
 function formatPrice(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
@@ -33,6 +36,7 @@ export function PeerGroupModal({
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [memberPage, setMemberPage] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +87,14 @@ export function PeerGroupModal({
       return a.ticker.localeCompare(b.ticker);
     });
   }, [activeGroup, metrics]);
+  const pagedMembers = useMemo(
+    () => sortedMembers.slice((memberPage - 1) * CHARTS_PER_PAGE, memberPage * CHARTS_PER_PAGE),
+    [memberPage, sortedMembers],
+  );
+
+  useEffect(() => {
+    setMemberPage(1);
+  }, [ticker, activeGroup?.name, sortedMembers.length]);
 
   return (
     <>
@@ -113,6 +125,13 @@ export function PeerGroupModal({
               Metrics warning: {metricsError}
             </div>
           )}
+          <ChartGridPager
+            totalItems={sortedMembers.length}
+            page={memberPage}
+            pageSize={CHARTS_PER_PAGE}
+            itemLabel="tickers"
+            onPageChange={setMemberPage}
+          />
           {loading ? (
             <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -120,7 +139,7 @@ export function PeerGroupModal({
             </div>
           ) : (
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {sortedMembers.map((member) => (
+              {pagedMembers.map((member) => (
                 <div key={`${ticker}-${member.ticker}`} className="card p-2">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="font-semibold text-accent">{member.ticker}</span>
