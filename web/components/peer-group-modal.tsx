@@ -99,7 +99,7 @@ export function PeerGroupModal({
   return (
     <>
       <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={onClose}>
-        <div className="flex max-h-[80vh] w-full max-w-6xl flex-col overflow-hidden" onClick={(event) => event.stopPropagation()}>
+        <div className="flex h-[calc(100vh-2rem)] w-[80vw] max-w-[80vw] flex-col overflow-hidden" onClick={(event) => event.stopPropagation()}>
           <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
             <h4 className="text-sm font-semibold text-slate-100">
               {ticker} Peer Group {activeGroup ? `- ${activeGroup.name}` : ""}
