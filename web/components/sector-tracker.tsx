@@ -726,8 +726,8 @@ export function SectorTracker() {
       )}
 
       {activeEtf && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-slate-950/70 p-4" onClick={() => setActiveEtf(null)}>
-          <div className="w-full max-w-6xl" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveEtf(null)}>
+          <div className="flex max-h-[80vh] w-full max-w-6xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
               <h4 className="text-sm font-semibold text-slate-100">
                 {activeEtf.ticker} Constituents {activeEtf.fundName ? `- ${activeEtf.fundName}` : ""}
@@ -754,51 +754,53 @@ export function SectorTracker() {
                 {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
               </span>
             </div>
-            {constituentWarning && (
-              <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
-                Constituent sync warning: {constituentWarning}
-              </div>
-            )}
-            <ChartGridPager
-              totalItems={sortedConstituents.length}
-              page={constituentPage}
-              pageSize={CHARTS_PER_PAGE}
-              itemLabel="tickers"
-              onPageChange={setConstituentPage}
-            />
-            {constituentLoading ? (
-              <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading constituents...
-              </div>
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
-                {pagedConstituents.map((row) => (
-                  <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-1.5">
-                    <div className="mb-2 flex items-center justify-between">
-                      <span className="font-semibold text-accent">{row.ticker}</span>
-                      <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
+            <div className="overflow-y-auto pr-1">
+              {constituentWarning && (
+                <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
+                  Constituent sync warning: {constituentWarning}
+                </div>
+              )}
+              <ChartGridPager
+                totalItems={sortedConstituents.length}
+                page={constituentPage}
+                pageSize={CHARTS_PER_PAGE}
+                itemLabel="tickers"
+                onPageChange={setConstituentPage}
+              />
+              {constituentLoading ? (
+                <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading constituents...
+                </div>
+              ) : (
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
+                  {pagedConstituents.map((row) => (
+                    <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-1.5">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="font-semibold text-accent">{row.ticker}</span>
+                        <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
+                      </div>
+                      <div className="mb-1 text-xs">
+                        <span className={pctCls(row.change1d ?? 0)}>{(row.change1d ?? 0).toFixed(2)}%</span>
+                        <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
+                      </div>
+                      <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
+                      <TradingViewWidget ticker={row.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <button
+                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                        onClick={() => setActiveChartTicker(row.ticker)}
+                      >
+                        <Maximize2 className="h-3.5 w-3.5" />
+                        Expand chart
+                      </button>
                     </div>
-                    <div className="mb-1 text-xs">
-                      <span className={pctCls(row.change1d ?? 0)}>{(row.change1d ?? 0).toFixed(2)}%</span>
-                      <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
-                    </div>
-                    <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                    <TradingViewWidget ticker={row.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                    <button
-                      className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                      onClick={() => setActiveChartTicker(row.ticker)}
-                    >
-                      <Maximize2 className="h-3.5 w-3.5" />
-                      Expand chart
-                    </button>
-                  </div>
-                ))}
-                {constituents.length === 0 && (
-                  <div className="card p-4 text-sm text-slate-300">No constituents available for this ETF.</div>
-                )}
-              </div>
-            )}
+                  ))}
+                  {constituents.length === 0 && (
+                    <div className="card p-4 text-sm text-slate-300">No constituents available for this ETF.</div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
