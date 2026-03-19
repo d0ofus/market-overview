@@ -99,8 +99,11 @@ export function AdminBuilder() {
     }, timeoutMs);
   };
 
-  const load = async () => {
-    setIsLoading(true);
+  const load = async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setIsLoading(true);
+    }
     setLoadError(null);
     try {
       const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
@@ -124,7 +127,9 @@ export function AdminBuilder() {
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to load admin config.");
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   };
   useEffect(() => {
@@ -206,14 +211,15 @@ export function AdminBuilder() {
       });
       if (result.updated) {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
-        await load();
         if (meta && isIndustryThematicGroup(meta.groupTitle)) {
           showConfirmationNote(`Saved ${meta.ticker} name to the database.`);
         } else {
           showConfirmationNote("Name saved to the database.");
         }
+        await load({ silent: true });
       } else {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "No database change needed." }));
+        showConfirmationNote("No database change needed.");
       }
     } catch (error) {
       setItemDisplayNameStatus((current) => ({
@@ -1054,7 +1060,13 @@ export function AdminBuilder() {
                         Save Name
                       </button>
                       {itemDisplayNameStatus[item.id] ? (
-                        <span className={`rounded px-2 py-1 text-[11px] font-medium ${itemDisplayNameStatus[item.id] === "Saved to database." ? "bg-emerald-500/20 text-emerald-200" : "bg-red-500/15 text-red-300"}`}>
+                        <span className={`rounded px-2 py-1 text-[11px] font-medium ${
+                          itemDisplayNameStatus[item.id] === "Saved to database."
+                            ? "bg-emerald-500/20 text-emerald-200"
+                            : itemDisplayNameStatus[item.id] === "No database change needed."
+                              ? "bg-slate-500/15 text-slate-200"
+                              : "bg-red-500/15 text-red-300"
+                        }`}>
                           {itemDisplayNameStatus[item.id]}
                         </span>
                       ) : null}
