@@ -31,6 +31,9 @@
 - Show % change and market cap on each chart
 
 ## Scans
+- Add weekly gainers scan
+- Add strongest FA scan
+- Add Strong earnings scanner
 - Colour by industry
 
 ## Scanning
