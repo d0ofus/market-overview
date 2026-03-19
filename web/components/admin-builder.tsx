@@ -25,6 +25,10 @@ function isOverviewAdminSection(title: string): boolean {
   return title.includes("Macro Overview") || title.includes("Equities Overview") || title.includes("Market Breadth & Sentiment");
 }
 
+function isIndustryThematicGroup(title: string): boolean {
+  return title === "Industry/Thematic ETFs" || title === "Thematic ETFs";
+}
+
 const buildRefreshLabel = (localTime: string, timezone: string) => `${localTime} ${timezone} (prev US close)`;
 
 function formatDateTimeCompact(value: string | null | undefined): string {
@@ -140,6 +144,19 @@ export function AdminBuilder() {
     setItemDisplayNames(next);
   }, [data]);
 
+  const itemMetaById = useMemo(() => {
+    const next = new Map<string, { ticker: string; groupTitle: string }>();
+    if (!data) return next;
+    for (const section of data.sections) {
+      for (const group of section.groups) {
+        for (const item of group.items) {
+          next.set(item.id, { ticker: item.ticker, groupTitle: group.title });
+        }
+      }
+    }
+    return next;
+  }, [data]);
+
   const patchGroup = async (groupId: string, patch: any) => {
     await adminFetch("/api/admin/group/" + groupId, { method: "PATCH", body: JSON.stringify(patch) });
     await load();
@@ -182,13 +199,20 @@ export function AdminBuilder() {
   const updateItemDisplayName = async (itemId: string) => {
     try {
       setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
-      await adminFetch("/api/admin/item/" + itemId, {
+      const result = await adminFetch<{ ok: boolean; itemId: string; updated: boolean }>("/api/admin/item/" + itemId, {
         method: "PATCH",
         body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
       });
-      setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
-      await load();
-      showConfirmationNote("Name saved to the database.");
+      if (result.updated) {
+        setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
+        await load();
+        const meta = itemMetaById.get(itemId);
+        if (meta && isIndustryThematicGroup(meta.groupTitle)) {
+          showConfirmationNote(`Saved ${meta.ticker} name to the database.`);
+        }
+      } else {
+        setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "No database change needed." }));
+      }
     } catch (error) {
       setItemDisplayNameStatus((current) => ({
         ...current,

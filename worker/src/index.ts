@@ -2907,14 +2907,25 @@ app.patch("/api/admin/item/:itemId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const itemId = c.req.param("itemId");
   const payload = itemPatchSchema.parse(await c.req.json());
-  await c.env.DB.prepare(
-    "UPDATE dashboard_items SET display_name = ? WHERE id = ?",
+  const nextDisplayName = payload.displayName?.trim() || null;
+  const existing = await c.env.DB.prepare(
+    "SELECT display_name as displayName FROM dashboard_items WHERE id = ? LIMIT 1",
   )
-    .bind(payload.displayName?.trim() || null, itemId)
-    .run();
-  await upsertAudit(c.env, "default", "ITEM_PATCH", { itemId, payload });
-  await refreshSnapshotSafe(c.env);
-  return c.json({ ok: true, itemId });
+    .bind(itemId)
+    .first<{ displayName: string | null }>();
+  if (!existing) return c.json({ error: "Item not found." }, 404);
+
+  const updated = (existing.displayName ?? null) !== nextDisplayName;
+  if (updated) {
+    await c.env.DB.prepare(
+      "UPDATE dashboard_items SET display_name = ? WHERE id = ?",
+    )
+      .bind(nextDisplayName, itemId)
+      .run();
+    await upsertAudit(c.env, "default", "ITEM_PATCH", { itemId, payload });
+    await refreshSnapshotSafe(c.env);
+  }
+  return c.json({ ok: true, itemId, updated });
 });
 
 app.post("/api/admin/upload-bars", async (c) => {
