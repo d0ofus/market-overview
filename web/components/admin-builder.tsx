@@ -199,6 +199,7 @@ export function AdminBuilder() {
   const updateItemDisplayName = async (itemId: string) => {
     try {
       setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
+      const meta = itemMetaById.get(itemId);
       const result = await adminFetch<{ ok: boolean; itemId: string; updated: boolean }>("/api/admin/item/" + itemId, {
         method: "PATCH",
         body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
@@ -206,9 +207,10 @@ export function AdminBuilder() {
       if (result.updated) {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
         await load();
-        const meta = itemMetaById.get(itemId);
         if (meta && isIndustryThematicGroup(meta.groupTitle)) {
           showConfirmationNote(`Saved ${meta.ticker} name to the database.`);
+        } else {
+          showConfirmationNote("Name saved to the database.");
         }
       } else {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "No database change needed." }));
