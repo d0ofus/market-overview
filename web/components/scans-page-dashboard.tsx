@@ -17,6 +17,7 @@ import {
   type ScanPreset,
   type ScanRow,
   type ScanRule,
+  type ScanRuleFieldReference,
   type ScanRuleOperator,
   type ScanSnapshot,
 } from "@/lib/api";
@@ -91,6 +92,8 @@ const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 const DEFAULT_FIELD_SEARCH_LIMIT = 50;
 
 const CUSTOM_FIELD_OPTION = "__custom__";
+const FIELD_VALUE_MODE = "field";
+const LITERAL_VALUE_MODE = "literal";
 
 const FIELD_LABELS: Record<string, string> = {
   marketCap: "Market Capitalization",
@@ -153,11 +156,25 @@ function formatRatio(value: number | null | undefined): string {
   return value.toFixed(2);
 }
 
+function isFieldReferenceValue(value: ScanRule["value"]): value is ScanRuleFieldReference {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "field";
+}
+
+function getRuleValueMode(rule: ScanRule): "literal" | "field" {
+  return isFieldReferenceValue(rule.value) ? "field" : "literal";
+}
+
+function emptyFieldReferenceValue(): ScanRuleFieldReference {
+  return { type: "field", field: "", multiplier: 1 };
+}
+
 function valueToInput(rule: ScanRule): string {
+  if (isFieldReferenceValue(rule.value)) return "";
   return Array.isArray(rule.value) ? rule.value.join(", ") : String(rule.value ?? "");
 }
 
 function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
+  if (isFieldReferenceValue(rule.value)) return rule;
   const trimmed = rawValue.trim();
   if (rule.operator === "in" || rule.operator === "not_in") {
     return {
@@ -173,6 +190,53 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
   return {
     ...rule,
     value: Number.isFinite(parsed) && !/[A-Za-z]/.test(trimmed) ? parsed : trimmed,
+  };
+}
+
+function compareFieldToInput(rule: ScanRule): string {
+  return isFieldReferenceValue(rule.value) ? rule.value.field : "";
+}
+
+function compareMultiplierToInput(rule: ScanRule): string {
+  if (!isFieldReferenceValue(rule.value)) return "1";
+  const multiplier = typeof rule.value.multiplier === "number" && Number.isFinite(rule.value.multiplier)
+    ? rule.value.multiplier
+    : 1;
+  return String(multiplier);
+}
+
+function setRuleValueMode(rule: ScanRule, mode: "literal" | "field"): ScanRule {
+  if (mode === "field") {
+    return {
+      ...rule,
+      operator: rule.operator === "in" || rule.operator === "not_in" ? "eq" : rule.operator,
+      value: isFieldReferenceValue(rule.value) ? rule.value : emptyFieldReferenceValue(),
+    };
+  }
+  return {
+    ...rule,
+    value: isFieldReferenceValue(rule.value) ? "" : rule.value,
+  };
+}
+
+function setRuleCompareField(rule: ScanRule, field: string): ScanRule {
+  if (!isFieldReferenceValue(rule.value)) return rule;
+  return { ...rule, value: { ...rule.value, field } };
+}
+
+function setRuleCompareMultiplier(rule: ScanRule, rawValue: string): ScanRule {
+  if (!isFieldReferenceValue(rule.value)) return rule;
+  const trimmed = rawValue.trim();
+  if (trimmed === "" || trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) {
+    return { ...rule, value: { ...rule.value, multiplier: 1 } };
+  }
+  const parsed = Number(trimmed);
+  return {
+    ...rule,
+    value: {
+      ...rule.value,
+      multiplier: Number.isFinite(parsed) ? parsed : 1,
+    },
   };
 }
 
@@ -430,6 +494,12 @@ export function ScansPageDashboard() {
     }
     if (rules.length === 0) {
       setError("Add at least one scan rule before saving.");
+      setMessage(null);
+      return;
+    }
+    const incompleteFieldRule = rules.find((rule) => isFieldReferenceValue(rule.value) && !rule.value.field.trim());
+    if (incompleteFieldRule) {
+      setError(`Rule "${getFieldLabel(incompleteFieldRule.field)}" needs a comparison field.`);
       setMessage(null);
       return;
     }
@@ -726,6 +796,14 @@ export function ScansPageDashboard() {
                 const fieldQuery = rule.field.trim().toLowerCase();
                 const fieldOptions = fieldOptionsByQuery[fieldQuery] ?? fieldOptionsByQuery[""] ?? [];
                 const selectedFieldLabel = fieldLabelMap[rule.field.trim()] ?? getFieldLabel(rule.field);
+                const compareField = compareFieldToInput(rule);
+                const compareFieldQuery = compareField.trim().toLowerCase();
+                const compareFieldOptions = fieldOptionsByQuery[compareFieldQuery] ?? fieldOptionsByQuery[""] ?? [];
+                const selectedCompareFieldLabel = fieldLabelMap[compareField.trim()] ?? getFieldLabel(compareField);
+                const valueMode = getRuleValueMode(rule);
+                const operatorOptions = valueMode === FIELD_VALUE_MODE
+                  ? RULE_OPERATORS.filter((option) => option.value !== "in" && option.value !== "not_in")
+                  : RULE_OPERATORS;
                 return (
                 <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
                   <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
@@ -776,24 +854,96 @@ export function ScansPageDashboard() {
                           rules: current.rules.map((row) => row.id === rule.id ? { ...row, operator: event.target.value as ScanRuleOperator } : row),
                         }))}
                       >
-                        {RULE_OPERATORS.map((option) => (
+                        {operatorOptions.map((option) => (
                           <option key={option.value} value={option.value}>{option.label}</option>
                         ))}
                       </select>
                     </label>
                   </div>
-                  <label className="block">
-                    Value
-                    <input
-                      className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                      value={valueToInput(rule)}
-                      onChange={(event) => setDraftPreset((current) => ({
-                        ...current,
-                        rules: current.rules.map((row) => row.id === rule.id ? ruleFromInput(row, event.target.value) : row),
-                      }))}
-                      placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
-                    />
-                  </label>
+                  <div className="grid gap-2 md:grid-cols-[10rem,minmax(0,1fr)]">
+                    <label className="block">
+                      Compare Using
+                      <select
+                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                        value={valueMode}
+                        onChange={(event) => setDraftPreset((current) => ({
+                          ...current,
+                          rules: current.rules.map((row) => row.id === rule.id ? setRuleValueMode(row, event.target.value === FIELD_VALUE_MODE ? "field" : "literal") : row),
+                        }))}
+                      >
+                        <option value={LITERAL_VALUE_MODE}>Literal value</option>
+                        <option value={FIELD_VALUE_MODE}>Another field</option>
+                      </select>
+                    </label>
+                    {valueMode === FIELD_VALUE_MODE ? (
+                      <div className="grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
+                        <label className="block">
+                          Compare To
+                          <select
+                            className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                            value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
+                            onChange={(event) => setDraftPreset((current) => ({
+                              ...current,
+                              rules: current.rules.map((row) => {
+                                if (row.id !== rule.id) return row;
+                                return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
+                              }),
+                            }))}
+                          >
+                            {compareFieldOptions.map((field) => (
+                              <option key={field.value} value={field.value}>{field.label}</option>
+                            ))}
+                            {!isSuggestedField(compareField, compareFieldOptions) && compareField.trim() ? (
+                              <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedCompareFieldLabel})</option>
+                            ) : null}
+                            <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
+                          </select>
+                        </label>
+                        <label className="block">
+                          <span className="sr-only">Compare field ID</span>
+                          <input
+                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
+                            value={compareField}
+                            onChange={(event) => setDraftPreset((current) => ({
+                              ...current,
+                              rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row),
+                            }))}
+                            placeholder="Compare field ID"
+                          />
+                        </label>
+                        <label className="block">
+                          Multiplier
+                          <input
+                            className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                            value={compareMultiplierToInput(rule)}
+                            onChange={(event) => setDraftPreset((current) => ({
+                              ...current,
+                              rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, event.target.value) : row),
+                            }))}
+                            placeholder="1"
+                          />
+                        </label>
+                      </div>
+                    ) : (
+                      <label className="block">
+                        Value
+                        <input
+                          className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                          value={valueToInput(rule)}
+                          onChange={(event) => setDraftPreset((current) => ({
+                            ...current,
+                            rules: current.rules.map((row) => row.id === rule.id ? ruleFromInput(row, event.target.value) : row),
+                          }))}
+                          placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  {valueMode === FIELD_VALUE_MODE ? (
+                    <p className="mt-2 text-[11px] text-slate-400">
+                      Example for EMA5 below price by 0% to 3%: add one rule with `EMA5 &lt;= close * 1` and another with `EMA5 &gt;= close * 0.97`.
+                    </p>
+                  ) : null}
                   <div className="mt-2 flex justify-end">
                     <button
                       className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"

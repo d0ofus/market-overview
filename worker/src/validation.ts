@@ -116,11 +116,18 @@ export const watchlistSourcePatchSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+const scanRuleScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+const scanRuleFieldReferenceSchema = z.object({
+  type: z.literal("field"),
+  field: z.string().min(1),
+  multiplier: z.number().finite().optional(),
+});
+
 const scanRuleValueSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
-  z.array(z.union([z.string(), z.number(), z.boolean()])),
+  scanRuleScalarSchema,
+  z.array(scanRuleScalarSchema),
+  scanRuleFieldReferenceSchema,
 ]);
 
 export const scanPresetRuleSchema = z.object({

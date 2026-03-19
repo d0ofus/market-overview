@@ -103,6 +103,21 @@ describe("scans page service", () => {
     ]);
   });
 
+  it("keeps field-reference rules as post-filters and fetches the comparison field column", () => {
+    const payload = buildTradingViewScanPayload({
+      ...topGainersPreset,
+      rules: [
+        { id: "ema5-max", field: "EMA5", operator: "lte", value: { type: "field", field: "close", multiplier: 1 } },
+        { id: "ema5-min", field: "EMA5", operator: "gte", value: { type: "field", field: "close", multiplier: 0.97 } },
+      ],
+    });
+
+    expect(payload.filter).toEqual([]);
+    expect(payload.columns).toContain("EMA5");
+    expect(payload.columns).toContain("close");
+    expect(payload.range).toEqual([0, 300]);
+  });
+
   it("applies string post-filters after the TradingView response is parsed", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -130,6 +145,43 @@ describe("scans page service", () => {
     expect(result.status).toBe("ok");
     expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
     expect(result.rows[0]?.relativeVolume).toBe(1.8);
+    vi.unstubAllGlobals();
+  });
+
+  it("applies field-reference comparisons after the TradingView response is parsed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:PASS",
+            d: ["Pass Corp", "Technology", "Software", 4.1, 500_000_000, 1.5, 100, 5_000_000, 500_000_000, 6_000_000, "NASDAQ", "stock", 98],
+          },
+          {
+            s: "NASDAQ:TOOLOW",
+            d: ["Too Low", "Technology", "Software", 3.7, 400_000_000, 1.2, 100, 4_000_000, 400_000_000, 5_000_000, "NASDAQ", "stock", 96],
+          },
+          {
+            s: "NASDAQ:TOOHIGH",
+            d: ["Too High", "Technology", "Software", 3.9, 450_000_000, 1.3, 100, 4_500_000, 450_000_000, 5_500_000, "NASDAQ", "stock", 101],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTradingViewScanRows({
+      ...topGainersPreset,
+      rules: [
+        { id: "type", field: "type", operator: "in", value: ["stock"] },
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+        { id: "ema5-max", field: "EMA5", operator: "lte", value: { type: "field", field: "close", multiplier: 1 } },
+        { id: "ema5-min", field: "EMA5", operator: "gte", value: { type: "field", field: "close", multiplier: 0.97 } },
+      ],
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["PASS"]);
     vi.unstubAllGlobals();
   });
 

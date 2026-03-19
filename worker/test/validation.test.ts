@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupPatchSchema, itemCreateSchema } from "../src/validation";
+import { groupPatchSchema, itemCreateSchema, scanPresetRuleSchema } from "../src/validation";
 
 describe("validation", () => {
   it("validates group patch", () => {
@@ -20,5 +20,24 @@ describe("validation", () => {
       tags: [],
     });
     expect(parsed.ticker).toBe("SPY");
+  });
+
+  it("accepts scan rules that compare against another field with an optional multiplier", () => {
+    const parsed = scanPresetRuleSchema.parse({
+      id: "ema5-below-price",
+      field: "EMA5",
+      operator: "gte",
+      value: {
+        type: "field",
+        field: "close",
+        multiplier: 0.97,
+      },
+    });
+
+    expect(parsed.value).toMatchObject({
+      type: "field",
+      field: "close",
+      multiplier: 0.97,
+    });
   });
 });

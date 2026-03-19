@@ -2,7 +2,15 @@ import type { Env } from "./types";
 
 export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
 
-export type ScanRuleValue = string | number | boolean | Array<string | number | boolean>;
+export type ScanRuleScalar = string | number | boolean;
+
+export type ScanRuleFieldReference = {
+  type: "field";
+  field: string;
+  multiplier?: number;
+};
+
+export type ScanRuleValue = ScanRuleScalar | Array<ScanRuleScalar> | ScanRuleFieldReference;
 
 export type ScanPresetRule = {
   id: string;
@@ -190,12 +198,18 @@ function normalizeScalarValue(value: string | number | boolean): string | number
   return value;
 }
 
+function isFieldReferenceValue(value: ScanRuleValue): value is ScanRuleFieldReference {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "field";
+}
+
 function normalizeRuleValues(value: ScanRuleValue): Array<string | number | boolean> {
+  if (isFieldReferenceValue(value)) return [];
   if (Array.isArray(value)) return value.map((item) => normalizeScalarValue(item));
   return [normalizeScalarValue(value)];
 }
 
 function isNumericRule(rule: ScanPresetRule): boolean {
+  if (isFieldReferenceValue(rule.value)) return false;
   return normalizeRuleValues(rule.value).every((value) => typeof value === "number");
 }
 
@@ -218,7 +232,26 @@ function mapRuleToTradingViewFilter(rule: ScanPresetRule): TradingViewFilter | n
   return null;
 }
 
-function valueMatchesRule(candidate: unknown, rule: ScanPresetRule): boolean {
+function resolveRuleTargetValue(row: TradingViewScanRow, rule: ScanPresetRule): unknown {
+  if (!isFieldReferenceValue(rule.value)) {
+    return normalizeRuleValues(rule.value)[0];
+  }
+  const compareField = rule.value.field.trim();
+  if (!compareField) return null;
+  const baseValue = rowValueForField(row, compareField);
+  const baseNumber = asFiniteNumber(baseValue);
+  const multiplier = typeof rule.value.multiplier === "number" && Number.isFinite(rule.value.multiplier)
+    ? rule.value.multiplier
+    : 1;
+  if (baseNumber != null) return baseNumber * multiplier;
+  const baseText = asComparableString(baseValue);
+  return multiplier === 1 ? baseText : null;
+}
+
+function valueMatchesRule(candidate: unknown, rule: ScanPresetRule, row: TradingViewScanRow): boolean {
+  if (isFieldReferenceValue(rule.value) && (rule.operator === "in" || rule.operator === "not_in")) {
+    return false;
+  }
   const values = normalizeRuleValues(rule.value);
   if (rule.operator === "in" || rule.operator === "not_in") {
     const candidateText = asComparableString(candidate);
@@ -228,7 +261,8 @@ function valueMatchesRule(candidate: unknown, rule: ScanPresetRule): boolean {
   }
 
   const candidateNumber = asFiniteNumber(candidate);
-  const ruleNumber = typeof values[0] === "number" ? values[0] : asFiniteNumber(values[0]);
+  const comparisonTarget = resolveRuleTargetValue(row, rule);
+  const ruleNumber = typeof comparisonTarget === "number" ? comparisonTarget : asFiniteNumber(comparisonTarget);
   if (candidateNumber != null && ruleNumber != null) {
     if (rule.operator === "gt") return candidateNumber > ruleNumber;
     if (rule.operator === "gte") return candidateNumber >= ruleNumber;
@@ -239,7 +273,7 @@ function valueMatchesRule(candidate: unknown, rule: ScanPresetRule): boolean {
   }
 
   const candidateText = asComparableString(candidate);
-  const ruleText = asComparableString(values[0]);
+  const ruleText = asComparableString(comparisonTarget);
   if (candidateText == null || ruleText == null) return false;
   if (rule.operator === "eq") return candidateText === ruleText;
   if (rule.operator === "neq") return candidateText !== ruleText;
@@ -269,7 +303,7 @@ function rowValueForField(row: TradingViewScanRow, field: string): unknown {
 }
 
 function rowMatchesRules(row: TradingViewScanRow, rules: ScanPresetRule[]): boolean {
-  return rules.every((rule) => valueMatchesRule(rowValueForField(row, rule.field), rule));
+  return rules.every((rule) => valueMatchesRule(rowValueForField(row, rule.field), rule, row));
 }
 
 function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
@@ -464,7 +498,11 @@ function buildTradingViewScanPayload(preset: ScanPreset): TradingViewScanPayload
   ];
   const extraColumns = Array.from(new Set(
     preset.rules
-      .map((rule) => normalizeFieldName(rule.field))
+      .flatMap((rule) => {
+        const fields = [normalizeFieldName(rule.field)];
+        if (isFieldReferenceValue(rule.value)) fields.push(normalizeFieldName(rule.value.field));
+        return fields;
+      })
       .concat([normalizeFieldName(preset.sortField)])
       .filter((field) => field && field !== "ticker" && !baseColumns.includes(field)),
   ));

@@ -106,11 +106,19 @@ export type ScanUniqueTickerRow = {
 
 export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
 
+export type ScanRuleScalar = string | number | boolean;
+
+export type ScanRuleFieldReference = {
+  type: "field";
+  field: string;
+  multiplier?: number;
+};
+
 export type ScanRule = {
   id: string;
   field: string;
   operator: ScanRuleOperator;
-  value: string | number | boolean | Array<string | number | boolean>;
+  value: ScanRuleScalar | Array<ScanRuleScalar> | ScanRuleFieldReference;
 };
 
 export type ScanPreset = {
