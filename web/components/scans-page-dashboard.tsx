@@ -860,57 +860,59 @@ export function ScansPageDashboard() {
                       </select>
                     </label>
                   </div>
-                  <div className="grid gap-2 md:grid-cols-[10rem,minmax(0,1fr)]">
+                  <div className="grid gap-2">
                     <label className="block">
-                      Compare Using
+                      Comparison Target
                       <select
-                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm md:max-w-48"
                         value={valueMode}
                         onChange={(event) => setDraftPreset((current) => ({
                           ...current,
                           rules: current.rules.map((row) => row.id === rule.id ? setRuleValueMode(row, event.target.value === FIELD_VALUE_MODE ? "field" : "literal") : row),
                         }))}
                       >
-                        <option value={LITERAL_VALUE_MODE}>Literal value</option>
+                        <option value={LITERAL_VALUE_MODE}>Fixed value</option>
                         <option value={FIELD_VALUE_MODE}>Another field</option>
                       </select>
                     </label>
                     {valueMode === FIELD_VALUE_MODE ? (
-                      <div className="grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
-                        <label className="block">
-                          Compare To
-                          <select
-                            className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                            value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
-                            onChange={(event) => setDraftPreset((current) => ({
-                              ...current,
-                              rules: current.rules.map((row) => {
-                                if (row.id !== rule.id) return row;
-                                return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
-                              }),
-                            }))}
-                          >
-                            {compareFieldOptions.map((field) => (
-                              <option key={field.value} value={field.value}>{field.label}</option>
-                            ))}
-                            {!isSuggestedField(compareField, compareFieldOptions) && compareField.trim() ? (
-                              <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedCompareFieldLabel})</option>
-                            ) : null}
-                            <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
-                          </select>
-                        </label>
-                        <label className="block">
-                          <span className="sr-only">Compare field ID</span>
-                          <input
-                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
-                            value={compareField}
-                            onChange={(event) => setDraftPreset((current) => ({
-                              ...current,
-                              rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row),
-                            }))}
-                            placeholder="Compare field ID"
-                          />
-                        </label>
+                      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),8rem]">
+                        <div className="grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr)]">
+                          <label className="block">
+                            Reference Field
+                            <select
+                              className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
+                              value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
+                              onChange={(event) => setDraftPreset((current) => ({
+                                ...current,
+                                rules: current.rules.map((row) => {
+                                  if (row.id !== rule.id) return row;
+                                  return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
+                                }),
+                              }))}
+                            >
+                              {compareFieldOptions.map((field) => (
+                                <option key={field.value} value={field.value}>{field.label}</option>
+                              ))}
+                              {!isSuggestedField(compareField, compareFieldOptions) && compareField.trim() ? (
+                                <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedCompareFieldLabel})</option>
+                              ) : null}
+                              <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
+                            </select>
+                          </label>
+                          <label className="block">
+                            <span className="sr-only">Reference field ID</span>
+                            <input
+                              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
+                              value={compareField}
+                              onChange={(event) => setDraftPreset((current) => ({
+                                ...current,
+                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row),
+                              }))}
+                              placeholder="Reference field ID"
+                            />
+                          </label>
+                        </div>
                         <label className="block">
                           Multiplier
                           <input
@@ -943,7 +945,11 @@ export function ScansPageDashboard() {
                     <p className="mt-2 text-[11px] text-slate-400">
                       Example for EMA5 below price by 0% to 3%: add one rule with `EMA5 &lt;= close * 1` and another with `EMA5 &gt;= close * 0.97`.
                     </p>
-                  ) : null}
+                  ) : (
+                    <p className="mt-2 text-[11px] text-slate-400">
+                      Use Fixed value for rules like `close &gt; 1` or `volume &gt; 100000`.
+                    </p>
+                  )}
                   <div className="mt-2 flex justify-end">
                     <button
                       className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"
