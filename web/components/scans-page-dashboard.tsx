@@ -327,6 +327,7 @@ export function ScansPageDashboard() {
   const [visibleColumns, setVisibleColumns] = useState<ResultColumnKey[]>(DEFAULT_VISIBLE_COLUMNS);
   const [fieldOptionsByQuery, setFieldOptionsByQuery] = useState<Record<string, TradingViewFieldOption[]>>({});
   const [fieldLabelMap, setFieldLabelMap] = useState<Record<string, string>>(FIELD_LABELS);
+  const [compareMultiplierInputByRule, setCompareMultiplierInputByRule] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -345,6 +346,18 @@ export function ScansPageDashboard() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(RESULTS_COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumns));
   }, [visibleColumns]);
+
+  useEffect(() => {
+    setCompareMultiplierInputByRule((current) => {
+      const next: Record<string, string> = {};
+      for (const rule of draftPreset.rules) {
+        if (current[rule.id] != null) {
+          next[rule.id] = current[rule.id];
+        }
+      }
+      return next;
+    });
+  }, [draftPreset.rules]);
 
   useEffect(() => {
     const queries = Array.from(new Set(["", ...draftPreset.rules.map((rule) => rule.field.trim())]));
@@ -804,6 +817,7 @@ export function ScansPageDashboard() {
                 const operatorOptions = valueMode === FIELD_VALUE_MODE
                   ? RULE_OPERATORS.filter((option) => option.value !== "in" && option.value !== "not_in")
                   : RULE_OPERATORS;
+                const compareMultiplierInput = compareMultiplierInputByRule[rule.id] ?? compareMultiplierToInput(rule);
                 return (
                 <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
                   <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
@@ -917,11 +931,28 @@ export function ScansPageDashboard() {
                           Multiplier
                           <input
                             className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                            value={compareMultiplierToInput(rule)}
-                            onChange={(event) => setDraftPreset((current) => ({
-                              ...current,
-                              rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, event.target.value) : row),
-                            }))}
+                            value={compareMultiplierInput}
+                            onChange={(event) => {
+                              const rawValue = event.target.value;
+                              setCompareMultiplierInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
+                              const trimmed = rawValue.trim();
+                              if (!trimmed || trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) return;
+                              setDraftPreset((current) => ({
+                                ...current,
+                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, rawValue) : row),
+                              }));
+                            }}
+                            onBlur={() => {
+                              setDraftPreset((current) => ({
+                                ...current,
+                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, compareMultiplierInput) : row),
+                              }));
+                              setCompareMultiplierInputByRule((current) => {
+                                const next = { ...current };
+                                delete next[rule.id];
+                                return next;
+                              });
+                            }}
                             placeholder="1"
                           />
                         </label>
