@@ -112,7 +112,9 @@ describe("scans page service", () => {
       ],
     });
 
-    expect(payload.filter).toEqual([]);
+    expect(payload.filter).toEqual([
+      { left: "EMA5", operation: "eless", right: "close" },
+    ]);
     expect(payload.columns).toContain("EMA5");
     expect(payload.columns).toContain("close");
     expect(payload.range).toEqual([0, 1000]);
@@ -193,6 +195,7 @@ describe("scans page service", () => {
         return {
           ok: true,
           json: async () => ({
+            totalCount: 1002,
             data: Array.from({ length: 1000 }, (_, index) => ({
               s: `NASDAQ:BIG${index}`,
               d: [`Big ${index}`, "Technology", "Software", 1.5, 200_000_000_000 - index, 1.1, 50, 5_000_000, 250_000_000, 5_000_000, "NASDAQ", "stock", 60, 40],
@@ -204,6 +207,7 @@ describe("scans page service", () => {
         return {
           ok: true,
           json: async () => ({
+            totalCount: 1002,
             data: [
               {
                 s: "NASDAQ:MID1",

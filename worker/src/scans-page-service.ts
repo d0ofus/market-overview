@@ -115,7 +115,7 @@ type TradingViewScanRow = {
 const DEFAULT_LIMIT = 100;
 const RETENTION_DAYS = 7;
 const MAX_FETCH_RANGE = 1000;
-const MAX_PAGINATED_FETCH_TOTAL = 20000;
+const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 
@@ -215,19 +215,35 @@ function isNumericRule(rule: ScanPresetRule): boolean {
 }
 
 function shouldPushRuleUpstream(rule: ScanPresetRule): boolean {
+  if (isFieldReferenceValue(rule.value)) {
+    const multiplier = typeof rule.value.multiplier === "number" && Number.isFinite(rule.value.multiplier)
+      ? rule.value.multiplier
+      : 1;
+    return multiplier === 1 && ["gt", "gte", "lt", "lte", "eq", "neq"].includes(rule.operator);
+  }
   if (!isNumericRule(rule)) return false;
   return ["gt", "gte", "lt", "lte", "eq", "neq"].includes(rule.operator);
 }
 
 function mapRuleToTradingViewFilter(rule: ScanPresetRule): TradingViewFilter | null {
-  if (!shouldPushRuleUpstream(rule)) return null;
   const field = normalizeFieldName(rule.field);
+  if (isFieldReferenceValue(rule.value)) {
+    if (!shouldPushRuleUpstream(rule)) return null;
+    if (rule.operator === "gt") return { left: field, operation: "greater", right: normalizeFieldName(rule.value.field) };
+    if (rule.operator === "gte") return { left: field, operation: "egreater", right: normalizeFieldName(rule.value.field) };
+    if (rule.operator === "lt") return { left: field, operation: "less", right: normalizeFieldName(rule.value.field) };
+    if (rule.operator === "lte") return { left: field, operation: "eless", right: normalizeFieldName(rule.value.field) };
+    if (rule.operator === "eq") return { left: field, operation: "equal", right: normalizeFieldName(rule.value.field) };
+    if (rule.operator === "neq") return { left: field, operation: "nequal", right: normalizeFieldName(rule.value.field) };
+    return null;
+  }
+  if (!shouldPushRuleUpstream(rule)) return null;
   const [value] = normalizeRuleValues(rule.value);
   if (typeof value !== "number") return null;
   if (rule.operator === "gt") return { left: field, operation: "greater", right: value };
   if (rule.operator === "gte") return { left: field, operation: "egreater", right: value };
   if (rule.operator === "lt") return { left: field, operation: "less", right: value };
-  if (rule.operator === "lte") return { left: field, operation: "less", right: value };
+  if (rule.operator === "lte") return { left: field, operation: "eless", right: value };
   if (rule.operator === "eq") return { left: field, operation: "equal", right: value };
   if (rule.operator === "neq") return { left: field, operation: "nequal", right: value };
   return null;
@@ -596,7 +612,8 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
 }> {
   const candidates: TradingViewScanRow[] = [];
   const usePagination = hasPostFilters(preset);
-  const targetFetchCount = usePagination ? paginatedFetchTarget(preset) : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
+  let targetFetchCount = usePagination ? paginatedFetchTarget(preset) : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
+  let hasKnownTotalCount = false;
 
   for (let rangeOffset = 0; rangeOffset < targetFetchCount; rangeOffset += MAX_FETCH_RANGE) {
     const rangeLimit = Math.min(MAX_FETCH_RANGE, targetFetchCount - rangeOffset);
@@ -613,12 +630,18 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
       const body = await response.text();
       throw new Error(`TradingView scans request failed (${response.status}): ${body.slice(0, 180)}`);
     }
-    const body = await response.json() as { data?: Array<{ s?: string; d?: unknown[] }> };
+    const body = await response.json() as { totalCount?: number; data?: Array<{ s?: string; d?: unknown[] }> };
+    if (typeof body.totalCount === "number" && Number.isFinite(body.totalCount) && body.totalCount > targetFetchCount) {
+      hasKnownTotalCount = true;
+      targetFetchCount = Math.min(body.totalCount, MAX_PAGINATED_FETCH_TOTAL);
+    } else if (typeof body.totalCount === "number" && Number.isFinite(body.totalCount)) {
+      hasKnownTotalCount = true;
+    }
     const pageRows = mapTradingViewResponse(payload, body);
     const pageMatches = pageRows.filter((row) => rowMatchesRules(row, preset.rules));
     candidates.push(...pageMatches);
 
-    if (!usePagination || pageRows.length < rangeLimit) {
+    if (!usePagination || pageRows.length === 0 || (!hasKnownTotalCount && pageRows.length < rangeLimit)) {
       break;
     }
   }
