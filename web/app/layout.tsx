@@ -4,7 +4,10 @@ import { Sidebar } from "@/components/sidebar";
 import { EscCloseListener } from "@/components/esc-close-listener";
 
 export const metadata: Metadata = {
-  title: "Market Command Centre | Overview",
+  title: {
+    default: "Overview | Market Command Centre",
+    template: "%s | Market Command Centre",
+  },
   description: "EOD-first swing trading research dashboard",
 };
 
