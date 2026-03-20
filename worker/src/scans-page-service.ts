@@ -114,8 +114,8 @@ type TradingViewScanRow = {
 
 const DEFAULT_LIMIT = 100;
 const RETENTION_DAYS = 7;
-const MAX_FETCH_RANGE = 300;
-const MAX_PAGINATED_FETCH_TOTAL = 3000;
+const MAX_FETCH_RANGE = 1000;
+const MAX_PAGINATED_FETCH_TOTAL = 20000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 
@@ -487,12 +487,12 @@ function hasPostFilters(preset: ScanPreset): boolean {
 }
 
 function paginatedFetchTarget(preset: ScanPreset): number {
-  return clamp(Math.max(preset.rowLimit * 10, MAX_FETCH_RANGE * 2), MAX_FETCH_RANGE * 2, MAX_PAGINATED_FETCH_TOTAL);
+  return clamp(Math.max(preset.rowLimit * 20, MAX_FETCH_RANGE * 2), MAX_FETCH_RANGE * 2, MAX_PAGINATED_FETCH_TOTAL);
 }
 
 function buildTradingViewScanPayload(
   preset: ScanPreset,
-  options?: { rangeStart?: number; rangeEnd?: number },
+  options?: { rangeOffset?: number; rangeLimit?: number },
 ): TradingViewScanPayload {
   const baseColumns = [
     "name",
@@ -518,8 +518,8 @@ function buildTradingViewScanPayload(
       .concat([normalizeFieldName(preset.sortField)])
       .filter((field) => field && field !== "ticker" && !baseColumns.includes(field)),
   ));
-  const rangeStart = Math.max(0, options?.rangeStart ?? 0);
-  const rangeEnd = Math.max(rangeStart + 1, options?.rangeEnd ?? (
+  const rangeOffset = Math.max(0, options?.rangeOffset ?? 0);
+  const rangeLimit = Math.max(1, options?.rangeLimit ?? (
     hasPostFilters(preset)
       ? Math.min(paginatedFetchTarget(preset), MAX_FETCH_RANGE)
       : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE)
@@ -533,7 +533,7 @@ function buildTradingViewScanPayload(
       sortBy: normalizeFieldName(preset.sortField) || "change",
       sortOrder: preset.sortDirection === "asc" ? "asc" : "desc",
     },
-    range: [rangeStart, rangeEnd],
+    range: [rangeOffset, rangeLimit],
     filter: preset.rules
       .map(mapRuleToTradingViewFilter)
       .filter((filter): filter is TradingViewFilter => Boolean(filter)),
@@ -576,9 +576,9 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
   const usePagination = hasPostFilters(preset);
   const targetFetchCount = usePagination ? paginatedFetchTarget(preset) : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
 
-  for (let rangeStart = 0; rangeStart < targetFetchCount; rangeStart += MAX_FETCH_RANGE) {
-    const rangeEnd = Math.min(rangeStart + MAX_FETCH_RANGE, targetFetchCount);
-    const payload = buildTradingViewScanPayload(preset, { rangeStart, rangeEnd });
+  for (let rangeOffset = 0; rangeOffset < targetFetchCount; rangeOffset += MAX_FETCH_RANGE) {
+    const rangeLimit = Math.min(MAX_FETCH_RANGE, targetFetchCount - rangeOffset);
+    const payload = buildTradingViewScanPayload(preset, { rangeOffset, rangeLimit });
     const response = await fetch(TV_SCAN_URL, {
       method: "POST",
       headers: {
@@ -596,7 +596,7 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
     const pageMatches = pageRows.filter((row) => rowMatchesRules(row, preset.rules));
     candidates.push(...pageMatches);
 
-    if (!usePagination || candidates.length >= preset.rowLimit || pageRows.length < (rangeEnd - rangeStart)) {
+    if (!usePagination || candidates.length >= preset.rowLimit || pageRows.length < rangeLimit) {
       break;
     }
   }

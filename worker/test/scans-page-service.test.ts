@@ -94,7 +94,7 @@ describe("scans page service", () => {
     const payload = buildTradingViewScanPayload(topGainersPreset);
 
     expect(payload.sort).toEqual({ sortBy: "change", sortOrder: "desc" });
-    expect(payload.range).toEqual([0, 300]);
+    expect(payload.range).toEqual([0, 1000]);
     expect(payload.filter).toEqual([
       { left: "close", operation: "greater", right: 1 },
       { left: "change", operation: "greater", right: 3 },
@@ -115,7 +115,7 @@ describe("scans page service", () => {
     expect(payload.filter).toEqual([]);
     expect(payload.columns).toContain("EMA5");
     expect(payload.columns).toContain("close");
-    expect(payload.range).toEqual([0, 300]);
+    expect(payload.range).toEqual([0, 1000]);
   });
 
   it("applies string post-filters after the TradingView response is parsed", async () => {
@@ -193,7 +193,7 @@ describe("scans page service", () => {
         return {
           ok: true,
           json: async () => ({
-            data: Array.from({ length: 300 }, (_, index) => ({
+            data: Array.from({ length: 1000 }, (_, index) => ({
               s: `NASDAQ:BIG${index}`,
               d: [`Big ${index}`, "Technology", "Software", 1.5, 200_000_000_000 - index, 1.1, 50, 5_000_000, 250_000_000, 5_000_000, "NASDAQ", "stock", 60, 40],
             })),
