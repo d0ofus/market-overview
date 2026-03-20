@@ -493,60 +493,6 @@ export function getTickerNews(ticker: string, tradingDay?: string | null, limit 
   }));
 }
 
-export function getScans() {
-  return getJson<{ rows: ScanDefinitionRow[] }>("/api/scanning");
-}
-
-export function createOrUpdateScan(payload: {
-  id?: string | null;
-  name: string;
-  providerKey: string;
-  sourceType: ScanSourceType;
-  sourceValue: string;
-  fallbackSourceType?: ScanSourceType | null;
-  fallbackSourceValue?: string | null;
-  isActive?: boolean;
-  notes?: string | null;
-}) {
-  return adminFetch<{ ok: boolean; id: string }>("/api/scanning", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function ingestScan(id: string) {
-  return adminFetch<{ ok: boolean; run: ScanRunSummary }>(`/api/scanning/${id}/ingest`, {
-    method: "POST",
-  });
-}
-
-export function getScanRuns(id: string, limit = 25) {
-  return getJson<{ rows: ScanRunSummary[] }>(appendQuery(`/api/scanning/${id}/runs`, { limit }));
-}
-
-export function getScanRunCompiledRows(id: string, runId: string) {
-  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scanning/${id}/runs/${runId}`);
-}
-
-export function getScanRunUniqueTickers(id: string, runId: string) {
-  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scanning/${id}/runs/${runId}/tickers`);
-}
-
-export function getScanCompiledRows(id: string) {
-  return getJson<{ rows: ScanCompiledRow[] }>(`/api/scanning/${id}/compiled`);
-}
-
-export function getScanCompiledUniqueTickers(id: string) {
-  return getJson<{ rows: ScanUniqueTickerRow[] }>(`/api/scanning/${id}/compiled/tickers`);
-}
-
-export function getScanExportUrl(id: string, mode: "compiled" | "unique", runId?: string | null) {
-  if (runId) {
-    return apiUrl(mode === "compiled" ? `/api/scanning/${id}/runs/${runId}/export.csv` : `/api/scanning/${id}/runs/${runId}/tickers.csv`);
-  }
-  return apiUrl(mode === "compiled" ? `/api/scanning/${id}/compiled/export.csv` : `/api/scanning/${id}/compiled/tickers.csv`);
-}
-
 export function getScansSnapshot(presetId?: string | null) {
   return getJson<ScanSnapshot>(appendQuery("/api/scans", { presetId: presetId ?? undefined }));
 }
@@ -911,9 +857,6 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "scans") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scans refresh endpoint." };
-    }
-    if (page === "scanning") {
-      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scanning refresh endpoint." };
     }
     if (page === "watchlist-compiler") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support watchlist compiler refresh endpoint." };

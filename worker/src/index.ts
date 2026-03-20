@@ -41,17 +41,6 @@ import { handleInboundTradingViewEmail } from "./alerts-email";
 import { fetchTickerNews } from "./alerts-news";
 import {
   cleanupOldScanningData,
-  compiledRowsToCsv,
-  ingestScan,
-  listScanDefinitions,
-  listScanRuns,
-  loadRunCompiledRows,
-  loadRunUniqueTickers,
-  loadScanCompiledRows,
-  loadScanUniqueTickers,
-  refreshActiveScans,
-  uniqueTickersToCsv,
-  upsertScanDefinition,
 } from "./scanning-service";
 import {
   cleanupOldGappersData,
@@ -662,7 +651,6 @@ type RefreshPage =
   | "ticker"
   | "alerts"
   | "scans"
-  | "scanning"
   | "watchlist-compiler"
   | "gappers";
 
@@ -729,14 +717,6 @@ async function refreshPageScopedData(
       page,
       refreshedTickers: snapshot.rowCount,
       notes: `Refreshed ${snapshot.presetName} scan snapshot with ${snapshot.rowCount} ranked rows.`,
-    };
-  }
-  if (page === "scanning") {
-    const refreshed = await refreshActiveScans(env);
-    return {
-      page,
-      refreshedTickers: refreshed.refreshedRows,
-      notes: `Refreshed ${refreshed.refreshedScans} saved scans and stored ${refreshed.refreshedRows} compiled rows.`,
     };
   }
   if (page === "watchlist-compiler") {
@@ -2089,96 +2069,6 @@ app.delete("/api/admin/scans/presets/:presetId", async (c) => {
   }
 });
 
-app.get("/api/scanning", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await listScanDefinitions(c.env);
-  return c.json({ rows });
-});
-
-app.post("/api/scanning", async (c) => {
-  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const body = await c.req.json().catch(() => ({}));
-  try {
-    const result = await upsertScanDefinition(c.env, body as any);
-    return c.json({ ok: true, ...result });
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Invalid scan payload." }, 400);
-  }
-});
-
-app.post("/api/scanning/:id/ingest", async (c) => {
-  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  await maybeRunScanningHousekeeping(c.env);
-  try {
-    const run = await ingestScan(c.env, c.req.param("id"));
-    return c.json({ ok: true, run });
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Scan ingest failed." }, 400);
-  }
-});
-
-app.get("/api/scanning/:id/runs", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await listScanRuns(c.env, c.req.param("id"), Number(c.req.query("limit") ?? 25));
-  return c.json({ rows });
-});
-
-app.get("/api/scanning/:id/runs/:runId", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId"));
-  return c.json({ rows });
-});
-
-app.get("/api/scanning/:id/runs/:runId/tickers", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId"));
-  return c.json({ rows });
-});
-
-app.get("/api/scanning/:id/compiled", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await loadScanCompiledRows(c.env, c.req.param("id"));
-  return c.json({ rows });
-});
-
-app.get("/api/scanning/:id/compiled/tickers", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const rows = await loadScanUniqueTickers(c.env, c.req.param("id"));
-  return c.json({ rows });
-});
-
-app.get("/api/scanning/:id/runs/:runId/export.csv", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const csv = compiledRowsToCsv(await loadRunCompiledRows(c.env, c.req.param("id"), c.req.param("runId")));
-  c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-run-${c.req.param("runId")}.csv"`);
-  return c.body(csv);
-});
-
-app.get("/api/scanning/:id/runs/:runId/tickers.csv", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const csv = uniqueTickersToCsv(await loadRunUniqueTickers(c.env, c.req.param("id"), c.req.param("runId")));
-  c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-run-${c.req.param("runId")}-tickers.csv"`);
-  return c.body(csv);
-});
-
-app.get("/api/scanning/:id/compiled/export.csv", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const csv = compiledRowsToCsv(await loadScanCompiledRows(c.env, c.req.param("id")));
-  c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-compiled.csv"`);
-  return c.body(csv);
-});
-
-app.get("/api/scanning/:id/compiled/tickers.csv", async (c) => {
-  await maybeRunScanningHousekeeping(c.env);
-  const csv = uniqueTickersToCsv(await loadScanUniqueTickers(c.env, c.req.param("id")));
-  c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="scan-${c.req.param("id")}-compiled-tickers.csv"`);
-  return c.body(csv);
-});
-
 app.get("/api/watchlist-compiler/sets", async (c) => {
   await maybeRunScanningHousekeeping(c.env);
   const rows = await listWatchlistSets(c.env, c.req.query("includeInactive") === "1");
@@ -2734,7 +2624,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "scanning", "watchlist-compiler", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "watchlist-compiler", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
