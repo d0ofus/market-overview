@@ -289,6 +289,19 @@ function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): S
   return copy;
 }
 
+function sortKeyFromPresetField(field: string | null | undefined): SortKey {
+  const normalized = String(field ?? "").trim();
+  if (normalized === "ticker") return "ticker";
+  if (normalized === "name") return "name";
+  if (normalized === "sector") return "sector";
+  if (normalized === "industry") return "industry";
+  if (normalized === "market_cap_basic") return "marketCap";
+  if (normalized === "relative_volume_10d_calc") return "relativeVolume";
+  if (normalized === "close") return "price";
+  if (normalized === "Value.Traded") return "priceAvgVolume";
+  return "change1d";
+}
+
 function NewsList({ items }: { items: AlertNewsRow[] }) {
   if (items.length === 0) return <p className="text-xs text-slate-400">No news found for this ticker.</p>;
   return (
@@ -319,7 +332,7 @@ export function ScansPageDashboard() {
   const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [compiledListCollapsed, setCompiledListCollapsed] = useState(false);
+  const [compiledListCollapsed, setCompiledListCollapsed] = useState(true);
   const [resultsTableCollapsed, setResultsTableCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compiledError, setCompiledError] = useState<string | null>(null);
@@ -422,9 +435,7 @@ export function ScansPageDashboard() {
       setSelectedPresetId(nextPresetId);
       setCompiledPresetIds((current) => {
         const available = new Set(rows.map((row) => row.id));
-        const filtered = current.filter((id) => available.has(id));
-        if (filtered.length > 0) return filtered;
-        return nextPresetId ? [nextPresetId] : [];
+        return current.filter((id) => available.has(id));
       });
       if (nextPresetId) {
         const nextSnapshot = await getScansSnapshot(nextPresetId);
@@ -464,6 +475,12 @@ export function ScansPageDashboard() {
   useEffect(() => {
     if (selectedPreset) setDraftPreset(structuredClone(selectedPreset));
     else setDraftPreset(emptyDraftPreset());
+  }, [selectedPreset]);
+
+  useEffect(() => {
+    if (!selectedPreset) return;
+    setSortKey(sortKeyFromPresetField(selectedPreset.sortField));
+    setSortDir(selectedPreset.sortDirection === "asc" ? "asc" : "desc");
   }, [selectedPreset]);
 
   useEffect(() => {
