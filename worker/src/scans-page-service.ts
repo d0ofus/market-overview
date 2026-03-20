@@ -333,13 +333,35 @@ function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
 export function normalizeScanRows(rows: TradingViewScanRow[] | null | undefined): ScanSnapshotRow[] {
   return (rows ?? [])
     .map(normalizeScanRow)
-    .filter((row): row is ScanSnapshotRow => Boolean(row))
-    .sort((a, b) => {
-      const left = a.change1d ?? Number.NEGATIVE_INFINITY;
-      const right = b.change1d ?? Number.NEGATIVE_INFINITY;
-      if (right !== left) return right - left;
+    .filter((row): row is ScanSnapshotRow => Boolean(row));
+}
+
+function sortSnapshotRows(rows: ScanSnapshotRow[], sortField: string, sortDirection: "asc" | "desc"): ScanSnapshotRow[] {
+  const direction = sortDirection === "asc" ? 1 : -1;
+  const normalized = normalizeFieldName(sortField);
+  const valueFor = (row: ScanSnapshotRow): string | number => {
+    if (normalized === "ticker") return row.ticker;
+    if (normalized === "name") return row.name ?? row.ticker;
+    if (normalized === "sector") return row.sector ?? "";
+    if (normalized === "industry") return row.industry ?? "";
+    if (normalized === "market_cap_basic") return row.marketCap ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "relative_volume_10d_calc") return row.relativeVolume ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "close") return row.price ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "Value.Traded") return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
+    return row.change1d ?? Number.NEGATIVE_INFINITY;
+  };
+  return [...rows].sort((a, b) => {
+    const left = valueFor(a);
+    const right = valueFor(b);
+    if (typeof left === "string" || typeof right === "string") {
+      const comparison = String(left).localeCompare(String(right));
+      if (comparison !== 0) return comparison * direction;
       return a.ticker.localeCompare(b.ticker);
-    });
+    }
+    const comparison = left - right;
+    if (comparison !== 0) return comparison * direction;
+    return a.ticker.localeCompare(b.ticker);
+  });
 }
 
 function mapPresetRow(row: {
@@ -596,12 +618,13 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
     const pageMatches = pageRows.filter((row) => rowMatchesRules(row, preset.rules));
     candidates.push(...pageMatches);
 
-    if (!usePagination || candidates.length >= preset.rowLimit || pageRows.length < rangeLimit) {
+    if (!usePagination || pageRows.length < rangeLimit) {
       break;
     }
   }
 
-  const rows = normalizeScanRows(candidates).slice(0, preset.rowLimit);
+  const rows = sortSnapshotRows(normalizeScanRows(candidates), preset.sortField, preset.sortDirection)
+    .slice(0, preset.rowLimit);
   return {
     providerLabel: TV_PROVIDER_LABEL,
     status: rows.length > 0 ? "ok" : "empty",

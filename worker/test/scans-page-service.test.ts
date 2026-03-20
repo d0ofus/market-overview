@@ -73,6 +73,12 @@ describe("scans page service", () => {
 
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
+      ticker: "MSFT",
+      name: "Microsoft",
+      relativeVolume: 1.3,
+      priceAvgVolume: 8_400_000_000,
+    });
+    expect(rows[1]).toMatchObject({
       ticker: "ABC",
       name: "ABC Corp",
       change1d: 8.5,
@@ -81,12 +87,6 @@ describe("scans page service", () => {
       avgVolume: 2_500_000,
       relativeVolume: 2.75,
       priceAvgVolume: 31_250_000,
-    });
-    expect(rows[1]).toMatchObject({
-      ticker: "MSFT",
-      name: "Microsoft",
-      relativeVolume: 1.3,
-      priceAvgVolume: 8_400_000_000,
     });
   });
 
@@ -200,6 +200,23 @@ describe("scans page service", () => {
           }),
         };
       }
+      if (rangeStart === 1000) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                s: "NASDAQ:MID1",
+                d: ["Mid 1", "Technology", "Software", 4.1, 35_000_000_000, 1.5, 25, 3_500_000, 87_500_000, 3_500_000, "NASDAQ", "stock", 25.2, 20],
+              },
+              {
+                s: "NASDAQ:MID2",
+                d: ["Mid 2", "Technology", "Software", 3.8, 34_000_000_000, 1.4, 24, 3_200_000, 76_800_000, 3_200_000, "NASDAQ", "stock", 24.1, 19],
+              },
+            ],
+          }),
+        };
+      }
       return {
         ok: true,
         json: async () => ({
@@ -232,7 +249,7 @@ describe("scans page service", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.rows.map((row) => row.ticker)).toEqual(["SMALL1", "SMALL2"]);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["MID1", "MID2"]);
     vi.unstubAllGlobals();
   });
 
