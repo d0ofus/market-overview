@@ -14,6 +14,7 @@ export function TradingViewWidget({
   size = "default",
   chartOnly = false,
   showStatusLine = false,
+  fillContainer = false,
   initialRange = "1M",
   className = "",
 }: {
@@ -23,6 +24,7 @@ export function TradingViewWidget({
   size?: "small" | "default";
   chartOnly?: boolean;
   showStatusLine?: boolean;
+  fillContainer?: boolean;
   initialRange?: "1M" | "3M" | "6M" | "12M";
   className?: string;
 }) {
@@ -31,14 +33,24 @@ export function TradingViewWidget({
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
   const denseStatusLayout = chartOnly && showStatusLine;
-  const maxWidth = size === "small" ? (denseStatusLayout ? 560 : 420) : compact ? 640 : 880;
-  const frameClass = size === "small"
+  const maxWidth = fillContainer
+    ? Number.POSITIVE_INFINITY
+    : size === "small"
+      ? (denseStatusLayout ? 560 : 420)
+      : compact
+        ? 640
+        : 880;
+  const frameClass = fillContainer
     ? denseStatusLayout
-      ? "w-full max-w-[560px] aspect-[7/5]"
-      : "w-full max-w-[420px] aspect-[4/3]"
-    : compact
-      ? "w-full max-w-[640px] aspect-[4/3]"
-      : "w-full max-w-[880px] aspect-[4/3]";
+      ? "w-full aspect-[8/5]"
+      : "w-full aspect-[16/11]"
+    : size === "small"
+      ? denseStatusLayout
+        ? "w-full max-w-[560px] aspect-[7/5]"
+        : "w-full max-w-[420px] aspect-[4/3]"
+      : compact
+        ? "w-full max-w-[640px] aspect-[4/3]"
+        : "w-full max-w-[880px] aspect-[4/3]";
 
   useEffect(() => {
     const syncTheme = () => {
@@ -99,7 +111,7 @@ export function TradingViewWidget({
 
   return (
     <div className={`card ${denseStatusLayout ? "p-1" : "p-2"} ${className}`}>
-      <div className={`tradingview-widget-container mx-auto ${frameClass}`} ref={ref}>
+      <div className={`tradingview-widget-container ${fillContainer ? "" : "mx-auto"} ${frameClass}`} ref={ref}>
         <div id={containerId} className="h-full" />
       </div>
     </div>

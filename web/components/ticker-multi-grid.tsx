@@ -90,6 +90,7 @@ export function TickerMultiGrid({
                 size="small"
                 chartOnly
                 showStatusLine={showChartStatusLine}
+                fillContainer
                 initialRange="3M"
                 className="!border-0 !bg-transparent !shadow-none !p-0"
               />

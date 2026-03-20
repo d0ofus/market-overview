@@ -785,7 +785,15 @@ export function SectorTracker() {
                         <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
                       </div>
                       <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                      <TradingViewWidget ticker={row.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <TradingViewWidget
+                        ticker={row.ticker}
+                        size="small"
+                        chartOnly
+                        showStatusLine
+                        fillContainer
+                        initialRange="3M"
+                        className="!border-0 !bg-transparent !shadow-none !p-0"
+                      />
                       <button
                         className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
                         onClick={() => setActiveChartTicker(row.ticker)}
@@ -813,7 +821,7 @@ export function SectorTracker() {
                 Close
               </button>
             </div>
-            <TradingViewWidget ticker={activeChartTicker} chartOnly showStatusLine initialRange="3M" />
+            <TradingViewWidget ticker={activeChartTicker} chartOnly showStatusLine fillContainer initialRange="3M" />
           </div>
         </div>
       )}

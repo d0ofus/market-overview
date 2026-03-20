@@ -476,6 +476,7 @@ export function PeerGroupsDashboard() {
             selectedKey={selectedTicker}
             onSelect={(ticker) => void loadTicker(ticker)}
             emptyMessage="No peer charts available for the current selection."
+            showChartStatusLine
           />
         </div>
       )}
