@@ -115,6 +115,7 @@ type TradingViewScanRow = {
 const DEFAULT_LIMIT = 100;
 const RETENTION_DAYS = 7;
 const MAX_FETCH_RANGE = 300;
+const MAX_PAGINATED_FETCH_TOTAL = 3000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 
@@ -481,7 +482,18 @@ export async function deleteScanPreset(env: Env, presetId: string): Promise<void
   ]);
 }
 
-function buildTradingViewScanPayload(preset: ScanPreset): TradingViewScanPayload {
+function hasPostFilters(preset: ScanPreset): boolean {
+  return preset.rules.some((rule) => !shouldPushRuleUpstream(rule));
+}
+
+function paginatedFetchTarget(preset: ScanPreset): number {
+  return clamp(Math.max(preset.rowLimit * 10, MAX_FETCH_RANGE * 2), MAX_FETCH_RANGE * 2, MAX_PAGINATED_FETCH_TOTAL);
+}
+
+function buildTradingViewScanPayload(
+  preset: ScanPreset,
+  options?: { rangeStart?: number; rangeEnd?: number },
+): TradingViewScanPayload {
   const baseColumns = [
     "name",
     "sector",
@@ -506,10 +518,12 @@ function buildTradingViewScanPayload(preset: ScanPreset): TradingViewScanPayload
       .concat([normalizeFieldName(preset.sortField)])
       .filter((field) => field && field !== "ticker" && !baseColumns.includes(field)),
   ));
-  const postFilteredCount = preset.rules.filter((rule) => !shouldPushRuleUpstream(rule)).length;
-  const rawLimit = postFilteredCount > 0
-    ? clamp(Math.max(preset.rowLimit * 4, 125), preset.rowLimit, MAX_FETCH_RANGE)
-    : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
+  const rangeStart = Math.max(0, options?.rangeStart ?? 0);
+  const rangeEnd = Math.max(rangeStart + 1, options?.rangeEnd ?? (
+    hasPostFilters(preset)
+      ? Math.min(paginatedFetchTarget(preset), MAX_FETCH_RANGE)
+      : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE)
+  ));
   return {
     markets: ["america"],
     symbols: { query: { types: [] }, tickers: [] },
@@ -519,7 +533,7 @@ function buildTradingViewScanPayload(preset: ScanPreset): TradingViewScanPayload
       sortBy: normalizeFieldName(preset.sortField) || "change",
       sortOrder: preset.sortDirection === "asc" ? "asc" : "desc",
     },
-    range: [0, rawLimit],
+    range: [rangeStart, rangeEnd],
     filter: preset.rules
       .map(mapRuleToTradingViewFilter)
       .filter((filter): filter is TradingViewFilter => Boolean(filter)),
@@ -558,24 +572,36 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
   error: string | null;
   rows: ScanSnapshotRow[];
 }> {
-  const payload = buildTradingViewScanPayload(preset);
-  const response = await fetch(TV_SCAN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "market-command-centre/1.0",
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`TradingView scans request failed (${response.status}): ${body.slice(0, 180)}`);
+  const candidates: TradingViewScanRow[] = [];
+  const usePagination = hasPostFilters(preset);
+  const targetFetchCount = usePagination ? paginatedFetchTarget(preset) : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
+
+  for (let rangeStart = 0; rangeStart < targetFetchCount; rangeStart += MAX_FETCH_RANGE) {
+    const rangeEnd = Math.min(rangeStart + MAX_FETCH_RANGE, targetFetchCount);
+    const payload = buildTradingViewScanPayload(preset, { rangeStart, rangeEnd });
+    const response = await fetch(TV_SCAN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "market-command-centre/1.0",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`TradingView scans request failed (${response.status}): ${body.slice(0, 180)}`);
+    }
+    const body = await response.json() as { data?: Array<{ s?: string; d?: unknown[] }> };
+    const pageRows = mapTradingViewResponse(payload, body);
+    const pageMatches = pageRows.filter((row) => rowMatchesRules(row, preset.rules));
+    candidates.push(...pageMatches);
+
+    if (!usePagination || candidates.length >= preset.rowLimit || pageRows.length < (rangeEnd - rangeStart)) {
+      break;
+    }
   }
-  const body = await response.json() as { data?: Array<{ s?: string; d?: unknown[] }> };
-  const candidates = mapTradingViewResponse(payload, body)
-    .filter((row) => rowMatchesRules(row, preset.rules))
-    .slice(0, preset.rowLimit);
-  const rows = normalizeScanRows(candidates);
+
+  const rows = normalizeScanRows(candidates).slice(0, preset.rowLimit);
   return {
     providerLabel: TV_PROVIDER_LABEL,
     status: rows.length > 0 ? "ok" : "empty",

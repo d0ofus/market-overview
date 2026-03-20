@@ -185,6 +185,57 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("pages through upstream-sorted results so post-filters are not biased to the first market-cap slice", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body ?? "{}")) as { range?: [number, number] };
+      const rangeStart = payload.range?.[0] ?? 0;
+      if (rangeStart === 0) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: Array.from({ length: 300 }, (_, index) => ({
+              s: `NASDAQ:BIG${index}`,
+              d: [`Big ${index}`, "Technology", "Software", 1.5, 200_000_000_000 - index, 1.1, 50, 5_000_000, 250_000_000, 5_000_000, "NASDAQ", "stock", 60, 40],
+            })),
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          data: [
+            {
+              s: "NASDAQ:SMALL1",
+              d: ["Small 1", "Technology", "Software", 4.2, 2_000_000_000, 1.7, 20, 3_000_000, 60_000_000, 3_000_000, "NASDAQ", "stock", 20.1, 18],
+            },
+            {
+              s: "NASDAQ:SMALL2",
+              d: ["Small 2", "Technology", "Software", 3.6, 1_500_000_000, 1.6, 14, 2_500_000, 35_000_000, 2_500_000, "NASDAQ", "stock", 14.2, 12],
+            },
+          ],
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTradingViewScanRows({
+      ...topGainersPreset,
+      sortField: "market_cap_basic",
+      sortDirection: "desc",
+      rowLimit: 2,
+      rules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+        { id: "close-max", field: "close", operator: "lte", value: { type: "field", field: "EMA5", multiplier: 1.03 } },
+        { id: "close-min", field: "close", operator: "gte", value: { type: "field", field: "EMA5", multiplier: 0.97 } },
+        { id: "sma200", field: "SMA200", operator: "lt", value: { type: "field", field: "close", multiplier: 1 } },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["SMALL1", "SMALL2"]);
+    vi.unstubAllGlobals();
+  });
+
   it("compiles unique tickers across the latest snapshots of multiple presets", async () => {
     const presetRows = [
       { id: "preset-a", name: "Leaders", isDefault: 1, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },

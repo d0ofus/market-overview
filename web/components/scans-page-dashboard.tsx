@@ -997,15 +997,6 @@ export function ScansPageDashboard() {
                       </label>
                     )}
                   </div>
-                  {valueMode === FIELD_VALUE_MODE ? (
-                    <p className="mt-2 text-[11px] text-slate-400">
-                      Example for EMA5 below price by 0% to 3%: add one rule with `EMA5 &lt;= close * 1` and another with `EMA5 &gt;= close * 0.97`.
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-[11px] text-slate-400">
-                      Use Fixed value for rules like `close &gt; 1` or `volume &gt; 100000`.
-                    </p>
-                  )}
                   <div className="mt-2 flex justify-end">
                     <button
                       className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"
