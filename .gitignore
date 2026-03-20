@@ -4,6 +4,7 @@ out
 .wrangler
 .env
 .env.local
+.env*.local
 .vercel
 web/.vercel
 worker/.dev.vars
