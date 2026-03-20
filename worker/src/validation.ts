@@ -118,11 +118,25 @@ export const watchlistSourcePatchSchema = z.object({
 
 const scanRuleScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
 
-const scanRuleFieldReferenceSchema = z.object({
+const scanRuleFieldReferenceSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const candidate = value as Record<string, unknown>;
+  const multiplierRaw = candidate.multiplier;
+  let multiplier = multiplierRaw;
+  if (typeof multiplierRaw === "string") {
+    const parsed = Number(multiplierRaw.trim());
+    multiplier = Number.isFinite(parsed) ? parsed : multiplierRaw;
+  }
+  return {
+    ...candidate,
+    field: typeof candidate.field === "string" ? candidate.field.trim() : candidate.field,
+    multiplier,
+  };
+}, z.object({
   type: z.literal("field"),
-  field: z.string().min(1),
+  field: z.string().min(1, "Comparison field is required."),
   multiplier: z.number().finite().optional(),
-});
+}));
 
 const scanRuleValueSchema = z.union([
   scanRuleScalarSchema,
@@ -135,6 +149,16 @@ export const scanPresetRuleSchema = z.object({
   field: z.string().min(1),
   operator: z.enum(["gt", "gte", "lt", "lte", "eq", "neq", "in", "not_in"]),
   value: scanRuleValueSchema,
+}).superRefine((rule, ctx) => {
+  if (typeof rule.value === "object" && rule.value !== null && !Array.isArray(rule.value) && rule.value.type === "field") {
+    if (rule.operator === "in" || rule.operator === "not_in") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["operator"],
+        message: "Field comparisons do not support 'in' or 'not in'.",
+      });
+    }
+  }
 });
 
 export const scanPresetCreateSchema = z.object({

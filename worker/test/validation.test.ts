@@ -40,4 +40,23 @@ describe("validation", () => {
       multiplier: 0.97,
     });
   });
+
+  it("coerces field-comparison multipliers sent as strings", () => {
+    const parsed = scanPresetRuleSchema.parse({
+      id: "ema5-below-price-string",
+      field: "EMA5",
+      operator: "gte",
+      value: {
+        type: "field",
+        field: " close ",
+        multiplier: "0.97",
+      },
+    });
+
+    expect(parsed.value).toMatchObject({
+      type: "field",
+      field: "close",
+      multiplier: 0.97,
+    });
+  });
 });

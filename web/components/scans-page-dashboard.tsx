@@ -240,6 +240,12 @@ function setRuleCompareMultiplier(rule: ScanRule, rawValue: string): ScanRule {
   };
 }
 
+function normalizeRuleForSave(rule: ScanRule, rawCompareMultiplierInput?: string): ScanRule {
+  if (!isFieldReferenceValue(rule.value)) return rule;
+  const withField = setRuleCompareField(rule, rule.value.field.trim());
+  return setRuleCompareMultiplier(withField, rawCompareMultiplierInput ?? compareMultiplierToInput(withField));
+}
+
 function humanizeFieldName(field: string): string {
   return field
     .replace(/[._]+/g, " ")
@@ -499,7 +505,9 @@ export function ScansPageDashboard() {
 
   const onSavePreset = async () => {
     const trimmedName = draftPreset.name.trim();
-    const rules = draftPreset.rules.filter((rule) => rule.field.trim());
+    const rules = draftPreset.rules
+      .filter((rule) => rule.field.trim())
+      .map((rule) => normalizeRuleForSave(rule, compareMultiplierInputByRule[rule.id]));
     if (!trimmedName) {
       setError("Preset name is required.");
       setMessage(null);
