@@ -8,7 +8,6 @@
 ## Breadth
 - Scoring for market breadth for overall 
 - Add other more bespoke breadth metrics
-- Make EOD timing after market but before Aus wake up
 - Add in Chart of S&P with mcllean oscillator
 - Define Overall Universe (worden universe) so that those rows are accurate
 
@@ -35,6 +34,10 @@
 - Add Strong earnings scanner
 - Colour by industry
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
+- Add Jeff Sun weekly scan
+- Add Qullamaggie weekly scan
+
+## Scanning
 
 ## Watchlist Compiler
 - Have a preset for 'Focus list - Ready for execution' + 'Focus list - Close to ready', and show multi-chart view + news + ranking (marketsurge score?)
@@ -57,6 +60,7 @@
 > ARKK: More than 25 components (https://www.ark-funds.com/funds/arkk#hold)
 
 ## General
+- Add research using AI on dashboard for any ticker
 - Add polymarket overview like (https://www.perplexity.ai/computer/a/f87a4860-4de3-4184-96fb-a1da94a68b38?view=split)
 - Add page to search for latest macroeconomic analysis (including charts)
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
