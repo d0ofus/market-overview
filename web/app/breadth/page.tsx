@@ -103,7 +103,11 @@ function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asO
 }
 
 export default async function BreadthPage() {
-  const statusPromise = getStatus().catch(
+  const summaryPromise = getBreadthSummary().catch(() => null);
+  const universeRowsPromise = Promise.all(universeOrder.map(async (universeId) => [universeId, await loadUniverse(universeId)] as const));
+
+  const [summaryApi, universeRowsPairs] = await Promise.all([summaryPromise, universeRowsPromise]);
+  const status = await getStatus("breadth").catch(
     (): StatusPayload => ({
       timezone: "Australia/Melbourne",
       autoRefreshLabel: "08:15 Australia/Melbourne (prev US close)",
@@ -113,10 +117,6 @@ export default async function BreadthPage() {
       providerLabel: "Alpaca (IEX Delayed Daily Bars)",
     }),
   );
-  const summaryPromise = getBreadthSummary().catch(() => null);
-  const universeRowsPromise = Promise.all(universeOrder.map(async (universeId) => [universeId, await loadUniverse(universeId)] as const));
-
-  const [status, summaryApi, universeRowsPairs] = await Promise.all([statusPromise, summaryPromise, universeRowsPromise]);
 
   const historyByUniverse = Object.fromEntries(universeRowsPairs) as Record<string, BreadthRow[]>;
   const historyRows = historyByUniverse["sp500-core"] ?? [];

@@ -386,7 +386,7 @@ export function getDashboard(date?: string): Promise<SnapshotResponse> {
   return getJson(`/api/dashboard${date ? `?date=${date}` : ""}`);
 }
 
-export function getStatus(): Promise<{
+export function getStatus(page?: "overview" | "breadth"): Promise<{
   timezone: string;
   autoRefreshLabel: string;
   autoRefreshLocalTime?: string;
@@ -394,7 +394,8 @@ export function getStatus(): Promise<{
   asOfDate: string | null;
   providerLabel: string;
 }> {
-  return getJson("/api/status");
+  const query = page ? `?page=${page}` : "";
+  return getJson(`/api/status${query}`);
 }
 
 export function getBreadth(universeId = "sp500-core") {

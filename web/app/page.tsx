@@ -44,19 +44,16 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const [status, dashboard] = await Promise.allSettled([getStatus(), getDashboard()]);
-  const statusValue =
-    status.status === "fulfilled"
-      ? status.value
-      : {
-          timezone: "Australia/Melbourne",
-          autoRefreshLabel: "08:15 Australia/Melbourne",
-          autoRefreshLocalTime: "08:15",
-          lastUpdated: null,
-          asOfDate: null,
-          providerLabel: "Alpaca (IEX Delayed Daily Bars)",
-        };
-  const dashboardValue = dashboard.status === "fulfilled" ? dashboard.value : null;
+  const dashboard = await getDashboard().catch(() => null);
+  const statusValue = await getStatus("overview").catch(() => ({
+    timezone: "Australia/Melbourne",
+    autoRefreshLabel: "08:15 Australia/Melbourne",
+    autoRefreshLocalTime: "08:15",
+    lastUpdated: null,
+    asOfDate: null,
+    providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+  }));
+  const dashboardValue = dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));

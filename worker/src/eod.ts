@@ -399,6 +399,7 @@ export async function computeAndStoreSnapshot(
   const pullProviderBars = options.pullProviderBars ?? true;
   const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
   const asOfDate = toISODate(previousWeekday(today));
+  const generatedAt = new Date().toISOString();
   const config = await loadConfig(env, configId);
   let providerLabel = "Stored Daily Bars";
   const provider = pullProviderBars
@@ -485,7 +486,7 @@ export async function computeAndStoreSnapshot(
   await env.DB.prepare(
     "INSERT OR REPLACE INTO snapshots_meta (id, config_id, as_of_date, generated_at, provider_label) VALUES (?, ?, ?, ?, ?)",
   )
-    .bind(snapshotId, configId, asOfDate, new Date().toISOString(), providerLabel)
+    .bind(snapshotId, configId, asOfDate, generatedAt, providerLabel)
     .run();
 
   const rowInserts = [];
@@ -540,6 +541,7 @@ export async function computeAndStoreSnapshot(
         asOfDate,
         universeId,
         breadthState.sourceByUniverse.get(universeId) ?? null,
+        generatedAt,
       );
     }
   }
@@ -563,10 +565,11 @@ export async function recomputeBreadthFromStoredBars(
 ): Promise<{ asOfDate: string; universeCount: number; unavailable: Array<{ id: string; name: string; reason: string }> }> {
   const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
   const asOfDate = toISODate(previousWeekday(today));
+  const generatedAt = new Date().toISOString();
   const breadthState = await ensureBreadthUniverseMemberships(env);
   const universeIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
   for (const universeId of universeIds) {
-    await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null);
+    await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null, generatedAt);
   }
   return {
     asOfDate,
@@ -620,7 +623,7 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
     console.error("sp500 core breadth refresh provider pull failed; using stored bars", error);
   }
 
-  await computeAndStoreBreadth(env, asOfDate, "sp500-core", SP500_SOURCE_LABEL);
+  await computeAndStoreBreadth(env, asOfDate, "sp500-core", SP500_SOURCE_LABEL, new Date().toISOString());
   return { asOfDate, barCount };
 }
 
@@ -629,6 +632,7 @@ export async function computeAndStoreBreadth(
   asOfDate: string,
   universeId: string,
   dataSource: string | null = null,
+  generatedAt = new Date().toISOString(),
 ): Promise<void> {
   const members = await env.DB.prepare("SELECT ticker FROM universe_symbols WHERE universe_id = ?")
     .bind(universeId)
@@ -672,7 +676,7 @@ export async function computeAndStoreBreadth(
 
   const id = `${asOfDate}:${universeId}`;
   await env.DB.prepare(
-    "INSERT OR REPLACE INTO breadth_snapshots (id, as_of_date, universe_id, advancers, decliners, unchanged, pct_above_20ma, pct_above_50ma, pct_above_200ma, new_20d_highs, new_20d_lows, median_return_1d, median_return_5d, sentiment_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR REPLACE INTO breadth_snapshots (id, as_of_date, universe_id, advancers, decliners, unchanged, pct_above_20ma, pct_above_50ma, pct_above_200ma, new_20d_highs, new_20d_lows, median_return_1d, median_return_5d, sentiment_json, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
     .bind(
       id,
@@ -694,6 +698,7 @@ export async function computeAndStoreBreadth(
         metrics: stats,
         dataSource,
       }),
+      generatedAt,
     )
     .run();
 }

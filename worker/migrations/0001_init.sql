@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS breadth_snapshots (
   median_return_1d REAL NOT NULL,
   median_return_5d REAL NOT NULL,
   sentiment_json TEXT,
+  generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(as_of_date, universe_id)
 );
 

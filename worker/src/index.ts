@@ -28,6 +28,7 @@ import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
+import { latestUsSessionAsOfDate, parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
 import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
 import {
   cleanupOldAlertsData,
@@ -483,67 +484,10 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   }
 }
 
-function parseLocalTime(value: string | null | undefined): { hour: number; minute: number } | null {
-  if (!value) return null;
-  const match = value.trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
-  if (!match) return null;
-  return {
-    hour: Number(match[1]),
-    minute: Number(match[2]),
-  };
-}
-
 function formatAutoRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
   const safeTime = parseLocalTime(localTime ?? "") ? localTime!.trim() : "08:15";
   const safeTz = timezone?.trim() || "Australia/Melbourne";
   return `${safeTime} ${safeTz} (prev US close)`;
-}
-
-function zonedParts(now: Date, timezone: string): { weekday: string; day: number; minutesOfDay: number; localDate: string } {
-  const dtf = new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = dtf.formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
-  const year = Number(get("year") || "1970");
-  const month = Number(get("month") || "1");
-  const day = Number(get("day") || "1");
-  const hour = Number(get("hour") || "0");
-  const minute = Number(get("minute") || "0");
-  const weekday = get("weekday");
-  return {
-    weekday,
-    day,
-    minutesOfDay: hour * 60 + minute,
-    localDate: `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
-  };
-}
-
-function previousWeekdayIso(isoDate: string): string {
-  const d = new Date(`${isoDate}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - 1);
-  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
-    d.setUTCDate(d.getUTCDate() - 1);
-  }
-  return d.toISOString().slice(0, 10);
-}
-
-function latestUsSessionAsOfDate(now: Date): string {
-  const ny = zonedParts(now, "America/New_York");
-  const hour = Math.floor(ny.minutesOfDay / 60);
-  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(ny.weekday);
-  if (!isWeekday) {
-    return previousWeekdayIso(ny.localDate);
-  }
-  // Use same-day NY session after regular close; otherwise use previous session.
-  return hour >= 16 ? ny.localDate : previousWeekdayIso(ny.localDate);
 }
 
 async function loadDefaultConfigRow(env: Env): Promise<{
@@ -925,6 +869,7 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/status", async (c) => {
+  const page = (c.req.query("page") ?? "overview").trim();
   let config:
     | {
         id: string;
@@ -951,30 +896,42 @@ app.get("/api/status", async (c) => {
       : null;
   }
 
-  const latest = await c.env.DB.prepare(
+  const overviewLatest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
     .bind(config?.id ?? "default")
     .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
-  let fallbackBreadthDate: string | null = null;
-  if (!latest?.generatedAt && !latest?.generated_at) {
-    const breadthLatest = await c.env.DB.prepare("SELECT as_of_date as asOfDate FROM breadth_snapshots ORDER BY as_of_date DESC LIMIT 1")
-      .first<{ asOfDate?: string; as_of_date?: string }>();
-    fallbackBreadthDate = breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null;
-  }
+  const breadthLatest = await c.env.DB.prepare(
+    "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+  )
+    .first<{ asOfDate?: string; generatedAt?: string; as_of_date?: string; generated_at?: string }>();
 
-  const normalizedLastUpdated = latest?.generatedAt ?? latest?.generated_at ?? null;
-  const normalizedAsOf = latest?.asOfDate ?? latest?.as_of_date ?? fallbackBreadthDate;
-  const normalizedProvider = latest?.providerLabel ?? latest?.provider_label ?? null;
+  const normalizedOverview = {
+    lastUpdated: overviewLatest?.generatedAt ?? overviewLatest?.generated_at ?? null,
+    asOfDate: overviewLatest?.asOfDate ?? overviewLatest?.as_of_date ?? null,
+    providerLabel: overviewLatest?.providerLabel ?? overviewLatest?.provider_label ?? null,
+  };
+  const normalizedBreadth = {
+    lastUpdated: breadthLatest?.generatedAt ?? breadthLatest?.generated_at ?? null,
+    asOfDate: breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null,
+  };
+  const useBreadthStatus = page === "breadth";
+  const normalizedLastUpdated = useBreadthStatus
+    ? normalizedBreadth.lastUpdated ?? normalizedOverview.lastUpdated
+    : normalizedOverview.lastUpdated ?? normalizedBreadth.lastUpdated;
+  const normalizedAsOf = useBreadthStatus
+    ? normalizedBreadth.asOfDate ?? normalizedOverview.asOfDate
+    : normalizedOverview.asOfDate ?? normalizedBreadth.asOfDate;
+  const normalizedProvider = normalizedOverview.providerLabel ?? "Alpaca (IEX Delayed Daily Bars)";
 
   return c.json({
     configId: config?.id ?? "default",
     timezone: config?.timezone ?? c.env.APP_TIMEZONE ?? "Australia/Melbourne",
     autoRefreshLabel: formatAutoRefreshLabel(config?.eodRunLocalTime, config?.timezone),
     autoRefreshLocalTime: config?.eodRunLocalTime ?? "08:15",
-    lastUpdated: normalizedLastUpdated ?? (fallbackBreadthDate ? `${fallbackBreadthDate}T00:00:00Z` : null),
+    lastUpdated: normalizedLastUpdated ?? (normalizedAsOf ? `${normalizedAsOf}T00:00:00Z` : null),
     asOfDate: normalizedAsOf,
-    providerLabel: normalizedProvider ?? "Alpaca (IEX Delayed Daily Bars)",
+    providerLabel: normalizedProvider,
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
   });
 });
@@ -2888,20 +2845,18 @@ export default {
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
-    const target = parseLocalTime(refreshTime) ?? { hour: 8, minute: 15 };
-    const local = zonedParts(now, timezone);
-    const targetMinutes = target.hour * 60 + target.minute;
-    const withinWindow = local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;
-    const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(local.weekday);
-    if (!isWeekday || !withinWindow) return;
+    if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 
     const expectedAsOf = latestUsSessionAsOfDate(now);
-    const latest = await env.DB.prepare(
+    const latestOverview = await env.DB.prepare(
       "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
     )
       .bind(defaultConfig?.id ?? "default")
       .first<{ asOfDate: string | null }>();
-    if (latest?.asOfDate !== expectedAsOf) {
+    const latestBreadth = await env.DB.prepare(
+      "SELECT as_of_date as asOfDate FROM breadth_snapshots ORDER BY generated_at DESC LIMIT 1",
+    ).first<{ asOfDate: string | null }>();
+    if (latestOverview?.asOfDate !== expectedAsOf || latestBreadth?.asOfDate !== expectedAsOf) {
       await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
     }
     await syncMonthlyEtfSlice(env);
