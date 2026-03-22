@@ -2853,10 +2853,17 @@ export default {
     )
       .bind(defaultConfig?.id ?? "default")
       .first<{ asOfDate: string | null }>();
-    const latestBreadth = await env.DB.prepare(
-      "SELECT as_of_date as asOfDate FROM breadth_snapshots ORDER BY generated_at DESC LIMIT 1",
-    ).first<{ asOfDate: string | null }>();
-    if (latestOverview?.asOfDate !== expectedAsOf || latestBreadth?.asOfDate !== expectedAsOf) {
+    const trackedUniverseCount = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols",
+    ).first<{ count: number | null }>();
+    const currentBreadthCount = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ?",
+    )
+      .bind(expectedAsOf)
+      .first<{ count: number | null }>();
+    const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
+    const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
+    if (latestOverview?.asOfDate !== expectedAsOf || !breadthIsComplete) {
       await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
     }
     await syncMonthlyEtfSlice(env);
