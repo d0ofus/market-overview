@@ -8,7 +8,6 @@
 ## Breadth
 - Scoring for market breadth for overall 
 - Add other more bespoke breadth metrics
-- Make EOD timing after market but before Aus wake up
 - Add in Chart of S&P with mcllean oscillator
 - Define Overall Universe (worden universe) so that those rows are accurate
 
@@ -18,7 +17,6 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-- Optimize loading of page
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -27,7 +25,6 @@
 - For industry peers view, change to liteweight charts
 
 ## Peer Groups
-- Continue the seeding of tickers
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
 
@@ -39,14 +36,13 @@
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
 ## Watchlist Compiler
-- Have a preset for 'Focus list - Ready for execution' + 'Focus list - Close to ready', and show multi-chart view + news + ranking (marketsurge score?)
+- Add ranking system for compiled names - Use perplexity/AI with API
 
 ## Gappers
 - Find out what the current filters are and add more scanning filters or use a preset 
 - Add $ on gap = Pre Vol * Price
 - Add Average $ traded filter
 - Remove ETFs, only stocks
-- Sign up for an LLM to test it out
 - Add highest pre-market volume scan
 
 ## Admin
@@ -59,8 +55,8 @@
 > ARKK: More than 25 components (https://www.ark-funds.com/funds/arkk#hold)
 
 ## General
-- Add polymarket overview like (https://www.perplexity.ai/computer/a/f87a4860-4de3-4184-96fb-a1da94a68b38?view=split)
 - Add page to search for latest macroeconomic analysis (including charts)
+- Add polymarket overview like (https://www.perplexity.ai/computer/a/f87a4860-4de3-4184-96fb-a1da94a68b38?view=split)
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
