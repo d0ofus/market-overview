@@ -2158,9 +2158,15 @@ app.delete("/api/admin/watchlist-compiler/sources/:id", async (c) => {
 app.post("/api/admin/watchlist-compiler/sets/:id/compile", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   await maybeRunScanningHousekeeping(c.env);
-  const result = await compileWatchlistSet(c.env, c.req.param("id"));
-  await upsertAudit(c.env, "default", "WATCHLIST_SET_COMPILE", { id: c.req.param("id"), runId: result.run.id });
-  return c.json({ ok: true, run: result.run, set: result.set });
+  try {
+    const result = await compileWatchlistSet(c.env, c.req.param("id"));
+    await upsertAudit(c.env, "default", "WATCHLIST_SET_COMPILE", { id: c.req.param("id"), runId: result.run.id });
+    return c.json({ ok: true, run: result.run, set: result.set });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to compile watchlist set.";
+    const status = /not found|add at least one active/i.test(message) ? 400 : 500;
+    return c.json({ error: message }, status);
+  }
 });
 
 app.get("/api/admin/peer-groups", async (c) => {

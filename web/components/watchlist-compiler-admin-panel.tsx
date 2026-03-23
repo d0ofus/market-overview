@@ -85,6 +85,20 @@ export function WatchlistCompilerAdminPanel() {
     return created.id;
   };
 
+  const addDraftSourceToSet = async (setId: string): Promise<boolean> => {
+    if (!newSourceUrl.trim()) return false;
+    await createAdminWatchlistCompilerSource(setId, {
+      sourceName: newSourceName.trim() || null,
+      sourceUrl: newSourceUrl.trim(),
+      sourceSections: newSourceSections.trim() || null,
+      isActive: true,
+    });
+    setNewSourceName("");
+    setNewSourceUrl("");
+    setNewSourceSections("");
+    return true;
+  };
+
   useEffect(() => {
     void load();
   }, []);
@@ -196,8 +210,9 @@ export function WatchlistCompilerAdminPanel() {
                       setMessage("Watchlist set updated.");
                     } else {
                       const created = await createAdminWatchlistCompilerSet(form);
+                      const addedDraftSource = await addDraftSourceToSet(created.id);
                       await load(created.id);
-                      setMessage("Watchlist set created.");
+                      setMessage(addedDraftSource ? "Watchlist set created and source URL added." : "Watchlist set created.");
                     }
                   } catch (error) {
                     setMessage(error instanceof Error ? error.message : "Failed to save watchlist set.");
@@ -263,15 +278,7 @@ export function WatchlistCompilerAdminPanel() {
                     try {
                       const setId = await ensureDraftSet();
                       if (!setId) return;
-                      await createAdminWatchlistCompilerSource(setId, {
-                        sourceName: newSourceName.trim() || null,
-                        sourceUrl: newSourceUrl.trim(),
-                        sourceSections: newSourceSections.trim() || null,
-                        isActive: true,
-                      });
-                      setNewSourceName("");
-                      setNewSourceUrl("");
-                      setNewSourceSections("");
+                      await addDraftSourceToSet(setId);
                       await load(setId);
                       setMessage("Watchlist URL added.");
                     } catch (error) {
