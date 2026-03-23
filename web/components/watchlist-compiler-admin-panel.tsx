@@ -74,6 +74,17 @@ export function WatchlistCompilerAdminPanel() {
     }
   };
 
+  const ensureDraftSet = async (): Promise<string | null> => {
+    if (selectedSetId) return selectedSetId;
+    if (!form.name.trim()) {
+      setMessage("Enter a set name first, or save the set before adding source URLs.");
+      return null;
+    }
+    const created = await createAdminWatchlistCompilerSet(form);
+    await load(created.id);
+    return created.id;
+  };
+
   useEffect(() => {
     void load();
   }, []);
@@ -233,26 +244,26 @@ export function WatchlistCompilerAdminPanel() {
             <div className="space-y-3">
               <div className="flex gap-2">
                 <input
-                  className="w-64 rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  className="w-64 rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
                   value={newSourceName}
                   onChange={(event) => setNewSourceName(event.target.value)}
                   placeholder="Scan name"
-                  disabled={!selectedSetId}
                 />
                 <input
-                  className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
                   value={newSourceUrl}
                   onChange={(event) => setNewSourceUrl(event.target.value)}
                   placeholder="https://www.tradingview.com/watchlists/34128913/"
-                  disabled={!selectedSetId}
                 />
                 <button
                   className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!selectedSetId || !newSourceUrl.trim()}
+                  disabled={!newSourceUrl.trim() || (!selectedSetId && !form.name.trim())}
                   onClick={async () => {
-                    if (!selectedSetId || !newSourceUrl.trim()) return;
+                    if (!newSourceUrl.trim()) return;
                     try {
-                      await createAdminWatchlistCompilerSource(selectedSetId, {
+                      const setId = await ensureDraftSet();
+                      if (!setId) return;
+                      await createAdminWatchlistCompilerSource(setId, {
                         sourceName: newSourceName.trim() || null,
                         sourceUrl: newSourceUrl.trim(),
                         sourceSections: newSourceSections.trim() || null,
@@ -261,26 +272,25 @@ export function WatchlistCompilerAdminPanel() {
                       setNewSourceName("");
                       setNewSourceUrl("");
                       setNewSourceSections("");
-                      await load(selectedSetId);
+                      await load(setId);
                       setMessage("Watchlist URL added.");
                     } catch (error) {
                       setMessage(error instanceof Error ? error.message : "Failed to add source URL.");
                     }
                   }}
                 >
-                  Add URL
+                  {selectedSetId ? "Add URL" : "Create Set + Add URL"}
                 </button>
               </div>
               <textarea
-                className="min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                className="min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
                 value={newSourceSections}
                 onChange={(event) => setNewSourceSections(event.target.value)}
                 placeholder={"Optional sections to include, one per line\nFOCUS LIST - READY FOR EXECUTION\nFOCUS LIST - CLOSE TO READY"}
-                disabled={!selectedSetId}
               />
               <p className="text-xs text-slate-500">Leave blank to import the full watchlist. When populated, only matching TradingView section headers are included.</p>
               {!selectedSetId && (
-                <p className="text-sm text-slate-400">Create or select a watchlist set first, then add its TradingView URLs here.</p>
+                <p className="text-sm text-slate-400">Enter the set details above. The first source you add will create the set automatically.</p>
               )}
               {detail ? (
                 <div className="space-y-2">
