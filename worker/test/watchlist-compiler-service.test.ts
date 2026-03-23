@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  filterWatchlistCandidatesBySections,
+  parseWatchlistSourceSections,
   resolveExportFileName,
   shouldRunScheduledWatchlistCompile,
   tickersToSingleColumnCsv,
@@ -39,5 +41,31 @@ describe("watchlist compiler service helpers", () => {
       latestRunIngestedAt: "2026-03-13T00:10:00.000Z",
       now,
     })).toBe(false);
+  });
+
+  it("parses source section filters from textarea-style input", () => {
+    expect(parseWatchlistSourceSections("FOCUS LIST - READY FOR EXECUTION\n###FOCUS LIST - CLOSE TO READY\n\n")).toEqual([
+      "FOCUS LIST - READY FOR EXECUTION",
+      "FOCUS LIST - CLOSE TO READY",
+    ]);
+  });
+
+  it("keeps only candidates from the requested TradingView section", () => {
+    const rows = filterWatchlistCandidatesBySections([
+      { ticker: "ADEA", rankLabel: "LIVE ORDERS", raw: { section: "LIVE ORDERS" } },
+      { ticker: "LUNR", rankLabel: "FOCUS LIST - READY FOR EXECUTION", raw: { section: "FOCUS LIST - READY FOR EXECUTION" } },
+      { ticker: "TPL", rankLabel: "FOCUS LIST - READY FOR EXECUTION", raw: { section: "FOCUS LIST - READY FOR EXECUTION" } },
+      { ticker: "GCT", rankLabel: "FOCUS LIST - CLOSE TO READY", raw: { section: "FOCUS LIST - CLOSE TO READY" } },
+    ], "FOCUS LIST - READY FOR EXECUTION");
+
+    expect(rows.map((row) => row.ticker)).toEqual(["LUNR", "TPL"]);
+  });
+
+  it("normalizes hashes and invisible formatting characters in section labels", () => {
+    const rows = filterWatchlistCandidatesBySections([
+      { ticker: "AAOI", rankLabel: "IN-PLAY: INDIVIDUAL/SECTORS", raw: { section: "###\u2064IN-PLAY: INDIVIDUAL/SECTORS" } },
+    ], "###IN-PLAY: INDIVIDUAL/SECTORS");
+
+    expect(rows.map((row) => row.ticker)).toEqual(["AAOI"]);
   });
 });

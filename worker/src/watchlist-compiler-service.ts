@@ -27,6 +27,7 @@ export type WatchlistSourceRecord = {
   setId: string;
   sourceName: string | null;
   sourceUrl: string;
+  sourceSections: string | null;
   sortOrder: number;
   isActive: boolean;
   createdAt: string;
@@ -55,6 +56,7 @@ type WatchlistCandidate = {
 type WatchlistCompileTrace = {
   sourceId: string;
   sourceUrl: string;
+  sourceSections: string[];
   status: "ok" | "empty" | "error";
   rawCount: number;
   acceptedCount: number;
@@ -110,6 +112,45 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "watchlist-set";
+}
+
+function normalizeWatchlistSectionName(value: string | null | undefined): string | null {
+  const text = String(value ?? "")
+    .replace(/^#+/, "")
+    .replace(/[\u200B-\u200D\u2060\u2063\u2064\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.toUpperCase() : null;
+}
+
+export function parseWatchlistSourceSections(value: string | null | undefined): string[] {
+  if (!value) return [];
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const part of value.split(/[\r\n,;]+/)) {
+    const normalized = normalizeWatchlistSectionName(part);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
+export function filterWatchlistCandidatesBySections<T extends { rankLabel?: string | null; raw?: unknown }>(
+  candidates: T[],
+  sourceSections: string | null | undefined,
+): T[] {
+  const allowedSections = parseWatchlistSourceSections(sourceSections);
+  if (allowedSections.length === 0) return candidates;
+  const allowed = new Set(allowedSections);
+  return candidates.filter((candidate) => {
+    const sectionFromRank = normalizeWatchlistSectionName(candidate.rankLabel);
+    const sectionFromRaw = candidate.raw && typeof candidate.raw === "object"
+      ? normalizeWatchlistSectionName((candidate.raw as { section?: unknown }).section as string | null | undefined)
+      : null;
+    const section = sectionFromRank ?? sectionFromRaw;
+    return Boolean(section && allowed.has(section));
+  });
 }
 
 function normalizeCandidate(input: {
@@ -259,10 +300,17 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
 }
 
 export async function listWatchlistSources(env: Env, setId: string): Promise<WatchlistSourceRecord[]> {
-  const rows = await env.DB.prepare(
-    "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive, created_at as createdAt, updated_at as updatedAt FROM tv_watchlist_sources WHERE set_id = ? ORDER BY sort_order ASC, created_at ASC",
-  ).bind(setId).all<any>();
-  return (rows.results ?? []).map((row) => ({ ...row, isActive: Boolean(row.isActive) }));
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, source_sections as sourceSections, sort_order as sortOrder, is_active as isActive, created_at as createdAt, updated_at as updatedAt FROM tv_watchlist_sources WHERE set_id = ? ORDER BY sort_order ASC, created_at ASC",
+    ).bind(setId).all<any>();
+    return (rows.results ?? []).map((row) => ({ ...row, sourceSections: row.sourceSections ?? null, isActive: Boolean(row.isActive) }));
+  } catch {
+    const rows = await env.DB.prepare(
+      "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive, created_at as createdAt, updated_at as updatedAt FROM tv_watchlist_sources WHERE set_id = ? ORDER BY sort_order ASC, created_at ASC",
+    ).bind(setId).all<any>();
+    return (rows.results ?? []).map((row) => ({ ...row, sourceSections: null, isActive: Boolean(row.isActive) }));
+  }
 }
 
 export async function loadWatchlistSet(env: Env, setId: string): Promise<WatchlistSetDetail | null> {
@@ -375,37 +423,75 @@ export async function deleteWatchlistSet(env: Env, setId: string): Promise<void>
   ]);
 }
 
-export async function createWatchlistSource(env: Env, setId: string, input: { sourceName?: string | null; sourceUrl: string; isActive?: boolean }): Promise<{ id: string }> {
+export async function createWatchlistSource(env: Env, setId: string, input: { sourceName?: string | null; sourceUrl: string; sourceSections?: string | null; isActive?: boolean }): Promise<{ id: string }> {
   const set = await loadWatchlistSet(env, setId);
   if (!set) throw new Error("Watchlist set not found.");
   const id = crypto.randomUUID();
   const nextOrder = await env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) + 1 as nextOrder FROM tv_watchlist_sources WHERE set_id = ?",
   ).bind(setId).first<{ nextOrder: number }>();
-  await env.DB.prepare(
-    "INSERT INTO tv_watchlist_sources (id, set_id, source_name, source_url, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-  ).bind(id, setId, input.sourceName?.trim() || null, input.sourceUrl.trim(), nextOrder?.nextOrder ?? 1, input.isActive === false ? 0 : 1).run();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO tv_watchlist_sources (id, set_id, source_name, source_url, source_sections, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ).bind(
+      id,
+      setId,
+      input.sourceName?.trim() || null,
+      input.sourceUrl.trim(),
+      input.sourceSections?.trim() || null,
+      nextOrder?.nextOrder ?? 1,
+      input.isActive === false ? 0 : 1,
+    ).run();
+  } catch {
+    await env.DB.prepare(
+      "INSERT INTO tv_watchlist_sources (id, set_id, source_name, source_url, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ).bind(id, setId, input.sourceName?.trim() || null, input.sourceUrl.trim(), nextOrder?.nextOrder ?? 1, input.isActive === false ? 0 : 1).run();
+  }
   await env.DB.prepare("UPDATE tv_watchlist_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(setId).run();
   return { id };
 }
 
-export async function updateWatchlistSource(env: Env, sourceId: string, input: { sourceName?: string | null; sourceUrl?: string; sortOrder?: number; isActive?: boolean }): Promise<void> {
-  const existing = await env.DB.prepare(
-    "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive FROM tv_watchlist_sources WHERE id = ? LIMIT 1",
-  ).bind(sourceId).first<{ id: string; setId: string; sourceName: string | null; sourceUrl: string; sortOrder: number; isActive: number }>();
+export async function updateWatchlistSource(env: Env, sourceId: string, input: { sourceName?: string | null; sourceUrl?: string; sourceSections?: string | null; sortOrder?: number; isActive?: boolean }): Promise<void> {
+  let existing: { id: string; setId: string; sourceName: string | null; sourceUrl: string; sourceSections: string | null; sortOrder: number; isActive: number } | null = null;
+  try {
+    existing = await env.DB.prepare(
+      "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, source_sections as sourceSections, sort_order as sortOrder, is_active as isActive FROM tv_watchlist_sources WHERE id = ? LIMIT 1",
+    ).bind(sourceId).first<{ id: string; setId: string; sourceName: string | null; sourceUrl: string; sourceSections: string | null; sortOrder: number; isActive: number }>();
+  } catch {
+    const legacyExisting = await env.DB.prepare(
+      "SELECT id, set_id as setId, source_name as sourceName, source_url as sourceUrl, sort_order as sortOrder, is_active as isActive FROM tv_watchlist_sources WHERE id = ? LIMIT 1",
+    ).bind(sourceId).first<{ id: string; setId: string; sourceName: string | null; sourceUrl: string; sortOrder: number; isActive: number }>();
+    existing = legacyExisting ? { ...legacyExisting, sourceSections: null } : null;
+  }
   if (!existing) throw new Error("Watchlist source not found.");
-  await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE tv_watchlist_sources SET source_name = ?, source_url = ?, sort_order = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    ).bind(
-      input.sourceName === undefined ? existing.sourceName : (input.sourceName?.trim() || null),
-      input.sourceUrl?.trim() || existing.sourceUrl,
-      input.sortOrder == null ? existing.sortOrder : input.sortOrder,
-      input.isActive == null ? existing.isActive : (input.isActive ? 1 : 0),
-      sourceId,
-    ),
-    env.DB.prepare("UPDATE tv_watchlist_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(existing.setId),
-  ]);
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE tv_watchlist_sources SET source_name = ?, source_url = ?, source_sections = ?, sort_order = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      ).bind(
+        input.sourceName === undefined ? existing.sourceName : (input.sourceName?.trim() || null),
+        input.sourceUrl?.trim() || existing.sourceUrl,
+        input.sourceSections === undefined ? existing.sourceSections : (input.sourceSections?.trim() || null),
+        input.sortOrder == null ? existing.sortOrder : input.sortOrder,
+        input.isActive == null ? existing.isActive : (input.isActive ? 1 : 0),
+        sourceId,
+      ),
+      env.DB.prepare("UPDATE tv_watchlist_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(existing.setId),
+    ]);
+  } catch {
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE tv_watchlist_sources SET source_name = ?, source_url = ?, sort_order = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      ).bind(
+        input.sourceName === undefined ? existing.sourceName : (input.sourceName?.trim() || null),
+        input.sourceUrl?.trim() || existing.sourceUrl,
+        input.sortOrder == null ? existing.sortOrder : input.sortOrder,
+        input.isActive == null ? existing.isActive : (input.isActive ? 1 : 0),
+        sourceId,
+      ),
+      env.DB.prepare("UPDATE tv_watchlist_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(existing.setId),
+    ]);
+  }
 }
 
 export async function deleteWatchlistSource(env: Env, sourceId: string): Promise<void> {
@@ -431,19 +517,22 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
 
   for (const source of activeSources) {
     const startedAt = Date.now();
+    const sourceSections = parseWatchlistSourceSections(source.sourceSections);
     try {
       const candidates = await provider.fetch({
         providerKey: "tradingview-public-link",
         sourceType: "tradingview-public-link",
         sourceValue: source.sourceUrl,
       });
-      const accepted = candidates
+      const filteredCandidates = filterWatchlistCandidatesBySections(candidates, source.sourceSections);
+      const accepted = filteredCandidates
         .map((candidate) => normalizeCandidate({ sourceId: source.id, sourceUrl: source.sourceUrl, candidate }))
         .filter((candidate): candidate is WatchlistCandidate => Boolean(candidate));
       normalizedRows.push(...accepted);
       traces.push({
         sourceId: source.id,
         sourceUrl: source.sourceUrl,
+        sourceSections,
         status: accepted.length > 0 ? "ok" : "empty",
         rawCount: candidates.length,
         acceptedCount: accepted.length,
@@ -453,6 +542,7 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
       traces.push({
         sourceId: source.id,
         sourceUrl: source.sourceUrl,
+        sourceSections,
         status: "error",
         rawCount: 0,
         acceptedCount: 0,

@@ -106,12 +106,14 @@ export const watchlistSetPatchSchema = z.object({
 export const watchlistSourceCreateSchema = z.object({
   sourceName: z.string().trim().max(120).nullable().optional(),
   sourceUrl: urlSchema,
+  sourceSections: z.string().trim().max(2000).nullable().optional(),
   isActive: z.boolean().optional().default(true),
 });
 
 export const watchlistSourcePatchSchema = z.object({
   sourceName: z.string().trim().max(120).nullable().optional(),
   sourceUrl: urlSchema.optional(),
+  sourceSections: z.string().trim().max(2000).nullable().optional(),
   sortOrder: z.number().int().min(1).max(9999).optional(),
   isActive: z.boolean().optional(),
 });

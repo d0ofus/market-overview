@@ -39,6 +39,7 @@ export function WatchlistCompilerAdminPanel() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [newSourceSections, setNewSourceSections] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -254,10 +255,12 @@ export function WatchlistCompilerAdminPanel() {
                       await createAdminWatchlistCompilerSource(selectedSetId, {
                         sourceName: newSourceName.trim() || null,
                         sourceUrl: newSourceUrl.trim(),
+                        sourceSections: newSourceSections.trim() || null,
                         isActive: true,
                       });
                       setNewSourceName("");
                       setNewSourceUrl("");
+                      setNewSourceSections("");
                       await load(selectedSetId);
                       setMessage("Watchlist URL added.");
                     } catch (error) {
@@ -268,6 +271,14 @@ export function WatchlistCompilerAdminPanel() {
                   Add URL
                 </button>
               </div>
+              <textarea
+                className="min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                value={newSourceSections}
+                onChange={(event) => setNewSourceSections(event.target.value)}
+                placeholder={"Optional sections to include, one per line\nFOCUS LIST - READY FOR EXECUTION\nFOCUS LIST - CLOSE TO READY"}
+                disabled={!selectedSetId}
+              />
+              <p className="text-xs text-slate-500">Leave blank to import the full watchlist. When populated, only matching TradingView section headers are included.</p>
               {!selectedSetId && (
                 <p className="text-sm text-slate-400">Create or select a watchlist set first, then add its TradingView URLs here.</p>
               )}
@@ -314,6 +325,26 @@ export function WatchlistCompilerAdminPanel() {
                             setMessage(error instanceof Error ? error.message : "Failed to update source URL.");
                           }
                         }}
+                      />
+                      <textarea
+                        className="mt-2 min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                        value={source.sourceSections ?? ""}
+                        onChange={async (event) => {
+                          const nextSections = event.target.value;
+                          setDetail((current) => current ? {
+                            ...current,
+                            sources: current.sources.map((row) => row.id === source.id ? { ...row, sourceSections: nextSections } : row),
+                          } : current);
+                        }}
+                        onBlur={async (event) => {
+                          try {
+                            await updateAdminWatchlistCompilerSource(source.id, { sourceSections: event.target.value.trim() || null });
+                            await load(selectedSetId);
+                          } catch (error) {
+                            setMessage(error instanceof Error ? error.message : "Failed to update source sections.");
+                          }
+                        }}
+                        placeholder={"Optional sections to include, one per line\nFOCUS LIST - READY FOR EXECUTION"}
                       />
                       <div className="mt-2 flex flex-wrap gap-2">
                         <button
