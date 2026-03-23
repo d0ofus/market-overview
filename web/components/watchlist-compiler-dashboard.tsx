@@ -41,6 +41,19 @@ function localDateSuffix() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+function parseSourceSections(value: string | null | undefined): string[] {
+  if (!value) return [];
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const part of value.split(/[\r\n,;]+/)) {
+    const normalized = part.replace(/^#+/, "").replace(/\s+/g, " ").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
 export function WatchlistCompilerDashboard() {
   const [sets, setSets] = useState<WatchlistCompilerSetRow[]>([]);
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
@@ -119,6 +132,19 @@ export function WatchlistCompilerDashboard() {
   const exportDate = localDateSuffix();
   const exportCsvUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "csv", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
   const exportTxtUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "txt", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
+  const selectedSections = useMemo(() => {
+    if (!detail) return [];
+    const seen = new Set<string>();
+    const output: string[] = [];
+    detail.sources.forEach((source) => {
+      parseSourceSections(source.sourceSections).forEach((section) => {
+        if (seen.has(section)) return;
+        seen.add(section);
+        output.push(section);
+      });
+    });
+    return output;
+  }, [detail]);
 
   return (
     <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
@@ -168,6 +194,12 @@ export function WatchlistCompilerDashboard() {
                   ? `Daily at ${detail.dailyCompileTimeLocal ?? "-"} ${detail.dailyCompileTimezone ?? "-"}`
                   : "Manual compile only"}
               </div>
+              {selectedSections.length > 0 && (
+                <div className="rounded border border-accent/20 bg-accent/5 p-2 text-xs text-slate-300">
+                  <div className="mb-1 font-semibold text-accent">Sections Pulled</div>
+                  <div>{selectedSections.join(", ")}</div>
+                </div>
+              )}
               <div className="rounded border border-borderSoft/60 bg-panelSoft/30 p-2 text-xs text-slate-400">
                 {detail.sources.map((source) => (
                   <div key={source.id} className="truncate">
