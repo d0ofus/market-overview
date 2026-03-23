@@ -541,20 +541,21 @@ export async function queryAlertsByFilters(env: Env, filterInput: AlertFilterInp
 async function loadNewsForTickerDays(env: Env, pairs: Array<{ ticker: string; tradingDay: string }>): Promise<Map<string, TickerNewsRow[]>> {
   const newsByKey = new Map<string, TickerNewsRow[]>();
   if (pairs.length === 0) return newsByKey;
+  const requestedKeys = new Set(pairs.map((pair) => `${pair.ticker}|${pair.tradingDay}`));
+  const tradingDays = Array.from(new Set(pairs.map((pair) => pair.tradingDay))).filter(Boolean);
 
-  for (let index = 0; index < pairs.length; index += ALERTS_TICKER_DAY_NEWS_BATCH_SIZE) {
-    const batch = pairs.slice(index, index + ALERTS_TICKER_DAY_NEWS_BATCH_SIZE);
-    const whereClause = batch.map(() => "(ticker = ? AND trading_day = ?)").join(" OR ");
-    const binds = batch.flatMap((pair) => [pair.ticker, pair.tradingDay]);
-
+  for (let index = 0; index < tradingDays.length; index += ALERTS_TICKER_DAY_NEWS_BATCH_SIZE) {
+    const batchDays = tradingDays.slice(index, index + ALERTS_TICKER_DAY_NEWS_BATCH_SIZE);
+    const placeholders = batchDays.map(() => "?").join(", ");
     const rows = await env.DB.prepare(
-      `SELECT id, ticker, trading_day as tradingDay, headline, source, url, published_at as publishedAt, snippet, fetched_at as fetchedAt FROM ticker_news WHERE ${whereClause} ORDER BY ticker ASC, trading_day ASC, datetime(COALESCE(published_at, fetched_at)) DESC`,
+      `SELECT id, ticker, trading_day as tradingDay, headline, source, url, published_at as publishedAt, snippet, fetched_at as fetchedAt FROM ticker_news WHERE trading_day IN (${placeholders}) ORDER BY trading_day DESC, ticker ASC, datetime(COALESCE(published_at, fetched_at)) DESC`,
     )
-      .bind(...binds)
+      .bind(...batchDays)
       .all<TickerNewsRow>();
 
     for (const row of rows.results ?? []) {
       const key = `${row.ticker}|${row.tradingDay}`;
+      if (!requestedKeys.has(key)) continue;
       const current = newsByKey.get(key) ?? [];
       if (current.length >= 3) continue;
       current.push(row);

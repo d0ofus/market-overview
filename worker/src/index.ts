@@ -1860,13 +1860,17 @@ app.get("/api/alerts", async (c) => {
 
 app.get("/api/alerts/unique-tickers", async (c) => {
   await maybeRunAlertsHousekeeping(c.env);
-  const payload = await queryUniqueTickerDaysByFilters(c.env, {
-    startDate: c.req.query("startDate"),
-    endDate: c.req.query("endDate"),
-    session: c.req.query("session"),
-    limit: Number(c.req.query("limit") ?? 150),
-  });
-  return c.json(payload);
+  try {
+    const payload = await queryUniqueTickerDaysByFilters(c.env, {
+      startDate: c.req.query("startDate"),
+      endDate: c.req.query("endDate"),
+      session: c.req.query("session"),
+      limit: Number(c.req.query("limit") ?? 150),
+    });
+    return c.json(payload);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load unique alert tickers." }, 500);
+  }
 });
 
 app.get("/api/alerts/news", async (c) => {
