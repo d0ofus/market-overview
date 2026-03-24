@@ -15,10 +15,12 @@ type Props = {
   detail: ResearchSnapshotDetailResponse | null;
   history: ResearchSnapshotRow[];
   compare: ResearchSnapshotCompareResponse | null;
+  baselineSnapshotId: string | null;
+  onBaselineChange: (value: string | null) => void;
   onClose: () => void;
 };
 
-export function ResearchTickerDrawer({ open, result, detail, history, compare, onClose }: Props) {
+export function ResearchTickerDrawer({ open, result, detail, history, compare, baselineSnapshotId, onBaselineChange, onClose }: Props) {
   if (!open || !result) return null;
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-slate-950/45 backdrop-blur-sm">
@@ -102,7 +104,7 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, o
             </div>
           </div>
 
-          <ResearchHistoryPanel history={history} compare={compare} />
+          <ResearchHistoryPanel history={history} compare={compare} selectedBaselineId={baselineSnapshotId} onBaselineChange={onBaselineChange} />
         </div>
       </div>
     </div>

@@ -23,6 +23,9 @@ type Props = {
   runs: ResearchRunListRow[];
   selectedRunId: string | null;
   onSelectRun: (id: string) => void;
+  manualTickerInput: string;
+  onManualTickerInputChange: (value: string) => void;
+  onRunManual: () => void;
 };
 
 function runBadge(status: string) {
@@ -145,6 +148,27 @@ export function WatchlistResearchPanel(props: Props) {
       </div>
 
       <div className="mt-4">
+        <div className="mb-3 rounded-xl border border-borderSoft/60 bg-panelSoft/40 p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Manual Ticker Entry</div>
+          <textarea
+            className="min-h-24 w-full rounded border border-borderSoft bg-panel px-3 py-2 text-sm text-slate-200"
+            placeholder={"Paste tickers here, separated by commas, spaces, or new lines\nNVDA, AMD, TSM"}
+            value={props.manualTickerInput}
+            onChange={(event) => props.onManualTickerInputChange(event.target.value)}
+          />
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <p className="text-xs text-slate-500">This uses the same research pipeline and profile settings, but does not depend on the compiled watchlist rows.</p>
+            <button
+              className="rounded border border-borderSoft px-3 py-1.5 text-sm text-slate-300 disabled:opacity-50"
+              disabled={props.isRunning || props.manualTickerInput.trim().length === 0}
+              onClick={props.onRunManual}
+              type="button"
+            >
+              Run Manual Tickers
+            </button>
+          </div>
+        </div>
+
         <div className="mb-2 flex items-center justify-between">
           <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Recent Research Runs</h4>
           <span className="text-[11px] text-slate-500">{props.runs.length} shown</span>

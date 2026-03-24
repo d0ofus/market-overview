@@ -103,6 +103,8 @@ export function WatchlistCompilerDashboard() {
   const [openResearchDetail, setOpenResearchDetail] = useState<ResearchSnapshotDetailResponse | null>(null);
   const [openResearchHistory, setOpenResearchHistory] = useState<ResearchSnapshotRow[]>([]);
   const [openResearchCompare, setOpenResearchCompare] = useState<ResearchSnapshotCompareResponse | null>(null);
+  const [openResearchBaselineId, setOpenResearchBaselineId] = useState<string | null>(null);
+  const [manualTickerInput, setManualTickerInput] = useState("");
 
   const selectedSet = useMemo(
     () => sets.find((row) => row.id === selectedSetId) ?? null,
@@ -265,6 +267,11 @@ export function WatchlistCompilerDashboard() {
     return output;
   }, [detail]);
 
+  const parsedManualTickers = useMemo(
+    () => Array.from(new Set(manualTickerInput.split(/[\s,;\n\r\t]+/).map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))),
+    [manualTickerInput],
+  );
+
   const toggleTickerSelection = (ticker: string) => {
     setSelectedTickers((current) => current.includes(ticker)
       ? current.filter((value) => value !== ticker)
@@ -276,6 +283,7 @@ export function WatchlistCompilerDashboard() {
     setOpenResearchDetail(null);
     setOpenResearchHistory([]);
     setOpenResearchCompare(null);
+    setOpenResearchBaselineId(null);
     try {
       const [detailRes, historyRes, compareRes] = await Promise.all([
         getResearchSnapshot(result.snapshotId),
@@ -289,6 +297,23 @@ export function WatchlistCompilerDashboard() {
       setMessage(error instanceof Error ? error.message : "Failed to load research detail.");
     }
   };
+
+  useEffect(() => {
+    if (!openResearchTicker) return;
+    let cancelled = false;
+    const loadCompare = async () => {
+      try {
+        const compareRes = await getResearchSnapshotCompare(openResearchTicker.snapshotId, openResearchBaselineId);
+        if (!cancelled) setOpenResearchCompare(compareRes);
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : "Failed to load snapshot comparison.");
+      }
+    };
+    void loadCompare();
+    return () => {
+      cancelled = true;
+    };
+  }, [openResearchTicker, openResearchBaselineId]);
 
   return (
     <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
@@ -463,6 +488,33 @@ export function WatchlistCompilerDashboard() {
             runs={researchRuns}
             selectedRunId={selectedResearchRunId}
             onSelectRun={setSelectedResearchRunId}
+            manualTickerInput={manualTickerInput}
+            onManualTickerInputChange={setManualTickerInput}
+            onRunManual={async () => {
+              try {
+                setResearchRunning(true);
+                const run = await createAdminResearchRun({
+                  sourceType: "manual",
+                  sourceLabel: selectedSet?.name ? `${selectedSet.name} Manual` : "Manual Research Run",
+                  tickers: parsedManualTickers,
+                  profileId: selectedResearchProfileId,
+                  maxTickers: researchMaxTickers,
+                  refreshMode: researchRefreshMode,
+                  rankingMode: researchRankingMode,
+                  deepDiveTopN: researchRankingMode === "rank_and_deep_dive" ? researchDeepDiveTopN : 0,
+                });
+                setSelectedResearchRunId(run.run.id);
+                setManualTickerInput("");
+                const statusRes = await getResearchRunStatus(run.run.id);
+                const resultsRes = await getResearchRunResults(run.run.id);
+                setResearchStatus(statusRes);
+                setResearchResults(resultsRes);
+                setMessage(`Manual research run started for ${run.run.requestedTickerCount} ticker${run.run.requestedTickerCount === 1 ? "" : "s"}.`);
+              } catch (error) {
+                setResearchRunning(false);
+                setMessage(error instanceof Error ? error.message : "Failed to start manual research run.");
+              }
+            }}
           />
         )}
 
@@ -620,7 +672,12 @@ export function WatchlistCompilerDashboard() {
         detail={openResearchDetail}
         history={openResearchHistory}
         compare={openResearchCompare}
-        onClose={() => setOpenResearchTicker(null)}
+        baselineSnapshotId={openResearchBaselineId}
+        onBaselineChange={setOpenResearchBaselineId}
+        onClose={() => {
+          setOpenResearchTicker(null);
+          setOpenResearchBaselineId(null);
+        }}
       />
     </div>
   );
