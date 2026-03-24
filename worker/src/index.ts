@@ -2781,20 +2781,54 @@ app.patch("/api/admin/item/:itemId", async (c) => {
   const payload = itemPatchSchema.parse(await c.req.json());
   const nextDisplayName = payload.displayName?.trim() || null;
   const existing = await c.env.DB.prepare(
-    "SELECT display_name as displayName FROM dashboard_items WHERE id = ? LIMIT 1",
+    `SELECT
+       i.display_name as displayName,
+       i.ticker as ticker,
+       g.title as groupTitle,
+       s.name as symbolName,
+       w.fund_name as watchlistFundName
+     FROM dashboard_items i
+     LEFT JOIN dashboard_groups g ON g.id = i.group_id
+     LEFT JOIN symbols s ON s.ticker = i.ticker
+     LEFT JOIN etf_watchlists w ON w.list_type = 'industry' AND w.ticker = i.ticker
+     WHERE i.id = ?
+     LIMIT 1`,
   )
     .bind(itemId)
-    .first<{ displayName: string | null }>();
+    .first<{
+      displayName: string | null;
+      ticker: string;
+      groupTitle: string | null;
+      symbolName: string | null;
+      watchlistFundName: string | null;
+    }>();
   if (!existing) return c.json({ error: "Item not found." }, 404);
 
-  const updated = (existing.displayName ?? null) !== nextDisplayName;
+  const isThematicGroup = existing.groupTitle === "Industry/Thematic ETFs" || existing.groupTitle === "Thematic ETFs";
+  const nextThematicFundName = nextDisplayName ?? existing.symbolName?.trim() ?? existing.ticker;
+  const watchlistNeedsUpdate = isThematicGroup && (existing.watchlistFundName ?? null) !== (nextThematicFundName ?? null);
+  const updated = (existing.displayName ?? null) !== nextDisplayName || watchlistNeedsUpdate;
   if (updated) {
-    await c.env.DB.prepare(
-      "UPDATE dashboard_items SET display_name = ? WHERE id = ?",
-    )
-      .bind(nextDisplayName, itemId)
-      .run();
-    await upsertAudit(c.env, "default", "ITEM_PATCH", { itemId, payload });
+    const statements = [
+      c.env.DB.prepare(
+        "UPDATE dashboard_items SET display_name = ? WHERE id = ?",
+      ).bind(nextDisplayName, itemId),
+    ];
+    if (watchlistNeedsUpdate) {
+      statements.push(
+        c.env.DB.prepare(
+          "UPDATE etf_watchlists SET fund_name = ? WHERE list_type = 'industry' AND ticker = ?",
+        ).bind(nextThematicFundName, existing.ticker),
+      );
+    }
+    await c.env.DB.batch(statements);
+    await upsertAudit(c.env, "default", "ITEM_PATCH", {
+      itemId,
+      payload,
+      ticker: existing.ticker,
+      thematicWatchlistUpdated: watchlistNeedsUpdate,
+      nextThematicFundName: watchlistNeedsUpdate ? nextThematicFundName : null,
+    });
     await refreshSnapshotSafe(c.env);
   }
   return c.json({ ok: true, itemId, updated });

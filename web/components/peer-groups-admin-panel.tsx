@@ -46,6 +46,13 @@ export function PeerGroupsAdminPanel() {
   const [bootstrapProviderMode, setBootstrapProviderMode] = useState<"both" | "finnhub" | "fmp">("finnhub");
   const [message, setMessage] = useState<string | null>(null);
 
+  const flashMessage = (next: string, timeoutMs = 4000) => {
+    setMessage(next);
+    window.setTimeout(() => {
+      setMessage((current) => current === next ? null : current);
+    }, timeoutMs);
+  };
+
   const load = async (preferredGroupId?: string | null) => {
     setLoading(true);
     try {
@@ -109,14 +116,22 @@ export function PeerGroupsAdminPanel() {
 
   const onSearchTicker = async () => {
     if (!tickerQuery.trim()) return;
-    const res = await searchAdminPeerTickers(tickerQuery);
-    setTickerResults((res.rows ?? []).map((row) => ({ ticker: row.ticker, name: row.name, exchange: row.exchange })));
+    try {
+      const res = await searchAdminPeerTickers(tickerQuery);
+      setTickerResults((res.rows ?? []).map((row) => ({ ticker: row.ticker, name: row.name, exchange: row.exchange })));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to search tickers.");
+    }
   };
 
   const onSelectTicker = async (ticker: string) => {
-    setSelectedTicker(ticker);
-    const detail = await getAdminPeerTickerDetail(ticker);
-    setSelectedTickerDetail(detail);
+    try {
+      setSelectedTicker(ticker);
+      const detail = await getAdminPeerTickerDetail(ticker);
+      setSelectedTickerDetail(detail);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Failed to load ${ticker}.`);
+    }
   };
 
   const onSaveGroup = async () => {
@@ -133,7 +148,7 @@ export function PeerGroupsAdminPanel() {
           isActive: form.isActive,
         });
         await load(selectedGroupId);
-        setMessage("Peer group updated.");
+        flashMessage("Peer group updated.");
       } else {
         const created = await createAdminPeerGroup({
           name: form.name,
@@ -144,7 +159,7 @@ export function PeerGroupsAdminPanel() {
           isActive: form.isActive,
         });
         await load(created.id);
-        setMessage("Peer group created.");
+        flashMessage("Peer group created.");
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to save peer group.");
@@ -191,7 +206,7 @@ export function PeerGroupsAdminPanel() {
                     onClick={() => setSelectedGroupId(group.id)}
                   >
                     <div className="text-sm font-semibold text-accent">{group.name}</div>
-                    <div className="text-[11px] text-slate-400">{group.groupType} • {group.memberCount ?? 0} members</div>
+                    <div className="text-[11px] text-slate-400">{group.groupType} | {group.memberCount ?? 0} members</div>
                   </button>
                 ))}
               </div>
@@ -237,10 +252,16 @@ export function PeerGroupsAdminPanel() {
                   <button
                     className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
                     onClick={async () => {
-                      await deleteAdminPeerGroup(selectedGroupId);
-                      await load(null);
-                      setSelectedGroupId(null);
-                      setForm(EMPTY_FORM);
+                      if (!window.confirm("Delete this peer group?")) return;
+                      try {
+                        await deleteAdminPeerGroup(selectedGroupId);
+                        await load(null);
+                        setSelectedGroupId(null);
+                        setForm(EMPTY_FORM);
+                        flashMessage("Peer group deleted.");
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : "Failed to delete peer group.");
+                      }
                     }}
                   >
                     Delete
@@ -288,7 +309,7 @@ export function PeerGroupsAdminPanel() {
                       await load(selectedGroupId);
                       const okCount = (res.rows ?? []).filter((row) => row.ok).length;
                       const errorCount = (res.rows ?? []).filter((row) => !row.ok).length;
-                      setMessage(`Bootstrap seeded ${okCount} ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`);
+                      flashMessage(`Bootstrap seeded ${okCount} ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`);
                     } catch (error) {
                       setMessage(error instanceof Error ? error.message : "Failed to bootstrap peer groups.");
                     } finally {
@@ -323,7 +344,7 @@ export function PeerGroupsAdminPanel() {
                   onClick={() => void onSelectTicker(row.ticker)}
                 >
                   <div className="text-sm font-semibold text-accent">{row.ticker}</div>
-                  <div className="text-[11px] text-slate-400">{row.name ?? "-"} {row.exchange ? `• ${row.exchange}` : ""}</div>
+                  <div className="text-[11px] text-slate-400">{row.name ?? "-"} {row.exchange ? `| ${row.exchange}` : ""}</div>
                 </button>
               ))}
             </div>
@@ -338,10 +359,14 @@ export function PeerGroupsAdminPanel() {
                   disabled={!selectedTicker}
                   onClick={async () => {
                     if (!selectedTicker) return;
-                    await seedAdminPeerGroup(selectedTicker);
-                    await load(selectedGroupId);
-                    await onSelectTicker(selectedTicker);
-                    setMessage(`Seeded peers for ${selectedTicker}.`);
+                    try {
+                      await seedAdminPeerGroup(selectedTicker);
+                      await load(selectedGroupId);
+                      await onSelectTicker(selectedTicker);
+                      flashMessage(`Seeded peers for ${selectedTicker}.`);
+                    } catch (error) {
+                      setMessage(error instanceof Error ? error.message : `Failed to seed peers for ${selectedTicker}.`);
+                    }
                   }}
                 >
                   Seed Peers
@@ -379,11 +404,15 @@ export function PeerGroupsAdminPanel() {
                         disabled={!targetGroupId || !selectedTickerDetail.symbol.ticker || selectedTickerDetail.groups.some((group) => group.id === targetGroupId)}
                         onClick={async () => {
                           if (!targetGroupId || !selectedTickerDetail.symbol.ticker) return;
-                          const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
-                          await addAdminPeerGroupMember(targetGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
-                          await load(targetGroupId);
-                          await onSelectTicker(selectedTickerDetail.symbol.ticker);
-                          setMessage(`Added ${selectedTickerDetail.symbol.ticker} to ${targetGroup?.name ?? "the selected peer group"}.`);
+                          try {
+                            const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
+                            await addAdminPeerGroupMember(targetGroupId, { ticker: selectedTickerDetail.symbol.ticker, source: "manual", confidence: 1 });
+                            await load(targetGroupId);
+                            await onSelectTicker(selectedTickerDetail.symbol.ticker);
+                            flashMessage(`Added ${selectedTickerDetail.symbol.ticker} to ${targetGroup?.name ?? "the selected peer group"}.`);
+                          } catch (error) {
+                            setMessage(error instanceof Error ? error.message : "Failed to add ticker to peer group.");
+                          }
                         }}
                       >
                         {selectedTickerDetail.groups.some((group) => group.id === targetGroupId) ? "Already In Group" : "Add Ticker To Group"}
@@ -412,10 +441,15 @@ export function PeerGroupsAdminPanel() {
                       <button
                         className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300"
                         onClick={async () => {
-                          await removeAdminPeerGroupMember(selectedGroupId, row.ticker);
-                          await load(selectedGroupId);
-                          if (selectedTicker === row.ticker) await onSelectTicker(row.ticker);
-                          setMessage(`Removed ${row.ticker} from the selected peer group.`);
+                          if (!window.confirm(`Remove ${row.ticker} from this peer group?`)) return;
+                          try {
+                            await removeAdminPeerGroupMember(selectedGroupId, row.ticker);
+                            await load(selectedGroupId);
+                            if (selectedTicker === row.ticker) await onSelectTicker(row.ticker);
+                            flashMessage(`Removed ${row.ticker} from the selected peer group.`);
+                          } catch (error) {
+                            setMessage(error instanceof Error ? error.message : `Failed to remove ${row.ticker}.`);
+                          }
                         }}
                       >
                         Remove

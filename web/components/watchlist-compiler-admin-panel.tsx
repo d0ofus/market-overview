@@ -44,6 +44,13 @@ export function WatchlistCompilerAdminPanel() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
+  const flashMessage = (next: string, timeoutMs = 4000) => {
+    setMessage(next);
+    window.setTimeout(() => {
+      setMessage((current) => current === next ? null : current);
+    }, timeoutMs);
+  };
+
   const load = async (preferredId?: string | null) => {
     setLoading(true);
     try {
@@ -99,6 +106,20 @@ export function WatchlistCompilerAdminPanel() {
     return true;
   };
 
+  const saveSourceChange = async (
+    sourceId: string,
+    payload: { sourceName?: string | null; sourceUrl?: string; sourceSections?: string | null; sortOrder?: number; isActive?: boolean },
+    successMessage: string,
+  ) => {
+    try {
+      await updateAdminWatchlistCompilerSource(sourceId, payload);
+      await load(selectedSetId);
+      flashMessage(successMessage);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to update source.");
+    }
+  };
+
   useEffect(() => {
     void load();
   }, []);
@@ -140,21 +161,25 @@ export function WatchlistCompilerAdminPanel() {
                     key={set.id}
                     className={`w-full rounded border px-3 py-2 text-left ${set.id === selectedSetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
                     onClick={async () => {
-                      setSelectedSetId(set.id);
-                      const nextDetail = await getWatchlistCompilerSet(set.id);
-                      setDetail(nextDetail);
-                      setForm({
-                        name: nextDetail.name,
-                        slug: nextDetail.slug,
-                        isActive: nextDetail.isActive,
-                        compileDaily: nextDetail.compileDaily,
-                        dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
-                        dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
-                      });
+                      try {
+                        setSelectedSetId(set.id);
+                        const nextDetail = await getWatchlistCompilerSet(set.id);
+                        setDetail(nextDetail);
+                        setForm({
+                          name: nextDetail.name,
+                          slug: nextDetail.slug,
+                          isActive: nextDetail.isActive,
+                          compileDaily: nextDetail.compileDaily,
+                          dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
+                          dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
+                        });
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : "Failed to load selected watchlist set.");
+                      }
                     }}
                   >
                     <div className="text-sm font-semibold text-accent">{set.name}</div>
-                    <div className="text-[11px] text-slate-400">{set.sourceCount} sources • {set.compileDaily ? "daily" : "manual"}</div>
+                    <div className="text-[11px] text-slate-400">{set.sourceCount} sources | {set.compileDaily ? "daily" : "manual"}</div>
                   </button>
                 ))}
                 {sets.length === 0 && <p className="text-xs text-slate-400">No watchlist sets yet.</p>}
@@ -207,12 +232,12 @@ export function WatchlistCompilerAdminPanel() {
                     if (selectedSetId) {
                       await updateAdminWatchlistCompilerSet(selectedSetId, form);
                       await load(selectedSetId);
-                      setMessage("Watchlist set updated.");
+                      flashMessage("Watchlist set updated.");
                     } else {
                       const created = await createAdminWatchlistCompilerSet(form);
                       const addedDraftSource = await addDraftSourceToSet(created.id);
                       await load(created.id);
-                      setMessage(addedDraftSource ? "Watchlist set created and source URL added." : "Watchlist set created.");
+                      flashMessage(addedDraftSource ? "Watchlist set created and source URL added." : "Watchlist set created.");
                     }
                   } catch (error) {
                     setMessage(error instanceof Error ? error.message : "Failed to save watchlist set.");
@@ -231,7 +256,7 @@ export function WatchlistCompilerAdminPanel() {
                       try {
                         const result = await compileAdminWatchlistCompilerSet(selectedSetId);
                         await load(selectedSetId);
-                        setMessage(`Compiled ${result.run.compiledRowCount} rows and ${result.run.uniqueTickerCount} unique tickers.`);
+                        flashMessage(`Compiled ${result.run.compiledRowCount} rows and ${result.run.uniqueTickerCount} unique tickers.`);
                       } catch (error) {
                         setMessage(error instanceof Error ? error.message : "Failed to compile watchlist set.");
                       }
@@ -242,9 +267,14 @@ export function WatchlistCompilerAdminPanel() {
                   <button
                     className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
                     onClick={async () => {
-                      await deleteAdminWatchlistCompilerSet(selectedSetId);
-                      await load(null);
-                      setMessage("Watchlist set deleted.");
+                      if (!window.confirm("Delete this watchlist set and all of its source URLs?")) return;
+                      try {
+                        await deleteAdminWatchlistCompilerSet(selectedSetId);
+                        await load(null);
+                        flashMessage("Watchlist set deleted.");
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : "Failed to delete watchlist set.");
+                      }
                     }}
                   >
                     Delete Set
@@ -280,7 +310,7 @@ export function WatchlistCompilerAdminPanel() {
                       if (!setId) return;
                       await addDraftSourceToSet(setId);
                       await load(setId);
-                      setMessage("Watchlist URL added.");
+                      flashMessage("Watchlist URL added.");
                     } catch (error) {
                       setMessage(error instanceof Error ? error.message : "Failed to add source URL.");
                     }
@@ -307,7 +337,7 @@ export function WatchlistCompilerAdminPanel() {
                       <input
                         className="mb-2 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
                         value={source.sourceName ?? ""}
-                        onChange={async (event) => {
+                        onChange={(event) => {
                           const nextName = event.target.value;
                           setDetail((current) => current ? {
                             ...current,
@@ -315,19 +345,14 @@ export function WatchlistCompilerAdminPanel() {
                           } : current);
                         }}
                         onBlur={async (event) => {
-                          try {
-                            await updateAdminWatchlistCompilerSource(source.id, { sourceName: event.target.value.trim() || null });
-                            await load(selectedSetId);
-                          } catch (error) {
-                            setMessage(error instanceof Error ? error.message : "Failed to update source name.");
-                          }
+                          await saveSourceChange(source.id, { sourceName: event.target.value.trim() || null }, "Source name saved.");
                         }}
                         placeholder={`Source ${index + 1} name`}
                       />
                       <input
                         className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
                         value={source.sourceUrl}
-                        onChange={async (event) => {
+                        onChange={(event) => {
                           const nextUrl = event.target.value;
                           setDetail((current) => current ? {
                             ...current,
@@ -335,18 +360,13 @@ export function WatchlistCompilerAdminPanel() {
                           } : current);
                         }}
                         onBlur={async (event) => {
-                          try {
-                            await updateAdminWatchlistCompilerSource(source.id, { sourceUrl: event.target.value.trim() });
-                            await load(selectedSetId);
-                          } catch (error) {
-                            setMessage(error instanceof Error ? error.message : "Failed to update source URL.");
-                          }
+                          await saveSourceChange(source.id, { sourceUrl: event.target.value.trim() }, "Source URL saved.");
                         }}
                       />
                       <textarea
                         className="mt-2 min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
                         value={source.sourceSections ?? ""}
-                        onChange={async (event) => {
+                        onChange={(event) => {
                           const nextSections = event.target.value;
                           setDetail((current) => current ? {
                             ...current,
@@ -354,12 +374,7 @@ export function WatchlistCompilerAdminPanel() {
                           } : current);
                         }}
                         onBlur={async (event) => {
-                          try {
-                            await updateAdminWatchlistCompilerSource(source.id, { sourceSections: event.target.value.trim() || null });
-                            await load(selectedSetId);
-                          } catch (error) {
-                            setMessage(error instanceof Error ? error.message : "Failed to update source sections.");
-                          }
+                          await saveSourceChange(source.id, { sourceSections: event.target.value.trim() || null }, "Source sections saved.");
                         }}
                         placeholder={"Optional sections to include, one per line\nFOCUS LIST - READY FOR EXECUTION"}
                       />
@@ -370,9 +385,8 @@ export function WatchlistCompilerAdminPanel() {
                           onClick={async () => {
                             const prev = detail.sources[index - 1];
                             if (!prev) return;
-                            await updateAdminWatchlistCompilerSource(source.id, { sortOrder: prev.sortOrder });
-                            await updateAdminWatchlistCompilerSource(prev.id, { sortOrder: source.sortOrder });
-                            await load(selectedSetId);
+                            await saveSourceChange(source.id, { sortOrder: prev.sortOrder }, "Source order updated.");
+                            await saveSourceChange(prev.id, { sortOrder: source.sortOrder }, "Source order updated.");
                           }}
                         >
                           Up
@@ -383,9 +397,8 @@ export function WatchlistCompilerAdminPanel() {
                           onClick={async () => {
                             const next = detail.sources[index + 1];
                             if (!next) return;
-                            await updateAdminWatchlistCompilerSource(source.id, { sortOrder: next.sortOrder });
-                            await updateAdminWatchlistCompilerSource(next.id, { sortOrder: source.sortOrder });
-                            await load(selectedSetId);
+                            await saveSourceChange(source.id, { sortOrder: next.sortOrder }, "Source order updated.");
+                            await saveSourceChange(next.id, { sortOrder: source.sortOrder }, "Source order updated.");
                           }}
                         >
                           Down
@@ -393,8 +406,7 @@ export function WatchlistCompilerAdminPanel() {
                         <button
                           className={`rounded border px-2 py-1 text-xs ${source.isActive ? "border-accent/40 text-accent" : "border-borderSoft text-slate-300"}`}
                           onClick={async () => {
-                            await updateAdminWatchlistCompilerSource(source.id, { isActive: !source.isActive });
-                            await load(selectedSetId);
+                            await saveSourceChange(source.id, { isActive: !source.isActive }, source.isActive ? "Source marked inactive." : "Source marked active.");
                           }}
                         >
                           {source.isActive ? "Active" : "Inactive"}
@@ -402,8 +414,14 @@ export function WatchlistCompilerAdminPanel() {
                         <button
                           className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300"
                           onClick={async () => {
-                            await deleteAdminWatchlistCompilerSource(source.id);
-                            await load(selectedSetId);
+                            if (!window.confirm("Delete this source URL?")) return;
+                            try {
+                              await deleteAdminWatchlistCompilerSource(source.id);
+                              await load(selectedSetId);
+                              flashMessage("Source URL deleted.");
+                            } catch (error) {
+                              setMessage(error instanceof Error ? error.message : "Failed to delete source URL.");
+                            }
                           }}
                         >
                           Delete

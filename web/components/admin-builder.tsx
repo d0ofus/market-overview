@@ -90,12 +90,12 @@ export function AdminBuilder() {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [itemDisplayNames, setItemDisplayNames] = useState<Record<string, string>>({});
   const [itemDisplayNameStatus, setItemDisplayNameStatus] = useState<Record<string, string | null>>({});
-  const [confirmationNote, setConfirmationNote] = useState<string | null>(null);
+  const [confirmationNote, setConfirmationNote] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
-  const showConfirmationNote = (message: string, timeoutMs = 3000) => {
-    setConfirmationNote(message);
+  const showConfirmationNote = (message: string, tone: "success" | "error" = "success", timeoutMs = 3000) => {
+    setConfirmationNote({ message, tone });
     setTimeout(() => {
-      setConfirmationNote((current) => current === message ? null : current);
+      setConfirmationNote((current) => current?.message === message ? null : current);
     }, timeoutMs);
   };
 
@@ -105,6 +105,7 @@ export function AdminBuilder() {
       setIsLoading(true);
     }
     setLoadError(null);
+    setEtfError(null);
     try {
       const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
       setData(config);
@@ -124,6 +125,15 @@ export function AdminBuilder() {
       setSectorEtfs(sectorRes.status === "fulfilled" ? (sectorRes.value.rows ?? []) : []);
       setIndustryEtfs(industryRes.status === "fulfilled" ? (industryRes.value.rows ?? []) : []);
       setEtfSyncStatus(syncRes.status === "fulfilled" ? (syncRes.value.rows ?? []) : []);
+      const etfLoadFailures = [
+        sectorRes.status === "rejected" ? "sector ETF watchlist" : null,
+        industryRes.status === "rejected" ? "industry ETF watchlist" : null,
+        syncRes.status === "rejected" ? "ETF sync status" : null,
+      ].filter(Boolean);
+      if (etfLoadFailures.length > 0) {
+        setEtfError(`Some ETF admin data failed to load: ${etfLoadFailures.join(", ")}.`);
+        showConfirmationNote("Some ETF admin data failed to load. Displayed lists may be incomplete.", "error", 5000);
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to load admin config.");
     } finally {
@@ -163,9 +173,13 @@ export function AdminBuilder() {
   }, [data]);
 
   const patchGroup = async (groupId: string, patch: any) => {
-    await adminFetch("/api/admin/group/" + groupId, { method: "PATCH", body: JSON.stringify(patch) });
-    await load();
-    showConfirmationNote("Configuration updated.");
+    try {
+      await adminFetch("/api/admin/group/" + groupId, { method: "PATCH", body: JSON.stringify(patch) });
+      await load();
+      showConfirmationNote("Configuration updated.");
+    } catch (error) {
+      showConfirmationNote(error instanceof Error ? error.message : "Failed to update group.", "error", 5000);
+    }
   };
 
   const addTicker = async (groupId: string) => {
@@ -188,18 +202,26 @@ export function AdminBuilder() {
     }
     setTickerInput((s) => ({ ...s, [groupId]: "" }));
     await load();
+    if (list.length > 0 && failures.length < list.length) {
+      showConfirmationNote(`Added ${list.length - failures.length} ticker${list.length - failures.length === 1 ? "" : "s"}.`);
+    }
     if (failures.length > 0) {
       setTickerErrors((s) => ({
         ...s,
         [groupId]: `Could not add: ${failures.join(" | ")}`,
       }));
+      showConfirmationNote("One or more tickers could not be added.", "error", 5000);
     }
   };
 
   const removeItem = async (itemId: string) => {
-    await adminFetch("/api/admin/item/" + itemId, { method: "DELETE" });
-    await load();
-    showConfirmationNote("Configuration updated.");
+    try {
+      await adminFetch("/api/admin/item/" + itemId, { method: "DELETE" });
+      await load();
+      showConfirmationNote("Configuration updated.");
+    } catch (error) {
+      showConfirmationNote(error instanceof Error ? error.message : "Failed to delete item.", "error", 5000);
+    }
   };
   const updateItemDisplayName = async (itemId: string) => {
     try {
@@ -234,18 +256,26 @@ export function AdminBuilder() {
   };
   const addSection = async () => {
     if (!newSectionTitle.trim()) return;
-    await adminFetch("/api/admin/section", { method: "POST", body: JSON.stringify({ title: newSectionTitle.trim() }) });
-    setNewSectionTitle("");
-    await load();
-    showConfirmationNote("Configuration updated.");
+    try {
+      await adminFetch("/api/admin/section", { method: "POST", body: JSON.stringify({ title: newSectionTitle.trim() }) });
+      setNewSectionTitle("");
+      await load();
+      showConfirmationNote("Configuration updated.");
+    } catch (error) {
+      showConfirmationNote(error instanceof Error ? error.message : "Failed to add section.", "error", 5000);
+    }
   };
   const addGroup = async (sectionId: string) => {
     const title = (newGroupTitle[sectionId] ?? "").trim();
     if (!title) return;
-    await adminFetch("/api/admin/section/" + sectionId + "/group", { method: "POST", body: JSON.stringify({ title }) });
-    setNewGroupTitle((s) => ({ ...s, [sectionId]: "" }));
-    await load();
-    showConfirmationNote("Configuration updated.");
+    try {
+      await adminFetch("/api/admin/section/" + sectionId + "/group", { method: "POST", body: JSON.stringify({ title }) });
+      setNewGroupTitle((s) => ({ ...s, [sectionId]: "" }));
+      await load();
+      showConfirmationNote("Configuration updated.");
+    } catch (error) {
+      showConfirmationNote(error instanceof Error ? error.message : "Failed to add group.", "error", 5000);
+    }
   };
 
   const saveRefreshConfig = async () => {
@@ -352,8 +382,13 @@ export function AdminBuilder() {
     const next = [...ids];
     const [el] = next.splice(index, 1);
     next.splice(to, 0, el);
-    await adminFetch("/api/admin/reorder", { method: "POST", body: JSON.stringify({ type, orderedIds: next }) });
-    await load();
+    try {
+      await adminFetch("/api/admin/reorder", { method: "POST", body: JSON.stringify({ type, orderedIds: next }) });
+      await load();
+      showConfirmationNote(`${type === "group" ? "Group" : "Ticker"} order updated.`);
+    } catch (error) {
+      showConfirmationNote(error instanceof Error ? error.message : `Failed to reorder ${type}.`, "error", 5000);
+    }
   };
 
   const parentSectorOptions = useMemo(() => {
@@ -453,11 +488,15 @@ export function AdminBuilder() {
     <div className="space-y-4">
       {confirmationNote && (
         <div
-          className="fixed bottom-4 right-4 z-[100] max-w-sm rounded-lg border border-emerald-400 bg-emerald-600 px-4 py-3 text-sm font-medium text-white shadow-2xl"
+          className={`fixed bottom-4 right-4 z-[100] max-w-sm rounded-lg border px-4 py-3 text-sm font-medium text-white shadow-2xl ${
+            confirmationNote.tone === "success"
+              ? "border-emerald-400 bg-emerald-600"
+              : "border-rose-400 bg-rose-600"
+          }`}
           role="status"
           aria-live="polite"
         >
-          {confirmationNote}
+          {confirmationNote.message}
         </div>
       )}
       <div className="card p-3">
@@ -952,8 +991,14 @@ export function AdminBuilder() {
                   {collapsedSections[section.id] ? "Expand" : "Collapse"}
                 </button>
                 <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
-                  await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
-                  await load();
+                  if (!window.confirm(`Delete section "${section.title}" and all of its groups?`)) return;
+                  try {
+                    await adminFetch("/api/admin/section/" + section.id, { method: "DELETE" });
+                    await load();
+                    showConfirmationNote("Section deleted.");
+                  } catch (error) {
+                    showConfirmationNote(error instanceof Error ? error.message : "Failed to delete section.", "error", 5000);
+                  }
                 }}>
                   Delete section
                 </button>
@@ -1008,8 +1053,14 @@ export function AdminBuilder() {
                     Save group
                   </button>
                   <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={async () => {
-                    await adminFetch("/api/admin/group/" + group.id, { method: "DELETE" });
-                    await load();
+                    if (!window.confirm(`Delete group "${group.title}" and all of its tickers?`)) return;
+                    try {
+                      await adminFetch("/api/admin/group/" + group.id, { method: "DELETE" });
+                      await load();
+                      showConfirmationNote("Group deleted.");
+                    } catch (error) {
+                      showConfirmationNote(error instanceof Error ? error.message : "Failed to delete group.", "error", 5000);
+                    }
                   }}>
                     Delete group
                   </button>
@@ -1081,7 +1132,10 @@ export function AdminBuilder() {
                       >
                         Down
                       </button>
-                      <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={() => removeItem(item.id)}>
+                      <button className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300" onClick={() => {
+                        if (!window.confirm(`Delete ${item.ticker} from this group?`)) return;
+                        void removeItem(item.id);
+                      }}>
                         Delete
                       </button>
                     </div>
