@@ -2,6 +2,8 @@
 
 ## Overview
 - Fix sparklines
+- Add macro stuff like 10Y yields
+- Add yield curve structure
 - Amend implied rate path to intervals of 0.1% on the y-axis
 - Add refresh button for macro rates table
 - Check on EW sectors column data
@@ -11,6 +13,7 @@
 
 ## Breadth
 - Add volume traded on majors as a breadth metric
+- Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
 - Add other more bespoke breadth metrics
 - Add in Chart of S&P with mcllean oscillator
@@ -34,7 +37,7 @@
 - Learn how to add/remove tickers from peer groups
 
 ## Scans
-- Add weekly gainers scan
+- Add RS scan
 - Add strongest FA scan
 - Add Strong earnings scanner
 - Colour by industry
@@ -44,10 +47,10 @@
 - Add ranking system for compiled names - Use perplexity/AI with API
 
 ## Gappers
+- Remove ETFs, closed ended funds, and OTC tickers
 - Find out what the current filters are and add more scanning filters or use a preset 
 - Add $ on gap = Pre Vol * Price
 - Add Average $ traded filter
-- Remove ETFs, only stocks
 - Add highest pre-market volume scan
 
 ## Admin
@@ -62,6 +65,10 @@
 ## General
 - See what other features in google sheets dashboard that are good
 - Remove top left Market command centre box
+
+## AI Research
+- Add ability to assess Relative strength to index
+- add in analyst recommendations and analyst reports analysis as well
 
 ## New Functions
 - Add in search function for leveraged ETFs
