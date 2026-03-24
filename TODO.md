@@ -53,19 +53,19 @@
 - Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 
 - Shows pending for ETFs like JETS, but ETF consituent sync status shows 'pending', 0 records and No cached data. Clicking on it shows contituents, and checking the DB shows all ok.
 - Check why most ETFs limited to 25 tickers
-- ETFs that need to be checked
+>> ETFs that need to be checked
 > IBIT
 > WGMI
 > ARKK: More than 25 components (https://www.ark-funds.com/funds/arkk#hold)
 
 ## General
+- See what other features in google sheets dashboard that are good
+- Remove top left Market command centre box
+
+## New Functions
+- Add in search function for leveraged ETFs
+- Add news impact page (on dashboard(?))
 - Add page to search for latest macroeconomic analysis (including charts)
 - Add polymarket overview like (https://www.perplexity.ai/computer/a/f87a4860-4de3-4184-96fb-a1da94a68b38?view=split)
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
-- Add in search function for leveraged ETFs
-- Add news impact page (on dashboard(?))
-- See what other features in google sheets that is good
 - Add Calendar of US holidays
-- Check on whether cloudflare database is sustainable
-> Remove backlog and use more snapshot cache to keep database sustainable
-- Remove top left Market command centre box
