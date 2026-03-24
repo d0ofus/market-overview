@@ -1,9 +1,12 @@
 # TODO
 
 ## Overview
+- Amend implied rate path to intervals of 0.1% on the y-axis
+- Add refresh button for macro rates table
 - Add multiple chart view of commodities
 - Add RS chart (like my google sheets dashboard)
 - Check on EW sectors column data
+- Fix sparklines
 
 ## Breadth
 - Scoring for market breadth for overall 
@@ -64,3 +67,4 @@
 - Add Calendar of US holidays
 - Check on whether cloudflare database is sustainable
 > Remove backlog and use more snapshot cache to keep database sustainable
+- Remove top left Market command centre box
