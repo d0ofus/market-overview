@@ -3,9 +3,10 @@
 ## Overview
 - Amend implied rate path to intervals of 0.1% on the y-axis
 - Add refresh button for macro rates table
+- Check on EW sectors column data
+- Put the same EW Sector ETF on the same row as the non-EW one. Sort by non-EW
 - Add multiple chart view of commodities
 - Add RS chart (like my google sheets dashboard)
-- Check on EW sectors column data
 - Fix sparklines
 
 ## Breadth
