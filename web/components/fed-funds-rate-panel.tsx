@@ -1,12 +1,42 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { FedWatchMeeting, FedWatchResponse } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse } from "@/lib/api";
 
-function formatDateLabel(value: string | null, fallback: string): string {
-  if (!value) return fallback;
-  const parsed = new Date(`${value}T00:00:00Z`);
+const DECISION_TZ = "America/New_York";
+const DECISION_HOUR = 14;
+const DECISION_MINUTE = 0;
+
+type ChartPoint = {
+  label: string;
+  meetingIso: string;
+  current: number | null;
+  ago_1w: number | null;
+  ago_3w: number | null;
+  ago_6w: number | null;
+  ago_10w: number | null;
+};
+
+function pct(value: number | null | undefined, digits = 1): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${value.toFixed(digits)}%`;
+}
+
+function ratePct(value: number | null | undefined, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${value.toFixed(digits)}%`;
+}
+
+function signedBps(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)} bps`;
+}
+
+function formatMeetingDate(iso: string | null | undefined, fallback: string): string {
+  if (!iso) return fallback;
+  const parsed = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return fallback;
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(parsed);
 }
@@ -25,89 +55,170 @@ function formatGeneratedAt(value: string | null | undefined): string {
   }).format(parsed);
 }
 
-function pct(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "N/A";
-  return `${value.toFixed(1)}%`;
+function nextMeetingPricing(row: FedFundsPathRow | null): { headline: string; detail: string } {
+  if (!row) return { headline: "Unavailable", detail: "No meeting data" };
+  if (row.probMovePct <= 0) return { headline: "0% NO CHANGE", detail: signedBps(row.changeBps) };
+  const action = row.probIsCut ? "CUT" : "HIKE";
+  return { headline: `${Math.round(row.probMovePct)}% ${action}`, detail: signedBps(row.changeBps) };
 }
 
-function dominantOutcome(meeting: FedWatchMeeting | null): string {
-  if (!meeting?.probabilities?.length) return "Unavailable";
-  const top = [...meeting.probabilities].sort((left, right) => right.nowPct - left.nowPct)[0];
-  return top ? `${top.targetRange} (${pct(top.nowPct)})` : "Unavailable";
+function numMovesLabel(row: FedFundsPathRow): string {
+  const absMoves = Math.abs(row.numMoves);
+  const value = absMoves.toFixed(2);
+  return row.numMovesIsCut ? `(${value})` : value;
 }
 
-function midpointLabel(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "Unavailable";
-  return `${value.toFixed(1)} bps`;
+function probabilityLabel(row: FedFundsPathRow): string {
+  const value = `${row.probMovePct.toFixed(1)}%`;
+  if (row.probMovePct <= 0) return value;
+  return row.probIsCut ? `(${value})` : value;
 }
 
-function biasLabel(meeting: FedWatchMeeting | null): string {
-  if (!meeting) return "Unavailable";
-  const hike = meeting.hikeProbability ?? 0;
-  const cut = meeting.cutProbability ?? 0;
-  const unchanged = meeting.noChangeProbability ?? 0;
-  if (unchanged >= hike && unchanged >= cut) return `No change bias (${pct(unchanged)})`;
-  if (hike >= cut) return `Hike bias (${pct(hike)})`;
-  return `Cut bias (${pct(cut)})`;
+function directionClass(value: number): string {
+  if (value > 0) return "text-emerald-400";
+  if (value < 0) return "text-rose-400";
+  return "text-slate-300";
 }
 
-function probabilityTooltipLabel(key: "nowPct" | "dayAgoPct" | "weekAgoPct" | "monthAgoPct"): string {
-  if (key === "dayAgoPct") return "1 Day";
-  if (key === "weekAgoPct") return "1 Week";
-  if (key === "monthAgoPct") return "1 Month";
-  return "Now";
+function zonedTimeToUtc(isoDate: string, hour: number, minute: number, timeZone: string): Date {
+  const desired = `${isoDate}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+  const utcGuess = new Date(`${desired}Z`);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(utcGuess);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  const asUtc = Date.UTC(
+    Number(get("year")),
+    Number(get("month")) - 1,
+    Number(get("day")),
+    Number(get("hour")),
+    Number(get("minute")),
+    Number(get("second")),
+  );
+  const desiredUtc = Date.UTC(
+    Number(isoDate.slice(0, 4)),
+    Number(isoDate.slice(5, 7)) - 1,
+    Number(isoDate.slice(8, 10)),
+    hour,
+    minute,
+    0,
+  );
+  return new Date(utcGuess.getTime() + (desiredUtc - asUtc));
+}
+
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return "00d 00:00:00";
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${days}d ${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function meetingDecisionLabel(iso: string | null | undefined, fallback: string): string {
+  if (!iso) return fallback;
+  const decision = zonedTimeToUtc(iso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ);
+  return `${formatMeetingDate(iso, fallback)} · ${new Intl.DateTimeFormat("en-US", {
+    timeZone: DECISION_TZ,
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(decision)}`;
+}
+
+function buildChartData(
+  currentMidpoint: number | null,
+  currentRows: FedFundsPathRow[],
+  comparisons: FedFundsComparisonSeries[],
+): ChartPoint[] {
+  const seriesMaps = new Map<FedFundsComparisonSeries["key"], Map<string, number>>();
+  for (const series of comparisons) {
+    seriesMaps.set(series.key, new Map(series.rows.map((row) => [row.meetingIso, row.implied])));
+  }
+
+  return [
+    {
+      label: "Current",
+      meetingIso: "current",
+      current: currentMidpoint,
+      ago_1w: comparisons.find((series) => series.key === "ago_1w")?.effr ?? null,
+      ago_3w: comparisons.find((series) => series.key === "ago_3w")?.effr ?? null,
+      ago_6w: comparisons.find((series) => series.key === "ago_6w")?.effr ?? null,
+      ago_10w: comparisons.find((series) => series.key === "ago_10w")?.effr ?? null,
+    },
+    ...currentRows.map((row) => ({
+      label: row.meeting,
+      meetingIso: row.meetingIso,
+      current: row.impliedRatePostMeeting,
+      ago_1w: seriesMaps.get("ago_1w")?.get(row.meetingIso) ?? null,
+      ago_3w: seriesMaps.get("ago_3w")?.get(row.meetingIso) ?? null,
+      ago_6w: seriesMaps.get("ago_6w")?.get(row.meetingIso) ?? null,
+      ago_10w: seriesMaps.get("ago_10w")?.get(row.meetingIso) ?? null,
+    })),
+  ];
 }
 
 export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) {
-  const meetings = snapshot.data?.meetings ?? [];
-  const [selectedMeetingIndex, setSelectedMeetingIndex] = useState(0);
-  const selectedMeeting = meetings[selectedMeetingIndex] ?? meetings[0] ?? null;
+  const rows = snapshot.data?.rows ?? [];
+  const nextMeeting = rows[0] ?? null;
+  const [now, setNow] = useState(() => Date.now());
 
-  const barData = useMemo(
-    () =>
-      (selectedMeeting?.probabilities ?? []).map((row) => ({
-        targetRange: row.targetRange,
-        nowPct: row.nowPct,
-      })),
-    [selectedMeeting],
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const countdown = useMemo(() => {
+    if (!nextMeeting?.meetingIso) return "—";
+    const when = zonedTimeToUtc(nextMeeting.meetingIso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ);
+    return formatCountdown(when.getTime() - now);
+  }, [nextMeeting, now]);
+
+  const nextPricing = useMemo(() => nextMeetingPricing(nextMeeting), [nextMeeting]);
+  const chartData = useMemo(
+    () => buildChartData(snapshot.data?.midpoint ?? null, rows, snapshot.data?.comparisons ?? []),
+    [rows, snapshot.data?.comparisons, snapshot.data?.midpoint],
   );
 
-  const lineData = useMemo(
-    () =>
-      meetings.map((meeting) => ({
-        label: meeting.label,
-        expectedMidpointBps: meeting.expectedMidpointBps,
-      })),
-    [meetings],
-  );
-
-  const probabilityColumns = useMemo(() => {
-    const columns: Array<{ key: "nowPct" | "dayAgoPct" | "weekAgoPct" | "monthAgoPct"; label: string }> = [
-      { key: "nowPct", label: "Now" },
-    ];
-    if ((selectedMeeting?.probabilities ?? []).some((row) => row.dayAgoPct != null)) columns.push({ key: "dayAgoPct", label: "1 Day" });
-    if ((selectedMeeting?.probabilities ?? []).some((row) => row.weekAgoPct != null)) columns.push({ key: "weekAgoPct", label: "1 Week" });
-    if ((selectedMeeting?.probabilities ?? []).some((row) => row.monthAgoPct != null)) columns.push({ key: "monthAgoPct", label: "1 Month" });
-    return columns;
-  }, [selectedMeeting]);
+  const comparisonMeta = snapshot.data?.comparisons ?? [];
+  const comparisonLines = comparisonMeta.map((series) => ({
+    key: series.key,
+    label: series.label,
+    color:
+      series.key === "ago_1w" ? "#F4C84A"
+      : series.key === "ago_3w" ? "#CBD5E1"
+      : series.key === "ago_6w" ? "#94A3B8"
+      : "#64748B",
+  }));
 
   const warningTone = snapshot.status === "stale" ? "border-amber-400/30 bg-amber-500/10 text-amber-100" : "border-red-400/30 bg-red-500/10 text-red-100";
 
   return (
     <section className="card overflow-hidden">
       <div className="border-b border-borderSoft/70 px-5 py-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="space-y-1">
+        <div className="space-y-3">
+          <div>
             <div className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Macro Rates</div>
-            <h2 className="text-xl font-semibold text-slate-100">Fed Funds Rate</h2>
-            <p className="max-w-3xl text-sm text-slate-400">
-              CME FedWatch target-rate probabilities for the meeting months exposed by the public tool.
-            </p>
+            <h2 className="text-xl font-semibold text-slate-100">Federal Reserve</h2>
+            <p className="text-sm text-slate-400">Fed Funds Rate: Twelve-Month Market Pricing</p>
           </div>
-          <div className="space-y-1 text-right text-xs text-slate-400">
-            <div>Source: <a className="text-accent hover:underline" href={snapshot.data?.sourceUrl ?? "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"} target="_blank" rel="noreferrer">CME FedWatch</a></div>
-            <div>Snapshot: {formatGeneratedAt(snapshot.data?.generatedAt)}</div>
-            <div>Current target range: <span className="font-medium text-slate-200">{snapshot.data?.currentTargetRange ?? "Unavailable"}</span></div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-300">
+            <span>As of: <span className="font-medium text-slate-100">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
+            <span>Target Band: <span className="font-medium text-slate-100">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
+            <span>Midpoint: <span className="font-medium text-slate-100">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
+            <span>Last EFFR: <span className="font-medium text-slate-100">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
+            <span>Step: <span className="font-medium text-slate-100">{snapshot.data?.assumedMoveBps ?? "N/A"} bps</span></span>
+            <span>Source: <a className="text-accent hover:underline" href={snapshot.data?.sourceUrl ?? "https://rateprobability.com/fed"} target="_blank" rel="noreferrer">RateProbability</a></span>
+            <span>Snapshot: <span className="font-medium text-slate-100">{formatGeneratedAt(snapshot.data?.generatedAt)}</span></span>
           </div>
         </div>
       </div>
@@ -118,150 +229,108 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
         </div>
       )}
 
-      {!selectedMeeting && (
+      {!snapshot.data && (
         <div className="px-5 py-8">
           <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-5">
-            <div className="text-sm font-semibold text-slate-100">FedWatch data unavailable</div>
+            <div className="text-sm font-semibold text-slate-100">Fed funds pricing unavailable</div>
             <p className="mt-2 text-sm text-slate-400">
-              The public CME FedWatch site did not expose parseable meeting probabilities from this environment. The section is live and will automatically render once a successful snapshot is captured.
+              The RateProbability API could not be reached from this environment. When it recovers, this section will automatically show the cached or live rate path again.
             </p>
             <a
               className="mt-4 inline-flex rounded-xl bg-accent/20 px-3 py-2 text-sm font-medium text-accent hover:bg-accent/30"
-              href="https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
+              href="https://rateprobability.com/fed"
               target="_blank"
               rel="noreferrer"
             >
-              Open CME FedWatch
+              Open RateProbability
             </a>
           </div>
         </div>
       )}
 
-      {selectedMeeting && (
+      {snapshot.data && (
         <div className="space-y-5 px-5 py-5">
-          <div className="flex flex-wrap gap-2">
-            {meetings.map((meeting, index) => (
-              <button
-                key={`${meeting.label}-${index}`}
-                className={`rounded-xl border px-3 py-2 text-sm transition ${
-                  index === selectedMeetingIndex
-                    ? "border-accent/50 bg-accent/15 text-accent"
-                    : "border-borderSoft/70 bg-slate-900/30 text-slate-300 hover:border-accent/30 hover:text-slate-100"
-                }`}
-                onClick={() => setSelectedMeetingIndex(index)}
-                type="button"
-              >
-                {meeting.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Next Meeting</div>
-              <div className="mt-2 text-lg font-semibold text-slate-100">{formatDateLabel(selectedMeeting.meetingDate, selectedMeeting.label)}</div>
-              <div className="mt-1 text-xs text-slate-500">{selectedMeeting.contract ?? "Contract unavailable"}</div>
+          <div className="grid gap-4 xl:grid-cols-3">
+            <div className="rounded-3xl border border-accent/20 bg-slate-950/50 p-5">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Next Decision In</div>
+              <div className="mt-3 font-mono text-4xl font-semibold tracking-[0.04em] text-slate-100">{countdown}</div>
+              <div className="mt-4 text-sm text-slate-400">{meetingDecisionLabel(nextMeeting?.meetingIso, nextMeeting?.meeting ?? "—")}</div>
             </div>
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Dominant Outcome</div>
-              <div className="mt-2 text-lg font-semibold text-slate-100">{dominantOutcome(selectedMeeting)}</div>
-              <div className="mt-1 text-xs text-slate-500">Most probable target range right now</div>
+            <div className="rounded-3xl border border-emerald-400/20 bg-slate-950/50 p-5">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Next Meeting Pricing</div>
+              <div className="mt-3 text-4xl font-semibold text-emerald-400">{nextPricing.headline}</div>
+              <div className="mt-4 text-lg text-emerald-300">{nextPricing.detail}</div>
             </div>
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Bias</div>
-              <div className="mt-2 text-lg font-semibold text-slate-100">{biasLabel(selectedMeeting)}</div>
-              <div className="mt-1 text-xs text-slate-500">Compared with the current target range</div>
-            </div>
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Expected Midpoint</div>
-              <div className="mt-2 text-lg font-semibold text-slate-100">{midpointLabel(selectedMeeting.expectedMidpointBps)}</div>
-              <div className="mt-1 text-xs text-slate-500">Probability-weighted target midpoint</div>
+            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/50 p-5">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Current Rate</div>
+              <div className="mt-3 text-4xl font-semibold text-slate-100">{ratePct(snapshot.data.midpoint, 2)}</div>
+              <div className="mt-4 text-sm text-slate-400">Last EFFR: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
             </div>
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-sm font-semibold text-slate-100">Target Rate Probability Distribution</div>
-                  <div className="text-xs text-slate-400">{selectedMeeting.label} meeting</div>
-                </div>
-                <div className="text-xs text-slate-500">Bars sized by current implied probability</div>
+          <div className="grid gap-4 xl:grid-cols-[1.15fr_0.92fr]">
+            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/45 p-5">
+              <div className="mb-4 text-lg font-semibold text-slate-100">Path of Fed Funds Target Midpoint: Market Expectation</div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-slate-900/60">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Meeting</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Implied Rate (Post-Meeting)</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Probability of Hike(Cut)</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300"># of Hikes(Cuts)</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Δ vs Current (bps)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.meetingIso} className="border-t border-borderSoft/60">
+                        <td className="px-3 py-3 font-medium text-slate-100">{row.meeting}</td>
+                        <td className="px-3 py-3 text-right font-mono text-slate-200">{ratePct(row.impliedRatePostMeeting, 2)}</td>
+                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.probIsCut ? -row.probMovePct : row.probMovePct)}`}>{probabilityLabel(row)}</td>
+                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.numMovesIsCut ? -row.numMoves : row.numMoves)}`}>{numMovesLabel(row)}</td>
+                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.changeBps)}`}>{signedBps(row.changeBps)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <div className="h-80">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={barData} margin={{ top: 8, right: 8, left: -12, bottom: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.16)" />
-                    <XAxis dataKey="targetRange" tick={{ fill: "#94A3B8", fontSize: 11 }} />
-                    <YAxis tick={{ fill: "#94A3B8", fontSize: 11 }} tickFormatter={(value) => `${value}%`} />
-                    <Tooltip
-                      formatter={(value) => [`${Number(value).toFixed(1)}%`, "Probability"]}
-                      contentStyle={{ background: "rgba(2, 6, 23, 0.96)", border: "1px solid rgba(71, 85, 105, 0.8)", borderRadius: 16 }}
-                      labelStyle={{ color: "#E2E8F0" }}
-                    />
-                    <Bar dataKey="nowPct" fill="#38BDF8" radius={[10, 10, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+              <p className="mt-4 text-xs text-slate-500">
+                Estimates represent market expectations for the midpoint of the Fed&apos;s target band for the fed funds rate. Data updates multiple times daily and the page shows the last cached copy if the live fetch is unavailable.
+              </p>
             </div>
 
-            <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-sm font-semibold text-slate-100">Cross-Meeting Path</div>
-                  <div className="text-xs text-slate-400">Expected midpoint across exposed meetings</div>
-                </div>
-              </div>
-              <div className="h-80">
+            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/45 p-5">
+              <div className="mb-4 text-lg font-semibold text-slate-100">Implied Rate Path</div>
+              <div className="h-[420px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={lineData} margin={{ top: 8, right: 8, left: -16, bottom: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.16)" />
-                    <XAxis dataKey="label" tick={{ fill: "#94A3B8", fontSize: 11 }} />
-                    <YAxis tick={{ fill: "#94A3B8", fontSize: 11 }} domain={["dataMin - 12.5", "dataMax + 12.5"]} />
+                  <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 16 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.18)" />
+                    <XAxis dataKey="label" tick={{ fill: "#94A3B8", fontSize: 11 }} angle={-32} textAnchor="end" height={72} interval={0} />
+                    <YAxis tick={{ fill: "#94A3B8", fontSize: 11 }} tickFormatter={(value) => `${Number(value).toFixed(2)}%`} domain={["dataMin - 0.05", "dataMax + 0.05"]} />
                     <Tooltip
-                      formatter={(value) => [`${Number(value).toFixed(1)} bps`, "Expected midpoint"]}
                       contentStyle={{ background: "rgba(2, 6, 23, 0.96)", border: "1px solid rgba(71, 85, 105, 0.8)", borderRadius: 16 }}
                       labelStyle={{ color: "#E2E8F0" }}
+                      formatter={(value, name) => [`${Number(value).toFixed(3)}%`, String(name)]}
                     />
-                    <Line type="monotone" dataKey="expectedMidpointBps" stroke="#34D399" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Line type="monotone" dataKey="current" name="Current" stroke="#3B82F6" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                    {comparisonLines.map((series) => (
+                      <Line
+                        key={series.key}
+                        type="monotone"
+                        dataKey={series.key}
+                        name={series.label}
+                        stroke={series.color}
+                        strokeWidth={2}
+                        dot={{ r: 2.5 }}
+                        activeDot={{ r: 4 }}
+                        connectNulls
+                      />
+                    ))}
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-4">
-            <div className="mb-3 text-sm font-semibold text-slate-100">Probability Table</div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-slate-900/60">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Target Range</th>
-                    {probabilityColumns.map((column) => (
-                      <th key={column.key} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
-                        {column.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedMeeting.probabilities.map((row) => (
-                    <tr key={row.targetRange} className="border-t border-borderSoft/60">
-                      <td className="px-3 py-2 font-medium text-slate-200">{row.targetRange}</td>
-                      {probabilityColumns.map((column) => (
-                        <td key={column.key} className="px-3 py-2 text-slate-300">
-                          {pct(row[column.key])}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-4 grid gap-2 text-xs text-slate-500 md:grid-cols-3">
-              <div>Mid price: <span className="text-slate-300">{selectedMeeting.midPrice ?? "N/A"}</span></div>
-              <div>Prior volume: <span className="text-slate-300">{selectedMeeting.priorVolume?.toLocaleString("en-US") ?? "N/A"}</span></div>
-              <div>Prior OI: <span className="text-slate-300">{selectedMeeting.priorOi?.toLocaleString("en-US") ?? "N/A"}</span></div>
             </div>
           </div>
         </div>

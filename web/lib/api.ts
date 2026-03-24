@@ -4,37 +4,39 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
 export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";
 
-export type FedWatchProbability = {
-  targetRange: string;
-  targetRateBpsLow: number;
-  targetRateBpsHigh: number;
-  midpointBps: number;
-  nowPct: number;
-  dayAgoPct: number | null;
-  weekAgoPct: number | null;
-  monthAgoPct: number | null;
+export type FedFundsPathRow = {
+  meeting: string;
+  meetingIso: string;
+  impliedRatePostMeeting: number;
+  probMovePct: number;
+  probIsCut: boolean;
+  numMoves: number;
+  numMovesIsCut: boolean;
+  changeBps: number;
 };
 
-export type FedWatchMeeting = {
-  meetingDate: string | null;
+export type FedFundsComparisonSeries = {
+  key: "ago_1w" | "ago_3w" | "ago_6w" | "ago_10w";
   label: string;
-  contract: string | null;
-  expires: string | null;
-  midPrice: number | null;
-  priorVolume: number | null;
-  priorOi: number | null;
-  expectedMidpointBps: number | null;
-  hikeProbability: number | null;
-  cutProbability: number | null;
-  noChangeProbability: number | null;
-  probabilities: FedWatchProbability[];
+  usedDate: string | null;
+  effr: number | null;
+  rows: Array<{
+    meeting: string;
+    meetingIso: string;
+    implied: number;
+  }>;
 };
 
 export type FedWatchData = {
   generatedAt: string;
   sourceUrl: string;
-  currentTargetRange: string | null;
-  meetings: FedWatchMeeting[];
+  asOf: string | null;
+  currentBand: string | null;
+  midpoint: number | null;
+  mostRecentEffr: number | null;
+  assumedMoveBps: number | null;
+  rows: FedFundsPathRow[];
+  comparisons: FedFundsComparisonSeries[];
 };
 
 export type FedWatchResponse = {

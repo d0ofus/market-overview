@@ -1,113 +1,82 @@
 import { describe, expect, it } from "vitest";
 import {
-  parseFedWatchIframeSrc,
-  parseFedWatchRedirectLocation,
-  parseFedWatchToolHtml,
+  isSnapshotFresh,
+  normalizeRateProbabilityPayload,
 } from "../src/fedwatch-service";
 
-describe("fedwatch service helpers", () => {
-  it("extracts the embedded CME QuikStrike iframe URL", () => {
-    const html = `
-      <html>
-        <body>
-          <iframe src="https://cmegroup-tools.quikstrike.net/User/QuikStrikeTools.aspx?viewitemid=IntegratedFedWatchTool&amp;userId=lwolf"></iframe>
-        </body>
-      </html>
-    `;
+describe("fed funds rate service helpers", () => {
+  it("normalizes the RateProbability latest payload into summary rows and comparison series", () => {
+    const payload = {
+      today: {
+        as_of: "2026-03-23",
+        "current band": "3.50 - 3.75",
+        midpoint: 3.625,
+        most_recent_effr: 3.64,
+        assumed_move_bps: 25,
+        rows: [
+          {
+            meeting: "Apr 29, 2026",
+            meeting_iso: "2026-04-29",
+            implied_rate_post_meeting: 3.65,
+            prob_move_pct: 10,
+            prob_is_cut: false,
+            num_moves: 0.1,
+            num_moves_is_cut: false,
+            change_bps: 2.5,
+          },
+          {
+            meeting: "Jun 17, 2026",
+            meeting_iso: "2026-06-17",
+            implied_rate_post_meeting: 3.66,
+            prob_move_pct: 4,
+            prob_is_cut: false,
+            num_moves: 0.14,
+            num_moves_is_cut: false,
+            change_bps: 3.5,
+          },
+        ],
+      },
+      ago_1w: {
+        used_date: "2026-03-16",
+        effr: 3.64,
+        label: "1w ago (2026-03-16)",
+        rows: [
+          { meeting: "Mar 18, 2026", meeting_iso: "2026-03-18", implied: 3.623 },
+          { meeting: "Apr 29, 2026", meeting_iso: "2026-04-29", implied: 3.625 },
+        ],
+      },
+      ago_3w: {
+        used_date: "2026-03-02",
+        effr: 3.64,
+        label: "3w ago (2026-03-02)",
+        rows: [
+          { meeting: "Mar 18, 2026", meeting_iso: "2026-03-18", implied: 3.62 },
+        ],
+      },
+    };
 
-    expect(parseFedWatchIframeSrc(html)).toBe(
-      "https://cmegroup-tools.quikstrike.net/User/QuikStrikeTools.aspx?viewitemid=IntegratedFedWatchTool&userId=lwolf",
-    );
+    const normalized = normalizeRateProbabilityPayload(payload, "2026-03-24T00:00:00.000Z");
+
+    expect(normalized?.sourceUrl).toBe("https://rateprobability.com/fed");
+    expect(normalized?.currentBand).toBe("3.50 - 3.75");
+    expect(normalized?.midpoint).toBe(3.625);
+    expect(normalized?.rows).toHaveLength(2);
+    expect(normalized?.rows[0]?.meetingIso).toBe("2026-04-29");
+    expect(normalized?.rows[0]?.probIsCut).toBe(false);
+    expect(normalized?.comparisons).toHaveLength(2);
+    expect(normalized?.comparisons[0]?.key).toBe("ago_1w");
+    expect(normalized?.comparisons[0]?.rows[1]?.implied).toBe(3.625);
   });
 
-  it("reads a sessionized redirect URL from response headers", () => {
-    const headers = [
-      "HTTP/1.1 302 Found",
-      "location: https://cmegroup-tools.quikstrike.net/User/QuikStrikeTools.aspx?viewitemid=IntegratedFedWatchTool&userId=lwolf&insid=123&qsid=abc",
-    ].join("\n");
-
-    expect(parseFedWatchRedirectLocation(headers)).toContain("qsid=abc");
+  it("returns null when required current rows are missing", () => {
+    expect(normalizeRateProbabilityPayload({ today: { rows: [] } }, "2026-03-24T00:00:00.000Z")).toBeNull();
   });
 
-  it("parses meeting metadata and target-rate probabilities from FedWatch html", () => {
-    const html = `
-      <div>Current target rate is 350-375</div>
-      <div class="fedwatch-meeting">
-        <table>
-          <tr>
-            <th>MEETING DATE</th>
-            <th>CONTRACT</th>
-            <th>EXPIRES</th>
-            <th>MID PRICE</th>
-            <th>PRIOR VOLUME</th>
-            <th>PRIOR OI</th>
-          </tr>
-          <tr>
-            <td>29 Apr 2026</td>
-            <td>ZQJ6</td>
-            <td>30 Apr 2026</td>
-            <td>96.3525</td>
-            <td>123,569</td>
-            <td>471,704</td>
-          </tr>
-        </table>
-        <table>
-          <tr>
-            <th>TARGET RATE (BPS)</th>
-            <th>NOW*</th>
-            <th>1 DAY</th>
-            <th>1 WEEK</th>
-            <th>1 MONTH</th>
-          </tr>
-          <tr>
-            <td>300-325</td>
-            <td>0.0%</td>
-            <td>0.0%</td>
-            <td>0.0%</td>
-            <td>0.8%</td>
-          </tr>
-          <tr>
-            <td>325-350</td>
-            <td>0.0%</td>
-            <td>0.0%</td>
-            <td>3.9%</td>
-            <td>18.4%</td>
-          </tr>
-          <tr>
-            <td>350-375 (Current)</td>
-            <td>92.8%</td>
-            <td>87.6%</td>
-            <td>96.0%</td>
-            <td>80.8%</td>
-          </tr>
-          <tr>
-            <td>375-400</td>
-            <td>7.2%</td>
-            <td>12.4%</td>
-            <td>0.0%</td>
-            <td>0.0%</td>
-          </tr>
-        </table>
-      </div>
-    `;
+  it("treats recent snapshots as fresh on an hourly cache window", () => {
+    const freshAt = new Date().toISOString();
+    const staleAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
 
-    const parsed = parseFedWatchToolHtml(html, "2026-03-24T00:00:00.000Z");
-
-    expect(parsed?.currentTargetRange).toBe("350-375");
-    expect(parsed?.meetings).toHaveLength(1);
-    expect(parsed?.meetings[0]?.meetingDate).toBe("2026-04-29");
-    expect(parsed?.meetings[0]?.probabilities.map((row) => row.targetRange)).toEqual([
-      "300-325",
-      "325-350",
-      "350-375",
-      "375-400",
-    ]);
-    expect(parsed?.meetings[0]?.expectedMidpointBps).toBeCloseTo(364, 0);
-    expect(parsed?.meetings[0]?.hikeProbability).toBeCloseTo(7.2, 5);
-    expect(parsed?.meetings[0]?.noChangeProbability).toBeCloseTo(92.8, 5);
-  });
-
-  it("returns null when meeting tables are missing", () => {
-    expect(parseFedWatchToolHtml("<html><body>empty</body></html>")).toBeNull();
+    expect(isSnapshotFresh(freshAt)).toBe(true);
+    expect(isSnapshotFresh(staleAt)).toBe(false);
   });
 });

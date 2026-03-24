@@ -1,46 +1,47 @@
 import type { Env } from "./types";
 
-const CME_FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html";
-const FEDWATCH_USER_AGENT = "market-command-centre/1.0";
+const RATE_PROBABILITY_API_URL = "https://rateprobability.com/api/latest";
+const RATE_PROBABILITY_SOURCE_URL = "https://rateprobability.com/fed";
 const SNAPSHOT_RETENTION_DAYS = 14;
+const SNAPSHOT_FRESH_MS = 60 * 60_000;
 
-export type FedWatchProbability = {
-  targetRange: string;
-  targetRateBpsLow: number;
-  targetRateBpsHigh: number;
-  midpointBps: number;
-  nowPct: number;
-  dayAgoPct: number | null;
-  weekAgoPct: number | null;
-  monthAgoPct: number | null;
+type RateProbabilityApiRow = {
+  meeting?: string;
+  meeting_iso?: string;
+  implied_rate_post_meeting?: number;
+  prob_move_pct?: number;
+  prob_is_cut?: boolean;
+  num_moves?: number;
+  num_moves_is_cut?: boolean;
+  change_bps?: number;
 };
 
-export type FedWatchMeeting = {
-  meetingDate: string | null;
-  label: string;
-  contract: string | null;
-  expires: string | null;
-  midPrice: number | null;
-  priorVolume: number | null;
-  priorOi: number | null;
-  expectedMidpointBps: number | null;
-  hikeProbability: number | null;
-  cutProbability: number | null;
-  noChangeProbability: number | null;
-  probabilities: FedWatchProbability[];
+type RateProbabilityApiComparisonRow = {
+  meeting?: string;
+  meeting_iso?: string;
+  implied?: number;
 };
 
-export type FedWatchData = {
-  generatedAt: string;
-  sourceUrl: string;
-  currentTargetRange: string | null;
-  meetings: FedWatchMeeting[];
+type RateProbabilityApiComparison = {
+  rows?: RateProbabilityApiComparisonRow[];
+  used_date?: string;
+  effr?: number;
+  label?: string;
 };
 
-export type FedWatchResponse = {
-  status: "ok" | "stale" | "unavailable";
-  warning: string | null;
-  data: FedWatchData | null;
+type RateProbabilityApiPayload = {
+  today?: {
+    as_of?: string;
+    "current band"?: string;
+    midpoint?: number;
+    most_recent_effr?: number;
+    assumed_move_bps?: number;
+    rows?: RateProbabilityApiRow[];
+  };
+  ago_1w?: RateProbabilityApiComparison;
+  ago_3w?: RateProbabilityApiComparison;
+  ago_6w?: RateProbabilityApiComparison;
+  ago_10w?: RateProbabilityApiComparison;
 };
 
 type StoredFedWatchSnapshotRow = {
@@ -51,239 +52,145 @@ type StoredFedWatchSnapshotRow = {
   dataJson: string;
 };
 
-type ParsedMeetingMeta = {
-  meetingDate: string | null;
-  label: string;
-  contract: string | null;
-  expires: string | null;
-  midPrice: number | null;
-  priorVolume: number | null;
-  priorOi: number | null;
+export type FedFundsPathRow = {
+  meeting: string;
+  meetingIso: string;
+  impliedRatePostMeeting: number;
+  probMovePct: number;
+  probIsCut: boolean;
+  numMoves: number;
+  numMovesIsCut: boolean;
+  changeBps: number;
 };
 
-function stripHtmlTags(value: string): string {
-  return value
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+export type FedFundsComparisonSeries = {
+  key: "ago_1w" | "ago_3w" | "ago_6w" | "ago_10w";
+  label: string;
+  usedDate: string | null;
+  effr: number | null;
+  rows: Array<{
+    meeting: string;
+    meetingIso: string;
+    implied: number;
+  }>;
+};
+
+export type FedWatchData = {
+  generatedAt: string;
+  sourceUrl: string;
+  asOf: string | null;
+  currentBand: string | null;
+  midpoint: number | null;
+  mostRecentEffr: number | null;
+  assumedMoveBps: number | null;
+  rows: FedFundsPathRow[];
+  comparisons: FedFundsComparisonSeries[];
+};
+
+export type FedWatchResponse = {
+  status: "ok" | "stale" | "unavailable";
+  warning: string | null;
+  data: FedWatchData | null;
+};
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function decodeHtml(value: string): string {
-  return value
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/gi, '"');
-}
-
-function parsePercent(value: string): number | null {
-  const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
-  if (!match) return null;
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseNumber(value: string): number | null {
-  const cleaned = value.replace(/,/g, "").trim();
-  if (!cleaned) return null;
-  const parsed = Number(cleaned);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseTargetRange(value: string): { label: string; low: number; high: number } | null {
-  const normalized = decodeHtml(stripHtmlTags(value)).replace(/\(Current\)/gi, "").trim();
-  const match = normalized.match(/(\d{2,4})\s*-\s*(\d{2,4})/);
-  if (!match) return null;
-  const low = Number(match[1]);
-  const high = Number(match[2]);
-  if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
-  return { label: `${low}-${high}`, low, high };
-}
-
-function midpointBps(low: number, high: number): number {
-  return (low + high) / 2;
-}
-
-function parseDateLabelToIso(value: string): string | null {
-  const cleaned = value.replace(/\s+/g, " ").trim();
-  const match = cleaned.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/);
-  if (!match) return null;
-  const day = Number(match[1]);
-  const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-    .indexOf(match[2].toLowerCase());
-  const year = Number(match[3]);
-  if (month < 0 || !Number.isFinite(day) || !Number.isFinite(year)) return null;
-  return new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
-}
-
-function parseTableRows(html: string): string[][] {
-  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
-  return rows
-    .map((match) => [...match[1].matchAll(/<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi)].map((cell) => decodeHtml(stripHtmlTags(cell[1]))))
-    .filter((cells) => cells.length > 0);
-}
-
-function parseMeetingMeta(tableHtml: string): ParsedMeetingMeta | null {
-  const rows = parseTableRows(tableHtml);
-  if (rows.length < 2) return null;
-  const headers = rows[0].map((cell) => cell.toLowerCase());
-  const values = rows[1];
-  const read = (name: string) => {
-    const idx = headers.findIndex((header) => header.includes(name));
-    return idx >= 0 ? values[idx] ?? null : null;
-  };
-  const label = read("meeting date") ?? read("meeting");
-  if (!label) return null;
+function parseTodayRow(row: RateProbabilityApiRow): FedFundsPathRow | null {
+  const meeting = String(row.meeting ?? "").trim();
+  const meetingIso = String(row.meeting_iso ?? "").trim();
+  const impliedRatePostMeeting = asNumber(row.implied_rate_post_meeting);
+  const probMovePct = asNumber(row.prob_move_pct);
+  const numMoves = asNumber(row.num_moves);
+  const changeBps = asNumber(row.change_bps);
+  if (!meeting || !meetingIso || impliedRatePostMeeting == null || probMovePct == null || numMoves == null || changeBps == null) {
+    return null;
+  }
   return {
-    meetingDate: parseDateLabelToIso(label),
-    label,
-    contract: read("contract"),
-    expires: read("expires"),
-    midPrice: parseNumber(read("mid price") ?? ""),
-    priorVolume: parseNumber(read("prior volume") ?? ""),
-    priorOi: parseNumber(read("prior oi") ?? ""),
+    meeting,
+    meetingIso,
+    impliedRatePostMeeting,
+    probMovePct,
+    probIsCut: row.prob_is_cut === true,
+    numMoves,
+    numMovesIsCut: row.num_moves_is_cut === true,
+    changeBps,
   };
 }
 
-function parseProbabilityTable(tableHtml: string): FedWatchProbability[] {
-  const rows = parseTableRows(tableHtml);
-  if (rows.length < 2) return [];
-  const headers = rows[0].map((cell) => cell.toLowerCase());
-  const targetIdx = headers.findIndex((header) => header.includes("target rate"));
-  const nowIdx = headers.findIndex((header) => header.includes("now"));
-  const dayIdx = headers.findIndex((header) => header.includes("1 day"));
-  const weekIdx = headers.findIndex((header) => header.includes("1 week"));
-  const monthIdx = headers.findIndex((header) => header.includes("1 month"));
-  if (targetIdx < 0 || nowIdx < 0) return [];
-
+function parseComparisonRows(rows: RateProbabilityApiComparisonRow[] | undefined): FedFundsComparisonSeries["rows"] {
+  if (!Array.isArray(rows)) return [];
   return rows
-    .slice(1)
-    .map((cells) => {
-      const range = parseTargetRange(cells[targetIdx] ?? "");
-      const nowPct = parsePercent(cells[nowIdx] ?? "");
-      if (!range || nowPct == null) return null;
-      return {
-        targetRange: range.label,
-        targetRateBpsLow: range.low,
-        targetRateBpsHigh: range.high,
-        midpointBps: midpointBps(range.low, range.high),
-        nowPct,
-        dayAgoPct: dayIdx >= 0 ? parsePercent(cells[dayIdx] ?? "") : null,
-        weekAgoPct: weekIdx >= 0 ? parsePercent(cells[weekIdx] ?? "") : null,
-        monthAgoPct: monthIdx >= 0 ? parsePercent(cells[monthIdx] ?? "") : null,
-      } satisfies FedWatchProbability;
+    .map((row) => {
+      const meeting = String(row.meeting ?? "").trim();
+      const meetingIso = String(row.meeting_iso ?? "").trim();
+      const implied = asNumber(row.implied);
+      if (!meeting || !meetingIso || implied == null) return null;
+      return { meeting, meetingIso, implied };
     })
-    .filter((value): value is FedWatchProbability => Boolean(value))
-    .sort((left, right) => left.targetRateBpsLow - right.targetRateBpsLow);
+    .filter((value): value is FedFundsComparisonSeries["rows"][number] => Boolean(value));
 }
 
-function computeExpectedMidpoint(probabilities: FedWatchProbability[]): number | null {
-  const weightedSum = probabilities.reduce((sum, row) => sum + (row.midpointBps * row.nowPct), 0);
-  const totalPct = probabilities.reduce((sum, row) => sum + row.nowPct, 0);
-  if (!Number.isFinite(weightedSum) || totalPct <= 0) return null;
-  return weightedSum / totalPct;
+function normalizeComparison(
+  key: FedFundsComparisonSeries["key"],
+  comparison: RateProbabilityApiComparison | undefined,
+): FedFundsComparisonSeries | null {
+  const rows = parseComparisonRows(comparison?.rows);
+  if (rows.length === 0) return null;
+  return {
+    key,
+    label: String(comparison?.label ?? key).trim(),
+    usedDate: typeof comparison?.used_date === "string" ? comparison.used_date : null,
+    effr: asNumber(comparison?.effr),
+    rows,
+  };
 }
 
-function summarizeBias(probabilities: FedWatchProbability[], currentTargetRange: string | null): Pick<FedWatchMeeting, "hikeProbability" | "cutProbability" | "noChangeProbability"> {
-  const current = currentTargetRange ? parseTargetRange(currentTargetRange) : null;
-  if (!current) {
-    return { hikeProbability: null, cutProbability: null, noChangeProbability: null };
-  }
-  let hikeProbability = 0;
-  let cutProbability = 0;
-  let noChangeProbability = 0;
-  for (const row of probabilities) {
-    if (row.targetRateBpsLow > current.low) {
-      hikeProbability += row.nowPct;
-    } else if (row.targetRateBpsLow < current.low) {
-      cutProbability += row.nowPct;
-    } else {
-      noChangeProbability += row.nowPct;
-    }
-  }
-  return { hikeProbability, cutProbability, noChangeProbability };
-}
+export function normalizeRateProbabilityPayload(
+  payload: RateProbabilityApiPayload,
+  generatedAt = new Date().toISOString(),
+): FedWatchData | null {
+  const today = payload.today;
+  const rows = (today?.rows ?? [])
+    .map((row) => parseTodayRow(row))
+    .filter((value): value is FedFundsPathRow => Boolean(value));
+  if (rows.length === 0) return null;
 
-export function parseFedWatchIframeSrc(publicHtml: string): string | null {
-  const match = publicHtml.match(/<iframe[^>]+src="([^"]*IntegratedFedWatchTool[^"]*)"/i);
-  if (!match?.[1]) return null;
-  return decodeHtml(match[1]);
-}
+  const comparisons = [
+    normalizeComparison("ago_1w", payload.ago_1w),
+    normalizeComparison("ago_3w", payload.ago_3w),
+    normalizeComparison("ago_6w", payload.ago_6w),
+    normalizeComparison("ago_10w", payload.ago_10w),
+  ].filter((value): value is FedFundsComparisonSeries => Boolean(value));
 
-export function parseFedWatchRedirectLocation(rawHeaders: string): string | null {
-  const match = rawHeaders.match(/^location:\s*(.+)$/im);
-  return match?.[1]?.trim() ?? null;
-}
-
-export function parseFedWatchToolHtml(html: string, generatedAt = new Date().toISOString(), sourceUrl = CME_FEDWATCH_URL): FedWatchData | null {
-  const currentTargetRange = html.match(/Current target rate is\s+(\d{2,4}\s*-\s*\d{2,4})/i)?.[1]?.replace(/\s+/g, "");
-  const meetingBlocks = [...html.matchAll(/(<table[\s\S]*?MEETING DATE[\s\S]*?<\/table>)[\s\S]*?(<table[\s\S]*?TARGET RATE[\s\S]*?<\/table>)/gi)];
-  const parsedMeetings: FedWatchMeeting[] = meetingBlocks
-    .map((block) => {
-      const meta = parseMeetingMeta(block[1]);
-      const probabilities = parseProbabilityTable(block[2]);
-      if (!meta || probabilities.length === 0) return null;
-      return {
-        ...meta,
-        expectedMidpointBps: computeExpectedMidpoint(probabilities),
-        ...summarizeBias(probabilities, currentTargetRange ?? null),
-        probabilities,
-      } satisfies FedWatchMeeting;
-    })
-    .filter((value): value is FedWatchMeeting => Boolean(value));
-
-  if (parsedMeetings.length === 0) return null;
   return {
     generatedAt,
-    sourceUrl,
-    currentTargetRange: currentTargetRange ?? null,
-    meetings: parsedMeetings,
+    sourceUrl: RATE_PROBABILITY_SOURCE_URL,
+    asOf: typeof today?.as_of === "string" ? today.as_of : null,
+    currentBand: typeof today?.["current band"] === "string" ? today["current band"] : null,
+    midpoint: asNumber(today?.midpoint),
+    mostRecentEffr: asNumber(today?.most_recent_effr),
+    assumedMoveBps: asNumber(today?.assumed_move_bps),
+    rows,
+    comparisons,
   };
 }
 
-async function fetchText(url: string, init?: RequestInit): Promise<string> {
-  const response = await fetch(url, init);
+async function fetchLiveFedFundsData(): Promise<FedWatchData> {
+  const response = await fetch(RATE_PROBABILITY_API_URL, {
+    headers: {
+      "User-Agent": "market-command-centre/1.0",
+      "Accept": "application/json",
+    },
+  });
   if (!response.ok) {
-    throw new Error(`FedWatch request failed (${response.status}) for ${url}`);
+    throw new Error(`RateProbability request failed (${response.status})`);
   }
-  return await response.text();
-}
-
-async function fetchLiveFedWatchData(): Promise<FedWatchData> {
-  const publicHtml = await fetchText(CME_FEDWATCH_URL, {
-    headers: {
-      "User-Agent": FEDWATCH_USER_AGENT,
-    },
-  });
-  const iframeSrc = parseFedWatchIframeSrc(publicHtml);
-  if (!iframeSrc) {
-    throw new Error("Unable to locate the embedded CME FedWatch tool URL on the public page.");
-  }
-
-  const initialResponse = await fetch(iframeSrc, {
-    headers: {
-      "Referer": CME_FEDWATCH_URL,
-      "User-Agent": FEDWATCH_USER_AGENT,
-    },
-    redirect: "manual",
-  });
-  const sessionLocation = initialResponse.headers.get("location");
-  const sessionUrl = sessionLocation
-    ? new URL(sessionLocation, iframeSrc).toString()
-    : iframeSrc;
-  const toolHtml = await fetchText(sessionUrl, {
-    headers: {
-      "Referer": CME_FEDWATCH_URL,
-      "User-Agent": FEDWATCH_USER_AGENT,
-    },
-  });
-
-  const parsed = parseFedWatchToolHtml(toolHtml, new Date().toISOString(), CME_FEDWATCH_URL);
+  const payload = await response.json() as RateProbabilityApiPayload;
+  const parsed = normalizeRateProbabilityPayload(payload, new Date().toISOString());
   if (!parsed) {
-    throw new Error("CME FedWatch loaded, but the tool did not expose parseable meeting probabilities in server-rendered HTML.");
+    throw new Error("RateProbability returned JSON, but the payload was missing required Fed funds path data.");
   }
   return parsed;
 }
@@ -291,7 +198,7 @@ async function fetchLiveFedWatchData(): Promise<FedWatchData> {
 function parseStoredData(raw: string): FedWatchData | null {
   try {
     const parsed = JSON.parse(raw) as FedWatchData | null;
-    return parsed?.meetings?.length ? parsed : null;
+    return parsed?.rows?.length ? parsed : null;
   } catch {
     return null;
   }
@@ -308,12 +215,14 @@ async function loadLatestStoredSnapshot(env: Env): Promise<FedWatchData | null> 
     ...parsed,
     generatedAt: row.generatedAt ?? parsed.generatedAt,
     sourceUrl: row.sourceUrl ?? parsed.sourceUrl,
-    currentTargetRange: row.currentTargetRange ?? parsed.currentTargetRange ?? null,
+    currentBand: row.currentTargetRange ?? parsed.currentBand ?? null,
   };
 }
 
-function isSnapshotCurrentForToday(generatedAt: string, now = new Date()): boolean {
-  return generatedAt.slice(0, 10) === now.toISOString().slice(0, 10);
+function isSnapshotFresh(generatedAt: string, now = Date.now()): boolean {
+  const parsed = Date.parse(generatedAt);
+  if (!Number.isFinite(parsed)) return false;
+  return now - parsed < SNAPSHOT_FRESH_MS;
 }
 
 async function persistSnapshot(env: Env, data: FedWatchData): Promise<void> {
@@ -323,7 +232,7 @@ async function persistSnapshot(env: Env, data: FedWatchData): Promise<void> {
     crypto.randomUUID(),
     data.generatedAt,
     data.sourceUrl,
-    data.currentTargetRange,
+    data.currentBand,
     JSON.stringify(data),
     data.generatedAt,
   ).run();
@@ -337,27 +246,27 @@ async function cleanupOldSnapshots(env: Env, retentionDays = SNAPSHOT_RETENTION_
 
 export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean }): Promise<FedWatchResponse> {
   const cached = await loadLatestStoredSnapshot(env);
-  if (!options?.force && cached && isSnapshotCurrentForToday(cached.generatedAt)) {
+  if (!options?.force && cached && isSnapshotFresh(cached.generatedAt)) {
     return { status: "ok", warning: null, data: cached };
   }
 
   try {
-    const live = await fetchLiveFedWatchData();
+    const live = await fetchLiveFedFundsData();
     await persistSnapshot(env, live);
     await cleanupOldSnapshots(env, SNAPSHOT_RETENTION_DAYS);
     return { status: "ok", warning: null, data: live };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "FedWatch fetch failed.";
+    const message = error instanceof Error ? error.message : "RateProbability fetch failed.";
     if (cached) {
       return {
         status: "stale",
-        warning: `Showing the last successful FedWatch snapshot because the live CME website could not be parsed today. ${message}`,
+        warning: `Showing the last successful RateProbability snapshot because the live API could not be refreshed. ${message}`,
         data: cached,
       };
     }
     return {
       status: "unavailable",
-      warning: `FedWatch data is temporarily unavailable from the public CME website. ${message}`,
+      warning: `Fed funds pricing data is temporarily unavailable from RateProbability. ${message}`,
       data: null,
     };
   }
@@ -366,3 +275,5 @@ export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean 
 export async function refreshFedWatchSnapshot(env: Env): Promise<FedWatchResponse> {
   return await getFedWatchSnapshot(env, { force: true });
 }
+
+export { isSnapshotFresh };
