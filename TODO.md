@@ -9,6 +9,7 @@
 - Fix sparklines
 
 ## Breadth
+- Add volume traded on majors as a breadth metric
 - Scoring for market breadth for overall 
 - Add other more bespoke breadth metrics
 - Add in Chart of S&P with mcllean oscillator
