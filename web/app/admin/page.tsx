@@ -2,6 +2,7 @@ import { AdminBuilder } from "@/components/admin-builder";
 import { AdminSection } from "@/components/admin-section";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { PeerGroupsAdminPanel } from "@/components/peer-groups-admin-panel";
+import { ResearchAdminPanel } from "@/components/research-admin-panel";
 import { WatchlistCompilerAdminPanel } from "@/components/watchlist-compiler-admin-panel";
 
 export default function AdminPage() {
@@ -10,6 +11,7 @@ export default function AdminPage() {
     { href: "#admin-overview", label: "Overview" },
     { href: "#admin-peer-groups", label: "Peer Groups" },
     { href: "#admin-watchlist-compiler", label: "Watchlist Compiler" },
+    { href: "#admin-ai-research", label: "AI Research" },
   ];
 
   return (
@@ -50,6 +52,13 @@ export default function AdminPage() {
         anchorId="admin-watchlist-compiler"
       >
         <WatchlistCompilerAdminPanel />
+      </AdminSection>
+      <AdminSection
+        title="AI Research"
+        description="Manage research profiles, prompt versions, search templates, and scoring rubrics."
+        anchorId="admin-ai-research"
+      >
+        <ResearchAdminPanel />
       </AdminSection>
     </div>
   );

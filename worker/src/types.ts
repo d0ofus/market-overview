@@ -25,8 +25,12 @@ export type Env = {
   LLM_MODEL?: string;
   LLM_BASE_URL?: string;
   ANTHROPIC_API_KEY?: string;
+  ANTHROPIC_HAIKU_MODEL?: string;
+  ANTHROPIC_SONNET_MODEL?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
+  PERPLEXITY_API_KEY?: string;
+  PERPLEXITY_MODEL?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

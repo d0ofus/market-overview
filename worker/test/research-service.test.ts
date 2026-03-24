@@ -1,0 +1,160 @@
+import { describe, expect, it } from "vitest";
+import { buildSnapshotComparison } from "../src/research/history";
+import { buildMarketSearchQueries, buildTickerSearchQueries } from "../src/research/search-queries";
+import { computeAttentionScore, computeFactorCards } from "../src/research/scoring";
+import type { SearchTemplateVersionRecord, StandardizedResearchCard } from "../src/research/types";
+
+const template: SearchTemplateVersionRecord = {
+  id: "search-template-swing-v1",
+  versionNumber: 1,
+  label: "Default",
+  schemaVersion: "v1",
+  createdAt: new Date().toISOString(),
+  templateJson: {
+    tickerFamilies: [
+      { key: "news", label: "News", queryTemplate: "{ticker} {companyName} catalysts last {lookbackDays} days", limit: 4 },
+      { key: "earnings_transcript", label: "Transcript", queryTemplate: "{ticker} earnings call transcript", limit: 2 },
+    ],
+    macroFamilies: [
+      { key: "macro_release", label: "Macro", queryTemplate: "latest CPI release", limit: 1 },
+    ],
+  },
+};
+
+const card: StandardizedResearchCard = {
+  ticker: "NVDA",
+  companyName: "NVIDIA Corporation",
+  summary: "Demand remains strong.",
+  valuation: { label: "mixed", summary: "Valuation is not cheap." },
+  earningsQuality: { label: "positive", summary: "Cash flow remains strong." },
+  catalysts: [{ title: "Product cycle", summary: "Launch cadence remains active.", freshness: "fresh", direction: "positive", evidenceIds: ["e1"] }],
+  risks: [{ title: "Crowded positioning", summary: "Expectations are elevated.", severity: "medium", evidenceIds: ["e2"] }],
+  contradictions: [],
+  confidenceScore: 0.72,
+  confidenceLabel: "medium",
+  catalystFreshnessLabel: "fresh",
+  riskLabel: "moderate",
+  factorCards: [],
+  topEvidenceIds: ["e1", "e2"],
+  valuationScore: 58,
+  earningsQualityScore: 73,
+  catalystQualityScore: 76,
+  catalystFreshnessScore: 82,
+  riskScore: 55,
+  contradictionScore: 78,
+  model: "rules",
+  reasoningBullets: ["Fresh product-cycle catalyst is still in play."],
+};
+
+describe("research search query builder", () => {
+  it("builds ticker and market queries from a template", () => {
+    const settings = {
+      lookbackDays: 14,
+      includeMacroContext: true,
+      maxTickerQueries: 4,
+      maxEvidenceItemsPerTicker: 12,
+      maxSearchResultsPerQuery: 4,
+      maxTickersPerRun: 20,
+      deepDiveTopN: 3,
+      comparisonEnabled: true,
+      sourceFamilies: {
+        sec: true,
+        news: true,
+        earningsTranscripts: true,
+        investorRelations: true,
+        analystCommentary: true,
+      },
+    };
+    const tickerQueries = buildTickerSearchQueries({
+      ticker: "NVDA",
+      companyName: "NVIDIA Corporation",
+      irDomain: "nvidia.com",
+      template,
+      settings,
+    });
+    const marketQueries = buildMarketSearchQueries({ template, settings });
+    expect(tickerQueries[0]?.query).toContain("NVDA");
+    expect(tickerQueries.length).toBeGreaterThan(0);
+    expect(marketQueries.length).toBe(1);
+  });
+});
+
+describe("research scoring", () => {
+  it("computes weighted factor cards and attention score", () => {
+    const factors = computeFactorCards(card, {
+      weights: {
+        valuation: 0.14,
+        earnings_quality: 0.18,
+        catalyst_quality: 0.22,
+        catalyst_freshness: 0.18,
+        risk: 0.18,
+        contradictions: 0.1,
+      },
+    });
+    expect(factors).toHaveLength(6);
+    expect(computeAttentionScore(factors)).toBeGreaterThan(60);
+  });
+});
+
+describe("research history compare", () => {
+  it("captures changed catalysts and risks", () => {
+    const comparison = buildSnapshotComparison({
+      currentSnapshot: {
+        id: "s2",
+        runId: "r1",
+        runTickerId: "rt1",
+        ticker: "NVDA",
+        profileId: "p1",
+        profileVersionId: "pv1",
+        previousSnapshotId: "s1",
+        schemaVersion: "v1",
+        overallScore: 72,
+        attentionRank: 1,
+        confidenceLabel: "medium",
+        confidenceScore: 0.72,
+        valuationLabel: "mixed",
+        earningsQualityLabel: "positive",
+        catalystFreshnessLabel: "fresh",
+        riskLabel: "moderate",
+        contradictionFlag: false,
+        thesisJson: {},
+        changeJson: null,
+        citationJson: null,
+        modelOutputJson: null,
+        createdAt: new Date().toISOString(),
+      },
+      currentCard: card,
+      previousSnapshot: {
+        id: "s1",
+        runId: "r0",
+        runTickerId: "rt0",
+        ticker: "NVDA",
+        profileId: "p1",
+        profileVersionId: "pv1",
+        previousSnapshotId: null,
+        schemaVersion: "v1",
+        overallScore: 66,
+        attentionRank: 2,
+        confidenceLabel: "medium",
+        confidenceScore: 0.61,
+        valuationLabel: "negative",
+        earningsQualityLabel: "mixed",
+        catalystFreshnessLabel: "recent",
+        riskLabel: "high",
+        contradictionFlag: false,
+        thesisJson: {
+          catalysts: [{ title: "Old catalyst" }],
+          risks: [{ title: "Crowded positioning" }],
+          contradictions: [],
+        },
+        changeJson: null,
+        citationJson: null,
+        modelOutputJson: null,
+        createdAt: new Date().toISOString(),
+      },
+    });
+    expect(comparison.newCatalysts).toContain("Product cycle");
+    expect(comparison.resolvedRisks).toHaveLength(0);
+    expect(comparison.scoreDelta).toBe(6);
+  });
+});

@@ -255,6 +255,273 @@ export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
   sources: WatchlistCompilerSourceRow[];
 };
 
+export type ResearchRefreshMode = "reuse_fresh_search_cache" | "force_fresh";
+export type ResearchRankingMode = "rank_only" | "rank_and_deep_dive";
+export type ResearchRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partial";
+export type ResearchTickerStatus = "queued" | "normalizing" | "retrieving" | "extracting" | "ranking_ready" | "deep_dive" | "completed" | "failed" | "skipped";
+
+export type ResearchProfileSettings = {
+  lookbackDays: number;
+  includeMacroContext: boolean;
+  maxTickerQueries: number;
+  maxEvidenceItemsPerTicker: number;
+  maxSearchResultsPerQuery: number;
+  maxTickersPerRun: number;
+  deepDiveTopN: number;
+  comparisonEnabled: boolean;
+  sourceFamilies: {
+    sec: boolean;
+    news: boolean;
+    earningsTranscripts: boolean;
+    investorRelations: boolean;
+    analystCommentary: boolean;
+  };
+};
+
+export type PromptVersionRow = {
+  id: string;
+  promptKind: "haiku_extract" | "sonnet_rank" | "sonnet_deep_dive";
+  versionNumber: number;
+  label: string;
+  providerKey: string;
+  modelFamily: string;
+  schemaVersion: string;
+  templateText: string | null;
+  templateJson: Record<string, unknown> | null;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type RubricVersionRow = {
+  id: string;
+  versionNumber: number;
+  label: string;
+  schemaVersion: string;
+  rubricJson: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type SearchTemplateVersionRow = {
+  id: string;
+  versionNumber: number;
+  label: string;
+  schemaVersion: string;
+  templateJson: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type ResearchProfileVersionRow = {
+  id: string;
+  profileId: string;
+  versionNumber: number;
+  promptVersionIdHaiku: string;
+  promptVersionIdSonnetRank: string;
+  promptVersionIdSonnetDeepDive: string;
+  rubricVersionId: string;
+  searchTemplateVersionId: string;
+  settings: ResearchProfileSettings;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type ResearchProfileRow = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+  currentVersionId: string | null;
+  currentVersion: ResearchProfileVersionRow | null;
+};
+
+export type ResearchRunRow = {
+  id: string;
+  sourceType: "watchlist_set" | "manual";
+  sourceId: string | null;
+  sourceLabel: string | null;
+  status: ResearchRunStatus;
+  profileId: string;
+  profileVersionId: string;
+  requestedTickerCount: number;
+  completedTickerCount: number;
+  failedTickerCount: number;
+  deepDiveTopN: number;
+  refreshMode: ResearchRefreshMode;
+  rankingMode: ResearchRankingMode;
+  inputJson: Record<string, unknown> | null;
+  providerUsageJson: Record<string, unknown> | null;
+  provenanceJson: Record<string, unknown> | null;
+  errorSummary: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  heartbeatAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchRunListRow = {
+  run: ResearchRunRow;
+  profileName: string | null;
+  profileVersionNumber: number | null;
+};
+
+export type ResearchRunTickerRow = {
+  id: string;
+  runId: string;
+  ticker: string;
+  sortOrder: number;
+  companyName: string | null;
+  exchange: string | null;
+  secCik: string | null;
+  irDomain: string | null;
+  status: ResearchTickerStatus;
+  attemptCount: number;
+  lastError: string | null;
+  previousSnapshotId: string | null;
+  snapshotId: string | null;
+  rankingRowId: string | null;
+  normalizationJson: Record<string, unknown> | null;
+  workingJson: Record<string, unknown> | null;
+  stageMetricsJson: Record<string, unknown> | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  heartbeatAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchCatalyst = {
+  title: string;
+  summary: string;
+  freshness: "fresh" | "recent" | "stale" | "unclear";
+  direction: "positive" | "negative" | "mixed";
+  evidenceIds: string[];
+};
+
+export type ResearchRisk = {
+  title: string;
+  summary: string;
+  severity: "high" | "medium" | "low";
+  evidenceIds: string[];
+};
+
+export type ResearchTickerResult = {
+  snapshotId: string;
+  ticker: string;
+  companyName: string | null;
+  overallScore: number | null;
+  attentionRank: number | null;
+  confidenceLabel: "high" | "medium" | "low" | null;
+  confidenceScore: number | null;
+  valuationLabel: "positive" | "mixed" | "negative" | "unclear" | null;
+  earningsQualityLabel: "positive" | "mixed" | "negative" | "unclear" | null;
+  catalystFreshnessLabel: "fresh" | "recent" | "stale" | "unclear" | null;
+  riskLabel: "low" | "moderate" | "high" | null;
+  contradictionFlag: boolean;
+  summary: string;
+  catalysts: ResearchCatalyst[];
+  risks: ResearchRisk[];
+  changeSummary: string | null;
+  citations: Array<{
+    evidenceId: string;
+    title: string;
+    url: string | null;
+    sourceDomain: string | null;
+    publishedAt: string | null;
+  }>;
+};
+
+export type ResearchRunStatusResponse = {
+  run: ResearchRunRow;
+  profile: ResearchProfileRow | null;
+  tickers: ResearchRunTickerRow[];
+};
+
+export type ResearchRunResultsResponse = {
+  run: ResearchRunRow;
+  profile: ResearchProfileRow | null;
+  results: ResearchTickerResult[];
+  providerUsage: Record<string, unknown> | null;
+  warnings: string[];
+};
+
+export type ResearchEvidenceRow = {
+  id: string;
+  providerKey: string;
+  sourceKind: string;
+  scopeKind: string;
+  ticker: string | null;
+  secCik: string | null;
+  canonicalUrl: string | null;
+  sourceDomain: string | null;
+  title: string;
+  publishedAt: string | null;
+  retrievedAt: string;
+  snippet: { summary: string; excerpt?: string | null; bullets?: string[] } | null;
+  metadata: Record<string, unknown> | null;
+};
+
+export type ResearchFactorRow = {
+  id: string;
+  snapshotId: string;
+  ticker: string;
+  factorKey: string;
+  score: number;
+  direction: string;
+  confidenceScore: number | null;
+  weightApplied: number;
+  explanationJson: Record<string, unknown> | null;
+  supportingEvidenceIds: string[];
+  createdAt: string;
+};
+
+export type ResearchSnapshotRow = {
+  id: string;
+  runId: string;
+  runTickerId: string;
+  ticker: string;
+  profileId: string;
+  profileVersionId: string;
+  previousSnapshotId: string | null;
+  schemaVersion: string;
+  overallScore: number | null;
+  attentionRank: number | null;
+  confidenceLabel: string | null;
+  confidenceScore: number | null;
+  valuationLabel: string | null;
+  earningsQualityLabel: string | null;
+  catalystFreshnessLabel: string | null;
+  riskLabel: string | null;
+  contradictionFlag: boolean;
+  thesisJson: Record<string, unknown>;
+  changeJson: Record<string, unknown> | null;
+  citationJson: Record<string, unknown> | null;
+  modelOutputJson: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+export type ResearchSnapshotDetailResponse = {
+  snapshot: ResearchSnapshotRow;
+  factors: ResearchFactorRow[];
+  evidence: ResearchEvidenceRow[];
+};
+
+export type ResearchSnapshotCompareResponse = {
+  ticker: string;
+  currentSnapshotId: string;
+  previousSnapshotId: string | null;
+  summary: string;
+  thesisEvolution: string[];
+  newCatalysts: string[];
+  newRisks: string[];
+  resolvedRisks: string[];
+  contradictionsIntroduced: string[];
+  contradictionsResolved: string[];
+  scoreDelta: number | null;
+  confidenceDelta: number | null;
+};
+
 export type GapperNewsItem = {
   headline: string;
   source: string;
@@ -708,6 +975,150 @@ export function compileAdminWatchlistCompilerSet(id: string) {
     `/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}/compile`,
     { method: "POST" },
   );
+}
+
+export function getResearchProfiles() {
+  return getJson<{ rows: ResearchProfileRow[] }>("/api/research/profiles");
+}
+
+export function getResearchRuns(params?: { sourceType?: string | null; sourceId?: string | null; limit?: number }) {
+  return getJson<{ rows: ResearchRunListRow[] }>(appendQuery("/api/research/runs", {
+    sourceType: params?.sourceType ?? undefined,
+    sourceId: params?.sourceId ?? undefined,
+    limit: params?.limit,
+  }));
+}
+
+export function getResearchRunStatus(id: string) {
+  return getJson<ResearchRunStatusResponse>(`/api/research/runs/${encodeURIComponent(id)}`);
+}
+
+export function getResearchRunResults(id: string) {
+  return getJson<ResearchRunResultsResponse>(`/api/research/runs/${encodeURIComponent(id)}/results`);
+}
+
+export function getTickerResearchHistory(ticker: string, profileId?: string | null) {
+  return getJson<{ rows: ResearchSnapshotRow[] }>(appendQuery(`/api/research/ticker/${encodeURIComponent(ticker)}/history`, {
+    profileId: profileId ?? undefined,
+  }));
+}
+
+export function getResearchSnapshot(id: string) {
+  return getJson<ResearchSnapshotDetailResponse>(`/api/research/snapshots/${encodeURIComponent(id)}`);
+}
+
+export function getResearchSnapshotCompare(id: string, baselineSnapshotId?: string | null) {
+  return getJson<ResearchSnapshotCompareResponse>(appendQuery(`/api/research/snapshots/${encodeURIComponent(id)}/compare`, {
+    baselineSnapshotId: baselineSnapshotId ?? undefined,
+  }));
+}
+
+export function getAdminResearchProfiles() {
+  return adminFetch<{
+    profiles: ResearchProfileRow[];
+    promptVersions: PromptVersionRow[];
+    rubricVersions: RubricVersionRow[];
+    searchTemplateVersions: SearchTemplateVersionRow[];
+  }>("/api/admin/research/profiles");
+}
+
+export function createAdminResearchRun(payload: {
+  sourceType: "watchlist_set" | "manual";
+  sourceId?: string | null;
+  sourceLabel?: string | null;
+  watchlistRunId?: string | null;
+  sourceBasis?: "compiled" | "unique";
+  tickers?: string[];
+  selectedTickers?: string[];
+  profileId?: string | null;
+  maxTickers?: number | null;
+  refreshMode?: ResearchRefreshMode;
+  rankingMode?: ResearchRankingMode;
+  deepDiveTopN?: number | null;
+}) {
+  return adminFetch<{ ok: boolean; run: ResearchRunRow }>("/api/admin/research/runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminResearchProfile(payload: {
+  slug: string;
+  name: string;
+  description?: string | null;
+  isActive?: boolean;
+  isDefault?: boolean;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/research/profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminResearchProfile(id: string, payload: {
+  slug?: string;
+  name?: string;
+  description?: string | null;
+  isActive?: boolean;
+  isDefault?: boolean;
+  currentVersionId?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/research/profiles/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminResearchProfileVersion(id: string, payload: {
+  promptVersionIdHaiku: string;
+  promptVersionIdSonnetRank: string;
+  promptVersionIdSonnetDeepDive: string;
+  rubricVersionId: string;
+  searchTemplateVersionId: string;
+  settings: ResearchProfileSettings;
+  activate?: boolean;
+}) {
+  return adminFetch<{ ok: boolean; id: string; versionNumber: number }>(`/api/admin/research/profiles/${encodeURIComponent(id)}/versions`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminPromptVersion(payload: {
+  promptKind: "haiku_extract" | "sonnet_rank" | "sonnet_deep_dive";
+  label: string;
+  providerKey?: string;
+  modelFamily: string;
+  schemaVersion?: string;
+  templateText?: string | null;
+  templateJson?: Record<string, unknown> | null;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/research/prompt-versions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminRubricVersion(payload: {
+  label: string;
+  schemaVersion?: string;
+  rubricJson: Record<string, unknown>;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/research/rubric-versions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminSearchTemplateVersion(payload: {
+  label: string;
+  schemaVersion?: string;
+  templateJson: Record<string, unknown>;
+}) {
+  return adminFetch<{ ok: boolean; id: string }>("/api/admin/research/search-template-versions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getGappers(limit = 50, force = false, filters?: GappersScanFilters | null) {

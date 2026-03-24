@@ -4,19 +4,38 @@ import { useEffect, useMemo, useState } from "react";
 import { Copy, Loader2, RefreshCw } from "lucide-react";
 import {
   compileAdminWatchlistCompilerSet,
+  createAdminResearchRun,
+  getResearchProfiles,
+  getResearchRunResults,
+  getResearchRuns,
+  getResearchRunStatus,
+  getResearchSnapshot,
+  getResearchSnapshotCompare,
+  getTickerResearchHistory,
   getWatchlistCompilerCompiled,
   getWatchlistCompilerExportUrl,
   getWatchlistCompilerRuns,
   getWatchlistCompilerSet,
   getWatchlistCompilerSets,
   getWatchlistCompilerUnique,
+  type ResearchProfileRow,
+  type ResearchRunListRow,
+  type ResearchRunResultsResponse,
+  type ResearchRunStatusResponse,
+  type ResearchSnapshotCompareResponse,
+  type ResearchSnapshotDetailResponse,
+  type ResearchSnapshotRow,
+  type ResearchTickerResult,
   type ScanCompiledRow,
   type ScanUniqueTickerRow,
   type WatchlistCompilerRunSummary,
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
 } from "@/lib/api";
+import { ResearchResultsTable } from "./research-results-table";
+import { ResearchTickerDrawer } from "./research-ticker-drawer";
 import { TradingViewWidget } from "./tradingview-widget";
+import { WatchlistResearchPanel } from "./watchlist-research-panel";
 
 type ViewMode = "compiled" | "unique";
 
@@ -67,11 +86,68 @@ export function WatchlistCompilerDashboard() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [compiling, setCompiling] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
+  const [researchProfiles, setResearchProfiles] = useState<ResearchProfileRow[]>([]);
+  const [selectedResearchProfileId, setSelectedResearchProfileId] = useState<string | null>(null);
+  const [researchRuns, setResearchRuns] = useState<ResearchRunListRow[]>([]);
+  const [selectedResearchRunId, setSelectedResearchRunId] = useState<string | null>(null);
+  const [researchStatus, setResearchStatus] = useState<ResearchRunStatusResponse | null>(null);
+  const [researchResults, setResearchResults] = useState<ResearchRunResultsResponse | null>(null);
+  const [researchRunning, setResearchRunning] = useState(false);
+  const [researchSourceBasis, setResearchSourceBasis] = useState<"compiled" | "unique">("unique");
+  const [researchRefreshMode, setResearchRefreshMode] = useState<"reuse_fresh_search_cache" | "force_fresh">("reuse_fresh_search_cache");
+  const [researchRankingMode, setResearchRankingMode] = useState<"rank_only" | "rank_and_deep_dive">("rank_only");
+  const [researchMaxTickers, setResearchMaxTickers] = useState(12);
+  const [researchDeepDiveTopN, setResearchDeepDiveTopN] = useState(3);
+  const [openResearchTicker, setOpenResearchTicker] = useState<ResearchTickerResult | null>(null);
+  const [openResearchDetail, setOpenResearchDetail] = useState<ResearchSnapshotDetailResponse | null>(null);
+  const [openResearchHistory, setOpenResearchHistory] = useState<ResearchSnapshotRow[]>([]);
+  const [openResearchCompare, setOpenResearchCompare] = useState<ResearchSnapshotCompareResponse | null>(null);
 
   const selectedSet = useMemo(
     () => sets.find((row) => row.id === selectedSetId) ?? null,
     [sets, selectedSetId],
   );
+
+  const loadResearchProfiles = async () => {
+    try {
+      const res = await getResearchProfiles();
+      const rows = res.rows ?? [];
+      setResearchProfiles(rows);
+      setSelectedResearchProfileId((current) => current ?? rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to load research profiles.");
+    }
+  };
+
+  const loadResearchRuns = async (setId: string, preferredRunId?: string | null) => {
+    try {
+      const res = await getResearchRuns({ sourceType: "watchlist_set", sourceId: setId, limit: 12 });
+      const rows = res.rows ?? [];
+      setResearchRuns(rows);
+      const nextRunId = preferredRunId ?? selectedResearchRunId ?? rows[0]?.run.id ?? null;
+      setSelectedResearchRunId(nextRunId);
+      if (nextRunId) {
+        const [statusRes, resultsRes] = await Promise.all([
+          getResearchRunStatus(nextRunId),
+          getResearchRunResults(nextRunId),
+        ]);
+        setResearchStatus(statusRes);
+        setResearchResults(resultsRes);
+        setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
+      } else {
+        setResearchStatus(null);
+        setResearchResults(null);
+        setResearchRunning(false);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to load research runs.");
+      setResearchRuns([]);
+      setResearchStatus(null);
+      setResearchResults(null);
+      setResearchRunning(false);
+    }
+  };
 
   const loadSets = async (preferredId?: string | null) => {
     setLoading(true);
@@ -105,12 +181,17 @@ export function WatchlistCompilerDashboard() {
       } else {
         setUniqueRows((rowsRes as { rows: ScanUniqueTickerRow[] }).rows ?? []);
       }
+      setSelectedTickers([]);
+      await loadResearchRuns(setId);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to load watchlist compiler detail.");
       setDetail(null);
       setRuns([]);
       setCompiledRows([]);
       setUniqueRows([]);
+      setResearchRuns([]);
+      setResearchStatus(null);
+      setResearchResults(null);
     } finally {
       setDetailLoading(false);
     }
@@ -118,6 +199,7 @@ export function WatchlistCompilerDashboard() {
 
   useEffect(() => {
     void loadSets();
+    void loadResearchProfiles();
   }, []);
 
   useEffect(() => {
@@ -128,6 +210,43 @@ export function WatchlistCompilerDashboard() {
   const visibleTickers = useMemo(() => (
     viewMode === "compiled" ? compiledRows.map((row) => row.ticker) : uniqueRows.map((row) => row.ticker)
   ), [compiledRows, uniqueRows, viewMode]);
+
+  const uniqueVisibleTickers = useMemo(
+    () => Array.from(new Set(visibleTickers)),
+    [visibleTickers],
+  );
+
+  useEffect(() => {
+    if (!selectedResearchRunId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [statusRes, resultsRes] = await Promise.all([
+          getResearchRunStatus(selectedResearchRunId),
+          getResearchRunResults(selectedResearchRunId),
+        ]);
+        if (cancelled) return;
+        setResearchStatus(statusRes);
+        setResearchResults(resultsRes);
+        setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : "Failed to load research run.");
+      }
+    };
+    void load();
+    if (researchRunning) {
+      const timer = window.setInterval(() => {
+        void load();
+      }, 5000);
+      return () => {
+        cancelled = true;
+        window.clearInterval(timer);
+      };
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedResearchRunId, researchRunning]);
 
   const exportDate = localDateSuffix();
   const exportCsvUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "csv", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
@@ -145,6 +264,31 @@ export function WatchlistCompilerDashboard() {
     });
     return output;
   }, [detail]);
+
+  const toggleTickerSelection = (ticker: string) => {
+    setSelectedTickers((current) => current.includes(ticker)
+      ? current.filter((value) => value !== ticker)
+      : [...current, ticker]);
+  };
+
+  const openTickerResearch = async (result: ResearchTickerResult) => {
+    setOpenResearchTicker(result);
+    setOpenResearchDetail(null);
+    setOpenResearchHistory([]);
+    setOpenResearchCompare(null);
+    try {
+      const [detailRes, historyRes, compareRes] = await Promise.all([
+        getResearchSnapshot(result.snapshotId),
+        getTickerResearchHistory(result.ticker, researchResults?.run.profileId ?? selectedResearchProfileId),
+        getResearchSnapshotCompare(result.snapshotId),
+      ]);
+      setOpenResearchDetail(detailRes);
+      setOpenResearchHistory(historyRes.rows ?? []);
+      setOpenResearchCompare(compareRes);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to load research detail.");
+    }
+  };
 
   return (
     <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
@@ -274,6 +418,54 @@ export function WatchlistCompilerDashboard() {
           {message && <p className="mt-2 text-xs text-slate-400">{message}</p>}
         </div>
 
+        {selectedSetId && (
+          <WatchlistResearchPanel
+            profiles={researchProfiles}
+            selectedProfileId={selectedResearchProfileId}
+            onProfileChange={setSelectedResearchProfileId}
+            sourceBasis={researchSourceBasis}
+            onSourceBasisChange={setResearchSourceBasis}
+            refreshMode={researchRefreshMode}
+            onRefreshModeChange={setResearchRefreshMode}
+            rankingMode={researchRankingMode}
+            onRankingModeChange={setResearchRankingMode}
+            maxTickers={researchMaxTickers}
+            onMaxTickersChange={setResearchMaxTickers}
+            deepDiveTopN={researchDeepDiveTopN}
+            onDeepDiveTopNChange={setResearchDeepDiveTopN}
+            selectedCount={selectedTickers.length}
+            visibleCount={uniqueVisibleTickers.length}
+            isRunning={researchRunning}
+            onRun={async () => {
+              if (!selectedSetId) return;
+              try {
+                setResearchRunning(true);
+                const run = await createAdminResearchRun({
+                  sourceType: "watchlist_set",
+                  sourceId: selectedSetId,
+                  watchlistRunId: selectedRunId,
+                  sourceBasis: researchSourceBasis,
+                  selectedTickers: selectedTickers.length > 0 ? selectedTickers : undefined,
+                  profileId: selectedResearchProfileId,
+                  maxTickers: researchMaxTickers,
+                  refreshMode: researchRefreshMode,
+                  rankingMode: researchRankingMode,
+                  deepDiveTopN: researchRankingMode === "rank_and_deep_dive" ? researchDeepDiveTopN : 0,
+                });
+                setSelectedResearchRunId(run.run.id);
+                await loadResearchRuns(selectedSetId, run.run.id);
+                setMessage(`Research run started for ${run.run.requestedTickerCount} ticker${run.run.requestedTickerCount === 1 ? "" : "s"}.`);
+              } catch (error) {
+                setResearchRunning(false);
+                setMessage(error instanceof Error ? error.message : "Failed to start research run.");
+              }
+            }}
+            runs={researchRuns}
+            selectedRunId={selectedResearchRunId}
+            onSelectRun={setSelectedResearchRunId}
+          />
+        )}
+
         <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.35fr),minmax(24rem,1fr)]">
           <div className="space-y-4">
             <div className="card p-3">
@@ -309,6 +501,17 @@ export function WatchlistCompilerDashboard() {
                   ))}
                 </select>
               </div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-400">
+                <div>{selectedTickers.length} selected</div>
+                <div className="flex gap-2">
+                  <button className="rounded border border-borderSoft px-2 py-1 hover:bg-panelSoft/70" onClick={() => setSelectedTickers(uniqueVisibleTickers)} type="button">
+                    Select Visible
+                  </button>
+                  <button className="rounded border border-borderSoft px-2 py-1 hover:bg-panelSoft/70" onClick={() => setSelectedTickers([])} type="button">
+                    Clear
+                  </button>
+                </div>
+              </div>
               {detailLoading ? (
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -319,7 +522,7 @@ export function WatchlistCompilerDashboard() {
                   <table className="min-w-full text-xs">
                     <thead className="bg-slate-900/60">
                       <tr>
-                        {["Ticker", "Company", "Source", "Price", "1D"].map((label) => (
+                        {["", "Ticker", "Company", "Source", "Price", "1D"].map((label) => (
                           <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>
                         ))}
                       </tr>
@@ -336,6 +539,9 @@ export function WatchlistCompilerDashboard() {
                         })();
                         return (
                           <tr key={row.id} className="border-t border-borderSoft/60 hover:bg-slate-900/30">
+                            <td className="px-2 py-1.5">
+                              <input type="checkbox" checked={selectedTickers.includes(row.ticker)} onChange={() => toggleTickerSelection(row.ticker)} />
+                            </td>
                             <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
                             <td className="px-2 py-1.5 text-slate-300">{row.displayName ?? "-"}</td>
                             <td className="max-w-44 truncate px-2 py-1.5 text-slate-400" title={source}>{source}</td>
@@ -346,7 +552,7 @@ export function WatchlistCompilerDashboard() {
                       })}
                       {compiledRows.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="px-2 py-4 text-center text-slate-400">No compiled rows yet.</td>
+                          <td colSpan={6} className="px-2 py-4 text-center text-slate-400">No compiled rows yet.</td>
                         </tr>
                       )}
                     </tbody>
@@ -357,7 +563,7 @@ export function WatchlistCompilerDashboard() {
                   <table className="min-w-full text-xs">
                     <thead className="bg-slate-900/60">
                       <tr>
-                        {["Ticker", "Company", "Occurrences", "Price", "1D"].map((label) => (
+                        {["", "Ticker", "Company", "Occurrences", "Price", "1D"].map((label) => (
                           <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>
                         ))}
                       </tr>
@@ -365,6 +571,9 @@ export function WatchlistCompilerDashboard() {
                     <tbody>
                       {uniqueRows.map((row) => (
                         <tr key={row.ticker} className="border-t border-borderSoft/60 hover:bg-slate-900/30">
+                          <td className="px-2 py-1.5">
+                            <input type="checkbox" checked={selectedTickers.includes(row.ticker)} onChange={() => toggleTickerSelection(row.ticker)} />
+                          </td>
                           <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
                           <td className="px-2 py-1.5 text-slate-300">{row.displayName ?? "-"}</td>
                           <td className="px-2 py-1.5 text-slate-300">{row.occurrences}</td>
@@ -374,7 +583,7 @@ export function WatchlistCompilerDashboard() {
                       ))}
                       {uniqueRows.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="px-2 py-4 text-center text-slate-400">No unique tickers yet.</td>
+                          <td colSpan={6} className="px-2 py-4 text-center text-slate-400">No unique tickers yet.</td>
                         </tr>
                       )}
                     </tbody>
@@ -397,7 +606,22 @@ export function WatchlistCompilerDashboard() {
             </div>
           </div>
         </div>
+
+        <ResearchResultsTable
+          results={researchResults?.results ?? []}
+          onOpenTicker={(result) => {
+            void openTickerResearch(result);
+          }}
+        />
       </section>
+      <ResearchTickerDrawer
+        open={Boolean(openResearchTicker)}
+        result={openResearchTicker}
+        detail={openResearchDetail}
+        history={openResearchHistory}
+        compare={openResearchCompare}
+        onClose={() => setOpenResearchTicker(null)}
+      />
     </div>
   );
 }

@@ -8,9 +8,17 @@ import {
   groupPatchSchema,
   itemCreateSchema,
   itemPatchSchema,
+  promptVersionCreateSchema,
+  researchCompareQuerySchema,
+  researchProfileCreateSchema,
+  researchProfilePatchSchema,
+  researchProfileVersionCreateSchema,
+  researchRunCreateSchema,
+  rubricVersionCreateSchema,
   scanPresetCreateSchema,
   scanPresetPatchSchema,
   scanRefreshSchema,
+  searchTemplateVersionCreateSchema,
   peerBootstrapSchema,
   peerGroupCreateSchema,
   peerGroupPatchSchema,
@@ -95,6 +103,31 @@ import {
   updateWatchlistSet,
   updateWatchlistSource,
 } from "./watchlist-compiler-service";
+import {
+  loadResearchRunResultsPayload,
+  loadResearchRunStatusPayload,
+  loadResearchSnapshotComparePayload,
+  loadResearchSnapshotDetailPayload,
+  loadTickerResearchHistoryPayload,
+} from "./research/api";
+import {
+  createPromptVersion,
+  createResearchProfile,
+  createResearchProfileVersion,
+  createRubricVersion,
+  createSearchTemplateVersion,
+  listResearchAdminVersions,
+  listResearchProfiles,
+  updateResearchProfile,
+} from "./research/profiles";
+import {
+  advanceResearchQueue,
+  advanceResearchRun,
+  startResearchRun,
+} from "./research/orchestrator";
+import {
+  listResearchRuns,
+} from "./research/storage";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -2108,6 +2141,64 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
   return c.body(tickersToSingleColumnCsv(tickers));
 });
 
+app.get("/api/research/profiles", async (c) => {
+  const profiles = await listResearchProfiles(c.env);
+  return c.json({
+    rows: profiles.map((profile) => ({
+      id: profile.id,
+      slug: profile.slug,
+      name: profile.name,
+      description: profile.description,
+      isDefault: profile.isDefault,
+      isActive: profile.isActive,
+      currentVersion: profile.currentVersion,
+    })),
+  });
+});
+
+app.get("/api/research/runs", async (c) => {
+  const rows = await listResearchRuns(c.env, {
+    sourceType: c.req.query("sourceType") ?? null,
+    sourceId: c.req.query("sourceId") ?? null,
+    limit: Number(c.req.query("limit") ?? 10),
+  });
+  return c.json({ rows });
+});
+
+app.get("/api/research/runs/:id", async (c) => {
+  await advanceResearchRun(c.env, c.req.param("id"));
+  const payload = await loadResearchRunStatusPayload(c.env, c.req.param("id"));
+  if (!payload) return c.json({ error: "Research run not found." }, 404);
+  return c.json(payload);
+});
+
+app.get("/api/research/runs/:id/results", async (c) => {
+  await advanceResearchRun(c.env, c.req.param("id"));
+  const payload = await loadResearchRunResultsPayload(c.env, c.req.param("id"));
+  if (!payload) return c.json({ error: "Research run not found." }, 404);
+  return c.json(payload);
+});
+
+app.get("/api/research/ticker/:ticker/history", async (c) => {
+  const rows = await loadTickerResearchHistoryPayload(c.env, c.req.param("ticker"), c.req.query("profileId") ?? null);
+  return c.json({ rows });
+});
+
+app.get("/api/research/snapshots/:id", async (c) => {
+  const payload = await loadResearchSnapshotDetailPayload(c.env, c.req.param("id"));
+  if (!payload) return c.json({ error: "Research snapshot not found." }, 404);
+  return c.json(payload);
+});
+
+app.get("/api/research/snapshots/:id/compare", async (c) => {
+  const query = researchCompareQuerySchema.parse({
+    baselineSnapshotId: c.req.query("baselineSnapshotId") ?? null,
+  });
+  const payload = await loadResearchSnapshotComparePayload(c.env, c.req.param("id"), query.baselineSnapshotId ?? null);
+  if (!payload) return c.json({ error: "Research snapshot not found." }, 404);
+  return c.json(payload);
+});
+
 app.get("/api/admin/config", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const configId = c.req.query("configId") ?? "default";
@@ -2185,6 +2276,106 @@ app.post("/api/admin/watchlist-compiler/sets/:id/compile", async (c) => {
     const message = error instanceof Error ? error.message : "Failed to compile watchlist set.";
     const status = /not found|add at least one active/i.test(message) ? 400 : 500;
     return c.json({ error: message }, status);
+  }
+});
+
+app.get("/api/admin/research/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await listResearchRuns(c.env, {
+    sourceType: c.req.query("sourceType") ?? null,
+    sourceId: c.req.query("sourceId") ?? null,
+    limit: Number(c.req.query("limit") ?? 20),
+  });
+  return c.json({ rows });
+});
+
+app.post("/api/admin/research/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchRunCreateSchema.parse(await c.req.json());
+    const run = await startResearchRun(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_RUN_CREATE", { runId: run.id, payload });
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to start research run." }, 400);
+  }
+});
+
+app.get("/api/admin/research/profiles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = await listResearchAdminVersions(c.env);
+  return c.json(payload);
+});
+
+app.post("/api/admin/research/profiles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchProfileCreateSchema.parse(await c.req.json());
+    const created = await createResearchProfile(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_PROFILE_CREATE", { id: created.id, payload });
+    return c.json({ ok: true, id: created.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create research profile." }, 400);
+  }
+});
+
+app.patch("/api/admin/research/profiles/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchProfilePatchSchema.parse(await c.req.json());
+    await updateResearchProfile(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "RESEARCH_PROFILE_PATCH", { id: c.req.param("id"), payload });
+    return c.json({ ok: true, id: c.req.param("id") });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to update research profile." }, 400);
+  }
+});
+
+app.post("/api/admin/research/profiles/:id/versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchProfileVersionCreateSchema.parse(await c.req.json());
+    const created = await createResearchProfileVersion(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "RESEARCH_PROFILE_VERSION_CREATE", { id: c.req.param("id"), versionId: created.id, payload });
+    return c.json({ ok: true, id: created.id, versionNumber: created.versionNumber });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create research profile version." }, 400);
+  }
+});
+
+app.post("/api/admin/research/prompt-versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = promptVersionCreateSchema.parse(await c.req.json());
+    const created = await createPromptVersion(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_PROMPT_VERSION_CREATE", { id: created.id, payload });
+    return c.json({ ok: true, id: created.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create prompt version." }, 400);
+  }
+});
+
+app.post("/api/admin/research/rubric-versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = rubricVersionCreateSchema.parse(await c.req.json());
+    const created = await createRubricVersion(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_RUBRIC_VERSION_CREATE", { id: created.id, payload });
+    return c.json({ ok: true, id: created.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create rubric version." }, 400);
+  }
+});
+
+app.post("/api/admin/research/search-template-versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = searchTemplateVersionCreateSchema.parse(await c.req.json());
+    const created = await createSearchTemplateVersion(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_SEARCH_TEMPLATE_VERSION_CREATE", { id: created.id, payload });
+    return c.json({ ok: true, id: created.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create search template version." }, 400);
   }
 });
 
@@ -2899,6 +3090,7 @@ export default {
     await maybeRunScansPageHousekeeping(env);
     await maybeRunScanningHousekeeping(env);
     await maybeRunGappersHousekeeping(env);
+    await advanceResearchQueue(env);
     const now = new Date(event.scheduledTime || Date.now());
     await runDueWatchlistCompiles(env, now);
     const defaultConfig = await loadDefaultConfigRow(env);
