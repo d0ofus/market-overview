@@ -18,11 +18,6 @@ type ChartPoint = {
   ago_10w: number | null;
 };
 
-function pct(value: number | null | undefined, digits = 1): string {
-  if (value == null || !Number.isFinite(value)) return "N/A";
-  return `${value.toFixed(digits)}%`;
-}
-
 function ratePct(value: number | null | undefined, digits = 2): string {
   if (value == null || !Number.isFinite(value)) return "N/A";
   return `${value.toFixed(digits)}%`;
@@ -38,7 +33,12 @@ function formatMeetingDate(iso: string | null | undefined, fallback: string): st
   if (!iso) return fallback;
   const parsed = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return fallback;
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(parsed);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(parsed);
 }
 
 function formatGeneratedAt(value: string | null | undefined): string {
@@ -75,9 +75,9 @@ function probabilityLabel(row: FedFundsPathRow): string {
 }
 
 function directionClass(value: number): string {
-  if (value > 0) return "text-emerald-400";
-  if (value < 0) return "text-rose-400";
-  return "text-slate-300";
+  if (value > 0) return "text-emerald-500 dark:text-emerald-400";
+  if (value < 0) return "text-rose-500 dark:text-rose-400";
+  return "text-slate-500 dark:text-slate-300";
 }
 
 function zonedTimeToUtc(isoDate: string, hour: number, minute: number, timeZone: string): Date {
@@ -127,7 +127,7 @@ function formatCountdown(ms: number): string {
 function meetingDecisionLabel(iso: string | null | undefined, fallback: string): string {
   if (!iso) return fallback;
   const decision = zonedTimeToUtc(iso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ);
-  return `${formatMeetingDate(iso, fallback)} · ${new Intl.DateTimeFormat("en-US", {
+  return `${formatMeetingDate(iso, fallback)} | ${new Intl.DateTimeFormat("en-US", {
     timeZone: DECISION_TZ,
     hour: "numeric",
     minute: "2-digit",
@@ -178,7 +178,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
   }, []);
 
   const countdown = useMemo(() => {
-    if (!nextMeeting?.meetingIso) return "—";
+    if (!nextMeeting?.meetingIso) return "--";
     const when = zonedTimeToUtc(nextMeeting.meetingIso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ);
     return formatCountdown(when.getTime() - now);
   }, [nextMeeting, now]);
@@ -200,7 +200,10 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
       : "#64748B",
   }));
 
-  const warningTone = snapshot.status === "stale" ? "border-amber-400/30 bg-amber-500/10 text-amber-100" : "border-red-400/30 bg-red-500/10 text-red-100";
+  const warningTone =
+    snapshot.status === "stale"
+      ? "border-amber-400/30 bg-amber-500/10 text-amber-100"
+      : "border-red-400/30 bg-red-500/10 text-red-100";
 
   return (
     <section className="card overflow-hidden">
@@ -208,17 +211,27 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
         <div className="space-y-3">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Macro Rates</div>
-            <h2 className="text-xl font-semibold text-slate-100">Federal Reserve</h2>
+            <h2 className="text-xl font-semibold text-text">Federal Reserve</h2>
             <p className="text-sm text-slate-400">Fed Funds Rate: Twelve-Month Market Pricing</p>
           </div>
           <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-300">
-            <span>As of: <span className="font-medium text-slate-100">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
-            <span>Target Band: <span className="font-medium text-slate-100">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
-            <span>Midpoint: <span className="font-medium text-slate-100">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
-            <span>Last EFFR: <span className="font-medium text-slate-100">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
-            <span>Step: <span className="font-medium text-slate-100">{snapshot.data?.assumedMoveBps ?? "N/A"} bps</span></span>
-            <span>Source: <a className="text-accent hover:underline" href={snapshot.data?.sourceUrl ?? "https://rateprobability.com/fed"} target="_blank" rel="noreferrer">RateProbability</a></span>
-            <span>Snapshot: <span className="font-medium text-slate-100">{formatGeneratedAt(snapshot.data?.generatedAt)}</span></span>
+            <span>As of: <span className="font-medium text-text">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
+            <span>Target Band: <span className="font-medium text-text">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
+            <span>Midpoint: <span className="font-medium text-text">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
+            <span>Last EFFR: <span className="font-medium text-text">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
+            <span>Step: <span className="font-medium text-text">{snapshot.data?.assumedMoveBps ?? "N/A"} bps</span></span>
+            <span>
+              Source:{" "}
+              <a
+                className="text-accent hover:underline"
+                href={snapshot.data?.sourceUrl ?? "https://rateprobability.com/fed"}
+                target="_blank"
+                rel="noreferrer"
+              >
+                RateProbability
+              </a>
+            </span>
+            <span>Snapshot: <span className="font-medium text-text">{formatGeneratedAt(snapshot.data?.generatedAt)}</span></span>
           </div>
         </div>
       </div>
@@ -231,8 +244,8 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
 
       {!snapshot.data && (
         <div className="px-5 py-8">
-          <div className="rounded-2xl border border-borderSoft/70 bg-slate-900/30 p-5">
-            <div className="text-sm font-semibold text-slate-100">Fed funds pricing unavailable</div>
+          <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/70 p-5">
+            <div className="text-sm font-semibold text-text">Fed funds pricing unavailable</div>
             <p className="mt-2 text-sm text-slate-400">
               The RateProbability API could not be reached from this environment. When it recovers, this section will automatically show the cached or live rate path again.
             </p>
@@ -250,45 +263,49 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
 
       {snapshot.data && (
         <div className="space-y-5 px-5 py-5">
-          <div className="grid gap-4 xl:grid-cols-3">
-            <div className="rounded-3xl border border-accent/20 bg-slate-950/50 p-5">
+          <div className="grid gap-3 xl:grid-cols-3">
+            <div className="rounded-2xl border border-accent/20 bg-panelSoft/80 p-4">
               <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Next Decision In</div>
-              <div className="mt-3 font-mono text-4xl font-semibold tracking-[0.04em] text-slate-100">{countdown}</div>
-              <div className="mt-4 text-sm text-slate-400">{meetingDecisionLabel(nextMeeting?.meetingIso, nextMeeting?.meeting ?? "—")}</div>
+              <div className="mt-2 font-mono text-3xl font-semibold tracking-[0.04em] text-text">{countdown}</div>
+              <div className="mt-3 text-sm text-slate-400">{meetingDecisionLabel(nextMeeting?.meetingIso, nextMeeting?.meeting ?? "--")}</div>
             </div>
-            <div className="rounded-3xl border border-emerald-400/20 bg-slate-950/50 p-5">
+            <div className="rounded-2xl border border-emerald-400/20 bg-panelSoft/80 p-4">
               <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Next Meeting Pricing</div>
-              <div className="mt-3 text-4xl font-semibold text-emerald-400">{nextPricing.headline}</div>
-              <div className="mt-4 text-lg text-emerald-300">{nextPricing.detail}</div>
+              <div className="mt-2 text-3xl font-semibold text-emerald-500 dark:text-emerald-400">{nextPricing.headline}</div>
+              <div className="mt-3 text-base text-emerald-600 dark:text-emerald-300">{nextPricing.detail}</div>
             </div>
-            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/50 p-5">
+            <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/80 p-4">
               <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Current Rate</div>
-              <div className="mt-3 text-4xl font-semibold text-slate-100">{ratePct(snapshot.data.midpoint, 2)}</div>
-              <div className="mt-4 text-sm text-slate-400">Last EFFR: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
+              <div className="mt-2 text-3xl font-semibold text-text">{ratePct(snapshot.data.midpoint, 2)}</div>
+              <div className="mt-3 text-sm text-slate-400">Last EFFR: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
             </div>
           </div>
 
           <div className="grid gap-4 xl:grid-cols-[1.15fr_0.92fr]">
-            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/45 p-5">
-              <div className="mb-4 text-lg font-semibold text-slate-100">Path of Fed Funds Target Midpoint: Market Expectation</div>
+            <div className="rounded-3xl border border-borderSoft/70 bg-panelSoft/75 p-5">
+              <div className="mb-4 text-lg font-semibold text-text">Path of Fed Funds Target Midpoint: Market Expectation</div>
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
-                  <thead className="bg-slate-900/60">
+                  <thead className="bg-panel/80">
                     <tr>
                       <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Meeting</th>
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Implied Rate (Post-Meeting)</th>
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Probability of Hike(Cut)</th>
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300"># of Hikes(Cuts)</th>
-                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Δ vs Current (bps)</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Delta vs Current (bps)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rows.map((row) => (
                       <tr key={row.meetingIso} className="border-t border-borderSoft/60">
-                        <td className="px-3 py-3 font-medium text-slate-100">{row.meeting}</td>
+                        <td className="px-3 py-3 font-medium text-text">{row.meeting}</td>
                         <td className="px-3 py-3 text-right font-mono text-slate-200">{ratePct(row.impliedRatePostMeeting, 2)}</td>
-                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.probIsCut ? -row.probMovePct : row.probMovePct)}`}>{probabilityLabel(row)}</td>
-                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.numMovesIsCut ? -row.numMoves : row.numMoves)}`}>{numMovesLabel(row)}</td>
+                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.probIsCut ? -row.probMovePct : row.probMovePct)}`}>
+                          {probabilityLabel(row)}
+                        </td>
+                        <td className={`px-3 py-3 text-right font-mono ${directionClass(row.numMovesIsCut ? -row.numMoves : row.numMoves)}`}>
+                          {numMovesLabel(row)}
+                        </td>
                         <td className={`px-3 py-3 text-right font-mono ${directionClass(row.changeBps)}`}>{signedBps(row.changeBps)}</td>
                       </tr>
                     ))}
@@ -300,21 +317,45 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
               </p>
             </div>
 
-            <div className="rounded-3xl border border-borderSoft/70 bg-slate-950/45 p-5">
-              <div className="mb-4 text-lg font-semibold text-slate-100">Implied Rate Path</div>
+            <div className="rounded-3xl border border-borderSoft/70 bg-panelSoft/75 p-5">
+              <div className="mb-4 text-lg font-semibold text-text">Implied Rate Path</div>
               <div className="h-[420px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 16 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.18)" />
-                    <XAxis dataKey="label" tick={{ fill: "#94A3B8", fontSize: 11 }} angle={-32} textAnchor="end" height={72} interval={0} />
-                    <YAxis tick={{ fill: "#94A3B8", fontSize: 11 }} tickFormatter={(value) => `${Number(value).toFixed(2)}%`} domain={["dataMin - 0.05", "dataMax + 0.05"]} />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fill: "#94A3B8", fontSize: 11 }}
+                      angle={-32}
+                      textAnchor="end"
+                      height={72}
+                      interval={0}
+                    />
+                    <YAxis
+                      tick={{ fill: "#94A3B8", fontSize: 11 }}
+                      tickFormatter={(value) => `${Number(value).toFixed(2)}%`}
+                      domain={["dataMin - 0.05", "dataMax + 0.05"]}
+                    />
                     <Tooltip
-                      contentStyle={{ background: "rgba(2, 6, 23, 0.96)", border: "1px solid rgba(71, 85, 105, 0.8)", borderRadius: 16 }}
+                      contentStyle={{
+                        background: "rgba(2, 6, 23, 0.96)",
+                        border: "1px solid rgba(71, 85, 105, 0.8)",
+                        borderRadius: 16,
+                      }}
                       labelStyle={{ color: "#E2E8F0" }}
                       formatter={(value, name) => [`${Number(value).toFixed(3)}%`, String(name)]}
                     />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Line type="monotone" dataKey="current" name="Current" stroke="#3B82F6" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                    <Line
+                      type="monotone"
+                      dataKey="current"
+                      name="Current"
+                      stroke="#3B82F6"
+                      strokeWidth={2.5}
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 5 }}
+                      connectNulls
+                    />
                     {comparisonLines.map((series) => (
                       <Line
                         key={series.key}

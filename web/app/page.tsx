@@ -29,9 +29,9 @@ function splitOverviewSectionGroups(section: OverviewSection): {
   const ordered = [
     ...(usIndex ? [usIndex] : []),
     ...(usIndexEq ? [usIndexEq] : []),
-    ...base,
     ...(sector ? [sector] : []),
     ...(sectorEq ? [sectorEq] : []),
+    ...base,
     ...(thematic ? [thematic] : []),
   ];
   return { base, usIndex, usIndexEq, sector, sectorEq, thematic, ordered };
@@ -98,7 +98,6 @@ export default async function HomePage() {
         <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
       )}
       <div className="grid gap-4">
-        <FedFundsRatePanel snapshot={fedWatch} />
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">
             {(usIndex || usIndexEq) && (
@@ -127,17 +126,6 @@ export default async function HomePage() {
                 )}
               </div>
             )}
-            {base.map((group) => (
-              <GroupPanel
-                key={group.id}
-                anchorId={groupAnchorId(group.id)}
-                title={group.title}
-                rows={group.rows}
-                columns={group.columns}
-                defaultOpen
-                pinTop10={group.pinTop10}
-              />
-            ))}
             {(sector || sectorEq) && (
               <div className="grid gap-3 lg:grid-cols-2">
                 {sector && (
@@ -164,6 +152,17 @@ export default async function HomePage() {
                 )}
               </div>
             )}
+            {base.map((group) => (
+              <GroupPanel
+                key={group.id}
+                anchorId={groupAnchorId(group.id)}
+                title={group.title}
+                rows={group.rows}
+                columns={group.columns}
+                defaultOpen
+                pinTop10={group.pinTop10}
+              />
+            ))}
             {thematic && (
               <GroupPanel
                 key={thematic.id}
@@ -177,6 +176,7 @@ export default async function HomePage() {
             )}
           </section>
         ))}
+        <FedFundsRatePanel snapshot={fedWatch} />
       </div>
       <p className="text-xs text-slate-400">Research dashboard only. Not investment advice.</p>
     </div>
