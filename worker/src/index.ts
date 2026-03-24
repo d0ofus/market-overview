@@ -49,6 +49,9 @@ import {
   refreshGappersSnapshot,
 } from "./gappers-service";
 import {
+  getFedWatchSnapshot,
+} from "./fedwatch-service";
+import {
   cleanupOldScansPageData,
   loadCompiledScansSnapshot,
   deleteScanPreset,
@@ -949,6 +952,18 @@ app.get("/api/dashboard", async (c) => {
   const data = await loadSnapshot(c.env, configId, date);
   c.header("Cache-Control", "public, max-age=300");
   return c.json(data);
+});
+
+app.get("/api/fedwatch", async (c) => {
+  try {
+    const snapshot = await getFedWatchSnapshot(c.env, {
+      force: c.req.query("force") === "1",
+    });
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json(snapshot);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load FedWatch." }, 500);
+  }
 });
 
 app.get("/api/breadth", async (c) => {

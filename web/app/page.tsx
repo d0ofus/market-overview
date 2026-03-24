@@ -1,7 +1,8 @@
 import { GroupPanel } from "@/components/group-panel";
 import { StatusBar } from "@/components/status-bar";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
-import { getDashboard, getStatus } from "@/lib/api";
+import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
+import { getDashboard, getFedWatch, getStatus, type FedWatchResponse } from "@/lib/api";
 
 export const revalidate = 0;
 
@@ -44,15 +45,22 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const dashboard = await getDashboard().catch(() => null);
-  const statusValue = await getStatus("overview").catch(() => ({
-    timezone: "Australia/Melbourne",
-    autoRefreshLabel: "08:15 Australia/Melbourne",
-    autoRefreshLocalTime: "08:15",
-    lastUpdated: null,
-    asOfDate: null,
-    providerLabel: "Alpaca (IEX Delayed Daily Bars)",
-  }));
+  const [dashboard, statusValue, fedWatch] = await Promise.all([
+    getDashboard().catch(() => null),
+    getStatus("overview").catch(() => ({
+      timezone: "Australia/Melbourne",
+      autoRefreshLabel: "08:15 Australia/Melbourne",
+      autoRefreshLocalTime: "08:15",
+      lastUpdated: null,
+      asOfDate: null,
+      providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+    })),
+    getFedWatch().catch(() => ({
+      status: "unavailable",
+      warning: "FedWatch data could not be loaded.",
+      data: null,
+    } satisfies FedWatchResponse)),
+  ]);
   const dashboardValue = dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
@@ -90,6 +98,7 @@ export default async function HomePage() {
         <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
       )}
       <div className="grid gap-4">
+        <FedFundsRatePanel snapshot={fedWatch} />
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">
             {(usIndex || usIndexEq) && (

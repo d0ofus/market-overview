@@ -4,6 +4,45 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
 export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";
 
+export type FedWatchProbability = {
+  targetRange: string;
+  targetRateBpsLow: number;
+  targetRateBpsHigh: number;
+  midpointBps: number;
+  nowPct: number;
+  dayAgoPct: number | null;
+  weekAgoPct: number | null;
+  monthAgoPct: number | null;
+};
+
+export type FedWatchMeeting = {
+  meetingDate: string | null;
+  label: string;
+  contract: string | null;
+  expires: string | null;
+  midPrice: number | null;
+  priorVolume: number | null;
+  priorOi: number | null;
+  expectedMidpointBps: number | null;
+  hikeProbability: number | null;
+  cutProbability: number | null;
+  noChangeProbability: number | null;
+  probabilities: FedWatchProbability[];
+};
+
+export type FedWatchData = {
+  generatedAt: string;
+  sourceUrl: string;
+  currentTargetRange: string | null;
+  meetings: FedWatchMeeting[];
+};
+
+export type FedWatchResponse = {
+  status: "ok" | "stale" | "unavailable";
+  warning: string | null;
+  data: FedWatchData | null;
+};
+
 export type AlertLogRow = {
   id: string;
   ticker: string;
@@ -401,6 +440,10 @@ export function getStatus(page?: "overview" | "breadth"): Promise<{
 
 export function getBreadth(universeId = "sp500-core") {
   return getJson<{ requestedUniverseId: string; universeId: string; rows: any[] }>(`/api/breadth?universeId=${universeId}&limit=120`);
+}
+
+export function getFedWatch(force = false) {
+  return getJson<FedWatchResponse>(appendQuery("/api/fedwatch", { force: force ? 1 : undefined }));
 }
 
 export function getBreadthSummary() {
