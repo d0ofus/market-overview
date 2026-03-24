@@ -1,13 +1,13 @@
 # TODO
 
 ## Overview
+- Fix sparklines
 - Amend implied rate path to intervals of 0.1% on the y-axis
 - Add refresh button for macro rates table
 - Check on EW sectors column data
 - Put the same EW Sector ETF on the same row as the non-EW one. Sort by non-EW
-- Add multiple chart view of commodities
+- Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 - Add RS chart (like my google sheets dashboard)
-- Fix sparklines
 
 ## Breadth
 - Add volume traded on majors as a breadth metric
