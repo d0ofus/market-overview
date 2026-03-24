@@ -23,6 +23,8 @@ type Props = {
   runs: ResearchRunListRow[];
   selectedRunId: string | null;
   onSelectRun: (id: string) => void;
+  selectedRunErrorDetail?: string | null;
+  onOpenRunDrawer: () => void;
   manualTickerInput: string;
   onManualTickerInputChange: (value: string) => void;
   onRunManual: () => void;
@@ -175,20 +177,40 @@ export function WatchlistResearchPanel(props: Props) {
         </div>
         <div className="space-y-2">
           {props.runs.map((row) => (
-            <button
+            <div
               key={row.run.id}
               className={`w-full rounded-xl border px-3 py-2 text-left ${props.selectedRunId === row.run.id ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 bg-panelSoft/40 hover:bg-panelSoft/70"}`}
-              onClick={() => props.onSelectRun(row.run.id)}
-              type="button"
             >
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-slate-200">{row.profileName ?? "Research Run"}</div>
-                <div className={`text-xs font-semibold uppercase ${runBadge(row.run.status)}`}>{row.run.status}</div>
-              </div>
-              <div className="mt-1 text-xs text-slate-400">
-                {formatTime(row.run.createdAt)} · {row.run.completedTickerCount}/{row.run.requestedTickerCount} complete
-              </div>
-            </button>
+              <button
+                className="w-full text-left"
+                onClick={() => props.onSelectRun(row.run.id)}
+                type="button"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-200">{row.profileName ?? "Research Run"}</div>
+                  <div className={`text-xs font-semibold uppercase ${runBadge(row.run.status)}`}>{row.run.status}</div>
+                </div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {formatTime(row.run.createdAt)} · {row.run.completedTickerCount}/{row.run.requestedTickerCount} complete
+                </div>
+                {props.selectedRunId === row.run.id && (props.selectedRunErrorDetail ?? row.run.errorSummary) ? (
+                  <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-200">
+                    {props.selectedRunErrorDetail ?? row.run.errorSummary}
+                  </div>
+                ) : null}
+              </button>
+              {props.selectedRunId === row.run.id && (row.run.status === "failed" || row.run.status === "partial") ? (
+                <div className="mt-2 flex justify-end">
+                  <button
+                    className="rounded border border-red-500/30 px-2.5 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/10"
+                    onClick={props.onOpenRunDrawer}
+                    type="button"
+                  >
+                    View Failure Details
+                  </button>
+                </div>
+              ) : null}
+            </div>
           ))}
           {props.runs.length === 0 && <p className="text-xs text-slate-400">No research runs for this watchlist set yet.</p>}
         </div>

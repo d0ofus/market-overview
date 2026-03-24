@@ -33,6 +33,7 @@ import {
   type WatchlistCompilerSetRow,
 } from "@/lib/api";
 import { ResearchResultsTable } from "./research-results-table";
+import { ResearchRunDrawer } from "./research-run-drawer";
 import { ResearchTickerDrawer } from "./research-ticker-drawer";
 import { TradingViewWidget } from "./tradingview-widget";
 import { WatchlistResearchPanel } from "./watchlist-research-panel";
@@ -104,6 +105,7 @@ export function WatchlistCompilerDashboard() {
   const [openResearchHistory, setOpenResearchHistory] = useState<ResearchSnapshotRow[]>([]);
   const [openResearchCompare, setOpenResearchCompare] = useState<ResearchSnapshotCompareResponse | null>(null);
   const [openResearchBaselineId, setOpenResearchBaselineId] = useState<string | null>(null);
+  const [openResearchRunDrawer, setOpenResearchRunDrawer] = useState(false);
   const [manualTickerInput, setManualTickerInput] = useState("");
 
   const selectedSet = useMemo(
@@ -488,6 +490,8 @@ export function WatchlistCompilerDashboard() {
             runs={researchRuns}
             selectedRunId={selectedResearchRunId}
             onSelectRun={setSelectedResearchRunId}
+            selectedRunErrorDetail={researchStatus?.tickers.find((row) => row.lastError)?.lastError ?? null}
+            onOpenRunDrawer={() => setOpenResearchRunDrawer(true)}
             manualTickerInput={manualTickerInput}
             onManualTickerInputChange={setManualTickerInput}
             onRunManual={async () => {
@@ -665,7 +669,31 @@ export function WatchlistCompilerDashboard() {
             void openTickerResearch(result);
           }}
         />
+        {researchStatus && (researchStatus.run.status === "failed" || researchStatus.run.status === "partial") ? (
+          <div className="card border-red-500/20 bg-red-500/5 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-red-100">Selected Run Error</h3>
+                <p className="mt-1 text-xs text-red-200/90">
+                  {researchStatus.run.errorSummary ?? researchStatus.tickers.find((row) => row.lastError)?.lastError ?? "This run did not complete successfully."}
+                </p>
+              </div>
+              <button
+                className="rounded border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-100 hover:bg-red-500/10"
+                onClick={() => setOpenResearchRunDrawer(true)}
+                type="button"
+              >
+                Open Details
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
+      <ResearchRunDrawer
+        open={openResearchRunDrawer}
+        status={researchStatus}
+        onClose={() => setOpenResearchRunDrawer(false)}
+      />
       <ResearchTickerDrawer
         open={Boolean(openResearchTicker)}
         result={openResearchTicker}
