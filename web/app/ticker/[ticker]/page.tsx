@@ -1,5 +1,6 @@
 import { getTicker } from "@/lib/api";
 import { Sparkline } from "@/components/sparkline";
+import { TickerResearchPanel } from "@/components/ticker-research-panel";
 import { TradingViewWidget } from "@/components/tradingview-widget";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 
@@ -26,6 +27,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           <Sparkline values={prices.slice(-120)} width={360} height={80} />
         </div>
       </div>
+      <TickerResearchPanel ticker={data.symbol.ticker} />
       {data.tradingViewEnabled && <TradingViewWidget ticker={data.symbol.ticker} />}
     </div>
   );
