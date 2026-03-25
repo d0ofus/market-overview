@@ -12,3 +12,4 @@ coverage
 dist
 *.log
 *.tsbuildinfo
+.vscode/
