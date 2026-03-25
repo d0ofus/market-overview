@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Loader2, RefreshCw } from "lucide-react";
 import {
   apiUrl,
@@ -110,6 +110,8 @@ export function WatchlistCompilerDashboard() {
   const [openResearchBaselineId, setOpenResearchBaselineId] = useState<string | null>(null);
   const [openResearchRunDrawer, setOpenResearchRunDrawer] = useState(false);
   const [manualTickerInput, setManualTickerInput] = useState("");
+  const selectedResearchRunIdRef = useRef<string | null>(null);
+  const researchRunRequestRef = useRef(0);
 
   const selectedSet = useMemo(
     () => sets.find((row) => row.id === selectedSetId) ?? null,
@@ -132,20 +134,11 @@ export function WatchlistCompilerDashboard() {
       const res = await getResearchRuns({ sourceType: "watchlist_set", sourceId: setId, limit: 12 });
       const rows = res.rows ?? [];
       setResearchRuns(rows);
-      const nextRunId = preferredRunId ?? selectedResearchRunId ?? rows[0]?.run.id ?? null;
+      const currentSelected = selectedResearchRunIdRef.current;
+      const nextRunId = preferredRunId ?? (currentSelected && rows.some((row) => row.run.id === currentSelected) ? currentSelected : null) ?? rows[0]?.run.id ?? null;
       setSelectedResearchRunId(nextRunId);
       if (nextRunId) {
-        try {
-          const [statusRes, resultsRes] = await Promise.all([
-            getResearchRunStatus(nextRunId),
-            getResearchRunResults(nextRunId),
-          ]);
-          setResearchStatus(statusRes);
-          setResearchResults(resultsRes);
-          setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
-        } catch (error) {
-          setMessage(error instanceof Error ? error.message : "Failed to load selected research run.");
-        }
+        await loadResearchRunDetail(nextRunId);
       } else {
         setResearchStatus(null);
         setResearchResults(null);
@@ -221,19 +214,68 @@ export function WatchlistCompilerDashboard() {
   );
 
   useEffect(() => {
+    selectedResearchRunIdRef.current = selectedResearchRunId;
+  }, [selectedResearchRunId]);
+
+  const syncResearchRun = (
+    statusRes: ResearchRunStatusResponse,
+    resultsRes: ResearchRunResultsResponse,
+    options?: { updateSelected?: boolean },
+  ) => {
+    const updateSelected = options?.updateSelected ?? statusRes.run.id === selectedResearchRunIdRef.current;
+    if (updateSelected) {
+      setResearchStatus(statusRes);
+      setResearchResults(resultsRes);
+      setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
+    }
+    setResearchRuns((current) => {
+      const nextRow: ResearchRunListRow = {
+        run: statusRes.run,
+        profileName: statusRes.profile?.name ?? current.find((row) => row.run.id === statusRes.run.id)?.profileName ?? null,
+        profileVersionNumber: statusRes.profile?.currentVersion?.versionNumber ?? current.find((row) => row.run.id === statusRes.run.id)?.profileVersionNumber ?? null,
+      };
+      const existingIndex = current.findIndex((row) => row.run.id === nextRow.run.id);
+      if (existingIndex >= 0) {
+        const copy = [...current];
+        copy[existingIndex] = nextRow;
+        return copy;
+      }
+      if (nextRow.run.sourceType === "watchlist_set" && nextRow.run.sourceId === selectedSetId) {
+        return [nextRow, ...current].slice(0, 12);
+      }
+      return current;
+    });
+  };
+
+  const loadResearchRunDetail = async (runId: string) => {
+    const requestId = researchRunRequestRef.current + 1;
+    researchRunRequestRef.current = requestId;
+    try {
+      const [statusRes, resultsRes] = await Promise.all([
+        getResearchRunStatus(runId),
+        getResearchRunResults(runId),
+      ]);
+      if (researchRunRequestRef.current !== requestId) return;
+      syncResearchRun(statusRes, resultsRes, { updateSelected: true });
+    } catch (error) {
+      if (researchRunRequestRef.current !== requestId) return;
+      setMessage(error instanceof Error ? error.message : "Failed to load selected research run.");
+    }
+  };
+
+  useEffect(() => {
     if (!selectedResearchRunId) return;
     let cancelled = false;
     let timer: number | null = null;
     let eventSource: EventSource | null = null;
+    const selectedRunIsLive = researchStatus?.run.id === selectedResearchRunId
+      && (researchStatus.run.status === "queued" || researchStatus.run.status === "running");
 
     const load = async () => {
       try {
-        const [statusRes, resultsRes] = await Promise.all([
-          getResearchRunStatus(selectedResearchRunId),
-          getResearchRunResults(selectedResearchRunId),
-        ]);
+        const [statusRes, resultsRes] = await Promise.all([getResearchRunStatus(selectedResearchRunId), getResearchRunResults(selectedResearchRunId)]);
         if (cancelled) return;
-        syncResearchRun(statusRes, resultsRes);
+        syncResearchRun(statusRes, resultsRes, { updateSelected: true });
       } catch (error) {
         if (!cancelled) setMessage(error instanceof Error ? error.message : "Failed to load research run.");
       }
@@ -246,7 +288,7 @@ export function WatchlistCompilerDashboard() {
       }, 5000);
     };
 
-    if (researchRunning) {
+    if (selectedRunIsLive) {
       eventSource = new EventSource(apiUrl(`/api/research/runs/${encodeURIComponent(selectedResearchRunId)}/stream`));
       eventSource.addEventListener("update", (event) => {
         if (cancelled) return;
@@ -255,9 +297,9 @@ export function WatchlistCompilerDashboard() {
             status: ResearchRunStatusResponse;
             results: ResearchRunResultsResponse;
           };
-          syncResearchRun(payload.status, payload.results);
+          syncResearchRun(payload.status, payload.results, { updateSelected: true });
           const isStillRunning = payload.status.run.status === "queued" || payload.status.run.status === "running";
-          setResearchRunning(isStillRunning);
+          if (selectedResearchRunIdRef.current === payload.status.run.id) setResearchRunning(isStillRunning);
           if (!isStillRunning) {
             eventSource?.close();
             eventSource = null;
@@ -286,7 +328,7 @@ export function WatchlistCompilerDashboard() {
       if (eventSource) eventSource.close();
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [selectedResearchRunId, researchRunning]);
+  }, [selectedResearchRunId, researchStatus?.run.id, researchStatus?.run.status]);
 
   const exportDate = localDateSuffix();
   const exportCsvUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "csv", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
@@ -314,29 +356,6 @@ export function WatchlistCompilerDashboard() {
     setSelectedTickers((current) => current.includes(ticker)
       ? current.filter((value) => value !== ticker)
       : [...current, ticker]);
-  };
-
-  const syncResearchRun = (statusRes: ResearchRunStatusResponse, resultsRes: ResearchRunResultsResponse) => {
-    setResearchStatus(statusRes);
-    setResearchResults(resultsRes);
-    setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
-    setResearchRuns((current) => {
-      const nextRow: ResearchRunListRow = {
-        run: statusRes.run,
-        profileName: statusRes.profile?.name ?? current.find((row) => row.run.id === statusRes.run.id)?.profileName ?? null,
-        profileVersionNumber: statusRes.profile?.currentVersion?.versionNumber ?? current.find((row) => row.run.id === statusRes.run.id)?.profileVersionNumber ?? null,
-      };
-      const existingIndex = current.findIndex((row) => row.run.id === nextRow.run.id);
-      if (existingIndex >= 0) {
-        const copy = [...current];
-        copy[existingIndex] = nextRow;
-        return copy;
-      }
-      if (nextRow.run.sourceType === "watchlist_set" && nextRow.run.sourceId === selectedSetId) {
-        return [nextRow, ...current].slice(0, 12);
-      }
-      return current;
-    });
   };
 
   const openTickerResearch = async (result: ResearchTickerResult) => {
@@ -548,7 +567,10 @@ export function WatchlistCompilerDashboard() {
             }}
             runs={researchRuns}
             selectedRunId={selectedResearchRunId}
-            onSelectRun={setSelectedResearchRunId}
+            onSelectRun={(runId) => {
+              setSelectedResearchRunId(runId);
+              void loadResearchRunDetail(runId);
+            }}
             selectedRunStatus={researchStatus}
             selectedRunResults={researchResults}
             stoppingRun={researchStopping}
@@ -560,7 +582,7 @@ export function WatchlistCompilerDashboard() {
                   getResearchRunStatus(researchStatus.run.id),
                   getResearchRunResults(researchStatus.run.id),
                 ]);
-                syncResearchRun(statusRes, resultsRes);
+                syncResearchRun(statusRes, resultsRes, { updateSelected: true });
                 setMessage(`Research run ${researchStatus.run.id.slice(0, 8)} was stopped.`);
                 if (selectedSetId) await loadResearchRuns(selectedSetId, researchStatus.run.id);
               } catch (error) {
@@ -590,7 +612,7 @@ export function WatchlistCompilerDashboard() {
                 setManualTickerInput("");
                 const statusRes = await getResearchRunStatus(run.run.id);
                 const resultsRes = await getResearchRunResults(run.run.id);
-                syncResearchRun(statusRes, resultsRes);
+                syncResearchRun(statusRes, resultsRes, { updateSelected: true });
                 setMessage(`Manual research run started for ${run.run.requestedTickerCount} ticker${run.run.requestedTickerCount === 1 ? "" : "s"}.`);
               } catch (error) {
                 setResearchRunning(false);
@@ -780,7 +802,7 @@ export function WatchlistCompilerDashboard() {
               getResearchRunStatus(researchStatus.run.id),
               getResearchRunResults(researchStatus.run.id),
             ]);
-            syncResearchRun(statusRes, resultsRes);
+            syncResearchRun(statusRes, resultsRes, { updateSelected: true });
             setMessage(`Research run ${researchStatus.run.id.slice(0, 8)} was stopped.`);
             if (selectedSetId) await loadResearchRuns(selectedSetId, researchStatus.run.id);
           } catch (error) {

@@ -359,6 +359,78 @@ export async function cancelResearchRun(env: Env, runId: string): Promise<Resear
   return loadResearchRun(env, runId);
 }
 
+export async function tryAcquireResearchRunExecution(
+  env: Env,
+  runId: string,
+  staleSeconds = 20,
+): Promise<ResearchRunRecord | null> {
+  const queuedRow = await env.DB.prepare(
+    `UPDATE research_runs
+     SET status = 'running',
+         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+         heartbeat_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status = 'queued'
+     RETURNING
+       id,
+       source_type as sourceType,
+       source_id as sourceId,
+       source_label as sourceLabel,
+       status,
+       profile_id as profileId,
+       profile_version_id as profileVersionId,
+       requested_ticker_count as requestedTickerCount,
+       completed_ticker_count as completedTickerCount,
+       failed_ticker_count as failedTickerCount,
+       deep_dive_top_n as deepDiveTopN,
+       refresh_mode as refreshMode,
+       ranking_mode as rankingMode,
+       input_json as inputJson,
+       provider_usage_json as providerUsageJson,
+       provenance_json as provenanceJson,
+       error_summary as errorSummary,
+       started_at as startedAt,
+       completed_at as completedAt,
+       heartbeat_at as heartbeatAt,
+       created_at as createdAt,
+       updated_at as updatedAt`,
+  ).bind(runId).first();
+  if (queuedRow) return mapRun(queuedRow);
+
+  const runningRow = await env.DB.prepare(
+    `UPDATE research_runs
+     SET heartbeat_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND status = 'running'
+       AND (heartbeat_at IS NULL OR datetime(heartbeat_at) <= datetime('now', ?))
+     RETURNING
+       id,
+       source_type as sourceType,
+       source_id as sourceId,
+       source_label as sourceLabel,
+       status,
+       profile_id as profileId,
+       profile_version_id as profileVersionId,
+       requested_ticker_count as requestedTickerCount,
+       completed_ticker_count as completedTickerCount,
+       failed_ticker_count as failedTickerCount,
+       deep_dive_top_n as deepDiveTopN,
+       refresh_mode as refreshMode,
+       ranking_mode as rankingMode,
+       input_json as inputJson,
+       provider_usage_json as providerUsageJson,
+       provenance_json as provenanceJson,
+       error_summary as errorSummary,
+       started_at as startedAt,
+       completed_at as completedAt,
+       heartbeat_at as heartbeatAt,
+       created_at as createdAt,
+       updated_at as updatedAt`,
+  ).bind(runId, `-${Math.max(5, staleSeconds)} seconds`).first();
+  return runningRow ? mapRun(runningRow) : null;
+}
+
 export async function updateResearchRunHeartbeat(env: Env, runId: string): Promise<void> {
   await env.DB.prepare("UPDATE research_runs SET heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(runId).run();
 }

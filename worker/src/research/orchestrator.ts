@@ -27,6 +27,7 @@ import {
   loadRunRankings,
   loadRunTickerEvidence,
   loadTickerResearchHistory,
+  tryAcquireResearchRunExecution,
   updateResearchRun,
   updateResearchRunHeartbeat,
   updateResearchRunTicker,
@@ -411,12 +412,10 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   const run = await loadResearchRun(env, runId);
   if (!run) return null;
   if (run.status === "completed" || run.status === "partial" || run.status === "failed" || run.status === "cancelled") return run;
-  await updateResearchRun(env, run.id, {
-    status: "running",
-    startedAt: run.startedAt ?? nowIso(),
-  });
-  let usage = run.providerUsageJson;
-  const runWarnings = new Set<string>((run.provenanceJson as { warnings?: string[] } | null)?.warnings ?? []);
+  const executionRun = await tryAcquireResearchRunExecution(env, run.id);
+  if (!executionRun) return loadResearchRun(env, run.id);
+  let usage = executionRun.providerUsageJson;
+  const runWarnings = new Set<string>((executionRun.provenanceJson as { warnings?: string[] } | null)?.warnings ?? []);
   for (let index = 0; index < maxTickers; index += 1) {
     const latestRun = await loadResearchRun(env, run.id);
     if (!latestRun || latestRun.status === "cancelled") break;
@@ -433,7 +432,7 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
     }
     await updateResearchRunHeartbeat(env, run.id);
     try {
-      const result = await processResearchTicker(env, run, nextTicker);
+      const result = await processResearchTicker(env, executionRun, nextTicker);
       usage = sumUsage(usage, result.usage);
       result.warnings.forEach((warning) => runWarnings.add(warning));
     } catch (error) {
@@ -469,6 +468,17 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
     return loadResearchRun(env, run.id);
   }
   return refreshed;
+}
+
+export async function drainResearchRun(env: Env, runId: string, maxPasses = 24): Promise<ResearchRunRecord | null> {
+  let latest: ResearchRunRecord | null = null;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    latest = await advanceResearchRun(env, runId, DEFAULT_RESEARCH_SLICE_TICKERS);
+    if (!latest) return null;
+    if (["completed", "partial", "failed", "cancelled"].includes(latest.status)) return latest;
+    await scheduler.wait(750);
+  }
+  return latest;
 }
 
 export async function advanceResearchQueue(env: Env, limitRuns = 2): Promise<void> {

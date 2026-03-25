@@ -125,6 +125,7 @@ import {
   advanceResearchQueue,
   advanceResearchRun,
   cancelResearchRun,
+  drainResearchRun,
   startResearchRun,
 } from "./research/orchestrator";
 import {
@@ -2168,14 +2169,12 @@ app.get("/api/research/runs", async (c) => {
 });
 
 app.get("/api/research/runs/:id", async (c) => {
-  await advanceResearchRun(c.env, c.req.param("id"));
   const payload = await loadResearchRunStatusPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research run not found." }, 404);
   return c.json(payload);
 });
 
 app.get("/api/research/runs/:id/results", async (c) => {
-  await advanceResearchRun(c.env, c.req.param("id"));
   const payload = await loadResearchRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research run not found." }, 404);
   return c.json(payload);
@@ -2193,7 +2192,6 @@ app.get("/api/research/runs/:id/stream", async (c) => {
         controller.close();
       };
       const push = async () => {
-        await advanceResearchRun(c.env, runId);
         const payload = await loadResearchRunStreamPayload(c.env, runId);
         if (!payload) {
           controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research run not found." })}\n\n`));
@@ -2346,6 +2344,7 @@ app.post("/api/admin/research/runs", async (c) => {
   try {
     const payload = researchRunCreateSchema.parse(await c.req.json());
     const run = await startResearchRun(c.env, payload);
+    c.executionCtx.waitUntil(drainResearchRun(c.env, run.id));
     await upsertAudit(c.env, "default", "RESEARCH_RUN_CREATE", { runId: run.id, payload });
     return c.json({ ok: true, run });
   } catch (error) {
