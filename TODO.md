@@ -33,6 +33,8 @@
 - For industry peers view, change to liteweight charts
 
 ## Peer Groups
+- Put details at top of box for multi-chart view after clicking ticker
+- Put 'Next' button at bottom of page
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
 
@@ -44,7 +46,8 @@
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
 ## Watchlist Compiler
-- Add ranking system for compiled names - Use perplexity/AI with API
+- Optimize search querying to use less requests/tokens
+- Make sure AI goes through specific categories (e.g. quality of earnings, earnings trend)
 
 ## Gappers
 - Remove ETFs, closed ended funds, and OTC tickers
@@ -54,6 +57,7 @@
 - Add highest pre-market volume scan
 
 ## Admin
+- Find out what slug means for peer-groups
 - Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 
 - Shows pending for ETFs like JETS, but ETF consituent sync status shows 'pending', 0 records and No cached data. Clicking on it shows contituents, and checking the DB shows all ok.
 - Check why most ETFs limited to 25 tickers
