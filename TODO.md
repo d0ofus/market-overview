@@ -47,6 +47,7 @@
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
 ## Watchlist Compiler
+- Create a research repository (maybe in peer-groups or new page?)
 - Optimize search querying to use less requests/tokens
 - Make sure AI goes through specific categories (e.g. quality of earnings, earnings trend) for deep dive
 - Shift chart to the left, and analysis on the right. Can take up whole page but stil lbe a pop up
