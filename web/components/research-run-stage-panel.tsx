@@ -70,6 +70,28 @@ function readWarningList(value: unknown): string[] {
     : [];
 }
 
+function readActivityList(value: unknown): Array<{ at: string | null; level: string; message: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const record = item as { at?: unknown; level?: unknown; message?: unknown } | null | undefined;
+      const message = typeof record?.message === "string" ? record.message.trim() : "";
+      if (!message) return null;
+      return {
+        at: typeof record?.at === "string" && record.at.trim() ? record.at : null,
+        level: record?.level === "warn" || record?.level === "error" ? String(record.level) : "info",
+        message,
+      };
+    })
+    .filter((item): item is { at: string | null; level: string; message: string } => Boolean(item));
+}
+
+function activityTone(level: string) {
+  if (level === "error") return "border-red-500/20 bg-red-500/10 text-red-100";
+  if (level === "warn") return "border-amber-500/20 bg-amber-500/10 text-amber-100/90";
+  return "border-borderSoft/50 bg-panelSoft/35 text-slate-200";
+}
+
 export function ResearchRunStagePanel({ status, results, compact = false, stopping = false, onStop }: Props) {
   if (!status) return null;
 
@@ -91,6 +113,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   const deepDiveCompleted = tickers.filter((row) => Boolean(row.workingJson?.deepDive)).length;
   const rankingAvailable = (results?.results?.length ?? 0) > 0;
   const runWarnings = readWarningList(results?.warnings ?? status.run.provenanceJson?.warnings);
+  const runActivity = readActivityList(status.run.provenanceJson?.activity).slice().reverse().slice(0, 8);
   const extractionWarnings = tickers.flatMap((row) => readWarningList(row.workingJson?.warnings));
   const rankingWarnings = runWarnings.filter((warning) => /ranking/i.test(warning));
   const deepDiveWarnings = runWarnings.filter((warning) => /deep-dive/i.test(warning));
@@ -212,6 +235,8 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               const extractionModel = normalizeModelLabel(row.workingJson?.extractionModel);
               const hasDeepDive = Boolean(row.workingJson?.deepDive);
               const rowWarnings = readWarningList(row.workingJson?.warnings);
+              const rowActivity = readActivityList(row.stageMetricsJson?.activity).slice().reverse().slice(0, 4);
+              const currentStep = typeof row.stageMetricsJson?.currentStep === "string" ? row.stageMetricsJson.currentStep : null;
               return (
                 <div key={row.id} className="rounded-lg border border-borderSoft/50 bg-panelSoft/40 px-3 py-2">
                   <div className="flex items-start justify-between gap-3">
@@ -229,6 +254,9 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                    <span className={`rounded-full border px-2 py-1 ${badgeTone("neutral")}`}>
+                      Attempt {row.attemptCount}
+                    </span>
                     {evidenceCount !== null ? (
                       <span className={`rounded-full border px-2 py-1 ${badgeTone("neutral")}`}>{evidenceCount} evidence</span>
                     ) : null}
@@ -244,6 +272,9 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                       <span className={`rounded-full border px-2 py-1 ${badgeTone("success")}`}>Deep dive ready</span>
                     ) : null}
                   </div>
+                  {currentStep ? (
+                    <div className="mt-2 text-xs text-slate-300">{currentStep}</div>
+                  ) : null}
                   {row.lastError ? (
                     <div className="mt-2 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-2 text-xs text-red-100">
                       {row.lastError}
@@ -255,6 +286,21 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                       <div className="space-y-1 text-xs text-amber-100/90">
                         {rowWarnings.map((warning) => (
                           <div key={warning}>{warning}</div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {rowActivity.length > 0 ? (
+                    <div className="mt-2 rounded-lg border border-borderSoft/50 bg-panel px-2.5 py-2">
+                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Activity</div>
+                      <div className="space-y-1">
+                        {rowActivity.map((entry, index) => (
+                          <div key={`${row.id}-activity-${index}`} className={`rounded-md border px-2 py-1.5 text-xs ${activityTone(entry.level)}`}>
+                            <div>{entry.message}</div>
+                            {entry.at ? (
+                              <div className="mt-1 text-[10px] opacity-70">{formatTime(entry.at)}</div>
+                            ) : null}
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -316,6 +362,23 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               ))}
               {runWarnings.length === 0 ? (
                 <p className="text-sm text-slate-400">No run-level LLM warnings have been recorded yet.</p>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-borderSoft/60 bg-panel px-3 py-3">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Activity Feed</div>
+            <div className="space-y-2">
+              {runActivity.map((entry, index) => (
+                <div key={`run-activity-${index}`} className={`rounded-lg border px-2.5 py-2 text-xs ${activityTone(entry.level)}`}>
+                  <div>{entry.message}</div>
+                  {entry.at ? (
+                    <div className="mt-1 text-[10px] opacity-70">{formatTime(entry.at)}</div>
+                  ) : null}
+                </div>
+              ))}
+              {runActivity.length === 0 ? (
+                <p className="text-sm text-slate-400">No run-level activity has been recorded yet.</p>
               ) : null}
             </div>
           </div>

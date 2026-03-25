@@ -435,6 +435,10 @@ export async function updateResearchRunHeartbeat(env: Env, runId: string): Promi
   await env.DB.prepare("UPDATE research_runs SET heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(runId).run();
 }
 
+export async function updateResearchRunTickerHeartbeat(env: Env, runTickerId: string): Promise<void> {
+  await env.DB.prepare("UPDATE research_run_tickers SET heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(runTickerId).run();
+}
+
 export async function updateResearchRunTicker(env: Env, runTickerId: string, patch: {
   status?: string;
   companyName?: string | null;
@@ -692,7 +696,7 @@ export async function countRunTickerStatuses(env: Env, runId: string): Promise<{
     if (row.status === "failed") counts.failed = Number(row.count ?? 0);
     if (row.status === "ranking_ready") counts.rankingReady = Number(row.count ?? 0);
     if (row.status === "queued") counts.queued = Number(row.count ?? 0);
-    if (row.status === "normalizing" || row.status === "retrieving" || row.status === "extracting") {
+    if (row.status === "normalizing" || row.status === "retrieving" || row.status === "extracting" || row.status === "deep_dive") {
       counts.inProgress += Number(row.count ?? 0);
     }
   }
