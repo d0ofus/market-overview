@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildSnapshotComparison } from "../src/research/history";
 import { buildMarketSearchQueries, buildTickerSearchQueries } from "../src/research/search-queries";
 import { computeAttentionScore, computeFactorCards } from "../src/research/scoring";
+import { rankResearchCards } from "../src/research/synthesis";
 import type { SearchTemplateVersionRecord, StandardizedResearchCard } from "../src/research/types";
 
 const template: SearchTemplateVersionRecord = {
@@ -75,6 +76,7 @@ describe("research search query builder", () => {
     const marketQueries = buildMarketSearchQueries({ template, settings });
     expect(tickerQueries[0]?.query).toContain("NVDA");
     expect(tickerQueries.length).toBeGreaterThan(0);
+    expect(tickerQueries.length).toBeLessThanOrEqual(2);
     expect(marketQueries.length).toBe(1);
   });
 });
@@ -156,5 +158,52 @@ describe("research history compare", () => {
     expect(comparison.newCatalysts).toContain("Product cycle");
     expect(comparison.resolvedRisks).toHaveLength(0);
     expect(comparison.scoreDelta).toBe(6);
+  });
+});
+
+describe("research ranking synthesis", () => {
+  it("uses deterministic ranking for singleton runs", async () => {
+    const result = await rankResearchCards({
+      ANTHROPIC_API_KEY: "present",
+    } as any, {
+      cards: [card],
+      prompt: {
+        id: "p1",
+        promptKind: "sonnet_rank",
+        versionNumber: 1,
+        label: "rank",
+        providerKey: "anthropic",
+        modelFamily: "claude",
+        schemaVersion: "v1",
+        templateText: null,
+        templateJson: null,
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      },
+      rubric: {},
+      settings: {
+        lookbackDays: 14,
+        includeMacroContext: true,
+        maxTickerQueries: 4,
+        maxEvidenceItemsPerTicker: 12,
+        maxSearchResultsPerQuery: 4,
+        maxTickersPerRun: 20,
+        deepDiveTopN: 3,
+        comparisonEnabled: true,
+        sourceFamilies: {
+          sec: true,
+          news: true,
+          earningsTranscripts: true,
+          investorRelations: true,
+          analystCommentary: true,
+        },
+      },
+      deepDiveTopN: 1,
+    });
+
+    expect(result.rankings).toHaveLength(1);
+    expect(result.rankings[0]?.rank).toBe(1);
+    expect(result.model).toBe("rules-singleton");
+    expect(result.warning).toBeNull();
   });
 });

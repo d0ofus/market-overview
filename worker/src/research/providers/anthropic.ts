@@ -7,7 +7,7 @@ export type AnthropicJsonResponse<T> = {
   model: string;
 };
 
-const ANTHROPIC_MAX_ATTEMPTS = 4;
+const ANTHROPIC_MAX_ATTEMPTS = 2;
 
 function shouldRetryAnthropic(status: number, detail: string): boolean {
   if (status === 429 || status === 529) return true;
@@ -125,6 +125,40 @@ function extractJson<T>(content: unknown): T {
   throw new Error(`Anthropic response was not valid JSON: ${detail}`);
 }
 
+async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: string): Promise<T> {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1200,
+      temperature: 0,
+      system: [
+        "You repair malformed JSON.",
+        "Return strict JSON only.",
+        "Preserve the original structure and wording where possible.",
+        "If the JSON is truncated, complete it conservatively and minimally.",
+      ].join(" "),
+      messages: [
+        {
+          role: "user",
+          content: rawText,
+        },
+      ],
+    }),
+  }, 15_000, `Anthropic JSON repair for ${model}`);
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Anthropic JSON repair failed for ${model} (${res.status}): ${detail.slice(0, 180)}`);
+  }
+  const json = await res.json() as Record<string, any>;
+  return extractJson<T>(json?.content);
+}
+
 export async function callAnthropicJson<T>(env: Env, input: {
   model: string;
   fallbackModels?: string[];
@@ -168,6 +202,16 @@ export async function callAnthropicJson<T>(env: Env, input: {
         try {
           data = extractJson<T>(json?.content);
         } catch (error) {
+          try {
+            data = await repairAnthropicJson<T>(apiKey, model, anthropicContentToText(json?.content));
+            return {
+              data,
+              usage: (json?.usage && typeof json.usage === "object") ? json.usage as Record<string, unknown> : null,
+              model: String(json?.model ?? model),
+            };
+          } catch {
+            // Fall through to retry / fallback handling below.
+          }
           const parseError = error instanceof Error
             ? new Error(`Anthropic JSON parse failed for ${model}: ${error.message}`)
             : new Error(`Anthropic JSON parse failed for ${model}.`);

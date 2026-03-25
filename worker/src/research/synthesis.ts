@@ -59,6 +59,14 @@ export async function rankResearchCards(env: Env, input: {
   warning: string | null;
 }> {
   const fallback = fallbackRankResearchCards(input);
+  if (input.cards.length <= 1) {
+    return {
+      ...fallback,
+      usage: null,
+      model: "rules-singleton",
+      warning: null,
+    };
+  }
   if (!env.ANTHROPIC_API_KEY || input.cards.length === 0) {
     return {
       ...fallback,
@@ -79,7 +87,6 @@ export async function rankResearchCards(env: Env, input: {
       }>;
     }>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
-      fallbackModels: [env.ANTHROPIC_HAIKU_MODEL?.trim() ?? ""],
       system: [
         input.prompt.templateText ?? "Rank swing-trading research cards.",
         "Return strict JSON only.",
@@ -182,11 +189,11 @@ export async function deepDiveResearchCard(env: Env, input: {
   try {
     const response = await provider.callJson<ResearchDeepDive>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
-      fallbackModels: [env.ANTHROPIC_HAIKU_MODEL?.trim() ?? ""],
       system: [
         input.prompt.templateText ?? "Produce a concise deep-dive summary.",
         "Return strict JSON only.",
         "Do not wrap the JSON in markdown fences.",
+        "Keep the response concise.",
         "Use current evidence only, and treat prior summaries as historical context if they are present.",
       ].join(" "),
       user: JSON.stringify({
@@ -201,12 +208,21 @@ export async function deepDiveResearchCard(env: Env, input: {
         summary: input.card.summary,
         valuation: input.card.valuation,
         earningsQuality: input.card.earningsQuality,
-        catalysts: input.card.catalysts,
-        risks: input.card.risks,
-        contradictions: input.card.contradictions,
-        reasoningBullets: input.card.reasoningBullets,
+        catalysts: input.card.catalysts.slice(0, 2).map((item) => ({
+          title: item.title,
+          summary: item.summary.slice(0, 240),
+          freshness: item.freshness,
+          direction: item.direction,
+        })),
+        risks: input.card.risks.slice(0, 2).map((item) => ({
+          title: item.title,
+          summary: item.summary.slice(0, 240),
+          severity: item.severity,
+        })),
+        contradictions: input.card.contradictions.slice(0, 3),
+        reasoningBullets: input.card.reasoningBullets.slice(0, 3).map((item) => item.slice(0, 180)),
       }),
-      maxTokens: 1000,
+      maxTokens: 600,
     });
     const normalized: ResearchDeepDive = {
       summary: typeof response.data?.summary === "string" && response.data.summary.trim()

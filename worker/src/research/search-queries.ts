@@ -16,6 +16,26 @@ function familyLimit(limit: number | undefined, settings: ResearchProfileSetting
   return Math.max(1, Math.min(limit ?? settings.maxSearchResultsPerQuery, settings.maxSearchResultsPerQuery));
 }
 
+function bundleTickerQueries(queries: PerplexitySearchQuery[], maxQueries: number): PerplexitySearchQuery[] {
+  if (queries.length <= maxQueries) return queries;
+  const transcriptQueries = queries.filter((query) => query.sourceKind === "earnings_transcript");
+  const otherQueries = queries.filter((query) => query.sourceKind !== "earnings_transcript");
+  const bundled: PerplexitySearchQuery[] = [];
+  if (otherQueries.length > 0) {
+    bundled.push({
+      key: "ticker_context_bundle",
+      label: "Ticker Context Bundle",
+      query: otherQueries.map((query) => query.query).join(" OR "),
+      scopeKind: "ticker",
+      sourceKind: "news",
+      limit: Math.max(...otherQueries.map((query) => query.limit)),
+      ticker: otherQueries[0]?.ticker ?? null,
+    });
+  }
+  bundled.push(...transcriptQueries);
+  return bundled.slice(0, Math.max(1, maxQueries));
+}
+
 export function buildTickerSearchQueries(input: {
   ticker: string;
   companyName: string | null;
@@ -34,7 +54,7 @@ export function buildTickerSearchQueries(input: {
     if (family.key === "analyst_commentary") return input.settings.sourceFamilies.analystCommentary;
     return true;
   });
-  return filtered.slice(0, input.settings.maxTickerQueries).map((family) => ({
+  const rendered = filtered.map((family) => ({
     key: family.key,
     label: family.label,
     query: renderTemplate(family.queryTemplate, {
@@ -52,6 +72,7 @@ export function buildTickerSearchQueries(input: {
     limit: familyLimit(family.limit, input.settings),
     ticker: input.ticker,
   }));
+  return bundleTickerQueries(rendered, Math.min(input.settings.maxTickerQueries, 2));
 }
 
 export function buildMarketSearchQueries(input: {

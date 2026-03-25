@@ -40,7 +40,7 @@ describe("callAnthropicJson", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("retries when Anthropic returns malformed JSON before succeeding", async () => {
+  it("repairs malformed Anthropic JSON before succeeding", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         content: [
@@ -81,6 +81,6 @@ describe("callAnthropicJson", () => {
       summary: "Still constructive.",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(waitMock).toHaveBeenCalledTimes(1);
+    expect(waitMock).toHaveBeenCalledTimes(0);
   });
 });
