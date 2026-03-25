@@ -126,6 +126,7 @@ import {
   advanceResearchRun,
   cancelResearchRun,
   drainResearchRun,
+  ensureResearchRunProgress,
   startResearchRun,
 } from "./research/orchestrator";
 import {
@@ -2169,12 +2170,14 @@ app.get("/api/research/runs", async (c) => {
 });
 
 app.get("/api/research/runs/:id", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchRunStatusPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research run not found." }, 404);
   return c.json(payload);
 });
 
 app.get("/api/research/runs/:id/results", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research run not found." }, 404);
   return c.json(payload);
@@ -2182,6 +2185,7 @@ app.get("/api/research/runs/:id/results", async (c) => {
 
 app.get("/api/research/runs/:id/stream", async (c) => {
   const runId = c.req.param("id");
+  c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, runId));
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {

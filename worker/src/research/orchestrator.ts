@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { DEFAULT_RESEARCH_SLICE_TICKERS } from "./constants";
+import { DEFAULT_RESEARCH_SLICE_TICKERS, RESEARCH_HEARTBEAT_STALE_MS } from "./constants";
 import { searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
 import { extractResearchCard } from "./extraction";
 import { buildSnapshotComparison } from "./history";
@@ -479,6 +479,34 @@ export async function drainResearchRun(env: Env, runId: string, maxPasses = 24):
     await scheduler.wait(750);
   }
   return latest;
+}
+
+function parseHeartbeatMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export async function ensureResearchRunProgress(env: Env, runId: string): Promise<boolean> {
+  const run = await loadResearchRun(env, runId);
+  if (!run) return false;
+  if (run.status === "completed" || run.status === "partial" || run.status === "failed" || run.status === "cancelled") {
+    return false;
+  }
+
+  if (run.status === "queued") {
+    void drainResearchRun(env, runId);
+    return true;
+  }
+
+  const heartbeatMs = parseHeartbeatMs(run.heartbeatAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt);
+  const nowMs = Date.now();
+  if (heartbeatMs === null || nowMs - heartbeatMs >= RESEARCH_HEARTBEAT_STALE_MS) {
+    void drainResearchRun(env, runId);
+    return true;
+  }
+
+  return false;
 }
 
 export async function advanceResearchQueue(env: Env, limitRuns = 2): Promise<void> {
