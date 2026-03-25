@@ -33,6 +33,7 @@
 - For industry peers view, change to liteweight charts
 
 ## Peer Groups
+- Remove OTC names like ABBNY, ABLZF etc.
 - Put details at top of box for multi-chart view after clicking ticker
 - Put 'Next' button at bottom of page
 - Remove XYZ._ tickers
@@ -47,7 +48,8 @@
 
 ## Watchlist Compiler
 - Optimize search querying to use less requests/tokens
-- Make sure AI goes through specific categories (e.g. quality of earnings, earnings trend)
+- Make sure AI goes through specific categories (e.g. quality of earnings, earnings trend) for deep dive
+- Shift chart to the left, and analysis on the right. Can take up whole page but stil lbe a pop up
 
 ## Gappers
 - Remove ETFs, closed ended funds, and OTC tickers
