@@ -79,6 +79,7 @@ export async function rankResearchCards(env: Env, input: {
       }>;
     }>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
+      fallbackModels: [env.ANTHROPIC_HAIKU_MODEL?.trim() ?? ""],
       system: [
         input.prompt.templateText ?? "Rank swing-trading research cards.",
         "Return strict JSON only.",
@@ -97,7 +98,7 @@ export async function rankResearchCards(env: Env, input: {
           confidenceScore: card.confidenceScore,
         })),
       }),
-      maxTokens: 1800,
+      maxTokens: 1200,
     });
     const rawRankings = Array.isArray(response.data?.rankings)
       ? response.data.rankings
@@ -169,6 +170,7 @@ export async function deepDiveResearchCard(env: Env, input: {
   try {
     const response = await provider.callJson<ResearchDeepDive>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
+      fallbackModels: [env.ANTHROPIC_HAIKU_MODEL?.trim() ?? ""],
       system: [
         input.prompt.templateText ?? "Produce a concise deep-dive summary.",
         "Return strict JSON only.",
@@ -185,7 +187,7 @@ export async function deepDiveResearchCard(env: Env, input: {
         contradictions: input.card.contradictions,
         reasoningBullets: input.card.reasoningBullets,
       }),
-      maxTokens: 1400,
+      maxTokens: 1000,
     });
     const normalized: ResearchDeepDive = {
       summary: typeof response.data?.summary === "string" && response.data.summary.trim()
