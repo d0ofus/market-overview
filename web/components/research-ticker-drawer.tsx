@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import type {
   ResearchSnapshotCompareResponse,
@@ -8,6 +9,7 @@ import type {
   ResearchTickerResult,
 } from "@/lib/api";
 import { ResearchHistoryPanel } from "./research-history-panel";
+import { TradingViewWidget } from "./tradingview-widget";
 
 type Props = {
   open: boolean;
@@ -21,6 +23,22 @@ type Props = {
 };
 
 export function ResearchTickerDrawer({ open, result, detail, history, compare, baselineSnapshotId, onBaselineChange, onClose }: Props) {
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open || !result) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    modalRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, result, onClose]);
+
   if (!open || !result) return null;
   const thesis = detail?.snapshot?.thesisJson ?? null;
   const deepDive = thesis?.deepDive && typeof thesis.deepDive === "object" ? thesis.deepDive as Record<string, any> : null;
@@ -30,10 +48,25 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
     typeof modelOutput?.rankingModel === "string" ? `Rank ${modelOutput.rankingModel === "rules" ? "Rules fallback" : modelOutput.rankingModel}` : null,
     typeof modelOutput?.deepDiveModel === "string" ? `Deep Dive ${modelOutput.deepDiveModel === "rules" ? "Rules fallback" : modelOutput.deepDiveModel}` : null,
   ].filter((value): value is string => Boolean(value));
+  const hasRulesFallback = modelLabels.some((label) => label.includes("Rules fallback"));
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-slate-950/45 backdrop-blur-sm">
-      <div className="h-full w-full max-w-3xl overflow-auto border-l border-borderSoft bg-panel p-4 shadow-2xl">
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <div
+        ref={modalRef}
+        className="max-h-[90vh] w-full max-w-6xl overflow-auto rounded-2xl border border-borderSoft bg-panel p-4 shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${result.ticker} research report`}
+        tabIndex={-1}
+      >
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <div className="text-lg font-semibold text-accent">{result.ticker}</div>
@@ -59,7 +92,11 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.35fr),minmax(18rem,1fr)]">
+        <div className="mt-4">
+          <TradingViewWidget ticker={result.ticker} chartOnly showStatusLine initialRange="3M" fillContainer className="!p-2" />
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.45fr),minmax(20rem,0.95fr)]">
           <div className="space-y-4">
             <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thesis</div>
@@ -131,6 +168,11 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
                 ))}
                 {modelLabels.length === 0 ? <span className="text-xs text-slate-500">No model metadata stored for this snapshot.</span> : null}
               </div>
+              {hasRulesFallback ? (
+                <p className="mt-3 text-xs text-amber-200/90">
+                  <code>Rules fallback</code> means that stage fell back to the app&apos;s deterministic scoring and template logic instead of using the LLM response, usually because the model call timed out, failed, or returned unusable output.
+                </p>
+              ) : null}
             </div>
 
             <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">

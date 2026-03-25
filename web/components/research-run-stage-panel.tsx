@@ -64,6 +64,12 @@ function summarizeUsage(usage: Record<string, unknown> | null | undefined) {
     .slice(0, 6);
 }
 
+function readWarningList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
+}
+
 export function ResearchRunStagePanel({ status, results, compact = false, stopping = false, onStop }: Props) {
   if (!status) return null;
 
@@ -84,6 +90,10 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   const deepDiveEnabled = status.run.rankingMode === "rank_and_deep_dive" && status.run.deepDiveTopN > 0;
   const deepDiveCompleted = tickers.filter((row) => Boolean(row.workingJson?.deepDive)).length;
   const rankingAvailable = (results?.results?.length ?? 0) > 0;
+  const runWarnings = readWarningList(results?.warnings ?? status.run.provenanceJson?.warnings);
+  const extractionWarnings = tickers.flatMap((row) => readWarningList(row.workingJson?.warnings));
+  const rankingWarnings = runWarnings.filter((warning) => /ranking/i.test(warning));
+  const deepDiveWarnings = runWarnings.filter((warning) => /deep-dive/i.test(warning));
 
   const retrievalState: StageState = evidenceReady === 0
     ? retrieving > 0 ? "active" : "pending"
@@ -120,21 +130,21 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
       key: "extraction",
       label: "Extraction",
       description: `${extractedReady}/${requested} tickers standardized`,
-      detail: extractionModels[0] ?? "Anthropic Haiku or rules fallback",
+      detail: extractionWarnings[0] ?? extractionModels[0] ?? "Anthropic Haiku or rules fallback",
       state: extractionState,
     },
     {
       key: "ranking",
       label: "Ranking",
       description: rankingAvailable ? `${results?.results.length ?? 0} ranked result(s) ready` : `${rankingReady} ticker(s) waiting for ranking`,
-      detail: "Run-level synthesis and ordering",
+      detail: rankingWarnings[0] ?? "Run-level synthesis and ordering",
       state: rankingState,
     },
     {
       key: "deep-dive",
       label: "Deep Dive",
       description: !deepDiveEnabled ? "Disabled for this run" : `${deepDiveCompleted}/${status.run.deepDiveTopN} deep dives stored`,
-      detail: deepDiveEnabled ? "Top ranked tickers receive final synthesis" : "Switch ranking mode to enable",
+      detail: deepDiveEnabled ? (deepDiveWarnings[0] ?? "Top ranked tickers receive final synthesis") : "Switch ranking mode to enable",
       state: deepDiveState,
     },
   ];
@@ -201,6 +211,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               const warningCount = typeof row.stageMetricsJson?.warningCount === "number" ? row.stageMetricsJson.warningCount : null;
               const extractionModel = normalizeModelLabel(row.workingJson?.extractionModel);
               const hasDeepDive = Boolean(row.workingJson?.deepDive);
+              const rowWarnings = readWarningList(row.workingJson?.warnings);
               return (
                 <div key={row.id} className="rounded-lg border border-borderSoft/50 bg-panelSoft/40 px-3 py-2">
                   <div className="flex items-start justify-between gap-3">
@@ -236,6 +247,16 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                   {row.lastError ? (
                     <div className="mt-2 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-2 text-xs text-red-100">
                       {row.lastError}
+                    </div>
+                  ) : null}
+                  {rowWarnings.length > 0 ? (
+                    <div className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-2">
+                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-200">LLM / Fallback Logs</div>
+                      <div className="space-y-1 text-xs text-amber-100/90">
+                        {rowWarnings.map((warning) => (
+                          <div key={warning}>{warning}</div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                 </div>
@@ -281,6 +302,20 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               ))}
               {usageRows.length === 0 ? (
                 <p className="text-sm text-slate-400">No provider usage has been recorded yet for this run.</p>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-borderSoft/60 bg-panel px-3 py-3">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">LLM / Fallback Logs</div>
+            <div className="space-y-2">
+              {runWarnings.map((warning) => (
+                <div key={warning} className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-100/90">
+                  {warning}
+                </div>
+              ))}
+              {runWarnings.length === 0 ? (
+                <p className="text-sm text-slate-400">No run-level LLM warnings have been recorded yet.</p>
               ) : null}
             </div>
           </div>
