@@ -73,6 +73,7 @@ async function collectTickerEvidence(env: Env, input: {
   secCik: string | null;
   irDomain: string | null;
   profile: Awaited<ReturnType<typeof resolveResearchProfile>>;
+  touchHeartbeat?: () => Promise<void>;
 }): Promise<{ evidence: ResearchEvidenceRecord[]; usage: Record<string, unknown> | null; warnings: string[] }> {
   const secProvider = getSecResearchProvider(env);
   const searchProvider = getSearchResearchProvider(env);
@@ -81,6 +82,7 @@ async function collectTickerEvidence(env: Env, input: {
   const warnings: string[] = [];
 
   if (input.profile.version.settings.sourceFamilies.sec && input.secCik) {
+    await input.touchHeartbeat?.();
     const [filings, facts] = await Promise.all([
       secProvider.fetchRecentFilings(input.secCik, env).catch(() => []),
       secProvider.fetchStructuredFacts(input.secCik, env).catch(() => []),
@@ -107,6 +109,7 @@ async function collectTickerEvidence(env: Env, input: {
   });
   for (const query of queries) {
     try {
+      await input.touchHeartbeat?.();
       const freshDate = startOfCurrentUtcDayIso();
       const result = await searchProvider.search(env, query, { forceFresh: input.run.refreshMode === "force_fresh" });
       usage = sumUsage(usage, result.usage);
@@ -131,6 +134,7 @@ async function collectMarketEvidence(env: Env, input: {
   run: ResearchRunRecord;
   runTickers: ResearchRunTickerRecord[];
   profile: Awaited<ReturnType<typeof resolveResearchProfile>>;
+  touchHeartbeat?: () => Promise<void>;
 }): Promise<{ evidence: ResearchEvidenceRecord[]; usage: Record<string, unknown> | null }> {
   const searchProvider = getSearchResearchProvider(env);
   const queries = buildMarketSearchQueries({
@@ -141,6 +145,7 @@ async function collectMarketEvidence(env: Env, input: {
   let usage: Record<string, unknown> | null = null;
   for (const query of queries) {
     try {
+      await input.touchHeartbeat?.();
       const result = await searchProvider.search(env, query, { forceFresh: input.run.refreshMode === "force_fresh" });
       usage = sumUsage(usage, result.usage);
       const searchEvidence = searchItemsToEvidence(result.items);
@@ -161,6 +166,9 @@ async function collectMarketEvidence(env: Env, input: {
 async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker: ResearchRunTickerRecord): Promise<{ usage: Record<string, unknown> | null; warnings: string[] }> {
   const profile = await resolveResearchProfile(env, run.profileId);
   const normalized = await normalizeResearchTicker(env, runTicker.ticker);
+  const touchHeartbeat = async () => {
+    await updateResearchRunHeartbeat(env, run.id);
+  };
   await updateResearchRunTicker(env, runTicker.id, {
     status: "retrieving",
     attemptCount: runTicker.attemptCount + 1,
@@ -179,7 +187,9 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     secCik: normalized.secCik,
     irDomain: normalized.irDomain,
     profile,
+    touchHeartbeat,
   });
+  await touchHeartbeat();
   await updateResearchRunTicker(env, runTicker.id, {
     status: "extracting",
     stageMetricsJson: {
@@ -228,7 +238,14 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     });
     return;
   }
-  const marketEvidence = await collectMarketEvidence(env, { run, runTickers: ready, profile });
+  const marketEvidence = await collectMarketEvidence(env, {
+    run,
+    runTickers: ready,
+    profile,
+    touchHeartbeat: async () => {
+      await updateResearchRunHeartbeat(env, run.id);
+    },
+  });
   const runWarnings: string[] = [];
   const cards = ready.map((row) => row.workingJson?.card as StandardizedResearchCard);
   const rankingResponse = await rankResearchCards(env, {
@@ -487,26 +504,24 @@ function parseHeartbeatMs(value: string | null | undefined): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-export async function ensureResearchRunProgress(env: Env, runId: string): Promise<boolean> {
+export async function ensureResearchRunProgress(env: Env, runId: string): Promise<ResearchRunRecord | null> {
   const run = await loadResearchRun(env, runId);
-  if (!run) return false;
+  if (!run) return null;
   if (run.status === "completed" || run.status === "partial" || run.status === "failed" || run.status === "cancelled") {
-    return false;
+    return run;
   }
 
   if (run.status === "queued") {
-    void drainResearchRun(env, runId);
-    return true;
+    return drainResearchRun(env, runId);
   }
 
   const heartbeatMs = parseHeartbeatMs(run.heartbeatAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt);
   const nowMs = Date.now();
   if (heartbeatMs === null || nowMs - heartbeatMs >= RESEARCH_HEARTBEAT_STALE_MS) {
-    void drainResearchRun(env, runId);
-    return true;
+    return drainResearchRun(env, runId);
   }
 
-  return false;
+  return run;
 }
 
 export async function advanceResearchQueue(env: Env, limitRuns = 2): Promise<void> {
