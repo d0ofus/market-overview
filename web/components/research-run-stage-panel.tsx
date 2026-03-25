@@ -237,6 +237,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               const rowWarnings = readWarningList(row.workingJson?.warnings);
               const rowActivity = readActivityList(row.stageMetricsJson?.activity).slice().reverse().slice(0, 4);
               const currentStep = typeof row.stageMetricsJson?.currentStep === "string" ? row.stageMetricsJson.currentStep : null;
+              const maxAttempts = typeof row.stageMetricsJson?.maxAttempts === "number" ? row.stageMetricsJson.maxAttempts : null;
               return (
                 <div key={row.id} className="rounded-lg border border-borderSoft/50 bg-panelSoft/40 px-3 py-2">
                   <div className="flex items-start justify-between gap-3">
@@ -255,7 +256,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                     <span className={`rounded-full border px-2 py-1 ${badgeTone("neutral")}`}>
-                      Attempt {row.attemptCount}
+                      {row.attemptCount > 1 ? "Retry" : "Attempt"} {row.attemptCount}{maxAttempts ? `/${maxAttempts}` : ""}
                     </span>
                     {evidenceCount !== null ? (
                       <span className={`rounded-full border px-2 py-1 ${badgeTone("neutral")}`}>{evidenceCount} evidence</span>

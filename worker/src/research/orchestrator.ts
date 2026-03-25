@@ -897,6 +897,15 @@ export async function ensureResearchRunProgress(env: Env, runId: string): Promis
     return drainResearchRun(env, runId);
   }
 
+  const counts = await countRunTickerStatuses(env, runId);
+  const idleButRunnable = counts.inProgress === 0 && (
+    counts.queued > 0
+    || (counts.rankingReady > 0 && (await loadRunRankings(env, runId)).length === 0)
+  );
+  if (idleButRunnable) {
+    return drainResearchRun(env, runId, Math.max(24, Math.ceil(RESEARCH_HEARTBEAT_STALE_MS / 750) + 8));
+  }
+
   const heartbeatMs = parseHeartbeatMs(run.heartbeatAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt);
   const nowMs = Date.now();
   if (heartbeatMs === null || nowMs - heartbeatMs >= RESEARCH_HEARTBEAT_STALE_MS) {
