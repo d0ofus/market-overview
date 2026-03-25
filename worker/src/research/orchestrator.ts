@@ -895,28 +895,26 @@ async function runWithHeartbeat<T>(input: {
   heartbeatEveryMs?: number;
   onHeartbeat?: (elapsedMs: number, beatCount: number) => Promise<void>;
 }): Promise<T> {
-  const heartbeatEveryMs = Math.max(10_000, input.heartbeatEveryMs ?? 20_000);
+  const heartbeatEveryMs = Math.max(10_000, input.heartbeatEveryMs ?? 15_000);
   const startedAt = Date.now();
   let beatCount = 0;
-  let active = true;
-  let inFlightBeat: Promise<void> | null = null;
-  const timer = setInterval(() => {
-    if (!active) return;
+  const workPromise = input.work();
+  await input.touchHeartbeat();
+  while (true) {
+    const raced = await Promise.race([
+      workPromise.then((value) => ({ done: true as const, value })),
+      scheduler.wait(heartbeatEveryMs).then(() => ({ done: false as const })),
+    ]);
+    if (raced.done) {
+      return raced.value;
+    }
     beatCount += 1;
-    inFlightBeat = (async () => {
+    try {
       await input.touchHeartbeat();
       await input.onHeartbeat?.(Date.now() - startedAt, beatCount);
-    })().catch(() => {
+    } catch {
       // Best-effort keepalive; terminal failures surface through the wrapped work.
-    });
-  }, heartbeatEveryMs);
-  try {
-    await input.touchHeartbeat();
-    return await input.work();
-  } finally {
-    active = false;
-    clearInterval(timer);
-    await inFlightBeat?.catch(() => undefined);
+    }
   }
 }
 

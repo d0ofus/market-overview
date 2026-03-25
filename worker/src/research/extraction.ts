@@ -115,7 +115,11 @@ export async function extractResearchCard(env: Env, input: {
     return { card, usage: null, model: card.model, warning: "Anthropic extraction skipped because ANTHROPIC_API_KEY is not configured." };
   }
   const modelProvider = getModelResearchProvider(env);
-  const evidence = summarizeEvidence(input.evidence, 14);
+  const evidence = summarizeEvidence(input.evidence, 10).map((item) => ({
+    ...item,
+    title: item.title.slice(0, 160),
+    summary: item.summary.slice(0, 280),
+  }));
   try {
     const response = await modelProvider.callJson<StandardizedResearchCard>(env, {
       model: env.ANTHROPIC_HAIKU_MODEL?.trim() || input.prompt.modelFamily,
@@ -124,6 +128,7 @@ export async function extractResearchCard(env: Env, input: {
         "Return strict JSON only.",
         "Ground every claim in the supplied evidence. Do not invent facts.",
         "Use concise prose.",
+        "Keep arrays short and cap reasoning bullets at 3 items.",
       ].join(" "),
       user: JSON.stringify({
         ticker: input.ticker,
@@ -150,7 +155,7 @@ export async function extractResearchCard(env: Env, input: {
           reasoningBullets: ["string"],
         },
       }),
-      maxTokens: 2200,
+      maxTokens: 1400,
     });
     const card = {
       ...fallbackExtractResearchCard(input),
