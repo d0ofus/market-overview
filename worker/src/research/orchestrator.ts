@@ -424,11 +424,25 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     logMessage: `Submitting ${collected.evidence.length} evidence item(s) to the extraction model.`,
     touchRunHeartbeat: true,
   });
-  const extracted = await extractResearchCard(env, {
-    ticker: runTicker.ticker,
-    companyName: normalized.companyName,
-    evidence: collected.evidence,
-    prompt: profile.bundle.haiku,
+  const extracted = await runWithHeartbeat({
+    touchHeartbeat,
+    onHeartbeat: async (elapsedMs) => {
+      await persistTickerProgress({
+        metricsPatch: {
+          currentStage: "extracting",
+          currentStep: `Waiting on extraction model (${formatElapsedLabel(elapsedMs)})`,
+          extractionElapsedMs: elapsedMs,
+        },
+        logMessage: `Still waiting on extraction model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+        touchRunHeartbeat: false,
+      });
+    },
+    work: () => extractResearchCard(env, {
+      ticker: runTicker.ticker,
+      companyName: normalized.companyName,
+      evidence: collected.evidence,
+      prompt: profile.bundle.haiku,
+    }),
   });
   const warnings = extracted.warning ? [...collected.warnings, extracted.warning] : collected.warnings;
   await persistTickerProgress({
@@ -496,12 +510,23 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     message: `Ranking ${cards.length} ready ticker(s).`,
     currentStep: "Ranking ready tickers",
   });
-  const rankingResponse = await rankResearchCards(env, {
-    cards,
-    prompt: profile.bundle.sonnetRank,
-    rubric: profile.bundle.rubric.rubricJson,
-    settings: profile.version.settings,
-    deepDiveTopN: run.deepDiveTopN,
+  const rankingResponse = await runWithHeartbeat({
+    touchHeartbeat: async () => {
+      await updateResearchRunHeartbeat(env, run.id);
+    },
+    onHeartbeat: async (elapsedMs) => {
+      await persistRunActivity(env, runState, {
+        message: `Still waiting on ranking model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+        currentStep: `Ranking ready tickers (${formatElapsedLabel(elapsedMs)} elapsed)`,
+      });
+    },
+    work: () => rankResearchCards(env, {
+      cards,
+      prompt: profile.bundle.sonnetRank,
+      rubric: profile.bundle.rubric.rubricJson,
+      settings: profile.version.settings,
+      deepDiveTopN: run.deepDiveTopN,
+    }),
   });
   if (rankingResponse.warning) runWarnings.push(`Ranking fallback used: ${rankingResponse.warning}`);
   let aggregateUsage = sumUsage(run.providerUsageJson, sumUsage(marketEvidence.usage, rankingResponse.usage));
@@ -548,7 +573,25 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     });
     await updateResearchRunHeartbeat(env, run.id);
     const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-      ? await deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null)
+      ? await runWithHeartbeat({
+        touchHeartbeat: async () => {
+          await touchResearchHeartbeat(env, run.id, row.id);
+        },
+        onHeartbeat: async (elapsedMs) => {
+          rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+            currentStage: "deep_dive",
+            currentStep: `Waiting on deep-dive model (${formatElapsedLabel(elapsedMs)})`,
+            deepDiveElapsedMs: elapsedMs,
+          }), {
+            message: `Still waiting on deep-dive model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+          });
+          await updateResearchRunTicker(env, row.id, {
+            status: "deep_dive",
+            stageMetricsJson: rowStageMetrics,
+          });
+        },
+        work: async () => deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null),
+      })
       : null;
     if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
     aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
@@ -836,6 +879,45 @@ function parseHeartbeatMs(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = new Date(value).getTime();
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function formatElapsedLabel(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+async function runWithHeartbeat<T>(input: {
+  work: () => Promise<T>;
+  touchHeartbeat: () => Promise<void>;
+  heartbeatEveryMs?: number;
+  onHeartbeat?: (elapsedMs: number, beatCount: number) => Promise<void>;
+}): Promise<T> {
+  const heartbeatEveryMs = Math.max(10_000, input.heartbeatEveryMs ?? 20_000);
+  const startedAt = Date.now();
+  let beatCount = 0;
+  let active = true;
+  let inFlightBeat: Promise<void> | null = null;
+  const timer = setInterval(() => {
+    if (!active) return;
+    beatCount += 1;
+    inFlightBeat = (async () => {
+      await input.touchHeartbeat();
+      await input.onHeartbeat?.(Date.now() - startedAt, beatCount);
+    })().catch(() => {
+      // Best-effort keepalive; terminal failures surface through the wrapped work.
+    });
+  }, heartbeatEveryMs);
+  try {
+    await input.touchHeartbeat();
+    return await input.work();
+  } finally {
+    active = false;
+    clearInterval(timer);
+    await inFlightBeat?.catch(() => undefined);
+  }
 }
 
 async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<Array<{ level: ResearchActivityLevel; message: string }>> {
