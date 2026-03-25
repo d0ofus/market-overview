@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { fetchWithTimeout } from "./http";
 
 const COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
 
@@ -83,7 +84,7 @@ function toPaddedCik(value: string | number): string {
 async function loadCompanyTickerMap(env: Env): Promise<Map<string, SecResolvedIssuer>> {
   const now = Date.now();
   if (companyTickerCache && companyTickerCache.expiresAt > now) return companyTickerCache.byTicker;
-  const res = await fetch(COMPANY_TICKERS_URL, { headers: secHeaders(env) });
+  const res = await fetchWithTimeout(COMPANY_TICKERS_URL, { headers: secHeaders(env) }, 12_000, "SEC company ticker map");
   if (!res.ok) throw new Error(`SEC company tickers request failed (${res.status}).`);
   const json = await res.json() as Record<string, CompanyTickerEntry>;
   const byTicker = new Map<string, SecResolvedIssuer>();
@@ -108,7 +109,7 @@ export async function resolveIssuer(ticker: string, env: Env): Promise<SecResolv
 
 export async function fetchRecentFilings(cik: string, env: Env, limit = 6): Promise<SecFilingItem[]> {
   const url = `https://data.sec.gov/submissions/CIK${toPaddedCik(cik)}.json`;
-  const res = await fetch(url, { headers: secHeaders(env) });
+  const res = await fetchWithTimeout(url, { headers: secHeaders(env) }, 12_000, `SEC submissions for ${toPaddedCik(cik)}`);
   if (!res.ok) throw new Error(`SEC submissions request failed (${res.status}).`);
   const json = await res.json() as { filings?: { recent?: SecRecentFilings } };
   const recent = json.filings?.recent;
@@ -163,7 +164,7 @@ function selectLatestFactEntries(
 
 export async function fetchStructuredFacts(cik: string, env: Env): Promise<SecStructuredFact[]> {
   const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${toPaddedCik(cik)}.json`;
-  const res = await fetch(url, { headers: secHeaders(env) });
+  const res = await fetchWithTimeout(url, { headers: secHeaders(env) }, 12_000, `SEC company facts for ${toPaddedCik(cik)}`);
   if (!res.ok) {
     if (res.status === 404) return [];
     throw new Error(`SEC company facts request failed (${res.status}).`);

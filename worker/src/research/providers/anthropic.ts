@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { fetchWithTimeout } from "./http";
 
 export type AnthropicJsonResponse<T> = {
   data: T;
@@ -31,7 +32,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
 }): Promise<AnthropicJsonResponse<T>> {
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) throw new Error("Anthropic API key is not configured.");
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -50,7 +51,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
         },
       ],
     }),
-  });
+  }, 25_000, `Anthropic request for ${input.model}`);
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Anthropic request failed (${res.status}): ${detail.slice(0, 180)}`);

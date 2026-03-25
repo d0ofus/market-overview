@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { fetchWithTimeout } from "./http";
 
 export type PerplexitySearchQuery = {
   key: string;
@@ -87,14 +88,14 @@ export async function searchPerplexity(
       },
     ],
   };
-  const res = await fetch("https://api.perplexity.ai/chat/completions", {
+  const res = await fetchWithTimeout("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
-  });
+  }, 20_000, `Perplexity search for ${query.ticker ?? query.key}`);
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Perplexity search failed (${res.status}): ${detail.slice(0, 180)}`);
