@@ -10,7 +10,7 @@ type Props = {
   onStop?: () => void;
 };
 
-type StageState = "pending" | "active" | "completed" | "disabled";
+type StageState = "pending" | "active" | "completed" | "disabled" | "error";
 
 function formatTime(value: string | null | undefined) {
   if (!value) return "-";
@@ -38,6 +38,7 @@ function fmtValue(value: unknown): string {
 function stageTone(state: StageState) {
   if (state === "completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-100";
   if (state === "active") return "border-accent/40 bg-accent/10 text-slate-100";
+  if (state === "error") return "border-red-500/30 bg-red-500/10 text-red-100";
   if (state === "disabled") return "border-borderSoft/50 bg-panelSoft/30 text-slate-500";
   return "border-borderSoft/60 bg-panelSoft/40 text-slate-300";
 }
@@ -92,6 +93,10 @@ function activityTone(level: string) {
   return "border-borderSoft/50 bg-panelSoft/35 text-slate-200";
 }
 
+function formatTickerStatus(status: string) {
+  return status.replace(/_/g, " ");
+}
+
 export function ResearchRunStagePanel({ status, results, compact = false, stopping = false, onStop }: Props) {
   if (!status) return null;
 
@@ -102,8 +107,10 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   const retrieving = tickers.filter((row) => row.status === "retrieving").length;
   const extracting = tickers.filter((row) => row.status === "extracting").length;
   const rankingReady = tickers.filter((row) => row.status === "ranking_ready").length;
+  const deepDiving = tickers.filter((row) => row.status === "deep_dive").length;
   const evidenceReady = tickers.filter((row) => typeof row.stageMetricsJson?.evidenceCount === "number" || row.status !== "queued").length;
   const extractedReady = tickers.filter((row) => Boolean(row.workingJson?.card)).length;
+  const rankableTickers = tickers.filter((row) => row.status !== "failed" && Boolean(row.workingJson?.card)).length;
   const extractionModels = Array.from(new Set(
     tickers
       .map((row) => normalizeModelLabel(row.workingJson?.extractionModel))
@@ -111,12 +118,20 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   ));
   const deepDiveEnabled = status.run.rankingMode === "rank_and_deep_dive" && status.run.deepDiveTopN > 0;
   const deepDiveCompleted = tickers.filter((row) => Boolean(row.workingJson?.deepDive)).length;
-  const rankingAvailable = (results?.results?.length ?? 0) > 0;
+  const rankingCount = results?.results?.length ?? 0;
+  const rankingAvailable = rankingCount > 0;
   const runWarnings = readWarningList(results?.warnings ?? status.run.provenanceJson?.warnings);
   const runActivity = readActivityList(status.run.provenanceJson?.activity).slice().reverse().slice(0, 8);
   const extractionWarnings = tickers.flatMap((row) => readWarningList(row.workingJson?.warnings));
   const rankingWarnings = runWarnings.filter((warning) => /ranking/i.test(warning));
   const deepDiveWarnings = runWarnings.filter((warning) => /deep-dive/i.test(warning));
+  const isTerminal = ["completed", "partial", "failed", "cancelled"].includes(status.run.status);
+  const lastUpdated = status.run.heartbeatAt ?? status.run.updatedAt ?? status.run.createdAt;
+  const lastUpdatedMs = lastUpdated ? new Date(lastUpdated).getTime() : Number.NaN;
+  const isStalled = !isTerminal && Number.isFinite(lastUpdatedMs) && (Date.now() - lastUpdatedMs) > 180_000;
+  const isLive = !isTerminal && !isStalled;
+  const expectedRankingCount = Math.max(0, rankableTickers);
+  const expectedDeepDiveCount = deepDiveEnabled ? Math.min(status.run.deepDiveTopN, expectedRankingCount) : 0;
 
   const retrievalState: StageState = evidenceReady === 0
     ? retrieving > 0 ? "active" : "pending"
@@ -124,22 +139,24 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   const extractionState: StageState = extractedReady === 0
     ? extracting > 0 ? "active" : "pending"
     : extractedReady >= requested - failed ? "completed" : "active";
-  const rankingState: StageState = rankingAvailable
+  const rankingState: StageState = expectedRankingCount > 0 && rankingCount >= expectedRankingCount
     ? "completed"
-    : rankingReady > 0 || status.run.status === "running"
+    : rankingReady > 0 || deepDiving > 0 || isLive
       ? "active"
-      : "pending";
+      : (isTerminal || isStalled) && expectedRankingCount > rankingCount
+        ? "error"
+        : "pending";
   const deepDiveState: StageState = !deepDiveEnabled
     ? "disabled"
-    : deepDiveCompleted > 0 && deepDiveCompleted >= Math.min(status.run.deepDiveTopN, completed || requested)
+    : expectedDeepDiveCount > 0 && deepDiveCompleted >= expectedDeepDiveCount
       ? "completed"
-      : rankingAvailable || status.run.status === "running"
+      : deepDiving > 0 || isLive
         ? "active"
-        : "pending";
+        : (isTerminal || isStalled) && expectedDeepDiveCount > deepDiveCompleted
+          ? "error"
+          : "pending";
 
   const usageRows = summarizeUsage(results?.providerUsage ?? status.run.providerUsageJson);
-  const lastUpdated = status.run.heartbeatAt ?? status.run.updatedAt ?? status.run.createdAt;
-  const isLive = status.run.status === "queued" || status.run.status === "running";
 
   const stages = [
     {
@@ -159,15 +176,15 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
     {
       key: "ranking",
       label: "Ranking",
-      description: rankingAvailable ? `${results?.results.length ?? 0} ranked result(s) ready` : `${rankingReady} ticker(s) waiting for ranking`,
-      detail: rankingWarnings[0] ?? "Run-level synthesis and ordering",
+      description: `${rankingCount}/${expectedRankingCount} ranked result(s) stored`,
+      detail: rankingWarnings[0] ?? (rankingState === "error" ? "Some extracted tickers never reached a persisted ranking result." : "Run-level synthesis and ordering"),
       state: rankingState,
     },
     {
       key: "deep-dive",
       label: "Deep Dive",
-      description: !deepDiveEnabled ? "Disabled for this run" : `${deepDiveCompleted}/${status.run.deepDiveTopN} deep dives stored`,
-      detail: deepDiveEnabled ? (deepDiveWarnings[0] ?? "Top ranked tickers receive final synthesis") : "Switch ranking mode to enable",
+      description: !deepDiveEnabled ? "Disabled for this run" : `${deepDiveCompleted}/${expectedDeepDiveCount} deep dives stored`,
+      detail: deepDiveEnabled ? (deepDiveWarnings[0] ?? (deepDiveState === "error" ? "Some ranked tickers never finished deep-dive persistence." : "Top ranked tickers receive final synthesis")) : "Switch ranking mode to enable",
       state: deepDiveState,
     },
   ];
@@ -178,7 +195,11 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Run Stages</div>
           <p className="mt-1 text-sm text-slate-300">
-            {isLive ? "This panel updates automatically while the run is in progress." : "Most recent run-stage summary."}
+            {isStalled
+              ? "This run has not reported progress recently and may be stalled."
+              : isLive
+                ? "This panel updates automatically while the run is in progress."
+                : "Most recent run-stage summary."}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -192,8 +213,8 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
               {stopping ? "Stopping..." : "Stop Run"}
             </button>
           ) : null}
-          <span className={`rounded-full border px-2 py-1 font-semibold ${badgeTone(isLive ? "live" : "neutral")}`}>
-            {isLive ? "Live" : status.run.status}
+          <span className={`rounded-full border px-2 py-1 font-semibold ${badgeTone(isStalled ? "error" : isLive ? "live" : "neutral")}`}>
+            {isStalled ? "Stalled" : isLive ? "Live" : status.run.status}
           </span>
           <span className={`rounded-full border px-2 py-1 ${badgeTone("neutral")}`}>
             {completed}/{requested} complete
@@ -222,12 +243,22 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
 
       <div className={`mt-4 grid gap-3 ${compact ? "xl:grid-cols-[minmax(0,1.2fr),minmax(16rem,0.8fr)]" : "xl:grid-cols-[minmax(0,1.4fr),minmax(18rem,1fr)]"}`}>
         <div className="rounded-xl border border-borderSoft/60 bg-panel px-3 py-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Live Ticker Status</div>
-            <div className="text-[11px] text-slate-500">
-              {extracting > 0 ? `${extracting} extracting` : retrieving > 0 ? `${retrieving} retrieving` : rankingReady > 0 ? `${rankingReady} awaiting ranking` : "No active ticker stage"}
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Live Ticker Status</div>
+              <div className="text-[11px] text-slate-500">
+                {deepDiving > 0
+                  ? `${deepDiving} generating deep dive`
+                  : extracting > 0
+                    ? `${extracting} extracting`
+                    : retrieving > 0
+                      ? `${retrieving} retrieving`
+                      : rankingReady > 0
+                        ? `${rankingReady} awaiting finalization`
+                        : isStalled
+                          ? "Run appears stalled"
+                          : "No active ticker stage"}
+              </div>
             </div>
-          </div>
           <div className="space-y-2">
             {tickers.map((row) => {
               const evidenceCount = typeof row.stageMetricsJson?.evidenceCount === "number" ? row.stageMetricsJson.evidenceCount : null;
@@ -248,10 +279,10 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
                     <div className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase ${badgeTone(
                       row.status === "failed" ? "error"
                         : row.status === "completed" ? "success"
-                          : row.status === "extracting" || row.status === "retrieving" || row.status === "ranking_ready" ? "live"
+                          : row.status === "extracting" || row.status === "retrieving" || row.status === "ranking_ready" || row.status === "deep_dive" ? "live"
                             : "neutral",
                     )}`}>
-                      {row.status}
+                      {formatTickerStatus(row.status)}
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px]">

@@ -135,7 +135,7 @@ export async function rankResearchCards(env: Env, input: {
         ...fallback,
         usage: response.usage,
         model: response.model,
-        warning: "Anthropic ranking returned no usable rankings array.",
+        warning: `Anthropic ranking returned no usable rankings array; deterministic fallback ranked all ${input.cards.length} ticker(s).`,
       };
     }
     const rankingMap = new Map(rawRankings.map((ranking) => [ranking.ticker, ranking]));

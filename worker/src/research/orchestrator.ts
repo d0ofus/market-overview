@@ -547,160 +547,189 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
       currentStep: "Persisting ranked output",
       rankingModel: rankingResponse.model,
     });
-    const factorCards = rankingResponse.factorCardsByTicker.get(row.ticker) ?? computeFactorCards(card, profile.bundle.rubric.rubricJson);
-    const ranking = rankingByTicker.get(row.ticker) ?? {
-      ticker: row.ticker,
-      rank: 999,
-      attentionScore: computeAttentionScore(factorCards),
-      priorityBucket: derivePriorityBucket(computeAttentionScore(factorCards)),
-      rankRationale: card.summary,
-      scoreDeltaVsPrevious: null,
-      deepDiveRequested: false,
-    };
-    rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
-      currentStep: ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-        ? "Generating deep dive"
-        : "Persisting ranked snapshot",
-      attentionRank: ranking.rank,
-      attentionScore: ranking.attentionScore,
-    }), {
-      message: ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-        ? `Selected for deep dive generation at rank ${ranking.rank}.`
-        : `Persisting ranked output at rank ${ranking.rank}.`,
-    });
-    await updateResearchRunTicker(env, row.id, {
-      stageMetricsJson: rowStageMetrics,
-    });
-    await updateResearchRunHeartbeat(env, run.id);
-    const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-      ? await runWithHeartbeat({
-        touchHeartbeat: async () => {
-          await touchResearchHeartbeat(env, run.id, row.id);
+    try {
+      const factorCards = rankingResponse.factorCardsByTicker.get(row.ticker) ?? computeFactorCards(card, profile.bundle.rubric.rubricJson);
+      const ranking = rankingByTicker.get(row.ticker) ?? {
+        ticker: row.ticker,
+        rank: 999,
+        attentionScore: computeAttentionScore(factorCards),
+        priorityBucket: derivePriorityBucket(computeAttentionScore(factorCards)),
+        rankRationale: card.summary,
+        scoreDeltaVsPrevious: null,
+        deepDiveRequested: false,
+      };
+      rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+        currentStep: ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
+          ? "Generating deep dive"
+          : "Persisting ranked snapshot",
+        attentionRank: ranking.rank,
+        attentionScore: ranking.attentionScore,
+      }), {
+        message: ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
+          ? `Selected for deep dive generation at rank ${ranking.rank}.`
+          : `Persisting ranked output at rank ${ranking.rank}.`,
+      });
+      await updateResearchRunTicker(env, row.id, {
+        status: ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive" ? "deep_dive" : "ranking_ready",
+        stageMetricsJson: rowStageMetrics,
+      });
+      await updateResearchRunHeartbeat(env, run.id);
+      const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
+        ? await runWithHeartbeat({
+          touchHeartbeat: async () => {
+            await touchResearchHeartbeat(env, run.id, row.id);
+          },
+          onHeartbeat: async (elapsedMs) => {
+            rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+              currentStage: "deep_dive",
+              currentStep: `Waiting on deep-dive model (${formatElapsedLabel(elapsedMs)})`,
+              deepDiveElapsedMs: elapsedMs,
+            }), {
+              message: `Still waiting on deep-dive model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+            });
+            await updateResearchRunTicker(env, row.id, {
+              status: "deep_dive",
+              stageMetricsJson: rowStageMetrics,
+            });
+          },
+          work: async () => deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null),
+        })
+        : null;
+      if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
+      aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
+      runState.providerUsageJson = aggregateUsage;
+      const snapshot = await insertResearchSnapshot(env, {
+        runId: run.id,
+        runTickerId: row.id,
+        ticker: row.ticker,
+        profileId: run.profileId,
+        profileVersionId: run.profileVersionId,
+        previousSnapshotId: row.previousSnapshotId,
+        overallScore: ranking.attentionScore,
+        attentionRank: ranking.rank,
+        confidenceLabel: card.confidenceLabel,
+        confidenceScore: card.confidenceScore,
+        valuationLabel: card.valuation.label,
+        earningsQualityLabel: card.earningsQuality.label,
+        catalystFreshnessLabel: card.catalystFreshnessLabel,
+        riskLabel: card.riskLabel,
+        contradictionFlag: card.contradictions.length > 0,
+        thesisJson: {
+          companyName: row.companyName,
+          summary: card.summary,
+          valuation: card.valuation,
+          earningsQuality: card.earningsQuality,
+          catalysts: card.catalysts,
+          risks: card.risks,
+          contradictions: card.contradictions,
+          reasoningBullets: card.reasoningBullets,
+          deepDive: deepDive?.deepDive ?? null,
         },
-        onHeartbeat: async (elapsedMs) => {
-          rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
-            currentStage: "deep_dive",
-            currentStep: `Waiting on deep-dive model (${formatElapsedLabel(elapsedMs)})`,
-            deepDiveElapsedMs: elapsedMs,
-          }), {
-            message: `Still waiting on deep-dive model (${formatElapsedLabel(elapsedMs)} elapsed).`,
-          });
-          await updateResearchRunTicker(env, row.id, {
-            status: "deep_dive",
-            stageMetricsJson: rowStageMetrics,
-          });
+        citationJson: {
+          evidenceIds: card.topEvidenceIds,
         },
-        work: async () => deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null),
-      })
-      : null;
-    if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
-    aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
-    runState.providerUsageJson = aggregateUsage;
-    const snapshot = await insertResearchSnapshot(env, {
-      runId: run.id,
-      runTickerId: row.id,
-      ticker: row.ticker,
-      profileId: run.profileId,
-      profileVersionId: run.profileVersionId,
-      previousSnapshotId: row.previousSnapshotId,
-      overallScore: ranking.attentionScore,
-      attentionRank: ranking.rank,
-      confidenceLabel: card.confidenceLabel,
-      confidenceScore: card.confidenceScore,
-      valuationLabel: card.valuation.label,
-      earningsQualityLabel: card.earningsQuality.label,
-      catalystFreshnessLabel: card.catalystFreshnessLabel,
-      riskLabel: card.riskLabel,
-      contradictionFlag: card.contradictions.length > 0,
-      thesisJson: {
-        companyName: row.companyName,
-        summary: card.summary,
-        valuation: card.valuation,
-        earningsQuality: card.earningsQuality,
-        catalysts: card.catalysts,
-        risks: card.risks,
-        contradictions: card.contradictions,
-        reasoningBullets: card.reasoningBullets,
-        deepDive: deepDive?.deepDive ?? null,
-      },
-      citationJson: {
-        evidenceIds: card.topEvidenceIds,
-      },
-      modelOutputJson: {
-        extractionModel: card.model,
-        rankingModel: rankingResponse.model,
-        deepDiveModel: deepDive?.model ?? null,
-      },
-    });
-    const previousSnapshot = row.previousSnapshotId ? await loadResearchSnapshot(env, row.previousSnapshotId) : null;
-    const comparison = buildSnapshotComparison({
-      currentSnapshot: snapshot,
-      currentCard: card,
-      previousSnapshot,
-    });
-    await env.DB.prepare(
-      "UPDATE research_snapshots SET change_json = ? WHERE id = ?",
-    ).bind(JSON.stringify(comparison), snapshot.id).run();
-    for (const factor of factorCards) {
-      await insertResearchFactor(env, {
+        modelOutputJson: {
+          extractionModel: card.model,
+          rankingModel: rankingResponse.model,
+          deepDiveModel: deepDive?.model ?? null,
+        },
+      });
+      const previousSnapshot = row.previousSnapshotId ? await loadResearchSnapshot(env, row.previousSnapshotId) : null;
+      const comparison = buildSnapshotComparison({
+        currentSnapshot: snapshot,
+        currentCard: card,
+        previousSnapshot,
+      });
+      await env.DB.prepare(
+        "UPDATE research_snapshots SET change_json = ? WHERE id = ?",
+      ).bind(JSON.stringify(comparison), snapshot.id).run();
+      for (const factor of factorCards) {
+        await insertResearchFactor(env, {
+          snapshotId: snapshot.id,
+          ticker: row.ticker,
+          factorKey: factor.key,
+          score: factor.score,
+          direction: factor.direction,
+          confidenceScore: factor.confidenceScore,
+          weightApplied: factor.weightApplied,
+          explanationJson: { summary: factor.summary },
+          supportingEvidenceIds: factor.evidenceIds,
+        });
+      }
+      const rankingRow = await insertResearchRanking(env, {
+        runId: run.id,
         snapshotId: snapshot.id,
         ticker: row.ticker,
-        factorKey: factor.key,
-        score: factor.score,
-        direction: factor.direction,
-        confidenceScore: factor.confidenceScore,
-        weightApplied: factor.weightApplied,
-        explanationJson: { summary: factor.summary },
-        supportingEvidenceIds: factor.evidenceIds,
+        rank: ranking.rank,
+        attentionScore: ranking.attentionScore,
+        priorityBucket: ranking.priorityBucket,
+        deepDiveRequested: ranking.deepDiveRequested,
+        deepDiveCompleted: Boolean(deepDive),
+        rankingJson: {
+          rationale: ranking.rankRationale,
+          scoreDeltaVsPrevious: ranking.scoreDeltaVsPrevious,
+        },
+      });
+      rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+        currentStage: "completed",
+        currentStep: "Completed",
+        attentionRank: ranking.rank,
+        attentionScore: ranking.attentionScore,
+        deepDiveCompleted: Boolean(deepDive?.deepDive),
+        deepDiveModel: deepDive?.model ?? null,
+      }), {
+        message: deepDive?.warning
+          ? `Completed with deep-dive fallback: ${deepDive.warning}`
+          : deepDive?.deepDive
+            ? `Completed with deep dive via ${deepDive.model}.`
+            : "Completed without deep dive.",
+        level: deepDive?.warning ? "warn" : "info",
+      });
+      await updateResearchRunTicker(env, row.id, {
+        status: "completed",
+        snapshotId: snapshot.id,
+        rankingRowId: rankingRow.id,
+        completedAt: nowIso(),
+        stageMetricsJson: rowStageMetrics,
+        workingJson: {
+          ...(row.workingJson ?? {}),
+          comparison,
+          ranking,
+          deepDive: deepDive?.deepDive ?? null,
+        },
+      });
+      await upsertTickerResearchHead(env, row.ticker, run.profileId, snapshot.id, run.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed while finalizing ranked output.";
+      const failureMessage = `${row.ticker}: Finalization failed after ranking: ${message}`;
+      runWarnings.push(failureMessage);
+      rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+        currentStage: "failed",
+        currentStep: "Failed while storing ranked output",
+      }), {
+        message: failureMessage,
+        level: "error",
+      });
+      await updateResearchRunTicker(env, row.id, {
+        status: "failed",
+        lastError: failureMessage,
+        completedAt: nowIso(),
+        stageMetricsJson: rowStageMetrics,
+      });
+      await persistRunActivity(env, runState, {
+        message: failureMessage,
+        level: "error",
+        currentStep: `Failure on ${row.ticker} during finalization`,
+        warning: true,
       });
     }
-    const rankingRow = await insertResearchRanking(env, {
-      runId: run.id,
-      snapshotId: snapshot.id,
-      ticker: row.ticker,
-      rank: ranking.rank,
-      attentionScore: ranking.attentionScore,
-      priorityBucket: ranking.priorityBucket,
-      deepDiveRequested: ranking.deepDiveRequested,
-      deepDiveCompleted: Boolean(deepDive),
-      rankingJson: {
-        rationale: ranking.rankRationale,
-        scoreDeltaVsPrevious: ranking.scoreDeltaVsPrevious,
-      },
-    });
-    rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
-      currentStage: "completed",
-      currentStep: "Completed",
-      attentionRank: ranking.rank,
-      attentionScore: ranking.attentionScore,
-      deepDiveCompleted: Boolean(deepDive?.deepDive),
-      deepDiveModel: deepDive?.model ?? null,
-    }), {
-      message: deepDive?.warning
-        ? `Completed with deep-dive fallback: ${deepDive.warning}`
-        : deepDive?.deepDive
-          ? `Completed with deep dive via ${deepDive.model}.`
-          : "Completed without deep dive.",
-      level: deepDive?.warning ? "warn" : "info",
-    });
-    await updateResearchRunTicker(env, row.id, {
-      status: "completed",
-      snapshotId: snapshot.id,
-      rankingRowId: rankingRow.id,
-      completedAt: nowIso(),
-      stageMetricsJson: rowStageMetrics,
-      workingJson: {
-        ...(row.workingJson ?? {}),
-        comparison,
-        ranking,
-        deepDive: deepDive?.deepDive ?? null,
-      },
-    });
-    await upsertTickerResearchHead(env, row.ticker, run.profileId, snapshot.id, run.id);
   }
   runState.provenanceJson = mergeJson(runState.provenanceJson, { currentStep: "Completed" });
+  const finalTickers = await loadResearchRunTickers(env, run.id);
+  const finalFailed = finalTickers.filter((row) => row.status === "failed");
+  const finalCompleted = finalTickers.filter((row) => row.status === "completed");
   await updateResearchRun(env, run.id, {
-    status: failed.length > 0 ? "partial" : "completed",
+    status: finalFailed.length > 0 ? (finalCompleted.length > 0 ? "partial" : "failed") : "completed",
     providerUsageJson: aggregateUsage,
     provenanceJson: {
       ...(runState.provenanceJson ?? {}),
@@ -710,8 +739,8 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
       ])),
     },
     completedAt: nowIso(),
-    completedTickerCount: ready.length,
-    failedTickerCount: failed.length,
+    completedTickerCount: finalCompleted.length,
+    failedTickerCount: finalFailed.length,
   });
 }
 
@@ -853,7 +882,7 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   const refreshed = await loadResearchRun(env, run.id);
   if (!refreshed) return null;
   if (refreshed.status === "cancelled") return refreshed;
-  if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0 && (await loadRunRankings(env, run.id)).length === 0) {
+  if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0) {
     await finalizeResearchRun(env, refreshed);
     return loadResearchRun(env, run.id);
   }
@@ -923,10 +952,51 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
   const nowMs = Date.now();
   const events: Array<{ level: ResearchActivityLevel; message: string }> = [];
   for (const ticker of tickers) {
-    if (!["normalizing", "retrieving", "extracting"].includes(ticker.status)) continue;
+    if (!["normalizing", "retrieving", "extracting", "deep_dive"].includes(ticker.status)) continue;
     const heartbeatMs = parseHeartbeatMs(ticker.heartbeatAt ?? ticker.updatedAt ?? ticker.startedAt ?? ticker.createdAt);
     if (heartbeatMs !== null && nowMs - heartbeatMs < RESEARCH_HEARTBEAT_STALE_MS) continue;
     const heartbeatAgeMs = heartbeatMs === null ? RESEARCH_HEARTBEAT_STALE_MS : Math.max(0, nowMs - heartbeatMs);
+    if (ticker.status === "deep_dive") {
+      const deepDiveRetryCount = typeof ticker.stageMetricsJson?.deepDiveRetryCount === "number"
+        ? Number(ticker.stageMetricsJson.deepDiveRetryCount)
+        : 0;
+      if (deepDiveRetryCount >= 2) {
+        const message = `Deep-dive generation became stale after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat and exceeded the retry limit (${deepDiveRetryCount}/2).`;
+        await updateResearchRunTicker(env, ticker.id, {
+          status: "failed",
+          lastError: message,
+          completedAt: nowIso(),
+          stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
+            currentStage: "failed",
+            currentStep: "Failed after stale deep-dive recovery attempts",
+            staleHeartbeatAgeMs: heartbeatAgeMs,
+            deepDiveRetryCount,
+          }), {
+            message,
+            level: "error",
+          }),
+        });
+        events.push({ level: "error", message: `${ticker.ticker}: ${message}` });
+        continue;
+      }
+      const message = `Recovered stale deep-dive state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; retrying deep dive (${deepDiveRetryCount + 1}/2).`;
+      await updateResearchRunTicker(env, ticker.id, {
+        status: "ranking_ready",
+        lastError: message,
+        completedAt: null,
+        stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
+          currentStage: "ranking_ready",
+          currentStep: "Queued for deep-dive retry after stale recovery",
+          staleHeartbeatAgeMs: heartbeatAgeMs,
+          deepDiveRetryCount: deepDiveRetryCount + 1,
+        }), {
+          message,
+          level: "warn",
+        }),
+      });
+      events.push({ level: "warn", message: `${ticker.ticker}: ${message}` });
+      continue;
+    }
     if (ticker.attemptCount >= RESEARCH_MAX_TICKER_ATTEMPTS) {
       const message = buildStaleFailureMessage(ticker.status, heartbeatAgeMs, ticker.attemptCount, RESEARCH_MAX_TICKER_ATTEMPTS);
       await updateResearchRunTicker(env, ticker.id, {
