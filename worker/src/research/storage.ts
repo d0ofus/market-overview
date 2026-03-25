@@ -341,6 +341,24 @@ export async function updateResearchRun(env: Env, runId: string, patch: {
   ).run();
 }
 
+export async function cancelResearchRun(env: Env, runId: string): Promise<ResearchRunRecord | null> {
+  const current = await loadResearchRun(env, runId);
+  if (!current) return null;
+  if (current.status === "completed" || current.status === "partial" || current.status === "failed" || current.status === "cancelled") {
+    return current;
+  }
+  const cancelledAt = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE research_runs SET status = 'cancelled', error_summary = ?, completed_at = COALESCE(completed_at, ?), heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).bind("Cancelled by user.", cancelledAt, runId),
+    env.DB.prepare(
+      "UPDATE research_run_tickers SET status = 'cancelled', last_error = COALESCE(last_error, ?), completed_at = COALESCE(completed_at, ?), heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE run_id = ? AND status IN ('queued', 'normalizing', 'retrieving', 'extracting', 'ranking_ready', 'deep_dive')",
+    ).bind("Cancelled by user.", cancelledAt, runId),
+  ]);
+  return loadResearchRun(env, runId);
+}
+
 export async function updateResearchRunHeartbeat(env: Env, runId: string): Promise<void> {
   await env.DB.prepare("UPDATE research_runs SET heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(runId).run();
 }

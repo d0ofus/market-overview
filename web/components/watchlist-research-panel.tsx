@@ -33,6 +33,8 @@ type Props = {
   onSelectRun: (id: string) => void;
   selectedRunStatus: ResearchRunStatusResponse | null;
   selectedRunResults: ResearchRunResultsResponse | null;
+  stoppingRun?: boolean;
+  onStopRun?: () => void;
   selectedRunErrorDetail?: string | null;
   onOpenRunDrawer: () => void;
   manualTickerInput: string;
@@ -163,7 +165,13 @@ export function WatchlistResearchPanel(props: Props) {
       <div className="mt-4">
         {props.selectedRunStatus ? (
           <div className="mb-4">
-            <ResearchRunStagePanel status={props.selectedRunStatus} results={props.selectedRunResults} compact />
+            <ResearchRunStagePanel
+              status={props.selectedRunStatus}
+              results={props.selectedRunResults}
+              compact
+              stopping={props.stoppingRun}
+              onStop={props.onStopRun}
+            />
           </div>
         ) : null}
 

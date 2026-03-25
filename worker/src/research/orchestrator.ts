@@ -12,6 +12,7 @@ import { deepDiveResearchCard, rankResearchCards } from "./synthesis";
 import {
   countRunTickerStatuses,
   createResearchRun,
+  cancelResearchRun,
   claimNextRunnableResearchTicker,
   findFreshEvidenceByCacheKey,
   insertResearchEvidence,
@@ -403,7 +404,6 @@ export async function startResearchRun(env: Env, request: ResearchRunRequest): P
     refreshMode: request.refreshMode ?? "reuse_fresh_search_cache",
     rankingMode: request.rankingMode ?? "rank_only",
   });
-  await advanceResearchRun(env, run.id, DEFAULT_RESEARCH_SLICE_TICKERS);
   return (await loadResearchRun(env, run.id)) ?? run;
 }
 
@@ -418,8 +418,19 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   let usage = run.providerUsageJson;
   const runWarnings = new Set<string>((run.provenanceJson as { warnings?: string[] } | null)?.warnings ?? []);
   for (let index = 0; index < maxTickers; index += 1) {
+    const latestRun = await loadResearchRun(env, run.id);
+    if (!latestRun || latestRun.status === "cancelled") break;
     const nextTicker = await claimNextRunnableResearchTicker(env, run.id);
     if (!nextTicker) break;
+    const claimedRun = await loadResearchRun(env, run.id);
+    if (!claimedRun || claimedRun.status === "cancelled") {
+      await updateResearchRunTicker(env, nextTicker.id, {
+        status: "cancelled",
+        lastError: "Cancelled by user.",
+        completedAt: nowIso(),
+      });
+      break;
+    }
     await updateResearchRunHeartbeat(env, run.id);
     try {
       const result = await processResearchTicker(env, run, nextTicker);
@@ -448,6 +459,7 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   });
   const refreshed = await loadResearchRun(env, run.id);
   if (!refreshed) return null;
+  if (refreshed.status === "cancelled") return refreshed;
   if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0 && (await loadRunRankings(env, run.id)).length === 0) {
     await finalizeResearchRun(env, refreshed);
     return loadResearchRun(env, run.id);
@@ -465,3 +477,5 @@ export async function advanceResearchQueue(env: Env, limitRuns = 2): Promise<voi
     await advanceResearchRun(env, run.id, DEFAULT_RESEARCH_SLICE_TICKERS);
   }
 }
+
+export { cancelResearchRun };

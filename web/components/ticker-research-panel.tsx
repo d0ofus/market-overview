@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   apiUrl,
+  cancelAdminResearchRun,
   createAdminResearchRun,
   getResearchProfiles,
   getResearchRunResults,
@@ -71,6 +72,7 @@ export function TickerResearchPanel({ ticker }: Props) {
   const [activeRunStatus, setActiveRunStatus] = useState<ResearchRunStatusResponse | null>(null);
   const [activeRunResults, setActiveRunResults] = useState<ResearchRunResultsResponse | null>(null);
   const [running, setRunning] = useState(false);
+  const [stoppingRun, setStoppingRun] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const latestSnapshot = history[0] ?? null;
@@ -320,7 +322,30 @@ export function TickerResearchPanel({ ticker }: Props) {
         {message && <p className="mt-3 text-xs text-slate-400">{message}</p>}
         {activeRunStatus ? (
           <div className="mt-4">
-            <ResearchRunStagePanel status={activeRunStatus} results={activeRunResults} compact />
+            <ResearchRunStagePanel
+              status={activeRunStatus}
+              results={activeRunResults}
+              compact
+              stopping={stoppingRun}
+              onStop={activeRunStatus.run.status === "queued" || activeRunStatus.run.status === "running" ? async () => {
+                try {
+                  setStoppingRun(true);
+                  await cancelAdminResearchRun(activeRunStatus.run.id);
+                  const [statusRes, resultsRes] = await Promise.all([
+                    getResearchRunStatus(activeRunStatus.run.id),
+                    getResearchRunResults(activeRunStatus.run.id),
+                  ]);
+                  setActiveRunStatus(statusRes);
+                  setActiveRunResults(resultsRes);
+                  setRunning(false);
+                  setMessage(`Research run ${activeRunStatus.run.id.slice(0, 8)} was stopped.`);
+                } catch (error) {
+                  setMessage(error instanceof Error ? error.message : "Failed to stop research run.");
+                } finally {
+                  setStoppingRun(false);
+                }
+              } : undefined}
+            />
           </div>
         ) : null}
       </div>

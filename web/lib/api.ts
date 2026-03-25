@@ -258,7 +258,7 @@ export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
 export type ResearchRefreshMode = "reuse_fresh_search_cache" | "force_fresh";
 export type ResearchRankingMode = "rank_only" | "rank_and_deep_dive";
 export type ResearchRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partial";
-export type ResearchTickerStatus = "queued" | "normalizing" | "retrieving" | "extracting" | "ranking_ready" | "deep_dive" | "completed" | "failed" | "skipped";
+export type ResearchTickerStatus = "queued" | "normalizing" | "retrieving" | "extracting" | "ranking_ready" | "deep_dive" | "completed" | "cancelled" | "failed" | "skipped";
 
 export type ResearchProfileSettings = {
   lookbackDays: number;
@@ -1039,6 +1039,12 @@ export function createAdminResearchRun(payload: {
   return adminFetch<{ ok: boolean; run: ResearchRunRow }>("/api/admin/research/runs", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function cancelAdminResearchRun(id: string) {
+  return adminFetch<{ ok: boolean; run: ResearchRunRow }>(`/api/admin/research/runs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
   });
 }
 

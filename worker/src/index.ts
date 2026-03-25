@@ -124,6 +124,7 @@ import {
 import {
   advanceResearchQueue,
   advanceResearchRun,
+  cancelResearchRun,
   startResearchRun,
 } from "./research/orchestrator";
 import {
@@ -2350,6 +2351,14 @@ app.post("/api/admin/research/runs", async (c) => {
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to start research run." }, 400);
   }
+});
+
+app.post("/api/admin/research/runs/:id/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const run = await cancelResearchRun(c.env, c.req.param("id"));
+  if (!run) return c.json({ error: "Research run not found." }, 404);
+  await upsertAudit(c.env, "default", "RESEARCH_RUN_CANCEL", { runId: run.id });
+  return c.json({ ok: true, run });
 });
 
 app.get("/api/admin/research/profiles", async (c) => {

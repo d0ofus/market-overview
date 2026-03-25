@@ -6,6 +6,8 @@ type Props = {
   status: ResearchRunStatusResponse | null;
   results?: ResearchRunResultsResponse | null;
   compact?: boolean;
+  stopping?: boolean;
+  onStop?: () => void;
 };
 
 type StageState = "pending" | "active" | "completed" | "disabled";
@@ -62,7 +64,7 @@ function summarizeUsage(usage: Record<string, unknown> | null | undefined) {
     .slice(0, 6);
 }
 
-export function ResearchRunStagePanel({ status, results, compact = false }: Props) {
+export function ResearchRunStagePanel({ status, results, compact = false, stopping = false, onStop }: Props) {
   if (!status) return null;
 
   const tickers = status.tickers ?? [];
@@ -147,6 +149,16 @@ export function ResearchRunStagePanel({ status, results, compact = false }: Prop
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          {isLive && onStop ? (
+            <button
+              className="rounded-full border border-red-500/30 bg-red-500/10 px-2 py-1 font-semibold text-red-200 disabled:opacity-60"
+              disabled={stopping}
+              onClick={onStop}
+              type="button"
+            >
+              {stopping ? "Stopping..." : "Stop Run"}
+            </button>
+          ) : null}
           <span className={`rounded-full border px-2 py-1 font-semibold ${badgeTone(isLive ? "live" : "neutral")}`}>
             {isLive ? "Live" : status.run.status}
           </span>

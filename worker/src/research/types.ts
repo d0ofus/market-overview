@@ -8,6 +8,7 @@ export type ResearchTickerStatus =
   | "ranking_ready"
   | "deep_dive"
   | "completed"
+  | "cancelled"
   | "failed"
   | "skipped";
 

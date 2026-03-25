@@ -8,6 +8,8 @@ type Props = {
   open: boolean;
   status: ResearchRunStatusResponse | null;
   results?: ResearchRunResultsResponse | null;
+  stopping?: boolean;
+  onStop?: () => void;
   onClose: () => void;
 };
 
@@ -23,7 +25,7 @@ function formatTime(value: string | null | undefined) {
   }).format(parsed);
 }
 
-export function ResearchRunDrawer({ open, status, results, onClose }: Props) {
+export function ResearchRunDrawer({ open, status, results, stopping = false, onStop, onClose }: Props) {
   if (!open || !status) return null;
 
   const failedTickers = status.tickers.filter((row) => row.status === "failed" || row.lastError);
@@ -61,7 +63,7 @@ export function ResearchRunDrawer({ open, status, results, onClose }: Props) {
         </div>
 
         <div className="mt-4">
-          <ResearchRunStagePanel status={status} results={results} />
+          <ResearchRunStagePanel status={status} results={results} stopping={stopping} onStop={onStop} />
         </div>
 
         {status.run.errorSummary ? (
