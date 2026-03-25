@@ -62,6 +62,11 @@ function formatTime(value: string | null | undefined) {
 }
 
 export function WatchlistResearchPanel(props: Props) {
+  const selectedRunIsLive = Boolean(
+    props.selectedRunStatus
+    && (props.selectedRunStatus.run.status === "queued" || props.selectedRunStatus.run.status === "running"),
+  );
+
   return (
     <section className="card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -71,14 +76,26 @@ export function WatchlistResearchPanel(props: Props) {
             Run evidence-first research on selected or visible tickers from this watchlist set.
           </p>
         </div>
-        <button
-          className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50"
-          disabled={props.isRunning || props.visibleCount === 0}
-          onClick={props.onRun}
-          type="button"
-        >
-          {props.isRunning ? "Research Running..." : `Run Research (${props.selectedCount > 0 ? props.selectedCount : Math.min(props.visibleCount, props.maxTickers)})`}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {selectedRunIsLive && props.onStopRun ? (
+            <button
+              className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-200 disabled:opacity-60"
+              disabled={props.stoppingRun}
+              onClick={props.onStopRun}
+              type="button"
+            >
+              {props.stoppingRun ? "Stopping Research..." : "Force Stop Research"}
+            </button>
+          ) : null}
+          <button
+            className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50"
+            disabled={props.isRunning || props.visibleCount === 0}
+            onClick={props.onRun}
+            type="button"
+          >
+            {props.isRunning ? "Research Running..." : `Run Research (${props.selectedCount > 0 ? props.selectedCount : Math.min(props.visibleCount, props.maxTickers)})`}
+          </button>
+        </div>
       </div>
 
       <div className="mt-4 grid gap-3 lg:grid-cols-5">
@@ -218,14 +235,25 @@ export function WatchlistResearchPanel(props: Props) {
                 <div className="mt-1 text-xs text-slate-400">
                   {formatTime(row.run.createdAt)} · {row.run.completedTickerCount}/{row.run.requestedTickerCount} complete
                 </div>
-                {props.selectedRunId === row.run.id && (props.selectedRunErrorDetail ?? row.run.errorSummary) ? (
+              {props.selectedRunId === row.run.id && (props.selectedRunErrorDetail ?? row.run.errorSummary) ? (
                   <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-200">
                     {props.selectedRunErrorDetail ?? row.run.errorSummary}
                   </div>
                 ) : null}
               </button>
-              {props.selectedRunId === row.run.id && (row.run.status === "failed" || row.run.status === "partial") ? (
-                <div className="mt-2 flex justify-end">
+              {props.selectedRunId === row.run.id ? (
+                <div className="mt-2 flex flex-wrap justify-end gap-2">
+                  {(row.run.status === "queued" || row.run.status === "running") && props.onStopRun ? (
+                    <button
+                      className="rounded border border-red-500/30 px-2.5 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/10 disabled:opacity-60"
+                      disabled={props.stoppingRun}
+                      onClick={props.onStopRun}
+                      type="button"
+                    >
+                      {props.stoppingRun ? "Stopping..." : "Force Stop"}
+                    </button>
+                  ) : null}
+                  {(row.run.status === "failed" || row.run.status === "partial") ? (
                   <button
                     className="rounded border border-red-500/30 px-2.5 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/10"
                     onClick={props.onOpenRunDrawer}
@@ -233,6 +261,7 @@ export function WatchlistResearchPanel(props: Props) {
                   >
                     View Failure Details
                   </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
