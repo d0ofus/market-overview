@@ -105,6 +105,7 @@ import {
 } from "./watchlist-compiler-service";
 import {
   loadResearchRunResultsPayload,
+  loadResearchRunStreamPayload,
   loadResearchRunStatusPayload,
   loadResearchSnapshotComparePayload,
   loadResearchSnapshotDetailPayload,
@@ -2177,6 +2178,56 @@ app.get("/api/research/runs/:id/results", async (c) => {
   const payload = await loadResearchRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research run not found." }, 404);
   return c.json(payload);
+});
+
+app.get("/api/research/runs/:id/stream", async (c) => {
+  const runId = c.req.param("id");
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
+      const push = async () => {
+        await advanceResearchRun(c.env, runId);
+        const payload = await loadResearchRunStreamPayload(c.env, runId);
+        if (!payload) {
+          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research run not found." })}\n\n`));
+          close();
+          return;
+        }
+        controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`));
+        const terminal = ["completed", "partial", "failed", "cancelled"].includes(payload.status.run.status);
+        if (terminal) {
+          controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
+          close();
+        }
+      };
+      try {
+        while (!closed) {
+          await push();
+          if (closed) break;
+          await scheduler.wait(1000);
+        }
+      } catch (error) {
+        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : "Research stream failed." })}\n\n`));
+        close();
+      }
+    },
+    cancel() {
+      // EventSource closed on the client.
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 });
 
 app.get("/api/research/ticker/:ticker/history", async (c) => {

@@ -12,6 +12,7 @@ import { deepDiveResearchCard, rankResearchCards } from "./synthesis";
 import {
   countRunTickerStatuses,
   createResearchRun,
+  claimNextRunnableResearchTicker,
   findFreshEvidenceByCacheKey,
   insertResearchEvidence,
   insertResearchFactor,
@@ -19,7 +20,6 @@ import {
   insertResearchSnapshot,
   linkResearchEvidence,
   listQueuedResearchRuns,
-  loadNextRunnableResearchTicker,
   loadResearchRun,
   loadResearchRunTickers,
   loadResearchSnapshot,
@@ -191,22 +191,23 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     evidence: collected.evidence,
     prompt: profile.bundle.haiku,
   });
+  const warnings = extracted.warning ? [...collected.warnings, extracted.warning] : collected.warnings;
   await updateResearchRunTicker(env, runTicker.id, {
     status: "ranking_ready",
     workingJson: {
       card: extracted.card,
       extractionModel: extracted.model,
-      warnings: collected.warnings,
+      warnings,
     },
     stageMetricsJson: {
       evidenceCount: collected.evidence.length,
-      warningCount: collected.warnings.length,
+      warningCount: warnings.length,
       extractionUsage: extracted.usage,
     },
   });
   return {
     usage: sumUsage(collected.usage, extracted.usage),
-    warnings: collected.warnings,
+    warnings,
   };
 }
 
@@ -226,6 +227,7 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     return;
   }
   const marketEvidence = await collectMarketEvidence(env, { run, runTickers: ready, profile });
+  const runWarnings: string[] = [];
   const cards = ready.map((row) => row.workingJson?.card as StandardizedResearchCard);
   const rankingResponse = await rankResearchCards(env, {
     cards,
@@ -234,6 +236,7 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     settings: profile.version.settings,
     deepDiveTopN: run.deepDiveTopN,
   });
+  if (rankingResponse.warning) runWarnings.push(`Ranking fallback used: ${rankingResponse.warning}`);
   let aggregateUsage = sumUsage(run.providerUsageJson, sumUsage(marketEvidence.usage, rankingResponse.usage));
   const rankingByTicker = new Map(rankingResponse.rankings.map((row) => [row.ticker, row]));
   for (const row of ready) {
@@ -251,6 +254,7 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
       ? await deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null)
       : null;
+    if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
     aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
     const snapshot = await insertResearchSnapshot(env, {
       runId: run.id,
@@ -341,6 +345,13 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
   await updateResearchRun(env, run.id, {
     status: failed.length > 0 ? "partial" : "completed",
     providerUsageJson: aggregateUsage,
+    provenanceJson: {
+      ...(run.provenanceJson ?? {}),
+      warnings: Array.from(new Set([
+        ...(((run.provenanceJson as { warnings?: string[] } | null)?.warnings) ?? []),
+        ...runWarnings,
+      ])),
+    },
     completedAt: nowIso(),
     completedTickerCount: ready.length,
     failedTickerCount: failed.length,
@@ -405,17 +416,21 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
     startedAt: run.startedAt ?? nowIso(),
   });
   let usage = run.providerUsageJson;
+  const runWarnings = new Set<string>((run.provenanceJson as { warnings?: string[] } | null)?.warnings ?? []);
   for (let index = 0; index < maxTickers; index += 1) {
-    const nextTicker = await loadNextRunnableResearchTicker(env, run.id);
+    const nextTicker = await claimNextRunnableResearchTicker(env, run.id);
     if (!nextTicker) break;
     await updateResearchRunHeartbeat(env, run.id);
     try {
       const result = await processResearchTicker(env, run, nextTicker);
       usage = sumUsage(usage, result.usage);
+      result.warnings.forEach((warning) => runWarnings.add(warning));
     } catch (error) {
+      const message = error instanceof Error ? error.message : "Ticker research failed.";
+      runWarnings.add(`${nextTicker.ticker} failed: ${message}`);
       await updateResearchRunTicker(env, nextTicker.id, {
         status: "failed",
-        lastError: error instanceof Error ? error.message : "Ticker research failed.",
+        lastError: message,
         completedAt: nowIso(),
       });
     }
@@ -424,16 +439,20 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   const totalProcessed = counts.completed + counts.failed + counts.rankingReady;
   await updateResearchRun(env, run.id, {
     providerUsageJson: usage,
+    provenanceJson: {
+      ...(run.provenanceJson ?? {}),
+      warnings: Array.from(runWarnings),
+    },
     completedTickerCount: counts.completed,
     failedTickerCount: counts.failed,
   });
   const refreshed = await loadResearchRun(env, run.id);
   if (!refreshed) return null;
-  if (counts.queued === 0 && counts.rankingReady > 0 && (await loadRunRankings(env, run.id)).length === 0) {
+  if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0 && (await loadRunRankings(env, run.id)).length === 0) {
     await finalizeResearchRun(env, refreshed);
     return loadResearchRun(env, run.id);
   }
-  if (counts.queued === 0 && totalProcessed >= refreshed.requestedTickerCount && counts.rankingReady === 0) {
+  if (counts.queued === 0 && counts.inProgress === 0 && totalProcessed >= refreshed.requestedTickerCount && counts.rankingReady === 0) {
     await finalizeResearchRun(env, refreshed);
     return loadResearchRun(env, run.id);
   }

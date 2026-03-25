@@ -109,54 +109,71 @@ export async function extractResearchCard(env: Env, input: {
   companyName: string | null;
   evidence: ResearchEvidenceRecord[];
   prompt: PromptVersionRecord;
-}): Promise<{ card: StandardizedResearchCard; usage: Record<string, unknown> | null; model: string }> {
+}): Promise<{ card: StandardizedResearchCard; usage: Record<string, unknown> | null; model: string; warning: string | null }> {
   if (!env.ANTHROPIC_API_KEY) {
     const card = fallbackExtractResearchCard(input);
-    return { card, usage: null, model: card.model };
+    return { card, usage: null, model: card.model, warning: "Anthropic extraction skipped because ANTHROPIC_API_KEY is not configured." };
   }
   const modelProvider = getModelResearchProvider(env);
   const evidence = summarizeEvidence(input.evidence, 14);
-  const response = await modelProvider.callJson<StandardizedResearchCard>(env, {
-    model: env.ANTHROPIC_HAIKU_MODEL?.trim() || input.prompt.modelFamily,
-    system: [
-      input.prompt.templateText ?? "Standardize evidence into a swing-trading research card.",
-      "Return strict JSON only.",
-      "Ground every claim in the supplied evidence. Do not invent facts.",
-      "Use concise prose.",
-    ].join(" "),
-    user: JSON.stringify({
+  try {
+    const response = await modelProvider.callJson<StandardizedResearchCard>(env, {
+      model: env.ANTHROPIC_HAIKU_MODEL?.trim() || input.prompt.modelFamily,
+      system: [
+        input.prompt.templateText ?? "Standardize evidence into a swing-trading research card.",
+        "Return strict JSON only.",
+        "Ground every claim in the supplied evidence. Do not invent facts.",
+        "Use concise prose.",
+      ].join(" "),
+      user: JSON.stringify({
+        ticker: input.ticker,
+        companyName: input.companyName,
+        evidence,
+        outputContract: {
+          summary: "string",
+          valuation: { label: "positive|mixed|negative|unclear", summary: "string" },
+          earningsQuality: { label: "positive|mixed|negative|unclear", summary: "string" },
+          catalysts: [{ title: "string", summary: "string", freshness: "fresh|recent|stale|unclear", direction: "positive|negative|mixed", evidenceIds: ["evidence-id"] }],
+          risks: [{ title: "string", summary: "string", severity: "high|medium|low", evidenceIds: ["evidence-id"] }],
+          contradictions: ["string"],
+          confidenceScore: "0..1",
+          confidenceLabel: "high|medium|low",
+          catalystFreshnessLabel: "fresh|recent|stale|unclear",
+          riskLabel: "low|moderate|high",
+          topEvidenceIds: ["evidence-id"],
+          valuationScore: "0..100",
+          earningsQualityScore: "0..100",
+          catalystQualityScore: "0..100",
+          catalystFreshnessScore: "0..100",
+          riskScore: "0..100",
+          contradictionScore: "0..100",
+          reasoningBullets: ["string"],
+        },
+      }),
+      maxTokens: 2200,
+    });
+    const card = {
+      ...fallbackExtractResearchCard(input),
+      ...response.data,
       ticker: input.ticker,
       companyName: input.companyName,
-      evidence,
-      outputContract: {
-        summary: "string",
-        valuation: { label: "positive|mixed|negative|unclear", summary: "string" },
-        earningsQuality: { label: "positive|mixed|negative|unclear", summary: "string" },
-        catalysts: [{ title: "string", summary: "string", freshness: "fresh|recent|stale|unclear", direction: "positive|negative|mixed", evidenceIds: ["evidence-id"] }],
-        risks: [{ title: "string", summary: "string", severity: "high|medium|low", evidenceIds: ["evidence-id"] }],
-        contradictions: ["string"],
-        confidenceScore: "0..1",
-        confidenceLabel: "high|medium|low",
-        catalystFreshnessLabel: "fresh|recent|stale|unclear",
-        riskLabel: "low|moderate|high",
-        topEvidenceIds: ["evidence-id"],
-        valuationScore: "0..100",
-        earningsQualityScore: "0..100",
-        catalystQualityScore: "0..100",
-        catalystFreshnessScore: "0..100",
-        riskScore: "0..100",
-        contradictionScore: "0..100",
-        reasoningBullets: ["string"],
+      model: response.model,
+    };
+    return { card, usage: response.usage, model: response.model, warning: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Anthropic extraction failed.";
+    const fallback = fallbackExtractResearchCard(input);
+    return {
+      card: {
+        ...fallback,
+        reasoningBullets: [
+          ...fallback.reasoningBullets,
+          `Anthropic extraction fallback used: ${message}`,
+        ],
       },
-    }),
-    maxTokens: 2200,
-  });
-  const card = {
-    ...fallbackExtractResearchCard(input),
-    ...response.data,
-    ticker: input.ticker,
-    companyName: input.companyName,
-    model: response.model,
-  };
-  return { card, usage: response.usage, model: response.model };
+      usage: null,
+      model: fallback.model,
+      warning: message,
+    };
+  }
 }

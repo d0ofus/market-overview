@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Copy, Loader2, RefreshCw } from "lucide-react";
 import {
+  apiUrl,
   compileAdminWatchlistCompilerSet,
   createAdminResearchRun,
   getResearchProfiles,
@@ -223,6 +224,9 @@ export function WatchlistCompilerDashboard() {
   useEffect(() => {
     if (!selectedResearchRunId) return;
     let cancelled = false;
+    let timer: number | null = null;
+    let eventSource: EventSource | null = null;
+
     const load = async () => {
       try {
         const [statusRes, resultsRes] = await Promise.all([
@@ -237,18 +241,54 @@ export function WatchlistCompilerDashboard() {
         if (!cancelled) setMessage(error instanceof Error ? error.message : "Failed to load research run.");
       }
     };
-    void load();
-    if (researchRunning) {
-      const timer = window.setInterval(() => {
+
+    const startPollingFallback = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(() => {
         void load();
       }, 5000);
-      return () => {
-        cancelled = true;
-        window.clearInterval(timer);
-      };
+    };
+
+    if (researchRunning) {
+      eventSource = new EventSource(apiUrl(`/api/research/runs/${encodeURIComponent(selectedResearchRunId)}/stream`));
+      eventSource.addEventListener("update", (event) => {
+        if (cancelled) return;
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as {
+            status: ResearchRunStatusResponse;
+            results: ResearchRunResultsResponse;
+          };
+          setResearchStatus(payload.status);
+          setResearchResults(payload.results);
+          const isStillRunning = payload.status.run.status === "queued" || payload.status.run.status === "running";
+          setResearchRunning(isStillRunning);
+          if (!isStillRunning) {
+            eventSource?.close();
+            eventSource = null;
+          }
+        } catch {
+          startPollingFallback();
+        }
+      });
+      eventSource.addEventListener("done", () => {
+        if (cancelled) return;
+        setResearchRunning(false);
+        eventSource?.close();
+        eventSource = null;
+      });
+      eventSource.addEventListener("error", () => {
+        eventSource?.close();
+        eventSource = null;
+        if (!cancelled) startPollingFallback();
+      });
+      void load();
+    } else {
+      void load();
     }
     return () => {
       cancelled = true;
+      if (eventSource) eventSource.close();
+      if (timer !== null) window.clearInterval(timer);
     };
   }, [selectedResearchRunId, researchRunning]);
 
@@ -490,6 +530,8 @@ export function WatchlistCompilerDashboard() {
             runs={researchRuns}
             selectedRunId={selectedResearchRunId}
             onSelectRun={setSelectedResearchRunId}
+            selectedRunStatus={researchStatus}
+            selectedRunResults={researchResults}
             selectedRunErrorDetail={researchStatus?.tickers.find((row) => row.lastError)?.lastError ?? null}
             onOpenRunDrawer={() => setOpenResearchRunDrawer(true)}
             manualTickerInput={manualTickerInput}
@@ -692,6 +734,7 @@ export function WatchlistCompilerDashboard() {
       <ResearchRunDrawer
         open={openResearchRunDrawer}
         status={researchStatus}
+        results={researchResults}
         onClose={() => setOpenResearchRunDrawer(false)}
       />
       <ResearchTickerDrawer

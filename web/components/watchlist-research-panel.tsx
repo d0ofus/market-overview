@@ -1,6 +1,14 @@
 "use client";
 
-import type { ResearchProfileRow, ResearchRefreshMode, ResearchRankingMode, ResearchRunListRow } from "@/lib/api";
+import type {
+  ResearchProfileRow,
+  ResearchRefreshMode,
+  ResearchRankingMode,
+  ResearchRunListRow,
+  ResearchRunResultsResponse,
+  ResearchRunStatusResponse,
+} from "@/lib/api";
+import { ResearchRunStagePanel } from "./research-run-stage-panel";
 
 type Props = {
   profiles: ResearchProfileRow[];
@@ -23,6 +31,8 @@ type Props = {
   runs: ResearchRunListRow[];
   selectedRunId: string | null;
   onSelectRun: (id: string) => void;
+  selectedRunStatus: ResearchRunStatusResponse | null;
+  selectedRunResults: ResearchRunResultsResponse | null;
   selectedRunErrorDetail?: string | null;
   onOpenRunDrawer: () => void;
   manualTickerInput: string;
@@ -139,7 +149,8 @@ export function WatchlistResearchPanel(props: Props) {
         <label className="text-xs text-slate-300">
           Deep Dive Top N
           <input
-            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm"
+            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm disabled:opacity-50"
+            disabled={props.rankingMode !== "rank_and_deep_dive"}
             min={0}
             max={20}
             type="number"
@@ -150,6 +161,12 @@ export function WatchlistResearchPanel(props: Props) {
       </div>
 
       <div className="mt-4">
+        {props.selectedRunStatus ? (
+          <div className="mb-4">
+            <ResearchRunStagePanel status={props.selectedRunStatus} results={props.selectedRunResults} compact />
+          </div>
+        ) : null}
+
         <div className="mb-3 rounded-xl border border-borderSoft/60 bg-panelSoft/40 p-3">
           <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Manual Ticker Entry</div>
           <textarea

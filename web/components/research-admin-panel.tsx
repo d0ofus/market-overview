@@ -57,7 +57,7 @@ export function ResearchAdminPanel() {
     rubric: { label: string; rubricJson: string };
     search: { label: string; templateJson: string };
   }>({
-    prompt: { promptKind: "haiku_extract", label: "", modelFamily: "haiku-4.5", templateText: "", templateJson: "{\"responseShape\":\"research-card\"}" },
+    prompt: { promptKind: "haiku_extract", label: "", modelFamily: "claude-3-haiku-20240307", templateText: "", templateJson: "{\"responseShape\":\"research-card\"}" },
     rubric: { label: "", rubricJson: "{\"weights\":{}}" },
     search: { label: "", templateJson: "{\"tickerFamilies\":[],\"macroFamilies\":[]}" },
   });

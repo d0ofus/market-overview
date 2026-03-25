@@ -93,7 +93,7 @@ INSERT OR IGNORE INTO prompt_versions (
     1,
     'Default Haiku Extraction',
     'anthropic',
-    'haiku-4.5',
+    'claude-3-haiku-20240307',
     'v1',
     'Standardize fresh evidence into a swing-trading research card. Return strict JSON only and ground every claim in supplied evidence.',
     '{"responseShape":"research-card","maxEvidenceItems":14}'
@@ -104,7 +104,7 @@ INSERT OR IGNORE INTO prompt_versions (
     1,
     'Default Sonnet Ranking',
     'anthropic',
-    'sonnet-4.6',
+    'claude-3-haiku-20240307',
     'v1',
     'Rank standardized ticker cards for swing-trade attention. Return strict JSON only and preserve evidence-first reasoning.',
     '{"responseShape":"run-ranking","maxTickers":25}'
@@ -115,7 +115,7 @@ INSERT OR IGNORE INTO prompt_versions (
     1,
     'Default Sonnet Deep Dive',
     'anthropic',
-    'sonnet-4.6',
+    'claude-3-haiku-20240307',
     'v1',
     'Produce a concise deep dive for the selected ticker using current evidence and prior snapshot only as historical context.',
     '{"responseShape":"ticker-deep-dive","maxEvidenceItems":18}'

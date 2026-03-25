@@ -22,6 +22,15 @@ type Props = {
 
 export function ResearchTickerDrawer({ open, result, detail, history, compare, baselineSnapshotId, onBaselineChange, onClose }: Props) {
   if (!open || !result) return null;
+  const thesis = detail?.snapshot?.thesisJson ?? null;
+  const deepDive = thesis?.deepDive && typeof thesis.deepDive === "object" ? thesis.deepDive as Record<string, any> : null;
+  const modelOutput = detail?.snapshot?.modelOutputJson ?? null;
+  const modelLabels = [
+    typeof modelOutput?.extractionModel === "string" ? `Extract ${modelOutput.extractionModel === "rules" ? "Rules fallback" : modelOutput.extractionModel}` : null,
+    typeof modelOutput?.rankingModel === "string" ? `Rank ${modelOutput.rankingModel === "rules" ? "Rules fallback" : modelOutput.rankingModel}` : null,
+    typeof modelOutput?.deepDiveModel === "string" ? `Deep Dive ${modelOutput.deepDiveModel === "rules" ? "Rules fallback" : modelOutput.deepDiveModel}` : null,
+  ].filter((value): value is string => Boolean(value));
+
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-slate-950/45 backdrop-blur-sm">
       <div className="h-full w-full max-w-3xl overflow-auto border-l border-borderSoft bg-panel p-4 shadow-2xl">
@@ -80,6 +89,47 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
                   </div>
                 ))}
                 {result.risks.length === 0 && <p className="text-xs text-slate-400">No dominant risks were recorded.</p>}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Deep Dive</div>
+              {deepDive ? (
+                <div className="space-y-3 text-sm text-slate-300">
+                  <p>{String(deepDive.summary ?? "No deep-dive summary stored yet.")}</p>
+                  <div>
+                    <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bull Case</div>
+                    <p>{String(deepDive.bullCase ?? "-")}</p>
+                  </div>
+                  <div>
+                    <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bear Case</div>
+                    <p>{String(deepDive.bearCase ?? "-")}</p>
+                  </div>
+                  <div>
+                    <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Watch Items</div>
+                    <div className="flex flex-wrap gap-2">
+                      {Array.isArray(deepDive.watchItems) && deepDive.watchItems.length > 0 ? deepDive.watchItems.map((item: unknown, index: number) => (
+                        <span key={`${String(item)}-${index}`} className="rounded-full border border-borderSoft/60 bg-panel px-2 py-1 text-[11px] text-slate-300">
+                          {String(item)}
+                        </span>
+                      )) : <span className="text-xs text-slate-500">No watch items stored.</span>}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No deep dive was stored for this snapshot.</p>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Models Used</div>
+              <div className="flex flex-wrap gap-2">
+                {modelLabels.map((label) => (
+                  <span key={label} className={`rounded-full border px-2 py-1 text-[11px] ${label.includes("Rules fallback") ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-sky-500/30 bg-sky-500/10 text-sky-200"}`}>
+                    {label}
+                  </span>
+                ))}
+                {modelLabels.length === 0 ? <span className="text-xs text-slate-500">No model metadata stored for this snapshot.</span> : null}
               </div>
             </div>
 

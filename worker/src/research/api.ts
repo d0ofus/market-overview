@@ -82,6 +82,18 @@ export async function loadResearchRunResultsPayload(env: Env, runId: string): Pr
   };
 }
 
+export async function loadResearchRunStreamPayload(env: Env, runId: string): Promise<{
+  status: ResearchRunStatusResponse;
+  results: ResearchRunResultsResponse;
+} | null> {
+  const [status, results] = await Promise.all([
+    loadResearchRunStatusPayload(env, runId),
+    loadResearchRunResultsPayload(env, runId),
+  ]);
+  if (!status || !results) return null;
+  return { status, results };
+}
+
 export async function loadResearchSnapshotDetailPayload(env: Env, snapshotId: string): Promise<{
   snapshot: any;
   factors: any[];

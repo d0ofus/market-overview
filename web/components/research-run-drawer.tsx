@@ -1,11 +1,13 @@
 "use client";
 
 import { X } from "lucide-react";
-import type { ResearchRunStatusResponse } from "@/lib/api";
+import type { ResearchRunResultsResponse, ResearchRunStatusResponse } from "@/lib/api";
+import { ResearchRunStagePanel } from "./research-run-stage-panel";
 
 type Props = {
   open: boolean;
   status: ResearchRunStatusResponse | null;
+  results?: ResearchRunResultsResponse | null;
   onClose: () => void;
 };
 
@@ -21,7 +23,7 @@ function formatTime(value: string | null | undefined) {
   }).format(parsed);
 }
 
-export function ResearchRunDrawer({ open, status, onClose }: Props) {
+export function ResearchRunDrawer({ open, status, results, onClose }: Props) {
   if (!open || !status) return null;
 
   const failedTickers = status.tickers.filter((row) => row.status === "failed" || row.lastError);
@@ -56,6 +58,10 @@ export function ResearchRunDrawer({ open, status, onClose }: Props) {
             <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Failed</div>
             <div className="mt-1 text-sm font-semibold text-slate-100">{status.run.failedTickerCount}</div>
           </div>
+        </div>
+
+        <div className="mt-4">
+          <ResearchRunStagePanel status={status} results={results} />
         </div>
 
         {status.run.errorSummary ? (

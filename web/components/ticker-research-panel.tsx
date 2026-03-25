@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  apiUrl,
   createAdminResearchRun,
   getResearchProfiles,
   getResearchRunResults,
@@ -19,6 +20,7 @@ import {
   type ResearchSnapshotRow,
 } from "@/lib/api";
 import { ResearchHistoryPanel } from "./research-history-panel";
+import { ResearchRunStagePanel } from "./research-run-stage-panel";
 
 type Props = {
   ticker: string;
@@ -38,6 +40,21 @@ function formatTime(value: string | null | undefined) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(parsed);
+}
+
+function modelBadgeTone(label: string) {
+  if (label === "Rules fallback") return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+  return "border-sky-500/30 bg-sky-500/10 text-sky-200";
+}
+
+function normalizeModelLabel(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return value === "rules" ? "Rules fallback" : value;
+}
+
+function summarizeUsage(usage: Record<string, unknown> | null | undefined) {
+  if (!usage) return [];
+  return Object.entries(usage).filter(([, value]) => value !== null && value !== undefined && value !== "").slice(0, 6);
 }
 
 export function TickerResearchPanel({ ticker }: Props) {
@@ -122,6 +139,8 @@ export function TickerResearchPanel({ ticker }: Props) {
   useEffect(() => {
     if (!activeRunId || !running) return;
     let cancelled = false;
+    let timer: number | null = null;
+    let eventSource: EventSource | null = null;
     const loadRun = async () => {
       try {
         const [statusRes, resultsRes] = await Promise.all([
@@ -143,17 +162,70 @@ export function TickerResearchPanel({ ticker }: Props) {
         }
       }
     };
+
+    const startPollingFallback = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(() => {
+        void loadRun();
+      }, 5000);
+    };
+
+    eventSource = new EventSource(apiUrl(`/api/research/runs/${encodeURIComponent(activeRunId)}/stream`));
+    eventSource.addEventListener("update", (event) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as {
+          status: ResearchRunStatusResponse;
+          results: ResearchRunResultsResponse;
+        };
+        setActiveRunStatus(payload.status);
+        setActiveRunResults(payload.results);
+        const isRunning = payload.status.run.status === "queued" || payload.status.run.status === "running";
+        setRunning(isRunning);
+        if (!isRunning) {
+          void loadHistory(selectedProfileId);
+          eventSource?.close();
+          eventSource = null;
+        }
+      } catch {
+        startPollingFallback();
+      }
+    });
+    eventSource.addEventListener("done", () => {
+      if (cancelled) return;
+      setRunning(false);
+      void loadHistory(selectedProfileId);
+      eventSource?.close();
+      eventSource = null;
+    });
+    eventSource.addEventListener("error", () => {
+      eventSource?.close();
+      eventSource = null;
+      if (!cancelled) startPollingFallback();
+    });
     void loadRun();
-    const timer = window.setInterval(() => {
-      void loadRun();
-    }, 5000);
+
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (eventSource) eventSource.close();
+      if (timer !== null) window.clearInterval(timer);
     };
   }, [activeRunId, running, selectedProfileId, ticker]);
 
   const latestThesis = useMemo(() => latestDetail?.snapshot?.thesisJson ?? null, [latestDetail]);
+  const latestModels = useMemo(() => {
+    const raw = latestDetail?.snapshot?.modelOutputJson ?? null;
+    return {
+      extractionModel: normalizeModelLabel(raw?.extractionModel),
+      rankingModel: normalizeModelLabel(raw?.rankingModel),
+      deepDiveModel: normalizeModelLabel(raw?.deepDiveModel),
+    };
+  }, [latestDetail]);
+  const latestDeepDive = useMemo(() => {
+    const raw = latestThesis?.deepDive;
+    return raw && typeof raw === "object" ? raw as Record<string, any> : null;
+  }, [latestThesis]);
+  const usageRows = useMemo(() => summarizeUsage(activeRunResults?.providerUsage ?? activeRunStatus?.run.providerUsageJson), [activeRunResults, activeRunStatus]);
 
   return (
     <section className="space-y-4">
@@ -234,7 +306,8 @@ export function TickerResearchPanel({ ticker }: Props) {
           <label className="text-xs text-slate-300">
             Deep Dive Top N
             <input
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm"
+              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm disabled:opacity-50"
+              disabled={rankingMode !== "rank_and_deep_dive"}
               min={0}
               max={5}
               type="number"
@@ -245,19 +318,11 @@ export function TickerResearchPanel({ ticker }: Props) {
         </div>
 
         {message && <p className="mt-3 text-xs text-slate-400">{message}</p>}
-        {activeRunStatus && (
-          <div className="mt-3 rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-3 text-xs text-slate-400">
-            Latest run status: <span className="font-semibold text-slate-200">{activeRunStatus.run.status}</span>
-            {" · "}
-            {activeRunStatus.run.completedTickerCount}/{activeRunStatus.run.requestedTickerCount} complete
-            {activeRunResults?.results?.[0]?.summary ? (
-              <>
-                {" · "}
-                <span className="text-slate-300">{activeRunResults.results[0].summary}</span>
-              </>
-            ) : null}
+        {activeRunStatus ? (
+          <div className="mt-4">
+            <ResearchRunStagePanel status={activeRunStatus} results={activeRunResults} compact />
           </div>
-        )}
+        ) : null}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr),minmax(18rem,1fr)]">
@@ -314,6 +379,58 @@ export function TickerResearchPanel({ ticker }: Props) {
                           <div className="text-xs text-slate-400">{String(item?.summary ?? "-")}</div>
                         </div>
                       )) : <p className="text-xs text-slate-400">No risks stored yet.</p>}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Deep Dive</div>
+                    {latestDeepDive ? (
+                      <div className="space-y-3 text-sm text-slate-300">
+                        <p>{String(latestDeepDive.summary ?? "No deep-dive summary stored yet.")}</p>
+                        <div>
+                          <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bull Case</div>
+                          <p>{String(latestDeepDive.bullCase ?? "-")}</p>
+                        </div>
+                        <div>
+                          <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bear Case</div>
+                          <p>{String(latestDeepDive.bearCase ?? "-")}</p>
+                        </div>
+                        <div>
+                          <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Watch Items</div>
+                          <div className="flex flex-wrap gap-2">
+                            {Array.isArray(latestDeepDive.watchItems) && latestDeepDive.watchItems.length > 0 ? latestDeepDive.watchItems.map((item: unknown, index: number) => (
+                              <span key={`${String(item)}-${index}`} className="rounded-full border border-borderSoft/60 bg-panel px-2 py-1 text-[11px] text-slate-300">
+                                {String(item)}
+                              </span>
+                            )) : <span className="text-xs text-slate-500">No watch items stored.</span>}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-400">No deep dive was stored for this snapshot. Switch the run to `Rank + Deep Dive` to trigger the final synthesis stage.</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Models & Usage</div>
+                    <div className="flex flex-wrap gap-2">
+                      {latestModels.extractionModel ? <span className={`rounded-full border px-2 py-1 text-[11px] ${modelBadgeTone(latestModels.extractionModel)}`}>Extract {latestModels.extractionModel}</span> : null}
+                      {latestModels.rankingModel ? <span className={`rounded-full border px-2 py-1 text-[11px] ${modelBadgeTone(latestModels.rankingModel)}`}>Rank {latestModels.rankingModel}</span> : null}
+                      {latestModels.deepDiveModel ? <span className={`rounded-full border px-2 py-1 text-[11px] ${modelBadgeTone(latestModels.deepDiveModel)}`}>Deep Dive {latestModels.deepDiveModel}</span> : null}
+                      {!latestModels.extractionModel && !latestModels.rankingModel && !latestModels.deepDiveModel ? (
+                        <span className="text-xs text-slate-500">No model metadata stored for this snapshot yet.</span>
+                      ) : null}
+                    </div>
+                    <div className="mt-4 space-y-2 text-sm text-slate-300">
+                      {usageRows.map(([key, value]) => (
+                        <div key={key} className="flex items-center justify-between gap-3">
+                          <span className="truncate text-slate-500">{key}</span>
+                          <span>{typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : String(value)}</span>
+                        </div>
+                      ))}
+                      {usageRows.length === 0 ? <p className="text-xs text-slate-500">Provider usage will appear here after a run reports it.</p> : null}
                     </div>
                   </div>
                 </div>

@@ -273,6 +273,47 @@ export async function loadNextRunnableResearchTicker(env: Env, runId: string): P
   return row ? mapRunTicker(row) : null;
 }
 
+export async function claimNextRunnableResearchTicker(env: Env, runId: string): Promise<ResearchRunTickerRecord | null> {
+  const row = await env.DB.prepare(
+    `UPDATE research_run_tickers
+     SET status = 'normalizing',
+         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+         heartbeat_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = (
+       SELECT id
+       FROM research_run_tickers
+       WHERE run_id = ? AND status = 'queued'
+       ORDER BY sort_order ASC
+       LIMIT 1
+     )
+     RETURNING
+       id,
+       run_id as runId,
+       ticker,
+       sort_order as sortOrder,
+       company_name as companyName,
+       exchange,
+       sec_cik as secCik,
+       ir_domain as irDomain,
+       status,
+       attempt_count as attemptCount,
+       last_error as lastError,
+       previous_snapshot_id as previousSnapshotId,
+       snapshot_id as snapshotId,
+       ranking_row_id as rankingRowId,
+       normalization_json as normalizationJson,
+       working_json as workingJson,
+       stage_metrics_json as stageMetricsJson,
+       started_at as startedAt,
+       completed_at as completedAt,
+       heartbeat_at as heartbeatAt,
+       created_at as createdAt,
+       updated_at as updatedAt`,
+  ).bind(runId).first();
+  return row ? mapRunTicker(row) : null;
+}
+
 export async function updateResearchRun(env: Env, runId: string, patch: {
   status?: string;
   providerUsageJson?: Record<string, unknown> | null;
@@ -551,16 +592,19 @@ export async function loadRunRankings(env: Env, runId: string): Promise<Research
   return (rows.results ?? []).map(mapRanking);
 }
 
-export async function countRunTickerStatuses(env: Env, runId: string): Promise<{ completed: number; failed: number; rankingReady: number; queued: number }> {
+export async function countRunTickerStatuses(env: Env, runId: string): Promise<{ completed: number; failed: number; rankingReady: number; queued: number; inProgress: number }> {
   const rows = await env.DB.prepare(
     "SELECT status, COUNT(*) as count FROM research_run_tickers WHERE run_id = ? GROUP BY status",
   ).bind(runId).all<{ status: string; count: number }>();
-  const counts = { completed: 0, failed: 0, rankingReady: 0, queued: 0 };
+  const counts = { completed: 0, failed: 0, rankingReady: 0, queued: 0, inProgress: 0 };
   for (const row of rows.results ?? []) {
     if (row.status === "completed") counts.completed = Number(row.count ?? 0);
     if (row.status === "failed") counts.failed = Number(row.count ?? 0);
     if (row.status === "ranking_ready") counts.rankingReady = Number(row.count ?? 0);
     if (row.status === "queued") counts.queued = Number(row.count ?? 0);
+    if (row.status === "normalizing" || row.status === "retrieving" || row.status === "extracting") {
+      counts.inProgress += Number(row.count ?? 0);
+    }
   }
   return counts;
 }
