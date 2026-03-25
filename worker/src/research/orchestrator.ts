@@ -431,6 +431,7 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
   if (run.status === "completed" || run.status === "partial" || run.status === "failed" || run.status === "cancelled") return run;
   const executionRun = await tryAcquireResearchRunExecution(env, run.id);
   if (!executionRun) return loadResearchRun(env, run.id);
+  await recoverStaleInProgressTickers(env, run.id);
   let usage = executionRun.providerUsageJson;
   const runWarnings = new Set<string>((executionRun.provenanceJson as { warnings?: string[] } | null)?.warnings ?? []);
   for (let index = 0; index < maxTickers; index += 1) {
@@ -502,6 +503,29 @@ function parseHeartbeatMs(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = new Date(value).getTime();
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<void> {
+  const tickers = await loadResearchRunTickers(env, runId);
+  const nowMs = Date.now();
+  for (const ticker of tickers) {
+    if (!["normalizing", "retrieving", "extracting"].includes(ticker.status)) continue;
+    const heartbeatMs = parseHeartbeatMs(ticker.heartbeatAt ?? ticker.updatedAt ?? ticker.startedAt ?? ticker.createdAt);
+    if (heartbeatMs !== null && nowMs - heartbeatMs < RESEARCH_HEARTBEAT_STALE_MS) continue;
+    if (ticker.attemptCount >= 2) {
+      await updateResearchRunTicker(env, ticker.id, {
+        status: "failed",
+        lastError: "Ticker processing became stale and exceeded the retry limit.",
+        completedAt: nowIso(),
+      });
+      continue;
+    }
+    await updateResearchRunTicker(env, ticker.id, {
+      status: "queued",
+      lastError: "Recovered stale ticker processing state; retrying.",
+      completedAt: null,
+    });
+  }
 }
 
 export async function ensureResearchRunProgress(env: Env, runId: string): Promise<ResearchRunRecord | null> {
