@@ -20,21 +20,109 @@ function retryDelayMs(attempt: number): number {
   return base + Math.floor(Math.random() * 300);
 }
 
-function extractJson<T>(content: unknown): T {
-  const text = Array.isArray(content)
+function anthropicContentToText(content: unknown): string {
+  return Array.isArray(content)
     ? content.map((part) => String((part as { text?: unknown })?.text ?? "")).join("\n")
     : String(content ?? "");
+}
+
+function stripCodeFence(text: string): string {
   const trimmed = text.trim();
-  try {
-    return JSON.parse(trimmed) as T;
-  } catch {
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(trimmed.slice(start, end + 1)) as T;
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match?.[1]?.trim() ?? trimmed;
+}
+
+function findBalancedJsonValue(text: string): string | null {
+  const trimmed = text.trim();
+  const objectStart = trimmed.indexOf("{");
+  const arrayStart = trimmed.indexOf("[");
+  const candidates = [objectStart, arrayStart].filter((value) => value >= 0).sort((left, right) => left - right);
+  if (candidates.length === 0) return null;
+  const start = candidates[0]!;
+  const stack: string[] = [];
+  let inString = false;
+  let escaping = false;
+  for (let index = start; index < trimmed.length; index += 1) {
+    const char = trimmed[index]!;
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = false;
+      }
+      continue;
     }
-    throw new Error("Anthropic response was not valid JSON.");
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      stack.push(char);
+      continue;
+    }
+    if (char === "}" || char === "]") {
+      const opener = stack.pop();
+      if (!opener) return null;
+      if ((char === "}" && opener !== "{") || (char === "]" && opener !== "[")) {
+        return null;
+      }
+      if (stack.length === 0) {
+        return trimmed.slice(start, index + 1);
+      }
+    }
   }
+  return null;
+}
+
+function removeTrailingCommas(text: string): string {
+  let current = text;
+  while (true) {
+    const next = current.replace(/,\s*([}\]])/g, "$1");
+    if (next === current) return current;
+    current = next;
+  }
+}
+
+function buildJsonCandidates(text: string): string[] {
+  const trimmed = text.trim();
+  const stripped = stripCodeFence(trimmed);
+  const candidates = [
+    trimmed,
+    stripped,
+    findBalancedJsonValue(trimmed),
+    findBalancedJsonValue(stripped),
+  ].filter((candidate): candidate is string => Boolean(candidate?.trim()));
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    for (const variant of [candidate.trim(), removeTrailingCommas(candidate.trim())]) {
+      if (!variant || seen.has(variant)) continue;
+      seen.add(variant);
+      output.push(variant);
+    }
+  }
+  return output;
+}
+
+function extractJson<T>(content: unknown): T {
+  const text = anthropicContentToText(content);
+  const candidates = buildJsonCandidates(text);
+  let lastError: Error | null = null;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Unknown JSON parse error.");
+    }
+  }
+  const detail = lastError?.message ?? "No JSON object or array could be isolated.";
+  throw new Error(`Anthropic response was not valid JSON: ${detail}`);
 }
 
 export async function callAnthropicJson<T>(env: Env, input: {
@@ -76,8 +164,27 @@ export async function callAnthropicJson<T>(env: Env, input: {
       }, 25_000, `Anthropic request for ${model}`);
       if (res.ok) {
         const json = await res.json() as Record<string, any>;
+        let data: T;
+        try {
+          data = extractJson<T>(json?.content);
+        } catch (error) {
+          const parseError = error instanceof Error
+            ? new Error(`Anthropic JSON parse failed for ${model}: ${error.message}`)
+            : new Error(`Anthropic JSON parse failed for ${model}.`);
+          lastError = parseError;
+          const hasModelFallback = modelIndex < modelCandidates.length - 1;
+          if (attempt < ANTHROPIC_MAX_ATTEMPTS - 1) {
+            await scheduler.wait(retryDelayMs(attempt));
+            continue;
+          }
+          if (hasModelFallback) {
+            await scheduler.wait(retryDelayMs(attempt));
+            break;
+          }
+          throw parseError;
+        }
         return {
-          data: extractJson<T>(json?.content),
+          data,
           usage: (json?.usage && typeof json.usage === "object") ? json.usage as Record<string, unknown> : null,
           model: String(json?.model ?? model),
         };

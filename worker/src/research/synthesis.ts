@@ -83,9 +83,21 @@ export async function rankResearchCards(env: Env, input: {
       system: [
         input.prompt.templateText ?? "Rank swing-trading research cards.",
         "Return strict JSON only.",
+        "Do not wrap the JSON in markdown fences.",
         "Use the supplied rubric and factor scores as the primary ranking signal.",
       ].join(" "),
       user: JSON.stringify({
+        outputContract: {
+          rankings: [
+            {
+              ticker: "string",
+              rank: "1-based integer",
+              attentionScore: "0..100",
+              priorityBucket: "high|medium|monitor",
+              rankRationale: "string",
+            },
+          ],
+        },
         rubric: input.rubric ?? {},
         cards: input.cards.map((card) => ({
           ticker: card.ticker,
@@ -174,9 +186,16 @@ export async function deepDiveResearchCard(env: Env, input: {
       system: [
         input.prompt.templateText ?? "Produce a concise deep-dive summary.",
         "Return strict JSON only.",
+        "Do not wrap the JSON in markdown fences.",
         "Use current evidence only, and treat prior summaries as historical context if they are present.",
       ].join(" "),
       user: JSON.stringify({
+        outputContract: {
+          summary: "string",
+          watchItems: ["string"],
+          bullCase: "string",
+          bearCase: "string",
+        },
         ticker: input.card.ticker,
         companyName: input.card.companyName,
         summary: input.card.summary,
