@@ -53,6 +53,7 @@
 - Shift chart to the left, and analysis on the right. Can take up whole page but stil lbe a pop up
 
 ## Gappers
+- Add avg traded volume column in table
 - Add highest pre-market volume scan, and change title to pre-market scan
 - Remove ETFs, closed ended funds, and OTC tickers
 - Find out what the current filters are and add more scanning filters or use a preset 
