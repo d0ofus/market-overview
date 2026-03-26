@@ -2190,6 +2190,7 @@ app.get("/api/research/runs/:id/stream", async (c) => {
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
+      let tickCount = 0;
       const close = () => {
         if (closed) return;
         closed = true;
@@ -2211,8 +2212,12 @@ app.get("/api/research/runs/:id/stream", async (c) => {
       };
       try {
         while (!closed) {
+          if (tickCount % 5 === 0) {
+            c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, runId));
+          }
           await push();
           if (closed) break;
+          tickCount += 1;
           await scheduler.wait(1000);
         }
       } catch (error) {

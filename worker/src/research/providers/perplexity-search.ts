@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { RESEARCH_SEARCH_TIMEOUT_MS } from "../constants";
 import { fetchWithTimeout } from "./http";
 
 export type PerplexitySearchQuery = {
@@ -97,7 +98,7 @@ export async function searchPerplexity(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
-  }, 20_000, `Perplexity search for ${query.ticker ?? query.key}`);
+  }, RESEARCH_SEARCH_TIMEOUT_MS, `Perplexity search for ${query.ticker ?? query.key}`);
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Perplexity search failed (${res.status}): ${detail.slice(0, 180)}`);

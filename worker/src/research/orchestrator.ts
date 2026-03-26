@@ -2,8 +2,11 @@ import type { Env } from "../types";
 import {
   DEFAULT_RESEARCH_SLICE_TICKERS,
   RESEARCH_EXECUTION_STALE_SECONDS,
+  RESEARCH_HEARTBEAT_INTERVAL_MS,
   RESEARCH_HEARTBEAT_STALE_MS,
   RESEARCH_MAX_TICKER_ATTEMPTS,
+  RESEARCH_RETRIEVAL_BUDGET_MS,
+  RESEARCH_SEARCH_QUERY_CONCURRENCY,
 } from "./constants";
 import { buildTopicEvidencePackets, searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
 import { extractResearchCard, fallbackExtractResearchCard } from "./extraction";
@@ -154,6 +157,9 @@ async function collectTickerEvidence(env: Env, input: {
   let secFactsCount = 0;
   let cachedEvidenceCount = 0;
   let newEvidenceCount = 0;
+  let duplicateEvidenceCount = 0;
+  const retrievalStartedAtMs = Date.now();
+  const seenEvidenceCacheKeys = new Set<string>();
 
   if (input.profile.version.settings.sourceFamilies.sec && input.secCik) {
     await input.touchHeartbeat?.();
@@ -178,6 +184,7 @@ async function collectTickerEvidence(env: Env, input: {
       const stored = await insertResearchEvidence(env, item);
       await linkResearchEvidence(env, input.run.id, input.runTicker.id, stored.id, "primary", index + 1);
       evidence.push(stored);
+      seenEvidenceCacheKeys.add(stored.cacheKey);
       newEvidenceCount += 1;
     }
     await input.reportProgress?.({
@@ -207,8 +214,35 @@ async function collectTickerEvidence(env: Env, input: {
     template: input.profile.bundle.searchTemplate,
     settings: input.profile.version.settings,
   });
-  for (const [queryIndex, query] of queries.entries()) {
-    try {
+  const evidenceTarget = Math.max(6, input.profile.version.settings.maxEvidenceItemsPerTicker);
+  const freshDate = startOfCurrentUtcDayIso();
+  let searchQueriesCompleted = 0;
+  let retrievalBudgetHit = false;
+  for (let batchStart = 0; batchStart < queries.length; batchStart += RESEARCH_SEARCH_QUERY_CONCURRENCY) {
+    const elapsedBeforeBatchMs = Date.now() - retrievalStartedAtMs;
+    if (elapsedBeforeBatchMs >= RESEARCH_RETRIEVAL_BUDGET_MS) {
+      retrievalBudgetHit = true;
+      const message = `Retrieval budget reached after ${formatElapsedLabel(elapsedBeforeBatchMs)}; proceeding with ${evidence.length} evidence item(s).`;
+      warnings.push(message);
+      await input.reportProgress?.({
+        message,
+        level: "warn",
+        stageMetricsPatch: {
+          evidenceCount: evidence.length,
+          cachedEvidenceCount,
+          newEvidenceCount,
+          duplicateEvidenceCount,
+          retrievalElapsedMs: elapsedBeforeBatchMs,
+          searchQueriesTotal: queries.length,
+          searchQueriesCompleted,
+        },
+      });
+      break;
+    }
+
+    const batch = queries.slice(batchStart, batchStart + RESEARCH_SEARCH_QUERY_CONCURRENCY);
+    for (const [offset, query] of batch.entries()) {
+      const queryIndex = batchStart + offset;
       await input.touchHeartbeat?.();
       await input.reportProgress?.({
         message: `Running search ${queryIndex + 1}/${queries.length}: ${query.label}.`,
@@ -216,21 +250,63 @@ async function collectTickerEvidence(env: Env, input: {
           currentStage: "retrieving",
           currentStep: `Search ${queryIndex + 1}/${queries.length}: ${query.label}`,
           searchQueriesTotal: queries.length,
-          searchQueriesCompleted: queryIndex,
+          searchQueriesCompleted,
           lastQueryLabel: query.label,
         },
       });
-      const freshDate = startOfCurrentUtcDayIso();
-      const result = await searchProvider.search(env, query, { forceFresh: input.run.refreshMode === "force_fresh" });
-      usage = sumUsage(usage, result.usage);
-      const searchEvidence = searchItemsToEvidence(result.items);
+    }
+
+    const settled = await Promise.all(batch.map(async (query) => {
+      try {
+        await input.touchHeartbeat?.();
+        const result = await searchProvider.search(env, query, { forceFresh: input.run.refreshMode === "force_fresh" });
+        return { query, result, error: null as Error | null };
+      } catch (error) {
+        return {
+          query,
+          result: null,
+          error: error instanceof Error ? error : new Error(`Search query ${query.key} failed.`),
+        };
+      }
+    }));
+
+    for (const entry of settled) {
+      searchQueriesCompleted += 1;
+      const { query } = entry;
+      if (entry.error || !entry.result) {
+        const message = entry.error?.message ?? `Search query ${query.key} failed.`;
+        warnings.push(message);
+        await input.reportProgress?.({
+          message: `Search ${query.label} failed: ${message}`,
+          level: "warn",
+          stageMetricsPatch: {
+            searchQueriesTotal: queries.length,
+            searchQueriesCompleted,
+            lastQueryLabel: query.label,
+            retrievalElapsedMs: Date.now() - retrievalStartedAtMs,
+          },
+        });
+        continue;
+      }
+
+      usage = sumUsage(usage, entry.result.usage);
+      const searchEvidence = searchItemsToEvidence(entry.result.items);
+      let insertedForQuery = 0;
+      let duplicatesForQuery = 0;
       for (const item of searchEvidence) {
+        if (seenEvidenceCacheKeys.has(item.cacheKey)) {
+          duplicateEvidenceCount += 1;
+          duplicatesForQuery += 1;
+          continue;
+        }
         const cached = input.run.refreshMode === "reuse_fresh_search_cache"
           ? await findFreshEvidenceByCacheKey(env, item.cacheKey, freshDate)
           : null;
         const stored = cached ?? await insertResearchEvidence(env, item);
         await linkResearchEvidence(env, input.run.id, input.runTicker.id, stored.id, "primary", evidence.length + 1);
         evidence.push(stored);
+        seenEvidenceCacheKeys.add(stored.cacheKey);
+        insertedForQuery += 1;
         if (cached) {
           cachedEvidenceCount += 1;
         } else {
@@ -238,28 +314,36 @@ async function collectTickerEvidence(env: Env, input: {
         }
       }
       await input.reportProgress?.({
-        message: `Search ${query.label} returned ${searchEvidence.length} item(s) (${cachedEvidenceCount} cached, ${newEvidenceCount} new so far).`,
+        message: `Search ${query.label} returned ${searchEvidence.length} item(s) (${insertedForQuery} added, ${duplicatesForQuery} duplicate, ${cachedEvidenceCount} cached total).`,
         stageMetricsPatch: {
           evidenceCount: evidence.length,
           cachedEvidenceCount,
           newEvidenceCount,
+          duplicateEvidenceCount,
+          retrievalElapsedMs: Date.now() - retrievalStartedAtMs,
           searchQueriesTotal: queries.length,
-          searchQueriesCompleted: queryIndex + 1,
+          searchQueriesCompleted,
           lastQueryLabel: query.label,
         },
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : `Search query ${query.key} failed.`;
-      warnings.push(message);
+      if (evidence.length >= evidenceTarget) break;
+    }
+
+    if (evidence.length >= evidenceTarget) {
+      const message = `Retrieved enough evidence after ${searchQueriesCompleted}/${queries.length} search queries; proceeding to extraction.`;
       await input.reportProgress?.({
-        message: `Search ${query.label} failed: ${message}`,
-        level: "warn",
+        message,
         stageMetricsPatch: {
+          evidenceCount: evidence.length,
+          cachedEvidenceCount,
+          newEvidenceCount,
+          duplicateEvidenceCount,
+          retrievalElapsedMs: Date.now() - retrievalStartedAtMs,
           searchQueriesTotal: queries.length,
-          searchQueriesCompleted: queryIndex + 1,
-          lastQueryLabel: query.label,
+          searchQueriesCompleted,
         },
       });
+      break;
     }
   }
 
@@ -272,8 +356,11 @@ async function collectTickerEvidence(env: Env, input: {
       secFactsCount,
       cachedEvidenceCount,
       newEvidenceCount,
+      duplicateEvidenceCount,
+      retrievalElapsedMs: Date.now() - retrievalStartedAtMs,
+      retrievalBudgetHit,
       searchQueriesTotal: queries.length,
-      searchQueriesCompleted: queries.length,
+      searchQueriesCompleted,
       evidenceCount: evidence.length,
     },
   };
@@ -392,7 +479,6 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
   const collected = await runWithHeartbeat({
     touchHeartbeat,
     onHeartbeat: async (elapsedMs, beatCount) => {
-      if (beatCount % 2 !== 0) return;
       await persistTickerProgress({
         metricsPatch: {
           currentStage: "retrieving",
@@ -1016,7 +1102,7 @@ async function runWithHeartbeat<T>(input: {
   heartbeatEveryMs?: number;
   onHeartbeat?: (elapsedMs: number, beatCount: number) => Promise<void>;
 }): Promise<T> {
-  const heartbeatEveryMs = Math.max(10_000, input.heartbeatEveryMs ?? 15_000);
+  const heartbeatEveryMs = Math.max(RESEARCH_HEARTBEAT_INTERVAL_MS, input.heartbeatEveryMs ?? RESEARCH_HEARTBEAT_INTERVAL_MS);
   const startedAt = Date.now();
   let beatCount = 0;
   const workPromise = input.work();
