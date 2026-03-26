@@ -389,22 +389,37 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     lastError: null,
     stageMetricsJson: stageMetrics,
   });
-  const collected = await collectTickerEvidence(env, {
-    run,
-    runTicker,
-    companyName: normalized.companyName,
-    secCik: normalized.secCik,
-    irDomain: normalized.irDomain,
-    profile,
+  const collected = await runWithHeartbeat({
     touchHeartbeat,
-    reportProgress: async (event) => {
+    onHeartbeat: async (elapsedMs, beatCount) => {
+      if (beatCount % 2 !== 0) return;
       await persistTickerProgress({
-        metricsPatch: event.stageMetricsPatch,
-        logMessage: event.message,
-        logLevel: event.level,
-        touchRunHeartbeat: true,
+        metricsPatch: {
+          currentStage: "retrieving",
+          currentStep: `Collecting ticker evidence (${formatElapsedLabel(elapsedMs)})`,
+          retrievalElapsedMs: elapsedMs,
+        },
+        logMessage: `Still gathering evidence (${formatElapsedLabel(elapsedMs)} elapsed).`,
+        touchRunHeartbeat: false,
       });
     },
+    work: () => collectTickerEvidence(env, {
+      run,
+      runTicker,
+      companyName: normalized.companyName,
+      secCik: normalized.secCik,
+      irDomain: normalized.irDomain,
+      profile,
+      touchHeartbeat,
+      reportProgress: async (event) => {
+        await persistTickerProgress({
+          metricsPatch: event.stageMetricsPatch,
+          logMessage: event.message,
+          logLevel: event.level,
+          touchRunHeartbeat: true,
+        });
+      },
+    }),
   });
   const topicPackets: TopicEvidencePacket[] = buildTopicEvidencePackets(collected.evidence, profile.version.settings);
   const peerContext: PeerContextPacket = profile.version.settings.peerComparisonEnabled !== false

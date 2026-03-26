@@ -7,6 +7,7 @@ import {
   summarizeEvidenceTopics,
   summarizeEvidence,
 } from "./evidence";
+import { buildAnthropicExtractionModels } from "./providers/anthropic";
 import { normalizeResearchProfileSettings, validateResearchCardOutput } from "./validation";
 import type {
   PeerComparisonBlock,
@@ -320,12 +321,15 @@ export async function extractResearchCard(env: Env, input: {
     return { card: fallback, usage: null, model: fallback.model, warning: "Anthropic extraction skipped because ANTHROPIC_API_KEY is not configured." };
   }
   const modelProvider = getModelResearchProvider(env);
+  const models = buildAnthropicExtractionModels(env, input.prompt.modelFamily);
   try {
     const response = await modelProvider.callJson<StandardizedResearchCard>(env, {
-      model: env.ANTHROPIC_HAIKU_MODEL?.trim() || input.prompt.modelFamily,
+      model: models.model,
+      fallbackModels: models.fallbackModels,
       system: [
         input.prompt.templateText ?? "Standardize evidence into a structured, evidence-grounded swing research card.",
         "Return strict JSON only.",
+        "Keep every narrative field concise: one or two sentences at most.",
         "Ground every material judgment in the supplied evidence IDs.",
         "Separate direct facts from inferred judgments.",
         "Do not invent facts, peers, or valuation metrics.",

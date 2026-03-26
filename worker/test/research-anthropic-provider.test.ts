@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/types";
-import { callAnthropicJson } from "../src/research/providers/anthropic";
+import {
+  buildAnthropicExtractionModels,
+  buildAnthropicSonnetModels,
+  callAnthropicJson,
+} from "../src/research/providers/anthropic";
 
 function buildEnv(): Env {
   return {
@@ -82,5 +86,78 @@ describe("callAnthropicJson", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(waitMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("falls back to a secondary model when malformed JSON cannot be repaired", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"watchItems\":[\"earnings date\",\"margin update\"],\"summary\":\"Still constructive",
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 15 },
+        model: "claude-haiku",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response("repair failed", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"watchItems\":[\"earnings date\",\"margin update\"],\"summary\":\"Still constructive",
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 15 },
+        model: "claude-haiku",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response("repair failed", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"watchItems\":[\"earnings date\",\"margin update\"],\"summary\":\"Still constructive.\"}",
+          },
+        ],
+        usage: { input_tokens: 11, output_tokens: 16 },
+        model: "claude-sonnet",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("scheduler", { wait: vi.fn().mockResolvedValue(undefined) });
+
+    const response = await callAnthropicJson<{ watchItems: string[]; summary: string }>(buildEnv(), {
+      model: "claude-haiku",
+      fallbackModels: ["claude-sonnet"],
+      system: "Return strict JSON only.",
+      user: "{}",
+    });
+
+    expect(response.data).toEqual({
+      watchItems: ["earnings date", "margin update"],
+      summary: "Still constructive.",
+    });
+    expect(response.model).toBe("claude-sonnet");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)).model).toBe("claude-sonnet");
+  });
+});
+
+describe("Anthropic model selection", () => {
+  it("keeps extraction on haiku but prepares a sonnet fallback", () => {
+    const selection = buildAnthropicExtractionModels(buildEnv(), "claude-3-haiku-20240307");
+    expect(selection.model).toBe("claude-3-haiku-20240307");
+    expect(selection.fallbackModels).toContain("claude-3-5-sonnet-20241022");
+  });
+
+  it("upgrades sonnet stages away from stale haiku prompt models", () => {
+    const selection = buildAnthropicSonnetModels(buildEnv(), "claude-3-haiku-20240307");
+    expect(selection.model).toBe("claude-3-5-sonnet-20241022");
+    expect(selection.fallbackModels).not.toContain("claude-3-5-sonnet-20241022");
   });
 });

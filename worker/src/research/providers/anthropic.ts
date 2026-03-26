@@ -8,6 +8,52 @@ export type AnthropicJsonResponse<T> = {
 };
 
 const ANTHROPIC_MAX_ATTEMPTS = 2;
+const DEFAULT_ANTHROPIC_SONNET_MODEL = "claude-3-5-sonnet-20241022";
+
+function normalizeModelName(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function uniqueModels(candidates: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const candidate of candidates) {
+    const normalized = normalizeModelName(candidate);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    models.push(normalized);
+  }
+  return models;
+}
+
+function isHaikuModel(model: string): boolean {
+  return /haiku/i.test(model);
+}
+
+export function buildAnthropicExtractionModels(env: Env, promptModel: string): { model: string; fallbackModels: string[] } {
+  const model = normalizeModelName(env.ANTHROPIC_HAIKU_MODEL) ?? normalizeModelName(promptModel) ?? "claude-3-haiku-20240307";
+  return {
+    model,
+    fallbackModels: uniqueModels([
+      env.ANTHROPIC_SONNET_MODEL,
+      DEFAULT_ANTHROPIC_SONNET_MODEL,
+    ]).filter((candidate) => candidate !== model),
+  };
+}
+
+export function buildAnthropicSonnetModels(env: Env, promptModel: string): { model: string; fallbackModels: string[] } {
+  const requested = normalizeModelName(env.ANTHROPIC_SONNET_MODEL) ?? normalizeModelName(promptModel) ?? DEFAULT_ANTHROPIC_SONNET_MODEL;
+  const model = isHaikuModel(requested) ? DEFAULT_ANTHROPIC_SONNET_MODEL : requested;
+  return {
+    model,
+    fallbackModels: uniqueModels([
+      env.ANTHROPIC_SONNET_MODEL,
+      !isHaikuModel(promptModel) ? promptModel : null,
+      DEFAULT_ANTHROPIC_SONNET_MODEL,
+    ]).filter((candidate) => candidate !== model),
+  };
+}
 
 function shouldRetryAnthropic(status: number, detail: string): boolean {
   if (status === 429 || status === 529) return true;
@@ -186,7 +232,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
         body: JSON.stringify({
           model,
           max_tokens: input.maxTokens ?? 1800,
-          temperature: 0.1,
+          temperature: 0,
           system: input.system,
           messages: [
             {
@@ -203,7 +249,8 @@ export async function callAnthropicJson<T>(env: Env, input: {
           data = extractJson<T>(json?.content);
         } catch (error) {
           try {
-            data = await repairAnthropicJson<T>(apiKey, model, anthropicContentToText(json?.content));
+            const repairModel = modelCandidates[Math.min(modelIndex + 1, modelCandidates.length - 1)] ?? model;
+            data = await repairAnthropicJson<T>(apiKey, repairModel, anthropicContentToText(json?.content));
             return {
               data,
               usage: (json?.usage && typeof json.usage === "object") ? json.usage as Record<string, unknown> : null,

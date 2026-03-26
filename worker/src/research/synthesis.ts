@@ -2,6 +2,7 @@ import type { Env } from "../types";
 import { getModelResearchProvider } from "./providers";
 import { computeAttentionScore, computeFactorCards, derivePriorityBucket } from "./scoring";
 import { clampRankingAdjustment, validateRankingReconciliationOutput, validateResearchDeepDiveOutput } from "./validation";
+import { buildAnthropicSonnetModels } from "./providers/anthropic";
 import type {
   PeerContextPacket,
   PromptVersionRecord,
@@ -122,6 +123,7 @@ export async function rankResearchCards(env: Env, input: {
     };
   }
   const provider = getModelResearchProvider(env);
+  const models = buildAnthropicSonnetModels(env, input.prompt.modelFamily);
   try {
     const response = await provider.callJson<{
       rankings?: Array<{
@@ -136,11 +138,13 @@ export async function rankResearchCards(env: Env, input: {
         peerImpactNarrative?: string;
       }>;
     }>(env, {
-      model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
+      model: models.model,
+      fallbackModels: models.fallbackModels,
       system: [
         input.prompt.templateText ?? "Rank swing-trading research cards.",
         "Return strict JSON only.",
         "Do not wrap the JSON in markdown fences.",
+        "Keep explanations concise and specific to the supplied cards.",
         "Deterministic factor cards are the canonical base score.",
         "You may reconcile and explain modest differences, but you may not ignore the factor cards.",
       ].join(" "),
@@ -235,13 +239,16 @@ export async function deepDiveResearchCard(env: Env, input: {
     };
   }
   const provider = getModelResearchProvider(env);
+  const models = buildAnthropicSonnetModels(env, input.prompt.modelFamily);
   try {
     const response = await provider.callJson<ResearchDeepDive>(env, {
-      model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
+      model: models.model,
+      fallbackModels: models.fallbackModels,
       system: [
         input.prompt.templateText ?? "Produce a true PM-style research synthesis.",
         "Return strict JSON only.",
         "Do not wrap the JSON in markdown fences.",
+        "Keep each field concise and avoid repeating the same point across sections.",
         "Prioritize synthesis over repetition.",
         "Explain what is priced in, what is underappreciated, why the name matters now, and what would invalidate the thesis.",
         "If peer context is weak, say so explicitly and do not force peer claims.",
