@@ -4,7 +4,7 @@ import { isOverviewSnapshotStale } from "../src/overview-snapshot";
 type FakeDbState = {
   snapshotId?: string | null;
   equalWeightRows?: Array<{ ticker: string; displayName: string | null }>;
-  sparklineRows?: Record<string, { sparklineJson: string | null } | undefined>;
+  sparklineRows?: Array<{ groupId: string; ticker: string; sparklineJson: string | null }>;
 };
 
 function createEnv(state: FakeDbState) {
@@ -17,15 +17,14 @@ function createEnv(state: FakeDbState) {
               if (sql.includes("FROM snapshots_meta")) {
                 return (state.snapshotId ? { id: state.snapshotId } : null) as T;
               }
-              if (sql.includes("FROM snapshot_rows") && sql.includes("sparkline_json")) {
-                const [, groupId, ticker] = args as [string, string, string];
-                return (state.sparklineRows?.[`${groupId}|${ticker}`] ?? null) as T;
-              }
               return null as T;
             },
             async all<T>() {
               if (sql.includes("FROM snapshot_rows") && sql.includes("display_name as displayName")) {
                 return { results: (state.equalWeightRows ?? []) as T[] };
+              }
+              if (sql.includes("FROM snapshot_rows sr") && sql.includes("sparkline_json as sparklineJson")) {
+                return { results: (state.sparklineRows ?? []) as T[] };
               }
               return { results: [] as T[] };
             },
@@ -48,15 +47,15 @@ describe("overview snapshot staleness", () => {
           displayName: "Invesco S&P 500 Equal Weight Consumer Staples ETF",
         },
       ],
-      sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-      },
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+      ],
     }) as never);
 
     expect(stale).toBe(true);
   });
 
-  it("marks snapshot stale when a mature ticker still has a 60-point sparkline", async () => {
+  it("keeps snapshot fresh when a ticker has fewer than 90 sparkline points", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -65,15 +64,15 @@ describe("overview snapshot staleness", () => {
           displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
         },
       ],
-      sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
-      },
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
+      ],
     }) as never);
 
-    expect(stale).toBe(true);
+    expect(stale).toBe(false);
   });
 
-  it("marks snapshot stale when a mature ticker has fewer than 90 sparkline points", async () => {
+  it("keeps snapshot fresh when a newer ticker has very short sparkline history", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -82,15 +81,15 @@ describe("overview snapshot staleness", () => {
           displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
         },
       ],
-      sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 21 }, (_, i) => i + 1)) },
-      },
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 21 }, (_, i) => i + 1)) },
+      ],
     }) as never);
 
-    expect(stale).toBe(true);
+    expect(stale).toBe(false);
   });
 
-  it("falls back to the US index group when the market leaders sparkline is missing", async () => {
+  it("keeps snapshot fresh when any other sparkline-enabled overview group is short", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -99,9 +98,28 @@ describe("overview snapshot staleness", () => {
           displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
         },
       ],
-      sparklineRows: {
-        "g-us-index|SPY": { sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
-      },
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-global", ticker: "EWJ", sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
+      ],
+    }) as never);
+
+    expect(stale).toBe(false);
+  });
+
+  it("marks snapshot stale when a sparkline-enabled overview row is missing sparkline data", async () => {
+    const stale = await isOverviewSnapshotStale(createEnv({
+      snapshotId: "snap-1",
+      equalWeightRows: [
+        {
+          ticker: "RSPS",
+          displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
+        },
+      ],
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-crypto", ticker: "MSTR", sparklineJson: null },
+      ],
     }) as never);
 
     expect(stale).toBe(true);
@@ -116,9 +134,13 @@ describe("overview snapshot staleness", () => {
           displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
         },
       ],
-      sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-      },
+      sparklineRows: [
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-global", ticker: "EWJ", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-crypto", ticker: "MSTR", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-us-index", ticker: "NQ1!", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-sector-etf", ticker: "XLE", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+      ],
     }) as never);
 
     expect(stale).toBe(false);

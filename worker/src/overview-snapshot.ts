@@ -3,11 +3,6 @@ import type { Env } from "./types";
 
 const DEFAULT_CONFIG_ID = "default";
 const EQUAL_WEIGHT_GROUP_ID = "g-sector-etf-eqwt";
-const REQUIRED_SPARKLINE_POINTS = 90;
-const MATURE_SPARKLINE_CANDIDATES: Array<{ ticker: string; groupId: string }> = [
-  { ticker: "AAPL", groupId: "g-market-leaders" },
-  { ticker: "SPY", groupId: "g-us-index" },
-];
 
 function parseSparklineLength(raw: string | null | undefined): number | null {
   if (!raw) return null;
@@ -37,13 +32,20 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
     if (expected && row.displayName !== expected) return true;
   }
 
-  for (const candidate of MATURE_SPARKLINE_CANDIDATES) {
-    const row = await env.DB.prepare(
-      "SELECT sparkline_json as sparklineJson FROM snapshot_rows WHERE snapshot_id = ? AND group_id = ? AND ticker = ? LIMIT 1",
-    ).bind(latest.id, candidate.groupId, candidate.ticker).first<{ sparklineJson: string | null }>();
-    const length = parseSparklineLength(row?.sparklineJson);
-    if (length != null && length < REQUIRED_SPARKLINE_POINTS) return true;
-    if (length != null) return false;
+  const sparklineRows = await env.DB.prepare(
+    `SELECT sr.group_id as groupId, sr.ticker, sr.sparkline_json as sparklineJson
+     FROM snapshot_rows sr
+     JOIN dashboard_groups dg ON dg.id = sr.group_id
+     JOIN dashboard_sections ds ON ds.id = dg.section_id
+     WHERE sr.snapshot_id = ?
+       AND ds.config_id = ?
+       AND dg.show_sparkline = 1
+       AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')`,
+  ).bind(latest.id, configId).all<{ groupId: string; ticker: string; sparklineJson: string | null }>();
+
+  for (const row of sparklineRows.results ?? []) {
+    const length = parseSparklineLength(row.sparklineJson);
+    if (length == null) return true;
   }
 
   return false;
