@@ -13,7 +13,7 @@ import type {
   TopicEvidencePacket,
 } from "./types";
 
-function buildFallbackDeepDive(card: StandardizedResearchCard): ResearchDeepDive {
+export function buildFallbackDeepDive(card: StandardizedResearchCard): ResearchDeepDive {
   return {
     summary: card.summary,
     watchItems: card.overallConclusion.keyWatchItems.slice(0, 5),

@@ -14,7 +14,7 @@ import { getSearchResearchProvider, getSecResearchProvider } from "./providers";
 import { buildMarketSearchQueries, buildTickerSearchQueries } from "./search-queries";
 import { computeFactorCards, computeAttentionScore, derivePriorityBucket } from "./scoring";
 import { normalizeResearchTicker } from "./sec-normalization";
-import { deepDiveResearchCard, rankResearchCards } from "./synthesis";
+import { buildFallbackDeepDive, deepDiveResearchCard, fallbackRankResearchCards, rankResearchCards } from "./synthesis";
 import {
   countRunTickerStatuses,
   createResearchRun,
@@ -498,11 +498,20 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
   };
 }
 
-async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<void> {
+async function finalizeResearchRun(
+  env: Env,
+  run: ResearchRunRecord,
+  options?: {
+    forceDeterministic?: boolean;
+    recoveryReason?: string | null;
+  },
+): Promise<void> {
   const profile = await resolveResearchProfile(env, run.profileId);
   const runTickers = await loadResearchRunTickers(env, run.id);
   const ready = runTickers.filter((row) => row.status === "ranking_ready" && row.workingJson?.card);
   const failed = runTickers.filter((row) => row.status === "failed");
+  const forceDeterministic = Boolean(options?.forceDeterministic);
+  const recoveryReason = options?.recoveryReason?.trim() || null;
   const runState = {
     id: run.id,
     provenanceJson: run.provenanceJson ?? null,
@@ -518,45 +527,71 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
     });
     return;
   }
-  await persistRunActivity(env, runState, {
-    message: `Finalizing research run for ${ready.length} ticker(s); collecting macro context and preparing ranking.`,
-    currentStep: "Collecting macro context",
-  });
-  const marketEvidence = await collectMarketEvidence(env, {
-    run,
-    runTickers: ready,
-    profile,
-    touchHeartbeat: async () => {
-      await updateResearchRunHeartbeat(env, run.id);
-    },
-  });
   const runWarnings: string[] = [];
   const cards = ready.map((row) => row.workingJson?.card as StandardizedResearchCard);
-  runState.providerUsageJson = sumUsage(runState.providerUsageJson, marketEvidence.usage);
-  await persistRunActivity(env, runState, {
-    message: `Ranking ${cards.length} ready ticker(s).`,
-    currentStep: "Ranking ready tickers",
-  });
-  const rankingResponse = await runWithHeartbeat({
-    touchHeartbeat: async () => {
-      await updateResearchRunHeartbeat(env, run.id);
-    },
-    onHeartbeat: async (elapsedMs) => {
-      await persistRunActivity(env, runState, {
-        message: `Still waiting on ranking model (${formatElapsedLabel(elapsedMs)} elapsed).`,
-        currentStep: `Ranking ready tickers (${formatElapsedLabel(elapsedMs)} elapsed)`,
-      });
-    },
-    work: () => rankResearchCards(env, {
+  let marketEvidenceUsage: Record<string, unknown> | null = null;
+  let rankingResponse: Awaited<ReturnType<typeof rankResearchCards>>;
+  if (forceDeterministic) {
+    const fallback = fallbackRankResearchCards({
       cards,
-      prompt: profile.bundle.sonnetRank,
       rubric: profile.bundle.rubric.rubricJson,
       settings: profile.version.settings,
       deepDiveTopN: run.deepDiveTopN,
-    }),
-  });
+    });
+    const deterministicWarning = recoveryReason ?? "Recovered stale ranking/finalization state and completed with deterministic ranking.";
+    runWarnings.push(deterministicWarning);
+    await persistRunActivity(env, runState, {
+      message: deterministicWarning,
+      level: "warn",
+      currentStep: "Recovering stale ranking/finalization",
+      warning: true,
+    });
+    rankingResponse = {
+      ...fallback,
+      usage: null,
+      model: "rules-stale-finalize",
+      warning: deterministicWarning,
+    };
+  } else {
+    await persistRunActivity(env, runState, {
+      message: `Finalizing research run for ${ready.length} ticker(s); collecting macro context and preparing ranking.`,
+      currentStep: "Collecting macro context",
+    });
+    const marketEvidence = await collectMarketEvidence(env, {
+      run,
+      runTickers: ready,
+      profile,
+      touchHeartbeat: async () => {
+        await updateResearchRunHeartbeat(env, run.id);
+      },
+    });
+    marketEvidenceUsage = marketEvidence.usage;
+    runState.providerUsageJson = sumUsage(runState.providerUsageJson, marketEvidenceUsage);
+    await persistRunActivity(env, runState, {
+      message: `Ranking ${cards.length} ready ticker(s).`,
+      currentStep: "Ranking ready tickers",
+    });
+    rankingResponse = await runWithHeartbeat({
+      touchHeartbeat: async () => {
+        await updateResearchRunHeartbeat(env, run.id);
+      },
+      onHeartbeat: async (elapsedMs) => {
+        await persistRunActivity(env, runState, {
+          message: `Still waiting on ranking model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+          currentStep: `Ranking ready tickers (${formatElapsedLabel(elapsedMs)} elapsed)`,
+        });
+      },
+      work: () => rankResearchCards(env, {
+        cards,
+        prompt: profile.bundle.sonnetRank,
+        rubric: profile.bundle.rubric.rubricJson,
+        settings: profile.version.settings,
+        deepDiveTopN: run.deepDiveTopN,
+      }),
+    });
+  }
   if (rankingResponse.warning) runWarnings.push(`Ranking fallback used: ${rankingResponse.warning}`);
-  let aggregateUsage = sumUsage(run.providerUsageJson, sumUsage(marketEvidence.usage, rankingResponse.usage));
+  let aggregateUsage = sumUsage(run.providerUsageJson, sumUsage(marketEvidenceUsage, rankingResponse.usage));
   runState.providerUsageJson = aggregateUsage;
   await persistRunActivity(env, runState, {
     message: rankingResponse.warning
@@ -604,30 +639,37 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
       });
       await updateResearchRunHeartbeat(env, run.id);
       const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-        ? await runWithHeartbeat({
-          touchHeartbeat: async () => {
-            await touchResearchHeartbeat(env, run.id, row.id);
-          },
-          onHeartbeat: async (elapsedMs) => {
-            rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
-              currentStage: "deep_dive",
-              currentStep: `Waiting on deep-dive model (${formatElapsedLabel(elapsedMs)})`,
-              deepDiveElapsedMs: elapsedMs,
-            }), {
-              message: `Still waiting on deep-dive model (${formatElapsedLabel(elapsedMs)} elapsed).`,
-            });
-            await updateResearchRunTicker(env, row.id, {
-              status: "deep_dive",
-              stageMetricsJson: rowStageMetrics,
-            });
-          },
-          work: async () => deepDiveResearchCard(env, {
-            card,
-            prompt: profile.bundle.sonnetDeepDive,
-            topicPackets,
-            peerContext,
-          }).catch(() => null),
-        })
+        ? forceDeterministic
+          ? {
+            deepDive: buildFallbackDeepDive(card),
+            usage: null,
+            model: "rules-stale-finalize",
+            warning: recoveryReason ?? "Recovered stale finalization and completed deep dive deterministically.",
+          }
+          : await runWithHeartbeat({
+            touchHeartbeat: async () => {
+              await touchResearchHeartbeat(env, run.id, row.id);
+            },
+            onHeartbeat: async (elapsedMs) => {
+              rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {
+                currentStage: "deep_dive",
+                currentStep: `Waiting on deep-dive model (${formatElapsedLabel(elapsedMs)})`,
+                deepDiveElapsedMs: elapsedMs,
+              }), {
+                message: `Still waiting on deep-dive model (${formatElapsedLabel(elapsedMs)} elapsed).`,
+              });
+              await updateResearchRunTicker(env, row.id, {
+                status: "deep_dive",
+                stageMetricsJson: rowStageMetrics,
+              });
+            },
+            work: async () => deepDiveResearchCard(env, {
+              card,
+              prompt: profile.bundle.sonnetDeepDive,
+              topicPackets,
+              peerContext,
+            }).catch(() => null),
+          })
         : null;
       if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
       aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
@@ -1170,18 +1212,27 @@ export async function ensureResearchRunProgress(env: Env, runId: string): Promis
   }
 
   const counts = await countRunTickerStatuses(env, runId);
+  const heartbeatMs = parseHeartbeatMs(run.heartbeatAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt);
+  const nowMs = Date.now();
+  const heartbeatAgeMs = heartbeatMs === null ? RESEARCH_HEARTBEAT_STALE_MS : Math.max(0, nowMs - heartbeatMs);
+  if (heartbeatMs === null || heartbeatAgeMs >= RESEARCH_HEARTBEAT_STALE_MS) {
+    if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0) {
+      const recoveryReason = `Recovered stale ranking/finalization state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; completed ranking${run.rankingMode === "rank_and_deep_dive" && run.deepDiveTopN > 0 ? " and requested deep dives" : ""} via deterministic fallback instead of retrying the same finalization attempt.`;
+      await finalizeResearchRun(env, run, {
+        forceDeterministic: true,
+        recoveryReason,
+      });
+      return loadResearchRun(env, runId);
+    }
+    return drainResearchRun(env, runId);
+  }
+
   const idleButRunnable = counts.inProgress === 0 && (
     counts.queued > 0
     || (counts.rankingReady > 0 && (await loadRunRankings(env, runId)).length === 0)
   );
   if (idleButRunnable) {
     return drainResearchRun(env, runId, Math.max(24, Math.ceil(RESEARCH_HEARTBEAT_STALE_MS / 750) + 8));
-  }
-
-  const heartbeatMs = parseHeartbeatMs(run.heartbeatAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt);
-  const nowMs = Date.now();
-  if (heartbeatMs === null || nowMs - heartbeatMs >= RESEARCH_HEARTBEAT_STALE_MS) {
-    return drainResearchRun(env, runId);
   }
 
   return run;
