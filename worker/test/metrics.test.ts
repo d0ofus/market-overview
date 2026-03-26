@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeMetrics, rankValue } from "../src/metrics";
+import { computeMetrics, rankValue, sanitizeBarSeries } from "../src/metrics";
 
 describe("computeMetrics", () => {
   it("computes core return metrics and sparkline", () => {
@@ -30,5 +30,14 @@ describe("computeMetrics", () => {
     expect(rankValue(sample, "1W")).toBe(3);
     expect(rankValue(sample, "YTD")).toBe(6);
     expect(rankValue(sample, "52W")).toBe(-2);
+  });
+
+  it("filters isolated corrupt bars from the series before building sparklines", () => {
+    const dates = ["2025-01-16", "2025-01-17", "2025-01-20", "2025-01-21", "2025-01-22"];
+    const closes = [591.7, 597.64, 482.1648070476866, 602.92, 606.33];
+    const cleaned = sanitizeBarSeries(dates, closes);
+    expect(cleaned.dates).toEqual(["2025-01-16", "2025-01-17", "2025-01-21", "2025-01-22"]);
+    expect(cleaned.closes).toEqual([591.7, 597.64, 602.92, 606.33]);
+    expect(computeMetrics(dates, closes).sparkline).toEqual([591.7, 597.64, 602.92, 606.33]);
   });
 });

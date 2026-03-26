@@ -6,12 +6,41 @@ const pct = (now: number, then: number): number => {
 };
 
 const SPARKLINE_LOOKBACK_DAYS = 90;
+const ISOLATED_OUTLIER_MOVE_PCT = 0.12;
+const ISOLATED_OUTLIER_NEIGHBOR_DRIFT_PCT = 0.06;
 
 const dailySparkline = (values: number[], lookback = SPARKLINE_LOOKBACK_DAYS): number[] =>
   values.slice(Math.max(0, values.length - lookback));
 
+export function sanitizeBarSeries(dates: string[], closes: number[]): { dates: string[]; closes: number[] } {
+  if (dates.length !== closes.length || closes.length < 3) {
+    return { dates: [...dates], closes: [...closes] };
+  }
+
+  const keep = new Array(closes.length).fill(true);
+  for (let i = 1; i < closes.length - 1; i += 1) {
+    const prev = closes[i - 1];
+    const curr = closes[i];
+    const next = closes[i + 1];
+    if (![prev, curr, next].every((value) => Number.isFinite(value) && value > 0)) continue;
+    const baseline = (prev + next) / 2;
+    if (!Number.isFinite(baseline) || baseline <= 0) continue;
+    const movePct = Math.abs(curr - baseline) / baseline;
+    const neighborDriftPct = Math.abs(next - prev) / baseline;
+    if (movePct >= ISOLATED_OUTLIER_MOVE_PCT && neighborDriftPct <= ISOLATED_OUTLIER_NEIGHBOR_DRIFT_PCT) {
+      keep[i] = false;
+    }
+  }
+
+  return {
+    dates: dates.filter((_, index) => keep[index]),
+    closes: closes.filter((_, index) => keep[index]),
+  };
+}
+
 export function computeMetrics(dates: string[], closes: number[]): MetricBundle {
-  if (dates.length === 0 || closes.length === 0) {
+  const cleaned = sanitizeBarSeries(dates, closes);
+  if (cleaned.dates.length === 0 || cleaned.closes.length === 0) {
     return {
       price: 0,
       change1d: 0,
@@ -26,24 +55,26 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     };
   }
 
-  const last = closes.length - 1;
-  const price = closes[last];
-  const prev1d = closes[Math.max(0, last - 1)];
-  const prev5d = closes[Math.max(0, last - 5)];
-  const prev63d = closes[Math.max(0, last - 63)];
-  const prev126d = closes[Math.max(0, last - 126)];
-  const prev21d = closes[Math.max(0, last - 21)];
+  const seriesDates = cleaned.dates;
+  const seriesCloses = cleaned.closes;
+  const last = seriesCloses.length - 1;
+  const price = seriesCloses[last];
+  const prev1d = seriesCloses[Math.max(0, last - 1)];
+  const prev5d = seriesCloses[Math.max(0, last - 5)];
+  const prev63d = seriesCloses[Math.max(0, last - 63)];
+  const prev126d = seriesCloses[Math.max(0, last - 126)];
+  const prev21d = seriesCloses[Math.max(0, last - 21)];
 
-  const currentYear = Number(dates[last].slice(0, 4));
-  let ytdAnchor = closes[0];
-  for (let i = 0; i < dates.length; i += 1) {
-    if (Number(dates[i].slice(0, 4)) === currentYear) {
-      ytdAnchor = closes[i];
+  const currentYear = Number(seriesDates[last].slice(0, 4));
+  let ytdAnchor = seriesCloses[0];
+  for (let i = 0; i < seriesDates.length; i += 1) {
+    if (Number(seriesDates[i].slice(0, 4)) === currentYear) {
+      ytdAnchor = seriesCloses[i];
       break;
     }
   }
 
-  const lookback252 = closes.slice(Math.max(0, closes.length - 252));
+  const lookback252 = seriesCloses.slice(Math.max(0, seriesCloses.length - 252));
   const high52w = Math.max(...lookback252);
 
   return {
@@ -56,7 +87,7 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     change21d: pct(price, prev21d),
     ytd: pct(price, ytdAnchor),
     pctFrom52wHigh: pct(price, high52w),
-    sparkline: dailySparkline(closes),
+    sparkline: dailySparkline(seriesCloses),
   };
 }
 

@@ -1,15 +1,18 @@
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
+import { sanitizeBarSeries } from "./metrics";
 import type { Env } from "./types";
 
 const DEFAULT_CONFIG_ID = "default";
 const EQUAL_WEIGHT_GROUP_ID = "g-sector-etf-eqwt";
 const SPARKLINE_LOOKBACK_POINTS = 90;
 
-function parseSparklineLength(raw: string | null | undefined): number | null {
+function parseSparklineValues(raw: string | null | undefined): number[] | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.length : null;
+    return Array.isArray(parsed) && parsed.every((value) => typeof value === "number" && Number.isFinite(value))
+      ? parsed as number[]
+      : null;
   } catch {
     return null;
   }
@@ -45,26 +48,32 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
   ).bind(latest.id, configId).all<{ groupId: string; ticker: string; sparklineJson: string | null }>();
 
   const uniqueTickers = Array.from(new Set((sparklineRows.results ?? []).map((row) => row.ticker.toUpperCase()).filter(Boolean)));
-  const availableBarsByTicker = new Map<string, number>();
+  const seriesByTicker = new Map<string, { dates: string[]; closes: number[] }>();
   if (uniqueTickers.length > 0) {
     const placeholders = uniqueTickers.map(() => "?").join(", ");
-    const counts = await env.DB.prepare(
-      `SELECT ticker, COUNT(*) as barCount
+    const bars = await env.DB.prepare(
+      `SELECT ticker, date, c
        FROM daily_bars
        WHERE ticker IN (${placeholders}) AND date <= ?
-       GROUP BY ticker`,
-    ).bind(...uniqueTickers, latest.asOfDate).all<{ ticker: string; barCount: number }>();
-    for (const row of counts.results ?? []) {
-      availableBarsByTicker.set(row.ticker.toUpperCase(), Number(row.barCount ?? 0));
+       ORDER BY ticker, date`,
+    ).bind(...uniqueTickers, latest.asOfDate).all<{ ticker: string; date: string; c: number }>();
+    for (const row of bars.results ?? []) {
+      const ticker = row.ticker.toUpperCase();
+      const series = seriesByTicker.get(ticker) ?? { dates: [], closes: [] };
+      series.dates.push(row.date);
+      series.closes.push(row.c);
+      seriesByTicker.set(ticker, series);
     }
   }
 
   for (const row of sparklineRows.results ?? []) {
-    const length = parseSparklineLength(row.sparklineJson);
-    const availableBars = availableBarsByTicker.get(row.ticker.toUpperCase()) ?? 0;
-    const expectedLength = Math.min(SPARKLINE_LOOKBACK_POINTS, availableBars);
-    if (length == null) return true;
-    if (length !== expectedLength) return true;
+    const values = parseSparklineValues(row.sparklineJson);
+    const rawSeries = seriesByTicker.get(row.ticker.toUpperCase()) ?? { dates: [], closes: [] };
+    const cleanedSeries = sanitizeBarSeries(rawSeries.dates, rawSeries.closes);
+    const expectedValues = cleanedSeries.closes.slice(Math.max(0, cleanedSeries.closes.length - SPARKLINE_LOOKBACK_POINTS));
+    if (values == null) return true;
+    if (values.length !== expectedValues.length) return true;
+    if (values.some((value, index) => Math.abs(value - expectedValues[index]) > 0.000001)) return true;
   }
 
   return false;

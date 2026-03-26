@@ -1,4 +1,4 @@
-import { computeBreadthStats, computeMetrics, rankValue } from "./metrics";
+import { computeBreadthStats, computeMetrics, rankValue, sanitizeBarSeries } from "./metrics";
 import { loadConfig } from "./db";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
@@ -113,16 +113,19 @@ async function loadWindowReturnsByTicker(
       .all<{ ticker: string; date: string; c: number; volume: number | null }>();
     rows.push(...(result.results ?? []));
   }
-  const closesByTicker = new Map<string, number[]>();
+  const seriesByTicker = new Map<string, { dates: string[]; closes: number[] }>();
   for (const row of rows) {
     const key = row.ticker.toUpperCase();
-    const values = closesByTicker.get(key) ?? [];
-    values.push(row.c);
-    closesByTicker.set(key, values);
+    const values = seriesByTicker.get(key) ?? { dates: [], closes: [] };
+    values.dates.push(row.date);
+    values.closes.push(row.c);
+    seriesByTicker.set(key, values);
   }
   const out = new Map<string, { change3m: number; change6m: number }>();
   for (const ticker of unique) {
-    const closes = closesByTicker.get(ticker) ?? [];
+    const series = seriesByTicker.get(ticker) ?? { dates: [], closes: [] };
+    const cleaned = sanitizeBarSeries(series.dates, series.closes);
+    const closes = cleaned.closes;
     if (closes.length === 0) {
       out.set(ticker, { change3m: 0, change6m: 0 });
       continue;

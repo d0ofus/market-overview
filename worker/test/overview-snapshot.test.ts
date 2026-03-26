@@ -6,7 +6,7 @@ type FakeDbState = {
   asOfDate?: string | null;
   equalWeightRows?: Array<{ ticker: string; displayName: string | null }>;
   sparklineRows?: Array<{ groupId: string; ticker: string; sparklineJson: string | null }>;
-  barCounts?: Record<string, number>;
+  barSeries?: Record<string, Array<{ date: string; c: number }>>;
 };
 
 function createEnv(state: FakeDbState) {
@@ -28,12 +28,11 @@ function createEnv(state: FakeDbState) {
               if (sql.includes("FROM snapshot_rows sr") && sql.includes("sparkline_json as sparklineJson")) {
                 return { results: (state.sparklineRows ?? []) as T[] };
               }
-              if (sql.includes("FROM daily_bars") && sql.includes("COUNT(*) as barCount")) {
+              if (sql.includes("FROM daily_bars") && sql.includes("ORDER BY ticker, date")) {
                 return {
-                  results: Object.entries(state.barCounts ?? {}).map(([ticker, barCount]) => ({
-                    ticker,
-                    barCount,
-                  })) as T[],
+                  results: Object.entries(state.barSeries ?? {}).flatMap(([ticker, rows]) =>
+                    rows.map((row) => ({ ticker, date: row.date, c: row.c })),
+                  ) as T[],
                 };
               }
               return { results: [] as T[] };
@@ -60,7 +59,9 @@ describe("overview snapshot staleness", () => {
       sparklineRows: [
         { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
       ],
-      barCounts: { AAPL: 90 },
+      barSeries: {
+        AAPL: Array.from({ length: 90 }, (_, i) => ({ date: `2026-01-${String(i + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(true);
@@ -78,7 +79,9 @@ describe("overview snapshot staleness", () => {
       sparklineRows: [
         { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
       ],
-      barCounts: { AAPL: 301 },
+      barSeries: {
+        AAPL: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(true);
@@ -96,7 +99,9 @@ describe("overview snapshot staleness", () => {
       sparklineRows: [
         { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 21 }, (_, i) => i + 1)) },
       ],
-      barCounts: { AAPL: 21 },
+      barSeries: {
+        AAPL: Array.from({ length: 21 }, (_, i) => ({ date: `2026-02-${String(i + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(false);
@@ -115,7 +120,10 @@ describe("overview snapshot staleness", () => {
         { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
         { groupId: "g-global", ticker: "EWJ", sparklineJson: JSON.stringify(Array.from({ length: 60 }, (_, i) => i + 1)) },
       ],
-      barCounts: { AAPL: 301, EWJ: 301 },
+      barSeries: {
+        AAPL: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        EWJ: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(true);
@@ -134,7 +142,10 @@ describe("overview snapshot staleness", () => {
         { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
         { groupId: "g-crypto", ticker: "MSTR", sparklineJson: null },
       ],
-      barCounts: { AAPL: 301, MSTR: 45 },
+      barSeries: {
+        AAPL: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        MSTR: Array.from({ length: 45 }, (_, i) => ({ date: `2026-02-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(true);
@@ -152,13 +163,16 @@ describe("overview snapshot staleness", () => {
       sparklineRows: [
         { groupId: "g-crypto", ticker: "MSTR", sparklineJson: JSON.stringify(Array.from({ length: 21 }, (_, i) => i + 1)) },
       ],
-      barCounts: { MSTR: 45 },
+      barSeries: {
+        MSTR: Array.from({ length: 45 }, (_, i) => ({ date: `2026-02-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(true);
   });
 
   it("keeps snapshot fresh when equal-weight names match and sparkline length is 90", async () => {
+    const last90 = Array.from({ length: 90 }, (_, i) => i + 212);
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -168,15 +182,49 @@ describe("overview snapshot staleness", () => {
         },
       ],
       sparklineRows: [
-        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-        { groupId: "g-global", ticker: "EWJ", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-        { groupId: "g-crypto", ticker: "MSTR", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-        { groupId: "g-us-index", ticker: "NQ1!", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
-        { groupId: "g-sector-etf", ticker: "XLE", sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
+        { groupId: "g-market-leaders", ticker: "AAPL", sparklineJson: JSON.stringify(last90) },
+        { groupId: "g-global", ticker: "EWJ", sparklineJson: JSON.stringify(last90) },
+        { groupId: "g-crypto", ticker: "MSTR", sparklineJson: JSON.stringify(last90) },
+        { groupId: "g-us-index", ticker: "NQ1!", sparklineJson: JSON.stringify(last90) },
+        { groupId: "g-sector-etf", ticker: "XLE", sparklineJson: JSON.stringify(last90) },
       ],
-      barCounts: { AAPL: 301, EWJ: 301, MSTR: 301, "NQ1!": 301, XLE: 301 },
+      barSeries: {
+        AAPL: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        EWJ: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        MSTR: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        "NQ1!": Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+        XLE: Array.from({ length: 301 }, (_, i) => ({ date: `2025-01-${String((i % 28) + 1).padStart(2, "0")}`, c: i + 1 })),
+      },
     }) as never);
 
     expect(stale).toBe(false);
+  });
+
+  it("marks snapshot stale when the saved sparkline still contains an isolated corrupt bar", async () => {
+    const clean = [591.7, 597.64, 602.92, 606.33];
+    const stale = await isOverviewSnapshotStale(createEnv({
+      snapshotId: "snap-1",
+      equalWeightRows: [
+        {
+          ticker: "RSPS",
+          displayName: "Consumer Staples Invesco S&P 500 Equal Weight ETF",
+        },
+      ],
+      sparklineRows: [
+        { groupId: "g-us-index", ticker: "SPY", sparklineJson: JSON.stringify([591.7, 597.64, 482.1648070476866, 602.92, 606.33]) },
+      ],
+      barSeries: {
+        SPY: [
+          { date: "2025-01-16", c: 591.7 },
+          { date: "2025-01-17", c: 597.64 },
+          { date: "2025-01-20", c: 482.1648070476866 },
+          { date: "2025-01-21", c: 602.92 },
+          { date: "2025-01-22", c: 606.33 },
+        ],
+      },
+    }) as never);
+
+    expect(clean).toEqual([591.7, 597.64, 602.92, 606.33]);
+    expect(stale).toBe(true);
   });
 });
