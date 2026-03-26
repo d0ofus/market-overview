@@ -3,6 +3,7 @@ import type { Env } from "./types";
 
 const DEFAULT_CONFIG_ID = "default";
 const EQUAL_WEIGHT_GROUP_ID = "g-sector-etf-eqwt";
+const SPARKLINE_LOOKBACK_POINTS = 90;
 
 function parseSparklineLength(raw: string | null | undefined): number | null {
   if (!raw) return null;
@@ -16,8 +17,8 @@ function parseSparklineLength(raw: string | null | undefined): number | null {
 
 export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFIG_ID): Promise<boolean> {
   const latest = await env.DB.prepare(
-    "SELECT id FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, datetime(generated_at) DESC LIMIT 1",
-  ).bind(configId).first<{ id: string }>();
+    "SELECT id, as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, datetime(generated_at) DESC LIMIT 1",
+  ).bind(configId).first<{ id: string; asOfDate: string }>();
   if (!latest?.id) return false;
 
   const expectedEqualWeightNames = new Map(
@@ -43,9 +44,27 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
        AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')`,
   ).bind(latest.id, configId).all<{ groupId: string; ticker: string; sparklineJson: string | null }>();
 
+  const uniqueTickers = Array.from(new Set((sparklineRows.results ?? []).map((row) => row.ticker.toUpperCase()).filter(Boolean)));
+  const availableBarsByTicker = new Map<string, number>();
+  if (uniqueTickers.length > 0) {
+    const placeholders = uniqueTickers.map(() => "?").join(", ");
+    const counts = await env.DB.prepare(
+      `SELECT ticker, COUNT(*) as barCount
+       FROM daily_bars
+       WHERE ticker IN (${placeholders}) AND date <= ?
+       GROUP BY ticker`,
+    ).bind(...uniqueTickers, latest.asOfDate).all<{ ticker: string; barCount: number }>();
+    for (const row of counts.results ?? []) {
+      availableBarsByTicker.set(row.ticker.toUpperCase(), Number(row.barCount ?? 0));
+    }
+  }
+
   for (const row of sparklineRows.results ?? []) {
     const length = parseSparklineLength(row.sparklineJson);
+    const availableBars = availableBarsByTicker.get(row.ticker.toUpperCase()) ?? 0;
+    const expectedLength = Math.min(SPARKLINE_LOOKBACK_POINTS, availableBars);
     if (length == null) return true;
+    if (length !== expectedLength) return true;
   }
 
   return false;
