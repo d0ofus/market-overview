@@ -28,18 +28,17 @@ function createEnv(counts: Record<string, number>) {
 }
 
 describe("loadTickersMissingBarHistory", () => {
-  it("returns overview tickers with fewer than 63 daily bars", async () => {
+  it("returns overview tickers with fewer than 90 daily bars", async () => {
     const missing = await loadTickersMissingBarHistory(
       createEnv({
-        AAPL: 63,
-        SPY: 62,
+        AAPL: 90,
+        SPY: 89,
         XLK: 20,
       }) as never,
       ["AAPL", "SPY", "XLK", "XLF"],
-      63,
+      90,
     );
 
     expect(missing).toEqual(["SPY", "XLK", "XLF"]);
   });
 });
-

@@ -5,9 +5,9 @@ const pct = (now: number, then: number): number => {
   return ((now - then) / then) * 100;
 };
 
-const THREE_MONTH_TRADING_DAYS = 63;
+const SPARKLINE_LOOKBACK_DAYS = 90;
 
-const dailySparkline = (values: number[], lookback = THREE_MONTH_TRADING_DAYS): number[] =>
+const dailySparkline = (values: number[], lookback = SPARKLINE_LOOKBACK_DAYS): number[] =>
   values.slice(Math.max(0, values.length - lookback));
 
 export function computeMetrics(dates: string[], closes: number[]): MetricBundle {
@@ -56,7 +56,7 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     change21d: pct(price, prev21d),
     ytd: pct(price, ytdAnchor),
     pctFrom52wHigh: pct(price, high52w),
-    sparkline: dailySparkline(closes, 60),
+    sparkline: dailySparkline(closes),
   };
 }
 

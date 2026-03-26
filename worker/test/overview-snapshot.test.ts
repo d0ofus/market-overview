@@ -49,7 +49,7 @@ describe("overview snapshot staleness", () => {
         },
       ],
       sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 63 }, (_, i) => i + 1)) },
+        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
       },
     }) as never);
 
@@ -73,7 +73,7 @@ describe("overview snapshot staleness", () => {
     expect(stale).toBe(true);
   });
 
-  it("marks snapshot stale when a mature ticker has fewer than 63 sparkline points", async () => {
+  it("marks snapshot stale when a mature ticker has fewer than 90 sparkline points", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -107,7 +107,7 @@ describe("overview snapshot staleness", () => {
     expect(stale).toBe(true);
   });
 
-  it("keeps snapshot fresh when equal-weight names match and sparkline length is 63", async () => {
+  it("keeps snapshot fresh when equal-weight names match and sparkline length is 90", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",
       equalWeightRows: [
@@ -117,7 +117,7 @@ describe("overview snapshot staleness", () => {
         },
       ],
       sparklineRows: {
-        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 63 }, (_, i) => i + 1)) },
+        "g-market-leaders|AAPL": { sparklineJson: JSON.stringify(Array.from({ length: 90 }, (_, i) => i + 1)) },
       },
     }) as never);
 
