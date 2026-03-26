@@ -1,14 +1,51 @@
 import type { Env } from "../types";
 import { getModelResearchProvider } from "./providers";
 import { computeAttentionScore, computeFactorCards, derivePriorityBucket } from "./scoring";
+import { clampRankingAdjustment, validateRankingReconciliationOutput, validateResearchDeepDiveOutput } from "./validation";
 import type {
+  PeerContextPacket,
   PromptVersionRecord,
   ResearchDeepDive,
   ResearchFactorCard,
   ResearchProfileSettings,
   ResearchRankingCard,
   StandardizedResearchCard,
+  TopicEvidencePacket,
 } from "./types";
+
+function buildFallbackDeepDive(card: StandardizedResearchCard): ResearchDeepDive {
+  return {
+    summary: card.summary,
+    watchItems: card.overallConclusion.keyWatchItems.slice(0, 5),
+    bullCase: card.overallConclusion.bestBullArgument,
+    bearCase: card.overallConclusion.bestBearArgument,
+    actualSetup: card.setupQuality.summary,
+    pricedInView: card.marketPricing.whyUpsideDownsideMayStillRemain,
+    underappreciatedView: card.marketPricing.pricedInAssessment === "underappreciated" || card.marketPricing.pricedInAssessment === "partially_priced_in"
+      ? "The current evidence suggests some of the setup may still be underappreciated relative to embedded expectations."
+      : "The evidence does not yet establish a large gap between reality and embedded expectations.",
+    evidencePriorities: [
+      card.earningsQuality.summary,
+      card.valuation.summary,
+      card.catalysts[0]?.summary ?? "",
+    ].filter(Boolean),
+    peerTake: card.peerComparison.available
+      ? card.peerComparison.strategicPositionRelative || "Peer context is directionally useful but should not override direct evidence."
+      : card.peerComparison.reasonUnavailable ?? "Peer context was too weak to make a credible structured comparison.",
+    leadershipView: card.peerComparison.available
+      ? `Price leadership is ${card.peerComparison.priceLeadershipRelative}; fundamental leadership is ${card.peerComparison.fundamentalLeadershipRelative}.`
+      : "Leadership needs to be judged from the ticker's own evidence because peer visibility is weak.",
+    invalidation: card.setupQuality.invalidationTriggers.join(", ") || "Further evidence deterioration or valuation pressure would weaken the setup.",
+    swingWorkflowSoWhat: card.overallConclusion.thesis,
+    evidenceIdsBySection: {
+      summary: card.topEvidenceIds.slice(0, 4),
+      setup: card.setupQuality.evidenceIds,
+      pricedIn: card.marketPricing.evidenceIds,
+      peers: card.peerComparison.evidenceIds,
+    },
+    model: "rules",
+  };
+}
 
 export function fallbackRankResearchCards(input: {
   cards: StandardizedResearchCard[];
@@ -38,9 +75,18 @@ export function fallbackRankResearchCards(input: {
       rank: index + 1,
       attentionScore: entry.attentionScore,
       priorityBucket: entry.priorityBucket,
-      rankRationale: entry.card.reasoningBullets[0] ?? entry.card.summary,
+      rankRationale: entry.card.overallConclusion.thesis,
       scoreDeltaVsPrevious: null,
       deepDiveRequested: index < input.deepDiveTopN,
+      convictionLevel: entry.card.confidenceLabel,
+      relativeDifferentiation: entry.card.peerComparison.available
+        ? entry.card.peerComparison.strategicPositionRelative
+        : entry.card.marketPricing.whyUpsideDownsideMayStillRemain,
+      deterministicBaseScore: entry.attentionScore,
+      deterministicAdjustmentNarrative: "Deterministic factor scoring was used as the primary ranking signal.",
+      peerImpactNarrative: entry.card.peerComparison.available
+        ? "Peer context contributed to the base score because peer confidence was adequate."
+        : "Peer context was excluded from scoring because it was unavailable or low-confidence.",
     })),
   };
 }
@@ -84,6 +130,10 @@ export async function rankResearchCards(env: Env, input: {
         attentionScore: number;
         priorityBucket: "high" | "medium" | "monitor";
         rankRationale: string;
+        convictionLevel?: "high" | "medium" | "low";
+        relativeDifferentiation?: string;
+        deterministicAdjustmentNarrative?: string;
+        peerImpactNarrative?: string;
       }>;
     }>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
@@ -91,7 +141,8 @@ export async function rankResearchCards(env: Env, input: {
         input.prompt.templateText ?? "Rank swing-trading research cards.",
         "Return strict JSON only.",
         "Do not wrap the JSON in markdown fences.",
-        "Use the supplied rubric and factor scores as the primary ranking signal.",
+        "Deterministic factor cards are the canonical base score.",
+        "You may reconcile and explain modest differences, but you may not ignore the factor cards.",
       ].join(" "),
       user: JSON.stringify({
         outputContract: {
@@ -102,57 +153,58 @@ export async function rankResearchCards(env: Env, input: {
               attentionScore: "0..100",
               priorityBucket: "high|medium|monitor",
               rankRationale: "string",
+              convictionLevel: "high|medium|low",
+              relativeDifferentiation: "string",
+              deterministicAdjustmentNarrative: "string",
+              peerImpactNarrative: "string",
             },
           ],
         },
         rubric: input.rubric ?? {},
         cards: input.cards.map((card) => ({
           ticker: card.ticker,
-          summary: card.summary,
-          valuation: card.valuation,
-          earningsQuality: card.earningsQuality,
-          catalysts: card.catalysts,
-          risks: card.risks,
-          contradictions: card.contradictions,
-          confidenceScore: card.confidenceScore,
+          thesisOverview: card.thesisOverview,
+          marketPricing: card.marketPricing,
+          earningsQualityDetailed: card.earningsQualityDetailed,
+          valuationView: card.valuationView,
+          thematicFit: card.thematicFit,
+          setupQuality: card.setupQuality,
+          peerComparison: card.peerComparison,
+          overallConclusion: card.overallConclusion,
+          evidenceTopicSummaries: card.evidenceTopicSummaries,
+          factorCards: fallback.factorCardsByTicker.get(card.ticker) ?? [],
+          deterministicBaseScore: fallback.rankings.find((row) => row.ticker === card.ticker)?.attentionScore ?? null,
         })),
       }),
-      maxTokens: 1200,
+      maxTokens: 1800,
     });
-    const rawRankings = Array.isArray(response.data?.rankings)
-      ? response.data.rankings
-      : Array.isArray(response.data)
-        ? response.data as Array<{
-          ticker: string;
-          rank: number;
-          attentionScore: number;
-          priorityBucket: "high" | "medium" | "monitor";
-          rankRationale: string;
-        }>
-        : [];
-    if (rawRankings.length === 0) {
-      return {
-        ...fallback,
-        usage: response.usage,
-        model: response.model,
-        warning: `Anthropic ranking returned no usable rankings array; deterministic fallback ranked all ${input.cards.length} ticker(s).`,
-      };
-    }
-    const rankingMap = new Map(rawRankings.map((ranking) => [ranking.ticker, ranking]));
+    const parsed = validateRankingReconciliationOutput(response.data);
+    const rankingMap = new Map(parsed.rankings.map((ranking) => [ranking.ticker, ranking]));
     return {
       factorCardsByTicker: fallback.factorCardsByTicker,
       rankings: fallback.rankings
         .map((fallbackRow) => {
           const fromModel = rankingMap.get(fallbackRow.ticker);
-          return fromModel ? {
+          if (!fromModel) return fallbackRow;
+          const delta = clampRankingAdjustment(fromModel.attentionScore - fallbackRow.attentionScore);
+          const adjustedScore = Math.max(0, Math.min(100, Number((fallbackRow.attentionScore + delta).toFixed(1))));
+          return {
             ...fallbackRow,
             rank: fromModel.rank,
-            attentionScore: fromModel.attentionScore,
+            attentionScore: adjustedScore,
             priorityBucket: fromModel.priorityBucket,
             rankRationale: fromModel.rankRationale,
-          } : fallbackRow;
+            convictionLevel: fromModel.convictionLevel ?? fallbackRow.convictionLevel,
+            relativeDifferentiation: fromModel.relativeDifferentiation ?? fallbackRow.relativeDifferentiation,
+            deterministicAdjustmentNarrative: fromModel.deterministicAdjustmentNarrative ?? `LLM reconciliation adjusted the base score by ${delta.toFixed(1)} points.`,
+            peerImpactNarrative: fromModel.peerImpactNarrative ?? fallbackRow.peerImpactNarrative,
+          };
         })
-        .sort((left, right) => left.rank - right.rank),
+        .sort((left, right) => left.rank - right.rank)
+        .map((row, index) => ({
+          ...row,
+          deepDiveRequested: index < input.deepDiveTopN,
+        })),
       usage: response.usage,
       model: response.model,
       warning: null,
@@ -170,16 +222,13 @@ export async function rankResearchCards(env: Env, input: {
 export async function deepDiveResearchCard(env: Env, input: {
   card: StandardizedResearchCard;
   prompt: PromptVersionRecord;
+  topicPackets?: TopicEvidencePacket[] | null;
+  peerContext?: PeerContextPacket | null;
 }): Promise<{ deepDive: ResearchDeepDive; usage: Record<string, unknown> | null; model: string; warning: string | null }> {
+  const fallback = buildFallbackDeepDive(input.card);
   if (!env.ANTHROPIC_API_KEY) {
     return {
-      deepDive: {
-        summary: input.card.summary,
-        watchItems: input.card.catalysts.slice(0, 3).map((item) => item.title),
-        bullCase: input.card.catalysts[0]?.summary ?? "Fresh upside catalyst remains limited.",
-        bearCase: input.card.risks[0]?.summary ?? "No dominant bear-case evidence was isolated.",
-        model: "rules",
-      },
+      deepDive: fallback,
       usage: null,
       model: "rules",
       warning: "Anthropic deep dive skipped because ANTHROPIC_API_KEY is not configured.",
@@ -190,11 +239,12 @@ export async function deepDiveResearchCard(env: Env, input: {
     const response = await provider.callJson<ResearchDeepDive>(env, {
       model: env.ANTHROPIC_SONNET_MODEL?.trim() || input.prompt.modelFamily,
       system: [
-        input.prompt.templateText ?? "Produce a concise deep-dive summary.",
+        input.prompt.templateText ?? "Produce a true PM-style research synthesis.",
         "Return strict JSON only.",
         "Do not wrap the JSON in markdown fences.",
-        "Keep the response concise.",
-        "Use current evidence only, and treat prior summaries as historical context if they are present.",
+        "Prioritize synthesis over repetition.",
+        "Explain what is priced in, what is underappreciated, why the name matters now, and what would invalidate the thesis.",
+        "If peer context is weak, say so explicitly and do not force peer claims.",
       ].join(" "),
       user: JSON.stringify({
         outputContract: {
@@ -202,45 +252,29 @@ export async function deepDiveResearchCard(env: Env, input: {
           watchItems: ["string"],
           bullCase: "string",
           bearCase: "string",
+          actualSetup: "string",
+          pricedInView: "string",
+          underappreciatedView: "string",
+          evidencePriorities: ["string"],
+          peerTake: "string",
+          leadershipView: "string",
+          invalidation: "string",
+          swingWorkflowSoWhat: "string",
+          evidenceIdsBySection: { summary: ["evidence-id"] },
         },
-        ticker: input.card.ticker,
-        companyName: input.card.companyName,
-        summary: input.card.summary,
-        valuation: input.card.valuation,
-        earningsQuality: input.card.earningsQuality,
-        catalysts: input.card.catalysts.slice(0, 2).map((item) => ({
-          title: item.title,
-          summary: item.summary.slice(0, 240),
-          freshness: item.freshness,
-          direction: item.direction,
-        })),
-        risks: input.card.risks.slice(0, 2).map((item) => ({
-          title: item.title,
-          summary: item.summary.slice(0, 240),
-          severity: item.severity,
-        })),
-        contradictions: input.card.contradictions.slice(0, 3),
-        reasoningBullets: input.card.reasoningBullets.slice(0, 3).map((item) => item.slice(0, 180)),
+        card: input.card,
+        topicEvidencePackets: input.topicPackets ?? [],
+        peerContext: input.peerContext ?? null,
       }),
-      maxTokens: 600,
+      maxTokens: 1400,
     });
-    const normalized: ResearchDeepDive = {
-      summary: typeof response.data?.summary === "string" && response.data.summary.trim()
-        ? response.data.summary.trim()
-        : input.card.summary,
-      watchItems: Array.isArray(response.data?.watchItems) && response.data.watchItems.length > 0
-        ? response.data.watchItems.map((item) => String(item))
-        : input.card.catalysts.slice(0, 3).map((item) => item.title),
-      bullCase: typeof response.data?.bullCase === "string" && response.data.bullCase.trim()
-        ? response.data.bullCase.trim()
-        : input.card.catalysts[0]?.summary ?? "Fresh upside catalyst remains limited.",
-      bearCase: typeof response.data?.bearCase === "string" && response.data.bearCase.trim()
-        ? response.data.bearCase.trim()
-        : input.card.risks[0]?.summary ?? "No dominant bear-case evidence was isolated.",
-      model: response.model,
-    };
+    const deepDive = validateResearchDeepDiveOutput(response.data, input.card.topEvidenceIds);
     return {
-      deepDive: normalized,
+      deepDive: {
+        ...fallback,
+        ...deepDive,
+        model: response.model,
+      },
       usage: response.usage,
       model: response.model,
       warning: null,
@@ -248,13 +282,7 @@ export async function deepDiveResearchCard(env: Env, input: {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Anthropic deep dive failed.";
     return {
-      deepDive: {
-        summary: input.card.summary,
-        watchItems: input.card.catalysts.slice(0, 3).map((item) => item.title),
-        bullCase: input.card.catalysts[0]?.summary ?? "Fresh upside catalyst remains limited.",
-        bearCase: input.card.risks[0]?.summary ?? "No dominant bear-case evidence was isolated.",
-        model: "rules",
-      },
+      deepDive: fallback,
       usage: null,
       model: "rules",
       warning: message,

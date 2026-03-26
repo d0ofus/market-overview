@@ -1,6 +1,6 @@
 import type { ResearchProfileSettings } from "./types";
 
-export const RESEARCH_SCHEMA_VERSION = "v1";
+export const RESEARCH_SCHEMA_VERSION = "v2";
 export const DEFAULT_RESEARCH_PROFILE_ID = "research-profile-swing-core";
 export const DEFAULT_RESEARCH_SLICE_TICKERS = 2;
 export const DEFAULT_RESEARCH_RUN_LIST_LIMIT = 10;
@@ -9,6 +9,10 @@ export const RESEARCH_EXECUTION_STALE_SECONDS = Math.ceil(RESEARCH_HEARTBEAT_STA
 export const RESEARCH_MAX_TICKER_ATTEMPTS = 3;
 export const RESEARCH_SEARCH_CACHE_TTL_MS = 24 * 60 * 60_000;
 export const RESEARCH_MAX_HISTORY_ROWS = 12;
+export const RESEARCH_MAX_PEER_CANDIDATES = 4;
+export const RESEARCH_DEFAULT_TOPIC_EVIDENCE_ITEMS = 4;
+export const RESEARCH_DEFAULT_TOPIC_EXCERPTS = 2;
+export const RESEARCH_MAX_RANKING_ADJUSTMENT = 10;
 
 export const DEFAULT_RESEARCH_SETTINGS: ResearchProfileSettings = {
   lookbackDays: 14,
@@ -19,6 +23,10 @@ export const DEFAULT_RESEARCH_SETTINGS: ResearchProfileSettings = {
   maxTickersPerRun: 20,
   deepDiveTopN: 3,
   comparisonEnabled: true,
+  peerComparisonEnabled: true,
+  maxPeerCandidates: 3,
+  maxTopicEvidenceItems: RESEARCH_DEFAULT_TOPIC_EVIDENCE_ITEMS,
+  maxEvidenceExcerptsPerTopic: RESEARCH_DEFAULT_TOPIC_EXCERPTS,
   sourceFamilies: {
     sec: true,
     news: true,

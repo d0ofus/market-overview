@@ -40,8 +40,16 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
   }, [open, result, onClose]);
 
   if (!open || !result) return null;
-  const thesis = detail?.snapshot?.thesisJson ?? null;
+  const thesis = (detail?.snapshot?.thesisJson ?? null) as Record<string, any> | null;
   const deepDive = thesis?.deepDive && typeof thesis.deepDive === "object" ? thesis.deepDive as Record<string, any> : null;
+  const thesisOverview = thesis?.thesisOverview as Record<string, any> | undefined;
+  const marketPricing = thesis?.marketPricing as Record<string, any> | undefined;
+  const earningsQualityDetailed = thesis?.earningsQualityDetailed as Record<string, any> | undefined;
+  const valuationView = thesis?.valuationView as Record<string, any> | undefined;
+  const thematicFit = thesis?.thematicFit as Record<string, any> | undefined;
+  const setupQuality = thesis?.setupQuality as Record<string, any> | undefined;
+  const peerComparison = thesis?.peerComparison as Record<string, any> | undefined;
+  const overallConclusion = thesis?.overallConclusion as Record<string, any> | undefined;
   const modelOutput = detail?.snapshot?.modelOutputJson ?? null;
   const modelLabels = [
     typeof modelOutput?.extractionModel === "string" ? `Extract ${modelOutput.extractionModel === "rules" ? "Rules fallback" : modelOutput.extractionModel}` : null,
@@ -99,33 +107,117 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
         <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.45fr),minmax(20rem,0.95fr)]">
           <div className="space-y-4">
             <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thesis</div>
-              <p className="text-sm text-slate-300">{result.summary}</p>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thesis Overview</div>
+              <p className="text-sm text-slate-300">{String(thesisOverview?.oneParagraph ?? result.summary)}</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Why Now</div>
+                  <p className="text-xs text-slate-400">{String(thesisOverview?.whyNow ?? "-")}</p>
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">What Would Change The View</div>
+                  <p className="text-xs text-slate-400">{String(thesisOverview?.whatWouldChangeMyMind ?? "-")}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Priced In View</div>
+                <div className="text-sm text-slate-300">{String(marketPricing?.pricedInAssessment ?? result.pricedInAssessmentLabel ?? "-")}</div>
+                <p className="mt-2 text-xs text-slate-400">{String(marketPricing?.whatExpectationsSeemEmbedded ?? "-")}</p>
+                <p className="mt-2 text-xs text-slate-400">{String(marketPricing?.whyUpsideDownsideMayStillRemain ?? "-")}</p>
+              </div>
+              <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Setup Quality</div>
+                <div className="text-sm text-slate-300">{String(setupQuality?.label ?? result.setupQualityLabel ?? "-")}</div>
+                <p className="mt-2 text-xs text-slate-400">{String(setupQuality?.summary ?? "-")}</p>
+                <p className="mt-2 text-xs text-slate-400">{String(setupQuality?.whatNeedsToHappenNext ?? "-")}</p>
+              </div>
             </div>
 
             <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Catalysts</div>
               <div className="space-y-2">
-                {result.catalysts.map((item) => (
+                {(Array.isArray(thesis?.catalystAssessment) ? thesis.catalystAssessment : result.catalysts).map((item: any) => (
                   <div key={item.title} className="rounded-lg border border-borderSoft/40 px-3 py-2">
                     <div className="text-sm font-semibold text-slate-200">{item.title}</div>
                     <div className="text-xs text-slate-400">{item.summary}</div>
                   </div>
                 ))}
-                {result.catalysts.length === 0 && <p className="text-xs text-slate-400">No major catalysts were recorded.</p>}
+                {(!Array.isArray(thesis?.catalystAssessment) || thesis.catalystAssessment.length === 0) && result.catalysts.length === 0 && <p className="text-xs text-slate-400">No major catalysts were recorded.</p>}
               </div>
             </div>
 
             <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Risks</div>
               <div className="space-y-2">
-                {result.risks.map((item) => (
+                {(Array.isArray(thesis?.riskAssessment) ? thesis.riskAssessment : result.risks).map((item: any) => (
                   <div key={item.title} className="rounded-lg border border-borderSoft/40 px-3 py-2">
                     <div className="text-sm font-semibold text-slate-200">{item.title}</div>
                     <div className="text-xs text-slate-400">{item.summary}</div>
                   </div>
                 ))}
-                {result.risks.length === 0 && <p className="text-xs text-slate-400">No dominant risks were recorded.</p>}
+                {(!Array.isArray(thesis?.riskAssessment) || thesis.riskAssessment.length === 0) && result.risks.length === 0 && <p className="text-xs text-slate-400">No dominant risks were recorded.</p>}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Contradictions</div>
+              <div className="space-y-2">
+                {Array.isArray(thesis?.contradictionsDetailed) && thesis.contradictionsDetailed.length > 0 ? thesis.contradictionsDetailed.map((item: any, index: number) => (
+                  <div key={`${item?.tension ?? "contradiction"}-${index}`} className="rounded-lg border border-borderSoft/40 px-3 py-2">
+                    <div className="text-sm font-semibold text-slate-200">{String(item?.tension ?? "-")}</div>
+                    <div className="text-xs text-slate-400">{String(item?.whyItMatters ?? "-")}</div>
+                  </div>
+                )) : <p className="text-xs text-slate-400">No explicit contradictions were stored.</p>}
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Earnings Quality</div>
+                <div className="space-y-2 text-xs text-slate-400">
+                  <p>{String(earningsQualityDetailed?.revenueQuality ?? "-")}</p>
+                  <p>{String(earningsQualityDetailed?.marginQuality ?? "-")}</p>
+                  <p>{String(earningsQualityDetailed?.cashFlowQuality ?? "-")}</p>
+                  <p>{String(earningsQualityDetailed?.guideQuality ?? "-")}</p>
+                </div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Valuation & Theme</div>
+                <p className="text-xs text-slate-400">{String(valuationView?.summary ?? "-")}</p>
+                <p className="mt-2 text-xs text-slate-400">{String(thematicFit?.themeName ?? "-")} · {String(thematicFit?.label ?? result.thematicFitLabel ?? "-")}</p>
+                <p className="mt-2 text-xs text-slate-400">{String(thematicFit?.adoptionSignal ?? "-")}</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Peer Comparison</div>
+              {peerComparison?.available ? (
+                <div className="space-y-2 text-xs text-slate-400">
+                  <p>{String(peerComparison.peerGroupName ?? "Peer group")} · {String(peerComparison.confidence ?? "-")} confidence</p>
+                  <p>{Array.isArray(peerComparison.closestPeers) ? peerComparison.closestPeers.join(", ") : "-"}</p>
+                  <p>{String(peerComparison.whyTheseAreClosestPeers ?? "-")}</p>
+                  <p>{String(peerComparison.strategicPositionRelative ?? "-")}</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">{String(peerComparison?.reasonUnavailable ?? "Peer comparison unavailable.")}</p>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Overall Conclusion</div>
+              <p className="text-sm text-slate-300">{String(overallConclusion?.thesis ?? result.overallConclusion ?? "-")}</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bull Case</div>
+                  <p className="text-xs text-slate-400">{String(overallConclusion?.bestBullArgument ?? "-")}</p>
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Bear Case</div>
+                  <p className="text-xs text-slate-400">{String(overallConclusion?.bestBearArgument ?? "-")}</p>
+                </div>
               </div>
             </div>
 

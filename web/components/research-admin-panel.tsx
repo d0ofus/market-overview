@@ -27,6 +27,10 @@ const DEFAULT_SETTINGS: ResearchProfileSettings = {
   maxTickersPerRun: 20,
   deepDiveTopN: 3,
   comparisonEnabled: true,
+  peerComparisonEnabled: true,
+  maxPeerCandidates: 3,
+  maxTopicEvidenceItems: 4,
+  maxEvidenceExcerptsPerTopic: 2,
   sourceFamilies: {
     sec: true,
     news: true,
@@ -232,11 +236,24 @@ export function ResearchAdminPanel() {
                   Default Deep Dive Top N
                   <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm" type="number" value={versionDraft.settings.deepDiveTopN} onChange={(event) => updateSetting("deepDiveTopN", Number(event.target.value || 0))} />
                 </label>
+                <label className="text-xs text-slate-300">
+                  Max Peer Candidates
+                  <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm" type="number" value={versionDraft.settings.maxPeerCandidates ?? 3} onChange={(event) => updateSetting("maxPeerCandidates", Number(event.target.value || 2))} />
+                </label>
+                <label className="text-xs text-slate-300">
+                  Topic Evidence Cap
+                  <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm" type="number" value={versionDraft.settings.maxTopicEvidenceItems ?? 4} onChange={(event) => updateSetting("maxTopicEvidenceItems", Number(event.target.value || 2))} />
+                </label>
+                <label className="text-xs text-slate-300">
+                  Excerpts / Topic
+                  <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm" type="number" value={versionDraft.settings.maxEvidenceExcerptsPerTopic ?? 2} onChange={(event) => updateSetting("maxEvidenceExcerptsPerTopic", Number(event.target.value || 1))} />
+                </label>
               </div>
 
               <div className="mt-3 flex flex-wrap gap-3 text-sm text-slate-300">
                 <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.includeMacroContext} onChange={(event) => updateSetting("includeMacroContext", event.target.checked)} />Include Macro Context</label>
-                <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.comparisonEnabled} onChange={(event) => updateSetting("comparisonEnabled", event.target.checked)} />Enable Compare vs Prior</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.comparisonEnabled} onChange={(event) => updateSetting("comparisonEnabled", event.target.checked)} />Enable Snapshot Compare</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.peerComparisonEnabled ?? true} onChange={(event) => updateSetting("peerComparisonEnabled", event.target.checked)} />Enable Peer Comparison</label>
                 <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.sourceFamilies.news} onChange={(event) => setVersionDraft((current) => ({ ...current, settings: { ...current.settings, sourceFamilies: { ...current.settings.sourceFamilies, news: event.target.checked } } }))} />News</label>
                 <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.sourceFamilies.earningsTranscripts} onChange={(event) => setVersionDraft((current) => ({ ...current, settings: { ...current.settings, sourceFamilies: { ...current.settings.sourceFamilies, earningsTranscripts: event.target.checked } } }))} />Transcripts</label>
                 <label className="flex items-center gap-2"><input type="checkbox" checked={versionDraft.settings.sourceFamilies.investorRelations} onChange={(event) => setVersionDraft((current) => ({ ...current, settings: { ...current.settings, sourceFamilies: { ...current.settings.sourceFamilies, investorRelations: event.target.checked } } }))} />IR</label>

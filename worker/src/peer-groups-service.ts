@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import type { PeerContextPacket } from "./research/types";
 
 export type PeerGroupType = "fundamental" | "technical" | "custom";
 export type PeerMembershipSource = "manual" | "fmp_seed" | "finnhub_seed" | "system";
@@ -547,6 +548,83 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
       members: membersByGroup.get(group.id) ?? [],
     })),
   };
+}
+
+export async function loadPreferredResearchPeerContext(env: Env, tickerInput: string, maxPeers = 3): Promise<PeerContextPacket> {
+  const detail = await loadPeerTickerDetail(env, tickerInput);
+  if (!detail) {
+    return {
+      available: false,
+      confidence: "low",
+      reasonUnavailable: "Ticker was not found in the peer directory.",
+      peerGroupId: null,
+      peerGroupName: null,
+      source: "none",
+      whyTheseAreClosestPeers: "",
+      closestPeers: [],
+    };
+  }
+  const preferredGroup = detail.groups
+    .filter((group) => group.isActive)
+    .sort((left, right) => {
+      const leftConfidence = averageConfidence(left.members);
+      const rightConfidence = averageConfidence(right.members);
+      const leftManualBias = left.members.some((member) => member.source === "manual" || member.source === "system") ? 1 : 0;
+      const rightManualBias = right.members.some((member) => member.source === "manual" || member.source === "system") ? 1 : 0;
+      if (left.groupType !== right.groupType) {
+        if (left.groupType === "fundamental") return -1;
+        if (right.groupType === "fundamental") return 1;
+      }
+      if (right.priority !== left.priority) return right.priority - left.priority;
+      if (rightConfidence !== leftConfidence) return rightConfidence - leftConfidence;
+      if (rightManualBias !== leftManualBias) return rightManualBias - leftManualBias;
+      return left.name.localeCompare(right.name);
+    })[0];
+  if (!preferredGroup) {
+    return {
+      available: false,
+      confidence: "low",
+      reasonUnavailable: "No active peer group was available for this ticker.",
+      peerGroupId: null,
+      peerGroupName: null,
+      source: "none",
+      whyTheseAreClosestPeers: "",
+      closestPeers: [],
+    };
+  }
+  const peers = preferredGroup.members
+    .filter((member) => member.ticker !== detail.symbol.ticker)
+    .slice(0, Math.max(2, Math.min(4, maxPeers)));
+  const avgConfidence = averageConfidence(peers);
+  const confidence = peers.length >= 2
+    ? avgConfidence >= 0.8 ? "high" : avgConfidence >= 0.55 ? "medium" : "low"
+    : "low";
+  return {
+    available: peers.length >= 2 && confidence !== "low",
+    confidence,
+    reasonUnavailable: peers.length >= 2 && confidence !== "low"
+      ? null
+      : peers.length < 2
+        ? "Fewer than two non-self peers were available in the preferred peer group."
+        : "Available peer memberships were too low-confidence for structured peer scoring.",
+    peerGroupId: preferredGroup.id,
+    peerGroupName: preferredGroup.name,
+    source: "peer_groups",
+    whyTheseAreClosestPeers: `Selected from the highest-priority active ${preferredGroup.groupType} peer group with the strongest membership confidence available for ${detail.symbol.ticker}.`,
+    closestPeers: peers.map((peer) => ({
+      ...peer,
+      price: null,
+      change1d: null,
+      marketCap: null,
+      avgVolume: null,
+    })),
+  };
+}
+
+function averageConfidence(members: Array<{ confidence: number | null }>): number {
+  const values = members.map((member) => member.confidence).filter((value): value is number => typeof value === "number");
+  if (values.length === 0) return 0.5;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 export async function createPeerGroup(

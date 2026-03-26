@@ -258,7 +258,7 @@ export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
 export type ResearchRefreshMode = "reuse_fresh_search_cache" | "force_fresh";
 export type ResearchRankingMode = "rank_only" | "rank_and_deep_dive";
 export type ResearchRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partial";
-export type ResearchTickerStatus = "queued" | "normalizing" | "retrieving" | "extracting" | "ranking_ready" | "deep_dive" | "completed" | "cancelled" | "failed" | "skipped";
+export type ResearchTickerStatus = "queued" | "normalizing" | "retrieving" | "peer_context_ready" | "extracting" | "ranking_ready" | "deep_dive" | "completed" | "cancelled" | "failed" | "skipped";
 
 export type ResearchProfileSettings = {
   lookbackDays: number;
@@ -269,6 +269,10 @@ export type ResearchProfileSettings = {
   maxTickersPerRun: number;
   deepDiveTopN: number;
   comparisonEnabled: boolean;
+  peerComparisonEnabled?: boolean;
+  maxPeerCandidates?: number;
+  maxTopicEvidenceItems?: number;
+  maxEvidenceExcerptsPerTopic?: number;
   sourceFamilies: {
     sec: boolean;
     news: boolean;
@@ -414,7 +418,7 @@ export type ResearchTickerResult = {
   attentionRank: number | null;
   confidenceLabel: "high" | "medium" | "low" | null;
   confidenceScore: number | null;
-  valuationLabel: "positive" | "mixed" | "negative" | "unclear" | null;
+  valuationLabel: "attractive" | "fair" | "full" | "stretched" | "cheap" | "somewhat_cheap" | "somewhat_expensive" | "expensive" | "unclear" | null;
   earningsQualityLabel: "positive" | "mixed" | "negative" | "unclear" | null;
   catalystFreshnessLabel: "fresh" | "recent" | "stale" | "unclear" | null;
   riskLabel: "low" | "moderate" | "high" | null;
@@ -423,6 +427,12 @@ export type ResearchTickerResult = {
   catalysts: ResearchCatalyst[];
   risks: ResearchRisk[];
   changeSummary: string | null;
+  pricedInAssessmentLabel?: "underappreciated" | "partially_priced_in" | "mostly_priced_in" | "fully_priced_in" | "unclear" | null;
+  setupQualityLabel?: "high" | "medium" | "low" | "unclear" | null;
+  thematicFitLabel?: "strong" | "average" | "weak" | "unclear" | null;
+  peerComparisonAvailable?: boolean;
+  peerComparisonConfidence?: "high" | "medium" | "low" | null;
+  overallConclusion?: string | null;
   citations: Array<{
     evidenceId: string;
     title: string;
@@ -505,6 +515,134 @@ export type ResearchSnapshotDetailResponse = {
   snapshot: ResearchSnapshotRow;
   factors: ResearchFactorRow[];
   evidence: ResearchEvidenceRow[];
+};
+
+export type ResearchCardThesisOverview = {
+  stance: "positive" | "mixed" | "negative" | "unclear";
+  oneParagraph: string;
+  whyNow: string;
+  whatWouldChangeMyMind: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardMarketPricing = {
+  pricedInAssessment: "underappreciated" | "partially_priced_in" | "mostly_priced_in" | "fully_priced_in" | "unclear";
+  whatExpectationsSeemEmbedded: string;
+  whyUpsideDownsideMayStillRemain: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardEarningsQualityDetailed = {
+  revenueQuality: string;
+  marginQuality: string;
+  cashFlowQuality: string;
+  guideQuality: string;
+  beatOrMissQuality: string;
+  oneOffsOrNoise: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardCatalystAssessment = {
+  title: string;
+  summary: string;
+  strength: string;
+  timing: string;
+  durability: string;
+  pricedInStatus: string;
+  direction: "positive" | "negative" | "mixed";
+  evidenceIds: string[];
+};
+
+export type ResearchCardRiskAssessment = {
+  title: string;
+  summary: string;
+  severity: "high" | "medium" | "low";
+  probability: string;
+  timeframe: string;
+  likelyImpact: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardContradiction = {
+  tension: string;
+  whyItMatters: string;
+  likelyDirectionIfResolved: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardValuationView = {
+  label: string;
+  summary: string;
+  metricsReferenced: string[];
+  relativeVsHistory: string;
+  relativeVsPeers: string;
+  multipleRisk: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardThematicFit = {
+  themeName: string;
+  label: "strong" | "average" | "weak" | "unclear";
+  durability: string;
+  adoptionSignal: string;
+  competitiveDensity: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardSetupQuality = {
+  label: "high" | "medium" | "low" | "unclear";
+  summary: string;
+  whatNeedsToHappenNext: string;
+  invalidationTriggers: string[];
+  evidenceIds: string[];
+};
+
+export type ResearchCardPeerComparison = {
+  available: boolean;
+  confidence: "high" | "medium" | "low";
+  reasonUnavailable: string | null;
+  peerGroupName: string | null;
+  closestPeers: string[];
+  whyTheseAreClosestPeers: string;
+  earningsQualityRelative: string;
+  growthOutlookRelative: string;
+  historicalExecutionRelative: string;
+  valuationRelative: string;
+  priceLeadershipRelative: string;
+  fundamentalLeadershipRelative: string;
+  strategicPositionRelative: string;
+  whatThisTickerDoesBetterThanPeers: string;
+  whatPeersDoBetterThanThisTicker: string;
+  peerRisksOrPeerAdvantages: string;
+  evidenceIds: string[];
+};
+
+export type ResearchCardOverallConclusion = {
+  thesis: string;
+  bestBullArgument: string;
+  bestBearArgument: string;
+  keyWatchItems: string[];
+  nextCatalystWindow: string;
+  confidenceLabel: "high" | "medium" | "low";
+  confidenceScore: number;
+  evidenceIds: string[];
+};
+
+export type ResearchDeepDiveV2 = {
+  summary: string;
+  watchItems: string[];
+  bullCase: string;
+  bearCase: string;
+  actualSetup: string;
+  pricedInView: string;
+  underappreciatedView: string;
+  evidencePriorities: string[];
+  peerTake: string;
+  leadershipView: string;
+  invalidation: string;
+  swingWorkflowSoWhat: string;
+  evidenceIdsBySection: Record<string, string[]>;
+  model: string;
 };
 
 export type ResearchSnapshotCompareResponse = {

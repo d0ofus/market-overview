@@ -5,7 +5,7 @@ import {
   RESEARCH_HEARTBEAT_STALE_MS,
   RESEARCH_MAX_TICKER_ATTEMPTS,
 } from "./constants";
-import { searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
+import { buildTopicEvidencePackets, searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
 import { extractResearchCard } from "./extraction";
 import { buildSnapshotComparison } from "./history";
 import { resolveResearchProfile } from "./profiles";
@@ -42,12 +42,15 @@ import {
 } from "./storage";
 import type {
   ResearchEvidenceRecord,
+  PeerContextPacket,
+  TopicEvidencePacket,
   ResearchRunRecord,
   ResearchRunRequest,
   ResearchRunTickerRecord,
   StandardizedResearchCard,
 } from "./types";
 import { loadWatchlistCompiledRows, loadWatchlistUniqueRows, loadWatchlistSet } from "../watchlist-compiler-service";
+import { loadPreferredResearchPeerContext } from "../peer-groups-service";
 
 function nowIso() {
   return new Date().toISOString();
@@ -403,6 +406,19 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
       });
     },
   });
+  const topicPackets: TopicEvidencePacket[] = buildTopicEvidencePackets(collected.evidence, profile.version.settings);
+  const peerContext: PeerContextPacket = profile.version.settings.peerComparisonEnabled !== false
+    ? await loadPreferredResearchPeerContext(env, runTicker.ticker, profile.version.settings.maxPeerCandidates ?? 3)
+    : {
+      available: false,
+      confidence: "low",
+      reasonUnavailable: "Peer comparison is disabled in the active research profile.",
+      peerGroupId: null,
+      peerGroupName: null,
+      source: "none",
+      whyTheseAreClosestPeers: "",
+      closestPeers: [],
+    };
   await touchHeartbeat();
   await persistTickerProgress({
     status: "extracting",
@@ -411,7 +427,13 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
       currentStep: "Sending evidence to extraction model",
       evidenceCount: collected.evidence.length,
       warningCount: collected.warnings.length,
+      topicPacketCount: topicPackets.length,
+      peerComparisonAvailable: peerContext.available,
     }),
+    workingPatch: {
+      topicPackets,
+      peerContext,
+    },
     logMessage: `Evidence collection complete with ${collected.evidence.length} item(s) and ${collected.warnings.length} warning(s).`,
     logLevel: collected.warnings.length > 0 ? "warn" : "info",
     touchRunHeartbeat: true,
@@ -442,6 +464,9 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
       companyName: normalized.companyName,
       evidence: collected.evidence,
       prompt: profile.bundle.haiku,
+      settings: profile.version.settings,
+      peerContext,
+      topicPackets,
     }),
   });
   const warnings = extracted.warning ? [...collected.warnings, extracted.warning] : collected.warnings;
@@ -450,6 +475,8 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     workingPatch: {
       card: extracted.card,
       extractionModel: extracted.model,
+      topicPackets,
+      peerContext,
       warnings,
     },
     metricsPatch: mergeJson(collected.metrics, {
@@ -542,6 +569,8 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
   const rankingByTicker = new Map(rankingResponse.rankings.map((row) => [row.ticker, row]));
   for (const row of ready) {
     const card = row.workingJson?.card as StandardizedResearchCard;
+    const topicPackets = Array.isArray(row.workingJson?.topicPackets) ? row.workingJson?.topicPackets as TopicEvidencePacket[] : [];
+    const peerContext = (row.workingJson?.peerContext ?? null) as PeerContextPacket | null;
     let rowStageMetrics = mergeJson(row.stageMetricsJson, {
       currentStage: "ranking_ready",
       currentStep: "Persisting ranked output",
@@ -592,7 +621,12 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
               stageMetricsJson: rowStageMetrics,
             });
           },
-          work: async () => deepDiveResearchCard(env, { card, prompt: profile.bundle.sonnetDeepDive }).catch(() => null),
+          work: async () => deepDiveResearchCard(env, {
+            card,
+            prompt: profile.bundle.sonnetDeepDive,
+            topicPackets,
+            peerContext,
+          }).catch(() => null),
         })
         : null;
       if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
@@ -609,24 +643,20 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
         attentionRank: ranking.rank,
         confidenceLabel: card.confidenceLabel,
         confidenceScore: card.confidenceScore,
-        valuationLabel: card.valuation.label,
+        valuationLabel: card.valuationView.label,
         earningsQualityLabel: card.earningsQuality.label,
         catalystFreshnessLabel: card.catalystFreshnessLabel,
         riskLabel: card.riskLabel,
         contradictionFlag: card.contradictions.length > 0,
         thesisJson: {
+          ...card,
           companyName: row.companyName,
-          summary: card.summary,
-          valuation: card.valuation,
-          earningsQuality: card.earningsQuality,
-          catalysts: card.catalysts,
-          risks: card.risks,
-          contradictions: card.contradictions,
-          reasoningBullets: card.reasoningBullets,
           deepDive: deepDive?.deepDive ?? null,
         },
         citationJson: {
           evidenceIds: card.topEvidenceIds,
+          topicPackets,
+          peerContext,
         },
         modelOutputJson: {
           extractionModel: card.model,
@@ -668,6 +698,11 @@ async function finalizeResearchRun(env: Env, run: ResearchRunRecord): Promise<vo
         rankingJson: {
           rationale: ranking.rankRationale,
           scoreDeltaVsPrevious: ranking.scoreDeltaVsPrevious,
+          convictionLevel: ranking.convictionLevel ?? null,
+          relativeDifferentiation: ranking.relativeDifferentiation ?? null,
+          deterministicBaseScore: ranking.deterministicBaseScore ?? null,
+          deterministicAdjustmentNarrative: ranking.deterministicAdjustmentNarrative ?? null,
+          peerImpactNarrative: ranking.peerImpactNarrative ?? null,
         },
       });
       rowStageMetrics = appendActivityPayload(mergeJson(rowStageMetrics, {

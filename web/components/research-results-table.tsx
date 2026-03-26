@@ -22,7 +22,7 @@ export function ResearchResultsTable({ results, onOpenTicker }: Props) {
         <table className="min-w-full text-xs">
           <thead className="bg-slate-900/60">
             <tr>
-              {["Rank", "Ticker", "Score", "Confidence", "Valuation", "Earnings", "Catalysts", "Risks"].map((label) => (
+              {["Rank", "Ticker", "Score", "Confidence", "Priced In", "Setup", "Peers", "Valuation"].map((label) => (
                 <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>
               ))}
             </tr>
@@ -41,10 +41,12 @@ export function ResearchResultsTable({ results, onOpenTicker }: Props) {
                 </td>
                 <td className="px-2 py-2 text-slate-300">{fmtScore(row.overallScore)}</td>
                 <td className="px-2 py-2 text-slate-300">{row.confidenceLabel ?? "-"}</td>
+                <td className="px-2 py-2 text-slate-300">{row.pricedInAssessmentLabel ?? "-"}</td>
+                <td className="px-2 py-2 text-slate-300">{row.setupQualityLabel ?? "-"}</td>
+                <td className="px-2 py-2 text-slate-300">
+                  {row.peerComparisonAvailable ? `available (${row.peerComparisonConfidence ?? "?"})` : "unavailable"}
+                </td>
                 <td className="px-2 py-2 text-slate-300">{row.valuationLabel ?? "-"}</td>
-                <td className="px-2 py-2 text-slate-300">{row.earningsQualityLabel ?? "-"}</td>
-                <td className="px-2 py-2 text-slate-300">{row.catalysts[0]?.title ?? "-"}</td>
-                <td className="px-2 py-2 text-slate-300">{row.risks[0]?.title ?? "-"}</td>
               </tr>
             ))}
             {results.length === 0 && (

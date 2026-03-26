@@ -22,6 +22,8 @@ export type PerplexitySearchItem = {
   title: string;
   url: string | null;
   summary: string;
+  excerpt?: string | null;
+  bullets?: string[] | null;
   publishedAt: string | null;
   sourceDomain: string | null;
   sourceKind: PerplexitySearchQuery["sourceKind"];
@@ -72,7 +74,7 @@ export async function searchPerplexity(
         content: [
           "You are a retrieval layer for a swing-trading research system.",
           "Search recent public web evidence and return strict JSON only.",
-          "Response shape: {\"items\":[{\"title\":\"\",\"url\":\"\",\"summary\":\"\",\"publishedAt\":null,\"sourceDomain\":\"\"}]}",
+          "Response shape: {\"items\":[{\"title\":\"\",\"url\":\"\",\"summary\":\"\",\"excerpt\":null,\"bullets\":[],\"publishedAt\":null,\"sourceDomain\":\"\"}]}",
           "Use only recent public evidence. If nothing useful is found, return {\"items\":[]}.",
         ].join(" "),
       },
@@ -112,6 +114,8 @@ export async function searchPerplexity(
         title: String(item?.title ?? query.label).trim() || query.label,
         url,
         summary: String(item?.summary ?? "").trim(),
+        excerpt: typeof item?.excerpt === "string" ? item.excerpt.trim() : null,
+        bullets: Array.isArray(item?.bullets) ? item.bullets.map((entry: unknown) => String(entry ?? "").trim()).filter(Boolean).slice(0, 3) : null,
         publishedAt: typeof item?.publishedAt === "string" ? item.publishedAt : null,
         sourceDomain: typeof item?.sourceDomain === "string" ? item.sourceDomain : (() => {
           try {

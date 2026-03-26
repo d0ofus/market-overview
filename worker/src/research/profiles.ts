@@ -11,6 +11,7 @@ import type {
   RubricVersionRecord,
   SearchTemplateVersionRecord,
 } from "./types";
+import { normalizeResearchProfileSettings } from "./validation";
 
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
@@ -78,6 +79,7 @@ function mapProfileRecord(row: any): ResearchProfileRecord {
 }
 
 function mapProfileVersionRecord(row: any): ResearchProfileVersionRecord {
+  const rawSettings = parseJson<Partial<ResearchProfileSettings>>(row.settingsJson, {});
   return {
     id: String(row.id),
     profileId: String(row.profileId),
@@ -87,14 +89,15 @@ function mapProfileVersionRecord(row: any): ResearchProfileVersionRecord {
     promptVersionIdSonnetDeepDive: String(row.promptVersionIdSonnetDeepDive),
     rubricVersionId: String(row.rubricVersionId),
     searchTemplateVersionId: String(row.searchTemplateVersionId),
-    settings: {
+    settings: normalizeResearchProfileSettings({
       ...DEFAULT_RESEARCH_SETTINGS,
-      ...parseJson<Partial<ResearchProfileSettings>>(row.settingsJson, {}),
+      ...rawSettings,
+      peerComparisonEnabled: rawSettings.peerComparisonEnabled ?? rawSettings.comparisonEnabled ?? DEFAULT_RESEARCH_SETTINGS.peerComparisonEnabled,
       sourceFamilies: {
         ...DEFAULT_RESEARCH_SETTINGS.sourceFamilies,
-        ...(parseJson<Partial<ResearchProfileSettings>>(row.settingsJson, {}).sourceFamilies ?? {}),
+        ...(rawSettings.sourceFamilies ?? {}),
       },
-    },
+    }),
     isActive: Boolean(row.isActive),
     createdAt: String(row.createdAt ?? ""),
   };

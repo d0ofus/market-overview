@@ -176,5 +176,11 @@ export async function fetchStructuredFacts(cik: string, env: Env): Promise<SecSt
     { key: "EarningsPerShareDiluted", label: "Diluted EPS", unitPreference: ["USD/shares"] },
     { key: "NetCashProvidedByUsedInOperatingActivities", label: "Operating Cash Flow", unitPreference: ["USD"] },
     { key: "GrossProfit", label: "Gross Profit", unitPreference: ["USD"] },
+    { key: "OperatingIncomeLoss", label: "Operating Income", unitPreference: ["USD"] },
+    { key: "OperatingExpenses", label: "Operating Expenses", unitPreference: ["USD"] },
+    { key: "CostOfGoodsSold", label: "Cost of Goods Sold", unitPreference: ["USD"] },
+    { key: "CommonStockSharesOutstanding", label: "Shares Outstanding", unitPreference: ["shares"] },
+    { key: "PaymentsToAcquirePropertyPlantAndEquipment", label: "Capital Expenditures", unitPreference: ["USD"] },
+    { key: "NetCashProvidedByUsedInInvestingActivities", label: "Investing Cash Flow", unitPreference: ["USD"] },
   ]);
 }

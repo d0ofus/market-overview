@@ -10,7 +10,7 @@ import {
   loadTickerResearchHistory,
 } from "./storage";
 import { buildSnapshotComparison } from "./history";
-import type { ResearchRunResultsResponse, ResearchRunStatusResponse, ResearchTickerResult } from "./types";
+import type { ResearchRunResultsResponse, ResearchRunStatusResponse, ResearchTickerResult, StandardizedResearchCard } from "./types";
 
 export async function loadResearchRunStatusPayload(env: Env, runId: string): Promise<ResearchRunStatusResponse | null> {
   const [run, profiles, tickers] = await Promise.all([
@@ -31,6 +31,7 @@ async function buildTickerResult(env: Env, snapshotId: string): Promise<Research
   if (!snapshot) return null;
   const evidence = await loadResearchSnapshotEvidence(env, snapshotId);
   const thesis = snapshot.thesisJson as Record<string, any>;
+  const card = thesis as unknown as Partial<StandardizedResearchCard>;
   const citationIds = Array.isArray((snapshot.citationJson as any)?.evidenceIds)
     ? ((snapshot.citationJson as any).evidenceIds as string[])
     : [];
@@ -54,10 +55,16 @@ async function buildTickerResult(env: Env, snapshotId: string): Promise<Research
     catalystFreshnessLabel: snapshot.catalystFreshnessLabel,
     riskLabel: snapshot.riskLabel,
     contradictionFlag: snapshot.contradictionFlag,
-    summary: String(thesis.summary ?? ""),
-    catalysts: Array.isArray(thesis.catalysts) ? thesis.catalysts : [],
-    risks: Array.isArray(thesis.risks) ? thesis.risks : [],
+    summary: String(card.summary ?? thesis.summary ?? card.thesisOverview?.oneParagraph ?? ""),
+    catalysts: Array.isArray(card.catalysts) ? card.catalysts : Array.isArray(thesis.catalysts) ? thesis.catalysts : [],
+    risks: Array.isArray(card.risks) ? card.risks : Array.isArray(thesis.risks) ? thesis.risks : [],
     changeSummary: typeof (snapshot.changeJson as any)?.summary === "string" ? (snapshot.changeJson as any).summary : null,
+    pricedInAssessmentLabel: typeof card.marketPricing?.pricedInAssessment === "string" ? card.marketPricing.pricedInAssessment : null,
+    setupQualityLabel: typeof card.setupQuality?.label === "string" ? card.setupQuality.label : null,
+    thematicFitLabel: typeof card.thematicFit?.label === "string" ? card.thematicFit.label : null,
+    peerComparisonAvailable: Boolean(card.peerComparison?.available),
+    peerComparisonConfidence: typeof card.peerComparison?.confidence === "string" ? card.peerComparison.confidence : null,
+    overallConclusion: typeof card.overallConclusion?.thesis === "string" ? card.overallConclusion.thesis : null,
     citations,
   };
 }
@@ -120,11 +127,12 @@ export async function loadResearchSnapshotComparePayload(env: Env, snapshotId: s
   return buildSnapshotComparison({
     currentSnapshot: current,
     currentCard: {
+      ...(thesis as StandardizedResearchCard),
       ticker: current.ticker,
       companyName: thesis.companyName ?? null,
-      summary: thesis.summary ?? "",
-      valuation: thesis.valuation ?? { label: "unclear", summary: "" },
-      earningsQuality: thesis.earningsQuality ?? { label: "unclear", summary: "" },
+      summary: thesis.summary ?? thesis.thesisOverview?.oneParagraph ?? "",
+      valuation: thesis.valuation ?? { label: current.valuationLabel ?? "unclear", summary: thesis.valuationView?.summary ?? "" },
+      earningsQuality: thesis.earningsQuality ?? { label: current.earningsQualityLabel ?? "unclear", summary: thesis.earningsQualityDetailed?.revenueQuality ?? "" },
       catalysts: Array.isArray(thesis.catalysts) ? thesis.catalysts : [],
       risks: Array.isArray(thesis.risks) ? thesis.risks : [],
       contradictions: Array.isArray(thesis.contradictions) ? thesis.contradictions : [],
@@ -134,15 +142,15 @@ export async function loadResearchSnapshotComparePayload(env: Env, snapshotId: s
       riskLabel: current.riskLabel ?? "moderate",
       factorCards: [],
       topEvidenceIds: Array.isArray((current.citationJson as any)?.evidenceIds) ? (current.citationJson as any).evidenceIds : [],
-      valuationScore: current.overallScore ?? 0,
-      earningsQualityScore: current.overallScore ?? 0,
-      catalystQualityScore: current.overallScore ?? 0,
-      catalystFreshnessScore: current.overallScore ?? 0,
-      riskScore: current.overallScore ?? 0,
-      contradictionScore: 70,
+      valuationScore: typeof thesis.valuationScore === "number" ? thesis.valuationScore : current.overallScore ?? 0,
+      earningsQualityScore: typeof thesis.earningsQualityScore === "number" ? thesis.earningsQualityScore : current.overallScore ?? 0,
+      catalystQualityScore: typeof thesis.catalystQualityScore === "number" ? thesis.catalystQualityScore : current.overallScore ?? 0,
+      catalystFreshnessScore: typeof thesis.catalystFreshnessScore === "number" ? thesis.catalystFreshnessScore : current.overallScore ?? 0,
+      riskScore: typeof thesis.riskScore === "number" ? thesis.riskScore : current.overallScore ?? 0,
+      contradictionScore: typeof thesis.contradictionScore === "number" ? thesis.contradictionScore : 70,
       model: "snapshot",
-      reasoningBullets: [],
-    },
+      reasoningBullets: Array.isArray(thesis.reasoningBullets) ? thesis.reasoningBullets : [],
+    } as StandardizedResearchCard,
     previousSnapshot: previous,
   });
 }

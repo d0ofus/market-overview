@@ -45,6 +45,15 @@ export function buildSnapshotComparison(input: {
     input.currentSnapshot.earningsQualityLabel && input.previousSnapshot?.earningsQualityLabel && input.currentSnapshot.earningsQualityLabel !== input.previousSnapshot.earningsQualityLabel
       ? `Earnings quality moved from ${input.previousSnapshot.earningsQualityLabel} to ${input.currentSnapshot.earningsQualityLabel}.`
       : null,
+    input.currentCard.marketPricing?.pricedInAssessment && previousThesis.marketPricing?.pricedInAssessment && input.currentCard.marketPricing.pricedInAssessment !== previousThesis.marketPricing.pricedInAssessment
+      ? `Priced-in view shifted from ${previousThesis.marketPricing.pricedInAssessment} to ${input.currentCard.marketPricing.pricedInAssessment}.`
+      : null,
+    input.currentCard.thematicFit?.label && previousThesis.thematicFit?.label && input.currentCard.thematicFit.label !== previousThesis.thematicFit.label
+      ? `Thematic fit changed from ${previousThesis.thematicFit.label} to ${input.currentCard.thematicFit.label}.`
+      : null,
+    typeof input.currentCard.peerComparison?.available === "boolean" && typeof previousThesis.peerComparison?.available === "boolean" && input.currentCard.peerComparison.available !== previousThesis.peerComparison.available
+      ? `Peer comparison is now ${input.currentCard.peerComparison.available ? "available" : "unavailable"}.`
+      : null,
   ].filter((value): value is string => Boolean(value));
   const summaryParts = [
     newCatalysts.length > 0 ? `${newCatalysts.length} new catalyst${newCatalysts.length === 1 ? "" : "s"} emerged.` : null,

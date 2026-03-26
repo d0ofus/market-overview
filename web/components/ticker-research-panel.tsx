@@ -214,7 +214,7 @@ export function TickerResearchPanel({ ticker }: Props) {
     };
   }, [activeRunId, running, selectedProfileId, ticker]);
 
-  const latestThesis = useMemo(() => latestDetail?.snapshot?.thesisJson ?? null, [latestDetail]);
+  const latestThesis = useMemo(() => (latestDetail?.snapshot?.thesisJson ?? null) as Record<string, any> | null, [latestDetail]);
   const latestModels = useMemo(() => {
     const raw = latestDetail?.snapshot?.modelOutputJson ?? null;
     return {
@@ -225,6 +225,10 @@ export function TickerResearchPanel({ ticker }: Props) {
   }, [latestDetail]);
   const latestDeepDive = useMemo(() => {
     const raw = latestThesis?.deepDive;
+    return raw && typeof raw === "object" ? raw as Record<string, any> : null;
+  }, [latestThesis]);
+  const latestPeerComparison = useMemo(() => {
+    const raw = latestThesis?.peerComparison;
     return raw && typeof raw === "object" ? raw as Record<string, any> : null;
   }, [latestThesis]);
   const usageRows = useMemo(() => summarizeUsage(activeRunResults?.providerUsage ?? activeRunStatus?.run.providerUsageJson), [activeRunResults, activeRunStatus]);
@@ -379,15 +383,40 @@ export function TickerResearchPanel({ ticker }: Props) {
                 </div>
 
                 <div className="mt-4 rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thesis</div>
-                  <p className="text-sm text-slate-300">{String(latestThesis?.summary ?? "No thesis summary stored yet.")}</p>
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thesis Overview</div>
+                  <p className="text-sm text-slate-300">{String(latestThesis?.thesisOverview?.oneParagraph ?? latestThesis?.summary ?? "No thesis summary stored yet.")}</p>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div>
+                      <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Why Now</div>
+                      <p className="text-xs text-slate-400">{String(latestThesis?.thesisOverview?.whyNow ?? "-")}</p>
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">Change My Mind</div>
+                      <p className="text-xs text-slate-400">{String(latestThesis?.thesisOverview?.whatWouldChangeMyMind ?? "-")}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Priced In Assessment</div>
+                    <div className="text-sm text-slate-200">{String(latestThesis?.marketPricing?.pricedInAssessment ?? "-")}</div>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.marketPricing?.whatExpectationsSeemEmbedded ?? "-")}</p>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.marketPricing?.whyUpsideDownsideMayStillRemain ?? "-")}</p>
+                  </div>
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Setup Quality</div>
+                    <div className="text-sm text-slate-200">{String(latestThesis?.setupQuality?.label ?? "-")}</div>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.setupQuality?.summary ?? "-")}</p>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.setupQuality?.whatNeedsToHappenNext ?? "-")}</p>
+                  </div>
                 </div>
 
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
                   <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Catalysts</div>
                     <div className="space-y-2">
-                      {Array.isArray(latestThesis?.catalysts) && latestThesis.catalysts.length > 0 ? latestThesis.catalysts.map((item: any, index: number) => (
+                      {Array.isArray(latestThesis?.catalystAssessment) && latestThesis.catalystAssessment.length > 0 ? latestThesis.catalystAssessment.map((item: any, index: number) => (
                         <div key={`${item?.title ?? "catalyst"}-${index}`} className="rounded-lg border border-borderSoft/40 px-3 py-2">
                           <div className="text-sm font-semibold text-slate-200">{String(item?.title ?? "-")}</div>
                           <div className="text-xs text-slate-400">{String(item?.summary ?? "-")}</div>
@@ -398,13 +427,59 @@ export function TickerResearchPanel({ ticker }: Props) {
                   <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Risks</div>
                     <div className="space-y-2">
-                      {Array.isArray(latestThesis?.risks) && latestThesis.risks.length > 0 ? latestThesis.risks.map((item: any, index: number) => (
+                      {Array.isArray(latestThesis?.riskAssessment) && latestThesis.riskAssessment.length > 0 ? latestThesis.riskAssessment.map((item: any, index: number) => (
                         <div key={`${item?.title ?? "risk"}-${index}`} className="rounded-lg border border-borderSoft/40 px-3 py-2">
                           <div className="text-sm font-semibold text-slate-200">{String(item?.title ?? "-")}</div>
                           <div className="text-xs text-slate-400">{String(item?.summary ?? "-")}</div>
                         </div>
                       )) : <p className="text-xs text-slate-400">No risks stored yet.</p>}
                     </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-3">
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Earnings Quality</div>
+                    <div className="space-y-2 text-xs text-slate-400">
+                      <p>{String(latestThesis?.earningsQualityDetailed?.revenueQuality ?? "-")}</p>
+                      <p>{String(latestThesis?.earningsQualityDetailed?.marginQuality ?? "-")}</p>
+                      <p>{String(latestThesis?.earningsQualityDetailed?.cashFlowQuality ?? "-")}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Valuation View</div>
+                    <div className="text-sm text-slate-200">{String(latestThesis?.valuationView?.label ?? latestSnapshot.valuationLabel ?? "-")}</div>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.valuationView?.summary ?? "-")}</p>
+                  </div>
+                  <div className="rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Thematic Fit</div>
+                    <div className="text-sm text-slate-200">{String(latestThesis?.thematicFit?.themeName ?? "-")}</div>
+                    <p className="mt-2 text-xs text-slate-400">{String(latestThesis?.thematicFit?.adoptionSignal ?? "-")}</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Peer Comparison</div>
+                  {latestPeerComparison?.available ? (
+                    <div className="space-y-2 text-xs text-slate-400">
+                      <p>{String(latestPeerComparison.peerGroupName ?? "Peer group")} · {String(latestPeerComparison.confidence ?? "-")} confidence</p>
+                      <p>{Array.isArray(latestPeerComparison.closestPeers) ? latestPeerComparison.closestPeers.join(", ") : "-"}</p>
+                      <p>{String(latestPeerComparison.whyTheseAreClosestPeers ?? "-")}</p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400">{String(latestPeerComparison?.reasonUnavailable ?? "Peer comparison unavailable / low confidence.")}</p>
+                  )}
+                </div>
+
+                <div className="mt-4 rounded-xl border border-borderSoft/60 bg-panelSoft/45 p-4">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Overall Conclusion</div>
+                  <p className="text-sm text-slate-300">{String(latestThesis?.overallConclusion?.thesis ?? "-")}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {Array.isArray(latestThesis?.overallConclusion?.keyWatchItems) && latestThesis.overallConclusion.keyWatchItems.length > 0 ? latestThesis.overallConclusion.keyWatchItems.map((item: unknown, index: number) => (
+                      <span key={`${String(item)}-${index}`} className="rounded-full border border-borderSoft/60 bg-panel px-2 py-1 text-[11px] text-slate-300">
+                        {String(item)}
+                      </span>
+                    )) : <span className="text-xs text-slate-500">No key watch items stored.</span>}
                   </div>
                 </div>
 
