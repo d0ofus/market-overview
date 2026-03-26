@@ -6,7 +6,7 @@ import {
   RESEARCH_MAX_TICKER_ATTEMPTS,
 } from "./constants";
 import { buildTopicEvidencePackets, searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
-import { extractResearchCard } from "./extraction";
+import { extractResearchCard, fallbackExtractResearchCard } from "./extraction";
 import { buildSnapshotComparison } from "./history";
 import { resolveResearchProfile } from "./profiles";
 import { appendActivityPayload, buildStaleFailureMessage, buildStaleRecoveryMessage, type ResearchActivityLevel } from "./progress";
@@ -1031,6 +1031,93 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
       });
       events.push({ level: "warn", message: `${ticker.ticker}: ${message}` });
       continue;
+    }
+    if (ticker.status === "extracting") {
+      const evidence = await loadRunTickerEvidence(env, ticker.id);
+      if (evidence.length > 0) {
+        const workingJson = mergeJson(ticker.workingJson, {});
+        const topicPackets = Array.isArray(workingJson.topicPackets)
+          ? workingJson.topicPackets as TopicEvidencePacket[]
+          : buildTopicEvidencePackets(evidence, {
+            lookbackDays: 14,
+            includeMacroContext: true,
+            maxTickerQueries: 4,
+            maxEvidenceItemsPerTicker: 12,
+            maxSearchResultsPerQuery: 4,
+            maxTickersPerRun: 20,
+            deepDiveTopN: 3,
+            comparisonEnabled: true,
+            peerComparisonEnabled: true,
+            maxPeerCandidates: 3,
+            maxTopicEvidenceItems: 4,
+            maxEvidenceExcerptsPerTopic: 2,
+            sourceFamilies: {
+              sec: true,
+              news: true,
+              earningsTranscripts: true,
+              investorRelations: true,
+              analystCommentary: true,
+            },
+          });
+        const peerContext = (workingJson.peerContext ?? {
+          available: false,
+          confidence: "low",
+          reasonUnavailable: "Peer context was unavailable when stale extraction fallback ran.",
+          peerGroupId: null,
+          peerGroupName: null,
+          source: "none",
+          whyTheseAreClosestPeers: "",
+          closestPeers: [],
+        }) as PeerContextPacket;
+        const companyName = typeof ticker.companyName === "string" && ticker.companyName.trim()
+          ? ticker.companyName
+          : evidence.find((item) => item.ticker?.toUpperCase() === ticker.ticker)?.ticker ?? null;
+        const fallbackCard = fallbackExtractResearchCard({
+          ticker: ticker.ticker,
+          companyName,
+          evidence,
+          peerContext,
+          topicPackets,
+        });
+        const message = `Recovered stale extracting state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; completed extraction via deterministic fallback instead of retrying the same attempt.`;
+        await updateResearchRunTicker(env, ticker.id, {
+          status: "ranking_ready",
+          lastError: message,
+          completedAt: null,
+          workingJson: {
+            ...workingJson,
+            card: {
+              ...fallbackCard,
+              reasoningBullets: [
+                ...fallbackCard.reasoningBullets,
+                "Stale extraction recovery used deterministic fallback synthesis from stored evidence.",
+              ].slice(0, 4),
+            },
+            extractionModel: "rules-stale-fallback",
+            warnings: Array.from(new Set([
+              ...(
+                Array.isArray(workingJson.warnings)
+                  ? workingJson.warnings.map((item) => String(item ?? "").trim()).filter(Boolean)
+                  : []
+              ),
+              message,
+            ])),
+            topicPackets,
+            peerContext,
+          },
+          stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
+            currentStage: "ranking_ready",
+            currentStep: "Recovered stale extraction via deterministic fallback",
+            staleHeartbeatAgeMs: heartbeatAgeMs,
+            extractionRecoveredViaFallback: true,
+          }), {
+            message,
+            level: "warn",
+          }),
+        });
+        events.push({ level: "warn", message: `${ticker.ticker}: ${message}` });
+        continue;
+      }
     }
     if (ticker.attemptCount >= RESEARCH_MAX_TICKER_ATTEMPTS) {
       const message = buildStaleFailureMessage(ticker.status, heartbeatAgeMs, ticker.attemptCount, RESEARCH_MAX_TICKER_ATTEMPTS);
