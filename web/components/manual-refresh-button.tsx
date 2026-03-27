@@ -9,9 +9,17 @@ type Props = {
   page: "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "ticker" | "alerts" | "scans" | "watchlist-compiler" | "gappers";
   ticker?: string | null;
   className?: string;
+  idleLabel?: string;
+  loadingLabel?: string;
 };
 
-export function ManualRefreshButton({ page, ticker = null, className = "" }: Props) {
+export function ManualRefreshButton({
+  page,
+  ticker = null,
+  className = "",
+  idleLabel = "Update This Page",
+  loadingLabel = "Refreshing...",
+}: Props) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [label, setLabel] = useState<string | null>(null);
@@ -36,7 +44,7 @@ export function ManualRefreshButton({ page, ticker = null, className = "" }: Pro
         }}
       >
         <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-        {loading ? "Refreshing..." : "Update This Page"}
+        {loading ? loadingLabel : idleLabel}
       </button>
       {label && <p className="mt-1 text-xs text-slate-400">{label}</p>}
     </div>

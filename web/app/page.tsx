@@ -95,7 +95,9 @@ export default async function HomePage() {
         </div>
       )}
       {!dashboardValue && (
-        <div className="card p-4 text-sm text-red-300">Overview data is temporarily unavailable. Try refreshing from Admin.</div>
+        <div className="card p-4 text-sm text-red-300">
+          Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.
+        </div>
       )}
       <div className="grid gap-4">
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (

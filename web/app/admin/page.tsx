@@ -16,8 +16,9 @@ export default function AdminPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <ManualRefreshButton page="admin" />
+      <div className="flex flex-wrap justify-end gap-2">
+        <ManualRefreshButton page="overview" idleLabel="Refresh Overview Data" />
+        <ManualRefreshButton page="admin" idleLabel="Refresh Admin Data" />
       </div>
       <div className="card p-3">
         <div className="flex flex-wrap gap-2">
@@ -34,7 +35,7 @@ export default function AdminPage() {
       </div>
       <AdminSection
         title="Overview"
-        description="Configure the /overview groups, ranking windows, visible columns, tickers, and ticker display names."
+        description="Configure the /overview groups, ranking windows, visible columns, tickers, and ticker display names. If /overview is empty, use Refresh Overview Data above."
         anchorId="admin-overview"
       >
         <AdminBuilder />
