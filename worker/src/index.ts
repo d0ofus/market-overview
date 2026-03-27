@@ -645,9 +645,19 @@ async function refreshPageScopedData(
 ): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
   if (page === "overview") {
     const tickers = await loadOverviewTickers(env);
-    await refreshRecentBarsForTickers(env, tickers);
-    await recomputeDashboardFromStoredBars(env);
-    return { page, refreshedTickers: tickers.length };
+    try {
+      await refreshRecentBarsForTickers(env, tickers);
+      await recomputeDashboardFromStoredBars(env);
+      return { page, refreshedTickers: tickers.length };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Live overview refresh failed.";
+      await recomputeDashboardFromStoredBars(env);
+      return {
+        page,
+        refreshedTickers: tickers.length,
+        notes: `Live overview refresh failed (${message}). Rebuilt overview from stored bars instead.`,
+      };
+    }
   }
   if (page === "breadth") {
     const breadth = await refreshSp500CoreBreadth(env);
@@ -673,10 +683,21 @@ async function refreshPageScopedData(
   }
   if (page === "admin") {
     const tickers = await loadAdminTickers(env);
-    await refreshRecentBarsForTickers(env, tickers);
-    await recomputeDashboardFromStoredBars(env);
-    await recomputeBreadthFromStoredBars(env);
-    return { page, refreshedTickers: tickers.length };
+    try {
+      await refreshRecentBarsForTickers(env, tickers);
+      await recomputeDashboardFromStoredBars(env);
+      await recomputeBreadthFromStoredBars(env);
+      return { page, refreshedTickers: tickers.length };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Live admin refresh failed.";
+      await recomputeDashboardFromStoredBars(env);
+      await recomputeBreadthFromStoredBars(env);
+      return {
+        page,
+        refreshedTickers: tickers.length,
+        notes: `Live admin refresh failed (${message}). Rebuilt dashboard and breadth from stored bars instead.`,
+      };
+    }
   }
   if (page === "ticker") {
     const ticker = tickerInput?.trim().toUpperCase() ?? "";
@@ -979,14 +1000,36 @@ app.get("/api/status", async (c) => {
 app.get("/api/dashboard", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const date = c.req.query("date");
-  await ensureOverviewCatalogCoverage(c.env);
-  if (!date && await isOverviewSnapshotStale(c.env, configId)) {
-    const tickers = await loadOverviewTickers(c.env);
-    await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
-    await recomputeDashboardFromStoredBars(c.env, undefined, configId);
+  try {
+    await ensureOverviewCatalogCoverage(c.env);
+  } catch (error) {
+    console.error("overview catalog ensure failed; continuing with existing config", error);
   }
-  await maybeRefreshOverviewBars(c.env);
-  const data = await loadSnapshot(c.env, configId, date);
+  if (!date) {
+    try {
+      if (await isOverviewSnapshotStale(c.env, configId)) {
+        const tickers = await loadOverviewTickers(c.env);
+        await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
+        await recomputeDashboardFromStoredBars(c.env, undefined, configId);
+      }
+    } catch (error) {
+      console.error("overview stale snapshot refresh failed; falling back to stored snapshot data", error);
+    }
+  }
+  try {
+    await maybeRefreshOverviewBars(c.env);
+  } catch (error) {
+    console.error("overview background bar refresh failed; continuing with stored snapshot data", error);
+  }
+
+  let data;
+  try {
+    data = await loadSnapshot(c.env, configId, date);
+  } catch (error) {
+    console.error("dashboard load failed; retrying from stored bars", { configId, date, error });
+    const rebuilt = await recomputeDashboardFromStoredBars(c.env, date, configId);
+    data = await loadSnapshot(c.env, configId, rebuilt.asOfDate);
+  }
   c.header("Cache-Control", "public, max-age=300");
   return c.json(data);
 });
