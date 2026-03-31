@@ -7,6 +7,11 @@ import {
   summarizeEvidenceTopics,
   summarizeEvidence,
 } from "./evidence";
+import {
+  RESEARCH_MODEL_JSON_REPAIR_TIMEOUT_MS,
+  RESEARCH_MODEL_MAX_ATTEMPTS,
+  RESEARCH_MODEL_REQUEST_TIMEOUT_MS,
+} from "./constants";
 import { buildAnthropicExtractionModels } from "./providers/anthropic";
 import { normalizeResearchProfileSettings, validateResearchCardOutput } from "./validation";
 import type {
@@ -450,6 +455,9 @@ export async function extractResearchCard(env: Env, input: {
         peerContext: input.peerContext ?? null,
       }),
       maxTokens: 2600,
+      requestTimeoutMs: RESEARCH_MODEL_REQUEST_TIMEOUT_MS,
+      jsonRepairTimeoutMs: RESEARCH_MODEL_JSON_REPAIR_TIMEOUT_MS,
+      maxAttemptsPerModel: RESEARCH_MODEL_MAX_ATTEMPTS,
     });
     const parsed = validateResearchCardOutput({
       ...fallback,

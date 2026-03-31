@@ -8,7 +8,20 @@ export type AnthropicJsonResponse<T> = {
 };
 
 const ANTHROPIC_MAX_ATTEMPTS = 2;
-const DEFAULT_ANTHROPIC_SONNET_MODEL = "claude-3-5-sonnet-20241022";
+const DEFAULT_ANTHROPIC_HAIKU_MODEL = "claude-3-5-haiku-20241022";
+const LEGACY_ANTHROPIC_HAIKU_MODEL = "claude-3-haiku-20240307";
+const DEFAULT_ANTHROPIC_SONNET_MODEL = "claude-3-7-sonnet-latest";
+const ANTHROPIC_SONNET_MODEL_CANDIDATES = [
+  DEFAULT_ANTHROPIC_SONNET_MODEL,
+  "claude-3-7-sonnet-20250219",
+  "claude-sonnet-4-20250514",
+  "claude-3-5-sonnet-20241022",
+] as const;
+const ANTHROPIC_HAIKU_MODEL_CANDIDATES = [
+  "claude-3-5-haiku-latest",
+  DEFAULT_ANTHROPIC_HAIKU_MODEL,
+  LEGACY_ANTHROPIC_HAIKU_MODEL,
+] as const;
 
 function normalizeModelName(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -31,13 +44,21 @@ function isHaikuModel(model: string): boolean {
   return /haiku/i.test(model);
 }
 
+function isSonnetModel(model: string): boolean {
+  return /sonnet/i.test(model);
+}
+
 export function buildAnthropicExtractionModels(env: Env, promptModel: string): { model: string; fallbackModels: string[] } {
-  const model = normalizeModelName(env.ANTHROPIC_HAIKU_MODEL) ?? normalizeModelName(promptModel) ?? "claude-3-haiku-20240307";
+  const requested = normalizeModelName(env.ANTHROPIC_HAIKU_MODEL) ?? normalizeModelName(promptModel);
+  const model = requested && !isSonnetModel(requested) ? requested : DEFAULT_ANTHROPIC_HAIKU_MODEL;
   return {
     model,
     fallbackModels: uniqueModels([
+      env.ANTHROPIC_HAIKU_MODEL,
+      !isSonnetModel(promptModel) ? promptModel : null,
+      ...ANTHROPIC_HAIKU_MODEL_CANDIDATES,
       env.ANTHROPIC_SONNET_MODEL,
-      DEFAULT_ANTHROPIC_SONNET_MODEL,
+      ...ANTHROPIC_SONNET_MODEL_CANDIDATES,
     ]).filter((candidate) => candidate !== model),
   };
 }
@@ -50,7 +71,7 @@ export function buildAnthropicSonnetModels(env: Env, promptModel: string): { mod
     fallbackModels: uniqueModels([
       env.ANTHROPIC_SONNET_MODEL,
       !isHaikuModel(promptModel) ? promptModel : null,
-      DEFAULT_ANTHROPIC_SONNET_MODEL,
+      ...ANTHROPIC_SONNET_MODEL_CANDIDATES,
     ]).filter((candidate) => candidate !== model),
   };
 }
@@ -64,6 +85,11 @@ function shouldRetryAnthropic(status: number, detail: string): boolean {
 function retryDelayMs(attempt: number): number {
   const base = 800 * (2 ** attempt);
   return base + Math.floor(Math.random() * 300);
+}
+
+function shouldFallbackModel(status: number, detail: string): boolean {
+  if (status === 404) return true;
+  return /not_found_error|model[^a-z0-9]+.*not found|unknown model/i.test(detail);
 }
 
 function anthropicContentToText(content: unknown): string {
@@ -171,7 +197,7 @@ function extractJson<T>(content: unknown): T {
   throw new Error(`Anthropic response was not valid JSON: ${detail}`);
 }
 
-async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: string): Promise<T> {
+async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: string, timeoutMs: number): Promise<T> {
   const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -196,7 +222,7 @@ async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: st
         },
       ],
     }),
-  }, 15_000, `Anthropic JSON repair for ${model}`);
+  }, timeoutMs, `Anthropic JSON repair for ${model}`);
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Anthropic JSON repair failed for ${model} (${res.status}): ${detail.slice(0, 180)}`);
@@ -211,9 +237,15 @@ export async function callAnthropicJson<T>(env: Env, input: {
   system: string;
   user: string;
   maxTokens?: number;
+  requestTimeoutMs?: number;
+  jsonRepairTimeoutMs?: number;
+  maxAttemptsPerModel?: number;
 }): Promise<AnthropicJsonResponse<T>> {
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) throw new Error("Anthropic API key is not configured.");
+  const requestTimeoutMs = Math.max(5_000, input.requestTimeoutMs ?? 25_000);
+  const jsonRepairTimeoutMs = Math.max(3_000, input.jsonRepairTimeoutMs ?? 15_000);
+  const maxAttemptsPerModel = Math.max(1, input.maxAttemptsPerModel ?? ANTHROPIC_MAX_ATTEMPTS);
   let lastError: Error | null = null;
   const modelCandidates = Array.from(new Set([
     input.model,
@@ -221,7 +253,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
   ].map((candidate) => candidate.trim()).filter(Boolean)));
   for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
     const model = modelCandidates[modelIndex]!;
-    for (let attempt = 0; attempt < ANTHROPIC_MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttemptsPerModel; attempt += 1) {
       const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -241,7 +273,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
             },
           ],
         }),
-      }, 25_000, `Anthropic request for ${model}`);
+      }, requestTimeoutMs, `Anthropic request for ${model}`);
       if (res.ok) {
         const json = await res.json() as Record<string, any>;
         let data: T;
@@ -250,7 +282,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
         } catch (error) {
           try {
             const repairModel = modelCandidates[Math.min(modelIndex + 1, modelCandidates.length - 1)] ?? model;
-            data = await repairAnthropicJson<T>(apiKey, repairModel, anthropicContentToText(json?.content));
+            data = await repairAnthropicJson<T>(apiKey, repairModel, anthropicContentToText(json?.content), jsonRepairTimeoutMs);
             return {
               data,
               usage: (json?.usage && typeof json.usage === "object") ? json.usage as Record<string, unknown> : null,
@@ -264,7 +296,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
             : new Error(`Anthropic JSON parse failed for ${model}.`);
           lastError = parseError;
           const hasModelFallback = modelIndex < modelCandidates.length - 1;
-          if (attempt < ANTHROPIC_MAX_ATTEMPTS - 1) {
+          if (attempt < maxAttemptsPerModel - 1) {
             await scheduler.wait(retryDelayMs(attempt));
             continue;
           }
@@ -285,10 +317,13 @@ export async function callAnthropicJson<T>(env: Env, input: {
       const error = new Error(`Anthropic request failed for ${model} (${res.status}): ${detail.slice(0, 180)}`);
       lastError = error;
       const hasModelFallback = modelIndex < modelCandidates.length - 1;
+      if (hasModelFallback && shouldFallbackModel(res.status, detail)) {
+        break;
+      }
       if (!shouldRetryAnthropic(res.status, detail)) {
         throw error;
       }
-      if (attempt < ANTHROPIC_MAX_ATTEMPTS - 1) {
+      if (attempt < maxAttemptsPerModel - 1) {
         await scheduler.wait(retryDelayMs(attempt));
         continue;
       }

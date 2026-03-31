@@ -18,6 +18,12 @@ import {
 
 type PromptKind = "haiku_extract" | "sonnet_rank" | "sonnet_deep_dive";
 
+const DEFAULT_PROMPT_MODELS: Record<PromptKind, string> = {
+  haiku_extract: "claude-3-5-haiku-20241022",
+  sonnet_rank: "claude-3-7-sonnet-latest",
+  sonnet_deep_dive: "claude-3-7-sonnet-latest",
+};
+
 const DEFAULT_SETTINGS: ResearchProfileSettings = {
   lookbackDays: 14,
   includeMacroContext: true,
@@ -61,7 +67,7 @@ export function ResearchAdminPanel() {
     rubric: { label: string; rubricJson: string };
     search: { label: string; templateJson: string };
   }>({
-    prompt: { promptKind: "haiku_extract", label: "", modelFamily: "claude-3-haiku-20240307", templateText: "", templateJson: "{\"responseShape\":\"research-card\"}" },
+    prompt: { promptKind: "haiku_extract", label: "", modelFamily: DEFAULT_PROMPT_MODELS.haiku_extract, templateText: "", templateJson: "{\"responseShape\":\"research-card\"}" },
     rubric: { label: "", rubricJson: "{\"weights\":{}}" },
     search: { label: "", templateJson: "{\"tickerFamilies\":[],\"macroFamilies\":[]}" },
   });
@@ -286,7 +292,23 @@ export function ResearchAdminPanel() {
               <div className="space-y-2">
                 <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Prompt Version</div>
                 <input className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" placeholder="Label" value={advancedDrafts.prompt.label} onChange={(event) => setAdvancedDrafts((current) => ({ ...current, prompt: { ...current.prompt, label: event.target.value } }))} />
-                <select className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={advancedDrafts.prompt.promptKind} onChange={(event) => setAdvancedDrafts((current) => ({ ...current, prompt: { ...current.prompt, promptKind: event.target.value as "haiku_extract" | "sonnet_rank" | "sonnet_deep_dive" } }))}>
+                <select className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={advancedDrafts.prompt.promptKind} onChange={(event) => {
+                  const nextKind = event.target.value as PromptKind;
+                  setAdvancedDrafts((current) => {
+                    const previousDefault = DEFAULT_PROMPT_MODELS[current.prompt.promptKind];
+                    const nextDefault = DEFAULT_PROMPT_MODELS[nextKind];
+                    return {
+                      ...current,
+                      prompt: {
+                        ...current.prompt,
+                        promptKind: nextKind,
+                        modelFamily: !current.prompt.modelFamily || current.prompt.modelFamily === previousDefault
+                          ? nextDefault
+                          : current.prompt.modelFamily,
+                      },
+                    };
+                  });
+                }}>
                   <option value="haiku_extract">Haiku Extract</option>
                   <option value="sonnet_rank">Sonnet Rank</option>
                   <option value="sonnet_deep_dive">Sonnet Deep Dive</option>

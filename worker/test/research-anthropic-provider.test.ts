@@ -146,18 +146,61 @@ describe("callAnthropicJson", () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)).model).toBe("claude-sonnet");
   });
+
+  it("falls through to a fallback model when Anthropic returns model not found", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        type: "error",
+        error: {
+          type: "not_found_error",
+          message: "model: missing-primary-model",
+        },
+      }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"summary\":\"Recovered via fallback model.\"}",
+          },
+        ],
+        usage: { input_tokens: 8, output_tokens: 12 },
+        model: "claude-sonnet",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("scheduler", { wait: vi.fn().mockResolvedValue(undefined) });
+
+    const response = await callAnthropicJson<{ summary: string }>(buildEnv(), {
+      model: "missing-primary-model",
+      fallbackModels: ["claude-sonnet"],
+      system: "Return strict JSON only.",
+      user: "{}",
+      maxAttemptsPerModel: 1,
+    });
+
+    expect(response.data).toEqual({ summary: "Recovered via fallback model." });
+    expect(response.model).toBe("claude-sonnet");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).model).toBe("claude-sonnet");
+  });
 });
 
 describe("Anthropic model selection", () => {
   it("keeps extraction on haiku but prepares a sonnet fallback", () => {
     const selection = buildAnthropicExtractionModels(buildEnv(), "claude-3-haiku-20240307");
     expect(selection.model).toBe("claude-3-haiku-20240307");
-    expect(selection.fallbackModels).toContain("claude-3-5-sonnet-20241022");
+    expect(selection.fallbackModels).toContain("claude-3-5-haiku-20241022");
+    expect(selection.fallbackModels).toContain("claude-3-7-sonnet-latest");
   });
 
   it("upgrades sonnet stages away from stale haiku prompt models", () => {
     const selection = buildAnthropicSonnetModels(buildEnv(), "claude-3-haiku-20240307");
-    expect(selection.model).toBe("claude-3-5-sonnet-20241022");
-    expect(selection.fallbackModels).not.toContain("claude-3-5-sonnet-20241022");
+    expect(selection.model).toBe("claude-3-7-sonnet-latest");
+    expect(selection.fallbackModels).not.toContain("claude-3-7-sonnet-latest");
+    expect(selection.fallbackModels).toContain("claude-3-5-sonnet-20241022");
   });
 });

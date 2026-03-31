@@ -1,5 +1,10 @@
 import type { Env } from "../types";
 import { getModelResearchProvider } from "./providers";
+import {
+  RESEARCH_MODEL_JSON_REPAIR_TIMEOUT_MS,
+  RESEARCH_MODEL_MAX_ATTEMPTS,
+  RESEARCH_MODEL_REQUEST_TIMEOUT_MS,
+} from "./constants";
 import { computeAttentionScore, computeFactorCards, derivePriorityBucket } from "./scoring";
 import { clampRankingAdjustment, validateRankingReconciliationOutput, validateResearchDeepDiveOutput } from "./validation";
 import { buildAnthropicSonnetModels } from "./providers/anthropic";
@@ -181,6 +186,9 @@ export async function rankResearchCards(env: Env, input: {
         })),
       }),
       maxTokens: 1800,
+      requestTimeoutMs: RESEARCH_MODEL_REQUEST_TIMEOUT_MS,
+      jsonRepairTimeoutMs: RESEARCH_MODEL_JSON_REPAIR_TIMEOUT_MS,
+      maxAttemptsPerModel: RESEARCH_MODEL_MAX_ATTEMPTS,
     });
     const parsed = validateRankingReconciliationOutput(response.data);
     const rankingMap = new Map(parsed.rankings.map((ranking) => [ranking.ticker, ranking]));
@@ -274,6 +282,9 @@ export async function deepDiveResearchCard(env: Env, input: {
         peerContext: input.peerContext ?? null,
       }),
       maxTokens: 1400,
+      requestTimeoutMs: RESEARCH_MODEL_REQUEST_TIMEOUT_MS,
+      jsonRepairTimeoutMs: RESEARCH_MODEL_JSON_REPAIR_TIMEOUT_MS,
+      maxAttemptsPerModel: RESEARCH_MODEL_MAX_ATTEMPTS,
     });
     const deepDive = validateResearchDeepDiveOutput(response.data, input.card.topEvidenceIds);
     return {
