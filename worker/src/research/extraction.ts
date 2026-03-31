@@ -321,9 +321,8 @@ export async function extractResearchCard(env: Env, input: {
 }): Promise<{ card: StandardizedResearchCard; usage: Record<string, unknown> | null; model: string; warning: string | null }> {
   const settings = normalizeResearchProfileSettings(input.settings ?? {});
   const packets = input.topicPackets ?? buildTopicEvidencePackets(input.evidence, settings);
-  const fallback = fallbackExtractResearchCard({ ...input, settings, topicPackets: packets });
   if (!env.ANTHROPIC_API_KEY) {
-    return { card: fallback, usage: null, model: fallback.model, warning: "Anthropic extraction skipped because ANTHROPIC_API_KEY is not configured." };
+    throw new Error("LLM extraction failed: ANTHROPIC_API_KEY is not configured.");
   }
   const modelProvider = getModelResearchProvider(env);
   const models = buildAnthropicExtractionModels(env, input.prompt.modelFamily);
@@ -460,7 +459,6 @@ export async function extractResearchCard(env: Env, input: {
       maxAttemptsPerModel: RESEARCH_MODEL_MAX_ATTEMPTS,
     });
     const parsed = validateResearchCardOutput({
-      ...fallback,
       ...response.data,
       model: response.model,
     }, input.evidence.map((item) => item.id));
@@ -468,14 +466,6 @@ export async function extractResearchCard(env: Env, input: {
     return { card, usage: response.usage, model: response.model, warning: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Anthropic extraction failed.";
-    return {
-      card: {
-        ...fallback,
-        reasoningBullets: [...fallback.reasoningBullets.slice(0, 2), "Extraction fell back to deterministic synthesis after model output validation failed."],
-      },
-      usage: null,
-      model: "rules",
-      warning: message,
-    };
+    throw new Error(`LLM extraction failed (${models.model}): ${message}`);
   }
 }

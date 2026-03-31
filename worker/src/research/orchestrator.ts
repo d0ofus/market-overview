@@ -9,7 +9,7 @@ import {
   RESEARCH_SEARCH_QUERY_CONCURRENCY,
 } from "./constants";
 import { buildTopicEvidencePackets, searchItemsToEvidence, secFactsToEvidence, secFilingsToEvidence } from "./evidence";
-import { extractResearchCard, fallbackExtractResearchCard } from "./extraction";
+import { extractResearchCard } from "./extraction";
 import { buildSnapshotComparison } from "./history";
 import { resolveResearchProfile } from "./profiles";
 import { appendActivityPayload, buildStaleFailureMessage, buildStaleRecoveryMessage, type ResearchActivityLevel } from "./progress";
@@ -17,7 +17,7 @@ import { getSearchResearchProvider, getSecResearchProvider } from "./providers";
 import { buildMarketSearchQueries, buildTickerSearchQueries } from "./search-queries";
 import { computeFactorCards, computeAttentionScore, derivePriorityBucket } from "./scoring";
 import { normalizeResearchTicker } from "./sec-normalization";
-import { buildFallbackDeepDive, deepDiveResearchCard, fallbackRankResearchCards, rankResearchCards } from "./synthesis";
+import { deepDiveResearchCard, rankResearchCards } from "./synthesis";
 import {
   countRunTickerStatuses,
   createResearchRun,
@@ -570,7 +570,7 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
       topicPackets,
     }),
   });
-  const warnings = extracted.warning ? [...collected.warnings, extracted.warning] : collected.warnings;
+  const warnings = collected.warnings;
   await persistTickerProgress({
     status: "ranking_ready",
     workingPatch: {
@@ -587,10 +587,8 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
       warningCount: warnings.length,
       extractionUsage: extracted.usage,
     }),
-    logMessage: extracted.warning
-      ? `Extraction completed with fallback: ${extracted.warning}`
-      : `Extraction completed via ${extracted.model}.`,
-    logLevel: extracted.warning ? "warn" : "info",
+    logMessage: `Extraction completed via ${extracted.model}.`,
+    logLevel: "info",
     touchRunHeartbeat: true,
   });
   return {
@@ -602,17 +600,11 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
 async function finalizeResearchRun(
   env: Env,
   run: ResearchRunRecord,
-  options?: {
-    forceDeterministic?: boolean;
-    recoveryReason?: string | null;
-  },
 ): Promise<void> {
   const profile = await resolveResearchProfile(env, run.profileId);
   const runTickers = await loadResearchRunTickers(env, run.id);
   const ready = runTickers.filter((row) => row.status === "ranking_ready" && row.workingJson?.card);
   const failed = runTickers.filter((row) => row.status === "failed");
-  const forceDeterministic = Boolean(options?.forceDeterministic);
-  const recoveryReason = options?.recoveryReason?.trim() || null;
   const runState = {
     id: run.id,
     provenanceJson: run.provenanceJson ?? null,
@@ -632,28 +624,7 @@ async function finalizeResearchRun(
   const cards = ready.map((row) => row.workingJson?.card as StandardizedResearchCard);
   let marketEvidenceUsage: Record<string, unknown> | null = null;
   let rankingResponse: Awaited<ReturnType<typeof rankResearchCards>>;
-  if (forceDeterministic) {
-    const fallback = fallbackRankResearchCards({
-      cards,
-      rubric: profile.bundle.rubric.rubricJson,
-      settings: profile.version.settings,
-      deepDiveTopN: run.deepDiveTopN,
-    });
-    const deterministicWarning = recoveryReason ?? "Recovered stale ranking/finalization state and completed with deterministic ranking.";
-    runWarnings.push(deterministicWarning);
-    await persistRunActivity(env, runState, {
-      message: deterministicWarning,
-      level: "warn",
-      currentStep: "Recovering stale ranking/finalization",
-      warning: true,
-    });
-    rankingResponse = {
-      ...fallback,
-      usage: null,
-      model: "rules-stale-finalize",
-      warning: deterministicWarning,
-    };
-  } else {
+  try {
     await persistRunActivity(env, runState, {
       message: `Finalizing research run for ${ready.length} ticker(s); collecting macro context and preparing ranking.`,
       currentStep: "Collecting macro context",
@@ -690,17 +661,49 @@ async function finalizeResearchRun(
         deepDiveTopN: run.deepDiveTopN,
       }),
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "LLM ranking failed.";
+    for (const row of ready) {
+      await updateResearchRunTicker(env, row.id, {
+        status: "failed",
+        lastError: message,
+        completedAt: nowIso(),
+        stageMetricsJson: appendActivityPayload(mergeJson(row.stageMetricsJson, {
+          currentStage: "failed",
+          currentStep: "Failed during LLM ranking",
+        }), {
+          message,
+          level: "error",
+        }),
+      });
+    }
+    await persistRunActivity(env, runState, {
+      message,
+      level: "error",
+      currentStep: "LLM ranking failed",
+      warning: true,
+    });
+    const finalTickers = await loadResearchRunTickers(env, run.id);
+    const finalFailed = finalTickers.filter((row) => row.status === "failed");
+    const finalCompleted = finalTickers.filter((row) => row.status === "completed");
+    await updateResearchRun(env, run.id, {
+      status: finalCompleted.length > 0 ? "partial" : "failed",
+      providerUsageJson: runState.providerUsageJson,
+      provenanceJson: runState.provenanceJson,
+      errorSummary: message,
+      completedAt: nowIso(),
+      completedTickerCount: finalCompleted.length,
+      failedTickerCount: finalFailed.length,
+    });
+    return;
   }
-  if (rankingResponse.warning) runWarnings.push(`Ranking fallback used: ${rankingResponse.warning}`);
   let aggregateUsage = sumUsage(run.providerUsageJson, sumUsage(marketEvidenceUsage, rankingResponse.usage));
   runState.providerUsageJson = aggregateUsage;
   await persistRunActivity(env, runState, {
-    message: rankingResponse.warning
-      ? `Ranking completed with fallback: ${rankingResponse.warning}`
-      : `Ranking completed via ${rankingResponse.model}.`,
-    level: rankingResponse.warning ? "warn" : "info",
+    message: `Ranking completed via ${rankingResponse.model}.`,
+    level: "info",
     currentStep: run.rankingMode === "rank_and_deep_dive" && run.deepDiveTopN > 0 ? "Generating deep dives" : "Persisting ranked results",
-    warning: Boolean(rankingResponse.warning),
+    warning: false,
   });
   const rankingByTicker = new Map(rankingResponse.rankings.map((row) => [row.ticker, row]));
   for (const row of ready) {
@@ -740,14 +743,7 @@ async function finalizeResearchRun(
       });
       await updateResearchRunHeartbeat(env, run.id);
       const deepDive = ranking.deepDiveRequested && run.rankingMode === "rank_and_deep_dive"
-        ? forceDeterministic
-          ? {
-            deepDive: buildFallbackDeepDive(card),
-            usage: null,
-            model: "rules-stale-finalize",
-            warning: recoveryReason ?? "Recovered stale finalization and completed deep dive deterministically.",
-          }
-          : await runWithHeartbeat({
+        ? await runWithHeartbeat({
             touchHeartbeat: async () => {
               await touchResearchHeartbeat(env, run.id, row.id);
             },
@@ -769,10 +765,9 @@ async function finalizeResearchRun(
               prompt: profile.bundle.sonnetDeepDive,
               topicPackets,
               peerContext,
-            }).catch(() => null),
+            }),
           })
         : null;
-      if (deepDive?.warning) runWarnings.push(`${row.ticker} deep-dive fallback used: ${deepDive.warning}`);
       aggregateUsage = sumUsage(aggregateUsage, deepDive?.usage ?? null);
       runState.providerUsageJson = aggregateUsage;
       const snapshot = await insertResearchSnapshot(env, {
@@ -856,12 +851,10 @@ async function finalizeResearchRun(
         deepDiveCompleted: Boolean(deepDive?.deepDive),
         deepDiveModel: deepDive?.model ?? null,
       }), {
-        message: deepDive?.warning
-          ? `Completed with deep-dive fallback: ${deepDive.warning}`
-          : deepDive?.deepDive
-            ? `Completed with deep dive via ${deepDive.model}.`
-            : "Completed without deep dive.",
-        level: deepDive?.warning ? "warn" : "info",
+        message: deepDive?.deepDive
+          ? `Completed with deep dive via ${deepDive.model}.`
+          : "Completed without deep dive.",
+        level: "info",
       });
       await updateResearchRunTicker(env, row.id, {
         status: "completed",
@@ -1135,132 +1128,40 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
     if (heartbeatMs !== null && nowMs - heartbeatMs < RESEARCH_HEARTBEAT_STALE_MS) continue;
     const heartbeatAgeMs = heartbeatMs === null ? RESEARCH_HEARTBEAT_STALE_MS : Math.max(0, nowMs - heartbeatMs);
     if (ticker.status === "deep_dive") {
-      const deepDiveRetryCount = typeof ticker.stageMetricsJson?.deepDiveRetryCount === "number"
-        ? Number(ticker.stageMetricsJson.deepDiveRetryCount)
-        : 0;
-      if (deepDiveRetryCount >= 2) {
-        const message = `Deep-dive generation became stale after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat and exceeded the retry limit (${deepDiveRetryCount}/2).`;
-        await updateResearchRunTicker(env, ticker.id, {
-          status: "failed",
-          lastError: message,
-          completedAt: nowIso(),
-          stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
-            currentStage: "failed",
-            currentStep: "Failed after stale deep-dive recovery attempts",
-            staleHeartbeatAgeMs: heartbeatAgeMs,
-            deepDiveRetryCount,
-          }), {
-            message,
-            level: "error",
-          }),
-        });
-        events.push({ level: "error", message: `${ticker.ticker}: ${message}` });
-        continue;
-      }
-      const message = `Recovered stale deep-dive state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; retrying deep dive (${deepDiveRetryCount + 1}/2).`;
+      const message = `Deep-dive generation became stale after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; failing because non-LLM deep-dive recovery is disabled.`;
       await updateResearchRunTicker(env, ticker.id, {
-        status: "ranking_ready",
+        status: "failed",
         lastError: message,
-        completedAt: null,
+        completedAt: nowIso(),
         stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
-          currentStage: "ranking_ready",
-          currentStep: "Queued for deep-dive retry after stale recovery",
+          currentStage: "failed",
+          currentStep: "Failed after stale deep-dive generation",
           staleHeartbeatAgeMs: heartbeatAgeMs,
-          deepDiveRetryCount: deepDiveRetryCount + 1,
         }), {
           message,
-          level: "warn",
+          level: "error",
         }),
       });
-      events.push({ level: "warn", message: `${ticker.ticker}: ${message}` });
+      events.push({ level: "error", message: `${ticker.ticker}: ${message}` });
       continue;
     }
     if (ticker.status === "extracting") {
-      const evidence = await loadRunTickerEvidence(env, ticker.id);
-      if (evidence.length > 0) {
-        const workingJson = mergeJson(ticker.workingJson, {});
-        const topicPackets = Array.isArray(workingJson.topicPackets)
-          ? workingJson.topicPackets as TopicEvidencePacket[]
-          : buildTopicEvidencePackets(evidence, {
-            lookbackDays: 14,
-            includeMacroContext: true,
-            maxTickerQueries: 4,
-            maxEvidenceItemsPerTicker: 12,
-            maxSearchResultsPerQuery: 4,
-            maxTickersPerRun: 20,
-            deepDiveTopN: 3,
-            comparisonEnabled: true,
-            peerComparisonEnabled: true,
-            maxPeerCandidates: 3,
-            maxTopicEvidenceItems: 4,
-            maxEvidenceExcerptsPerTopic: 2,
-            sourceFamilies: {
-              sec: true,
-              news: true,
-              earningsTranscripts: true,
-              investorRelations: true,
-              analystCommentary: true,
-            },
-          });
-        const peerContext = (workingJson.peerContext ?? {
-          available: false,
-          confidence: "low",
-          reasonUnavailable: "Peer context was unavailable when stale extraction fallback ran.",
-          peerGroupId: null,
-          peerGroupName: null,
-          source: "none",
-          whyTheseAreClosestPeers: "",
-          closestPeers: [],
-        }) as PeerContextPacket;
-        const companyName = typeof ticker.companyName === "string" && ticker.companyName.trim()
-          ? ticker.companyName
-          : evidence.find((item) => item.ticker?.toUpperCase() === ticker.ticker)?.ticker ?? null;
-        const fallbackCard = fallbackExtractResearchCard({
-          ticker: ticker.ticker,
-          companyName,
-          evidence,
-          peerContext,
-          topicPackets,
-        });
-        const message = `Recovered stale extracting state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; completed extraction via deterministic fallback instead of retrying the same attempt.`;
-        await updateResearchRunTicker(env, ticker.id, {
-          status: "ranking_ready",
-          lastError: message,
-          completedAt: null,
-          workingJson: {
-            ...workingJson,
-            card: {
-              ...fallbackCard,
-              reasoningBullets: [
-                ...fallbackCard.reasoningBullets,
-                "Stale extraction recovery used deterministic fallback synthesis from stored evidence.",
-              ].slice(0, 4),
-            },
-            extractionModel: "rules-stale-fallback",
-            warnings: Array.from(new Set([
-              ...(
-                Array.isArray(workingJson.warnings)
-                  ? workingJson.warnings.map((item) => String(item ?? "").trim()).filter(Boolean)
-                  : []
-              ),
-              message,
-            ])),
-            topicPackets,
-            peerContext,
-          },
-          stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
-            currentStage: "ranking_ready",
-            currentStep: "Recovered stale extraction via deterministic fallback",
-            staleHeartbeatAgeMs: heartbeatAgeMs,
-            extractionRecoveredViaFallback: true,
-          }), {
-            message,
-            level: "warn",
-          }),
-        });
-        events.push({ level: "warn", message: `${ticker.ticker}: ${message}` });
-        continue;
-      }
+      const message = `LLM extraction became stale after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; failing because deterministic extraction fallback is disabled.`;
+      await updateResearchRunTicker(env, ticker.id, {
+        status: "failed",
+        lastError: message,
+        completedAt: nowIso(),
+        stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
+          currentStage: "failed",
+          currentStep: "Failed after stale LLM extraction",
+          staleHeartbeatAgeMs: heartbeatAgeMs,
+        }), {
+          message,
+          level: "error",
+        }),
+      });
+      events.push({ level: "error", message: `${ticker.ticker}: ${message}` });
+      continue;
     }
     if (ticker.attemptCount >= RESEARCH_MAX_TICKER_ATTEMPTS) {
       const message = buildStaleFailureMessage(ticker.status, heartbeatAgeMs, ticker.attemptCount, RESEARCH_MAX_TICKER_ATTEMPTS);
@@ -1318,11 +1219,7 @@ export async function ensureResearchRunProgress(env: Env, runId: string): Promis
   const heartbeatAgeMs = heartbeatMs === null ? RESEARCH_HEARTBEAT_STALE_MS : Math.max(0, nowMs - heartbeatMs);
   if (heartbeatMs === null || heartbeatAgeMs >= RESEARCH_HEARTBEAT_STALE_MS) {
     if (counts.queued === 0 && counts.inProgress === 0 && counts.rankingReady > 0) {
-      const recoveryReason = `Recovered stale ranking/finalization state after ${formatElapsedLabel(heartbeatAgeMs)} without a heartbeat; completed ranking${run.rankingMode === "rank_and_deep_dive" && run.deepDiveTopN > 0 ? " and requested deep dives" : ""} via deterministic fallback instead of retrying the same finalization attempt.`;
-      await finalizeResearchRun(env, run, {
-        forceDeterministic: true,
-        recoveryReason,
-      });
+      await finalizeResearchRun(env, run);
       return loadResearchRun(env, runId);
     }
     return drainResearchRun(env, runId);

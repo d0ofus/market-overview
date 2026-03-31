@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSnapshotComparison } from "../src/research/history";
 import { buildMarketSearchQueries, buildTickerSearchQueries } from "../src/research/search-queries";
 import { computeAttentionScore, computeFactorCards } from "../src/research/scoring";
@@ -250,7 +250,37 @@ describe("research history compare", () => {
 });
 
 describe("research ranking synthesis", () => {
-  it("uses deterministic ranking for singleton runs", async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("uses the LLM even for singleton runs", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      content: [
+        {
+          text: JSON.stringify({
+            rankings: [{
+              ticker: "NVDA",
+              rank: 1,
+              attentionScore: 74,
+              priorityBucket: "high",
+              rankRationale: "Fresh catalysts and strong execution keep the name at the top.",
+              convictionLevel: "medium",
+              relativeDifferentiation: "Execution still stands out.",
+              deterministicAdjustmentNarrative: "No material change from the deterministic base score.",
+              peerImpactNarrative: "Peer context is limited in this fixture.",
+            }],
+          }),
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 20 },
+      model: "claude-test",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
     const result = await rankResearchCards({
       ANTHROPIC_API_KEY: "present",
     } as any, {
@@ -295,7 +325,7 @@ describe("research ranking synthesis", () => {
 
     expect(result.rankings).toHaveLength(1);
     expect(result.rankings[0]?.rank).toBe(1);
-    expect(result.model).toBe("rules-singleton");
+    expect(result.model).toBe("claude-test");
     expect(result.warning).toBeNull();
   });
 });

@@ -111,21 +111,10 @@ export async function rankResearchCards(env: Env, input: {
   warning: string | null;
 }> {
   const fallback = fallbackRankResearchCards(input);
-  if (input.cards.length <= 1) {
-    return {
-      ...fallback,
-      usage: null,
-      model: "rules-singleton",
-      warning: null,
-    };
-  }
   if (!env.ANTHROPIC_API_KEY || input.cards.length === 0) {
-    return {
-      ...fallback,
-      usage: null,
-      model: "rules",
-      warning: !env.ANTHROPIC_API_KEY ? "Anthropic ranking skipped because ANTHROPIC_API_KEY is not configured." : null,
-    };
+    throw new Error(!env.ANTHROPIC_API_KEY
+      ? "LLM ranking failed: ANTHROPIC_API_KEY is not configured."
+      : "LLM ranking failed: no cards were available for ranking.");
   }
   const provider = getModelResearchProvider(env);
   const models = buildAnthropicSonnetModels(env, input.prompt.modelFamily);
@@ -222,12 +211,8 @@ export async function rankResearchCards(env: Env, input: {
       warning: null,
     };
   } catch (error) {
-    return {
-      ...fallback,
-      usage: null,
-      model: "rules",
-      warning: error instanceof Error ? error.message : "Anthropic ranking failed.",
-    };
+    const message = error instanceof Error ? error.message : "Anthropic ranking failed.";
+    throw new Error(`LLM ranking failed (${models.model}): ${message}`);
   }
 }
 
@@ -237,14 +222,8 @@ export async function deepDiveResearchCard(env: Env, input: {
   topicPackets?: TopicEvidencePacket[] | null;
   peerContext?: PeerContextPacket | null;
 }): Promise<{ deepDive: ResearchDeepDive; usage: Record<string, unknown> | null; model: string; warning: string | null }> {
-  const fallback = buildFallbackDeepDive(input.card);
   if (!env.ANTHROPIC_API_KEY) {
-    return {
-      deepDive: fallback,
-      usage: null,
-      model: "rules",
-      warning: "Anthropic deep dive skipped because ANTHROPIC_API_KEY is not configured.",
-    };
+    throw new Error("LLM deep dive failed: ANTHROPIC_API_KEY is not configured.");
   }
   const provider = getModelResearchProvider(env);
   const models = buildAnthropicSonnetModels(env, input.prompt.modelFamily);
@@ -289,7 +268,6 @@ export async function deepDiveResearchCard(env: Env, input: {
     const deepDive = validateResearchDeepDiveOutput(response.data, input.card.topEvidenceIds);
     return {
       deepDive: {
-        ...fallback,
         ...deepDive,
         model: response.model,
       },
@@ -299,11 +277,6 @@ export async function deepDiveResearchCard(env: Env, input: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Anthropic deep dive failed.";
-    return {
-      deepDive: fallback,
-      usage: null,
-      model: "rules",
-      warning: message,
-    };
+    throw new Error(`LLM deep dive failed (${models.model}): ${message}`);
   }
 }
