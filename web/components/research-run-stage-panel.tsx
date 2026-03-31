@@ -109,7 +109,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
   const rankingReady = tickers.filter((row) => row.status === "ranking_ready").length;
   const deepDiving = tickers.filter((row) => row.status === "deep_dive").length;
   const evidenceReady = tickers.filter((row) => typeof row.stageMetricsJson?.evidenceCount === "number" || row.status !== "queued").length;
-  const extractedReady = tickers.filter((row) => Boolean(row.workingJson?.card)).length;
+  const extractedReady = tickers.filter((row) => row.status !== "failed" && Boolean(row.workingJson?.card)).length;
   const rankableTickers = tickers.filter((row) => row.status !== "failed" && Boolean(row.workingJson?.card)).length;
   const extractionModels = Array.from(new Set(
     tickers
@@ -170,7 +170,7 @@ export function ResearchRunStagePanel({ status, results, compact = false, stoppi
       key: "extraction",
       label: "Extraction",
       description: `${extractedReady}/${requested} tickers standardized`,
-      detail: extractionWarnings[0] ?? extractionModels[0] ?? "Anthropic Haiku or rules fallback",
+      detail: extractionWarnings[0] ?? extractionModels[0] ?? "Configured extraction LLM",
       state: extractionState,
     },
     {

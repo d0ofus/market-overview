@@ -129,6 +129,7 @@ import {
   ensureResearchRunProgress,
   startResearchRun,
 } from "./research/orchestrator";
+import { createResearchProgressPump } from "./research/stream-progress";
 import {
   listResearchRuns,
 } from "./research/storage";
@@ -2228,12 +2229,11 @@ app.get("/api/research/runs/:id/results", async (c) => {
 
 app.get("/api/research/runs/:id/stream", async (c) => {
   const runId = c.req.param("id");
-  c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, runId));
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
-      let tickCount = 0;
+      const progressPump = createResearchProgressPump(() => ensureResearchRunProgress(c.env, runId));
       const close = () => {
         if (closed) return;
         closed = true;
@@ -2255,12 +2255,10 @@ app.get("/api/research/runs/:id/stream", async (c) => {
       };
       try {
         while (!closed) {
-          if (tickCount % 5 === 0) {
-            c.executionCtx.waitUntil(ensureResearchRunProgress(c.env, runId));
-          }
+          progressPump.start();
+          progressPump.throwIfErrored();
           await push();
           if (closed) break;
-          tickCount += 1;
           await scheduler.wait(1000);
         }
       } catch (error) {

@@ -18,6 +18,7 @@ import { buildMarketSearchQueries, buildTickerSearchQueries } from "./search-que
 import { computeFactorCards, computeAttentionScore, derivePriorityBucket } from "./scoring";
 import { normalizeResearchTicker } from "./sec-normalization";
 import { deepDiveResearchCard, rankResearchCards } from "./synthesis";
+import { resetResearchTickerTransientState } from "./ticker-state";
 import {
   countRunTickerStatuses,
   createResearchRun,
@@ -408,7 +409,7 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     currentStage: "normalizing",
     currentStep: "Resolving company metadata",
   });
-  let workingJson = mergeJson(runTicker.workingJson, {});
+  let workingJson = resetResearchTickerTransientState().workingJson;
   const persistTickerProgress = async (input: {
     status?: ResearchRunTickerRecord["status"];
     companyName?: string | null;
@@ -474,6 +475,8 @@ async function processResearchTicker(env: Env, run: ResearchRunRecord, runTicker
     normalizationJson: normalized,
     startedAt: runTicker.startedAt ?? nowIso(),
     lastError: null,
+    ...resetResearchTickerTransientState(),
+    workingJson,
     stageMetricsJson: stageMetrics,
   });
   const collected = await runWithHeartbeat({
@@ -668,6 +671,7 @@ async function finalizeResearchRun(
         status: "failed",
         lastError: message,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
         stageMetricsJson: appendActivityPayload(mergeJson(row.stageMetricsJson, {
           currentStage: "failed",
           currentStep: "Failed during LLM ranking",
@@ -885,6 +889,7 @@ async function finalizeResearchRun(
         status: "failed",
         lastError: failureMessage,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
         stageMetricsJson: rowStageMetrics,
       });
       await persistRunActivity(env, runState, {
@@ -1023,6 +1028,7 @@ export async function advanceResearchRun(env: Env, runId: string, maxTickers = D
         status: "failed",
         lastError: message,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
       });
       await persistRunActivity(env, runState, {
         message: `${nextTicker.ticker} failed: ${message}`,
@@ -1133,6 +1139,7 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
         status: "failed",
         lastError: message,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
         stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
           currentStage: "failed",
           currentStep: "Failed after stale deep-dive generation",
@@ -1151,6 +1158,7 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
         status: "failed",
         lastError: message,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
         stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
           currentStage: "failed",
           currentStep: "Failed after stale LLM extraction",
@@ -1169,6 +1177,7 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
         status: "failed",
         lastError: message,
         completedAt: nowIso(),
+        ...resetResearchTickerTransientState(),
         stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
           currentStage: "failed",
           currentStep: "Failed after stale recovery attempts",
@@ -1187,6 +1196,7 @@ async function recoverStaleInProgressTickers(env: Env, runId: string): Promise<A
       status: "queued",
       lastError: message,
       completedAt: null,
+      ...resetResearchTickerTransientState(),
       stageMetricsJson: appendActivityPayload(mergeJson(ticker.stageMetricsJson, {
         currentStage: "queued",
         currentStep: "Queued for retry after stale recovery",
