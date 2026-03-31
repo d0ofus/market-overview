@@ -14,6 +14,7 @@ const links = [
   { href: "/peer-groups", label: "Peer Groups" },
   { href: "/scans", label: "Scans" },
   { href: "/watchlist-compiler", label: "Watchlist Compiler" },
+  { href: "/research-lab", label: "Research Lab" },
   { href: "/gappers", label: "Gappers" },
   { href: "/admin", label: "Admin" },
 ];

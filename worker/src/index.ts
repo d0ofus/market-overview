@@ -133,6 +133,19 @@ import { createResearchProgressPump } from "./research/stream-progress";
 import {
   listResearchRuns,
 } from "./research/storage";
+import {
+  loadResearchLabRunResultsPayload,
+  loadResearchLabRunStatusPayload,
+  loadResearchLabRunStreamPayload,
+  loadResearchLabTickerHistoryPayload,
+} from "./research-lab/api";
+import {
+  drainResearchLabRun,
+  ensureResearchLabRunProgress,
+  listResearchLabRuns as listResearchLabRunRows,
+  startResearchLabRun,
+} from "./research-lab/orchestrator";
+import { createResearchLabProgressPump } from "./research-lab/stream-progress";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -2281,6 +2294,93 @@ app.get("/api/research/runs/:id/stream", async (c) => {
 
 app.get("/api/research/ticker/:ticker/history", async (c) => {
   const rows = await loadTickerResearchHistoryPayload(c.env, c.req.param("ticker"), c.req.query("profileId") ?? null);
+  return c.json({ rows });
+});
+
+app.get("/api/research-lab/runs", async (c) => {
+  const rows = await listResearchLabRunRows(c.env, Number(c.req.query("limit") ?? 10));
+  return c.json({ rows });
+});
+
+app.post("/api/research-lab/runs", async (c) => {
+  try {
+    const payload = await c.req.json();
+    const run = await startResearchLabRun(c.env, payload);
+    c.executionCtx.waitUntil(drainResearchLabRun(c.env, run.id));
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to start research lab run." }, 400);
+  }
+});
+
+app.get("/api/research-lab/runs/:id", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
+  const payload = await loadResearchLabRunStatusPayload(c.env, c.req.param("id"));
+  if (!payload) return c.json({ error: "Research lab run not found." }, 404);
+  return c.json(payload);
+});
+
+app.get("/api/research-lab/runs/:id/results", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
+  const payload = await loadResearchLabRunResultsPayload(c.env, c.req.param("id"));
+  if (!payload) return c.json({ error: "Research lab run not found." }, 404);
+  return c.json(payload);
+});
+
+app.get("/api/research-lab/runs/:id/stream", async (c) => {
+  const runId = c.req.param("id");
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const progressPump = createResearchLabProgressPump(() => ensureResearchLabRunProgress(c.env, runId));
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
+      const push = async () => {
+        const payload = await loadResearchLabRunStreamPayload(c.env, runId);
+        if (!payload) {
+          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research lab run not found." })}\n\n`));
+          close();
+          return;
+        }
+        controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`));
+        const terminal = ["completed", "partial", "failed", "cancelled"].includes(payload.status.run.status);
+        if (terminal) {
+          controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
+          close();
+        }
+      };
+      try {
+        while (!closed) {
+          progressPump.start();
+          progressPump.throwIfErrored();
+          await push();
+          if (closed) break;
+          await scheduler.wait(1000);
+        }
+      } catch (error) {
+        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : "Research lab stream failed." })}\n\n`));
+        close();
+      }
+    },
+    cancel() {
+      // EventSource closed on the client.
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+});
+
+app.get("/api/research-lab/ticker/:ticker/history", async (c) => {
+  const rows = await loadResearchLabTickerHistoryPayload(c.env, c.req.param("ticker"));
   return c.json({ rows });
 });
 
