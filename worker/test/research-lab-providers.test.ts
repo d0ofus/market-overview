@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
   searchPerplexityMock: vi.fn(),
@@ -19,11 +19,18 @@ import {
   RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
   RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
   RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+  RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS,
   RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
 } from "../src/research-lab/constants";
 import { callResearchLabSonnetJson, runResearchLabPerplexityQuery } from "../src/research-lab/providers";
 
 describe("research lab providers", () => {
+  beforeEach(() => {
+    harness.searchPerplexityMock.mockReset();
+    harness.buildAnthropicSonnetModelsMock.mockReset();
+    harness.callAnthropicJsonMock.mockReset();
+  });
+
   it("uses the lab-specific Perplexity timeout override", async () => {
     harness.searchPerplexityMock.mockResolvedValue({
       items: [],
@@ -51,6 +58,27 @@ describe("research lab providers", () => {
         timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
       }),
     );
+  });
+
+  it("retries a timed out Perplexity request once before succeeding", async () => {
+    harness.searchPerplexityMock
+      .mockRejectedValueOnce(new Error("Perplexity search for APD timed out after 18000ms."))
+      .mockResolvedValueOnce({
+        items: [],
+        usage: null,
+        raw: null,
+      });
+
+    await runResearchLabPerplexityQuery({} as any, {
+      key: "news_catalysts",
+      label: "News & Catalysts",
+      query: "APD recent catalysts",
+      ticker: "APD",
+      limit: 3,
+      sourceKind: "news",
+    });
+
+    expect(harness.searchPerplexityMock).toHaveBeenCalledTimes(RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS);
   });
 
   it("reuses shared Anthropic model fallback logic for lab synthesis", async () => {

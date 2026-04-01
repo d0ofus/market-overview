@@ -5,6 +5,7 @@ import {
   RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
   RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
   RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+  RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS,
   RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
 } from "./constants";
 import type { ResearchLabPromptConfigRecord } from "./types";
@@ -42,16 +43,28 @@ export async function runResearchLabPerplexityQuery(
     forceFresh?: boolean;
   },
 ): Promise<Awaited<ReturnType<typeof searchPerplexity>>> {
-  return searchPerplexity(env, {
-    key: query.key,
-    label: query.label,
-    query: query.query,
-    scopeKind: query.key === "macro_relevance" ? "market" : "ticker",
-    sourceKind: query.sourceKind,
-    limit: query.limit,
-    ticker: query.key === "macro_relevance" ? null : query.ticker,
-  }, {
-    forceFresh: Boolean(query.forceFresh),
-    timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
-  });
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await searchPerplexity(env, {
+        key: query.key,
+        label: query.label,
+        query: query.query,
+        scopeKind: query.key === "macro_relevance" ? "market" : "ticker",
+        sourceKind: query.sourceKind,
+        limit: query.limit,
+        ticker: query.key === "macro_relevance" ? null : query.ticker,
+      }, {
+        forceFresh: Boolean(query.forceFresh),
+        timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
+      });
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Perplexity search failed.");
+      const isTimeout = /timed out/i.test(lastError.message);
+      if (!isTimeout || attempt >= RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS - 1) {
+        throw lastError;
+      }
+    }
+  }
+  throw lastError ?? new Error("Perplexity search failed.");
 }

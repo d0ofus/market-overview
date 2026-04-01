@@ -61,6 +61,10 @@ function isInProgressItemStatus(status: ResearchLabRunItemRecord["status"]) {
   return status === "memory_loading" || status === "gathering" || status === "synthesizing" || status === "persisting";
 }
 
+function isActionableItemStatus(status: ResearchLabRunItemRecord["status"]) {
+  return status === "queued" || status === "gathering" || status === "synthesizing";
+}
+
 function itemIdentityFromRecord(item: ResearchLabRunItemRecord): ResearchLabTickerIdentity | null {
   if (!item.companyName) return null;
   return {
@@ -365,7 +369,11 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
     return;
   }
 
-  if ((item.status === "synthesizing" || item.status === "persisting") && currentIdentity) {
+  if (item.status === "persisting") {
+    return;
+  }
+
+  if (item.status === "synthesizing" && currentIdentity) {
     const evidence = await loadResearchLabEvidenceForRunItem(env, item.id);
     if (evidence.length === 0) {
       await failItem(env, item, {
@@ -571,7 +579,11 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
 }
 
 function selectNextRunnableItem(items: ResearchLabRunItemRecord[]): ResearchLabRunItemRecord | null {
-  return items.find((item) => !isTerminalItemStatus(item.status)) ?? null;
+  for (const item of items) {
+    if (isTerminalItemStatus(item.status)) continue;
+    return isActionableItemStatus(item.status) ? item : null;
+  }
+  return null;
 }
 
 async function executeDrain(env: Env, runId: string) {

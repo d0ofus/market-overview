@@ -28,6 +28,18 @@ export const researchLabRunCreateSchema = z.object({
 });
 
 const evidenceIdsSchema = z.array(z.string().min(1)).default([]);
+const priorComparisonSchema = z.preprocess((value) => {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return value;
+  const candidate = value as { summary?: unknown; changed?: unknown };
+  if (typeof candidate.summary !== "string" || typeof candidate.changed !== "boolean") {
+    return null;
+  }
+  return value;
+}, z.object({
+  summary: z.string().min(1),
+  changed: z.boolean(),
+}).nullable().default(null));
 
 export const researchLabSynthesisSchema = z.object({
   ticker: tickerTokenSchema,
@@ -71,10 +83,7 @@ export const researchLabSynthesisSchema = z.object({
     summary: z.string().min(1),
   }),
   monitoringPoints: z.array(z.string().min(1)).default([]),
-  priorComparison: z.object({
-    summary: z.string().min(1),
-    changed: z.boolean(),
-  }).nullable().default(null),
+  priorComparison: priorComparisonSchema,
   evidenceIds: evidenceIdsSchema,
 });
 

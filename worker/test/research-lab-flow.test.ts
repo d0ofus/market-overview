@@ -570,4 +570,29 @@ describe("research lab flow", () => {
     await drainResearchLabRun(env, run.id);
     expect(harness.state.items[0]?.status).toBe("completed");
   });
+
+  it("does not re-enter work when the first non-terminal ticker is already persisting", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["GEV", "APD"] });
+    harness.state.run = {
+      ...harness.state.run,
+      status: "running",
+    };
+    harness.state.items[0] = {
+      ...harness.state.items[0],
+      companyName: "GE Vernova Inc.",
+      exchange: "NYSE",
+      secCik: "0001996810",
+      irDomain: "gevernova.com",
+      status: "persisting",
+      heartbeatAt: new Date().toISOString(),
+    };
+
+    const eventCountBefore = harness.state.events.length;
+    await drainResearchLabRun(env, run.id);
+
+    expect(harness.state.items[0]?.status).toBe("persisting");
+    expect(harness.state.items[1]?.status).toBe("queued");
+    expect(harness.state.events).toHaveLength(eventCountBefore);
+  });
 });
