@@ -134,12 +134,16 @@ import {
   listResearchRuns,
 } from "./research/storage";
 import {
+  RESEARCH_LAB_STREAM_REFRESH_MS,
+} from "./research-lab/constants";
+import {
   loadResearchLabRunResultsPayload,
   loadResearchLabRunStatusPayload,
   loadResearchLabRunStreamPayload,
   loadResearchLabTickerHistoryPayload,
 } from "./research-lab/api";
 import {
+  cancelResearchLabRun,
   drainResearchLabRun,
   ensureResearchLabRunProgress,
   listResearchLabRuns as listResearchLabRunRows,
@@ -2313,15 +2317,19 @@ app.post("/api/research-lab/runs", async (c) => {
   }
 });
 
+app.post("/api/research-lab/runs/:id/cancel", async (c) => {
+  const run = await cancelResearchLabRun(c.env, c.req.param("id"));
+  if (!run) return c.json({ error: "Research lab run not found." }, 404);
+  return c.json({ ok: true, run });
+});
+
 app.get("/api/research-lab/runs/:id", async (c) => {
-  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchLabRunStatusPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);
 });
 
 app.get("/api/research-lab/runs/:id/results", async (c) => {
-  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchLabRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);
@@ -2334,32 +2342,34 @@ app.get("/api/research-lab/runs/:id/stream", async (c) => {
     async start(controller) {
       let closed = false;
       const progressPump = createResearchLabProgressPump(() => ensureResearchLabRunProgress(c.env, runId));
+      let lastProgressKickAt = 0;
       const close = () => {
         if (closed) return;
         closed = true;
         controller.close();
       };
-      const push = async () => {
-        const payload = await loadResearchLabRunStreamPayload(c.env, runId);
-        if (!payload) {
-          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research lab run not found." })}\n\n`));
-          close();
-          return;
-        }
-        controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`));
-        const terminal = ["completed", "partial", "failed", "cancelled"].includes(payload.status.run.status);
-        if (terminal) {
-          controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
-          close();
-        }
-      };
       try {
         while (!closed) {
-          progressPump.start();
+          const payload = await loadResearchLabRunStreamPayload(c.env, runId);
+          if (!payload) {
+            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research lab run not found." })}\n\n`));
+            close();
+            return;
+          }
+          const terminal = ["completed", "partial", "failed", "cancelled"].includes(payload.status.run.status);
+          if (!terminal && !progressPump.isInFlight() && (Date.now() - lastProgressKickAt >= RESEARCH_LAB_STREAM_REFRESH_MS)) {
+            lastProgressKickAt = Date.now();
+            progressPump.start();
+          }
           progressPump.throwIfErrored();
-          await push();
+          controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`));
+          if (terminal) {
+            controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
+            close();
+            return;
+          }
           if (closed) break;
-          await scheduler.wait(1000);
+          await scheduler.wait(RESEARCH_LAB_STREAM_REFRESH_MS);
         }
       } catch (error) {
         controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : "Research lab stream failed." })}\n\n`));

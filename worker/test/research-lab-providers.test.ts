@@ -35,7 +35,7 @@ describe("research lab providers", () => {
         ticker: "AMPX",
       }),
       expect.objectContaining({
-        forceFresh: true,
+        forceFresh: false,
         timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
       }),
     );

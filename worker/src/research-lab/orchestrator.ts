@@ -11,6 +11,7 @@ import { buildResearchLabMemorySummary, buildResearchLabOutputDelta } from "./me
 import { validateResearchLabRunCreate } from "./schemas";
 import {
   createResearchLabRun,
+  cancelResearchLabRun as cancelResearchLabRunRecord,
   insertResearchLabEvidence,
   insertResearchLabOutput,
   insertResearchLabRunEvent,
@@ -599,6 +600,23 @@ export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreat
       promptConfigId: promptConfig.id,
       evidenceProfileId: evidenceProfile.id,
     },
+  });
+  return run;
+}
+
+export async function cancelResearchLabRun(env: Env, runId: string): Promise<ResearchLabRunRecord | null> {
+  const existing = await loadResearchLabRun(env, runId);
+  if (!existing) return null;
+  if (existing.status === "completed" || existing.status === "partial" || existing.status === "failed" || existing.status === "cancelled") {
+    return existing;
+  }
+  const run = await cancelResearchLabRunRecord(env, runId);
+  if (!run || run.status !== "cancelled") return run;
+  await insertResearchLabRunEvent(env, {
+    runId,
+    eventType: "run_cancelled",
+    level: "warn",
+    message: "Research lab run cancelled by user.",
   });
   return run;
 }

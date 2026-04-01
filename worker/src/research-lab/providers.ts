@@ -83,6 +83,7 @@ export async function runResearchLabPerplexityQuery(
     ticker: string;
     limit: number;
     sourceKind: "news" | "earnings_transcript" | "ir_page" | "analyst_commentary" | "macro_release" | "media";
+    forceFresh?: boolean;
   },
 ): Promise<Awaited<ReturnType<typeof searchPerplexity>>> {
   return searchPerplexity(env, {
@@ -94,7 +95,7 @@ export async function runResearchLabPerplexityQuery(
     limit: query.limit,
     ticker: query.key === "macro_relevance" ? null : query.ticker,
   }, {
-    forceFresh: true,
+    forceFresh: Boolean(query.forceFresh),
     timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
   });
 }

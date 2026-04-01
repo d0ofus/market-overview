@@ -339,8 +339,14 @@ vi.mock("../src/research-lab/storage", () => ({
   loadResearchLabEvidenceForRunItem: vi.fn(async (_env: unknown, runItemId: string) => (
     harness.state.evidence.filter((entry) => entry.runItemId === runItemId)
   )),
+  loadResearchLabEvidenceForRun: vi.fn(async (_env: unknown, runId: string) => (
+    harness.state.evidence.filter((entry) => entry.runId === runId)
+  )),
   loadResearchLabOutputForRunItem: vi.fn(async (_env: unknown, runItemId: string) => (
     harness.state.outputs.find((entry) => entry.runItemId === runItemId) ?? null
+  )),
+  loadResearchLabOutputsForRun: vi.fn(async (_env: unknown, runId: string) => (
+    harness.state.outputs.filter((entry) => entry.runId === runId)
   )),
   loadResearchLabTickerHistory: vi.fn(async (_env: unknown, ticker: string) => (
     harness.state.outputs.filter((entry) => entry.ticker === ticker).map((output) => ({
@@ -351,10 +357,33 @@ vi.mock("../src/research-lab/storage", () => ({
   loadResearchLabRunEvents: vi.fn(async (_env: unknown, runId: string) => (
     harness.state.events.filter((event) => event.runId === runId)
   )),
+  cancelResearchLabRun: vi.fn(async (_env: unknown, runId: string) => {
+    if (!harness.state.run || harness.state.run.id !== runId) return null;
+    harness.state.items = harness.state.items.map((item) => (
+      ["completed", "failed"].includes(item.status)
+        ? item
+        : {
+          ...item,
+          status: "failed",
+          lastError: item.lastError ?? "Cancelled by user.",
+          completedAt: item.completedAt ?? "2026-03-31T10:10:00.000Z",
+          heartbeatAt: "2026-03-31T10:10:00.000Z",
+        }
+    ));
+    harness.state.run = {
+      ...harness.state.run,
+      status: "cancelled",
+      completedAt: "2026-03-31T10:10:00.000Z",
+      heartbeatAt: "2026-03-31T10:10:00.000Z",
+      failedTickerCount: harness.state.items.filter((item) => item.status === "failed").length,
+      completedTickerCount: harness.state.items.filter((item) => item.status === "completed").length,
+    };
+    return harness.state.run;
+  }),
 }));
 
 import { loadResearchLabRunResultsPayload, loadResearchLabRunStreamPayload } from "../src/research-lab/api";
-import { drainResearchLabRun, ensureResearchLabRunProgress, startResearchLabRun } from "../src/research-lab/orchestrator";
+import { cancelResearchLabRun, drainResearchLabRun, ensureResearchLabRunProgress, startResearchLabRun } from "../src/research-lab/orchestrator";
 import * as researchLabStorage from "../src/research-lab/storage";
 
 describe("research lab flow", () => {
@@ -417,6 +446,21 @@ describe("research lab flow", () => {
 
     expect(harness.state.run.status).toBe("completed");
     expect(harness.state.items[0]?.status).toBe("completed");
+  });
+
+  it("cancels a live lab run without restarting it", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["NVDA", "MSFT"] });
+    harness.state.run = {
+      ...harness.state.run,
+      status: "running",
+    };
+
+    const cancelled = await cancelResearchLabRun(env, run.id);
+
+    expect(cancelled?.status).toBe("cancelled");
+    expect(harness.state.items.every((item) => item.status === "failed")).toBe(true);
+    expect(harness.state.events.some((event) => event.eventType === "run_cancelled")).toBe(true);
   });
 
   it("marks the ticker failed when Claude synthesis fails even if evidence was gathered", async () => {

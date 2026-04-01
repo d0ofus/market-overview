@@ -21,6 +21,7 @@ export type ResearchLabEventLevel = "info" | "warn" | "error";
 
 export type ResearchLabEventType =
   | "run_created"
+  | "run_cancelled"
   | "memory_load_started"
   | "memory_load_finished"
   | "gathering_started"

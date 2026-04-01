@@ -1,9 +1,9 @@
 import type { Env } from "../types";
 import { RESEARCH_LAB_RESULTS_EVENT_LIMIT } from "./constants";
 import {
-  loadResearchLabEvidenceForRunItem,
+  loadResearchLabEvidenceForRun,
   loadResearchLabEvidenceProfile,
-  loadResearchLabOutputForRunItem,
+  loadResearchLabOutputsForRun,
   loadResearchLabPromptConfig,
   loadResearchLabRun,
   loadResearchLabRunEvents,
@@ -42,12 +42,23 @@ export async function loadResearchLabRunResultsPayload(
 ): Promise<ResearchLabRunResultsResponse | null> {
   const status = await loadResearchLabRunStatusPayload(env, runId);
   if (!status) return null;
-  const items = await Promise.all(status.items.map(async (item) => ({
+  const [evidenceRows, outputRows] = await Promise.all([
+    loadResearchLabEvidenceForRun(env, runId),
+    loadResearchLabOutputsForRun(env, runId),
+  ]);
+  const evidenceByItem = new Map<string, typeof evidenceRows>();
+  for (const row of evidenceRows) {
+    const current = evidenceByItem.get(row.runItemId) ?? [];
+    current.push(row);
+    evidenceByItem.set(row.runItemId, current);
+  }
+  const outputByItem = new Map(outputRows.map((row) => [row.runItemId, row]));
+  const items = status.items.map((item) => ({
     item,
     events: status.events.filter((event) => event.runItemId === item.id),
-    evidence: await loadResearchLabEvidenceForRunItem(env, item.id),
-    output: await loadResearchLabOutputForRunItem(env, item.id),
-  })));
+    evidence: evidenceByItem.get(item.id) ?? [],
+    output: outputByItem.get(item.id) ?? null,
+  }));
   return {
     run: status.run,
     items,
@@ -60,11 +71,30 @@ export async function loadResearchLabRunStreamPayload(env: Env, runId: string): 
   status: ResearchLabRunStatusResponse;
   results: ResearchLabRunResultsResponse;
 } | null> {
-  const [status, results] = await Promise.all([
-    loadResearchLabRunStatusPayload(env, runId),
-    loadResearchLabRunResultsPayload(env, runId),
+  const status = await loadResearchLabRunStatusPayload(env, runId);
+  if (!status) return null;
+  const [evidenceRows, outputRows] = await Promise.all([
+    loadResearchLabEvidenceForRun(env, runId),
+    loadResearchLabOutputsForRun(env, runId),
   ]);
-  if (!status || !results) return null;
+  const evidenceByItem = new Map<string, typeof evidenceRows>();
+  for (const row of evidenceRows) {
+    const current = evidenceByItem.get(row.runItemId) ?? [];
+    current.push(row);
+    evidenceByItem.set(row.runItemId, current);
+  }
+  const outputByItem = new Map(outputRows.map((row) => [row.runItemId, row]));
+  const results: ResearchLabRunResultsResponse = {
+    run: status.run,
+    items: status.items.map((item) => ({
+      item,
+      events: status.events.filter((event) => event.runItemId === item.id),
+      evidence: evidenceByItem.get(item.id) ?? [],
+      output: outputByItem.get(item.id) ?? null,
+    })),
+    promptConfig: status.promptConfig,
+    evidenceProfile: status.evidenceProfile,
+  };
   return { status, results };
 }
 

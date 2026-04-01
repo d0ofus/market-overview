@@ -270,6 +270,13 @@ export async function loadResearchLabEvidenceForRunItem(env: Env, runItemId: str
   return (rows.results ?? []).map(mapEvidence);
 }
 
+export async function loadResearchLabEvidenceForRun(env: Env, runId: string): Promise<ResearchLabEvidenceRecord[]> {
+  const rows = await env.DB.prepare(
+    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, provider_key as providerKey, evidence_kind as evidenceKind, query_label as queryLabel, canonical_url as canonicalUrl, source_domain as sourceDomain, title, published_at as publishedAt, summary, excerpt, bullets_json as bulletsJson, content_hash as contentHash, provider_payload_json as providerPayloadJson, created_at as createdAt FROM research_lab_evidence WHERE run_id = ? ORDER BY created_at ASC",
+  ).bind(runId).all<Record<string, unknown>>();
+  return (rows.results ?? []).map(mapEvidence);
+}
+
 export async function loadResearchLabOutputsForRun(env: Env, runId: string): Promise<ResearchLabOutputRecord[]> {
   const rows = await env.DB.prepare(
     "SELECT id, run_id as runId, run_item_id as runItemId, ticker, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE run_id = ? ORDER BY created_at ASC",
@@ -365,6 +372,32 @@ export async function updateResearchLabRunItemHeartbeat(env: Env, runItemId: str
   await env.DB.prepare(
     "UPDATE research_lab_run_items SET heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   ).bind(heartbeatAt, runItemId).run();
+}
+
+export async function cancelResearchLabRun(env: Env, runId: string): Promise<ResearchLabRunRecord | null> {
+  const current = await loadResearchLabRun(env, runId);
+  if (!current) return null;
+  if (current.status === "completed" || current.status === "partial" || current.status === "failed" || current.status === "cancelled") {
+    return current;
+  }
+  const cancelledAt = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE research_lab_run_items SET status = 'failed', last_error = COALESCE(last_error, ?), completed_at = COALESCE(completed_at, ?), heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE run_id = ? AND status IN ('queued', 'memory_loading', 'gathering', 'gathering_failed', 'synthesizing', 'synthesizing_failed', 'persisting')",
+    ).bind("Cancelled by user.", cancelledAt, runId),
+    env.DB.prepare(
+      "UPDATE research_lab_runs SET status = 'cancelled', error_summary = COALESCE(error_summary, ?), completed_at = COALESCE(completed_at, ?), heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).bind("Cancelled by user.", cancelledAt, runId),
+  ]);
+  const items = await loadResearchLabRunItems(env, runId);
+  await env.DB.prepare(
+    "UPDATE research_lab_runs SET completed_ticker_count = ?, failed_ticker_count = ? WHERE id = ?",
+  ).bind(
+    items.filter((item) => item.status === "completed").length,
+    items.filter((item) => item.status === "failed").length,
+    runId,
+  ).run();
+  return loadResearchLabRun(env, runId);
 }
 
 export async function tryAcquireResearchLabRunExecution(

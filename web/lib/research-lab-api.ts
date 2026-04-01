@@ -278,6 +278,12 @@ export function createResearchLabRun(payload: {
   });
 }
 
+export function cancelResearchLabRun(id: string) {
+  return getJson<{ ok: true; run: ResearchLabRunRecord }>(`/api/research-lab/runs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+}
+
 export function getResearchLabRuns(limit = 10) {
   return getJson<{ rows: ResearchLabRunListRow[] }>(`/api/research-lab/runs?limit=${encodeURIComponent(String(limit))}`);
 }

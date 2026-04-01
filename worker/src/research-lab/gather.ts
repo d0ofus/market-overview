@@ -1,5 +1,10 @@
 import type { Env } from "../types";
 import { runResearchLabPerplexityQuery } from "./providers";
+import {
+  RESEARCH_LAB_DEFAULT_EVIDENCE_TARGET,
+  RESEARCH_LAB_DEFAULT_FORCE_FRESH_SEARCH,
+  RESEARCH_LAB_DEFAULT_MAX_QUERY_FAMILIES,
+} from "./constants";
 import type {
   ResearchLabEvidenceKind,
   ResearchLabEvidenceProfileRecord,
@@ -19,6 +24,9 @@ type EvidenceProfileConfig = {
   lookbackDays?: number;
   maxItemsPerQuery?: number;
   maxItemsForPrompt?: number;
+  evidenceTarget?: number;
+  maxQueryFamilies?: number;
+  forceFreshSearch?: boolean;
   families?: EvidenceProfileFamily[];
 };
 
@@ -91,9 +99,12 @@ export async function gatherResearchLabEvidence(env: Env, input: {
 }> {
   const config = (input.evidenceProfile.queryConfigJson ?? {}) as EvidenceProfileConfig;
   const lookbackDays = Math.max(3, Number(config.lookbackDays ?? 21));
-  const maxItemsPerQuery = Math.max(1, Number(config.maxItemsPerQuery ?? 3));
-  const promptEvidenceLimit = Math.max(6, Number(config.maxItemsForPrompt ?? 12));
-  const families = buildResearchLabGatherQueries(input.identity, input.evidenceProfile);
+  const maxItemsPerQuery = Math.max(1, Math.min(3, Number(config.maxItemsPerQuery ?? 2)));
+  const evidenceTarget = Math.max(4, Number(config.evidenceTarget ?? RESEARCH_LAB_DEFAULT_EVIDENCE_TARGET));
+  const promptEvidenceLimit = Math.max(6, Number(config.maxItemsForPrompt ?? Math.min(12, evidenceTarget)));
+  const maxQueryFamilies = Math.max(1, Number(config.maxQueryFamilies ?? RESEARCH_LAB_DEFAULT_MAX_QUERY_FAMILIES));
+  const forceFreshSearch = Boolean(config.forceFreshSearch ?? RESEARCH_LAB_DEFAULT_FORCE_FRESH_SEARCH);
+  const families = buildResearchLabGatherQueries(input.identity, input.evidenceProfile).slice(0, maxQueryFamilies);
   const evidence: ResearchLabEvidenceRecord[] = [];
   const seenKeys = new Set<string>();
   let usage: Record<string, unknown> | null = null;
@@ -112,6 +123,7 @@ export async function gatherResearchLabEvidence(env: Env, input: {
       ticker: input.identity.ticker,
       limit: Math.max(1, Math.min(family.limit ?? maxItemsPerQuery, maxItemsPerQuery)),
       sourceKind: family.sourceKind,
+      forceFresh: forceFreshSearch,
     });
 
     if (result.raw && typeof result.raw === "object") {
@@ -145,7 +157,9 @@ export async function gatherResearchLabEvidence(env: Env, input: {
       if (seenKeys.has(dedupeKey)) continue;
       seenKeys.add(dedupeKey);
       evidence.push(record);
+      if (evidence.length >= evidenceTarget) break;
     }
+    if (evidence.length >= evidenceTarget) break;
   }
 
   if (evidence.length === 0) {

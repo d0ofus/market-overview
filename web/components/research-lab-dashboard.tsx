@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Play, RefreshCw } from "lucide-react";
 import { apiUrl } from "@/lib/api";
 import {
+  cancelResearchLabRun,
   createResearchLabRun,
   getResearchLabRunResults,
   getResearchLabRuns,
@@ -70,6 +71,7 @@ export function ResearchLabDashboard() {
   const [results, setResults] = useState<ResearchLabRunResultsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
 
@@ -209,6 +211,20 @@ export function ResearchLabDashboard() {
     }
   };
 
+  const stopRun = async () => {
+    if (!selectedRunId) return;
+    setCancelling(true);
+    setMessage(null);
+    try {
+      await cancelResearchLabRun(selectedRunId);
+      await loadRuns(selectedRunId);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to cancel research lab run.");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const itemResults = useMemo(
     () => results?.items ?? [],
     [results?.items],
@@ -254,6 +270,17 @@ export function ResearchLabDashboard() {
                 {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 Start Run
               </button>
+              {selectedRun && ["queued", "running"].includes(selectedRun.status) ? (
+                <button
+                  type="button"
+                  onClick={() => void stopRun()}
+                  disabled={cancelling}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-100 transition hover:border-rose-300/50 hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+                  Stop Run
+                </button>
+              ) : null}
               <p className="text-xs text-slate-500">
                 Sequential processing, no fallback output, schema-validated synthesis only.
               </p>
