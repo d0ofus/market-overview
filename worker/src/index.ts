@@ -2324,12 +2324,14 @@ app.post("/api/research-lab/runs/:id/cancel", async (c) => {
 });
 
 app.get("/api/research-lab/runs/:id", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchLabRunStatusPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);
 });
 
 app.get("/api/research-lab/runs/:id/results", async (c) => {
+  c.executionCtx.waitUntil(ensureResearchLabRunProgress(c.env, c.req.param("id")));
   const payload = await loadResearchLabRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);

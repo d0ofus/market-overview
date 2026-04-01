@@ -23,12 +23,12 @@ import {
   loadResearchLabPromptConfig,
   loadResearchLabRun,
   loadResearchLabRunItems,
+  loadResearchLabEvidenceForRunItem,
   tryAcquireResearchLabRunExecution,
   updateResearchLabRun,
   updateResearchLabRunHeartbeat,
   updateResearchLabRunItem,
   updateResearchLabRunItemHeartbeat,
-  claimNextQueuedResearchLabRunItem,
   upsertResearchLabMemoryHead,
 } from "./storage";
 import { synthesizeResearchLabOutput } from "./synthesize";
@@ -49,10 +49,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function waitMs(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 function isTerminalRunStatus(status: ResearchLabRunStatus) {
   return status === "completed" || status === "partial" || status === "failed" || status === "cancelled";
 }
@@ -63,6 +59,17 @@ function isTerminalItemStatus(status: ResearchLabRunItemRecord["status"]) {
 
 function isInProgressItemStatus(status: ResearchLabRunItemRecord["status"]) {
   return status === "memory_loading" || status === "gathering" || status === "synthesizing" || status === "persisting";
+}
+
+function itemIdentityFromRecord(item: ResearchLabRunItemRecord): ResearchLabTickerIdentity | null {
+  if (!item.companyName) return null;
+  return {
+    ticker: item.ticker,
+    companyName: item.companyName,
+    exchange: item.exchange,
+    secCik: item.secCik,
+    irDomain: item.irDomain,
+  };
 }
 
 function ageMs(value: string | null | undefined): number | null {
@@ -119,12 +126,19 @@ async function runWithResearchLabHeartbeat<T>(input: {
   const workPromise = input.work();
   await touchResearchLabHeartbeat(input.env, input.runId, input.runItemId);
   while (true) {
-    const raced = await Promise.race([
-      workPromise.then((value) => ({ done: true as const, value })),
-      waitMs(heartbeatEveryMs).then(() => ({ done: false as const })),
-    ]);
-    if (raced.done) {
-      return raced.value;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const raced = await Promise.race([
+        workPromise.then((value) => ({ done: true as const, value })),
+        new Promise<{ done: false }>((resolve) => {
+          timerId = setTimeout(() => resolve({ done: false as const }), heartbeatEveryMs);
+        }),
+      ]);
+      if (raced.done) {
+        return raced.value;
+      }
+    } finally {
+      if (timerId) clearTimeout(timerId);
     }
     try {
       await touchResearchLabHeartbeat(input.env, input.runId, input.runItemId);
@@ -281,6 +295,207 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
   promptConfig: ResearchLabPromptConfigRecord;
   evidenceProfile: ResearchLabEvidenceProfileRecord;
 }) {
+  const currentIdentity = itemIdentityFromRecord(item);
+  if (item.status === "gathering" && currentIdentity) {
+    const gatherStartedAt = nowIso();
+    await updateResearchLabRunItem(env, item.id, {
+      status: "gathering",
+      heartbeatAt: gatherStartedAt,
+      lastError: null,
+    });
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "gathering_started",
+      level: "info",
+      message: `Gathering Perplexity evidence for ${item.ticker}.`,
+      contextJson: {
+        provider: "perplexity",
+        evidenceProfileId: configs.evidenceProfile.id,
+      },
+    });
+    await updateResearchLabRunHeartbeat(env, run.id, gatherStartedAt);
+
+    let gatherResult: Awaited<ReturnType<typeof gatherResearchLabEvidence>>;
+    const gatherClock = Date.now();
+    try {
+      gatherResult = await runWithResearchLabHeartbeat({
+        env,
+        runId: run.id,
+        runItemId: item.id,
+        work: () => gatherResearchLabEvidence(env, {
+          runId: run.id,
+          runItemId: item.id,
+          identity: currentIdentity,
+          evidenceProfile: configs.evidenceProfile,
+        }),
+      });
+    } catch (error) {
+      await failItem(env, item, {
+        stage: "gathering",
+        message: error instanceof Error ? error.message : "Evidence gathering failed.",
+      });
+      return;
+    }
+
+    await insertResearchLabEvidence(env, gatherResult.evidence);
+    await updateResearchLabRunItem(env, item.id, {
+      status: "synthesizing",
+      gatherProviderKey: "perplexity",
+      gatherModel: gatherResult.model,
+      gatherUsageJson: gatherResult.usage,
+      gatherLatencyMs: Date.now() - gatherClock,
+      heartbeatAt: nowIso(),
+    });
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "gathering_finished",
+      level: "info",
+      message: `Gathered ${gatherResult.evidence.length} evidence item(s) for ${item.ticker}.`,
+      contextJson: {
+        evidenceCount: gatherResult.evidence.length,
+        model: gatherResult.model,
+        usage: gatherResult.usage,
+      },
+    });
+    await updateResearchLabRunHeartbeat(env, run.id, nowIso());
+    return;
+  }
+
+  if ((item.status === "synthesizing" || item.status === "persisting") && currentIdentity) {
+    const evidence = await loadResearchLabEvidenceForRunItem(env, item.id);
+    if (evidence.length === 0) {
+      await failItem(env, item, {
+        stage: "synthesizing",
+        message: `No gathered evidence was found for ${item.ticker}.`,
+      });
+      return;
+    }
+    const priorOutput = await loadLatestResearchLabOutputForTicker(env, item.ticker, configs.promptConfig.configFamily);
+    const synthStartedAt = nowIso();
+    await updateResearchLabRunItem(env, item.id, {
+      status: "synthesizing",
+      heartbeatAt: synthStartedAt,
+      lastError: null,
+    });
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "synthesis_started",
+      level: "info",
+      message: `Synthesizing ${item.ticker} with Claude Sonnet.`,
+      contextJson: {
+        provider: "anthropic",
+        promptConfigId: configs.promptConfig.id,
+      },
+    });
+    await updateResearchLabRunHeartbeat(env, run.id, synthStartedAt);
+
+    let synthResult: Awaited<ReturnType<typeof synthesizeResearchLabOutput>>;
+    const synthClock = Date.now();
+    try {
+      synthResult = await runWithResearchLabHeartbeat({
+        env,
+        runId: run.id,
+        runItemId: item.id,
+        work: () => synthesizeResearchLabOutput(env, {
+          identity: currentIdentity,
+          evidence,
+          promptConfig: configs.promptConfig,
+          evidencePromptLimit: evidence.length,
+          priorOutput,
+        }),
+      });
+    } catch (error) {
+      await failItem(env, item, {
+        stage: "synthesizing",
+        message: error instanceof Error ? error.message : "Synthesis failed.",
+      });
+      return;
+    }
+
+    await updateResearchLabRunItem(env, item.id, {
+      status: "persisting",
+      synthProviderKey: "anthropic",
+      synthModel: synthResult.model,
+      synthUsageJson: synthResult.usage,
+      synthLatencyMs: Date.now() - synthClock,
+      heartbeatAt: nowIso(),
+    });
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "synthesis_finished",
+      level: "info",
+      message: `Synthesis completed for ${item.ticker}.`,
+      contextJson: {
+        model: synthResult.model,
+        usage: synthResult.usage,
+      },
+    });
+
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "persistence_started",
+      level: "info",
+      message: `Persisting lab artifacts for ${item.ticker}.`,
+    });
+    const memorySummary = buildResearchLabMemorySummary(synthResult.synthesis);
+    const delta = buildResearchLabOutputDelta(synthResult.synthesis, priorOutput);
+
+    const output = await insertResearchLabOutput(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      promptConfigId: configs.promptConfig.id,
+      evidenceProfileId: configs.evidenceProfile.id,
+      priorOutputId: priorOutput?.id ?? null,
+      synthesisJson: synthResult.synthesis,
+      memorySummaryJson: memorySummary,
+      deltaJson: delta,
+      sourceEvidenceIds: synthResult.synthesis.evidenceIds,
+      model: synthResult.model,
+      usageJson: synthResult.usage,
+    });
+    await upsertResearchLabMemoryHead(env, {
+      ticker: item.ticker,
+      promptConfigFamily: configs.promptConfig.configFamily,
+      latestOutputId: output.id,
+      updatedAt: nowIso(),
+    });
+    await updateResearchLabRunItem(env, item.id, {
+      status: "completed",
+      memoryOutputId: output.id,
+      synthProviderKey: "anthropic",
+      synthModel: synthResult.model,
+      synthUsageJson: synthResult.usage,
+      synthLatencyMs: Date.now() - synthClock,
+      completedAt: nowIso(),
+      heartbeatAt: nowIso(),
+    });
+    await insertResearchLabRunEvent(env, {
+      runId: run.id,
+      runItemId: item.id,
+      ticker: item.ticker,
+      eventType: "persistence_finished",
+      level: "info",
+      message: `Persisted final synthesis for ${item.ticker}.`,
+      contextJson: {
+        outputId: output.id,
+        priorOutputId: priorOutput?.id ?? null,
+      },
+    });
+    await updateResearchLabRunHeartbeat(env, run.id, nowIso());
+    return;
+  }
+
   const memoryStartedAt = nowIso();
   await updateResearchLabRunItem(env, item.id, {
     status: "memory_loading",
@@ -348,187 +563,15 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
       },
     });
   }
-
-  const gatherStartedAt = nowIso();
   await updateResearchLabRunItem(env, item.id, {
     status: "gathering",
-    heartbeatAt: gatherStartedAt,
-  });
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "gathering_started",
-    level: "info",
-    message: `Gathering Perplexity evidence for ${item.ticker}.`,
-    contextJson: {
-      provider: "perplexity",
-      evidenceProfileId: configs.evidenceProfile.id,
-    },
-  });
-  await updateResearchLabRunHeartbeat(env, run.id, gatherStartedAt);
-
-  let gatherResult: Awaited<ReturnType<typeof gatherResearchLabEvidence>>;
-  const gatherClock = Date.now();
-  try {
-    gatherResult = await runWithResearchLabHeartbeat({
-      env,
-      runId: run.id,
-      runItemId: item.id,
-      work: () => gatherResearchLabEvidence(env, {
-        runId: run.id,
-        runItemId: item.id,
-        identity,
-        evidenceProfile: configs.evidenceProfile,
-      }),
-    });
-  } catch (error) {
-    await failItem(env, item, {
-      stage: "gathering",
-      message: error instanceof Error ? error.message : "Evidence gathering failed.",
-    });
-    return;
-  }
-
-  await insertResearchLabEvidence(env, gatherResult.evidence);
-  await updateResearchLabRunItem(env, item.id, {
-    gatherProviderKey: "perplexity",
-    gatherModel: gatherResult.model,
-    gatherUsageJson: gatherResult.usage,
-    gatherLatencyMs: Date.now() - gatherClock,
     heartbeatAt: nowIso(),
-  });
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "gathering_finished",
-    level: "info",
-    message: `Gathered ${gatherResult.evidence.length} evidence item(s) for ${item.ticker}.`,
-    contextJson: {
-      evidenceCount: gatherResult.evidence.length,
-      model: gatherResult.model,
-      usage: gatherResult.usage,
-    },
-  });
-
-  const synthStartedAt = nowIso();
-  await updateResearchLabRunItem(env, item.id, {
-    status: "synthesizing",
-    heartbeatAt: synthStartedAt,
-  });
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "synthesis_started",
-    level: "info",
-    message: `Synthesizing ${item.ticker} with Claude Sonnet.`,
-    contextJson: {
-      provider: "anthropic",
-      promptConfigId: configs.promptConfig.id,
-    },
-  });
-  await updateResearchLabRunHeartbeat(env, run.id, synthStartedAt);
-
-  let synthResult: Awaited<ReturnType<typeof synthesizeResearchLabOutput>>;
-  const synthClock = Date.now();
-  try {
-    synthResult = await runWithResearchLabHeartbeat({
-      env,
-      runId: run.id,
-      runItemId: item.id,
-      work: () => synthesizeResearchLabOutput(env, {
-        identity,
-        evidence: gatherResult.evidence,
-        promptConfig: configs.promptConfig,
-        evidencePromptLimit: gatherResult.promptEvidenceLimit,
-        priorOutput,
-      }),
-    });
-  } catch (error) {
-    await failItem(env, item, {
-      stage: "synthesizing",
-      message: error instanceof Error ? error.message : "Synthesis failed.",
-    });
-    return;
-  }
-
-  await updateResearchLabRunItem(env, item.id, {
-    status: "persisting",
-    synthProviderKey: "anthropic",
-    synthModel: synthResult.model,
-    synthUsageJson: synthResult.usage,
-    synthLatencyMs: Date.now() - synthClock,
-    heartbeatAt: nowIso(),
-  });
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "synthesis_finished",
-    level: "info",
-    message: `Synthesis completed for ${item.ticker}.`,
-    contextJson: {
-      model: synthResult.model,
-      usage: synthResult.usage,
-    },
-  });
-
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "persistence_started",
-    level: "info",
-    message: `Persisting lab artifacts for ${item.ticker}.`,
-  });
-  const memorySummary = buildResearchLabMemorySummary(synthResult.synthesis);
-  const delta = buildResearchLabOutputDelta(synthResult.synthesis, priorOutput);
-
-  const output = await insertResearchLabOutput(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    promptConfigId: configs.promptConfig.id,
-    evidenceProfileId: configs.evidenceProfile.id,
-    priorOutputId: priorOutput?.id ?? null,
-    synthesisJson: synthResult.synthesis,
-    memorySummaryJson: memorySummary,
-    deltaJson: delta,
-    sourceEvidenceIds: synthResult.synthesis.evidenceIds,
-    model: synthResult.model,
-    usageJson: synthResult.usage,
-  });
-  await upsertResearchLabMemoryHead(env, {
-    ticker: item.ticker,
-    promptConfigFamily: configs.promptConfig.configFamily,
-    latestOutputId: output.id,
-    updatedAt: nowIso(),
-  });
-  await updateResearchLabRunItem(env, item.id, {
-    status: "completed",
-    memoryOutputId: output.id,
-    synthProviderKey: "anthropic",
-    synthModel: synthResult.model,
-    synthUsageJson: synthResult.usage,
-    synthLatencyMs: Date.now() - synthClock,
-    completedAt: nowIso(),
-    heartbeatAt: nowIso(),
-  });
-  await insertResearchLabRunEvent(env, {
-    runId: run.id,
-    runItemId: item.id,
-    ticker: item.ticker,
-    eventType: "persistence_finished",
-    level: "info",
-    message: `Persisted final synthesis for ${item.ticker}.`,
-    contextJson: {
-      outputId: output.id,
-      priorOutputId: priorOutput?.id ?? null,
-    },
   });
   await updateResearchLabRunHeartbeat(env, run.id, nowIso());
+}
+
+function selectNextRunnableItem(items: ResearchLabRunItemRecord[]): ResearchLabRunItemRecord | null {
+  return items.find((item) => !isTerminalItemStatus(item.status)) ?? null;
 }
 
 async function executeDrain(env: Env, runId: string) {
@@ -555,10 +598,10 @@ async function executeDrain(env: Env, runId: string) {
   }) ?? run;
   const configs = await resolveLabConfigs(env, run);
 
-  while (true) {
-    await updateResearchLabRunHeartbeat(env, runId, nowIso());
-    const item = await claimNextQueuedResearchLabRunItem(env, runId);
-    if (!item) break;
+  await updateResearchLabRunHeartbeat(env, runId, nowIso());
+  const items = await loadResearchLabRunItems(env, runId);
+  const item = selectNextRunnableItem(items);
+  if (item) {
     await processItem(env, run, item, configs);
   }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => {
   const promptConfig = {
@@ -132,7 +132,6 @@ const harness = vi.hoisted(() => {
       gatherError: null as Error | null,
       gatherDelayMs: 0,
       synthError: null as Error | null,
-      executionLocked: false,
       priorOutputs: new Map<string, any>(),
       eventCounter: 0,
       outputCounter: 0,
@@ -298,11 +297,7 @@ vi.mock("../src/research-lab/storage", () => ({
   loadResearchLabRunItems: vi.fn(async (_env: unknown, runId: string) => (
     harness.state.items.filter((item) => item.runId === runId)
   )),
-  tryAcquireResearchLabRunExecution: vi.fn(async () => {
-    if (harness.state.executionLocked) return false;
-    harness.state.executionLocked = true;
-    return true;
-  }),
+  tryAcquireResearchLabRunExecution: vi.fn(async () => true),
   updateResearchLabRun: vi.fn(async (_env: unknown, runId: string, patch: any) => {
     if (!harness.state.run || harness.state.run.id !== runId) return null;
     harness.state.run = { ...harness.state.run, ...patch, updatedAt: "2026-03-31T10:10:00.000Z" };
@@ -386,9 +381,24 @@ import { loadResearchLabRunResultsPayload, loadResearchLabRunStreamPayload } fro
 import { cancelResearchLabRun, drainResearchLabRun, ensureResearchLabRunProgress, startResearchLabRun } from "../src/research-lab/orchestrator";
 import * as researchLabStorage from "../src/research-lab/storage";
 
+async function progressToTerminal(env: any, runId: string, maxPasses = 12) {
+  let latest = null as any;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    latest = await ensureResearchLabRunProgress(env, runId);
+    if (latest && ["completed", "partial", "failed", "cancelled"].includes(latest.status)) {
+      return latest;
+    }
+  }
+  return latest;
+}
+
 describe("research lab flow", () => {
   beforeEach(() => {
     harness.reset();
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
     vi.useRealTimers();
   });
 
@@ -396,7 +406,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["KMI", "LASR"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
 
     expect(harness.state.run.status).toBe("completed");
     expect(harness.state.outputs).toHaveLength(2);
@@ -420,7 +430,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["KMI"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
 
     expect(harness.state.run.status).toBe("failed");
     expect(harness.state.items[0]?.status).toBe("failed");
@@ -435,6 +445,9 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["AMPX"] });
 
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[0]?.status).toBe("gathering");
+
     const drainPromise = drainResearchLabRun(env, run.id);
     await vi.advanceTimersByTimeAsync(21_000);
 
@@ -444,8 +457,7 @@ describe("research lab flow", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     await drainPromise;
 
-    expect(harness.state.run.status).toBe("completed");
-    expect(harness.state.items[0]?.status).toBe("completed");
+    expect(harness.state.items[0]?.status).toBe("synthesizing");
   });
 
   it("cancels a live lab run without restarting it", async () => {
@@ -468,7 +480,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["KMI"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
 
     expect(harness.state.run.status).toBe("failed");
     expect(harness.state.evidence).toHaveLength(1);
@@ -482,7 +494,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["LASR"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
 
     expect(harness.state.run.status).toBe("failed");
     expect(harness.state.outputs).toHaveLength(0);
@@ -519,7 +531,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["KMI"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
     const payload = await loadResearchLabRunResultsPayload(env, run.id);
 
     expect(payload?.items).toHaveLength(1);
@@ -532,7 +544,7 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["KMI"] });
 
-    await drainResearchLabRun(env, run.id);
+    await progressToTerminal(env, run.id);
     const payload = await loadResearchLabRunStreamPayload(env, run.id);
 
     expect(payload?.status.run.status).toBe("completed");
@@ -543,5 +555,19 @@ describe("research lab flow", () => {
       "synthesis_finished",
       "persistence_finished",
     ]));
+  });
+
+  it("advances one stage per progress pass to avoid long single-invocation chains", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["DELL"] });
+
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[0]?.status).toBe("gathering");
+
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[0]?.status).toBe("synthesizing");
+
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[0]?.status).toBe("completed");
   });
 });
