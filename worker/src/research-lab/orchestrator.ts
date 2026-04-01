@@ -3,6 +3,7 @@ import { normalizeResearchTicker } from "../research/sec-normalization";
 import {
   RESEARCH_LAB_DEFAULT_EVIDENCE_PROFILE_ID,
   RESEARCH_LAB_DEFAULT_PROMPT_CONFIG_ID,
+  RESEARCH_LAB_HEARTBEAT_INTERVAL_MS,
   RESEARCH_LAB_HEARTBEAT_STALE_MS,
 } from "./constants";
 import { gatherResearchLabEvidence } from "./gather";
@@ -45,6 +46,10 @@ const runExecutions = new Map<string, Promise<void>>();
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function waitMs(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 function isTerminalRunStatus(status: ResearchLabRunStatus) {
@@ -90,6 +95,42 @@ function summarizeRunUsage(items: ResearchLabRunItemRecord[]) {
     perplexity: sumUsageRows(items.map((item) => item.gatherUsageJson)),
     anthropic: sumUsageRows(items.map((item) => item.synthUsageJson)),
   };
+}
+
+async function touchResearchLabHeartbeat(env: Env, runId: string, runItemId: string, heartbeatAt = nowIso()) {
+  await Promise.all([
+    updateResearchLabRunHeartbeat(env, runId, heartbeatAt),
+    updateResearchLabRunItemHeartbeat(env, runItemId, heartbeatAt),
+  ]);
+}
+
+async function runWithResearchLabHeartbeat<T>(input: {
+  env: Env;
+  runId: string;
+  runItemId: string;
+  work: () => Promise<T>;
+  heartbeatEveryMs?: number;
+}): Promise<T> {
+  const heartbeatEveryMs = Math.max(
+    1_000,
+    Number(input.heartbeatEveryMs ?? RESEARCH_LAB_HEARTBEAT_INTERVAL_MS),
+  );
+  const workPromise = input.work();
+  await touchResearchLabHeartbeat(input.env, input.runId, input.runItemId);
+  while (true) {
+    const raced = await Promise.race([
+      workPromise.then((value) => ({ done: true as const, value })),
+      waitMs(heartbeatEveryMs).then(() => ({ done: false as const })),
+    ]);
+    if (raced.done) {
+      return raced.value;
+    }
+    try {
+      await touchResearchLabHeartbeat(input.env, input.runId, input.runItemId);
+    } catch {
+      // Best-effort keepalive; surface terminal failures from the underlying work.
+    }
+  }
 }
 
 async function resolveLabConfigs(env: Env, run: ResearchLabRunRecord): Promise<{
@@ -329,11 +370,16 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
   let gatherResult: Awaited<ReturnType<typeof gatherResearchLabEvidence>>;
   const gatherClock = Date.now();
   try {
-    gatherResult = await gatherResearchLabEvidence(env, {
+    gatherResult = await runWithResearchLabHeartbeat({
+      env,
       runId: run.id,
       runItemId: item.id,
-      identity,
-      evidenceProfile: configs.evidenceProfile,
+      work: () => gatherResearchLabEvidence(env, {
+        runId: run.id,
+        runItemId: item.id,
+        identity,
+        evidenceProfile: configs.evidenceProfile,
+      }),
     });
   } catch (error) {
     await failItem(env, item, {
@@ -387,12 +433,17 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
   let synthResult: Awaited<ReturnType<typeof synthesizeResearchLabOutput>>;
   const synthClock = Date.now();
   try {
-    synthResult = await synthesizeResearchLabOutput(env, {
-      identity,
-      evidence: gatherResult.evidence,
-      promptConfig: configs.promptConfig,
-      evidencePromptLimit: gatherResult.promptEvidenceLimit,
-      priorOutput,
+    synthResult = await runWithResearchLabHeartbeat({
+      env,
+      runId: run.id,
+      runItemId: item.id,
+      work: () => synthesizeResearchLabOutput(env, {
+        identity,
+        evidence: gatherResult.evidence,
+        promptConfig: configs.promptConfig,
+        evidencePromptLimit: gatherResult.promptEvidenceLimit,
+        priorOutput,
+      }),
     });
   } catch (error) {
     await failItem(env, item, {

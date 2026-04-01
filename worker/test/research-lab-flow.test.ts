@@ -130,6 +130,7 @@ const harness = vi.hoisted(() => {
       promptConfig,
       evidenceProfile,
       gatherError: null as Error | null,
+      gatherDelayMs: 0,
       synthError: null as Error | null,
       executionLocked: false,
       priorOutputs: new Map<string, any>(),
@@ -165,6 +166,9 @@ vi.mock("../src/research/sec-normalization", () => ({
 vi.mock("../src/research-lab/gather", () => ({
   gatherResearchLabEvidence: vi.fn(async (_env: unknown, input: { runId: string; runItemId: string; identity: { ticker: string } }) => {
     if (harness.state.gatherError) throw harness.state.gatherError;
+    if (harness.state.gatherDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, harness.state.gatherDelayMs));
+    }
     return {
       evidence: harness.makeEvidence(input.runId, input.runItemId, input.identity.ticker),
       usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
@@ -351,10 +355,12 @@ vi.mock("../src/research-lab/storage", () => ({
 
 import { loadResearchLabRunResultsPayload, loadResearchLabRunStreamPayload } from "../src/research-lab/api";
 import { drainResearchLabRun, ensureResearchLabRunProgress, startResearchLabRun } from "../src/research-lab/orchestrator";
+import * as researchLabStorage from "../src/research-lab/storage";
 
 describe("research lab flow", () => {
   beforeEach(() => {
     harness.reset();
+    vi.useRealTimers();
   });
 
   it("runs a successful end-to-end lab flow with persisted evidence, output, and events", async () => {
@@ -392,6 +398,25 @@ describe("research lab flow", () => {
     expect(harness.state.items[0]?.lastError).toContain("Perplexity");
     expect(harness.state.outputs).toHaveLength(0);
     expect(harness.state.events.some((event) => event.eventType === "gathering_failed")).toBe(true);
+  });
+
+  it("keeps research-lab heartbeats alive while a long gather is still running", async () => {
+    vi.useFakeTimers();
+    harness.state.gatherDelayMs = 25_000;
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["AMPX"] });
+
+    const drainPromise = drainResearchLabRun(env, run.id);
+    await vi.advanceTimersByTimeAsync(21_000);
+
+    expect(vi.mocked(researchLabStorage.updateResearchLabRunHeartbeat).mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(vi.mocked(researchLabStorage.updateResearchLabRunItemHeartbeat).mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await drainPromise;
+
+    expect(harness.state.run.status).toBe("completed");
+    expect(harness.state.items[0]?.status).toBe("completed");
   });
 
   it("marks the ticker failed when Claude synthesis fails even if evidence was gathered", async () => {

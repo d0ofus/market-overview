@@ -60,7 +60,7 @@ function extractJsonBlock(text: string): Record<string, unknown> | null {
 export async function searchPerplexity(
   env: Env,
   query: PerplexitySearchQuery,
-  options?: { forceFresh?: boolean },
+  options?: { forceFresh?: boolean; timeoutMs?: number },
 ): Promise<PerplexitySearchResult> {
   const apiKey = env.PERPLEXITY_API_KEY?.trim();
   if (!apiKey) {
@@ -98,7 +98,7 @@ export async function searchPerplexity(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
-  }, RESEARCH_SEARCH_TIMEOUT_MS, `Perplexity search for ${query.ticker ?? query.key}`);
+  }, Math.max(1, Number(options?.timeoutMs ?? RESEARCH_SEARCH_TIMEOUT_MS)), `Perplexity search for ${query.ticker ?? query.key}`);
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Perplexity search failed (${res.status}): ${detail.slice(0, 180)}`);

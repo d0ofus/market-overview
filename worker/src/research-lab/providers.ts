@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import { fetchWithTimeout } from "../research/providers/http";
 import { searchPerplexity } from "../research/providers/perplexity-search";
-import { RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS } from "./constants";
+import { RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS, RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS } from "./constants";
 import type { ResearchLabPromptConfigRecord } from "./types";
 
 function anthropicContentToText(content: unknown): string {
@@ -93,5 +93,8 @@ export async function runResearchLabPerplexityQuery(
     sourceKind: query.sourceKind,
     limit: query.limit,
     ticker: query.key === "macro_relevance" ? null : query.ticker,
-  }, { forceFresh: true });
+  }, {
+    forceFresh: true,
+    timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
+  });
 }
