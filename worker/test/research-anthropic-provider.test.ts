@@ -187,6 +187,39 @@ describe("callAnthropicJson", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).model).toBe("claude-sonnet");
   });
+
+  it("retries a timed out Anthropic request before succeeding", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("Anthropic request for claude-test timed out after 25000ms."))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"summary\":\"Recovered after retry.\"}",
+          },
+        ],
+        usage: { input_tokens: 9, output_tokens: 13 },
+        model: "claude-test",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    const waitMock = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("scheduler", { wait: waitMock });
+
+    const response = await callAnthropicJson<{ summary: string }>(buildEnv(), {
+      model: "claude-test",
+      system: "Return strict JSON only.",
+      user: "{}",
+      requestTimeoutMs: 25_000,
+      maxAttemptsPerModel: 2,
+    });
+
+    expect(response.data).toEqual({ summary: "Recovered after retry." });
+    expect(response.model).toBe("claude-test");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(waitMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Anthropic model selection", () => {

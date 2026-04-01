@@ -1,5 +1,9 @@
 import type { Env } from "../types";
 import { validateResearchLabSynthesis } from "./schemas";
+import {
+  RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
+  RESEARCH_LAB_SYNTHESIS_MAX_PROMPT_CHARS,
+} from "./constants";
 import { callResearchLabSonnetJson } from "./providers";
 import type {
   ResearchLabEvidenceFamilyPacket,
@@ -17,6 +21,15 @@ type PromptConfigJson = {
   additionalInstructions?: string | null;
 };
 
+type PromptPayloadShape = {
+  maxEvidenceItems: number;
+  maxItemsPerFamily: number;
+  summaryChars: number;
+  excerptChars: number;
+  includePriorMemory: boolean;
+  includePriorDelta: boolean;
+};
+
 const FAMILY_LABELS: Record<ResearchLabEvidenceKind, string> = {
   key_metrics: "Key Metrics",
   news_catalysts: "News & Catalysts",
@@ -26,14 +39,22 @@ const FAMILY_LABELS: Record<ResearchLabEvidenceKind, string> = {
   macro_relevance: "Macro Relevance",
 };
 
+function normalizeSnippet(value: string | null | undefined, maxChars: number): string | null {
+  if (!value || maxChars <= 0) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.slice(0, maxChars);
+}
+
 function summarizeEvidenceForPrompt(
   evidence: ResearchLabEvidenceRecord[],
   promptConfig: ResearchLabPromptConfigRecord,
   hardLimit: number,
+  shape: PromptPayloadShape,
 ): ResearchLabEvidenceFamilyPacket[] {
   const config = (promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson;
-  const maxEvidenceItems = Math.max(6, Math.min(Number(config.maxEvidenceItems ?? hardLimit), hardLimit));
-  const maxItemsPerFamily = Math.max(1, Math.min(Number(config.maxItemsPerFamily ?? 2), 4));
+  const maxEvidenceItems = Math.max(4, Math.min(Number(config.maxEvidenceItems ?? shape.maxEvidenceItems), shape.maxEvidenceItems, hardLimit));
+  const maxItemsPerFamily = Math.max(1, Math.min(Number(config.maxItemsPerFamily ?? shape.maxItemsPerFamily), shape.maxItemsPerFamily, 4));
   const grouped = new Map<ResearchLabEvidenceKind, ResearchLabEvidenceRecord[]>();
   for (const record of evidence) {
     const rows = grouped.get(record.evidenceKind) ?? [];
@@ -61,42 +82,65 @@ function summarizeEvidenceForPrompt(
       items: rows.map((row) => ({
         id: row.id,
         title: row.title,
-        summary: row.summary.slice(0, 320),
-        excerpt: row.excerpt?.slice(0, 220) ?? null,
+        summary: normalizeSnippet(row.summary, shape.summaryChars) ?? "",
+        excerpt: normalizeSnippet(row.excerpt, shape.excerptChars),
         publishedAt: row.publishedAt,
         sourceDomain: row.sourceDomain,
-        canonicalUrl: row.canonicalUrl,
+        canonicalUrl: null,
       })),
     });
   }
   return packets;
 }
 
-export async function synthesizeResearchLabOutput(env: Env, input: {
+function compactPriorMemorySummary(summary: ResearchLabOutputRecord["memorySummaryJson"] | null): ResearchLabOutputRecord["memorySummaryJson"] | null {
+  if (!summary) return null;
+  return {
+    ...summary,
+    overallSummary: normalizeSnippet(summary.overallSummary, 240) ?? summary.overallSummary,
+    topCatalysts: summary.topCatalysts.slice(0, 3).map((item) => normalizeSnippet(item, 90) ?? item).filter(Boolean),
+    topRisks: summary.topRisks.slice(0, 3).map((item) => normalizeSnippet(item, 90) ?? item).filter(Boolean),
+    evidenceIds: summary.evidenceIds.slice(0, 6),
+  };
+}
+
+function buildSynthesisPromptUser(input: {
   identity: ResearchLabTickerIdentity;
   evidence: ResearchLabEvidenceRecord[];
   promptConfig: ResearchLabPromptConfigRecord;
   evidencePromptLimit: number;
   priorOutput: ResearchLabOutputRecord | null;
-}): Promise<{ synthesis: ResearchLabSynthesis; usage: Record<string, unknown> | null; model: string }> {
-  const evidencePackets = summarizeEvidenceForPrompt(input.evidence, input.promptConfig, input.evidencePromptLimit);
-  const additionalInstructions = typeof (input.promptConfig.synthesisConfigJson as PromptConfigJson | null | undefined)?.additionalInstructions === "string"
-    ? String((input.promptConfig.synthesisConfigJson as PromptConfigJson).additionalInstructions)
-    : "";
-
-  const response = await callResearchLabSonnetJson<ResearchLabSynthesis>(env, {
-    promptConfig: {
-      ...input.promptConfig,
-      systemPrompt: [
-        input.promptConfig.systemPrompt,
-        "Return strict JSON only.",
-        "Do not use markdown fences.",
-        "Ground every material claim in the provided evidence ids.",
-        "If evidence is weak, say so explicitly instead of guessing.",
-        additionalInstructions,
-      ].filter(Boolean).join(" "),
+}) {
+  const shapes: PromptPayloadShape[] = [
+    {
+      maxEvidenceItems: Math.min(input.evidencePromptLimit, 8),
+      maxItemsPerFamily: 2,
+      summaryChars: 220,
+      excerptChars: 120,
+      includePriorMemory: true,
+      includePriorDelta: true,
     },
-    user: JSON.stringify({
+    {
+      maxEvidenceItems: Math.min(input.evidencePromptLimit, 6),
+      maxItemsPerFamily: 2,
+      summaryChars: 180,
+      excerptChars: 0,
+      includePriorMemory: true,
+      includePriorDelta: true,
+    },
+    {
+      maxEvidenceItems: Math.min(input.evidencePromptLimit, 5),
+      maxItemsPerFamily: 1,
+      summaryChars: 140,
+      excerptChars: 0,
+      includePriorMemory: true,
+      includePriorDelta: false,
+    },
+  ];
+
+  let selectedUser = "";
+  for (const shape of shapes) {
+    const user = JSON.stringify({
       ticker: input.identity.ticker,
       companyName: input.identity.companyName,
       outputContract: {
@@ -113,14 +157,54 @@ export async function synthesizeResearchLabOutput(env: Env, input: {
         contradictions: [{ title: "string", summary: "string", evidenceIds: ["evidence-id"] }],
         confidence: { label: "high|medium|low", score: "0..1", summary: "string" },
         monitoringPoints: ["string"],
-        priorComparison: { summary: "string", changed: "boolean" } | null,
+        priorComparison: "object|null",
         evidenceIds: ["evidence-id"],
       },
-      evidenceFamilies: evidencePackets,
-      priorMemorySummary: input.priorOutput?.memorySummaryJson ?? null,
-      priorDeltaSummary: input.priorOutput?.deltaJson?.summary ?? null,
-    }),
-    maxTokens: 2200,
+      evidenceFamilies: summarizeEvidenceForPrompt(
+        input.evidence,
+        input.promptConfig,
+        input.evidencePromptLimit,
+        shape,
+      ),
+      priorMemorySummary: shape.includePriorMemory ? compactPriorMemorySummary(input.priorOutput?.memorySummaryJson ?? null) : null,
+      priorDeltaSummary: shape.includePriorDelta
+        ? normalizeSnippet(input.priorOutput?.deltaJson?.summary ?? null, 220)
+        : null,
+    });
+    selectedUser = user;
+    if (user.length <= RESEARCH_LAB_SYNTHESIS_MAX_PROMPT_CHARS) {
+      return user;
+    }
+  }
+  return selectedUser;
+}
+
+export async function synthesizeResearchLabOutput(env: Env, input: {
+  identity: ResearchLabTickerIdentity;
+  evidence: ResearchLabEvidenceRecord[];
+  promptConfig: ResearchLabPromptConfigRecord;
+  evidencePromptLimit: number;
+  priorOutput: ResearchLabOutputRecord | null;
+}): Promise<{ synthesis: ResearchLabSynthesis; usage: Record<string, unknown> | null; model: string }> {
+  const additionalInstructions = typeof (input.promptConfig.synthesisConfigJson as PromptConfigJson | null | undefined)?.additionalInstructions === "string"
+    ? String((input.promptConfig.synthesisConfigJson as PromptConfigJson).additionalInstructions)
+    : "";
+  const userPrompt = buildSynthesisPromptUser(input);
+
+  const response = await callResearchLabSonnetJson<ResearchLabSynthesis>(env, {
+    promptConfig: {
+      ...input.promptConfig,
+      systemPrompt: [
+        input.promptConfig.systemPrompt,
+        "Return strict JSON only.",
+        "Do not use markdown fences.",
+        "Ground every material claim in the provided evidence ids.",
+        "If evidence is weak, say so explicitly instead of guessing.",
+        additionalInstructions,
+      ].filter(Boolean).join(" "),
+    },
+    user: userPrompt,
+    maxTokens: RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
   });
 
   const synthesis = validateResearchLabSynthesis({

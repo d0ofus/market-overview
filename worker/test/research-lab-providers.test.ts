@@ -15,7 +15,12 @@ vi.mock("../src/research/providers/anthropic", () => ({
   callAnthropicJson: harness.callAnthropicJsonMock,
 }));
 
-import { RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS } from "../src/research-lab/constants";
+import {
+  RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+  RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
+  RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+  RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
+} from "../src/research-lab/constants";
 import { callResearchLabSonnetJson, runResearchLabPerplexityQuery } from "../src/research-lab/providers";
 
 describe("research lab providers", () => {
@@ -85,6 +90,9 @@ describe("research lab providers", () => {
       expect.objectContaining({
         model: "claude-sonnet-4-6",
         fallbackModels: ["claude-sonnet-4-5", "claude-3-5-sonnet-20241022"],
+        maxTokens: RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
+        requestTimeoutMs: RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+        maxAttemptsPerModel: RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
       }),
     );
   });

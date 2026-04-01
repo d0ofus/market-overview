@@ -94,6 +94,11 @@ function shouldFallbackModel(status: number, detail: string): boolean {
   return /not_found_error|model[^a-z0-9]+.*not found|unknown model/i.test(detail);
 }
 
+function shouldRetryAnthropicTransportError(error: unknown): boolean {
+  const detail = error instanceof Error ? error.message : String(error ?? "");
+  return /timed out|network|fetch failed|connection|socket|econnreset|enotfound|tls|temporarily unavailable/i.test(detail);
+}
+
 function anthropicContentToText(content: unknown): string {
   return Array.isArray(content)
     ? content.map((part) => String((part as { text?: unknown })?.text ?? "")).join("\n")
@@ -255,26 +260,46 @@ export async function callAnthropicJson<T>(env: Env, input: {
   for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
     const model = modelCandidates[modelIndex]!;
     for (let attempt = 0; attempt < maxAttemptsPerModel; attempt += 1) {
-      const { response, text } = await fetchTextWithTimeout("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: input.maxTokens ?? 1800,
-          temperature: 0,
-          system: input.system,
-          messages: [
-            {
-              role: "user",
-              content: input.user,
-            },
-          ],
-        }),
-      }, requestTimeoutMs, `Anthropic request for ${model}`);
+      let response: Response;
+      let text: string;
+      try {
+        ({ response, text } = await fetchTextWithTimeout("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: input.maxTokens ?? 1800,
+            temperature: 0,
+            system: input.system,
+            messages: [
+              {
+                role: "user",
+                content: input.user,
+              },
+            ],
+          }),
+        }, requestTimeoutMs, `Anthropic request for ${model}`));
+      } catch (error) {
+        const transportError = error instanceof Error ? error : new Error("Anthropic request failed.");
+        lastError = transportError;
+        const hasModelFallback = modelIndex < modelCandidates.length - 1;
+        if (!shouldRetryAnthropicTransportError(transportError)) {
+          throw transportError;
+        }
+        if (attempt < maxAttemptsPerModel - 1) {
+          await scheduler.wait(retryDelayMs(attempt));
+          continue;
+        }
+        if (hasModelFallback) {
+          await scheduler.wait(retryDelayMs(attempt));
+          break;
+        }
+        throw transportError;
+      }
       if (response.ok) {
         const json = JSON.parse(text) as Record<string, any>;
         let data: T;

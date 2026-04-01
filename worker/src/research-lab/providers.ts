@@ -1,7 +1,12 @@
 import type { Env } from "../types";
 import { searchPerplexity } from "../research/providers/perplexity-search";
 import { buildAnthropicSonnetModels, callAnthropicJson } from "../research/providers/anthropic";
-import { RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS, RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS } from "./constants";
+import {
+  RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+  RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
+  RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+  RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,
+} from "./constants";
 import type { ResearchLabPromptConfigRecord } from "./types";
 
 export function resolveResearchLabSonnetModels(env: Env, promptConfig: ResearchLabPromptConfigRecord) {
@@ -19,9 +24,9 @@ export async function callResearchLabSonnetJson<T>(env: Env, input: {
     fallbackModels: models.fallbackModels,
     system: input.promptConfig.systemPrompt,
     user: input.user,
-    maxTokens: input.maxTokens ?? 2200,
+    maxTokens: input.maxTokens ?? RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
     requestTimeoutMs: RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
-    maxAttemptsPerModel: 1,
+    maxAttemptsPerModel: RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
   });
 }
 
