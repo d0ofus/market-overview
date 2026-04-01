@@ -87,6 +87,20 @@ function buildEvidenceProfile(profile: ResearchLabProfileRecord, version: Resear
   };
 }
 
+export function createResearchLabPromptConfigFromProfile(
+  profile: ResearchLabProfileRecord,
+  version: ResearchLabProfileVersionRecord,
+): ResearchLabPromptConfigRecord {
+  return buildPromptConfig(profile, version);
+}
+
+export function createResearchLabEvidenceProfileFromProfile(
+  profile: ResearchLabProfileRecord,
+  version: ResearchLabProfileVersionRecord,
+): ResearchLabEvidenceProfileRecord {
+  return buildEvidenceProfile(profile, version);
+}
+
 export async function listResearchLabProfiles(env: Env): Promise<ResearchLabProfileDetail[]> {
   const [profilesRes, versionsRes] = await Promise.all([
     env.DB.prepare(

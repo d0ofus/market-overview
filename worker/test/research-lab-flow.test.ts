@@ -259,6 +259,34 @@ vi.mock("../src/watchlist-compiler-service", () => ({
 }));
 
 vi.mock("../src/research-lab/profiles", () => ({
+  createResearchLabPromptConfigFromProfile: vi.fn((profile: any, version: any) => ({
+    id: version.id,
+    name: `${profile.name} (${version.label})`,
+    description: profile.description,
+    configFamily: `profile:${profile.id}`,
+    modelFamily: version.modelFamily,
+    systemPrompt: version.systemPrompt,
+    schemaVersion: version.schemaVersion,
+    isDefault: profile.isDefault,
+    synthesisConfigJson: {
+      ...(version.synthesisConfigJson ?? {}),
+      modules: version.modulesConfigJson ?? {},
+    },
+    profileId: profile.id,
+    profileVersionId: version.id,
+    createdAt: version.createdAt,
+    updatedAt: profile.updatedAt,
+  })),
+  createResearchLabEvidenceProfileFromProfile: vi.fn((profile: any, version: any) => ({
+    id: version.id,
+    name: `${profile.name} Evidence (${version.label})`,
+    description: profile.description,
+    configFamily: `profile:${profile.id}`,
+    isDefault: profile.isDefault,
+    queryConfigJson: version.evidenceConfigJson ?? {},
+    createdAt: version.createdAt,
+    updatedAt: profile.updatedAt,
+  })),
   loadResearchLabProfile: vi.fn(async () => harness.state.profile),
   loadResearchLabProfileVersion: vi.fn(async () => harness.state.profileVersion),
   resolveResearchLabProfile: vi.fn(async () => ({
@@ -476,7 +504,7 @@ vi.mock("../src/research-lab/storage", () => ({
   }),
 }));
 
-import { loadResearchLabRunResultsPayload, loadResearchLabRunStreamPayload } from "../src/research-lab/api";
+import { loadResearchLabRunResultsPayload, loadResearchLabRunStatusPayload, loadResearchLabRunStreamPayload } from "../src/research-lab/api";
 import { cancelResearchLabRun, drainResearchLabRun, ensureResearchLabRunProgress, startResearchLabRun } from "../src/research-lab/orchestrator";
 import * as researchLabStorage from "../src/research-lab/storage";
 
@@ -522,6 +550,29 @@ describe("research lab flow", () => {
       "persistence_finished",
       "run_completed",
     ]));
+  });
+
+  it("stores profile-backed runs without writing synthetic profile version ids into legacy config foreign keys", async () => {
+    harness.state.promptConfig = {
+      ...harness.state.promptConfig,
+      id: harness.state.profileVersion.id,
+      configFamily: `profile:${harness.state.profile.id}`,
+    };
+    harness.state.evidenceProfile = {
+      ...harness.state.evidenceProfile,
+      id: harness.state.profileVersion.id,
+      configFamily: `profile:${harness.state.profile.id}`,
+    };
+    const env = {} as any;
+
+    await startResearchLabRun(env, { tickers: ["KMI"] });
+
+    expect(vi.mocked(researchLabStorage.createResearchLabRun).mock.calls.at(-1)?.[1]).toMatchObject({
+      profileId: harness.state.profile.id,
+      profileVersionId: harness.state.profileVersion.id,
+      promptConfigId: null,
+      evidenceProfileId: null,
+    });
   });
 
   it("marks the ticker failed when Perplexity gathering fails and persists no output", async () => {
@@ -654,6 +705,25 @@ describe("research lab flow", () => {
       "synthesis_finished",
       "persistence_finished",
     ]));
+  });
+
+  it("derives prompt and evidence details from the active profile version when legacy config ids are null", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["KMI"] });
+    harness.state.run = {
+      ...harness.state.run,
+      promptConfigId: null,
+      evidenceProfileId: null,
+    };
+
+    const payload = await loadResearchLabRunStatusPayload(env, run.id);
+
+    expect(payload?.profile?.id).toBe(harness.state.profile.id);
+    expect(payload?.profileVersion?.id).toBe(harness.state.profileVersion.id);
+    expect(payload?.promptConfig?.id).toBe(harness.state.profileVersion.id);
+    expect(payload?.evidenceProfile?.id).toBe(harness.state.profileVersion.id);
+    expect(payload?.promptConfig?.configFamily).toBe(`profile:${harness.state.profile.id}`);
+    expect(payload?.evidenceProfile?.configFamily).toBe(`profile:${harness.state.profile.id}`);
   });
 
   it("advances one stage per progress pass to avoid long single-invocation chains", async () => {

@@ -1,6 +1,8 @@
 import type { Env } from "../types";
 import { RESEARCH_LAB_RESULTS_EVENT_LIMIT } from "./constants";
 import {
+  createResearchLabEvidenceProfileFromProfile,
+  createResearchLabPromptConfigFromProfile,
   loadResearchLabProfile,
   loadResearchLabProfileVersion,
 } from "./profiles";
@@ -25,14 +27,20 @@ export async function loadResearchLabRunStatusPayload(
 ): Promise<ResearchLabRunStatusResponse | null> {
   const run = await loadResearchLabRun(env, runId);
   if (!run) return null;
-  const [items, events, profile, profileVersion, promptConfig, evidenceProfile] = await Promise.all([
+  const [items, events, profile, profileVersion, promptConfigRow, evidenceProfileRow] = await Promise.all([
     loadResearchLabRunItems(env, runId),
     loadResearchLabRunEvents(env, runId, RESEARCH_LAB_RESULTS_EVENT_LIMIT),
     run.profileId ? loadResearchLabProfile(env, run.profileId) : null,
     run.profileVersionId ? loadResearchLabProfileVersion(env, run.profileVersionId) : null,
-    run.promptConfigId ? loadResearchLabPromptConfig(env, run.promptConfigId) : loadResearchLabPromptConfig(env, null),
-    run.evidenceProfileId ? loadResearchLabEvidenceProfile(env, run.evidenceProfileId) : loadResearchLabEvidenceProfile(env, null),
+    run.promptConfigId ? loadResearchLabPromptConfig(env, run.promptConfigId) : null,
+    run.evidenceProfileId ? loadResearchLabEvidenceProfile(env, run.evidenceProfileId) : null,
   ]);
+  const promptConfig = profile && profileVersion
+    ? createResearchLabPromptConfigFromProfile(profile, profileVersion)
+    : (promptConfigRow ?? (run.promptConfigId ? null : await loadResearchLabPromptConfig(env, null)));
+  const evidenceProfile = profile && profileVersion
+    ? createResearchLabEvidenceProfileFromProfile(profile, profileVersion)
+    : (evidenceProfileRow ?? (run.evidenceProfileId ? null : await loadResearchLabEvidenceProfile(env, null)));
   return {
     run,
     items,

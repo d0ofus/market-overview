@@ -98,6 +98,11 @@ function dedupeTickers(tickers: string[]) {
   return Array.from(new Set(tickers.map((value) => value.trim().toUpperCase()).filter(Boolean)));
 }
 
+function persistedConfigId(config: { id: string; configFamily: string } | null | undefined): string | null {
+  if (!config) return null;
+  return config.configFamily.startsWith("profile:") ? null : config.id;
+}
+
 function sumUsageRows(rows: Array<Record<string, unknown> | null | undefined>) {
   const total: Record<string, unknown> = {};
   for (const row of rows) {
@@ -533,8 +538,8 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
       ticker: item.ticker,
       profileId: run.profileId,
       profileVersionId: run.profileVersionId,
-      promptConfigId: configs.promptConfig.id,
-      evidenceProfileId: configs.evidenceProfile.id,
+      promptConfigId: persistedConfigId(configs.promptConfig),
+      evidenceProfileId: persistedConfigId(configs.evidenceProfile),
       priorOutputId: priorOutput?.id ?? null,
       synthesisJson: synthResult.synthesis,
       memorySummaryJson: memorySummary,
@@ -721,8 +726,8 @@ export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreat
     },
     profileId: resolvedProfile.profile.id,
     profileVersionId: resolvedProfile.version.id,
-    promptConfigId: resolvedProfile.promptConfig.id,
-    evidenceProfileId: resolvedProfile.evidenceProfile.id,
+    promptConfigId: persistedConfigId(resolvedProfile.promptConfig),
+    evidenceProfileId: persistedConfigId(resolvedProfile.evidenceProfile),
   });
   await insertResearchLabRunEvent(env, {
     runId: run.id,
@@ -737,8 +742,8 @@ export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreat
       sourceBasis: resolved.metadataJson?.sourceBasis ?? null,
       profileId: resolvedProfile.profile.id,
       profileVersionId: resolvedProfile.version.id,
-      promptConfigId: resolvedProfile.promptConfig.id,
-      evidenceProfileId: resolvedProfile.evidenceProfile.id,
+      promptConfigId: persistedConfigId(resolvedProfile.promptConfig),
+      evidenceProfileId: persistedConfigId(resolvedProfile.evidenceProfile),
     },
   });
   return run;
