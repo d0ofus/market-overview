@@ -194,13 +194,13 @@ describe("Anthropic model selection", () => {
     const selection = buildAnthropicExtractionModels(buildEnv(), "claude-3-haiku-20240307");
     expect(selection.model).toBe("claude-3-haiku-20240307");
     expect(selection.fallbackModels).toContain("claude-3-5-haiku-20241022");
-    expect(selection.fallbackModels).toContain("claude-3-7-sonnet-latest");
+    expect(selection.fallbackModels).toContain("claude-sonnet-4-6");
   });
 
   it("upgrades sonnet stages away from stale haiku prompt models", () => {
     const selection = buildAnthropicSonnetModels(buildEnv(), "claude-3-haiku-20240307");
-    expect(selection.model).toBe("claude-3-7-sonnet-latest");
-    expect(selection.fallbackModels).not.toContain("claude-3-7-sonnet-latest");
+    expect(selection.model).toBe("claude-sonnet-4-6");
+    expect(selection.fallbackModels).not.toContain("claude-sonnet-4-6");
     expect(selection.fallbackModels).toContain("claude-3-5-sonnet-20241022");
   });
 });

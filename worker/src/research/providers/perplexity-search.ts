@@ -1,6 +1,6 @@
 import type { Env } from "../../types";
 import { RESEARCH_SEARCH_TIMEOUT_MS } from "../constants";
-import { fetchWithTimeout } from "./http";
+import { fetchTextWithTimeout } from "./http";
 
 export type PerplexitySearchQuery = {
   key: string;
@@ -91,19 +91,24 @@ export async function searchPerplexity(
       },
     ],
   };
-  const res = await fetchWithTimeout("https://api.perplexity.ai/chat/completions", {
+  const timeoutMs = Math.max(1, Number(options?.timeoutMs ?? RESEARCH_SEARCH_TIMEOUT_MS));
+  const { response, text } = await fetchTextWithTimeout("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
-  }, Math.max(1, Number(options?.timeoutMs ?? RESEARCH_SEARCH_TIMEOUT_MS)), `Perplexity search for ${query.ticker ?? query.key}`);
-  if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`Perplexity search failed (${res.status}): ${detail.slice(0, 180)}`);
+  }, timeoutMs, `Perplexity search for ${query.ticker ?? query.key}`);
+  if (!response.ok) {
+    throw new Error(`Perplexity search failed (${response.status}): ${text.slice(0, 180)}`);
   }
-  const json = await res.json() as Record<string, any>;
+  let json: Record<string, any>;
+  try {
+    json = JSON.parse(text) as Record<string, any>;
+  } catch (error) {
+    throw new Error(`Perplexity search returned invalid JSON: ${error instanceof Error ? error.message : "Unknown parse error."}`);
+  }
   const content = json?.choices?.[0]?.message?.content;
   const parsed = extractJsonBlock(typeof content === "string" ? content : Array.isArray(content) ? content.map((entry) => entry?.text ?? "").join("\n") : "");
   const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];

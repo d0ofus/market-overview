@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { fetchWithTimeout } from "./http";
+import { fetchTextWithTimeout } from "./http";
 
 export type AnthropicJsonResponse<T> = {
   data: T;
@@ -10,11 +10,13 @@ export type AnthropicJsonResponse<T> = {
 const ANTHROPIC_MAX_ATTEMPTS = 2;
 const DEFAULT_ANTHROPIC_HAIKU_MODEL = "claude-3-5-haiku-20241022";
 const LEGACY_ANTHROPIC_HAIKU_MODEL = "claude-3-haiku-20240307";
-const DEFAULT_ANTHROPIC_SONNET_MODEL = "claude-3-7-sonnet-latest";
+const DEFAULT_ANTHROPIC_SONNET_MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_SONNET_MODEL_CANDIDATES = [
   DEFAULT_ANTHROPIC_SONNET_MODEL,
-  "claude-3-7-sonnet-20250219",
+  "claude-sonnet-4-5",
+  "claude-sonnet-4",
   "claude-sonnet-4-20250514",
+  "claude-3-7-sonnet-20250219",
   "claude-3-5-sonnet-20241022",
 ] as const;
 const ANTHROPIC_HAIKU_MODEL_CANDIDATES = [
@@ -198,7 +200,7 @@ function extractJson<T>(content: unknown): T {
 }
 
 async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: string, timeoutMs: number): Promise<T> {
-  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+  const { response, text } = await fetchTextWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -223,11 +225,10 @@ async function repairAnthropicJson<T>(apiKey: string, model: string, rawText: st
       ],
     }),
   }, timeoutMs, `Anthropic JSON repair for ${model}`);
-  if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`Anthropic JSON repair failed for ${model} (${res.status}): ${detail.slice(0, 180)}`);
+  if (!response.ok) {
+    throw new Error(`Anthropic JSON repair failed for ${model} (${response.status}): ${text.slice(0, 180)}`);
   }
-  const json = await res.json() as Record<string, any>;
+  const json = JSON.parse(text) as Record<string, any>;
   return extractJson<T>(json?.content);
 }
 
@@ -254,7 +255,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
   for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
     const model = modelCandidates[modelIndex]!;
     for (let attempt = 0; attempt < maxAttemptsPerModel; attempt += 1) {
-      const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+      const { response, text } = await fetchTextWithTimeout("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -274,8 +275,8 @@ export async function callAnthropicJson<T>(env: Env, input: {
           ],
         }),
       }, requestTimeoutMs, `Anthropic request for ${model}`);
-      if (res.ok) {
-        const json = await res.json() as Record<string, any>;
+      if (response.ok) {
+        const json = JSON.parse(text) as Record<string, any>;
         let data: T;
         try {
           data = extractJson<T>(json?.content);
@@ -313,14 +314,14 @@ export async function callAnthropicJson<T>(env: Env, input: {
         };
       }
 
-      const detail = await res.text();
-      const error = new Error(`Anthropic request failed for ${model} (${res.status}): ${detail.slice(0, 180)}`);
+      const detail = text;
+      const error = new Error(`Anthropic request failed for ${model} (${response.status}): ${detail.slice(0, 180)}`);
       lastError = error;
       const hasModelFallback = modelIndex < modelCandidates.length - 1;
-      if (hasModelFallback && shouldFallbackModel(res.status, detail)) {
+      if (hasModelFallback && shouldFallbackModel(response.status, detail)) {
         break;
       }
-      if (!shouldRetryAnthropic(res.status, detail)) {
+      if (!shouldRetryAnthropic(response.status, detail)) {
         throw error;
       }
       if (attempt < maxAttemptsPerModel - 1) {

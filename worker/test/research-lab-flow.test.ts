@@ -6,7 +6,7 @@ const harness = vi.hoisted(() => {
     name: "Research Lab Prompt",
     description: null,
     configFamily: "research_lab_default",
-    modelFamily: "claude-3-7-sonnet-latest",
+    modelFamily: "claude-sonnet-4-6",
     systemPrompt: "Test prompt",
     schemaVersion: "v1",
     isDefault: true,
@@ -113,7 +113,7 @@ const harness = vi.hoisted(() => {
       },
       deltaJson: null,
       sourceEvidenceIds: [`${ticker}-old-e1`],
-      model: "claude-3-7-sonnet-latest",
+      model: "claude-sonnet-4-6",
       usageJson: { input_tokens: 100, output_tokens: 200 },
       createdAt: "2026-03-30T09:00:00.000Z",
     };
@@ -184,7 +184,7 @@ vi.mock("../src/research-lab/synthesize", () => ({
     return {
       synthesis: harness.makeSynthesis(input.identity.ticker, input.identity.companyName ?? `${input.identity.ticker} Corp`),
       usage: { input_tokens: 44, output_tokens: 55, total_tokens: 99 },
-      model: "claude-3-7-sonnet-latest",
+      model: "claude-sonnet-4-6",
     };
   }),
 }));

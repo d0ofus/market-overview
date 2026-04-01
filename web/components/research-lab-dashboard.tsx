@@ -55,7 +55,11 @@ function statusTone(status: string) {
 function formatUsage(value: Record<string, unknown> | null | undefined) {
   if (!value) return null;
   return Object.entries(value)
-    .map(([key, entry]) => `${key}: ${typeof entry === "number" ? formatNumber(entry) : String(entry)}`)
+    .map(([key, entry]) => {
+      if (typeof entry === "number") return `${key}: ${formatNumber(entry)}`;
+      if (entry && typeof entry === "object") return `${key}: ${JSON.stringify(entry)}`;
+      return `${key}: ${String(entry)}`;
+    })
     .join(" | ");
 }
 

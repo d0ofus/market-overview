@@ -166,7 +166,7 @@ INSERT OR IGNORE INTO research_lab_prompt_configs (
   'Research Lab Default Prompt',
   'Default Sonnet synthesis prompt for isolated stock research lab runs.',
   'research_lab_default',
-  'claude-3-7-sonnet-latest',
+  'claude-sonnet-4-6',
   'You are a senior buyside research analyst. Synthesize only from the supplied evidence. Be explicit about uncertainty, contradictions, and how much is already priced in. Return compact, decision-useful structured output with direct evidence grounding.',
   'v1',
   1,

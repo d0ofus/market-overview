@@ -20,3 +20,28 @@ export async function fetchWithTimeout(
     clearTimeout(timeoutId);
   }
 }
+
+export async function fetchTextWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+  label: string,
+): Promise<{ response: Response; text: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(`${label} timed out after ${timeoutMs}ms.`), timeoutMs);
+  try {
+    const response = await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    return { response, text };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
