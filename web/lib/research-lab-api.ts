@@ -1,4 +1,4 @@
-import { apiUrl } from "./api";
+import { adminFetch, apiUrl } from "./api";
 
 export type ResearchLabRunStatus =
   | "queued"
@@ -19,11 +19,47 @@ export type ResearchLabRunItemStatus =
   | "completed"
   | "failed";
 
+export type ResearchLabSourceType = "manual" | "watchlist_set";
+export type ResearchLabSourceBasis = "compiled" | "unique";
+
+export type ResearchLabProfileRecord = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+  currentVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchLabProfileVersionRecord = {
+  id: string;
+  profileId: string;
+  versionNumber: number;
+  label: string;
+  modelFamily: string;
+  systemPrompt: string;
+  schemaVersion: string;
+  evidenceConfigJson: Record<string, unknown>;
+  synthesisConfigJson: Record<string, unknown>;
+  modulesConfigJson: Record<string, unknown>;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type ResearchLabProfileDetail = ResearchLabProfileRecord & {
+  currentVersion: ResearchLabProfileVersionRecord | null;
+};
+
 export type ResearchLabRunRecord = {
   id: string;
-  sourceType: "manual" | "watchlist_set";
+  sourceType: ResearchLabSourceType;
   sourceId: string | null;
   sourceLabel: string | null;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
   status: ResearchLabRunStatus;
@@ -43,6 +79,8 @@ export type ResearchLabRunRecord = {
 
 export type ResearchLabRunListRow = {
   run: ResearchLabRunRecord;
+  profileName: string | null;
+  profileVersionNumber: number | null;
   promptConfigName: string | null;
   evidenceProfileName: string | null;
 };
@@ -57,6 +95,8 @@ export type ResearchLabPromptConfigRecord = {
   schemaVersion: string;
   isDefault: boolean;
   synthesisConfigJson: Record<string, unknown>;
+  profileId?: string | null;
+  profileVersionId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -132,6 +172,16 @@ export type ResearchLabEvidenceRecord = {
   createdAt: string;
 };
 
+export type ResearchLabKeyDriver = {
+  title: string;
+  whyItMatters: string;
+  direction: "positive" | "negative" | "mixed";
+  timeframe: string;
+  priceRelationship: string;
+  confidence: "high" | "medium" | "low";
+  evidenceIds: string[];
+};
+
 export type ResearchLabSynthesis = {
   ticker: string;
   companyName: string | null;
@@ -178,6 +228,12 @@ export type ResearchLabSynthesis = {
     summary: string;
     changed: boolean;
   } | null;
+  modules?: {
+    keyDrivers?: {
+      summary: string;
+      drivers: ResearchLabKeyDriver[];
+    } | null;
+  } | null;
   evidenceIds: string[];
 };
 
@@ -186,6 +242,8 @@ export type ResearchLabOutputRecord = {
   runId: string;
   runItemId: string;
   ticker: string;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
   priorOutputId: string | null;
@@ -225,6 +283,8 @@ export type ResearchLabRunStatusResponse = {
   run: ResearchLabRunRecord;
   items: ResearchLabRunItemRecord[];
   events: ResearchLabRunEventRecord[];
+  profile: ResearchLabProfileRecord | null;
+  profileVersion: ResearchLabProfileVersionRecord | null;
   promptConfig: ResearchLabPromptConfigRecord | null;
   evidenceProfile: ResearchLabEvidenceProfileRecord | null;
 };
@@ -239,6 +299,8 @@ export type ResearchLabRunItemResult = {
 export type ResearchLabRunResultsResponse = {
   run: ResearchLabRunRecord;
   items: ResearchLabRunItemResult[];
+  profile: ResearchLabProfileRecord | null;
+  profileVersion: ResearchLabProfileVersionRecord | null;
   promptConfig: ResearchLabPromptConfigRecord | null;
   evidenceProfile: ResearchLabEvidenceProfileRecord | null;
 };
@@ -266,6 +328,14 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function createResearchLabRun(payload: {
   tickers: string[];
+  sourceType?: ResearchLabSourceType;
+  sourceId?: string | null;
+  sourceLabel?: string | null;
+  watchlistRunId?: string | null;
+  sourceBasis?: ResearchLabSourceBasis;
+  selectedTickers?: string[];
+  maxTickers?: number | null;
+  profileId?: string | null;
   promptConfigId?: string | null;
   evidenceProfileId?: string | null;
 }) {
@@ -284,8 +354,18 @@ export function cancelResearchLabRun(id: string) {
   });
 }
 
-export function getResearchLabRuns(limit = 10) {
-  return getJson<{ rows: ResearchLabRunListRow[] }>(`/api/research-lab/runs?limit=${encodeURIComponent(String(limit))}`);
+export function getResearchLabRuns(params?: number | {
+  sourceType?: ResearchLabSourceType | null;
+  sourceId?: string | null;
+  limit?: number;
+}) {
+  const normalized = typeof params === "number" ? { limit: params } : params;
+  const query = new URLSearchParams();
+  if (normalized?.sourceType) query.set("sourceType", normalized.sourceType);
+  if (normalized?.sourceId) query.set("sourceId", normalized.sourceId);
+  if (normalized?.limit) query.set("limit", String(normalized.limit));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return getJson<{ rows: ResearchLabRunListRow[] }>(`/api/research-lab/runs${suffix}`);
 }
 
 export function getResearchLabRunStatus(id: string) {
@@ -298,4 +378,55 @@ export function getResearchLabRunResults(id: string) {
 
 export function getResearchLabTickerHistory(ticker: string) {
   return getJson<{ rows: ResearchLabTickerHistoryEntry[] }>(`/api/research-lab/ticker/${encodeURIComponent(ticker)}/history`);
+}
+
+export function getResearchLabProfiles() {
+  return getJson<{ rows: ResearchLabProfileDetail[] }>("/api/research-lab/profiles");
+}
+
+export function getAdminResearchLabProfiles() {
+  return adminFetch<{ profiles: ResearchLabProfileDetail[]; versions: ResearchLabProfileVersionRecord[] }>("/api/admin/research-lab/profiles");
+}
+
+export function createAdminResearchLabProfile(payload: {
+  slug: string;
+  name: string;
+  description?: string | null;
+  isActive?: boolean;
+  isDefault?: boolean;
+}) {
+  return adminFetch<{ ok: true; id: string }>("/api/admin/research-lab/profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminResearchLabProfile(id: string, payload: {
+  slug?: string;
+  name?: string;
+  description?: string | null;
+  isActive?: boolean;
+  isDefault?: boolean;
+  currentVersionId?: string | null;
+}) {
+  return adminFetch<{ ok: true; id: string }>(`/api/admin/research-lab/profiles/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createAdminResearchLabProfileVersion(id: string, payload: {
+  label: string;
+  modelFamily: string;
+  systemPrompt: string;
+  schemaVersion?: string;
+  evidenceConfigJson: Record<string, unknown>;
+  synthesisConfigJson: Record<string, unknown>;
+  modulesConfigJson?: Record<string, unknown>;
+  activate?: boolean;
+}) {
+  return adminFetch<{ ok: true; id: string; versionNumber: number }>(`/api/admin/research-lab/profiles/${encodeURIComponent(id)}/versions`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

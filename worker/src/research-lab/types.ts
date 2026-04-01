@@ -45,6 +45,7 @@ export type ResearchLabEvidenceKind =
 
 export type ResearchLabProviderKey = "perplexity" | "anthropic";
 export type ResearchLabSourceType = "manual" | "watchlist_set";
+export type ResearchLabSourceBasis = "compiled" | "unique";
 
 export type ResearchLabOpinion = "positive" | "mixed" | "negative" | "unclear";
 export type ResearchLabConfidenceLabel = "high" | "medium" | "low";
@@ -62,8 +63,59 @@ export type ResearchLabTickerIdentity = {
 
 export type ResearchLabRunCreateRequest = {
   tickers: string[];
+  sourceType?: ResearchLabSourceType;
+  sourceId?: string | null;
+  sourceLabel?: string | null;
+  watchlistRunId?: string | null;
+  sourceBasis?: ResearchLabSourceBasis;
+  selectedTickers?: string[];
+  maxTickers?: number | null;
+  profileId?: string | null;
   promptConfigId?: string | null;
   evidenceProfileId?: string | null;
+};
+
+export type ResearchLabProfileRecord = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+  currentVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchLabProfileVersionRecord = {
+  id: string;
+  profileId: string;
+  versionNumber: number;
+  label: string;
+  modelFamily: string;
+  systemPrompt: string;
+  schemaVersion: string;
+  evidenceConfigJson: Record<string, unknown>;
+  synthesisConfigJson: Record<string, unknown>;
+  modulesConfigJson: Record<string, unknown>;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type ResearchLabProfileDetail = ResearchLabProfileRecord & {
+  currentVersion: ResearchLabProfileVersionRecord | null;
+};
+
+export type ResearchLabResolvedProfile = {
+  profile: ResearchLabProfileRecord;
+  version: ResearchLabProfileVersionRecord;
+  promptConfig: ResearchLabPromptConfigRecord;
+  evidenceProfile: ResearchLabEvidenceProfileRecord;
+};
+
+export type ResearchLabAdminProfilesResponse = {
+  profiles: ResearchLabProfileDetail[];
+  versions: ResearchLabProfileVersionRecord[];
 };
 
 export type ResearchLabEvidenceProfileRecord = {
@@ -87,6 +139,8 @@ export type ResearchLabPromptConfigRecord = {
   schemaVersion: string;
   isDefault: boolean;
   synthesisConfigJson: Record<string, unknown>;
+  profileId?: string | null;
+  profileVersionId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -96,6 +150,8 @@ export type ResearchLabRunRecord = {
   sourceType: ResearchLabSourceType;
   sourceId: string | null;
   sourceLabel: string | null;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
   status: ResearchLabRunStatus;
@@ -208,6 +264,25 @@ export type ResearchLabContradiction = {
   evidenceIds: string[];
 };
 
+export type ResearchLabKeyDriver = {
+  title: string;
+  whyItMatters: string;
+  direction: "positive" | "negative" | "mixed";
+  timeframe: string;
+  priceRelationship: string;
+  confidence: "high" | "medium" | "low";
+  evidenceIds: string[];
+};
+
+export type ResearchLabKeyDriversModule = {
+  summary: string;
+  drivers: ResearchLabKeyDriver[];
+};
+
+export type ResearchLabSynthesisModules = {
+  keyDrivers?: ResearchLabKeyDriversModule | null;
+};
+
 export type ResearchLabSynthesis = {
   ticker: string;
   companyName: string | null;
@@ -239,6 +314,7 @@ export type ResearchLabSynthesis = {
     summary: string;
     changed: boolean;
   } | null;
+  modules?: ResearchLabSynthesisModules | null;
   evidenceIds: string[];
 };
 
@@ -274,6 +350,8 @@ export type ResearchLabOutputRecord = {
   runId: string;
   runItemId: string;
   ticker: string;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
   priorOutputId: string | null;
@@ -295,6 +373,8 @@ export type ResearchLabMemoryHeadRecord = {
 
 export type ResearchLabRunListRow = {
   run: ResearchLabRunRecord;
+  profileName: string | null;
+  profileVersionNumber: number | null;
   promptConfigName: string | null;
   evidenceProfileName: string | null;
 };
@@ -303,6 +383,8 @@ export type ResearchLabRunStatusResponse = {
   run: ResearchLabRunRecord;
   items: ResearchLabRunItemRecord[];
   events: ResearchLabRunEventRecord[];
+  profile: ResearchLabProfileRecord | null;
+  profileVersion: ResearchLabProfileVersionRecord | null;
   promptConfig: ResearchLabPromptConfigRecord | null;
   evidenceProfile: ResearchLabEvidenceProfileRecord | null;
 };
@@ -317,6 +399,8 @@ export type ResearchLabRunItemResult = {
 export type ResearchLabRunResultsResponse = {
   run: ResearchLabRunRecord;
   items: ResearchLabRunItemResult[];
+  profile: ResearchLabProfileRecord | null;
+  profileVersion: ResearchLabProfileVersionRecord | null;
   promptConfig: ResearchLabPromptConfigRecord | null;
   evidenceProfile: ResearchLabEvidenceProfileRecord | null;
 };

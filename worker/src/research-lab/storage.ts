@@ -67,6 +67,8 @@ function mapRun(row: Record<string, unknown>): ResearchLabRunRecord {
     sourceType: String(row.sourceType ?? "manual") as ResearchLabSourceType,
     sourceId: typeof row.sourceId === "string" ? row.sourceId : null,
     sourceLabel: typeof row.sourceLabel === "string" ? row.sourceLabel : null,
+    profileId: typeof row.profileId === "string" ? row.profileId : null,
+    profileVersionId: typeof row.profileVersionId === "string" ? row.profileVersionId : null,
     promptConfigId: typeof row.promptConfigId === "string" ? row.promptConfigId : null,
     evidenceProfileId: typeof row.evidenceProfileId === "string" ? row.evidenceProfileId : null,
     status: String(row.status ?? "queued") as ResearchLabRunRecord["status"],
@@ -157,11 +159,13 @@ function mapOutput(row: Record<string, unknown>): ResearchLabOutputRecord {
     runId: String(row.runId ?? ""),
     runItemId: String(row.runItemId ?? ""),
     ticker: String(row.ticker ?? ""),
+    profileId: typeof row.profileId === "string" ? row.profileId : null,
+    profileVersionId: typeof row.profileVersionId === "string" ? row.profileVersionId : null,
     promptConfigId: typeof row.promptConfigId === "string" ? row.promptConfigId : null,
     evidenceProfileId: typeof row.evidenceProfileId === "string" ? row.evidenceProfileId : null,
     priorOutputId: typeof row.priorOutputId === "string" ? row.priorOutputId : null,
-    synthesisJson: parseJson(row.synthesisJson, null) as ResearchLabOutputRecord["synthesisJson"],
-    memorySummaryJson: parseJson(row.memorySummaryJson, null) as ResearchLabOutputRecord["memorySummaryJson"],
+    synthesisJson: parseJson(row.synthesisJson, null) as unknown as ResearchLabOutputRecord["synthesisJson"],
+    memorySummaryJson: parseJson(row.memorySummaryJson, null) as unknown as ResearchLabOutputRecord["memorySummaryJson"],
     deltaJson: parseJson(row.deltaJson, null),
     sourceEvidenceIds: parseJson<string[]>(row.sourceEvidenceIdsJson, []),
     model: String(row.model ?? ""),
@@ -204,22 +208,28 @@ export async function createResearchLabRun(env: Env, input: {
   sourceType?: ResearchLabSourceType;
   sourceId?: string | null;
   sourceLabel?: string | null;
+  metadataJson?: Record<string, unknown> | null;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
 }): Promise<ResearchLabRunRecord> {
   const runId = uid();
   const statements = [
     env.DB.prepare(
-      "INSERT INTO research_lab_runs (id, source_type, source_id, source_label, prompt_config_id, evidence_profile_id, status, requested_ticker_count, completed_ticker_count, failed_ticker_count, input_json, provider_usage_json, metadata_json, heartbeat_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, ?, NULL, NULL, CURRENT_TIMESTAMP)",
+      "INSERT INTO research_lab_runs (id, source_type, source_id, source_label, profile_id, profile_version_id, prompt_config_id, evidence_profile_id, status, requested_ticker_count, completed_ticker_count, failed_ticker_count, input_json, provider_usage_json, metadata_json, heartbeat_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, ?, NULL, ?, CURRENT_TIMESTAMP)",
     ).bind(
       runId,
       input.sourceType ?? "manual",
       input.sourceId ?? null,
       input.sourceLabel ?? "Research Lab",
+      input.profileId,
+      input.profileVersionId,
       input.promptConfigId,
       input.evidenceProfileId,
       input.tickers.length,
       JSON.stringify(input.request),
+      JSON.stringify(input.metadataJson ?? null),
     ),
     ...input.tickers.map((ticker, index) => env.DB.prepare(
       "INSERT INTO research_lab_run_items (id, run_id, ticker, sort_order, status) VALUES (?, ?, ?, ?, 'queued')",
@@ -231,12 +241,30 @@ export async function createResearchLabRun(env: Env, input: {
   return run;
 }
 
-export async function listResearchLabRuns(env: Env, limit = 10): Promise<ResearchLabRunListRow[]> {
+export async function listResearchLabRuns(env: Env, input?: {
+  sourceType?: ResearchLabSourceType | null;
+  sourceId?: string | null;
+  limit?: number;
+}): Promise<ResearchLabRunListRow[]> {
+  const limit = Math.max(1, Math.min(Number(input?.limit ?? 10), 25));
+  const whereParts: string[] = [];
+  const bindings: Array<string | number | null> = [];
+  if (input?.sourceType) {
+    whereParts.push("r.source_type = ?");
+    bindings.push(input.sourceType);
+  }
+  if (input?.sourceId) {
+    whereParts.push("r.source_id = ?");
+    bindings.push(input.sourceId);
+  }
+  const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
   const rows = await env.DB.prepare(
-    `SELECT r.id, r.source_type as sourceType, r.source_id as sourceId, r.source_label as sourceLabel, r.prompt_config_id as promptConfigId, r.evidence_profile_id as evidenceProfileId, r.status, r.requested_ticker_count as requestedTickerCount, r.completed_ticker_count as completedTickerCount, r.failed_ticker_count as failedTickerCount, r.input_json as inputJson, r.provider_usage_json as providerUsageJson, r.metadata_json as metadataJson, r.error_summary as errorSummary, r.started_at as startedAt, r.completed_at as completedAt, r.heartbeat_at as heartbeatAt, r.created_at as createdAt, r.updated_at as updatedAt, pc.name as promptConfigName, ep.name as evidenceProfileName FROM research_lab_runs r LEFT JOIN research_lab_prompt_configs pc ON pc.id = r.prompt_config_id LEFT JOIN research_lab_evidence_profiles ep ON ep.id = r.evidence_profile_id ORDER BY r.created_at DESC LIMIT ${Math.max(1, Math.min(limit, 25))}`,
-  ).all<Record<string, unknown>>();
+    `SELECT r.id, r.source_type as sourceType, r.source_id as sourceId, r.source_label as sourceLabel, r.profile_id as profileId, r.profile_version_id as profileVersionId, r.prompt_config_id as promptConfigId, r.evidence_profile_id as evidenceProfileId, r.status, r.requested_ticker_count as requestedTickerCount, r.completed_ticker_count as completedTickerCount, r.failed_ticker_count as failedTickerCount, r.input_json as inputJson, r.provider_usage_json as providerUsageJson, r.metadata_json as metadataJson, r.error_summary as errorSummary, r.started_at as startedAt, r.completed_at as completedAt, r.heartbeat_at as heartbeatAt, r.created_at as createdAt, r.updated_at as updatedAt, pc.name as promptConfigName, ep.name as evidenceProfileName, p.name as profileName, pv.version_number as profileVersionNumber FROM research_lab_runs r LEFT JOIN research_lab_prompt_configs pc ON pc.id = r.prompt_config_id LEFT JOIN research_lab_evidence_profiles ep ON ep.id = r.evidence_profile_id LEFT JOIN research_lab_profiles p ON p.id = r.profile_id LEFT JOIN research_lab_profile_versions pv ON pv.id = r.profile_version_id ${whereSql} ORDER BY r.created_at DESC LIMIT ${limit}`,
+  ).bind(...bindings).all<Record<string, unknown>>();
   return (rows.results ?? []).map((row) => ({
     run: mapRun(row),
+    profileName: typeof row.profileName === "string" ? row.profileName : null,
+    profileVersionNumber: typeof row.profileVersionNumber === "number" ? Number(row.profileVersionNumber) : null,
     promptConfigName: typeof row.promptConfigName === "string" ? row.promptConfigName : null,
     evidenceProfileName: typeof row.evidenceProfileName === "string" ? row.evidenceProfileName : null,
   }));
@@ -244,7 +272,7 @@ export async function listResearchLabRuns(env: Env, limit = 10): Promise<Researc
 
 export async function loadResearchLabRun(env: Env, runId: string): Promise<ResearchLabRunRecord | null> {
   const row = await env.DB.prepare(
-    "SELECT id, source_type as sourceType, source_id as sourceId, source_label as sourceLabel, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, status, requested_ticker_count as requestedTickerCount, completed_ticker_count as completedTickerCount, failed_ticker_count as failedTickerCount, input_json as inputJson, provider_usage_json as providerUsageJson, metadata_json as metadataJson, error_summary as errorSummary, started_at as startedAt, completed_at as completedAt, heartbeat_at as heartbeatAt, created_at as createdAt, updated_at as updatedAt FROM research_lab_runs WHERE id = ? LIMIT 1",
+    "SELECT id, source_type as sourceType, source_id as sourceId, source_label as sourceLabel, profile_id as profileId, profile_version_id as profileVersionId, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, status, requested_ticker_count as requestedTickerCount, completed_ticker_count as completedTickerCount, failed_ticker_count as failedTickerCount, input_json as inputJson, provider_usage_json as providerUsageJson, metadata_json as metadataJson, error_summary as errorSummary, started_at as startedAt, completed_at as completedAt, heartbeat_at as heartbeatAt, created_at as createdAt, updated_at as updatedAt FROM research_lab_runs WHERE id = ? LIMIT 1",
   ).bind(runId).first<Record<string, unknown>>();
   return row ? mapRun(row) : null;
 }
@@ -279,14 +307,14 @@ export async function loadResearchLabEvidenceForRun(env: Env, runId: string): Pr
 
 export async function loadResearchLabOutputsForRun(env: Env, runId: string): Promise<ResearchLabOutputRecord[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE run_id = ? ORDER BY created_at ASC",
+    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, profile_id as profileId, profile_version_id as profileVersionId, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE run_id = ? ORDER BY created_at ASC",
   ).bind(runId).all<Record<string, unknown>>();
   return (rows.results ?? []).map(mapOutput);
 }
 
 export async function loadResearchLabOutputForRunItem(env: Env, runItemId: string): Promise<ResearchLabOutputRecord | null> {
   const row = await env.DB.prepare(
-    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE run_item_id = ? LIMIT 1",
+    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, profile_id as profileId, profile_version_id as profileVersionId, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE run_item_id = ? LIMIT 1",
   ).bind(runItemId).first<Record<string, unknown>>();
   return row ? mapOutput(row) : null;
 }
@@ -297,14 +325,14 @@ export async function loadLatestResearchLabOutputForTicker(
   promptConfigFamily: string,
 ): Promise<ResearchLabOutputRecord | null> {
   const row = await env.DB.prepare(
-    "SELECT o.id, o.run_id as runId, o.run_item_id as runItemId, o.ticker, o.prompt_config_id as promptConfigId, o.evidence_profile_id as evidenceProfileId, o.prior_output_id as priorOutputId, o.synthesis_json as synthesisJson, o.memory_summary_json as memorySummaryJson, o.delta_json as deltaJson, o.source_evidence_ids_json as sourceEvidenceIdsJson, o.model, o.usage_json as usageJson, o.created_at as createdAt FROM research_lab_memory_heads h INNER JOIN research_lab_outputs o ON o.id = h.latest_output_id WHERE h.ticker = ? AND h.prompt_config_family = ? LIMIT 1",
+    "SELECT o.id, o.run_id as runId, o.run_item_id as runItemId, o.ticker, o.profile_id as profileId, o.profile_version_id as profileVersionId, o.prompt_config_id as promptConfigId, o.evidence_profile_id as evidenceProfileId, o.prior_output_id as priorOutputId, o.synthesis_json as synthesisJson, o.memory_summary_json as memorySummaryJson, o.delta_json as deltaJson, o.source_evidence_ids_json as sourceEvidenceIdsJson, o.model, o.usage_json as usageJson, o.created_at as createdAt FROM research_lab_memory_heads h INNER JOIN research_lab_outputs o ON o.id = h.latest_output_id WHERE h.ticker = ? AND h.prompt_config_family = ? LIMIT 1",
   ).bind(ticker.toUpperCase(), promptConfigFamily).first<Record<string, unknown>>();
   return row ? mapOutput(row) : null;
 }
 
 export async function loadResearchLabTickerHistory(env: Env, ticker: string, limit = 12): Promise<ResearchLabTickerHistoryEntry[]> {
   const rows = await env.DB.prepare(
-    `SELECT o.id, o.run_id as runId, o.run_item_id as runItemId, o.ticker, o.prompt_config_id as promptConfigId, o.evidence_profile_id as evidenceProfileId, o.prior_output_id as priorOutputId, o.synthesis_json as synthesisJson, o.memory_summary_json as memorySummaryJson, o.delta_json as deltaJson, o.source_evidence_ids_json as sourceEvidenceIdsJson, o.model, o.usage_json as usageJson, o.created_at as createdAt, r.id as runRowId, r.source_type as sourceType, r.source_id as sourceId, r.source_label as sourceLabel, r.prompt_config_id as runPromptConfigId, r.evidence_profile_id as runEvidenceProfileId, r.status as runStatus, r.requested_ticker_count as requestedTickerCount, r.completed_ticker_count as completedTickerCount, r.failed_ticker_count as failedTickerCount, r.input_json as inputJson, r.provider_usage_json as providerUsageJson, r.metadata_json as metadataJson, r.error_summary as errorSummary, r.started_at as startedAt, r.completed_at as completedAt, r.heartbeat_at as heartbeatAt, r.created_at as runCreatedAt, r.updated_at as runUpdatedAt FROM research_lab_outputs o LEFT JOIN research_lab_runs r ON r.id = o.run_id WHERE o.ticker = ? ORDER BY o.created_at DESC LIMIT ${Math.max(1, Math.min(limit, 25))}`,
+    `SELECT o.id, o.run_id as runId, o.run_item_id as runItemId, o.ticker, o.profile_id as profileId, o.profile_version_id as profileVersionId, o.prompt_config_id as promptConfigId, o.evidence_profile_id as evidenceProfileId, o.prior_output_id as priorOutputId, o.synthesis_json as synthesisJson, o.memory_summary_json as memorySummaryJson, o.delta_json as deltaJson, o.source_evidence_ids_json as sourceEvidenceIdsJson, o.model, o.usage_json as usageJson, o.created_at as createdAt, r.id as runRowId, r.source_type as sourceType, r.source_id as sourceId, r.source_label as sourceLabel, r.profile_id as runProfileId, r.profile_version_id as runProfileVersionId, r.prompt_config_id as runPromptConfigId, r.evidence_profile_id as runEvidenceProfileId, r.status as runStatus, r.requested_ticker_count as requestedTickerCount, r.completed_ticker_count as completedTickerCount, r.failed_ticker_count as failedTickerCount, r.input_json as inputJson, r.provider_usage_json as providerUsageJson, r.metadata_json as metadataJson, r.error_summary as errorSummary, r.started_at as startedAt, r.completed_at as completedAt, r.heartbeat_at as heartbeatAt, r.created_at as runCreatedAt, r.updated_at as runUpdatedAt FROM research_lab_outputs o LEFT JOIN research_lab_runs r ON r.id = o.run_id WHERE o.ticker = ? ORDER BY o.created_at DESC LIMIT ${Math.max(1, Math.min(limit, 25))}`,
   ).bind(ticker.toUpperCase()).all<Record<string, unknown>>();
   return (rows.results ?? []).map((row) => ({
     output: mapOutput(row),
@@ -313,6 +341,8 @@ export async function loadResearchLabTickerHistory(env: Env, ticker: string, lim
       sourceType: row.sourceType,
       sourceId: row.sourceId,
       sourceLabel: row.sourceLabel,
+      profileId: row.runProfileId,
+      profileVersionId: row.runProfileVersionId,
       promptConfigId: row.runPromptConfigId,
       evidenceProfileId: row.runEvidenceProfileId,
       status: row.runStatus,
@@ -551,6 +581,8 @@ export async function insertResearchLabOutput(env: Env, input: {
   runId: string;
   runItemId: string;
   ticker: string;
+  profileId: string | null;
+  profileVersionId: string | null;
   promptConfigId: string | null;
   evidenceProfileId: string | null;
   priorOutputId: string | null;
@@ -563,12 +595,14 @@ export async function insertResearchLabOutput(env: Env, input: {
 }): Promise<ResearchLabOutputRecord> {
   const id = uid();
   await env.DB.prepare(
-    "INSERT INTO research_lab_outputs (id, run_id, run_item_id, ticker, prompt_config_id, evidence_profile_id, prior_output_id, synthesis_json, memory_summary_json, delta_json, source_evidence_ids_json, model, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO research_lab_outputs (id, run_id, run_item_id, ticker, profile_id, profile_version_id, prompt_config_id, evidence_profile_id, prior_output_id, synthesis_json, memory_summary_json, delta_json, source_evidence_ids_json, model, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).bind(
     id,
     input.runId,
     input.runItemId,
     input.ticker,
+    input.profileId,
+    input.profileVersionId,
     input.promptConfigId,
     input.evidenceProfileId,
     input.priorOutputId,
@@ -580,7 +614,7 @@ export async function insertResearchLabOutput(env: Env, input: {
     JSON.stringify(input.usageJson ?? null),
   ).run();
   const row = await env.DB.prepare(
-    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE id = ? LIMIT 1",
+    "SELECT id, run_id as runId, run_item_id as runItemId, ticker, profile_id as profileId, profile_version_id as profileVersionId, prompt_config_id as promptConfigId, evidence_profile_id as evidenceProfileId, prior_output_id as priorOutputId, synthesis_json as synthesisJson, memory_summary_json as memorySummaryJson, delta_json as deltaJson, source_evidence_ids_json as sourceEvidenceIdsJson, model, usage_json as usageJson, created_at as createdAt FROM research_lab_outputs WHERE id = ? LIMIT 1",
   ).bind(id).first<Record<string, unknown>>();
   if (!row) throw new Error("Failed to load inserted research lab output.");
   return mapOutput(row);

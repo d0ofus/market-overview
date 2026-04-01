@@ -11,6 +11,9 @@ import {
   promptVersionCreateSchema,
   researchCompareQuerySchema,
   researchProfileCreateSchema,
+  researchLabProfileCreateSchema,
+  researchLabProfilePatchSchema,
+  researchLabProfileVersionCreateSchema,
   researchProfilePatchSchema,
   researchProfileVersionCreateSchema,
   researchRunCreateSchema,
@@ -142,6 +145,13 @@ import {
   loadResearchLabRunStreamPayload,
   loadResearchLabTickerHistoryPayload,
 } from "./research-lab/api";
+import {
+  createResearchLabProfile,
+  createResearchLabProfileVersion,
+  listResearchLabAdminProfiles,
+  listResearchLabProfiles,
+  updateResearchLabProfile,
+} from "./research-lab/profiles";
 import {
   cancelResearchLabRun,
   drainResearchLabRun,
@@ -2301,7 +2311,11 @@ app.get("/api/research/ticker/:ticker/history", async (c) => {
 });
 
 app.get("/api/research-lab/runs", async (c) => {
-  const rows = await listResearchLabRunRows(c.env, Number(c.req.query("limit") ?? 10));
+  const rows = await listResearchLabRunRows(c.env, {
+    sourceType: (c.req.query("sourceType") as "manual" | "watchlist_set" | null) ?? null,
+    sourceId: c.req.query("sourceId") ?? null,
+    limit: Number(c.req.query("limit") ?? 10),
+  });
   return c.json({ rows });
 });
 
@@ -2309,6 +2323,7 @@ app.post("/api/research-lab/runs", async (c) => {
   try {
     const payload = await c.req.json();
     const run = await startResearchLabRun(c.env, payload);
+    c.executionCtx.waitUntil(drainResearchLabRun(c.env, run.id));
     return c.json({ ok: true, run });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to start research lab run." }, 400);
@@ -2385,6 +2400,11 @@ app.get("/api/research-lab/runs/:id/stream", async (c) => {
 
 app.get("/api/research-lab/ticker/:ticker/history", async (c) => {
   const rows = await loadResearchLabTickerHistoryPayload(c.env, c.req.param("ticker"));
+  return c.json({ rows });
+});
+
+app.get("/api/research-lab/profiles", async (c) => {
+  const rows = await listResearchLabProfiles(c.env);
   return c.json({ rows });
 });
 
@@ -2518,6 +2538,48 @@ app.get("/api/admin/research/profiles", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await listResearchAdminVersions(c.env);
   return c.json(payload);
+});
+
+app.get("/api/admin/research-lab/profiles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = await listResearchLabAdminProfiles(c.env);
+  return c.json(payload);
+});
+
+app.post("/api/admin/research-lab/profiles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchLabProfileCreateSchema.parse(await c.req.json());
+    const created = await createResearchLabProfile(c.env, payload);
+    await upsertAudit(c.env, "default", "RESEARCH_LAB_PROFILE_CREATE", { id: created.id, payload });
+    return c.json({ ok: true, id: created.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create research-lab profile." }, 400);
+  }
+});
+
+app.patch("/api/admin/research-lab/profiles/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchLabProfilePatchSchema.parse(await c.req.json());
+    await updateResearchLabProfile(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "RESEARCH_LAB_PROFILE_PATCH", { id: c.req.param("id"), payload });
+    return c.json({ ok: true, id: c.req.param("id") });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to update research-lab profile." }, 400);
+  }
+});
+
+app.post("/api/admin/research-lab/profiles/:id/versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = researchLabProfileVersionCreateSchema.parse(await c.req.json());
+    const created = await createResearchLabProfileVersion(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "RESEARCH_LAB_PROFILE_VERSION_CREATE", { id: c.req.param("id"), versionId: created.id, payload });
+    return c.json({ ok: true, id: created.id, versionNumber: created.versionNumber });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to create research-lab profile version." }, 400);
+  }
 });
 
 app.post("/api/admin/research/profiles", async (c) => {

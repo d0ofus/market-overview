@@ -9,6 +9,11 @@ export {
   rubricVersionCreateSchema,
   searchTemplateVersionCreateSchema,
 } from "./research/validation";
+export {
+  researchLabProfileCreateSchema,
+  researchLabProfilePatchSchema,
+  researchLabProfileVersionCreateSchema,
+} from "./research-lab/validation";
 
 export const rankingWindowSchema = z.enum(["1D", "5D", "1W", "YTD", "52W"]);
 

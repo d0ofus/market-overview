@@ -15,6 +15,33 @@ const harness = vi.hoisted(() => {
     updatedAt: "2026-03-31T10:00:00.000Z",
   };
 
+  const profile = {
+    id: "research-lab-profile-default",
+    slug: "default",
+    name: "Default Research Lab",
+    description: null,
+    isActive: true,
+    isDefault: true,
+    currentVersionId: "research-lab-profile-default-v1",
+    createdAt: "2026-03-31T10:00:00.000Z",
+    updatedAt: "2026-03-31T10:00:00.000Z",
+  };
+
+  const profileVersion = {
+    id: "research-lab-profile-default-v1",
+    profileId: "research-lab-profile-default",
+    versionNumber: 1,
+    label: "Default",
+    modelFamily: "claude-sonnet-4-6",
+    systemPrompt: "Test prompt",
+    schemaVersion: "v1",
+    evidenceConfigJson: {},
+    synthesisConfigJson: {},
+    modulesConfigJson: {},
+    isActive: true,
+    createdAt: "2026-03-31T10:00:00.000Z",
+  };
+
   const evidenceProfile = {
     id: "research-lab-evidence-default-v1",
     name: "Research Lab Evidence",
@@ -98,6 +125,8 @@ const harness = vi.hoisted(() => {
       runId: "prior-run",
       runItemId: "prior-item",
       ticker,
+      profileId: profile.id,
+      profileVersionId: profileVersion.id,
       promptConfigId: promptConfig.id,
       evidenceProfileId: evidenceProfile.id,
       priorOutputId: null,
@@ -129,6 +158,33 @@ const harness = vi.hoisted(() => {
       memoryHeads: new Map<string, any>(),
       promptConfig,
       evidenceProfile,
+      profile,
+      profileVersion,
+      watchlistSet: {
+        id: "watchlist-set-1",
+        scanDefinitionId: "scan-1",
+        name: "Momentum Set",
+        slug: "momentum-set",
+        isActive: true,
+        compileDaily: false,
+        dailyCompileTimeLocal: null,
+        dailyCompileTimezone: null,
+        createdAt: "2026-03-31T10:00:00.000Z",
+        updatedAt: "2026-03-31T10:00:00.000Z",
+        sourceCount: 1,
+        latestRun: null,
+        sources: [],
+      },
+      watchlistCompiledRows: [
+        { ticker: "KMI" },
+        { ticker: "LASR" },
+        { ticker: "KMI" },
+      ],
+      watchlistUniqueRows: [
+        { ticker: "LASR" },
+        { ticker: "KMI" },
+        { ticker: "NVDA" },
+      ],
       gatherError: null as Error | null,
       gatherDelayMs: 0,
       synthError: null as Error | null,
@@ -188,6 +244,45 @@ vi.mock("../src/research-lab/synthesize", () => ({
   }),
 }));
 
+vi.mock("../src/watchlist-compiler-service", () => ({
+  loadWatchlistSet: vi.fn(async () => harness.state.watchlistSet),
+  loadWatchlistCompiledRows: vi.fn(async () => ({
+    set: harness.state.watchlistSet,
+    runId: "watchlist-run-1",
+    rows: harness.state.watchlistCompiledRows,
+  })),
+  loadWatchlistUniqueRows: vi.fn(async () => ({
+    set: harness.state.watchlistSet,
+    runId: "watchlist-run-1",
+    rows: harness.state.watchlistUniqueRows,
+  })),
+}));
+
+vi.mock("../src/research-lab/profiles", () => ({
+  loadResearchLabProfile: vi.fn(async () => harness.state.profile),
+  loadResearchLabProfileVersion: vi.fn(async () => harness.state.profileVersion),
+  resolveResearchLabProfile: vi.fn(async () => ({
+    profile: harness.state.profile,
+    version: harness.state.profileVersion,
+    promptConfig: {
+      ...harness.state.promptConfig,
+      profileId: harness.state.profile.id,
+      profileVersionId: harness.state.profileVersion.id,
+    },
+    evidenceProfile: harness.state.evidenceProfile,
+  })),
+  resolveResearchLabProfileAtVersion: vi.fn(async () => ({
+    profile: harness.state.profile,
+    version: harness.state.profileVersion,
+    promptConfig: {
+      ...harness.state.promptConfig,
+      profileId: harness.state.profile.id,
+      profileVersionId: harness.state.profileVersion.id,
+    },
+    evidenceProfile: harness.state.evidenceProfile,
+  })),
+}));
+
 vi.mock("../src/research-lab/storage", () => ({
   createResearchLabRun: vi.fn(async (_env: unknown, input: any) => {
     harness.state.runCounter += 1;
@@ -197,6 +292,8 @@ vi.mock("../src/research-lab/storage", () => ({
       sourceType: input.sourceType ?? "manual",
       sourceId: input.sourceId ?? null,
       sourceLabel: input.sourceLabel ?? "Research Lab",
+      profileId: input.profileId ?? null,
+      profileVersionId: input.profileVersionId ?? null,
       promptConfigId: input.promptConfigId,
       evidenceProfileId: input.evidenceProfileId,
       status: "queued",
@@ -205,7 +302,7 @@ vi.mock("../src/research-lab/storage", () => ({
       failedTickerCount: 0,
       inputJson: input.request,
       providerUsageJson: null,
-      metadataJson: null,
+      metadataJson: input.metadataJson ?? null,
       errorSummary: null,
       startedAt: null,
       completedAt: null,
@@ -255,6 +352,8 @@ vi.mock("../src/research-lab/storage", () => ({
       runId: input.runId,
       runItemId: input.runItemId,
       ticker: input.ticker,
+      profileId: input.profileId ?? null,
+      profileVersionId: input.profileVersionId ?? null,
       promptConfigId: input.promptConfigId,
       evidenceProfileId: input.evidenceProfileId,
       priorOutputId: input.priorOutputId,
@@ -594,5 +693,26 @@ describe("research lab flow", () => {
     expect(harness.state.items[0]?.status).toBe("persisting");
     expect(harness.state.items[1]?.status).toBe("queued");
     expect(harness.state.events).toHaveLength(eventCountBefore);
+  });
+
+  it("resolves watchlist-backed runs from the requested source basis and selected tickers", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, {
+      tickers: [],
+      sourceType: "watchlist_set",
+      sourceId: "watchlist-set-1",
+      sourceBasis: "unique",
+      selectedTickers: ["NVDA", "KMI"],
+      maxTickers: 1,
+    });
+
+    expect(run.sourceType).toBe("watchlist_set");
+    expect(run.sourceId).toBe("watchlist-set-1");
+    expect(run.requestedTickerCount).toBe(1);
+    expect(harness.state.items.map((item) => item.ticker)).toEqual(["KMI"]);
+    expect(harness.state.run?.metadataJson).toMatchObject({
+      watchlistRunId: "watchlist-run-1",
+      sourceBasis: "unique",
+    });
   });
 });

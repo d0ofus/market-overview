@@ -61,12 +61,12 @@ describe("research lab synthesize", () => {
 
     const longText = "A".repeat(2_400);
     const evidence = Array.from({ length: 8 }, (_, index) => ({
-      id: `e${index + 1}`,
+      id: `evidence-${index + 1}`,
       runId: "run-1",
       runItemId: "item-1",
       ticker: "AMZN",
       providerKey: "perplexity" as const,
-      evidenceKind: (index % 2 === 0 ? "news_catalysts" : "analyst_media") as const,
+      evidenceKind: (index % 2 === 0 ? "news_catalysts" : "analyst_media") as "news_catalysts" | "analyst_media",
       queryLabel: "News",
       canonicalUrl: `https://example.com/${index + 1}`,
       sourceDomain: "example.com",
@@ -80,7 +80,7 @@ describe("research lab synthesize", () => {
       createdAt: "2026-04-01T00:00:00.000Z",
     }));
 
-    await synthesizeResearchLabOutput({} as any, {
+    const result = await synthesizeResearchLabOutput({} as any, {
       identity: {
         ticker: "AMZN",
         companyName: "Amazon.com, Inc.",
@@ -108,6 +108,8 @@ describe("research lab synthesize", () => {
         runId: "run-0",
         runItemId: "item-0",
         ticker: "AMZN",
+        profileId: "profile-1",
+        profileVersionId: "profile-version-1",
         promptConfigId: "prompt-1",
         evidenceProfileId: "profile-1",
         priorOutputId: null,
@@ -157,8 +159,12 @@ describe("research lab synthesize", () => {
 
     const payload = JSON.parse(promptInput.user);
     expect(payload.priorDeltaSummary === null || payload.priorDeltaSummary.length <= 220).toBe(true);
-    expect(payload.evidenceFamilies.every((family: { items: Array<{ summary: string; excerpt: string | null; canonicalUrl?: unknown }> }) => (
-      family.items.every((item) => item.summary.length <= 220 && (item.excerpt === null || item.excerpt.length <= 120) && item.canonicalUrl === null)
+    expect(payload.evidenceFamilies.every((family: { items: Array<{ summary: string; excerpt?: string | null; ref: string; canonicalId?: unknown }> }) => (
+      family.items.every((item) => item.summary.length <= 220 && (!item.excerpt || item.excerpt.length <= 120) && /^e\d+$/.test(item.ref) && item.canonicalId === undefined)
     ))).toBe(true);
+    expect(Array.isArray(payload.requestedSections?.base)).toBe(true);
+    expect(result.synthesis.catalysts[0]?.evidenceIds).toEqual(["evidence-1"]);
+    expect(result.synthesis.risks[0]?.evidenceIds).toEqual(["evidence-1"]);
+    expect(result.synthesis.evidenceIds).toEqual(["evidence-1"]);
   });
 });

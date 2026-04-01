@@ -1,13 +1,23 @@
 import type { Env } from "../types";
 import { normalizeResearchTicker } from "../research/sec-normalization";
 import {
+  loadWatchlistCompiledRows,
+  loadWatchlistSet,
+  loadWatchlistUniqueRows,
+} from "../watchlist-compiler-service";
+import {
   RESEARCH_LAB_DEFAULT_EVIDENCE_PROFILE_ID,
   RESEARCH_LAB_DEFAULT_PROMPT_CONFIG_ID,
   RESEARCH_LAB_HEARTBEAT_INTERVAL_MS,
   RESEARCH_LAB_HEARTBEAT_STALE_MS,
+  RESEARCH_LAB_MAX_TICKERS_PER_RUN,
 } from "./constants";
 import { gatherResearchLabEvidence } from "./gather";
 import { buildResearchLabMemorySummary, buildResearchLabOutputDelta } from "./memory";
+import {
+  resolveResearchLabProfile,
+  resolveResearchLabProfileAtVersion,
+} from "./profiles";
 import { validateResearchLabRunCreate } from "./schemas";
 import {
   createResearchLabRun,
@@ -40,6 +50,7 @@ import type {
   ResearchLabRunItemRecord,
   ResearchLabRunRecord,
   ResearchLabRunStatus,
+  ResearchLabSourceType,
   ResearchLabTickerIdentity,
 } from "./types";
 
@@ -156,6 +167,13 @@ async function resolveLabConfigs(env: Env, run: ResearchLabRunRecord): Promise<{
   promptConfig: ResearchLabPromptConfigRecord;
   evidenceProfile: ResearchLabEvidenceProfileRecord;
 }> {
+  if (run.profileId && run.profileVersionId) {
+    const resolved = await resolveResearchLabProfileAtVersion(env, run.profileId, run.profileVersionId);
+    return {
+      promptConfig: resolved.promptConfig,
+      evidenceProfile: resolved.evidenceProfile,
+    };
+  }
   const [promptConfig, evidenceProfile] = await Promise.all([
     run.promptConfigId ? loadResearchLabPromptConfig(env, run.promptConfigId) : loadDefaultResearchLabPromptConfig(env),
     run.evidenceProfileId ? loadResearchLabEvidenceProfile(env, run.evidenceProfileId) : loadDefaultResearchLabEvidenceProfile(env),
@@ -167,6 +185,57 @@ async function resolveLabConfigs(env: Env, run: ResearchLabRunRecord): Promise<{
     throw new Error(`Research lab evidence profile not found: ${run.evidenceProfileId ?? RESEARCH_LAB_DEFAULT_EVIDENCE_PROFILE_ID}`);
   }
   return { promptConfig, evidenceProfile };
+}
+
+async function resolveRunTickersFromRequest(env: Env, request: ResearchLabRunCreateRequest): Promise<{
+  sourceType: ResearchLabSourceType;
+  sourceId: string | null;
+  sourceLabel: string | null;
+  tickers: string[];
+  metadataJson: Record<string, unknown> | null;
+}> {
+  if (request.sourceType !== "watchlist_set") {
+    const tickers = dedupeTickers(request.tickers);
+    return {
+      sourceType: "manual",
+      sourceId: request.sourceId ?? null,
+      sourceLabel: request.sourceLabel ?? "Research Lab",
+      tickers,
+      metadataJson: null,
+    };
+  }
+
+  const setId = request.sourceId?.trim();
+  if (!setId) {
+    throw new Error("Watchlist set id is required for watchlist-backed research lab runs.");
+  }
+  const set = await loadWatchlistSet(env, setId);
+  if (!set) {
+    throw new Error("Watchlist set not found.");
+  }
+  const sourceBasis = request.sourceBasis ?? "unique";
+  const payload = sourceBasis === "compiled"
+    ? await loadWatchlistCompiledRows(env, setId, request.watchlistRunId ?? null)
+    : await loadWatchlistUniqueRows(env, setId, request.watchlistRunId ?? null);
+  const selectedTickers = dedupeTickers(request.selectedTickers ?? []);
+  const allowed = new Set(selectedTickers);
+  const rawTickers = (payload.rows ?? [])
+    .map((row: { ticker?: unknown }) => String(row?.ticker ?? "").trim().toUpperCase())
+    .filter(Boolean);
+  const tickers = Array.from(new Set(rawTickers.filter((ticker) => allowed.size === 0 || allowed.has(ticker))));
+  return {
+    sourceType: "watchlist_set",
+    sourceId: set.id,
+    sourceLabel: request.sourceLabel ?? set.name,
+    tickers,
+    metadataJson: {
+      watchlistRunId: payload.runId ?? null,
+      sourceBasis,
+      selectedTickers: selectedTickers.length > 0 ? selectedTickers : null,
+      visibleTickerCount: rawTickers.length,
+      filteredTickerCount: tickers.length,
+    },
+  };
 }
 
 async function failItem(
@@ -462,6 +531,8 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
       runId: run.id,
       runItemId: item.id,
       ticker: item.ticker,
+      profileId: run.profileId,
+      profileVersionId: run.profileVersionId,
       promptConfigId: configs.promptConfig.id,
       evidenceProfileId: configs.evidenceProfile.id,
       priorOutputId: priorOutput?.id ?? null,
@@ -622,28 +693,36 @@ async function executeDrain(env: Env, runId: string) {
 
 export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreateRequest) {
   const request = validateResearchLabRunCreate(payload);
-  const tickers = dedupeTickers(request.tickers);
+  const resolvedProfile = await resolveResearchLabProfile(env, request.profileId);
+  const resolved = await resolveRunTickersFromRequest(env, request);
+  const maxTickers = Math.max(1, Math.min(request.maxTickers ?? RESEARCH_LAB_MAX_TICKERS_PER_RUN, RESEARCH_LAB_MAX_TICKERS_PER_RUN));
+  const tickers = resolved.tickers.slice(0, maxTickers);
   if (tickers.length === 0) {
-    throw new Error("At least one ticker is required.");
-  }
-  const [promptConfig, evidenceProfile] = await Promise.all([
-    request.promptConfigId ? loadResearchLabPromptConfig(env, request.promptConfigId) : loadDefaultResearchLabPromptConfig(env),
-    request.evidenceProfileId ? loadResearchLabEvidenceProfile(env, request.evidenceProfileId) : loadDefaultResearchLabEvidenceProfile(env),
-  ]);
-  if (!promptConfig) {
-    throw new Error(`Research lab prompt config not found: ${request.promptConfigId ?? RESEARCH_LAB_DEFAULT_PROMPT_CONFIG_ID}`);
-  }
-  if (!evidenceProfile) {
-    throw new Error(`Research lab evidence profile not found: ${request.evidenceProfileId ?? RESEARCH_LAB_DEFAULT_EVIDENCE_PROFILE_ID}`);
+    throw new Error(request.sourceType === "watchlist_set"
+      ? "No tickers were available from the selected watchlist compiler output."
+      : "At least one ticker is required.");
   }
 
   const run = await createResearchLabRun(env, {
-    request: { ...request, tickers },
+    request: {
+      ...request,
+      sourceType: resolved.sourceType,
+      sourceId: resolved.sourceId,
+      sourceLabel: resolved.sourceLabel,
+      tickers,
+    },
     tickers,
-    sourceType: "manual",
-    sourceLabel: "Research Lab",
-    promptConfigId: promptConfig.id,
-    evidenceProfileId: evidenceProfile.id,
+    sourceType: resolved.sourceType,
+    sourceId: resolved.sourceId,
+    sourceLabel: resolved.sourceLabel,
+    metadataJson: {
+      ...(resolved.metadataJson ?? {}),
+      requestedMaxTickers: request.maxTickers ?? null,
+    },
+    profileId: resolvedProfile.profile.id,
+    profileVersionId: resolvedProfile.version.id,
+    promptConfigId: resolvedProfile.promptConfig.id,
+    evidenceProfileId: resolvedProfile.evidenceProfile.id,
   });
   await insertResearchLabRunEvent(env, {
     runId: run.id,
@@ -652,8 +731,14 @@ export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreat
     message: `Created research lab run for ${tickers.join(", ")}.`,
     contextJson: {
       tickers,
-      promptConfigId: promptConfig.id,
-      evidenceProfileId: evidenceProfile.id,
+      sourceType: resolved.sourceType,
+      sourceId: resolved.sourceId,
+      watchlistRunId: resolved.metadataJson?.watchlistRunId ?? null,
+      sourceBasis: resolved.metadataJson?.sourceBasis ?? null,
+      profileId: resolvedProfile.profile.id,
+      profileVersionId: resolvedProfile.version.id,
+      promptConfigId: resolvedProfile.promptConfig.id,
+      evidenceProfileId: resolvedProfile.evidenceProfile.id,
     },
   });
   return run;

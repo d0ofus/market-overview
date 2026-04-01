@@ -1,6 +1,10 @@
 import type { Env } from "../types";
 import { RESEARCH_LAB_RESULTS_EVENT_LIMIT } from "./constants";
 import {
+  loadResearchLabProfile,
+  loadResearchLabProfileVersion,
+} from "./profiles";
+import {
   loadResearchLabEvidenceForRun,
   loadResearchLabEvidenceProfile,
   loadResearchLabOutputsForRun,
@@ -21,9 +25,11 @@ export async function loadResearchLabRunStatusPayload(
 ): Promise<ResearchLabRunStatusResponse | null> {
   const run = await loadResearchLabRun(env, runId);
   if (!run) return null;
-  const [items, events, promptConfig, evidenceProfile] = await Promise.all([
+  const [items, events, profile, profileVersion, promptConfig, evidenceProfile] = await Promise.all([
     loadResearchLabRunItems(env, runId),
     loadResearchLabRunEvents(env, runId, RESEARCH_LAB_RESULTS_EVENT_LIMIT),
+    run.profileId ? loadResearchLabProfile(env, run.profileId) : null,
+    run.profileVersionId ? loadResearchLabProfileVersion(env, run.profileVersionId) : null,
     run.promptConfigId ? loadResearchLabPromptConfig(env, run.promptConfigId) : loadResearchLabPromptConfig(env, null),
     run.evidenceProfileId ? loadResearchLabEvidenceProfile(env, run.evidenceProfileId) : loadResearchLabEvidenceProfile(env, null),
   ]);
@@ -31,6 +37,8 @@ export async function loadResearchLabRunStatusPayload(
     run,
     items,
     events,
+    profile,
+    profileVersion,
     promptConfig,
     evidenceProfile,
   };
@@ -62,6 +70,8 @@ export async function loadResearchLabRunResultsPayload(
   return {
     run: status.run,
     items,
+    profile: status.profile,
+    profileVersion: status.profileVersion,
     promptConfig: status.promptConfig,
     evidenceProfile: status.evidenceProfile,
   };
@@ -92,6 +102,8 @@ export async function loadResearchLabRunStreamPayload(env: Env, runId: string): 
       evidence: evidenceByItem.get(item.id) ?? [],
       output: outputByItem.get(item.id) ?? null,
     })),
+    profile: status.profile,
+    profileVersion: status.profileVersion,
     promptConfig: status.promptConfig,
     evidenceProfile: status.evidenceProfile,
   };

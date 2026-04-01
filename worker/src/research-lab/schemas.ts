@@ -22,9 +22,25 @@ export function parseResearchLabTickerInput(input: string): string[] {
 }
 
 export const researchLabRunCreateSchema = z.object({
-  tickers: z.array(tickerTokenSchema).min(1).max(RESEARCH_LAB_MAX_TICKERS_PER_RUN),
+  tickers: z.array(tickerTokenSchema).max(RESEARCH_LAB_MAX_TICKERS_PER_RUN).default([]),
+  sourceType: z.enum(["manual", "watchlist_set"]).optional().default("manual"),
+  sourceId: z.string().trim().min(1).nullable().optional().default(null),
+  sourceLabel: z.string().trim().min(1).nullable().optional().default(null),
+  watchlistRunId: z.string().trim().min(1).nullable().optional().default(null),
+  sourceBasis: z.enum(["compiled", "unique"]).optional().default("unique"),
+  selectedTickers: z.array(tickerTokenSchema).optional().default([]),
+  maxTickers: z.number().int().min(1).max(100).nullable().optional().default(null),
+  profileId: z.string().trim().min(1).nullable().optional().default(null),
   promptConfigId: z.string().trim().min(1).nullable().optional().default(RESEARCH_LAB_DEFAULT_PROMPT_CONFIG_ID),
   evidenceProfileId: z.string().trim().min(1).nullable().optional().default(RESEARCH_LAB_DEFAULT_EVIDENCE_PROFILE_ID),
+}).superRefine((value, ctx) => {
+  if (value.sourceType !== "watchlist_set" && value.tickers.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["tickers"],
+      message: "At least one ticker is required for manual research-lab runs.",
+    });
+  }
 });
 
 const evidenceIdsSchema = z.array(z.string().min(1)).default([]);
@@ -40,6 +56,23 @@ const priorComparisonSchema = z.preprocess((value) => {
   summary: z.string().min(1),
   changed: z.boolean(),
 }).nullable().default(null));
+
+const keyDriverSchema = z.object({
+  title: z.string().min(1),
+  whyItMatters: z.string().min(1),
+  direction: z.enum(["positive", "negative", "mixed"]),
+  timeframe: z.string().min(1),
+  priceRelationship: z.string().min(1),
+  confidence: z.enum(["high", "medium", "low"]),
+  evidenceIds: evidenceIdsSchema,
+});
+
+const synthesisModulesSchema = z.object({
+  keyDrivers: z.object({
+    summary: z.string().min(1),
+    drivers: z.array(keyDriverSchema).default([]),
+  }).nullable().optional(),
+}).nullable().optional();
 
 export const researchLabSynthesisSchema = z.object({
   ticker: tickerTokenSchema,
@@ -84,6 +117,7 @@ export const researchLabSynthesisSchema = z.object({
   }),
   monitoringPoints: z.array(z.string().min(1)).default([]),
   priorComparison: priorComparisonSchema,
+  modules: synthesisModulesSchema,
   evidenceIds: evidenceIdsSchema,
 });
 
@@ -126,6 +160,15 @@ export function validateResearchLabSynthesis(raw: unknown, availableEvidenceIds:
   parsed.catalysts = parsed.catalysts.map((item) => ({ ...item, evidenceIds: filterEvidenceIds(item.evidenceIds) }));
   parsed.risks = parsed.risks.map((item) => ({ ...item, evidenceIds: filterEvidenceIds(item.evidenceIds) }));
   parsed.contradictions = parsed.contradictions.map((item) => ({ ...item, evidenceIds: filterEvidenceIds(item.evidenceIds) }));
+  if (parsed.modules?.keyDrivers) {
+    parsed.modules.keyDrivers = {
+      ...parsed.modules.keyDrivers,
+      drivers: parsed.modules.keyDrivers.drivers.map((item) => ({
+        ...item,
+        evidenceIds: filterEvidenceIds(item.evidenceIds),
+      })),
+    };
+  }
   return parsed as ResearchLabSynthesis;
 }
 

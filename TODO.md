@@ -74,7 +74,15 @@
 - See what other features in google sheets dashboard that are good
 - Remove top left Market command centre box
 
-## AI Research
+## Research Lab
+- Add in comparison with peers
+- Add in primary drivers analysis in synthesis layer. What are they and where they stand, and correlation
+- Sort news by dates
+- Add in current analyst consensus
+- Check on database management 
+- Make token use more efficient
+- See what prompts are being used
+- Link research with /peer-groups
 - Add ability to assess Relative strength to index
 - add in analyst recommendations and analyst reports analysis as well
 
