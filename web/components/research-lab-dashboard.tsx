@@ -112,10 +112,8 @@ export function ResearchLabDashboard() {
       const nextRunId = preferredRunId ?? selectedRunId ?? rows[0]?.run.id ?? null;
       setSelectedRunId(nextRunId);
       if (nextRunId) {
-        const [statusPayload, resultsPayload] = await Promise.all([
-          getResearchLabRunStatus(nextRunId),
-          getResearchLabRunResults(nextRunId),
-        ]);
+        const statusPayload = await getResearchLabRunStatus(nextRunId);
+        const resultsPayload = await getResearchLabRunResults(nextRunId);
         applyPayload(statusPayload, resultsPayload);
       } else {
         setStatus(null);
@@ -137,10 +135,8 @@ export function ResearchLabDashboard() {
     let cancelled = false;
     (async () => {
       try {
-        const [statusPayload, resultsPayload] = await Promise.all([
-          getResearchLabRunStatus(selectedRunId),
-          getResearchLabRunResults(selectedRunId),
-        ]);
+        const statusPayload = await getResearchLabRunStatus(selectedRunId);
+        const resultsPayload = await getResearchLabRunResults(selectedRunId);
         if (cancelled) return;
         applyPayload(statusPayload, resultsPayload);
       } catch (error) {
