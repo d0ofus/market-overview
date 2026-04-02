@@ -154,7 +154,6 @@ import {
 } from "./research-lab/profiles";
 import {
   cancelResearchLabRun,
-  drainResearchLabRun,
   ensureResearchLabRunProgress,
   listResearchLabRuns as listResearchLabRunRows,
   startResearchLabRun,
@@ -2337,8 +2336,9 @@ app.post("/api/research-lab/runs/:id/cancel", async (c) => {
 
 app.post("/api/research-lab/runs/:id/pump", async (c) => {
   const runId = c.req.param("id");
-  c.executionCtx.waitUntil(drainResearchLabRun(c.env, runId));
-  return c.json({ ok: true, runId });
+  const run = await ensureResearchLabRunProgress(c.env, runId);
+  if (!run) return c.json({ error: "Research lab run not found." }, 404);
+  return c.json({ ok: true, runId, status: run.status });
 });
 
 app.get("/api/research-lab/runs/:id", async (c) => {

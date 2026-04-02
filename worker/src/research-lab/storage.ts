@@ -452,6 +452,20 @@ export async function tryAcquireResearchLabRunExecution(
   return Number(result.meta.changes ?? 0) > 0;
 }
 
+export async function releaseResearchLabRunExecution(
+  env: Env,
+  runId: string,
+  executionToken: string,
+) {
+  await env.DB.prepare(
+    `UPDATE research_lab_runs
+     SET metadata_json = json_remove(COALESCE(metadata_json, '{}'), '$.executionToken', '$.executionAcquiredAt'),
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND json_extract(COALESCE(metadata_json, '{}'), '$.executionToken') = ?`,
+  ).bind(runId, executionToken).run();
+}
+
 export async function claimNextQueuedResearchLabRunItem(env: Env, runId: string): Promise<ResearchLabRunItemRecord | null> {
   const row = await env.DB.prepare(
     "SELECT id FROM research_lab_run_items WHERE run_id = ? AND status = 'queued' ORDER BY sort_order ASC LIMIT 1",

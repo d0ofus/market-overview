@@ -424,7 +424,35 @@ vi.mock("../src/research-lab/storage", () => ({
   loadResearchLabRunItems: vi.fn(async (_env: unknown, runId: string) => (
     harness.state.items.filter((item) => item.runId === runId)
   )),
-  tryAcquireResearchLabRunExecution: vi.fn(async () => true),
+  tryAcquireResearchLabRunExecution: vi.fn(async (_env: unknown, runId: string, executionToken: string, staleBeforeIso: string) => {
+    if (!harness.state.run || harness.state.run.id !== runId) return false;
+    const currentToken = harness.state.run.metadataJson?.executionToken ?? null;
+    const heartbeatAt = harness.state.run.heartbeatAt ? Date.parse(harness.state.run.heartbeatAt) : null;
+    const staleBefore = Date.parse(staleBeforeIso);
+    const canAcquire = currentToken === null || heartbeatAt === null || heartbeatAt <= staleBefore;
+    if (!canAcquire) return false;
+    harness.state.run = {
+      ...harness.state.run,
+      metadataJson: {
+        ...(harness.state.run.metadataJson ?? {}),
+        executionToken,
+        executionAcquiredAt: "2026-03-31T10:00:00.000Z",
+      },
+      heartbeatAt: "2026-03-31T10:00:00.000Z",
+    };
+    return true;
+  }),
+  releaseResearchLabRunExecution: vi.fn(async (_env: unknown, runId: string, executionToken: string) => {
+    if (!harness.state.run || harness.state.run.id !== runId) return;
+    if ((harness.state.run.metadataJson?.executionToken ?? null) !== executionToken) return;
+    const metadataJson = { ...(harness.state.run.metadataJson ?? {}) };
+    delete metadataJson.executionToken;
+    delete metadataJson.executionAcquiredAt;
+    harness.state.run = {
+      ...harness.state.run,
+      metadataJson: Object.keys(metadataJson).length > 0 ? metadataJson : null,
+    };
+  }),
   updateResearchLabRun: vi.fn(async (_env: unknown, runId: string, patch: any) => {
     if (!harness.state.run || harness.state.run.id !== runId) return null;
     harness.state.run = { ...harness.state.run, ...patch, updatedAt: "2026-03-31T10:10:00.000Z" };
@@ -731,6 +759,20 @@ describe("research lab flow", () => {
     await drainResearchLabRun(env, run.id);
     expect(harness.state.items[0]?.status).toBe("completed");
     expect(harness.state.outputs).toHaveLength(1);
+  });
+
+  it("releases the execution token so the next ticker can start immediately on the next pass", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["AA", "DELL"] });
+
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[0]?.status).toBe("completed");
+    expect(harness.state.items[1]?.status).toBe("queued");
+    expect(harness.state.run.metadataJson?.executionToken).toBeUndefined();
+
+    await drainResearchLabRun(env, run.id);
+    expect(harness.state.items[1]?.status).toBe("completed");
+    expect(harness.state.outputs).toHaveLength(2);
   });
 
   it("does not re-enter work when the first non-terminal ticker is already persisting", async () => {

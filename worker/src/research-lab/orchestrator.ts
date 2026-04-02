@@ -34,6 +34,7 @@ import {
   loadResearchLabRun,
   loadResearchLabRunItems,
   loadResearchLabEvidenceForRunItem,
+  releaseResearchLabRunExecution,
   tryAcquireResearchLabRunExecution,
   updateResearchLabRun,
   updateResearchLabRunHeartbeat,
@@ -679,27 +680,31 @@ async function executeDrain(env: Env, runId: string) {
   );
   if (!acquired) return;
 
-  run = await updateResearchLabRun(env, runId, {
-    status: "running",
-    startedAt: run.startedAt ?? nowIso(),
-    heartbeatAt: nowIso(),
-  }) ?? run;
-  const configs = await resolveLabConfigs(env, run);
+  try {
+    run = await updateResearchLabRun(env, runId, {
+      status: "running",
+      startedAt: run.startedAt ?? nowIso(),
+      heartbeatAt: nowIso(),
+    }) ?? run;
+    const configs = await resolveLabConfigs(env, run);
 
-  await updateResearchLabRunHeartbeat(env, runId, nowIso());
-  const items = await loadResearchLabRunItems(env, runId);
-  let item = selectNextRunnableItem(items);
-  while (item) {
-    await processItem(env, run, item, configs);
-    const refreshedItems = await loadResearchLabRunItems(env, runId);
-    const refreshedItem = refreshedItems.find((entry) => entry.id === item?.id) ?? null;
-    if (!refreshedItem || isTerminalItemStatus(refreshedItem.status) || refreshedItem.status === "persisting") {
-      break;
+    await updateResearchLabRunHeartbeat(env, runId, nowIso());
+    const items = await loadResearchLabRunItems(env, runId);
+    let item = selectNextRunnableItem(items);
+    while (item) {
+      await processItem(env, run, item, configs);
+      const refreshedItems = await loadResearchLabRunItems(env, runId);
+      const refreshedItem = refreshedItems.find((entry) => entry.id === item?.id) ?? null;
+      if (!refreshedItem || isTerminalItemStatus(refreshedItem.status) || refreshedItem.status === "persisting") {
+        break;
+      }
+      item = refreshedItem;
     }
-    item = refreshedItem;
-  }
 
-  await finalizeRun(env, runId);
+    await finalizeRun(env, runId);
+  } finally {
+    await releaseResearchLabRunExecution(env, runId, executionToken);
+  }
 }
 
 export async function startResearchLabRun(env: Env, payload: ResearchLabRunCreateRequest) {
