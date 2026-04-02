@@ -595,19 +595,17 @@ describe("research lab flow", () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["AMPX"] });
 
-    await drainResearchLabRun(env, run.id);
-    expect(harness.state.items[0]?.status).toBe("gathering");
-
     const drainPromise = drainResearchLabRun(env, run.id);
     await vi.advanceTimersByTimeAsync(21_000);
 
     expect(vi.mocked(researchLabStorage.updateResearchLabRunHeartbeat).mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(vi.mocked(researchLabStorage.updateResearchLabRunItemHeartbeat).mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(harness.state.items[0]?.status).toBe("gathering");
 
     await vi.advanceTimersByTimeAsync(10_000);
     await drainPromise;
 
-    expect(harness.state.items[0]?.status).toBe("synthesizing");
+    expect(harness.state.items[0]?.status).toBe("completed");
   });
 
   it("cancels a live lab run without restarting it", async () => {
@@ -726,18 +724,13 @@ describe("research lab flow", () => {
     expect(payload?.evidenceProfile?.configFamily).toBe(`profile:${harness.state.profile.id}`);
   });
 
-  it("advances one stage per progress pass to avoid long single-invocation chains", async () => {
+  it("drains a single ticker through all stages in one progress pass", async () => {
     const env = {} as any;
     const run = await startResearchLabRun(env, { tickers: ["DELL"] });
 
     await drainResearchLabRun(env, run.id);
-    expect(harness.state.items[0]?.status).toBe("gathering");
-
-    await drainResearchLabRun(env, run.id);
-    expect(harness.state.items[0]?.status).toBe("synthesizing");
-
-    await drainResearchLabRun(env, run.id);
     expect(harness.state.items[0]?.status).toBe("completed");
+    expect(harness.state.outputs).toHaveLength(1);
   });
 
   it("does not re-enter work when the first non-terminal ticker is already persisting", async () => {

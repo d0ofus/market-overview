@@ -50,4 +50,45 @@ describe("research lab schemas", () => {
 
     expect(result.priorComparison).toBeNull();
   });
+
+  it("coerces neutral catalyst directions to mixed", () => {
+    const result = validateResearchLabSynthesis({
+      ticker: "AA",
+      companyName: "Alcoa Corporation",
+      opinion: "mixed",
+      overallSummary: "The setup is balanced.",
+      whyNow: "Commodity and demand signals are mixed.",
+      valuationView: {
+        label: "fair",
+        summary: "Valuation looks balanced.",
+      },
+      earningsQualityView: {
+        label: "mixed",
+        summary: "Operating quality is uneven.",
+      },
+      pricedInView: {
+        label: "mostly_priced_in",
+        summary: "Most of the current setup looks reflected.",
+      },
+      catalysts: [{
+        title: "Aluminum pricing",
+        summary: "Pricing trends are directionally uncertain.",
+        direction: "neutral",
+        timeframe: "next quarter",
+        evidenceIds: ["e1"],
+      }],
+      risks: [],
+      contradictions: [],
+      confidence: {
+        label: "medium",
+        score: 0.52,
+        summary: "Evidence is mixed.",
+      },
+      monitoringPoints: ["Watch pricing and demand updates."],
+      priorComparison: null,
+      evidenceIds: ["e1"],
+    }, ["e1"]);
+
+    expect(result.catalysts[0]?.direction).toBe("mixed");
+  });
 });

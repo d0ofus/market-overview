@@ -57,10 +57,16 @@ const priorComparisonSchema = z.preprocess((value) => {
   changed: z.boolean(),
 }).nullable().default(null));
 
+const ternaryDirectionSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "neutral" ? "mixed" : normalized;
+}, z.enum(["positive", "negative", "mixed"]));
+
 const keyDriverSchema = z.object({
   title: z.string().min(1),
   whyItMatters: z.string().min(1),
-  direction: z.enum(["positive", "negative", "mixed"]),
+  direction: ternaryDirectionSchema,
   timeframe: z.string().min(1),
   priceRelationship: z.string().min(1),
   confidence: z.enum(["high", "medium", "low"]),
@@ -95,7 +101,7 @@ export const researchLabSynthesisSchema = z.object({
   catalysts: z.array(z.object({
     title: z.string().min(1),
     summary: z.string().min(1),
-    direction: z.enum(["positive", "negative", "mixed"]),
+    direction: ternaryDirectionSchema,
     timeframe: z.string().min(1),
     evidenceIds: evidenceIdsSchema,
   })).default([]),

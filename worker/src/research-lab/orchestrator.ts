@@ -688,9 +688,15 @@ async function executeDrain(env: Env, runId: string) {
 
   await updateResearchLabRunHeartbeat(env, runId, nowIso());
   const items = await loadResearchLabRunItems(env, runId);
-  const item = selectNextRunnableItem(items);
-  if (item) {
+  let item = selectNextRunnableItem(items);
+  while (item) {
     await processItem(env, run, item, configs);
+    const refreshedItems = await loadResearchLabRunItems(env, runId);
+    const refreshedItem = refreshedItems.find((entry) => entry.id === item?.id) ?? null;
+    if (!refreshedItem || isTerminalItemStatus(refreshedItem.status) || refreshedItem.status === "persisting") {
+      break;
+    }
+    item = refreshedItem;
   }
 
   await finalizeRun(env, runId);
