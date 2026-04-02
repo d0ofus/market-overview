@@ -91,4 +91,39 @@ describe("research lab schemas", () => {
 
     expect(result.catalysts[0]?.direction).toBe("mixed");
   });
+
+  it("coerces mixed valuation labels to unclear", () => {
+    const result = validateResearchLabSynthesis({
+      ticker: "DOCN",
+      companyName: "DigitalOcean Holdings, Inc.",
+      opinion: "mixed",
+      overallSummary: "The setup is balanced.",
+      whyNow: "Current evidence is mixed.",
+      valuationView: {
+        label: "mixed",
+        summary: "Valuation inputs point in different directions.",
+      },
+      earningsQualityView: {
+        label: "mixed",
+        summary: "Operating trends are mixed.",
+      },
+      pricedInView: {
+        label: "unclear",
+        summary: "Pricing-in is hard to judge.",
+      },
+      catalysts: [],
+      risks: [],
+      contradictions: [],
+      confidence: {
+        label: "medium",
+        score: 0.5,
+        summary: "Evidence is balanced.",
+      },
+      monitoringPoints: ["Watch the next quarter."],
+      priorComparison: null,
+      evidenceIds: ["e1"],
+    }, ["e1"]);
+
+    expect(result.valuationView.label).toBe("unclear");
+  });
 });

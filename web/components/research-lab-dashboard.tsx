@@ -10,6 +10,7 @@ import {
   getResearchLabRunResults,
   getResearchLabRuns,
   getResearchLabRunStatus,
+  pumpResearchLabRun,
   type ResearchLabRunEventRecord,
   type ResearchLabRunListRow,
   type ResearchLabRunResultsResponse,
@@ -162,6 +163,13 @@ export function ResearchLabDashboard() {
   useEffect(() => {
     if (!selectedRunId || !selectedRun || !["queued", "running"].includes(selectedRun.status)) return;
     const eventSource = new EventSource(apiUrl(`/api/research-lab/runs/${encodeURIComponent(selectedRunId)}/stream`));
+    const kickProgress = () => {
+      void pumpResearchLabRun(selectedRunId).catch((error) => {
+        setStreamError(error instanceof Error ? error.message : "Failed to advance research lab run.");
+      });
+    };
+    kickProgress();
+    const intervalId = window.setInterval(kickProgress, 4_000);
     setStreamError(null);
 
     eventSource.addEventListener("update", (event) => {
@@ -193,6 +201,7 @@ export function ResearchLabDashboard() {
     });
 
     return () => {
+      window.clearInterval(intervalId);
       eventSource.close();
     };
   }, [selectedRunId, selectedRun?.status]);
@@ -212,6 +221,7 @@ export function ResearchLabDashboard() {
     setMessage(null);
     try {
       const response = await createResearchLabRun({ tickers });
+      void pumpResearchLabRun(response.run.id);
       setRuns((current) => [{
         run: response.run,
         profileName: status?.profile?.name ?? null,

@@ -63,6 +63,13 @@ const ternaryDirectionSchema = z.preprocess((value) => {
   return normalized === "neutral" ? "mixed" : normalized;
 }, z.enum(["positive", "negative", "mixed"]));
 
+const valuationLabelSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "mixed" || normalized === "neutral") return "unclear";
+  return normalized;
+}, z.enum(["cheap", "fair", "expensive", "unclear"]));
+
 const keyDriverSchema = z.object({
   title: z.string().min(1),
   whyItMatters: z.string().min(1),
@@ -87,7 +94,7 @@ export const researchLabSynthesisSchema = z.object({
   overallSummary: z.string().min(1),
   whyNow: z.string().min(1),
   valuationView: z.object({
-    label: z.enum(["cheap", "fair", "expensive", "unclear"]),
+    label: valuationLabelSchema,
     summary: z.string().min(1),
   }),
   earningsQualityView: z.object({

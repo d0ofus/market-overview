@@ -2335,15 +2335,19 @@ app.post("/api/research-lab/runs/:id/cancel", async (c) => {
   return c.json({ ok: true, run });
 });
 
+app.post("/api/research-lab/runs/:id/pump", async (c) => {
+  const runId = c.req.param("id");
+  c.executionCtx.waitUntil(drainResearchLabRun(c.env, runId));
+  return c.json({ ok: true, runId });
+});
+
 app.get("/api/research-lab/runs/:id", async (c) => {
-  await ensureResearchLabRunProgress(c.env, c.req.param("id"));
   const payload = await loadResearchLabRunStatusPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);
 });
 
 app.get("/api/research-lab/runs/:id/results", async (c) => {
-  await ensureResearchLabRunProgress(c.env, c.req.param("id"));
   const payload = await loadResearchLabRunResultsPayload(c.env, c.req.param("id"));
   if (!payload) return c.json({ error: "Research lab run not found." }, 404);
   return c.json(payload);
@@ -2362,7 +2366,6 @@ app.get("/api/research-lab/runs/:id/stream", async (c) => {
       };
       try {
         while (!closed) {
-          await ensureResearchLabRunProgress(c.env, runId);
           const payload = await loadResearchLabRunStreamPayload(c.env, runId);
           if (!payload) {
             controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "Research lab run not found." })}\n\n`));

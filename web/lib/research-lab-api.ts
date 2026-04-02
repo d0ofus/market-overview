@@ -354,6 +354,12 @@ export function cancelResearchLabRun(id: string) {
   });
 }
 
+export function pumpResearchLabRun(id: string) {
+  return getJson<{ ok: true; runId: string }>(`/api/research-lab/runs/${encodeURIComponent(id)}/pump`, {
+    method: "POST",
+  });
+}
+
 export function getResearchLabRuns(params?: number | {
   sourceType?: ResearchLabSourceType | null;
   sourceId?: string | null;

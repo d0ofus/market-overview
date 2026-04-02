@@ -25,6 +25,7 @@ import {
   getResearchLabRunStatus,
   getResearchLabRuns,
   getResearchLabTickerHistory,
+  pumpResearchLabRun,
   type ResearchLabProfileDetail,
   type ResearchLabRunItemResult,
   type ResearchLabRunListRow,
@@ -213,6 +214,13 @@ export function WatchlistCompilerDashboard() {
   useEffect(() => {
     if (!selectedResearchRunId || !researchStatus || researchStatus.run.id !== selectedResearchRunId || !["queued", "running"].includes(researchStatus.run.status)) return;
     const eventSource = new EventSource(apiUrl(`/api/research-lab/runs/${encodeURIComponent(selectedResearchRunId)}/stream`));
+    const kickProgress = () => {
+      void pumpResearchLabRun(selectedResearchRunId).catch((error) => {
+        setMessage(error instanceof Error ? error.message : "Failed to advance research-lab run.");
+      });
+    };
+    kickProgress();
+    const intervalId = window.setInterval(kickProgress, 4_000);
     eventSource.addEventListener("update", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as { status: ResearchLabRunStatusResponse; results: ResearchLabRunResultsResponse };
       applyResearchStatus(payload.status);
@@ -225,7 +233,10 @@ export function WatchlistCompilerDashboard() {
     eventSource.addEventListener("error", () => {
       eventSource.close();
     });
-    return () => eventSource.close();
+    return () => {
+      window.clearInterval(intervalId);
+      eventSource.close();
+    };
   }, [selectedResearchRunId, researchStatus?.run.id, researchStatus?.run.status]);
 
   const exportDate = localDateSuffix();
@@ -350,6 +361,7 @@ export function WatchlistCompilerDashboard() {
                   maxTickers,
                   profileId: selectedProfileId,
                 });
+                void pumpResearchLabRun(run.run.id);
                 setResearchRuns((current) => [{
                   run: run.run,
                   profileName: profiles.find((profile) => profile.id === (selectedProfileId ?? ""))?.name ?? null,
@@ -402,6 +414,7 @@ export function WatchlistCompilerDashboard() {
               try {
                 setResearchRunning(true);
                 const run = await createResearchLabRun({ tickers: manualTickers, sourceType: "manual", sourceLabel: selectedSet?.name ? `${selectedSet.name} Manual` : "Manual Research Run", maxTickers, profileId: selectedProfileId });
+                void pumpResearchLabRun(run.run.id);
                 setResearchRuns((current) => [{
                   run: run.run,
                   profileName: profiles.find((profile) => profile.id === (selectedProfileId ?? ""))?.name ?? null,
