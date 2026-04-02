@@ -2323,7 +2323,6 @@ app.post("/api/research-lab/runs", async (c) => {
   try {
     const payload = await c.req.json();
     const run = await startResearchLabRun(c.env, payload);
-    c.executionCtx.waitUntil(drainResearchLabRun(c.env, run.id));
     return c.json({ ok: true, run });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to start research lab run." }, 400);
