@@ -105,14 +105,40 @@ export function WatchlistCompilerDashboard() {
     }
   };
 
-  const loadResearchRunDetail = async (runId: string) => {
-    const [statusRes, resultsRes] = await Promise.all([
-      getResearchLabRunStatus(runId),
-      getResearchLabRunResults(runId),
-    ]);
+  const applyResearchStatus = (statusRes: ResearchLabRunStatusResponse) => {
     setResearchStatus(statusRes);
-    setResearchResults(resultsRes);
+    setResearchRuns((current) => {
+      const existing = current.find((row) => row.run.id === statusRes.run.id);
+      const row: ResearchLabRunListRow = {
+        run: statusRes.run,
+        profileName: statusRes.profile?.name ?? existing?.profileName ?? null,
+        profileVersionNumber: statusRes.profileVersion?.versionNumber ?? existing?.profileVersionNumber ?? null,
+        promptConfigName: statusRes.promptConfig?.name ?? existing?.promptConfigName ?? null,
+        evidenceProfileName: statusRes.evidenceProfile?.name ?? existing?.evidenceProfileName ?? null,
+      };
+      const index = current.findIndex((entry) => entry.run.id === row.run.id);
+      if (index >= 0) {
+        const next = [...current];
+        next[index] = row;
+        return next;
+      }
+      return [row, ...current].slice(0, 12);
+    });
     setResearchRunning(statusRes.run.status === "queued" || statusRes.run.status === "running");
+  };
+
+  const applyResearchResults = (resultsRes: ResearchLabRunResultsResponse) => {
+    setResearchResults(resultsRes);
+  };
+
+  const loadResearchRunDetail = async (runId: string) => {
+    const statusRes = await getResearchLabRunStatus(runId);
+    applyResearchStatus(statusRes);
+    void getResearchLabRunResults(runId).then((resultsRes) => {
+      setResearchResults((current) => (current?.run.id === runId || selectedResearchRunIdRef.current === runId || !current ? resultsRes : current));
+    }).catch((error) => {
+      setMessage(error instanceof Error ? error.message : "Failed to load research-lab results.");
+    });
   };
 
   const loadResearchRuns = async (setId: string, preferredRunId?: string | null) => {
@@ -181,13 +207,16 @@ export function WatchlistCompilerDashboard() {
   }, [selectedResearchRunId]);
 
   useEffect(() => {
+    setResearchResults((current) => (current?.run.id === selectedResearchRunId ? current : null));
+  }, [selectedResearchRunId]);
+
+  useEffect(() => {
     if (!selectedResearchRunId || !researchStatus || researchStatus.run.id !== selectedResearchRunId || !["queued", "running"].includes(researchStatus.run.status)) return;
     const eventSource = new EventSource(apiUrl(`/api/research-lab/runs/${encodeURIComponent(selectedResearchRunId)}/stream`));
     eventSource.addEventListener("update", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as { status: ResearchLabRunStatusResponse; results: ResearchLabRunResultsResponse };
-      setResearchStatus(payload.status);
-      setResearchResults(payload.results);
-      setResearchRunning(payload.status.run.status === "queued" || payload.status.run.status === "running");
+      applyResearchStatus(payload.status);
+      applyResearchResults(payload.results);
     });
     eventSource.addEventListener("done", () => {
       eventSource.close();
@@ -321,8 +350,32 @@ export function WatchlistCompilerDashboard() {
                   maxTickers,
                   profileId: selectedProfileId,
                 });
+                setResearchRuns((current) => [{
+                  run: run.run,
+                  profileName: profiles.find((profile) => profile.id === (selectedProfileId ?? ""))?.name ?? null,
+                  profileVersionNumber: null,
+                  promptConfigName: null,
+                  evidenceProfileName: null,
+                }, ...current.filter((entry) => entry.run.id !== run.run.id)].slice(0, 12));
+                setResearchStatus({
+                  run: run.run,
+                  items: [],
+                  events: [],
+                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
+                  profileVersion: null,
+                  promptConfig: null,
+                  evidenceProfile: null,
+                });
+                setResearchResults({
+                  run: run.run,
+                  items: [],
+                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
+                  profileVersion: null,
+                  promptConfig: null,
+                  evidenceProfile: null,
+                });
                 setSelectedResearchRunId(run.run.id);
-                await loadResearchRuns(selectedSetId, run.run.id);
+                void loadResearchRuns(selectedSetId, run.run.id);
               } catch (error) {
                 setResearchRunning(false);
                 setMessage(error instanceof Error ? error.message : "Failed to start research-lab run.");
@@ -349,9 +402,33 @@ export function WatchlistCompilerDashboard() {
               try {
                 setResearchRunning(true);
                 const run = await createResearchLabRun({ tickers: manualTickers, sourceType: "manual", sourceLabel: selectedSet?.name ? `${selectedSet.name} Manual` : "Manual Research Run", maxTickers, profileId: selectedProfileId });
+                setResearchRuns((current) => [{
+                  run: run.run,
+                  profileName: profiles.find((profile) => profile.id === (selectedProfileId ?? ""))?.name ?? null,
+                  profileVersionNumber: null,
+                  promptConfigName: null,
+                  evidenceProfileName: null,
+                }, ...current.filter((entry) => entry.run.id !== run.run.id)].slice(0, 12));
+                setResearchStatus({
+                  run: run.run,
+                  items: [],
+                  events: [],
+                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
+                  profileVersion: null,
+                  promptConfig: null,
+                  evidenceProfile: null,
+                });
+                setResearchResults({
+                  run: run.run,
+                  items: [],
+                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
+                  profileVersion: null,
+                  promptConfig: null,
+                  evidenceProfile: null,
+                });
                 setSelectedResearchRunId(run.run.id);
                 setManualTickerInput("");
-                await loadResearchRunDetail(run.run.id);
+                void loadResearchRunDetail(run.run.id);
               } catch (error) {
                 setResearchRunning(false);
                 setMessage(error instanceof Error ? error.message : "Failed to start manual research-lab run.");

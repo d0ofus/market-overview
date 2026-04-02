@@ -69,9 +69,8 @@ export function ResearchLabDashboard() {
     [runs, selectedRunId, status],
   );
 
-  const applyPayload = (statusPayload: ResearchLabRunStatusResponse, resultsPayload: ResearchLabRunResultsResponse) => {
+  const applyStatusPayload = (statusPayload: ResearchLabRunStatusResponse) => {
     setStatus(statusPayload);
-    setResults(resultsPayload);
     setRuns((current) => {
       const row: ResearchLabRunListRow = {
         run: statusPayload.run,
@@ -90,6 +89,23 @@ export function ResearchLabDashboard() {
     });
   };
 
+  const applyResultsPayload = (resultsPayload: ResearchLabRunResultsResponse) => {
+    setResults(resultsPayload);
+  };
+
+  const loadRunResults = async (runId: string) => {
+    const resultsPayload = await getResearchLabRunResults(runId);
+    setResults((current) => (current?.run.id === runId || selectedRunId === runId || !current ? resultsPayload : current));
+  };
+
+  const loadRunDetail = async (runId: string) => {
+    const statusPayload = await getResearchLabRunStatus(runId);
+    applyStatusPayload(statusPayload);
+    void loadRunResults(runId).catch((error) => {
+      setMessage(error instanceof Error ? error.message : "Failed to load research lab results.");
+    });
+  };
+
   const loadRuns = async (preferredRunId?: string | null) => {
     setLoading(true);
     try {
@@ -99,11 +115,7 @@ export function ResearchLabDashboard() {
       const nextRunId = preferredRunId ?? selectedRunId ?? rows[0]?.run.id ?? null;
       setSelectedRunId(nextRunId);
       if (nextRunId) {
-        const [statusPayload, resultsPayload] = await Promise.all([
-          getResearchLabRunStatus(nextRunId),
-          getResearchLabRunResults(nextRunId),
-        ]);
-        applyPayload(statusPayload, resultsPayload);
+        await loadRunDetail(nextRunId);
       } else {
         setStatus(null);
         setResults(null);
@@ -121,15 +133,21 @@ export function ResearchLabDashboard() {
 
   useEffect(() => {
     if (!selectedRunId) return;
+    setResults((current) => (current?.run.id === selectedRunId ? current : null));
     let cancelled = false;
     (async () => {
       try {
-        const [statusPayload, resultsPayload] = await Promise.all([
-          getResearchLabRunStatus(selectedRunId),
-          getResearchLabRunResults(selectedRunId),
-        ]);
+        const statusPayload = await getResearchLabRunStatus(selectedRunId);
         if (cancelled) return;
-        applyPayload(statusPayload, resultsPayload);
+        applyStatusPayload(statusPayload);
+        void getResearchLabRunResults(selectedRunId).then((resultsPayload) => {
+          if (cancelled) return;
+          applyResultsPayload(resultsPayload);
+        }).catch((error) => {
+          if (!cancelled) {
+            setMessage(error instanceof Error ? error.message : "Failed to load research lab results.");
+          }
+        });
       } catch (error) {
         if (!cancelled) {
           setMessage(error instanceof Error ? error.message : "Failed to load research lab run.");
@@ -152,7 +170,8 @@ export function ResearchLabDashboard() {
           status: ResearchLabRunStatusResponse;
           results: ResearchLabRunResultsResponse;
         };
-        applyPayload(payload.status, payload.results);
+        applyStatusPayload(payload.status);
+        applyResultsPayload(payload.results);
       } catch (error) {
         setStreamError(error instanceof Error ? error.message : "Failed to parse stream update.");
       }
@@ -193,9 +212,33 @@ export function ResearchLabDashboard() {
     setMessage(null);
     try {
       const response = await createResearchLabRun({ tickers });
+      setRuns((current) => [{
+        run: response.run,
+        profileName: status?.profile?.name ?? null,
+        profileVersionNumber: status?.profileVersion?.versionNumber ?? null,
+        promptConfigName: status?.promptConfig?.name ?? null,
+        evidenceProfileName: status?.evidenceProfile?.name ?? null,
+      }, ...current.filter((entry) => entry.run.id !== response.run.id)].slice(0, 10));
+      setStatus({
+        run: response.run,
+        items: [],
+        events: [],
+        profile: status?.profile ?? null,
+        profileVersion: status?.profileVersion ?? null,
+        promptConfig: status?.promptConfig ?? null,
+        evidenceProfile: status?.evidenceProfile ?? null,
+      });
+      setResults({
+        run: response.run,
+        items: [],
+        profile: status?.profile ?? null,
+        profileVersion: status?.profileVersion ?? null,
+        promptConfig: status?.promptConfig ?? null,
+        evidenceProfile: status?.evidenceProfile ?? null,
+      });
       setSelectedRunId(response.run.id);
       setTickerInput(tickers.join(", "));
-      await loadRuns(response.run.id);
+      void loadRuns(response.run.id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to start research lab run.");
     } finally {
