@@ -7,7 +7,20 @@ import { adminFetch, deleteSectorEntry, getEtfConstituents, getIndustryEtfs, get
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 
-const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+const formatLocalMonthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+const formatLocalDateInputValue = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const parseMonthKey = (value: string) => {
+  const [year, month] = value.split("-").map(Number);
+  return { year, month };
+};
+const getDaysInMonth = (value: string) => {
+  const { year, month } = parseMonthKey(value);
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
+const getMonthStartWeekday = (value: string) => {
+  const { year, month } = parseMonthKey(value);
+  return new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+};
 const pctCls = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
 const CHARTS_PER_PAGE = 20;
 
@@ -122,7 +135,7 @@ function CollapsibleSection({
 
 export function SectorTracker() {
   const [view, setView] = useState<"list" | "calendar">("calendar");
-  const [month, setMonth] = useState(monthKey());
+  const [month, setMonth] = useState(formatLocalMonthKey());
   const [entries, setEntries] = useState<SectorEntry[]>([]);
   const [calendarRows, setCalendarRows] = useState<SectorEntry[]>([]);
   const [symbolOptions, setSymbolOptions] = useState<Array<{ ticker: string; name: string | null }>>([]);
@@ -131,7 +144,7 @@ export function SectorTracker() {
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
-  const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
+  const [eventDate, setEventDate] = useState(formatLocalDateInputValue());
   const [notes, setNotes] = useState("");
   const [tickerInput, setTickerInput] = useState("");
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
@@ -262,9 +275,26 @@ export function SectorTracker() {
   };
 
   const daysInMonth = useMemo(() => {
-    const [y, m] = month.split("-").map(Number);
-    return new Date(y, m, 0).getDate();
+    return getDaysInMonth(month);
   }, [month]);
+
+  const monthStartWeekday = useMemo(() => getMonthStartWeekday(month), [month]);
+
+  const calendarCells = useMemo(() => {
+    const cells: Array<{ key: string; date: string | null; day: number | null }> = [];
+    for (let i = 0; i < monthStartWeekday; i += 1) {
+      cells.push({ key: `blank-start-${i}`, date: null, day: null });
+    }
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const date = `${month}-${String(day).padStart(2, "0")}`;
+      cells.push({ key: date, date, day });
+    }
+    const trailingCells = (7 - (cells.length % 7)) % 7;
+    for (let i = 0; i < trailingCells; i += 1) {
+      cells.push({ key: `blank-end-${i}`, date: null, day: null });
+    }
+    return cells;
+  }, [daysInMonth, month, monthStartWeekday]);
 
   const calendarMap = useMemo(() => {
     const map = new Map<string, SectorEntry[]>();
@@ -599,9 +629,10 @@ export function SectorTracker() {
               ))}
             </div>
             <div className="mt-1 grid grid-cols-7 gap-2">
-              {Array.from({ length: daysInMonth }, (_, i) => {
-                const day = i + 1;
-                const date = `${month}-${String(day).padStart(2, "0")}`;
+              {calendarCells.map(({ key, date, day }) => {
+                if (!date || !day) {
+                  return <div key={key} aria-hidden="true" className="min-h-48 rounded border border-transparent bg-transparent p-1.5" />;
+                }
                 const items = calendarMap.get(date) ?? [];
                 return (
                   <div key={date} className="min-h-48 rounded border border-borderSoft/70 bg-panelSoft/40 p-1.5">
