@@ -55,10 +55,6 @@ function localDateSuffix() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
-function parseManualTickers(value: string) {
-  return Array.from(new Set(value.split(/[\s,;\n\r\t]+/).map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
-}
-
 export function WatchlistCompilerDashboard() {
   const [sets, setSets] = useState<WatchlistCompilerSetRow[]>([]);
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
@@ -84,7 +80,6 @@ export function WatchlistCompilerDashboard() {
   const [researchStopping, setResearchStopping] = useState(false);
   const [sourceBasis, setSourceBasis] = useState<"compiled" | "unique">("unique");
   const [maxTickers, setMaxTickers] = useState(12);
-  const [manualTickerInput, setManualTickerInput] = useState("");
   const [historyTicker, setHistoryTicker] = useState<string | null>(null);
   const [historyRows, setHistoryRows] = useState<ResearchLabTickerHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -93,7 +88,6 @@ export function WatchlistCompilerDashboard() {
   const selectedSet = useMemo(() => sets.find((row) => row.id === selectedSetId) ?? null, [sets, selectedSetId]);
   const visibleTickers = useMemo(() => (viewMode === "compiled" ? compiledRows.map((row) => row.ticker) : uniqueRows.map((row) => row.ticker)), [compiledRows, uniqueRows, viewMode]);
   const uniqueVisibleTickers = useMemo(() => Array.from(new Set(visibleTickers)), [visibleTickers]);
-  const manualTickers = useMemo(() => parseManualTickers(manualTickerInput), [manualTickerInput]);
 
   const loadProfiles = async () => {
     try {
@@ -408,45 +402,6 @@ export function WatchlistCompilerDashboard() {
                 setResearchStopping(false);
               }
             } : undefined}
-            manualTickerInput={manualTickerInput}
-            onManualTickerInputChange={setManualTickerInput}
-            onRunManual={async () => {
-              try {
-                setResearchRunning(true);
-                const run = await createResearchLabRun({ tickers: manualTickers, sourceType: "manual", sourceLabel: selectedSet?.name ? `${selectedSet.name} Manual` : "Manual Research Run", maxTickers, profileId: selectedProfileId });
-                void pumpResearchLabRun(run.run.id);
-                setResearchRuns((current) => [{
-                  run: run.run,
-                  profileName: profiles.find((profile) => profile.id === (selectedProfileId ?? ""))?.name ?? null,
-                  profileVersionNumber: null,
-                  promptConfigName: null,
-                  evidenceProfileName: null,
-                }, ...current.filter((entry) => entry.run.id !== run.run.id)].slice(0, 12));
-                setResearchStatus({
-                  run: run.run,
-                  items: [],
-                  events: [],
-                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
-                  profileVersion: null,
-                  promptConfig: null,
-                  evidenceProfile: null,
-                });
-                setResearchResults({
-                  run: run.run,
-                  items: [],
-                  profile: profiles.find((profile) => profile.id === (selectedProfileId ?? "")) ?? null,
-                  profileVersion: null,
-                  promptConfig: null,
-                  evidenceProfile: null,
-                });
-                setSelectedResearchRunId(run.run.id);
-                setManualTickerInput("");
-                void loadResearchRunDetail(run.run.id);
-              } catch (error) {
-                setResearchRunning(false);
-                setMessage(error instanceof Error ? error.message : "Failed to start manual research-lab run.");
-              }
-            }}
           />
         ) : null}
 
