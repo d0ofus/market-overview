@@ -75,18 +75,21 @@
 - Remove top left Market command centre box
 
 ## Research Lab
+- Make token use more efficient
+
 - Add in comparison with peers
 - Add in primary drivers analysis in synthesis layer. What are they and where they stand, and correlation
 - Sort news by dates
 - Add in current analyst consensus
 - Check on database management 
-- Make token use more efficient
 - See what prompts are being used
 - Link research with /peer-groups
 - Add ability to assess Relative strength to index
 - add in analyst recommendations and analyst reports analysis as well
 
 ## New Functions
+- Add in morning brief section using Claude API
+- Add macro dashboard
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
 - Add page to search for latest macroeconomic analysis (including charts)
