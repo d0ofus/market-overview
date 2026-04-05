@@ -41,12 +41,18 @@ function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("en-US", {
+  const date = new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "2-digit",
+  }).format(parsed);
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+  }).format(parsed);
+  const time = new Intl.DateTimeFormat("en-US", {
     hour: "2-digit",
     minute: "2-digit",
   }).format(parsed);
+  return `${date}, ${weekday}, ${time}`;
 }
 
 function formatTime(value: string | null | undefined): string {
