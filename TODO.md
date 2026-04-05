@@ -85,6 +85,7 @@
 - Add in morning brief section using Claude API
 - Add macro dashboard
 - Create correlation/cointegration matrix of peer-groups or manual input tickers
+- Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
 - Add page to search for latest macroeconomic analysis (including charts)
