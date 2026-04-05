@@ -7,10 +7,12 @@ import { ResearchLabResultCard } from "./research-lab-result-card";
 import {
   cancelResearchLabRun,
   createResearchLabRun,
+  getResearchLabProfiles,
   getResearchLabRunResults,
   getResearchLabRuns,
   getResearchLabRunStatus,
   pumpResearchLabRun,
+  type ResearchLabProfileDetail,
   type ResearchLabRunEventRecord,
   type ResearchLabRunListRow,
   type ResearchLabRunResultsResponse,
@@ -53,8 +55,54 @@ function sortEvents(events: ResearchLabRunEventRecord[]) {
   return [...events].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
+function buildOptimisticProfileState(profile: ResearchLabProfileDetail | null) {
+  if (!profile?.currentVersion) {
+    return {
+      profile: profile ?? null,
+      profileVersion: null,
+      promptConfig: null,
+      evidenceProfile: null,
+    };
+  }
+
+  return {
+    profile,
+    profileVersion: profile.currentVersion,
+    promptConfig: {
+      id: profile.currentVersion.id,
+      name: `${profile.name} (${profile.currentVersion.label})`,
+      description: profile.description,
+      configFamily: `profile:${profile.id}`,
+      modelFamily: profile.currentVersion.modelFamily,
+      systemPrompt: profile.currentVersion.systemPrompt,
+      schemaVersion: profile.currentVersion.schemaVersion,
+      isDefault: profile.isDefault,
+      profileId: profile.id,
+      profileVersionId: profile.currentVersion.id,
+      createdAt: profile.currentVersion.createdAt,
+      updatedAt: profile.updatedAt,
+      synthesisConfigJson: {
+        ...(profile.currentVersion.synthesisConfigJson ?? {}),
+        modules: profile.currentVersion.modulesConfigJson ?? {},
+      },
+    },
+    evidenceProfile: {
+      id: profile.currentVersion.id,
+      name: `${profile.name} Evidence (${profile.currentVersion.label})`,
+      description: profile.description,
+      configFamily: `profile:${profile.id}`,
+      isDefault: profile.isDefault,
+      queryConfigJson: profile.currentVersion.evidenceConfigJson ?? {},
+      createdAt: profile.currentVersion.createdAt,
+      updatedAt: profile.updatedAt,
+    },
+  };
+}
+
 export function ResearchLabDashboard() {
   const [tickerInput, setTickerInput] = useState("");
+  const [profiles, setProfiles] = useState<ResearchLabProfileDetail[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [runs, setRuns] = useState<ResearchLabRunListRow[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [status, setStatus] = useState<ResearchLabRunStatusResponse | null>(null);
@@ -68,6 +116,10 @@ export function ResearchLabDashboard() {
   const selectedRun = useMemo(
     () => runs.find((row) => row.run.id === selectedRunId)?.run ?? status?.run ?? null,
     [runs, selectedRunId, status],
+  );
+  const selectedProfile = useMemo(
+    () => profiles.find((profile) => profile.id === selectedProfileId) ?? null,
+    [profiles, selectedProfileId],
   );
 
   const applyStatusPayload = (statusPayload: ResearchLabRunStatusResponse) => {
@@ -128,8 +180,26 @@ export function ResearchLabDashboard() {
     }
   };
 
+  const loadProfiles = async (preferredProfileId?: string | null) => {
+    try {
+      const response = await getResearchLabProfiles();
+      const rows = response.rows ?? [];
+      setProfiles(rows);
+      const currentSelection = preferredProfileId ?? selectedProfileId;
+      const nextProfileId = preferredProfileId
+        ?? rows.find((profile) => profile.id === currentSelection)?.id
+        ?? rows.find((profile) => profile.isDefault)?.id
+        ?? rows[0]?.id
+        ?? null;
+      setSelectedProfileId(nextProfileId);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to load research lab profiles.");
+    }
+  };
+
   useEffect(() => {
     void loadRuns();
+    void loadProfiles();
   }, []);
 
   useEffect(() => {
@@ -220,31 +290,36 @@ export function ResearchLabDashboard() {
     setStarting(true);
     setMessage(null);
     try {
-      const response = await createResearchLabRun({ tickers });
+      const runProfile = selectedProfile;
+      const optimisticProfileState = buildOptimisticProfileState(runProfile);
+      const response = await createResearchLabRun({
+        tickers,
+        profileId: selectedProfileId,
+      });
       void pumpResearchLabRun(response.run.id);
       setRuns((current) => [{
         run: response.run,
-        profileName: status?.profile?.name ?? null,
-        profileVersionNumber: status?.profileVersion?.versionNumber ?? null,
-        promptConfigName: status?.promptConfig?.name ?? null,
-        evidenceProfileName: status?.evidenceProfile?.name ?? null,
+        profileName: runProfile?.name ?? null,
+        profileVersionNumber: runProfile?.currentVersion?.versionNumber ?? null,
+        promptConfigName: runProfile?.currentVersion ? `${runProfile.name} (${runProfile.currentVersion.label})` : null,
+        evidenceProfileName: runProfile?.currentVersion ? `${runProfile.name} Evidence (${runProfile.currentVersion.label})` : null,
       }, ...current.filter((entry) => entry.run.id !== response.run.id)].slice(0, 10));
       setStatus({
         run: response.run,
         items: [],
         events: [],
-        profile: status?.profile ?? null,
-        profileVersion: status?.profileVersion ?? null,
-        promptConfig: status?.promptConfig ?? null,
-        evidenceProfile: status?.evidenceProfile ?? null,
+        profile: optimisticProfileState.profile,
+        profileVersion: optimisticProfileState.profileVersion,
+        promptConfig: optimisticProfileState.promptConfig,
+        evidenceProfile: optimisticProfileState.evidenceProfile,
       });
       setResults({
         run: response.run,
         items: [],
-        profile: status?.profile ?? null,
-        profileVersion: status?.profileVersion ?? null,
-        promptConfig: status?.promptConfig ?? null,
-        evidenceProfile: status?.evidenceProfile ?? null,
+        profile: optimisticProfileState.profile,
+        profileVersion: optimisticProfileState.profileVersion,
+        promptConfig: optimisticProfileState.promptConfig,
+        evidenceProfile: optimisticProfileState.evidenceProfile,
       });
       setSelectedRunId(response.run.id);
       setTickerInput(tickers.join(", "));
@@ -290,7 +365,10 @@ export function ResearchLabDashboard() {
             </div>
             <button
               type="button"
-              onClick={() => void loadRuns(selectedRunId)}
+              onClick={() => {
+                void loadRuns(selectedRunId);
+                void loadProfiles(selectedProfileId);
+              }}
               className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/80 bg-panelSoft/80 px-3 py-2 text-sm text-slate-200 transition hover:border-accent/40 hover:text-text"
             >
               <RefreshCw className="h-4 w-4" />
@@ -305,6 +383,20 @@ export function ResearchLabDashboard() {
               placeholder="AAPL, MSFT, NVDA"
               className="h-12 rounded-2xl border border-borderSoft/80 bg-panelSoft/70 px-4 text-sm text-text outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
             />
+            <label className="text-xs uppercase tracking-[0.24em] text-slate-500">
+              Profile
+              <select
+                value={selectedProfileId ?? ""}
+                onChange={(event) => setSelectedProfileId(event.target.value || null)}
+                className="mt-2 h-12 w-full rounded-2xl border border-borderSoft/80 bg-panelSoft/70 px-4 text-sm text-text outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+              >
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}{profile.isDefault ? " (Default)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="flex items-center gap-3">
               <button
                 type="button"
