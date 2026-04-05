@@ -2,7 +2,6 @@ import { AdminBuilder } from "@/components/admin-builder";
 import { AdminSection } from "@/components/admin-section";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { PeerGroupsAdminPanel } from "@/components/peer-groups-admin-panel";
-import { ResearchAdminPanel } from "@/components/research-admin-panel";
 import { ResearchLabAdminPanel } from "@/components/research-lab-admin-panel";
 import { WatchlistCompilerAdminPanel } from "@/components/watchlist-compiler-admin-panel";
 
@@ -60,10 +59,7 @@ export default function AdminPage() {
         description="Manage research profiles, prompt versions, search templates, and scoring rubrics."
         anchorId="admin-ai-research"
       >
-        <div className="space-y-4">
-          <ResearchAdminPanel />
-          <ResearchLabAdminPanel />
-        </div>
+        <ResearchLabAdminPanel />
       </AdminSection>
     </div>
   );
