@@ -5,20 +5,24 @@ import { ChevronDown, ChevronUp, Loader2, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addAdminPeerGroupMember,
+  addAdminSymbolToDirectory,
   bootstrapAdminPeerGroups,
   createAdminPeerGroup,
   deleteAdminPeerGroup,
   getAdminPeerGroups,
+  getAdminSymbolCatalogStatus,
   getAdminPeerTickerDetail,
   getPeerDirectory,
   removeAdminPeerGroupMember,
   searchAdminPeerTickers,
   seedAdminPeerGroup,
+  syncAdminSymbolCatalog,
   updateAdminPeerGroup,
   type PeerDirectoryRow,
   type PeerGroupRow,
   type PeerGroupType,
   type PeerTickerDetail,
+  type SymbolCatalogStatus,
 } from "@/lib/api";
 
 const EMPTY_FORM = {
@@ -65,6 +69,9 @@ export function PeerGroupsAdminPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [catalogStatus, setCatalogStatus] = useState<SymbolCatalogStatus | null>(null);
+  const [catalogSyncing, setCatalogSyncing] = useState(false);
+  const [addingSymbol, setAddingSymbol] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [bootstrapLimit, setBootstrapLimit] = useState("25");
   const [bootstrapProviderMode, setBootstrapProviderMode] = useState<"both" | "finnhub" | "fmp">("finnhub");
@@ -82,8 +89,12 @@ export function PeerGroupsAdminPanel() {
   const load = async (preferredGroupId?: string | null) => {
     setLoading(true);
     try {
-      const res = await getAdminPeerGroups();
+      const [res, nextCatalogStatus] = await Promise.all([
+        getAdminPeerGroups(),
+        getAdminSymbolCatalogStatus().catch(() => null),
+      ]);
       const rows = res.rows ?? [];
+      setCatalogStatus(nextCatalogStatus);
       setGroups(rows);
       const nextId = preferredGroupId ?? selectedGroupId ?? rows[0]?.id ?? null;
       setSelectedGroupId(nextId);
@@ -110,6 +121,14 @@ export function PeerGroupsAdminPanel() {
       setMessage(error instanceof Error ? error.message : "Failed to load peer-group admin data.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshCatalogStatus = async () => {
+    try {
+      setCatalogStatus(await getAdminSymbolCatalogStatus());
+    } catch {
+      // Keep the existing UI usable even if the status endpoint is temporarily unavailable.
     }
   };
 
@@ -236,6 +255,13 @@ export function PeerGroupsAdminPanel() {
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId],
   );
+  const selectedSymbol = selectedTickerDetail?.symbol ?? null;
+  const canAddSelectedTickerToDirectory = Boolean(selectedSymbol?.ticker) && (!selectedSymbol?.persisted || !selectedSymbol?.isActive);
+  const selectedSymbolActionLabel = !selectedSymbol?.persisted
+    ? "Add To Directory"
+    : !selectedSymbol?.isActive
+      ? "Reactivate Symbol"
+      : "In Directory";
 
   return (
     <section className="space-y-4">
@@ -441,6 +467,76 @@ export function PeerGroupsAdminPanel() {
 
           <div className="card p-3">
             <div className="mb-3 text-sm font-semibold text-slate-200">Ticker Search</div>
+            <div className="mb-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-300">Symbol Directory</div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    NasdaqTrader catalog sync with manual overrides preserved for symbols you add directly.
+                  </div>
+                </div>
+                <button
+                  className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent disabled:opacity-50"
+                  disabled={catalogSyncing}
+                  onClick={async () => {
+                    setCatalogSyncing(true);
+                    setMessage(null);
+                    try {
+                      const result = await syncAdminSymbolCatalog();
+                      await refreshCatalogStatus();
+                      flashMessage(
+                        `Symbol sync completed: ${result.inserted} added, ${result.reactivated} reactivated, ${result.deactivated} deactivated.`,
+                        5000,
+                      );
+                    } catch (error) {
+                      setMessage(error instanceof Error ? error.message : "Failed to sync the symbol directory.");
+                    } finally {
+                      setCatalogSyncing(false);
+                    }
+                  }}
+                  type="button"
+                >
+                  {catalogSyncing ? "Syncing..." : "Run Sync Now"}
+                </button>
+              </div>
+
+              {catalogStatus ? (
+                <div className="mt-3 grid gap-2 text-[11px] text-slate-300 md:grid-cols-2 xl:grid-cols-5">
+                  <div className="rounded border border-borderSoft/50 bg-panelSoft px-3 py-2">
+                    <div className="text-slate-500">Active symbols</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{catalogStatus.activeCount}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/50 bg-panelSoft px-3 py-2">
+                    <div className="text-slate-500">Inactive symbols</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{catalogStatus.inactiveCount}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/50 bg-panelSoft px-3 py-2">
+                    <div className="text-slate-500">Manual overrides</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{catalogStatus.manualCount}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/50 bg-panelSoft px-3 py-2">
+                    <div className="text-slate-500">Catalog managed</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{catalogStatus.catalogManagedCount}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/50 bg-panelSoft px-3 py-2">
+                    <div className="text-slate-500">Scheduled sync</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{catalogStatus.scheduledEnabled ? "Enabled" : "Disabled"}</div>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-3 text-[11px] text-slate-500">Symbol catalog status is unavailable until the updated worker is live.</p>
+              )}
+
+              {catalogStatus?.status || catalogStatus?.lastSyncedAt || catalogStatus?.error ? (
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                  <span>Status: {catalogStatus.status ?? "unknown"}</span>
+                  <span>Last sync: {catalogStatus.lastSyncedAt ? new Date(catalogStatus.lastSyncedAt).toLocaleString() : "never"}</span>
+                  <span>Rows fetched: {catalogStatus.recordsCount ?? 0}</span>
+                  {catalogStatus.error ? <span className="text-red-300">Last error: {catalogStatus.error}</span> : null}
+                </div>
+              ) : null}
+            </div>
+
             <Collapsible.Root open={bootstrapOpen} onOpenChange={setBootstrapOpen} className="mb-3 overflow-hidden rounded border border-borderSoft/60 bg-slate-900/30">
               <Collapsible.Trigger className="flex w-full items-center justify-between px-3 py-3 text-left">
                 <div>
@@ -566,30 +662,93 @@ export function PeerGroupsAdminPanel() {
             <div className="card p-3">
               <div className="mb-2 flex items-center justify-between">
                 <h4 className="text-sm font-semibold text-slate-200">Selected Ticker</h4>
-                <button
-                  className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent"
-                  disabled={!selectedTicker}
-                  onClick={async () => {
-                    if (!selectedTicker) return;
-                    try {
-                      await seedAdminPeerGroup(selectedTicker);
-                      await load(selectedGroupId);
-                      await onSelectTicker(selectedTicker);
-                      flashMessage(`Seeded peers for ${selectedTicker}.`);
-                    } catch (error) {
-                      setMessage(error instanceof Error ? error.message : `Failed to seed peers for ${selectedTicker}.`);
-                    }
-                  }}
-                  type="button"
-                >
-                  Seed Peers
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-200 disabled:opacity-50"
+                    disabled={!canAddSelectedTickerToDirectory || addingSymbol}
+                    onClick={async () => {
+                      if (!selectedSymbol?.ticker || !canAddSelectedTickerToDirectory) return;
+                      setAddingSymbol(true);
+                      setMessage(null);
+                      try {
+                        const result = await addAdminSymbolToDirectory(selectedSymbol.ticker);
+                        await load(selectedGroupId);
+                        if (result.detail) {
+                          setSelectedTickerDetail(result.detail);
+                          setSelectedTicker(result.detail.symbol.ticker);
+                        } else {
+                          await onSelectTicker(selectedSymbol.ticker);
+                        }
+                        await refreshCatalogStatus();
+                        flashMessage(
+                          result.created
+                            ? `${result.ticker} was added to the symbol directory.`
+                            : result.reactivated
+                              ? `${result.ticker} was reactivated in the symbol directory.`
+                              : `${result.ticker} is already available in the symbol directory.`,
+                        );
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : `Failed to add ${selectedSymbol.ticker} to the symbol directory.`);
+                      } finally {
+                        setAddingSymbol(false);
+                      }
+                    }}
+                    type="button"
+                  >
+                    {addingSymbol ? "Saving..." : selectedSymbolActionLabel}
+                  </button>
+                  <button
+                    className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent"
+                    disabled={!selectedTicker}
+                    onClick={async () => {
+                      if (!selectedTicker) return;
+                      try {
+                        await seedAdminPeerGroup(selectedTicker);
+                        await load(selectedGroupId);
+                        await onSelectTicker(selectedTicker);
+                        flashMessage(`Seeded peers for ${selectedTicker}.`);
+                      } catch (error) {
+                        setMessage(error instanceof Error ? error.message : `Failed to seed peers for ${selectedTicker}.`);
+                      }
+                    }}
+                    type="button"
+                  >
+                    Seed Peers
+                  </button>
+                </div>
               </div>
               {selectedTickerDetail ? (
                 <div className="space-y-3 text-sm">
                   <div>
                     <div className="font-semibold text-accent">{selectedTickerDetail.symbol.ticker}</div>
                     <div className="text-slate-300">{selectedTickerDetail.symbol.name ?? "-"}</div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-[11px] text-slate-300">
+                    <span className="rounded border border-borderSoft/60 bg-slate-900/40 px-2 py-1">
+                      {selectedTickerDetail.symbol.persisted ? "In directory" : "Resolved only"}
+                    </span>
+                    {selectedTickerDetail.symbol.persisted ? (
+                      <span className={`rounded border px-2 py-1 ${selectedTickerDetail.symbol.isActive ? "border-emerald-500/30 text-emerald-300" : "border-amber-500/30 text-amber-300"}`}>
+                        {selectedTickerDetail.symbol.isActive ? "Active" : "Inactive"}
+                      </span>
+                    ) : null}
+                    {selectedTickerDetail.symbol.listingSource ? (
+                      <span className="rounded border border-borderSoft/60 bg-slate-900/40 px-2 py-1">
+                        Source: {selectedTickerDetail.symbol.listingSource}
+                      </span>
+                    ) : null}
+                    {selectedTickerDetail.symbol.catalogManaged ? (
+                      <span className="rounded border border-borderSoft/60 bg-slate-900/40 px-2 py-1">
+                        Catalog managed
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    {selectedTickerDetail.symbol.persisted
+                      ? selectedTickerDetail.symbol.isActive
+                        ? "This symbol is currently available in the peer-group directory."
+                        : "This symbol exists in the directory but is inactive. Reactivate it to include it in active candidate flows."
+                      : "This symbol resolved successfully but is not yet stored in the directory."}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {selectedTickerDetail.groups.map((group) => (
@@ -653,7 +812,14 @@ export function PeerGroupsAdminPanel() {
                 {groupMembers.map((row) => (
                   <div key={`${selectedGroupId}-${row.ticker}`} className="flex items-center justify-between rounded border border-borderSoft/60 px-3 py-2 text-sm">
                     <div>
-                      <div className="font-semibold text-accent">{row.ticker}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-semibold text-accent">{row.ticker}</div>
+                        {row.symbolIsActive === false ? (
+                          <span className="rounded border border-amber-500/30 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-amber-300">
+                            inactive
+                          </span>
+                        ) : null}
+                      </div>
                       <div className="text-[11px] text-slate-400">{row.name ?? "-"}</div>
                     </div>
                     {selectedGroupId && (

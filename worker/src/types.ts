@@ -31,6 +31,7 @@ export type Env = {
   OPENAI_MODEL?: string;
   PERPLEXITY_API_KEY?: string;
   PERPLEXITY_MODEL?: string;
+  SYMBOL_CATALOG_SYNC_ENABLED?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

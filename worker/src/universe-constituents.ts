@@ -116,6 +116,11 @@ export function parseNasdaqTradedCommonStocks(raw: string): NasdaqTraderCommonSt
   return out;
 }
 
+export async function loadNasdaqTraderCommonStocks(): Promise<NasdaqTraderCommonStock[]> {
+  const raw = await fetchText(NASDAQ_TRADER_URL);
+  return parseNasdaqTradedCommonStocks(raw);
+}
+
 export function parseSp500Csv(raw: string): string[] {
   return parseTickerCsv(raw, ["Symbol"]);
 }
@@ -170,8 +175,7 @@ export async function loadNasdaqTraderUniverses(): Promise<{
   nyseTickers: string[];
   allCommonTickers: string[];
 }> {
-  const raw = await fetchText(NASDAQ_TRADER_URL);
-  const rows = parseNasdaqTradedCommonStocks(raw);
+  const rows = await loadNasdaqTraderCommonStocks();
   const nasdaqTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "Q").map((r) => r.symbol));
   const nyseTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "N").map((r) => r.symbol));
   const allCommonTickers = dedupeSorted(rows.map((r) => r.symbol));

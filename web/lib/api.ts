@@ -749,6 +749,8 @@ export type PeerDirectoryRow = {
   exchange: string | null;
   sector: string | null;
   industry: string | null;
+  symbolIsActive: boolean;
+  listingSource: string | null;
   groups: PeerGroupRow[];
 };
 
@@ -770,8 +772,30 @@ export type PeerTickerDetail = {
     sector: string | null;
     industry: string | null;
     sharesOutstanding: number | null;
+    persisted: boolean;
+    isActive: boolean;
+    listingSource: string | null;
+    catalogManaged: boolean;
+    catalogLastSeenAt: string | null;
+    deactivatedAt: string | null;
   };
   groups: Array<PeerGroupRow & { members: PeerTickerMember[] }>;
+};
+
+export type SymbolCatalogStatus = {
+  sourceKey: string;
+  scheduledEnabled: boolean;
+  schemaReady: boolean;
+  lastSyncedAt: string | null;
+  status: string | null;
+  error: string | null;
+  recordsCount: number | null;
+  updatedAt: string | null;
+  totalCount: number;
+  activeCount: number;
+  inactiveCount: number;
+  manualCount: number;
+  catalogManagedCount: number;
 };
 
 export type PeerMetricRow = {
@@ -1376,6 +1400,38 @@ export function searchAdminPeerTickers(q: string) {
 
 export function getAdminPeerTickerDetail(ticker: string) {
   return adminFetch<PeerTickerDetail>(`/api/admin/peer-groups/ticker/${encodeURIComponent(ticker)}`);
+}
+
+export function addAdminSymbolToDirectory(ticker: string) {
+  return adminFetch<{ ok: boolean; ticker: string; created: boolean; reactivated: boolean; detail: PeerTickerDetail | null }>(
+    "/api/admin/symbols/add",
+    {
+      method: "POST",
+      body: JSON.stringify({ ticker }),
+    },
+  );
+}
+
+export function getAdminSymbolCatalogStatus() {
+  return adminFetch<SymbolCatalogStatus>("/api/admin/symbols/status");
+}
+
+export function syncAdminSymbolCatalog() {
+  return adminFetch<{
+    ok: boolean;
+    sourceKey: string;
+    trigger: "manual" | "scheduled";
+    fetched: number;
+    inserted: number;
+    updated: number;
+    reactivated: number;
+    deactivated: number;
+    completedAt: string;
+    status: "ok";
+  }>("/api/admin/symbols/sync", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export function addAdminPeerGroupMember(groupId: string, payload: {

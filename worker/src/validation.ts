@@ -89,6 +89,12 @@ export const peerNormalizeSchema = z.object({
   limit: z.number().int().min(1).max(1000).optional().default(250),
 });
 
+export const adminSymbolAddSchema = z.object({
+  ticker: z.string().min(1).transform((v) => v.toUpperCase()),
+});
+
+export const adminSymbolCatalogSyncSchema = z.object({});
+
 const timezoneStringSchema = z.string().min(1);
 const localTimeSchema = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/);
 const urlSchema = z.string().url().refine((value) => {

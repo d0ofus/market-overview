@@ -28,6 +28,8 @@ import {
   peerMembershipCreateSchema,
   peerNormalizeSchema,
   peerSeedSchema,
+  adminSymbolAddSchema,
+  adminSymbolCatalogSyncSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -87,6 +89,12 @@ import {
 } from "./peer-groups-service";
 import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
+import {
+  addManualSymbolToDirectory,
+  loadSymbolCatalogStatus,
+  maybeRunScheduledSymbolCatalogSync,
+  syncSymbolCatalogFromNasdaqTrader,
+} from "./symbol-directory-service";
 import {
   compileActiveWatchlistSets,
   compileWatchlistSet,
@@ -1721,7 +1729,16 @@ app.post("/api/admin/etfs", async (c) => {
     .bind(listType, body.parentSector ?? null, body.industry ?? null)
     .first<{ nextOrder: number }>();
   const commonStatements = [
-    c.env.DB.prepare("INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)")
+    c.env.DB.prepare(
+      `INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(ticker) DO UPDATE SET
+         name = COALESCE(excluded.name, symbols.name),
+         exchange = COALESCE(excluded.exchange, symbols.exchange),
+         asset_class = COALESCE(symbols.asset_class, excluded.asset_class),
+         sector = COALESCE(excluded.sector, symbols.sector),
+         industry = COALESCE(excluded.industry, symbols.industry)`,
+    )
       .bind(ticker, meta?.name ?? fundName, meta?.exchange ?? "NYSEARCA", "etf", body.parentSector ?? null, body.industry ?? null),
     c.env.DB.prepare(
       "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'watchlist:add', 0, CURRENT_TIMESTAMP)",
@@ -2687,6 +2704,49 @@ app.delete("/api/admin/peer-groups/:groupId", async (c) => {
   return c.json({ ok: true, id: groupId });
 });
 
+app.get("/api/admin/symbols/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const status = await loadSymbolCatalogStatus(c.env);
+  return c.json(status);
+});
+
+app.post("/api/admin/symbols/sync", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    adminSymbolCatalogSyncSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await syncSymbolCatalogFromNasdaqTrader(c.env, { trigger: "manual" });
+    await upsertAudit(c.env, "default", "SYMBOL_CATALOG_SYNC", result);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Symbol catalog sync failed.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/symbols/add", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = adminSymbolAddSchema.parse(await c.req.json());
+    const result = await addManualSymbolToDirectory(c.env, payload.ticker);
+    const detail = await loadPeerTickerDetail(c.env, result.resolved.ticker);
+    await upsertAudit(c.env, "default", "SYMBOL_DIRECTORY_ADD", {
+      ticker: result.resolved.ticker,
+      created: result.created,
+      reactivated: result.reactivated,
+    });
+    return c.json({
+      ok: true,
+      ticker: result.resolved.ticker,
+      created: result.created,
+      reactivated: result.reactivated,
+      detail,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to add symbol to the directory.";
+    return c.json({ error: message }, 400);
+  }
+});
+
 app.get("/api/admin/peer-groups/ticker-search", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const q = String(c.req.query("q") ?? "").trim();
@@ -2739,6 +2799,12 @@ app.get("/api/admin/peer-groups/ticker/:ticker", async (c) => {
         sector: null,
         industry: null,
         sharesOutstanding: null,
+        persisted: false,
+        isActive: true,
+        listingSource: null,
+        catalogManaged: false,
+        catalogLastSeenAt: null,
+        deactivatedAt: null,
       },
       groups: [],
     });
@@ -3150,7 +3216,12 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
     .first<{ nextOrder: number }>();
   await c.env.DB.batch([
     c.env.DB.prepare(
-      "INSERT OR REPLACE INTO symbols (ticker, name, exchange, asset_class) VALUES (?, ?, ?, ?)",
+      `INSERT INTO symbols (ticker, name, exchange, asset_class)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(ticker) DO UPDATE SET
+         name = COALESCE(excluded.name, symbols.name),
+         exchange = COALESCE(excluded.exchange, symbols.exchange),
+         asset_class = COALESCE(symbols.asset_class, excluded.asset_class)`,
     ).bind(resolved.ticker, resolved.name, resolved.exchange, resolved.assetClass),
     c.env.DB.prepare(
       "INSERT INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json) VALUES (?, ?, ?, ?, ?, 1, ?)",
@@ -3373,6 +3444,11 @@ export default {
     await advanceResearchQueue(env);
     const now = new Date(event.scheduledTime || Date.now());
     await runDueWatchlistCompiles(env, now);
+    try {
+      await maybeRunScheduledSymbolCatalogSync(env, now);
+    } catch (error) {
+      console.error("scheduled symbol catalog sync failed", error);
+    }
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";

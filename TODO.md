@@ -29,13 +29,10 @@
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
-- Add day of the week to subtitles for multi-grid
 - For industry peers view, change to liteweight charts
 
 ## Peer Groups
 - Remove OTC names like ABBNY, ABLZF etc.
-- Put details at top of box for multi-chart view after clicking ticker
-- Put 'Next' button at bottom of page
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
 
@@ -47,10 +44,6 @@
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
 ## Watchlist Compiler
-- Create a research repository (maybe in peer-groups or new page?)
-- Optimize search querying to use less requests/tokens
-- Make sure AI goes through specific categories (e.g. quality of earnings, earnings trend) for deep dive
-- Shift chart to the left, and analysis on the right. Can take up whole page but stil lbe a pop up
 
 ## Gappers
 - Add avg traded volume column in table
@@ -75,9 +68,9 @@
 - Remove top left Market command centre box
 
 ## Research Lab
-- Make token use more efficient
+==>> Make token use more efficient
 
-- Add in comparison with peers
+- Add in comparison with peers (see peer-group groupings), analyse leader/laggard relationship with peers, performance comparison and whether the industry is trending
 - Add in primary drivers analysis in synthesis layer. What are they and where they stand, and correlation
 - Sort news by dates
 - Add in current analyst consensus
@@ -86,10 +79,12 @@
 - Link research with /peer-groups
 - Add ability to assess Relative strength to index
 - add in analyst recommendations and analyst reports analysis as well
+- Create a research repository (maybe in peer-groups or new page?)
 
 ## New Functions
 - Add in morning brief section using Claude API
 - Add macro dashboard
+- Create correlation/cointegration matrix of peer-groups or manual input tickers
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
 - Add page to search for latest macroeconomic analysis (including charts)

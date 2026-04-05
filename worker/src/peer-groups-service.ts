@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import type { PeerContextPacket } from "./research/types";
+import { hasSymbolDirectoryLifecycleColumns } from "./symbol-directory-service";
 
 export type PeerGroupType = "fundamental" | "technical" | "custom";
 export type PeerMembershipSource = "manual" | "fmp_seed" | "finnhub_seed" | "system";
@@ -23,6 +24,8 @@ export type PeerDirectoryRow = {
   exchange: string | null;
   sector: string | null;
   industry: string | null;
+  symbolIsActive: boolean;
+  listingSource: string | null;
   groups: PeerGroupRecord[];
 };
 
@@ -44,6 +47,12 @@ export type PeerTickerDetail = {
     sector: string | null;
     industry: string | null;
     sharesOutstanding: number | null;
+    persisted: boolean;
+    isActive: boolean;
+    listingSource: string | null;
+    catalogManaged: boolean;
+    catalogLastSeenAt: string | null;
+    deactivatedAt: string | null;
   };
   groups: Array<PeerGroupRecord & { members: PeerTickerMember[] }>;
 };
@@ -166,12 +175,14 @@ export async function listPeerBootstrapCandidates(
   } = {},
 ): Promise<Array<{ ticker: string; name: string | null; exchange: string | null }>> {
   if (!(await hasPeerGroupSchema(env))) throw new Error("Peer Groups schema is missing. Apply migration 0011_peer_groups.sql first.");
+  const lifecycleReady = await hasSymbolDirectoryLifecycleColumns(env);
   const limit = Math.max(1, Math.min(100, Number(input.limit ?? 10)));
   const offset = Math.max(0, Number(input.offset ?? 0));
   const q = String(input.q ?? "").trim();
   const qUpper = q.toUpperCase();
   const params: Array<string | number> = [];
   const where = ["(s.asset_class IS NULL OR s.asset_class IN ('equity', 'stock'))"];
+  if (lifecycleReady) where.push("s.is_active = 1");
   if (input.onlyUnseeded !== false) {
     where.push("NOT EXISTS (SELECT 1 FROM ticker_peer_groups tpg WHERE tpg.ticker = s.ticker)");
   }
@@ -283,6 +294,7 @@ export async function queryPeerDirectory(
     offset?: number | null;
   },
 ): Promise<{ rows: PeerDirectoryRow[]; total: number; limit: number; offset: number }> {
+  const lifecycleReady = await hasSymbolDirectoryLifecycleColumns(env);
   const q = String(input.q ?? "").trim();
   const qUpper = q.toUpperCase();
   const groupId = String(input.groupId ?? "").trim();
@@ -325,7 +337,13 @@ export async function queryPeerDirectory(
     ? [qUpper, qUpper, qUpper, `${qUpper}%`, q, `%${q}%`]
     : ["", "", "", "", "", ""];
   const symbolRows = await env.DB.prepare(
-    `SELECT s.ticker, s.name, s.exchange, s.sector, s.industry
+    `SELECT
+      s.ticker,
+      s.name,
+      s.exchange,
+      s.sector,
+      s.industry
+      ${lifecycleReady ? ", s.is_active as symbolIsActive, s.listing_source as listingSource" : ", 1 as symbolIsActive, NULL as listingSource"}
      FROM symbols s
      WHERE ${whereSql}
      ORDER BY
@@ -345,6 +363,8 @@ export async function queryPeerDirectory(
       exchange: string | null;
       sector: string | null;
       industry: string | null;
+      symbolIsActive: number;
+      listingSource: string | null;
     }>();
 
   const tickers = (symbolRows.results ?? []).map((row) => row.ticker.toUpperCase());
@@ -398,6 +418,8 @@ export async function queryPeerDirectory(
       exchange: row.exchange ?? null,
       sector: row.sector ?? null,
       industry: row.industry ?? null,
+      symbolIsActive: Boolean(row.symbolIsActive),
+      listingSource: row.listingSource ?? null,
       groups: groupsByTicker.get(row.ticker.toUpperCase()) ?? [],
     })),
     total: Number(countRow?.count ?? 0),
@@ -410,8 +432,19 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
   const ticker = normalizeTicker(tickerInput);
   if (!ticker) return null;
   const sharesOutstandingColumn = await hasSharesOutstandingColumn(env);
+  const lifecycleReady = await hasSymbolDirectoryLifecycleColumns(env);
   const symbol = await env.DB.prepare(
-    `SELECT ticker, name, exchange, sector, industry${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"} FROM symbols WHERE ticker = ? LIMIT 1`,
+    `SELECT
+      ticker,
+      name,
+      exchange,
+      sector,
+      industry
+      ${sharesOutstandingColumn ? ", shares_outstanding as sharesOutstanding" : ", NULL as sharesOutstanding"}
+      ${lifecycleReady ? ", is_active as isActive, listing_source as listingSource, catalog_managed as catalogManaged, catalog_last_seen_at as catalogLastSeenAt, deactivated_at as deactivatedAt" : ", 1 as isActive, NULL as listingSource, 0 as catalogManaged, NULL as catalogLastSeenAt, NULL as deactivatedAt"}
+     FROM symbols
+     WHERE ticker = ?
+     LIMIT 1`,
   )
     .bind(ticker)
     .first<{
@@ -421,6 +454,11 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
       sector: string | null;
       industry: string | null;
       sharesOutstanding: number | null;
+      isActive: number | null;
+      listingSource: string | null;
+      catalogManaged: number | null;
+      catalogLastSeenAt: string | null;
+      deactivatedAt: string | null;
   }>();
   if (!symbol) return null;
   const schemaReady = await hasPeerGroupSchema(env);
@@ -433,6 +471,12 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
         sector: symbol.sector ?? null,
         industry: symbol.industry ?? null,
         sharesOutstanding: typeof symbol.sharesOutstanding === "number" ? symbol.sharesOutstanding : null,
+        persisted: true,
+        isActive: Boolean(symbol.isActive ?? 1),
+        listingSource: symbol.listingSource ?? null,
+        catalogManaged: Boolean(symbol.catalogManaged ?? 0),
+        catalogLastSeenAt: symbol.catalogLastSeenAt ?? null,
+        deactivatedAt: symbol.deactivatedAt ?? null,
       },
       groups: [],
     };
@@ -487,6 +531,12 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
         sector: symbol.sector ?? null,
         industry: symbol.industry ?? null,
         sharesOutstanding: typeof symbol.sharesOutstanding === "number" ? symbol.sharesOutstanding : null,
+        persisted: true,
+        isActive: Boolean(symbol.isActive ?? 1),
+        listingSource: symbol.listingSource ?? null,
+        catalogManaged: Boolean(symbol.catalogManaged ?? 0),
+        catalogLastSeenAt: symbol.catalogLastSeenAt ?? null,
+        deactivatedAt: symbol.deactivatedAt ?? null,
       },
       groups,
     };
@@ -542,6 +592,12 @@ export async function loadPeerTickerDetail(env: Env, tickerInput: string): Promi
       sector: symbol.sector ?? null,
       industry: symbol.industry ?? null,
       sharesOutstanding: typeof symbol.sharesOutstanding === "number" ? symbol.sharesOutstanding : null,
+      persisted: true,
+      isActive: Boolean(symbol.isActive ?? 1),
+      listingSource: symbol.listingSource ?? null,
+      catalogManaged: Boolean(symbol.catalogManaged ?? 0),
+      catalogLastSeenAt: symbol.catalogLastSeenAt ?? null,
+      deactivatedAt: symbol.deactivatedAt ?? null,
     },
     groups: groups.map((group) => ({
       ...group,
