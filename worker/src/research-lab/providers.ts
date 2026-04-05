@@ -45,6 +45,8 @@ export async function runResearchLabPerplexityQuery(
     limit: number;
     sourceKind: "news" | "earnings_transcript" | "ir_page" | "analyst_commentary" | "macro_release" | "media";
     forceFresh?: boolean;
+    maxAgeDays?: number;
+    requirePublishedAt?: boolean;
   },
 ): Promise<Awaited<ReturnType<typeof searchPerplexity>>> {
   let lastError: Error | null = null;
@@ -58,6 +60,8 @@ export async function runResearchLabPerplexityQuery(
         sourceKind: query.sourceKind,
         limit: query.limit,
         ticker: query.key === "macro_relevance" ? null : query.ticker,
+        maxAgeDays: query.maxAgeDays ?? null,
+        requirePublishedAt: Boolean(query.requirePublishedAt),
       }, {
         forceFresh: Boolean(query.forceFresh),
         timeoutMs: RESEARCH_LAB_PERPLEXITY_TIMEOUT_MS,

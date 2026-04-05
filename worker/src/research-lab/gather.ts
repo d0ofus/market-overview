@@ -18,6 +18,8 @@ type EvidenceProfileFamily = {
   queryTemplate: string;
   sourceKind: "news" | "earnings_transcript" | "ir_page" | "analyst_commentary" | "macro_release" | "media";
   limit?: number;
+  maxAgeDays?: number;
+  requirePublishedAt?: boolean;
 };
 
 type EvidenceProfileConfig = {
@@ -86,6 +88,15 @@ function buildEvidenceRecord(input: {
   };
 }
 
+function isFreshEnough(publishedAt: string | null, maxAgeDays?: number, requirePublishedAt?: boolean): boolean {
+  const timestamp = publishedAt ? Date.parse(publishedAt) : Number.NaN;
+  const hasValidTimestamp = Number.isFinite(timestamp);
+  if (requirePublishedAt && !hasValidTimestamp) return false;
+  if (!maxAgeDays || !hasValidTimestamp) return true;
+  const ageMs = Date.now() - Number(timestamp);
+  return ageMs <= maxAgeDays * 24 * 60 * 60 * 1000;
+}
+
 export async function gatherResearchLabEvidence(env: Env, input: {
   runId: string;
   runItemId: string;
@@ -124,6 +135,8 @@ export async function gatherResearchLabEvidence(env: Env, input: {
       limit: Math.max(1, Math.min(family.limit ?? maxItemsPerQuery, maxItemsPerQuery)),
       sourceKind: family.sourceKind,
       forceFresh: forceFreshSearch,
+      maxAgeDays: family.maxAgeDays,
+      requirePublishedAt: family.requirePublishedAt,
     });
 
     if (result.raw && typeof result.raw === "object") {
@@ -153,6 +166,7 @@ export async function gatherResearchLabEvidence(env: Env, input: {
         rawPayload: result.raw,
       });
       if (!record.summary) continue;
+      if (!isFreshEnough(record.publishedAt, family.maxAgeDays, family.requirePublishedAt)) continue;
       const dedupeKey = record.canonicalUrl?.trim() || record.contentHash;
       if (seenKeys.has(dedupeKey)) continue;
       seenKeys.add(dedupeKey);

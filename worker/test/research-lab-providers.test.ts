@@ -46,6 +46,8 @@ describe("research lab providers", () => {
       ticker: "AMPX",
       limit: 3,
       sourceKind: "news",
+      maxAgeDays: 21,
+      requirePublishedAt: true,
     });
 
     expect(harness.searchPerplexityMock).toHaveBeenCalledWith(
@@ -53,6 +55,8 @@ describe("research lab providers", () => {
       expect.objectContaining({
         key: "news_catalysts",
         ticker: "AMPX",
+        maxAgeDays: 21,
+        requirePublishedAt: true,
       }),
       expect.objectContaining({
         forceFresh: false,

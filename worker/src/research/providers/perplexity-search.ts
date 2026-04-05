@@ -17,6 +17,8 @@ export type PerplexitySearchQuery = {
     | "media";
   limit: number;
   ticker?: string | null;
+  maxAgeDays?: number | null;
+  requirePublishedAt?: boolean;
 };
 
 export type PerplexitySearchItem = {
@@ -76,7 +78,11 @@ export async function searchPerplexity(
           "You are a retrieval layer for a swing-trading research system.",
           "Search recent public web evidence and return strict JSON only.",
           "Response shape: {\"items\":[{\"title\":\"\",\"url\":\"\",\"summary\":\"\",\"excerpt\":null,\"bullets\":[],\"publishedAt\":null,\"sourceDomain\":\"\"}]}",
-          "Use only recent public evidence. If nothing useful is found, return {\"items\":[]}.",
+          "Return newest items first.",
+          "Always include publishedAt when it can be determined from the source.",
+          "If a recency window is requested, exclude items older than that window rather than returning stale results.",
+          "Prefer company-specific developments over generic background coverage.",
+          "If nothing useful is found within the requested recency window, return {\"items\":[]}.",
         ].join(" "),
       },
       {
@@ -87,6 +93,24 @@ export async function searchPerplexity(
           focus: query.label,
           ticker: query.ticker ?? null,
           forceFresh: Boolean(options?.forceFresh),
+          sourceKind: query.sourceKind,
+          maxAgeDays: query.maxAgeDays ?? null,
+          requirePublishedAt: Boolean(query.requirePublishedAt),
+          retrievalRules: [
+            "Prefer the newest dated items first.",
+            query.maxAgeDays
+              ? `Exclude items older than ${query.maxAgeDays} days.`
+              : "Prefer recent items over older background items.",
+            query.requirePublishedAt
+              ? "Exclude items without a reliable publishedAt value."
+              : "Include publishedAt whenever available.",
+            query.key === "news_catalysts"
+              ? "For News & Catalysts, prefer company-specific developments such as management changes, guidance, partnerships, product launches, regulatory updates, and material operating news."
+              : null,
+            query.key === "transcripts" || query.key === "investor_relations"
+              ? "Prefer the latest quarter's earnings materials and latest dated investor materials."
+              : null,
+          ].filter(Boolean),
         }),
       },
     ],
