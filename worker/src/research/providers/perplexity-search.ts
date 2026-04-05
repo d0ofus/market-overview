@@ -88,6 +88,7 @@ export async function searchPerplexity(
       {
         role: "user",
         content: JSON.stringify({
+          today: new Date().toISOString().slice(0, 10),
           query: query.query,
           limit: query.limit,
           focus: query.label,

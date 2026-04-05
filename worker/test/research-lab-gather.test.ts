@@ -151,4 +151,77 @@ describe("research lab gather", () => {
       requirePublishedAt: true,
     });
   });
+
+  it("keeps undated evidence when freshness caps are enabled without requiring publishedAt", async () => {
+    harness.queryCalls.length = 0;
+    const provider = await import("../src/research-lab/providers");
+    vi.mocked(provider.runResearchLabPerplexityQuery).mockResolvedValueOnce({
+      items: [
+        {
+          title: "Fresh undated catalyst",
+          url: "https://example.com/news/fresh-undated",
+          summary: "Fresh undated summary",
+          excerpt: null,
+          bullets: [],
+          publishedAt: null,
+          sourceDomain: "example.com",
+        },
+        {
+          title: "Stale dated catalyst",
+          url: "https://example.com/news/stale",
+          summary: "Stale dated summary",
+          excerpt: null,
+          bullets: [],
+          publishedAt: "2025-10-01T09:00:00.000Z",
+          sourceDomain: "example.com",
+        },
+      ],
+      usage: { total_tokens: 10 },
+      raw: { model: "sonar-pro" },
+    });
+
+    const result = await gatherResearchLabEvidence({ PERPLEXITY_MODEL: "sonar-pro" } as any, {
+      runId: "run-3",
+      runItemId: "item-3",
+      identity: {
+        ticker: "ZM",
+        companyName: "Zoom Communications, Inc.",
+        exchange: "NASDAQ",
+        secCik: "1585521",
+        irDomain: "investors.zoom.us",
+      },
+      evidenceProfile: {
+        id: "profile-3",
+        name: "Freshness",
+        description: null,
+        configFamily: "test",
+        isDefault: false,
+        queryConfigJson: {
+          maxItemsPerQuery: 3,
+          evidenceTarget: 3,
+          maxQueryFamilies: 1,
+          families: [
+            {
+              key: "news_catalysts",
+              label: "News",
+              queryTemplate: "{ticker}",
+              sourceKind: "news",
+              limit: 3,
+              maxAgeDays: 21,
+            },
+          ],
+        },
+        createdAt: "2026-04-05T09:00:00.000Z",
+        updatedAt: "2026-04-05T09:00:00.000Z",
+      },
+    });
+
+    expect(result.evidence).toHaveLength(1);
+    expect(result.evidence[0]?.title).toBe("Fresh undated catalyst");
+    expect(harness.queryCalls[0]).toMatchObject({
+      key: "news_catalysts",
+      maxAgeDays: 21,
+      requirePublishedAt: false,
+    });
+  });
 });
