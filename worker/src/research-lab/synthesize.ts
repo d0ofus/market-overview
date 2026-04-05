@@ -26,10 +26,21 @@ type PromptConfigJson = {
   maxEvidenceItems?: number;
   maxItemsPerFamily?: number;
   additionalInstructions?: string | null;
+  includeRequestedSections?: boolean;
+  includeFamilyLabels?: boolean;
+  includeSourceDomain?: boolean;
+  includePublishedAt?: boolean;
+  excerptFamilies?: string[] | null;
+  includePriorMemory?: boolean;
+  includePriorDelta?: boolean;
+  summaryCharsByShape?: Record<string, unknown> | null;
+  excerptCharsByShape?: Record<string, unknown> | null;
   modules?: {
     keyDrivers?: KeyDriversModuleConfig | null;
   } | null;
 };
+
+type PromptShapeName = "full" | "medium" | "compact";
 
 type PromptPayloadShape = {
   maxEvidenceItems: number;
@@ -63,6 +74,20 @@ const FAMILY_LABELS: Record<ResearchLabEvidenceKind, string> = {
   macro_relevance: "Macro Relevance",
 };
 
+const DEFAULT_SUMMARY_CHARS_BY_SHAPE: Record<PromptShapeName, number> = {
+  full: 160,
+  medium: 140,
+  compact: 120,
+};
+
+const DEFAULT_EXCERPT_CHARS_BY_SHAPE: Record<PromptShapeName, number> = {
+  full: 100,
+  medium: 0,
+  compact: 0,
+};
+
+const DEFAULT_EXCERPT_FAMILIES = new Set<ResearchLabEvidenceKind>(["transcripts", "investor_relations"]);
+
 function normalizeSnippet(value: string | null | undefined, maxChars: number): string | null {
   if (!value || maxChars <= 0) return null;
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -74,6 +99,55 @@ function withDefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== null && entry !== undefined && entry !== ""),
   ) as T;
+}
+
+function parsePromptConfig(promptConfig: ResearchLabPromptConfigRecord) {
+  return (promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson;
+}
+
+function readBooleanConfig(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readBoundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(Math.round(numeric), max));
+}
+
+function readShapeCharsConfig(
+  raw: Record<string, unknown> | null | undefined,
+  fallback: Record<PromptShapeName, number>,
+  min: number,
+): Record<PromptShapeName, number> {
+  return {
+    full: readBoundedNumber(raw?.full, fallback.full, min, 600),
+    medium: readBoundedNumber(raw?.medium, fallback.medium, min, 600),
+    compact: readBoundedNumber(raw?.compact, fallback.compact, min, 600),
+  };
+}
+
+function readExcerptFamiliesConfig(value: unknown): Set<ResearchLabEvidenceKind> {
+  if (!Array.isArray(value)) return new Set(DEFAULT_EXCERPT_FAMILIES);
+  const families = value
+    .map((entry) => String(entry ?? "").trim())
+    .filter((entry): entry is ResearchLabEvidenceKind => Object.prototype.hasOwnProperty.call(FAMILY_LABELS, entry));
+  return families.length > 0 ? new Set(families) : new Set(DEFAULT_EXCERPT_FAMILIES);
+}
+
+function getPromptPayloadConfig(promptConfig: ResearchLabPromptConfigRecord) {
+  const config = parsePromptConfig(promptConfig);
+  return {
+    includeRequestedSections: readBooleanConfig(config.includeRequestedSections, false),
+    includeFamilyLabels: readBooleanConfig(config.includeFamilyLabels, false),
+    includeSourceDomain: readBooleanConfig(config.includeSourceDomain, false),
+    includePublishedAt: readBooleanConfig(config.includePublishedAt, false),
+    excerptFamilies: readExcerptFamiliesConfig(config.excerptFamilies),
+    includePriorMemory: readBooleanConfig(config.includePriorMemory, true),
+    includePriorDelta: readBooleanConfig(config.includePriorDelta, false),
+    summaryCharsByShape: readShapeCharsConfig(config.summaryCharsByShape, DEFAULT_SUMMARY_CHARS_BY_SHAPE, 40),
+    excerptCharsByShape: readShapeCharsConfig(config.excerptCharsByShape, DEFAULT_EXCERPT_CHARS_BY_SHAPE, 0),
+  };
 }
 
 function compactPriorMemorySummary(summary: ResearchLabOutputRecord["memorySummaryJson"] | null): ResearchLabOutputRecord["memorySummaryJson"] | null {
@@ -90,7 +164,7 @@ function compactPriorMemorySummary(summary: ResearchLabOutputRecord["memorySumma
 function getPromptModulesConfig(promptConfig: ResearchLabPromptConfigRecord): {
   keyDrivers: Required<KeyDriversModuleConfig>;
 } {
-  const raw = ((promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson).modules?.keyDrivers ?? {};
+  const raw = parsePromptConfig(promptConfig).modules?.keyDrivers ?? {};
   return {
     keyDrivers: {
       enabled: Boolean(raw?.enabled),
@@ -109,7 +183,8 @@ function summarizeEvidenceForPrompt(
   hardLimit: number,
   shape: PromptPayloadShape,
 ): { packets: PromptEvidenceFamilyPacket[]; aliasMap: Map<string, string> } {
-  const config = (promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson;
+  const config = parsePromptConfig(promptConfig);
+  const payloadConfig = getPromptPayloadConfig(promptConfig);
   const maxEvidenceItems = Math.max(4, Math.min(Number(config.maxEvidenceItems ?? shape.maxEvidenceItems), shape.maxEvidenceItems, hardLimit));
   const maxItemsPerFamily = Math.max(1, Math.min(Number(config.maxItemsPerFamily ?? shape.maxItemsPerFamily), shape.maxItemsPerFamily, 4));
   const grouped = new Map<ResearchLabEvidenceKind, ResearchLabEvidenceRecord[]>();
@@ -148,9 +223,11 @@ function summarizeEvidenceForPrompt(
           canonicalId: row.id,
           title: row.title,
           summary: normalizeSnippet(row.summary, shape.summaryChars) ?? "",
-          excerpt: normalizeSnippet(row.excerpt, shape.excerptChars) ?? undefined,
-          publishedAt: row.publishedAt ?? undefined,
-          sourceDomain: row.sourceDomain ?? undefined,
+          excerpt: payloadConfig.excerptFamilies.has(kind)
+            ? normalizeSnippet(row.excerpt, shape.excerptChars) ?? undefined
+            : undefined,
+          publishedAt: payloadConfig.includePublishedAt ? row.publishedAt ?? undefined : undefined,
+          sourceDomain: payloadConfig.includeSourceDomain ? row.sourceDomain ?? undefined : undefined,
         });
       }),
     });
@@ -207,30 +284,31 @@ function buildSynthesisPromptUser(input: {
   priorOutput: ResearchLabOutputRecord | null;
 }): { user: string; aliasMap: Map<string, string> } {
   const modules = getPromptModulesConfig(input.promptConfig);
+  const payloadConfig = getPromptPayloadConfig(input.promptConfig);
   const shapes: PromptPayloadShape[] = [
     {
       maxEvidenceItems: Math.min(input.evidencePromptLimit, 8),
       maxItemsPerFamily: 2,
-      summaryChars: 220,
-      excerptChars: 120,
-      includePriorMemory: true,
-      includePriorDelta: true,
+      summaryChars: payloadConfig.summaryCharsByShape.full,
+      excerptChars: payloadConfig.excerptCharsByShape.full,
+      includePriorMemory: payloadConfig.includePriorMemory,
+      includePriorDelta: payloadConfig.includePriorDelta,
     },
     {
       maxEvidenceItems: Math.min(input.evidencePromptLimit, 6),
       maxItemsPerFamily: 2,
-      summaryChars: 180,
-      excerptChars: 0,
-      includePriorMemory: true,
-      includePriorDelta: true,
+      summaryChars: payloadConfig.summaryCharsByShape.medium,
+      excerptChars: payloadConfig.excerptCharsByShape.medium,
+      includePriorMemory: payloadConfig.includePriorMemory,
+      includePriorDelta: payloadConfig.includePriorDelta,
     },
     {
       maxEvidenceItems: Math.min(input.evidencePromptLimit, 5),
       maxItemsPerFamily: 1,
-      summaryChars: 140,
-      excerptChars: 0,
-      includePriorMemory: true,
-      includePriorDelta: false,
+      summaryChars: payloadConfig.summaryCharsByShape.compact,
+      excerptChars: payloadConfig.excerptCharsByShape.compact,
+      includePriorMemory: payloadConfig.includePriorMemory,
+      includePriorDelta: payloadConfig.includePriorDelta,
     },
   ];
 
@@ -247,35 +325,39 @@ function buildSynthesisPromptUser(input: {
     const user = JSON.stringify(withDefined({
       ticker: input.identity.ticker,
       companyName: input.identity.companyName ?? undefined,
-      requestedSections: withDefined({
-        base: [
-          "opinion",
-          "overallSummary",
-          "whyNow",
-          "valuationView",
-          "earningsQualityView",
-          "pricedInView",
-          "catalysts",
-          "risks",
-          "contradictions",
-          "confidence",
-          "monitoringPoints",
-          "priorComparison",
-          "evidenceIds",
-        ],
-        modules: modules.keyDrivers.enabled
-          ? {
-            keyDrivers: {
-              maxDrivers: modules.keyDrivers.maxDrivers,
-              requirePriceRelationship: modules.keyDrivers.requirePriceRelationship,
-              priceWindow: modules.keyDrivers.priceWindow,
-            },
-          }
-          : undefined,
-      }),
+      requestedSections: (payloadConfig.includeRequestedSections || modules.keyDrivers.enabled)
+        ? withDefined({
+          base: payloadConfig.includeRequestedSections
+            ? [
+              "opinion",
+              "overallSummary",
+              "whyNow",
+              "valuationView",
+              "earningsQualityView",
+              "pricedInView",
+              "catalysts",
+              "risks",
+              "contradictions",
+              "confidence",
+              "monitoringPoints",
+              "priorComparison",
+              "evidenceIds",
+            ]
+            : undefined,
+          modules: modules.keyDrivers.enabled
+            ? {
+              keyDrivers: {
+                maxDrivers: modules.keyDrivers.maxDrivers,
+                requirePriceRelationship: modules.keyDrivers.requirePriceRelationship,
+                priceWindow: modules.keyDrivers.priceWindow,
+              },
+            }
+            : undefined,
+        })
+        : undefined,
       evidenceFamilies: packets.map((packet) => ({
         kind: packet.kind,
-        label: packet.label,
+        label: payloadConfig.includeFamilyLabels ? packet.label : undefined,
         items: packet.items.map((item) => withDefined({
           ref: item.ref,
           title: item.title,
@@ -349,7 +431,7 @@ export async function synthesizeResearchLabOutput(env: Env, input: {
   priorOutput: ResearchLabOutputRecord | null;
   onHeartbeat?: () => Promise<void> | void;
 }): Promise<{ synthesis: ResearchLabSynthesis; usage: Record<string, unknown> | null; model: string }> {
-  const config = (input.promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson;
+  const config = parsePromptConfig(input.promptConfig);
   const additionalInstructions = typeof config.additionalInstructions === "string"
     ? config.additionalInstructions.trim()
     : "";
