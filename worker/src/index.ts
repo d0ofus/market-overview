@@ -30,6 +30,7 @@ import {
   peerSeedSchema,
   adminSymbolAddSchema,
   adminSymbolCatalogSyncSchema,
+  adminSymbolCatalogScheduleSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -91,6 +92,7 @@ import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
 import {
   addManualSymbolToDirectory,
+  setSymbolCatalogSyncEnabled,
   loadSymbolCatalogStatus,
   maybeRunScheduledSymbolCatalogSync,
   syncSymbolCatalogFromNasdaqTrader,
@@ -2708,6 +2710,20 @@ app.get("/api/admin/symbols/status", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const status = await loadSymbolCatalogStatus(c.env);
   return c.json(status);
+});
+
+app.post("/api/admin/symbols/schedule", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = adminSymbolCatalogScheduleSchema.parse(await c.req.json());
+    const enabled = await setSymbolCatalogSyncEnabled(c.env, payload.enabled);
+    const status = await loadSymbolCatalogStatus(c.env);
+    await upsertAudit(c.env, "default", "SYMBOL_CATALOG_SCHEDULE_SET", { enabled });
+    return c.json({ ok: true, enabled, status });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update symbol catalog schedule.";
+    return c.json({ error: message }, 400);
+  }
 });
 
 app.post("/api/admin/symbols/sync", async (c) => {

@@ -1434,6 +1434,13 @@ export function syncAdminSymbolCatalog() {
   });
 }
 
+export function setAdminSymbolCatalogSchedule(enabled: boolean) {
+  return adminFetch<{ ok: boolean; enabled: boolean; status: SymbolCatalogStatus }>("/api/admin/symbols/schedule", {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export function addAdminPeerGroupMember(groupId: string, payload: {
   ticker: string;
   source?: PeerMembershipSource;

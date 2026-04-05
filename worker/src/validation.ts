@@ -95,6 +95,10 @@ export const adminSymbolAddSchema = z.object({
 
 export const adminSymbolCatalogSyncSchema = z.object({});
 
+export const adminSymbolCatalogScheduleSchema = z.object({
+  enabled: z.boolean(),
+});
+
 const timezoneStringSchema = z.string().min(1);
 const localTimeSchema = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/);
 const urlSchema = z.string().url().refine((value) => {

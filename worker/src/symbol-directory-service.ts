@@ -16,6 +16,7 @@ type CatalogCountsRow = {
   manualCount: number | null;
   catalogManagedCount: number | null;
 };
+type ScheduleEnabledRow = { count: number };
 
 export type SymbolCatalogSyncStatus = {
   sourceKey: string;
@@ -106,22 +107,22 @@ async function loadExistingSymbolStateMap(env: Env, tickers: string[]): Promise<
 
 async function markCatalogSyncRunning(env: Env): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at)
-     VALUES (?, NULL, 'running', NULL, 0, CURRENT_TIMESTAMP)
+    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at, scheduled_enabled)
+     VALUES (?, NULL, 'running', NULL, 0, CURRENT_TIMESTAMP, ?)
      ON CONFLICT(source_key) DO UPDATE SET
        status = 'running',
        error = NULL,
        records_count = 0,
        updated_at = CURRENT_TIMESTAMP`,
   )
-    .bind(SYMBOL_CATALOG_SOURCE_KEY)
+    .bind(SYMBOL_CATALOG_SOURCE_KEY, isSymbolCatalogSyncEnabledFromEnv(env) ? 1 : 0)
     .run();
 }
 
 async function markCatalogSyncSuccess(env: Env, completedAt: string, recordsCount: number): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at)
-     VALUES (?, ?, 'ok', NULL, ?, CURRENT_TIMESTAMP)
+    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at, scheduled_enabled)
+     VALUES (?, ?, 'ok', NULL, ?, CURRENT_TIMESTAMP, ?)
      ON CONFLICT(source_key) DO UPDATE SET
        last_synced_at = excluded.last_synced_at,
        status = 'ok',
@@ -129,21 +130,21 @@ async function markCatalogSyncSuccess(env: Env, completedAt: string, recordsCoun
        records_count = excluded.records_count,
        updated_at = CURRENT_TIMESTAMP`,
   )
-    .bind(SYMBOL_CATALOG_SOURCE_KEY, completedAt, recordsCount)
+    .bind(SYMBOL_CATALOG_SOURCE_KEY, completedAt, recordsCount, isSymbolCatalogSyncEnabledFromEnv(env) ? 1 : 0)
     .run();
 }
 
 async function markCatalogSyncError(env: Env, errorMessage: string): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at)
-     VALUES (?, NULL, 'error', ?, 0, CURRENT_TIMESTAMP)
+    `INSERT INTO symbol_catalog_sync_status (source_key, last_synced_at, status, error, records_count, updated_at, scheduled_enabled)
+     VALUES (?, NULL, 'error', ?, 0, CURRENT_TIMESTAMP, ?)
      ON CONFLICT(source_key) DO UPDATE SET
        status = 'error',
        error = excluded.error,
        records_count = 0,
        updated_at = CURRENT_TIMESTAMP`,
   )
-    .bind(SYMBOL_CATALOG_SOURCE_KEY, errorMessage.slice(0, 700))
+    .bind(SYMBOL_CATALOG_SOURCE_KEY, errorMessage.slice(0, 700), isSymbolCatalogSyncEnabledFromEnv(env) ? 1 : 0)
     .run();
 }
 
@@ -214,8 +215,52 @@ async function requireSymbolDirectorySchema(env: Env): Promise<void> {
   }
 }
 
-export function isSymbolCatalogSyncEnabled(env: Env): boolean {
+function isSymbolCatalogSyncEnabledFromEnv(env: Env): boolean {
   return isTruthyEnvFlag(env.SYMBOL_CATALOG_SYNC_ENABLED);
+}
+
+async function hasScheduledEnabledColumn(env: Env): Promise<boolean> {
+  return await columnExists(env, "symbol_catalog_sync_status", "scheduled_enabled");
+}
+
+export async function isSymbolCatalogSyncEnabled(env: Env): Promise<boolean> {
+  const statusTableReady = await hasSymbolCatalogSyncStatusTable(env);
+  if (!statusTableReady) return isSymbolCatalogSyncEnabledFromEnv(env);
+  const scheduledEnabledColumnReady = await hasScheduledEnabledColumn(env);
+  if (!scheduledEnabledColumnReady) return isSymbolCatalogSyncEnabledFromEnv(env);
+  const row = await env.DB.prepare(
+    "SELECT scheduled_enabled as count FROM symbol_catalog_sync_status WHERE source_key = ? LIMIT 1",
+  )
+    .bind(SYMBOL_CATALOG_SOURCE_KEY)
+    .first<ScheduleEnabledRow>();
+  if (row == null) return isSymbolCatalogSyncEnabledFromEnv(env);
+  return Number(row.count ?? 0) === 1;
+}
+
+export async function setSymbolCatalogSyncEnabled(env: Env, enabled: boolean): Promise<boolean> {
+  await requireSymbolDirectorySchema(env);
+  const scheduledEnabledColumnReady = await hasScheduledEnabledColumn(env);
+  if (!scheduledEnabledColumnReady) {
+    throw new Error("Symbol catalog schedule toggle schema is missing. Apply migration 0033_symbol_catalog_schedule_toggle.sql first.");
+  }
+  await env.DB.prepare(
+    `INSERT INTO symbol_catalog_sync_status (
+       source_key,
+       last_synced_at,
+       status,
+       error,
+       records_count,
+       updated_at,
+       scheduled_enabled
+     )
+     VALUES (?, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP, ?)
+     ON CONFLICT(source_key) DO UPDATE SET
+       scheduled_enabled = excluded.scheduled_enabled,
+       updated_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(SYMBOL_CATALOG_SOURCE_KEY, enabled ? 1 : 0)
+    .run();
+  return enabled;
 }
 
 export function isSymbolCatalogSyncDue(lastSyncedAt: string | null | undefined, now = new Date()): boolean {
@@ -283,11 +328,11 @@ export async function addManualSymbolToDirectory(
 }
 
 export async function loadSymbolCatalogStatus(env: Env): Promise<SymbolCatalogSyncStatus> {
-  const scheduledEnabled = isSymbolCatalogSyncEnabled(env);
   const [lifecycleReady, statusReady] = await Promise.all([
     hasSymbolDirectoryLifecycleColumns(env),
     hasSymbolCatalogSyncStatusTable(env),
   ]);
+  const scheduledEnabledColumnReady = statusReady ? await hasScheduledEnabledColumn(env) : false;
 
   const statusRow = statusReady
     ? await env.DB.prepare(
@@ -298,6 +343,7 @@ export async function loadSymbolCatalogStatus(env: Env): Promise<SymbolCatalogSy
         error,
         records_count as recordsCount,
         updated_at as updatedAt
+        ${scheduledEnabledColumnReady ? ", scheduled_enabled as scheduledEnabled" : ""}
       FROM symbol_catalog_sync_status
       WHERE source_key = ?
       LIMIT 1`,
@@ -310,8 +356,12 @@ export async function loadSymbolCatalogStatus(env: Env): Promise<SymbolCatalogSy
         error: string | null;
         recordsCount: number | null;
         updatedAt: string | null;
+        scheduledEnabled?: number | null;
       }>()
     : null;
+  const scheduledEnabled = scheduledEnabledColumnReady
+    ? Number(statusRow?.scheduledEnabled ?? 0) === 1
+    : isSymbolCatalogSyncEnabledFromEnv(env);
 
   const counts = lifecycleReady
     ? await env.DB.prepare(
@@ -405,7 +455,7 @@ export async function syncSymbolCatalogFromNasdaqTrader(
 }
 
 export async function maybeRunScheduledSymbolCatalogSync(env: Env, now = new Date()): Promise<SymbolCatalogSyncResult | null> {
-  if (!isSymbolCatalogSyncEnabled(env)) return null;
+  if (!(await isSymbolCatalogSyncEnabled(env))) return null;
   const status = await loadSymbolCatalogStatus(env);
   if (!status.schemaReady || !isSymbolCatalogSyncDue(status.lastSyncedAt, now)) return null;
   return await syncSymbolCatalogFromNasdaqTrader(env, { trigger: "scheduled" });
