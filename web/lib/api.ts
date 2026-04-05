@@ -1406,6 +1406,7 @@ export function seedAdminPeerGroup(ticker: string) {
 }
 
 export function bootstrapAdminPeerGroups(payload?: {
+  tickers?: string[];
   limit?: number;
   offset?: number;
   q?: string;

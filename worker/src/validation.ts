@@ -76,6 +76,7 @@ export const peerSeedSchema = z.object({
 });
 
 export const peerBootstrapSchema = z.object({
+  tickers: z.array(z.string().min(1).transform((v) => v.toUpperCase())).max(100).optional().default([]),
   limit: z.number().int().min(1).max(100).optional().default(10),
   offset: z.number().int().min(0).optional().default(0),
   q: z.string().trim().optional().default(""),

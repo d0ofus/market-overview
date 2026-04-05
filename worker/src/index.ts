@@ -2793,7 +2793,10 @@ app.post("/api/admin/peer-groups/seed", async (c) => {
 app.post("/api/admin/peer-groups/bootstrap", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = peerBootstrapSchema.parse(await c.req.json().catch(() => ({})));
-  const candidates = await listPeerBootstrapCandidates(c.env, payload);
+  const requestedTickers = uniqueTickers(payload.tickers ?? []);
+  const candidates = requestedTickers.length > 0
+    ? requestedTickers.map((ticker) => ({ ticker, name: null, exchange: null }))
+    : await listPeerBootstrapCandidates(c.env, payload);
   const rows: Array<{
     ticker: string;
     ok: boolean;
@@ -2826,7 +2829,7 @@ app.post("/api/admin/peer-groups/bootstrap", async (c) => {
   }
   return c.json({
     ok: true,
-    requested: payload.limit,
+    requested: requestedTickers.length > 0 ? requestedTickers.length : payload.limit,
     attempted: candidates.length,
     rows,
   });

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import * as Collapsible from "@radix-ui/react-collapsible";
+import { ChevronDown, ChevronUp, Loader2, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addAdminPeerGroupMember,
   bootstrapAdminPeerGroups,
@@ -29,11 +30,33 @@ const EMPTY_FORM = {
   isActive: true,
 };
 
+const GROUPS_PAGE_SIZE = 12;
+const GROUP_INDEX_LABELS = ["All", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""), "#"];
+
+function parseBootstrapTickers(input: string): string[] {
+  return Array.from(
+    new Set(
+      input
+        .split(/[\s,]+/)
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function firstGroupIndexLabel(group: PeerGroupRow): string {
+  const firstChar = (group.name.trim()[0] ?? "").toUpperCase();
+  return /^[A-Z]$/.test(firstChar) ? firstChar : "#";
+}
+
 export function PeerGroupsAdminPanel() {
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [targetGroupId, setTargetGroupId] = useState<string>("");
   const [form, setForm] = useState(EMPTY_FORM);
+  const [groupQuery, setGroupQuery] = useState("");
+  const [groupIndexFilter, setGroupIndexFilter] = useState("All");
+  const [groupPage, setGroupPage] = useState(0);
   const [tickerQuery, setTickerQuery] = useState("");
   const [tickerResults, setTickerResults] = useState<Array<{ ticker: string; name: string | null; exchange: string | null }>>([]);
   const [selectedTicker, setSelectedTicker] = useState<string>("");
@@ -42,9 +65,12 @@ export function PeerGroupsAdminPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [bootstrapLimit, setBootstrapLimit] = useState("25");
   const [bootstrapProviderMode, setBootstrapProviderMode] = useState<"both" | "finnhub" | "fmp">("finnhub");
+  const [bootstrapTickersText, setBootstrapTickersText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const formCardRef = useRef<HTMLDivElement | null>(null);
 
   const flashMessage = (next: string, timeoutMs = 4000) => {
     setMessage(next);
@@ -93,7 +119,10 @@ export function PeerGroupsAdminPanel() {
 
   useEffect(() => {
     const next = groups.find((row) => row.id === selectedGroupId) ?? null;
-    if (!next) return;
+    if (!next) {
+      setGroupMembers([]);
+      return;
+    }
     setForm({
       name: next.name,
       slug: next.slug,
@@ -113,6 +142,10 @@ export function PeerGroupsAdminPanel() {
     if (targetGroupId && groups.some((row) => row.id === targetGroupId)) return;
     setTargetGroupId(selectedGroupId ?? groups[0]?.id ?? "");
   }, [groups, selectedGroupId, targetGroupId]);
+
+  useEffect(() => {
+    setGroupPage(0);
+  }, [groupQuery, groupIndexFilter]);
 
   const onSearchTicker = async () => {
     if (!tickerQuery.trim()) return;
@@ -168,6 +201,42 @@ export function PeerGroupsAdminPanel() {
     }
   };
 
+  const onStartNewGroup = () => {
+    setSelectedGroupId(null);
+    setForm(EMPTY_FORM);
+    setGroupMembers([]);
+    formCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const filteredGroups = useMemo(() => {
+    const query = groupQuery.trim().toLowerCase();
+    return groups.filter((group) => {
+      const matchesIndex = groupIndexFilter === "All" || firstGroupIndexLabel(group) === groupIndexFilter;
+      const matchesQuery = !query
+        || group.name.toLowerCase().includes(query)
+        || group.slug.toLowerCase().includes(query)
+        || group.groupType.toLowerCase().includes(query);
+      return matchesIndex && matchesQuery;
+    });
+  }, [groupIndexFilter, groupQuery, groups]);
+
+  const availableIndexLabels = useMemo(() => {
+    const labels = new Set(groups.map(firstGroupIndexLabel));
+    return GROUP_INDEX_LABELS.filter((label) => label === "All" || labels.has(label));
+  }, [groups]);
+
+  const totalGroupPages = Math.max(1, Math.ceil(filteredGroups.length / GROUPS_PAGE_SIZE));
+  const currentGroupPage = Math.min(groupPage, totalGroupPages - 1);
+  const visibleGroups = filteredGroups.slice(
+    currentGroupPage * GROUPS_PAGE_SIZE,
+    currentGroupPage * GROUPS_PAGE_SIZE + GROUPS_PAGE_SIZE,
+  );
+  const bootstrapTickers = parseBootstrapTickers(bootstrapTickersText);
+  const selectedGroup = useMemo(
+    () => groups.find((group) => group.id === selectedGroupId) ?? null,
+    [groups, selectedGroupId],
+  );
+
   return (
     <section className="space-y-4">
       <div>
@@ -177,54 +246,151 @@ export function PeerGroupsAdminPanel() {
 
       {message && <div className="card border border-borderSoft/70 p-3 text-sm text-slate-300">{message}</div>}
 
-      <div className="grid gap-4 xl:grid-cols-[20rem,minmax(0,1fr)]">
+      <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
         <div className="space-y-4">
           <div className="card p-3">
-            <div className="mb-3 flex items-center justify-between">
-              <h4 className="text-sm font-semibold text-slate-200">Groups</h4>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-200">Groups</h4>
+                <p className="text-[11px] text-slate-400">{groups.length} total groups</p>
+              </div>
               <button
-                className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
-                onClick={() => {
-                  setSelectedGroupId(null);
-                  setForm(EMPTY_FORM);
-                }}
+                className="rounded border border-accent/40 bg-accent/15 px-2.5 py-1.5 text-xs text-accent"
+                onClick={onStartNewGroup}
+                type="button"
               >
-                New
+                New Group
               </button>
             </div>
-            {loading ? (
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading groups...
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {groups.map((group) => (
+
+            <div className="space-y-3">
+              <label className="block text-xs text-slate-300">
+                Find a group
+                <div className="mt-1 flex items-center gap-2 rounded border border-borderSoft bg-panelSoft px-3 py-2">
+                  <Search className="h-4 w-4 text-slate-500" />
+                  <input
+                    className="w-full bg-transparent text-sm outline-none"
+                    value={groupQuery}
+                    onChange={(event) => setGroupQuery(event.target.value)}
+                    placeholder="Search name, slug, or type"
+                  />
+                </div>
+              </label>
+
+              <div className="flex flex-wrap gap-1.5">
+                {availableIndexLabels.map((label) => (
                   <button
-                    key={group.id}
-                    className={`w-full rounded border px-3 py-2 text-left ${group.id === selectedGroupId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
-                    onClick={() => setSelectedGroupId(group.id)}
+                    key={label}
+                    className={`rounded border px-2 py-1 text-[11px] ${
+                      groupIndexFilter === label
+                        ? "border-accent/50 bg-accent/15 text-accent"
+                        : "border-borderSoft/70 text-slate-400 hover:bg-slate-900/40"
+                    }`}
+                    onClick={() => setGroupIndexFilter(label)}
+                    type="button"
                   >
-                    <div className="text-sm font-semibold text-accent">{group.name}</div>
-                    <div className="text-[11px] text-slate-400">{group.groupType} | {group.memberCount ?? 0} members</div>
+                    {label}
                   </button>
                 ))}
               </div>
-            )}
-          </div>
 
-          <div className="card p-3 text-xs text-slate-300">
-            <div className="mb-2 font-semibold text-slate-200">{selectedGroupId ? "Edit Group" : "Create Group"}</div>
-            <div className="space-y-3">
-              <label className="block">
+              {loading ? (
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading groups...
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    {visibleGroups.map((group) => (
+                      <button
+                        key={group.id}
+                        className={`w-full rounded border px-3 py-2 text-left ${group.id === selectedGroupId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
+                        onClick={() => setSelectedGroupId(group.id)}
+                        type="button"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-accent">{group.name}</div>
+                            <div className="text-[11px] text-slate-400">{group.slug}</div>
+                          </div>
+                          <div className="rounded bg-slate-900/60 px-2 py-0.5 text-[11px] text-slate-300">
+                            {group.memberCount ?? 0}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-400">
+                          {group.groupType} | priority {group.priority} | {group.isActive ? "active" : "inactive"}
+                        </div>
+                      </button>
+                    ))}
+                    {visibleGroups.length === 0 && (
+                      <p className="rounded border border-dashed border-borderSoft/70 px-3 py-4 text-sm text-slate-400">
+                        No groups match the current filter.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 text-[11px] text-slate-400">
+                    <span>
+                      {filteredGroups.length === 0
+                        ? "0 groups"
+                        : `Showing ${currentGroupPage * GROUPS_PAGE_SIZE + 1}-${Math.min(filteredGroups.length, (currentGroupPage + 1) * GROUPS_PAGE_SIZE)} of ${filteredGroups.length}`}
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+                        disabled={currentGroupPage === 0}
+                        onClick={() => setGroupPage((current) => Math.max(0, current - 1))}
+                        type="button"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+                        disabled={currentGroupPage + 1 >= totalGroupPages}
+                        onClick={() => setGroupPage((current) => Math.min(totalGroupPages - 1, current + 1))}
+                        type="button"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div ref={formCardRef} className="card p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-200">{selectedGroupId ? "Edit Group" : "Create Group"}</div>
+                <div className="text-xs text-slate-400">
+                  {selectedGroup ? `${selectedGroup.name} is selected for editing.` : "Create a new peer group without leaving the page."}
+                </div>
+              </div>
+              {selectedGroupId ? (
+                <button
+                  className="rounded border border-borderSoft px-2.5 py-1.5 text-xs text-slate-300"
+                  onClick={onStartNewGroup}
+                  type="button"
+                >
+                  Switch To New
+                </button>
+              ) : null}
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block text-xs text-slate-300">
                 Name
                 <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} />
               </label>
-              <label className="block">
+              <label className="block text-xs text-slate-300">
                 Slug
                 <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.slug} onChange={(event) => setForm((current) => ({ ...current, slug: event.target.value }))} />
               </label>
-              <label className="block">
+              <label className="block text-xs text-slate-300">
                 Group Type
                 <select className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.groupType} onChange={(event) => setForm((current) => ({ ...current, groupType: event.target.value as PeerGroupType }))}>
                   <option value="fundamental">fundamental</option>
@@ -232,96 +398,141 @@ export function PeerGroupsAdminPanel() {
                   <option value="custom">custom</option>
                 </select>
               </label>
-              <label className="block">
-                Description
-                <textarea className="mt-1 min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} />
-              </label>
-              <label className="block">
+              <label className="block text-xs text-slate-300">
                 Priority
                 <input className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.priority} onChange={(event) => setForm((current) => ({ ...current, priority: event.target.value }))} />
               </label>
-              <label className="flex items-center gap-2">
+              <label className="block text-xs text-slate-300 md:col-span-2">
+                Description
+                <textarea className="mt-1 min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} />
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
                 <input type="checkbox" checked={form.isActive} onChange={(event) => setForm((current) => ({ ...current, isActive: event.target.checked }))} />
                 Active
               </label>
-              <div className="flex gap-2">
-                <button className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-sm text-accent" onClick={() => void onSaveGroup()} disabled={saving || !form.name.trim()}>
-                  {saving ? "Saving..." : "Save Group"}
-                </button>
-                {selectedGroupId && (
-                  <button
-                    className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
-                    onClick={async () => {
-                      if (!window.confirm("Delete this peer group?")) return;
-                      try {
-                        await deleteAdminPeerGroup(selectedGroupId);
-                        await load(null);
-                        setSelectedGroupId(null);
-                        setForm(EMPTY_FORM);
-                        flashMessage("Peer group deleted.");
-                      } catch (error) {
-                        setMessage(error instanceof Error ? error.message : "Failed to delete peer group.");
-                      }
-                    }}
-                  >
-                    Delete
-                  </button>
-                )}
-              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="space-y-4">
-          <div className="card p-3">
-            <div className="mb-3 text-sm font-semibold text-slate-200">Ticker Search</div>
-            <div className="mb-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Bootstrap Seed Batch</div>
-              <div className="grid gap-2 md:grid-cols-[6rem,12rem,auto]">
-                <input
-                  className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
-                  value={bootstrapLimit}
-                  onChange={(event) => setBootstrapLimit(event.target.value)}
-                  placeholder="25"
-                />
-                <select
-                  className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
-                  value={bootstrapProviderMode}
-                  onChange={(event) => setBootstrapProviderMode(event.target.value as "both" | "finnhub" | "fmp")}
-                >
-                  <option value="finnhub">Finnhub only</option>
-                  <option value="both">Both providers</option>
-                  <option value="fmp">FMP only</option>
-                </select>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-sm text-accent" onClick={() => void onSaveGroup()} disabled={saving || !form.name.trim()} type="button">
+                {saving ? "Saving..." : "Save Group"}
+              </button>
+              {selectedGroupId && (
                 <button
-                  className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:opacity-50"
-                  disabled={bootstrapping}
+                  className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
                   onClick={async () => {
-                    setBootstrapping(true);
-                    setMessage(null);
+                    if (!window.confirm("Delete this peer group?")) return;
                     try {
-                      const res = await bootstrapAdminPeerGroups({
-                        limit: Number(bootstrapLimit || 3),
-                        onlyUnseeded: true,
-                        providerMode: bootstrapProviderMode,
-                        enrichPeers: false,
-                      });
-                      await load(selectedGroupId);
-                      const okCount = (res.rows ?? []).filter((row) => row.ok).length;
-                      const errorCount = (res.rows ?? []).filter((row) => !row.ok).length;
-                      flashMessage(`Bootstrap seeded ${okCount} ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`);
+                      await deleteAdminPeerGroup(selectedGroupId);
+                      await load(null);
+                      setSelectedGroupId(null);
+                      setForm(EMPTY_FORM);
+                      flashMessage("Peer group deleted.");
                     } catch (error) {
-                      setMessage(error instanceof Error ? error.message : "Failed to bootstrap peer groups.");
-                    } finally {
-                      setBootstrapping(false);
+                      setMessage(error instanceof Error ? error.message : "Failed to delete peer group.");
                     }
                   }}
+                  type="button"
                 >
-                  {bootstrapping ? "Bootstrapping..." : "Bootstrap Batch"}
+                  Delete
                 </button>
-              </div>
-              <p className="mt-2 text-[11px] text-slate-400">Defaults to Finnhub-only for speed. Use Both providers sparingly because FMP free-tier calls are the bottleneck.</p>
+              )}
             </div>
+          </div>
+
+          <div className="card p-3">
+            <div className="mb-3 text-sm font-semibold text-slate-200">Ticker Search</div>
+            <Collapsible.Root open={bootstrapOpen} onOpenChange={setBootstrapOpen} className="mb-3 overflow-hidden rounded border border-borderSoft/60 bg-slate-900/30">
+              <Collapsible.Trigger className="flex w-full items-center justify-between px-3 py-3 text-left">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-300">Bootstrap Seed Batch</div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    Seed from the symbol directory, or target specific tickers with comma-separated input.
+                  </div>
+                </div>
+                <span className="rounded border border-borderSoft/70 px-2 py-1 text-[11px] text-slate-300">
+                  {bootstrapOpen ? <span className="inline-flex items-center gap-1"><ChevronUp className="h-3.5 w-3.5" />Collapse</span> : <span className="inline-flex items-center gap-1"><ChevronDown className="h-3.5 w-3.5" />Expand</span>}
+                </span>
+              </Collapsible.Trigger>
+              <Collapsible.Content className="border-t border-borderSoft/60 px-3 py-3">
+                <div className="space-y-3">
+                  <label className="block text-xs text-slate-300">
+                    Specific tickers
+                    <textarea
+                      className="mt-1 min-h-20 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
+                      value={bootstrapTickersText}
+                      onChange={(event) => setBootstrapTickersText(event.target.value)}
+                      placeholder="AAPL, MSFT, NVDA"
+                    />
+                  </label>
+
+                  <div className="grid gap-2 md:grid-cols-[8rem,12rem,minmax(0,1fr)]">
+                    <label className="block text-xs text-slate-300">
+                      Batch size
+                      <input
+                        className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm disabled:opacity-50"
+                        value={bootstrapLimit}
+                        disabled={bootstrapTickers.length > 0}
+                        onChange={(event) => setBootstrapLimit(event.target.value)}
+                        placeholder="25"
+                      />
+                    </label>
+                    <label className="block text-xs text-slate-300">
+                      Provider
+                      <select
+                        className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
+                        value={bootstrapProviderMode}
+                        onChange={(event) => setBootstrapProviderMode(event.target.value as "both" | "finnhub" | "fmp")}
+                      >
+                        <option value="finnhub">Finnhub only</option>
+                        <option value="both">Both providers</option>
+                        <option value="fmp">FMP only</option>
+                      </select>
+                    </label>
+                    <div className="flex items-end">
+                      <button
+                        className="w-full rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent disabled:opacity-50"
+                        disabled={bootstrapping}
+                        onClick={async () => {
+                          setBootstrapping(true);
+                          setMessage(null);
+                          try {
+                            const res = await bootstrapAdminPeerGroups({
+                              tickers: bootstrapTickers.length > 0 ? bootstrapTickers : undefined,
+                              limit: bootstrapTickers.length > 0 ? undefined : Number(bootstrapLimit || 3),
+                              onlyUnseeded: true,
+                              providerMode: bootstrapProviderMode,
+                              enrichPeers: false,
+                            });
+                            await load(selectedGroupId);
+                            const okCount = (res.rows ?? []).filter((row) => row.ok).length;
+                            const errorCount = (res.rows ?? []).filter((row) => !row.ok).length;
+                            flashMessage(
+                              bootstrapTickers.length > 0
+                                ? `Bootstrapped ${okCount} requested ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`
+                                : `Bootstrap seeded ${okCount} ticker${okCount === 1 ? "" : "s"}${errorCount ? `, ${errorCount} failed` : ""}.`,
+                            );
+                          } catch (error) {
+                            setMessage(error instanceof Error ? error.message : "Failed to bootstrap peer groups.");
+                          } finally {
+                            setBootstrapping(false);
+                          }
+                        }}
+                        type="button"
+                      >
+                        {bootstrapping ? "Bootstrapping..." : bootstrapTickers.length > 0 ? "Bootstrap Tickers" : "Bootstrap Batch"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400">
+                    {bootstrapTickers.length > 0
+                      ? `Targeting ${bootstrapTickers.length} ticker${bootstrapTickers.length === 1 ? "" : "s"} directly.`
+                      : "Leave specific tickers blank to seed the next unseeded candidates from the symbols directory."}
+                    {" "}Finnhub-only remains the fastest option.
+                  </p>
+                </div>
+              </Collapsible.Content>
+            </Collapsible.Root>
             <div className="flex gap-2">
               <input
                 className="w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm"
@@ -332,7 +543,7 @@ export function PeerGroupsAdminPanel() {
                 }}
                 placeholder="AAPL"
               />
-              <button className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent" onClick={() => void onSearchTicker()}>
+              <button className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent" onClick={() => void onSearchTicker()} type="button">
                 Search
               </button>
             </div>
@@ -342,6 +553,7 @@ export function PeerGroupsAdminPanel() {
                   key={row.ticker}
                   className={`rounded border px-3 py-2 text-left ${selectedTicker === row.ticker ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
                   onClick={() => void onSelectTicker(row.ticker)}
+                  type="button"
                 >
                   <div className="text-sm font-semibold text-accent">{row.ticker}</div>
                   <div className="text-[11px] text-slate-400">{row.name ?? "-"} {row.exchange ? `| ${row.exchange}` : ""}</div>
@@ -368,6 +580,7 @@ export function PeerGroupsAdminPanel() {
                       setMessage(error instanceof Error ? error.message : `Failed to seed peers for ${selectedTicker}.`);
                     }
                   }}
+                  type="button"
                 >
                   Seed Peers
                 </button>
@@ -414,6 +627,7 @@ export function PeerGroupsAdminPanel() {
                             setMessage(error instanceof Error ? error.message : "Failed to add ticker to peer group.");
                           }
                         }}
+                        type="button"
                       >
                         {selectedTickerDetail.groups.some((group) => group.id === targetGroupId) ? "Already In Group" : "Add Ticker To Group"}
                       </button>
@@ -430,6 +644,11 @@ export function PeerGroupsAdminPanel() {
 
             <div className="card p-3">
               <div className="mb-2 text-sm font-semibold text-slate-200">Selected Group Members</div>
+              {selectedGroup ? (
+                <p className="mb-3 text-xs text-slate-400">{selectedGroup.name} currently has {groupMembers.length} visible member{groupMembers.length === 1 ? "" : "s"}.</p>
+              ) : (
+                <p className="mb-3 text-xs text-slate-400">Save or select a group to manage its memberships.</p>
+              )}
               <div className="space-y-2">
                 {groupMembers.map((row) => (
                   <div key={`${selectedGroupId}-${row.ticker}`} className="flex items-center justify-between rounded border border-borderSoft/60 px-3 py-2 text-sm">
@@ -451,6 +670,7 @@ export function PeerGroupsAdminPanel() {
                             setMessage(error instanceof Error ? error.message : `Failed to remove ${row.ticker}.`);
                           }
                         }}
+                        type="button"
                       >
                         Remove
                       </button>
