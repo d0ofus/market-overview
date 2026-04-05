@@ -10,6 +10,7 @@ export type TickerMultiGridItem = {
   title?: string;
   subtitle?: string | null;
   detail?: ReactNode;
+  headerDetail?: ReactNode;
   onTitleClick?: () => void;
 };
 
@@ -64,26 +65,29 @@ export function TickerMultiGrid({
               key={item.key}
               className={`rounded border ${showChartStatusLine ? "p-1.5" : "p-2"} ${isSelected ? "border-accent/60" : "border-borderSoft/60"}`}
             >
-              <div className="mb-2">
-                {item.onTitleClick ? (
-                  <button
-                    className="block text-left text-sm font-semibold text-accent hover:underline"
-                    onClick={item.onTitleClick}
-                  >
-                    {item.title ?? item.ticker}
-                  </button>
-                ) : (
-                  <div className="text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
-                )}
-                {item.subtitle && (
-                  <button
-                    className={`mt-0.5 block w-full text-left text-[11px] text-slate-400 ${onSelect ? "" : "cursor-default"}`}
-                    onClick={() => onSelect?.(item.key)}
-                    disabled={!onSelect}
-                  >
-                    {item.subtitle}
-                  </button>
-                )}
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  {item.onTitleClick ? (
+                    <button
+                      className="block text-left text-sm font-semibold text-accent hover:underline"
+                      onClick={item.onTitleClick}
+                    >
+                      {item.title ?? item.ticker}
+                    </button>
+                  ) : (
+                    <div className="text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
+                  )}
+                  {item.subtitle && (
+                    <button
+                      className={`mt-0.5 block w-full text-left text-[11px] text-slate-400 ${onSelect ? "" : "cursor-default"}`}
+                      onClick={() => onSelect?.(item.key)}
+                      disabled={!onSelect}
+                    >
+                      {item.subtitle}
+                    </button>
+                  )}
+                </div>
+                {item.headerDetail ? <div className="shrink-0">{item.headerDetail}</div> : null}
               </div>
               <TradingViewWidget
                 ticker={item.ticker}

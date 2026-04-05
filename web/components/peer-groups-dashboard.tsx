@@ -32,6 +32,38 @@ function fmtPct(value: number | null | undefined): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
+function MultiChartPager({
+  page,
+  totalPages,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-slate-400">
+      <span>Page {page} of {totalPages}</span>
+      <button
+        className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+        onClick={() => onPageChange(Math.max(1, page - 1))}
+        disabled={page === 1}
+        type="button"
+      >
+        Previous
+      </button>
+      <button
+        className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
+        onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+        disabled={page >= totalPages}
+        type="button"
+      >
+        Next
+      </button>
+    </div>
+  );
+}
+
 export function PeerGroupsDashboard() {
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [directory, setDirectory] = useState<PeerDirectoryRow[]>([]);
@@ -177,8 +209,8 @@ export function PeerGroupsDashboard() {
         ticker,
         title: ticker,
         subtitle: name,
-        detail: (
-          <div className="grid grid-cols-4 gap-2 text-[11px] text-slate-400">
+        headerDetail: (
+          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-right text-[11px] text-slate-400">
             <div>Price: <span className="text-slate-200">{fmtPrice(metric?.price)}</span></div>
             <div>1D: <span className={change1d != null && change1d < 0 ? "text-neg" : "text-pos"}>{fmtPct(change1d)}</span></div>
             <div>Mkt Cap: <span className="text-slate-200">{fmtCompact(metric?.marketCap)}</span></div>
@@ -451,23 +483,7 @@ export function PeerGroupsDashboard() {
                   />
                 </label>
               </div>
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <span>Page {chartPage} of {totalChartPages}</span>
-                <button
-                  className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
-                  onClick={() => setChartPage((current) => Math.max(1, current - 1))}
-                  disabled={chartPage === 1}
-                >
-                  Previous
-                </button>
-                <button
-                  className="rounded border border-borderSoft px-2 py-1 disabled:opacity-40"
-                  onClick={() => setChartPage((current) => Math.min(totalChartPages, current + 1))}
-                  disabled={chartPage >= totalChartPages}
-                >
-                  Next
-                </button>
-              </div>
+              <MultiChartPager page={chartPage} totalPages={totalChartPages} onPageChange={setChartPage} />
             </div>
           </div>
           <TickerMultiGrid
@@ -478,6 +494,9 @@ export function PeerGroupsDashboard() {
             emptyMessage="No peer charts available for the current selection."
             showChartStatusLine
           />
+          <div className="flex justify-end px-1">
+            <MultiChartPager page={chartPage} totalPages={totalChartPages} onPageChange={setChartPage} />
+          </div>
         </div>
       )}
     </div>
