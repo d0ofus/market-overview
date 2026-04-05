@@ -246,6 +246,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
   requestTimeoutMs?: number;
   jsonRepairTimeoutMs?: number;
   maxAttemptsPerModel?: number;
+  onHeartbeat?: () => Promise<void> | void;
 }): Promise<AnthropicJsonResponse<T>> {
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) throw new Error("Anthropic API key is not configured.");
@@ -263,6 +264,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
       let response: Response;
       let text: string;
       try {
+        await input.onHeartbeat?.();
         ({ response, text } = await fetchTextWithTimeout("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: {
@@ -308,6 +310,7 @@ export async function callAnthropicJson<T>(env: Env, input: {
         } catch (error) {
           try {
             const repairModel = modelCandidates[Math.min(modelIndex + 1, modelCandidates.length - 1)] ?? model;
+            await input.onHeartbeat?.();
             data = await repairAnthropicJson<T>(apiKey, repairModel, anthropicContentToText(json?.content), jsonRepairTimeoutMs);
             return {
               data,

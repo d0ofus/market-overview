@@ -17,6 +17,7 @@ vi.mock("../src/research/providers/anthropic", () => ({
 
 import {
   RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+  RESEARCH_LAB_ANTHROPIC_JSON_REPAIR_TIMEOUT_MS,
   RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
   RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
   RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS,
@@ -107,6 +108,7 @@ describe("research lab providers", () => {
         updatedAt: "2026-04-01T00:00:00.000Z",
       },
       user: "{}",
+      onHeartbeat: async () => {},
     });
 
     expect(harness.buildAnthropicSonnetModelsMock).toHaveBeenCalledWith(
@@ -120,7 +122,9 @@ describe("research lab providers", () => {
         fallbackModels: ["claude-sonnet-4-5", "claude-3-5-sonnet-20241022"],
         maxTokens: RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
         requestTimeoutMs: RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+        jsonRepairTimeoutMs: RESEARCH_LAB_ANTHROPIC_JSON_REPAIR_TIMEOUT_MS,
         maxAttemptsPerModel: RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+        onHeartbeat: expect.any(Function),
       }),
     );
   });

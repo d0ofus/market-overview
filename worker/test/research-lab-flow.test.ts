@@ -188,6 +188,7 @@ const harness = vi.hoisted(() => {
       gatherError: null as Error | null,
       gatherDelayMs: 0,
       synthError: null as Error | null,
+      synthDelayMs: 0,
       priorOutputs: new Map<string, any>(),
       eventCounter: 0,
       outputCounter: 0,
@@ -234,8 +235,15 @@ vi.mock("../src/research-lab/gather", () => ({
 }));
 
 vi.mock("../src/research-lab/synthesize", () => ({
-  synthesizeResearchLabOutput: vi.fn(async (_env: unknown, input: { identity: { ticker: string; companyName: string | null } }) => {
+  synthesizeResearchLabOutput: vi.fn(async (
+    _env: unknown,
+    input: { identity: { ticker: string; companyName: string | null }; onHeartbeat?: () => Promise<void> | void },
+  ) => {
     if (harness.state.synthError) throw harness.state.synthError;
+    if (harness.state.synthDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, harness.state.synthDelayMs));
+      await input.onHeartbeat?.();
+    }
     return {
       synthesis: harness.makeSynthesis(input.identity.ticker, input.identity.companyName ?? `${input.identity.ticker} Corp`),
       usage: { input_tokens: 44, output_tokens: 55, total_tokens: 99 },
@@ -634,6 +642,37 @@ describe("research lab flow", () => {
     await drainPromise;
 
     expect(harness.state.items[0]?.status).toBe("completed");
+  });
+
+  it("does not stale-fail a synthesizing ticker while a live execution lock is still held", async () => {
+    const env = {} as any;
+    const run = await startResearchLabRun(env, { tickers: ["WDC"] });
+    harness.state.run = {
+      ...harness.state.run,
+      status: "running",
+      heartbeatAt: new Date().toISOString(),
+      metadataJson: {
+        ...(harness.state.run?.metadataJson ?? {}),
+        executionToken: "live-token",
+        executionAcquiredAt: new Date().toISOString(),
+      },
+    };
+    harness.state.items[0] = {
+      ...harness.state.items[0],
+      companyName: "Western Digital Corporation",
+      exchange: "NASDAQ",
+      secCik: "0000106040",
+      irDomain: "investor.wdc.com",
+      status: "synthesizing",
+      heartbeatAt: "2026-03-31T07:00:00.000Z",
+      startedAt: "2026-03-31T07:00:00.000Z",
+    };
+
+    await ensureResearchLabRunProgress(env, run.id);
+
+    expect(harness.state.items[0]?.status).toBe("synthesizing");
+    expect(harness.state.items[0]?.lastError).toBeNull();
+    expect(harness.state.run.status).toBe("running");
   });
 
   it("cancels a live lab run without restarting it", async () => {

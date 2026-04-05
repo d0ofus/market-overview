@@ -220,6 +220,47 @@ describe("callAnthropicJson", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(waitMock).toHaveBeenCalledTimes(1);
   });
+
+  it("emits heartbeat callbacks before each long provider segment", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"summary\":\"missing end quote}",
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 15 },
+        model: "claude-test",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [
+          {
+            text: "{\"summary\":\"Recovered by repair.\"}",
+          },
+        ],
+        usage: { input_tokens: 11, output_tokens: 16 },
+        model: "claude-repair",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    const onHeartbeat = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await callAnthropicJson<{ summary: string }>(buildEnv(), {
+      model: "claude-test",
+      system: "Return strict JSON only.",
+      user: "{}",
+      onHeartbeat,
+    });
+
+    expect(response.data).toEqual({ summary: "Recovered by repair." });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onHeartbeat).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Anthropic model selection", () => {

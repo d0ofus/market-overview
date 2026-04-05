@@ -3,6 +3,7 @@ import { searchPerplexity } from "../research/providers/perplexity-search";
 import { buildAnthropicSonnetModels, callAnthropicJson } from "../research/providers/anthropic";
 import {
   RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+  RESEARCH_LAB_ANTHROPIC_JSON_REPAIR_TIMEOUT_MS,
   RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
   RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
   RESEARCH_LAB_PERPLEXITY_MAX_ATTEMPTS,
@@ -18,6 +19,7 @@ export async function callResearchLabSonnetJson<T>(env: Env, input: {
   promptConfig: ResearchLabPromptConfigRecord;
   user: string;
   maxTokens?: number;
+  onHeartbeat?: () => Promise<void> | void;
 }): Promise<{ data: T; usage: Record<string, unknown> | null; model: string }> {
   const models = resolveResearchLabSonnetModels(env, input.promptConfig);
   return callAnthropicJson<T>(env, {
@@ -27,7 +29,9 @@ export async function callResearchLabSonnetJson<T>(env: Env, input: {
     user: input.user,
     maxTokens: input.maxTokens ?? RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
     requestTimeoutMs: RESEARCH_LAB_ANTHROPIC_TIMEOUT_MS,
+    jsonRepairTimeoutMs: RESEARCH_LAB_ANTHROPIC_JSON_REPAIR_TIMEOUT_MS,
     maxAttemptsPerModel: RESEARCH_LAB_ANTHROPIC_MAX_ATTEMPTS,
+    onHeartbeat: input.onHeartbeat,
   });
 }
 

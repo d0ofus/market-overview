@@ -347,6 +347,7 @@ export async function synthesizeResearchLabOutput(env: Env, input: {
   promptConfig: ResearchLabPromptConfigRecord;
   evidencePromptLimit: number;
   priorOutput: ResearchLabOutputRecord | null;
+  onHeartbeat?: () => Promise<void> | void;
 }): Promise<{ synthesis: ResearchLabSynthesis; usage: Record<string, unknown> | null; model: string }> {
   const config = (input.promptConfig.synthesisConfigJson ?? {}) as PromptConfigJson;
   const additionalInstructions = typeof config.additionalInstructions === "string"
@@ -369,6 +370,7 @@ export async function synthesizeResearchLabOutput(env: Env, input: {
     },
     user: promptInput.user,
     maxTokens: RESEARCH_LAB_ANTHROPIC_MAX_TOKENS,
+    onHeartbeat: input.onHeartbeat,
   });
 
   const availableEvidenceIds = new Set(input.evidence.map((item) => item.id));

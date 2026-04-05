@@ -95,6 +95,15 @@ function ageMs(value: string | null | undefined): number | null {
   return Math.max(0, Date.now() - parsed);
 }
 
+function hasLiveExecutionToken(run: ResearchLabRunRecord | null | undefined): boolean {
+  const token = run?.metadataJson && typeof run.metadataJson.executionToken === "string"
+    ? run.metadataJson.executionToken
+    : null;
+  if (!token) return false;
+  const heartbeatAgeMs = ageMs(run?.heartbeatAt ?? run?.updatedAt ?? run?.startedAt ?? run?.createdAt);
+  return heartbeatAgeMs !== null && heartbeatAgeMs < RESEARCH_LAB_HEARTBEAT_STALE_MS;
+}
+
 function dedupeTickers(tickers: string[]) {
   return Array.from(new Set(tickers.map((value) => value.trim().toUpperCase()).filter(Boolean)));
 }
@@ -293,7 +302,11 @@ async function failItem(
 }
 
 async function recoverStaleItems(env: Env, runId: string) {
-  const items = await loadResearchLabRunItems(env, runId);
+  const [run, items] = await Promise.all([
+    loadResearchLabRun(env, runId),
+    loadResearchLabRunItems(env, runId),
+  ]);
+  if (hasLiveExecutionToken(run)) return;
   for (const item of items) {
     if (!isInProgressItemStatus(item.status)) continue;
     const itemAgeMs = ageMs(item.heartbeatAt ?? item.updatedAt ?? item.startedAt ?? item.createdAt);
@@ -491,6 +504,7 @@ async function processItem(env: Env, run: ResearchLabRunRecord, item: ResearchLa
           promptConfig: configs.promptConfig,
           evidencePromptLimit: evidence.length,
           priorOutput,
+          onHeartbeat: () => touchResearchLabHeartbeat(env, run.id, item.id),
         }),
       });
     } catch (error) {
