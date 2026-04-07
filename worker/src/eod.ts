@@ -29,8 +29,9 @@ const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const MIN_BREADTH_COVERAGE_PCT = 1;
-const OVERVIEW_RS_PILOT_GROUP_ID = "g-crypto";
-const OVERVIEW_RS_PILOT_TICKER = "BITO";
+const OVERVIEW_RS_ENABLED_GROUPS = new Set(["g-crypto", "g-metals-energy"]);
+const OVERVIEW_RS_CRYPTO_GROUP_ID = "g-crypto";
+const OVERVIEW_RS_CRYPTO_TICKER = "BITO";
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
@@ -150,10 +151,19 @@ async function loadOverviewRelativeStrengthPilot(
   rows: Array<{ groupId: string; ticker: string }>,
   asOfDate: string,
 ): Promise<Map<string, number[] | null>> {
-  const hasPilotRow = rows.some((row) => row.groupId === OVERVIEW_RS_PILOT_GROUP_ID && row.ticker.toUpperCase() === OVERVIEW_RS_PILOT_TICKER);
-  if (!hasPilotRow) return new Map();
+  const eligibleTickers = Array.from(new Set(
+    rows
+      .filter((row) => {
+        const ticker = row.ticker.toUpperCase();
+        if (row.groupId === OVERVIEW_RS_CRYPTO_GROUP_ID) return ticker === OVERVIEW_RS_CRYPTO_TICKER;
+        return OVERVIEW_RS_ENABLED_GROUPS.has(row.groupId);
+      })
+      .map((row) => row.ticker.toUpperCase())
+      .filter(Boolean),
+  ));
+  if (eligibleTickers.length === 0) return new Map();
 
-  const bars = await loadBarsForTickers(env, [OVERVIEW_RS_PILOT_TICKER, OVERVIEW_RS_BENCHMARK_TICKER], asOfDate);
+  const bars = await loadBarsForTickers(env, [...eligibleTickers, OVERVIEW_RS_BENCHMARK_TICKER], asOfDate);
   const seriesByTicker = new Map<string, { dates: string[]; closes: number[] }>();
   for (const row of bars) {
     const ticker = row.ticker.toUpperCase();
@@ -163,16 +173,22 @@ async function loadOverviewRelativeStrengthPilot(
     seriesByTicker.set(ticker, series);
   }
 
-  const tickerSeries = seriesByTicker.get(OVERVIEW_RS_PILOT_TICKER) ?? { dates: [], closes: [] };
   const benchmarkSeries = seriesByTicker.get(OVERVIEW_RS_BENCHMARK_TICKER) ?? { dates: [], closes: [] };
-  const relativeStrength = buildRelativeStrengthSeries(
-    tickerSeries.dates,
-    tickerSeries.closes,
-    benchmarkSeries.dates,
-    benchmarkSeries.closes,
-  );
+  const relativeStrengthByTicker = new Map<string, number[] | null>();
+  for (const ticker of eligibleTickers) {
+    const tickerSeries = seriesByTicker.get(ticker) ?? { dates: [], closes: [] };
+    relativeStrengthByTicker.set(
+      ticker,
+      buildRelativeStrengthSeries(
+        tickerSeries.dates,
+        tickerSeries.closes,
+        benchmarkSeries.dates,
+        benchmarkSeries.closes,
+      ),
+    );
+  }
 
-  return new Map([[OVERVIEW_RS_PILOT_TICKER, relativeStrength]]);
+  return relativeStrengthByTicker;
 }
 
 async function loadUniverseTickers(env: Env, universeId: string): Promise<string[]> {
@@ -821,10 +837,7 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
             ytd: r.ytd,
             pctFrom52wHigh: r.pctFrom52wHigh,
             sparkline: JSON.parse(r.sparklineJson) as number[],
-            relativeStrength30dVsSpy:
-              r.groupId === OVERVIEW_RS_PILOT_GROUP_ID && r.ticker.toUpperCase() === OVERVIEW_RS_PILOT_TICKER
-                ? (relativeStrengthByTicker.get(OVERVIEW_RS_PILOT_TICKER) ?? null)
-                : null,
+            relativeStrength30dVsSpy: relativeStrengthByTicker.get(r.ticker.toUpperCase()) ?? null,
             rankKey: r.rankKey,
             holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
           })),

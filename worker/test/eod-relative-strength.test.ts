@@ -40,6 +40,16 @@ function createEnv() {
       showSparkline: 1,
       pinTop10: 0,
     },
+    {
+      id: "g-metals-energy",
+      sectionId: "sec-macro",
+      title: "Metals & Energy",
+      sort_order: 3,
+      dataType: "macro",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
   ];
   const items = [
     {
@@ -62,6 +72,26 @@ function createEnv() {
       tagsJson: "[]",
       holdingsJson: null,
     },
+    {
+      id: "item-gld",
+      groupId: "g-metals-energy",
+      sort_order: 1,
+      ticker: "GLD",
+      displayName: "SPDR Gold Shares",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
+    {
+      id: "item-uso",
+      groupId: "g-metals-energy",
+      sort_order: 2,
+      ticker: "USO",
+      displayName: "United States Oil Fund",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
   ];
   const columns = [
     {
@@ -72,10 +102,16 @@ function createEnv() {
       groupId: "g-crypto",
       columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline", "relativeStrength30dVsSpy"]),
     },
+    {
+      groupId: "g-metals-energy",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
   ];
   const symbolRows = [
     { ticker: "SPY", name: "SPDR S&P 500 ETF" },
     { ticker: "BITO", name: "ProShares Bitcoin Strategy ETF" },
+    { ticker: "GLD", name: "SPDR Gold Shares" },
+    { ticker: "USO", name: "United States Oil Fund" },
   ];
   const snapshotMeta = {
     id: "snap-1",
@@ -116,16 +152,56 @@ function createEnv() {
       rankKey: 20,
       holdingsJson: null,
     },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-metals-energy",
+      ticker: "GLD",
+      displayName: "SPDR Gold Shares",
+      price: 36,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([30, 31.5, 33, 36]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-metals-energy",
+      ticker: "USO",
+      displayName: "United States Oil Fund",
+      price: 18,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([15, 15.75, 16.5, 18]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
   ];
   const dailyBars = [
     { ticker: "BITO", date: "2025-01-02", c: 20, volume: 1000 },
     { ticker: "BITO", date: "2025-01-03", c: 21, volume: 1100 },
     { ticker: "BITO", date: "2025-01-06", c: 22, volume: 1200 },
     { ticker: "BITO", date: "2025-01-07", c: 24, volume: 1300 },
+    { ticker: "GLD", date: "2025-01-02", c: 30, volume: 1400 },
+    { ticker: "GLD", date: "2025-01-03", c: 31.5, volume: 1500 },
+    { ticker: "GLD", date: "2025-01-06", c: 33, volume: 1600 },
+    { ticker: "GLD", date: "2025-01-07", c: 36, volume: 1700 },
     { ticker: "SPY", date: "2025-01-02", c: 10, volume: 2000 },
     { ticker: "SPY", date: "2025-01-03", c: 10.5, volume: 2100 },
     { ticker: "SPY", date: "2025-01-06", c: 11, volume: 2200 },
     { ticker: "SPY", date: "2025-01-07", c: 12, volume: 2300 },
+    { ticker: "USO", date: "2025-01-02", c: 15, volume: 2400 },
+    { ticker: "USO", date: "2025-01-03", c: 15.75, volume: 2500 },
+    { ticker: "USO", date: "2025-01-06", c: 16.5, volume: 2600 },
+    { ticker: "USO", date: "2025-01-07", c: 18, volume: 2700 },
   ];
 
   const db = {
@@ -189,16 +265,22 @@ function createEnv() {
 }
 
 describe("loadSnapshot relative strength pilot", () => {
-  it("populates BITO with RS 30d vs SPY and leaves non-pilot rows empty", async () => {
+  it("populates crypto and metals-energy rows with RS 30d vs SPY and leaves non-enabled rows empty", async () => {
     const snapshot = await loadSnapshot(createEnv() as never);
     const macroSection = snapshot.sections[0];
     const cryptoGroup = macroSection.groups.find((group) => group.id === "g-crypto");
     const indexGroup = macroSection.groups.find((group) => group.id === "g-us-index");
+    const metalsGroup = macroSection.groups.find((group) => group.id === "g-metals-energy");
     const bitoRow = cryptoGroup?.rows.find((row) => row.ticker === "BITO");
+    const gldRow = metalsGroup?.rows.find((row) => row.ticker === "GLD");
+    const usoRow = metalsGroup?.rows.find((row) => row.ticker === "USO");
     const spyRow = indexGroup?.rows.find((row) => row.ticker === "SPY");
 
     expect(cryptoGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(metalsGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(bitoRow?.relativeStrength30dVsSpy).toEqual([2, 2, 2, 2]);
+    expect(gldRow?.relativeStrength30dVsSpy).toEqual([3, 3, 3, 3]);
+    expect(usoRow?.relativeStrength30dVsSpy).toEqual([1.5, 1.5, 1.5, 1.5]);
     expect(spyRow?.relativeStrength30dVsSpy).toBeNull();
   });
 });
