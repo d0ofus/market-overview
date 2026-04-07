@@ -116,6 +116,69 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const toggleExpandedTicker = (ticker: string) => {
     setExpandedTicker((current) => (current === ticker ? null : ticker));
   };
+  const renderCell = (row: Row, column: string) => {
+    if (column === "ticker") {
+      return (
+        <td key={`${row.ticker}-${column}`} className="px-3 py-2 font-semibold text-accent">
+          {showsEtfConstituents ? (
+            <button
+              className="text-left hover:underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                void openEtfConstituents(row.ticker, row.displayName);
+              }}
+            >
+              {row.ticker}
+            </button>
+          ) : (
+            row.ticker
+          )}
+        </td>
+      );
+    }
+    if (column === "name") {
+      return <td key={`${row.ticker}-${column}`} className="max-w-64 truncate px-3 py-2 text-slate-300">{row.displayName ?? row.ticker}</td>;
+    }
+    if (column === "sparkline") {
+      return (
+        <td key={`${row.ticker}-${column}`} className="px-3 py-2">
+          <Sparkline values={row.sparkline} />
+        </td>
+      );
+    }
+    if (column === "relativeStrength30dVsSpy") {
+      return (
+        <td key={`${row.ticker}-${column}`} className="px-3 py-2">
+          <HistogramSparkline values={row.relativeStrength30dVsSpy} />
+        </td>
+      );
+    }
+    if (column === "price") {
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{row.price.toFixed(2)}</td>;
+    }
+    if (column === "1D") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change1d)}`}>{pct(row.change1d)}</td>;
+    }
+    if (column === "1W") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change1w)}`}>{pct(row.change1w)}</td>;
+    }
+    if (column === "5D") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change5d)}`}>{pct(row.change5d)}</td>;
+    }
+    if (column === "3M") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change3m)}`}>{pct(row.change3m)}</td>;
+    }
+    if (column === "6M") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change6m)}`}>{pct(row.change6m)}</td>;
+    }
+    if (column === "YTD") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.ytd)}`}>{pct(row.ytd)}</td>;
+    }
+    if (column === "pctFrom52WHigh") {
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.pctFrom52wHigh)}`}>{pct(row.pctFrom52wHigh)}</td>;
+    }
+    return null;
+  };
   const sortedConstituents = useMemo(() => {
     const rowsCopy = [...constituents];
     if (constituentSort === "change1d") {
@@ -203,46 +266,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                         className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
                         onClick={() => toggleExpandedTicker(row.ticker)}
                       >
-                        {columns.includes("ticker") && (
-                          <td className="px-3 py-2 font-semibold text-accent">
-                            {showsEtfConstituents ? (
-                              <button
-                                className="text-left hover:underline"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void openEtfConstituents(row.ticker, row.displayName);
-                                }}
-                              >
-                                {row.ticker}
-                              </button>
-                            ) : (
-                              row.ticker
-                            )}
-                          </td>
-                        )}
-                        {columns.includes("name") && (
-                          <td className="max-w-64 truncate px-3 py-2 text-slate-300">{row.displayName ?? row.ticker}</td>
-                        )}
-                        {columns.includes("price") && <td className="px-3 py-2">{row.price.toFixed(2)}</td>}
-                        {columns.includes("1D") && <td className={`px-3 py-2 ${cellClass(row.change1d)}`}>{pct(row.change1d)}</td>}
-                        {columns.includes("1W") && <td className={`px-3 py-2 ${cellClass(row.change1w)}`}>{pct(row.change1w)}</td>}
-                        {columns.includes("5D") && <td className={`px-3 py-2 ${cellClass(row.change5d)}`}>{pct(row.change5d)}</td>}
-                        {columns.includes("3M") && <td className={`px-3 py-2 ${cellClass(row.change3m)}`}>{pct(row.change3m)}</td>}
-                        {columns.includes("6M") && <td className={`px-3 py-2 ${cellClass(row.change6m)}`}>{pct(row.change6m)}</td>}
-                        {columns.includes("YTD") && <td className={`px-3 py-2 ${cellClass(row.ytd)}`}>{pct(row.ytd)}</td>}
-                        {columns.includes("pctFrom52WHigh") && (
-                          <td className={`px-3 py-2 ${cellClass(row.pctFrom52wHigh)}`}>{pct(row.pctFrom52wHigh)}</td>
-                        )}
-                        {columns.includes("sparkline") && (
-                          <td className="px-3 py-2">
-                            <Sparkline values={row.sparkline} />
-                          </td>
-                        )}
-                        {columns.includes("relativeStrength30dVsSpy") && (
-                          <td className="px-3 py-2">
-                            <HistogramSparkline values={row.relativeStrength30dVsSpy} />
-                          </td>
-                        )}
+                        {columns.map((column) => renderCell(row, column))}
                       </tr>
                       {isOpen && (
                         <tr className="border-t border-borderSoft/60 bg-slate-950/40">
