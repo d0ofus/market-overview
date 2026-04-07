@@ -808,6 +808,88 @@ export type PeerMetricRow = {
   source: string;
 };
 
+export type CorrelationLookback = "60D" | "120D" | "252D" | "2Y" | "5Y";
+export type CorrelationRollingWindow = "20D" | "60D" | "120D";
+export type CorrelationTickerStatus = "ok" | "stale";
+
+export type CorrelationResolvedTicker = {
+  ticker: string;
+  displayName: string | null;
+  lastBarDate: string | null;
+  barCount: number;
+  status: CorrelationTickerStatus;
+};
+
+export type CorrelationUnresolvedTicker = {
+  ticker: string;
+  reason: "unknown_ticker" | "missing_history";
+};
+
+export type CorrelationMatrixResponse = {
+  requestedTickers: string[];
+  lookback: CorrelationLookback;
+  returnPeriods: number;
+  generatedAt: string;
+  expectedAsOfDate: string;
+  latestAvailableDate: string | null;
+  resolvedTickers: CorrelationResolvedTicker[];
+  unresolvedTickers: CorrelationUnresolvedTicker[];
+  matrix: Array<Array<number | null>>;
+  overlapCounts: number[][];
+  warnings: string[];
+  defaultPair: { left: string; right: string } | null;
+};
+
+export type CorrelationPairResponse = {
+  lookback: CorrelationLookback;
+  rollingWindow: CorrelationRollingWindow;
+  generatedAt: string;
+  warnings: string[];
+  pair: {
+    left: CorrelationResolvedTicker;
+    right: CorrelationResolvedTicker;
+    overlapStartDate: string | null;
+    overlapEndDate: string | null;
+    priceObservationCount: number;
+    returnObservationCount: number;
+  };
+  overview: {
+    normalizedSeries: Array<{ date: string; left: number; right: number }>;
+    regressionPoints: Array<{ date: string; x: number; y: number }>;
+    regressionLine: Array<{ x: number; y: number }>;
+    stats: {
+      beta: number | null;
+      intercept: number | null;
+      correlation: number | null;
+      rSquared: number | null;
+      observationCount: number;
+    };
+  };
+  spread: {
+    series: Array<{
+      date: string;
+      spread: number;
+      mean: number | null;
+      upper2Sigma: number | null;
+      lower2Sigma: number | null;
+      zScore: number | null;
+    }>;
+    latest: {
+      spread: number | null;
+      zScore: number | null;
+    };
+  };
+  dynamics: {
+    rollingCorrelation: Array<{ date: string; value: number | null }>;
+    leadLag: {
+      confidenceBand: number | null;
+      bestLag: { lag: number; correlation: number; observationCount: number } | null;
+      rows: Array<{ lag: number; correlation: number | null; observationCount: number }>;
+    };
+    lagOverlay: Array<{ date: string; left: number | null; right: number | null }>;
+  };
+};
+
 function sortNewsNewestFirst<T extends { publishedAt: string | null; fetchedAt?: string | null }>(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
     const left = Date.parse(a.publishedAt ?? a.fetchedAt ?? "") || 0;
@@ -887,6 +969,30 @@ export function getTicker(ticker: string) {
     series: Array<{ date: string; c: number }>;
     tradingViewEnabled: boolean;
   }>(`/api/ticker/${ticker}`);
+}
+
+export function getCorrelationMatrix(params: {
+  tickers: string;
+  lookback?: CorrelationLookback;
+}) {
+  return getJson<CorrelationMatrixResponse>(appendQuery("/api/correlation/matrix", {
+    tickers: params.tickers,
+    lookback: params.lookback ?? "252D",
+  }));
+}
+
+export function getCorrelationPair(params: {
+  left: string;
+  right: string;
+  lookback?: CorrelationLookback;
+  rollingWindow?: CorrelationRollingWindow;
+}) {
+  return getJson<CorrelationPairResponse>(appendQuery("/api/correlation/pair", {
+    left: params.left,
+    right: params.right,
+    lookback: params.lookback ?? "252D",
+    rollingWindow: params.rollingWindow ?? "60D",
+  }));
 }
 
 export function get13fOverview() {

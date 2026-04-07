@@ -5,6 +5,8 @@ import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, 
 import type { Env } from "./types";
 import {
   configPatchSchema,
+  correlationMatrixQuerySchema,
+  correlationPairQuerySchema,
   groupPatchSchema,
   itemCreateSchema,
   itemPatchSchema,
@@ -116,6 +118,10 @@ import {
   updateWatchlistSet,
   updateWatchlistSource,
 } from "./watchlist-compiler-service";
+import {
+  loadCorrelationMatrix,
+  loadCorrelationPair,
+} from "./correlation-service";
 import {
   loadResearchRunResultsPayload,
   loadResearchRunStreamPayload,
@@ -1918,6 +1924,38 @@ app.get("/api/ticker/:ticker", async (c) => {
     series: asc,
     tradingViewEnabled: (c.env.TRADINGVIEW_WIDGET_ENABLED ?? "true") === "true",
   });
+});
+
+app.get("/api/correlation/matrix", async (c) => {
+  try {
+    const query = correlationMatrixQuerySchema.parse({
+      tickers: c.req.query("tickers") ?? "",
+      lookback: c.req.query("lookback") ?? undefined,
+    });
+    return c.json(await loadCorrelationMatrix(c.env, query.tickers, query.lookback));
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid correlation request." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to build correlation matrix." }, 400);
+  }
+});
+
+app.get("/api/correlation/pair", async (c) => {
+  try {
+    const query = correlationPairQuerySchema.parse({
+      left: c.req.query("left") ?? "",
+      right: c.req.query("right") ?? "",
+      lookback: c.req.query("lookback") ?? undefined,
+      rollingWindow: c.req.query("rollingWindow") ?? undefined,
+    });
+    return c.json(await loadCorrelationPair(c.env, [query.left, query.right], query.lookback, query.rollingWindow));
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid pair analysis request." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to build pair analysis." }, 400);
+  }
 });
 
 app.get("/api/gappers", async (c) => {

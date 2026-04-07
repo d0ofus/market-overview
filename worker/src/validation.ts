@@ -212,3 +212,86 @@ export const scanPresetPatchSchema = z.object({
 export const scanRefreshSchema = z.object({
   presetId: z.string().min(1).nullable().optional(),
 });
+
+export const correlationLookbackSchema = z.enum(["60D", "120D", "252D", "2Y", "5Y"]);
+export const correlationRollingWindowSchema = z.enum(["20D", "60D", "120D"]);
+
+const correlationTickerTokenSchema = z.string().regex(/^[A-Z.\-^]{1,20}$/, "Tickers must be comma-separated symbols like AAPL, MSFT, SPY.");
+
+const parseCorrelationTickers = (value: string): string[] =>
+  Array.from(new Set(
+    value
+      .split(/[,\s;\n\r\t]+/)
+      .map((token) => token.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+
+export const correlationTickersCsvSchema = z.string().transform((value, ctx) => {
+  const tickers = parseCorrelationTickers(value);
+  if (tickers.length < 2) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Enter at least 2 tickers.",
+    });
+    return z.NEVER;
+  }
+  if (tickers.length > 10) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Correlation analysis supports up to 10 tickers per run.",
+    });
+    return z.NEVER;
+  }
+  const invalid = tickers.find((ticker) => !correlationTickerTokenSchema.safeParse(ticker).success);
+  if (invalid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Unsupported ticker format: ${invalid}`,
+    });
+    return z.NEVER;
+  }
+  return tickers;
+});
+
+function lookbackSupportsRollingWindow(lookback: z.infer<typeof correlationLookbackSchema>, rollingWindow: z.infer<typeof correlationRollingWindowSchema>): boolean {
+  const lookbackPeriods = {
+    "60D": 60,
+    "120D": 120,
+    "252D": 252,
+    "2Y": 504,
+    "5Y": 1260,
+  } as const;
+  const rollingPeriods = {
+    "20D": 20,
+    "60D": 60,
+    "120D": 120,
+  } as const;
+  return rollingPeriods[rollingWindow] <= lookbackPeriods[lookback];
+}
+
+export const correlationMatrixQuerySchema = z.object({
+  tickers: correlationTickersCsvSchema,
+  lookback: correlationLookbackSchema.optional().default("252D"),
+});
+
+export const correlationPairQuerySchema = z.object({
+  left: z.string().trim().transform((value) => value.toUpperCase()).pipe(correlationTickerTokenSchema),
+  right: z.string().trim().transform((value) => value.toUpperCase()).pipe(correlationTickerTokenSchema),
+  lookback: correlationLookbackSchema.optional().default("252D"),
+  rollingWindow: correlationRollingWindowSchema.optional().default("60D"),
+}).superRefine((value, ctx) => {
+  if (value.left === value.right) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["right"],
+      message: "Choose 2 different tickers.",
+    });
+  }
+  if (!lookbackSupportsRollingWindow(value.lookback, value.rollingWindow)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rollingWindow"],
+      message: "Rolling window cannot be larger than the selected lookback.",
+    });
+  }
+});

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { groupPatchSchema, itemCreateSchema, scanPresetRuleSchema } from "../src/validation";
+import {
+  correlationMatrixQuerySchema,
+  correlationPairQuerySchema,
+  groupPatchSchema,
+  itemCreateSchema,
+  scanPresetRuleSchema,
+} from "../src/validation";
 
 describe("validation", () => {
   it("validates group patch", () => {
@@ -58,5 +64,28 @@ describe("validation", () => {
       field: "close",
       multiplier: 0.97,
     });
+  });
+
+  it("parses and normalizes correlation matrix queries", () => {
+    const parsed = correlationMatrixQuerySchema.parse({
+      tickers: "spy, qqq, spy, iwm",
+      lookback: "120D",
+    });
+
+    expect(parsed).toEqual({
+      tickers: ["SPY", "QQQ", "IWM"],
+      lookback: "120D",
+    });
+  });
+
+  it("rejects correlation pair queries when rolling window exceeds lookback", () => {
+    expect(() =>
+      correlationPairQuerySchema.parse({
+        left: "AAPL",
+        right: "MSFT",
+        lookback: "60D",
+        rollingWindow: "120D",
+      })
+    ).toThrow("Rolling window cannot be larger than the selected lookback.");
   });
 });
