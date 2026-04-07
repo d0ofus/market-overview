@@ -29,9 +29,14 @@ const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const MIN_BREADTH_COVERAGE_PCT = 1;
-const OVERVIEW_RS_ENABLED_GROUPS = new Set(["g-crypto", "g-metals-energy"]);
-const OVERVIEW_RS_CRYPTO_GROUP_ID = "g-crypto";
-const OVERVIEW_RS_CRYPTO_TICKER = "BITO";
+const OVERVIEW_RS_ENABLED_GROUPS = new Set([
+  "g-crypto",
+  "g-metals-energy",
+  "g-global",
+  "g-country",
+  "g-market-leaders",
+  "g-thematic",
+]);
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
@@ -153,11 +158,7 @@ async function loadOverviewRelativeStrengthPilot(
 ): Promise<Map<string, number[] | null>> {
   const eligibleTickers = Array.from(new Set(
     rows
-      .filter((row) => {
-        const ticker = row.ticker.toUpperCase();
-        if (row.groupId === OVERVIEW_RS_CRYPTO_GROUP_ID) return ticker === OVERVIEW_RS_CRYPTO_TICKER;
-        return OVERVIEW_RS_ENABLED_GROUPS.has(row.groupId);
-      })
+      .filter((row) => OVERVIEW_RS_ENABLED_GROUPS.has(row.groupId))
       .map((row) => row.ticker.toUpperCase())
       .filter(Boolean),
   ));

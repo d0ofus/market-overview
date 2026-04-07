@@ -50,6 +50,46 @@ function createEnv() {
       showSparkline: 1,
       pinTop10: 0,
     },
+    {
+      id: "g-global",
+      sectionId: "sec-macro",
+      title: "Global Indices",
+      sort_order: 4,
+      dataType: "macro",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
+    {
+      id: "g-country",
+      sectionId: "sec-macro",
+      title: "Country ETFs",
+      sort_order: 5,
+      dataType: "equities",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
+    {
+      id: "g-market-leaders",
+      sectionId: "sec-macro",
+      title: "Market Leaders (FAANG)",
+      sort_order: 6,
+      dataType: "equities",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
+    {
+      id: "g-thematic",
+      sectionId: "sec-macro",
+      title: "Industry/Thematic ETFs",
+      sort_order: 7,
+      dataType: "equities",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
   ];
   const items = [
     {
@@ -92,6 +132,46 @@ function createEnv() {
       tagsJson: "[]",
       holdingsJson: null,
     },
+    {
+      id: "item-ewj",
+      groupId: "g-global",
+      sort_order: 1,
+      ticker: "EWJ",
+      displayName: "iShares MSCI Japan ETF",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
+    {
+      id: "item-eem",
+      groupId: "g-country",
+      sort_order: 1,
+      ticker: "EEM",
+      displayName: "iShares MSCI Emerging Markets ETF",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
+    {
+      id: "item-meta",
+      groupId: "g-market-leaders",
+      sort_order: 1,
+      ticker: "META",
+      displayName: "Meta Platforms Inc",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
+    {
+      id: "item-smh",
+      groupId: "g-thematic",
+      sort_order: 1,
+      ticker: "SMH",
+      displayName: "VanEck Semiconductor ETF",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
   ];
   const columns = [
     {
@@ -106,12 +186,32 @@ function createEnv() {
       groupId: "g-metals-energy",
       columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
     },
+    {
+      groupId: "g-global",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
+    {
+      groupId: "g-country",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
+    {
+      groupId: "g-market-leaders",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
+    {
+      groupId: "g-thematic",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
   ];
   const symbolRows = [
     { ticker: "SPY", name: "SPDR S&P 500 ETF" },
     { ticker: "BITO", name: "ProShares Bitcoin Strategy ETF" },
     { ticker: "GLD", name: "SPDR Gold Shares" },
     { ticker: "USO", name: "United States Oil Fund" },
+    { ticker: "EWJ", name: "iShares MSCI Japan ETF" },
+    { ticker: "EEM", name: "iShares MSCI Emerging Markets ETF" },
+    { ticker: "META", name: "Meta Platforms Inc" },
+    { ticker: "SMH", name: "VanEck Semiconductor ETF" },
   ];
   const snapshotMeta = {
     id: "snap-1",
@@ -184,6 +284,70 @@ function createEnv() {
       rankKey: 20,
       holdingsJson: null,
     },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-global",
+      ticker: "EWJ",
+      displayName: "iShares MSCI Japan ETF",
+      price: 48,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([40, 42, 44, 48]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-country",
+      ticker: "EEM",
+      displayName: "iShares MSCI Emerging Markets ETF",
+      price: 30,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([25, 26.25, 27.5, 30]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-market-leaders",
+      ticker: "META",
+      displayName: "Meta Platforms Inc",
+      price: 60,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([50, 52.5, 55, 60]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-thematic",
+      ticker: "SMH",
+      displayName: "VanEck Semiconductor ETF",
+      price: 42,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([35, 36.75, 38.5, 42]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
   ];
   const dailyBars = [
     { ticker: "BITO", date: "2025-01-02", c: 20, volume: 1000 },
@@ -194,10 +358,26 @@ function createEnv() {
     { ticker: "GLD", date: "2025-01-03", c: 31.5, volume: 1500 },
     { ticker: "GLD", date: "2025-01-06", c: 33, volume: 1600 },
     { ticker: "GLD", date: "2025-01-07", c: 36, volume: 1700 },
+    { ticker: "EWJ", date: "2025-01-02", c: 40, volume: 1800 },
+    { ticker: "EWJ", date: "2025-01-03", c: 42, volume: 1900 },
+    { ticker: "EWJ", date: "2025-01-06", c: 44, volume: 1950 },
+    { ticker: "EWJ", date: "2025-01-07", c: 48, volume: 1975 },
+    { ticker: "EEM", date: "2025-01-02", c: 25, volume: 1980 },
+    { ticker: "EEM", date: "2025-01-03", c: 26.25, volume: 1985 },
+    { ticker: "EEM", date: "2025-01-06", c: 27.5, volume: 1990 },
+    { ticker: "EEM", date: "2025-01-07", c: 30, volume: 1995 },
+    { ticker: "META", date: "2025-01-02", c: 50, volume: 2001 },
+    { ticker: "META", date: "2025-01-03", c: 52.5, volume: 2002 },
+    { ticker: "META", date: "2025-01-06", c: 55, volume: 2003 },
+    { ticker: "META", date: "2025-01-07", c: 60, volume: 2004 },
     { ticker: "SPY", date: "2025-01-02", c: 10, volume: 2000 },
     { ticker: "SPY", date: "2025-01-03", c: 10.5, volume: 2100 },
     { ticker: "SPY", date: "2025-01-06", c: 11, volume: 2200 },
     { ticker: "SPY", date: "2025-01-07", c: 12, volume: 2300 },
+    { ticker: "SMH", date: "2025-01-02", c: 35, volume: 2301 },
+    { ticker: "SMH", date: "2025-01-03", c: 36.75, volume: 2302 },
+    { ticker: "SMH", date: "2025-01-06", c: 38.5, volume: 2303 },
+    { ticker: "SMH", date: "2025-01-07", c: 42, volume: 2304 },
     { ticker: "USO", date: "2025-01-02", c: 15, volume: 2400 },
     { ticker: "USO", date: "2025-01-03", c: 15.75, volume: 2500 },
     { ticker: "USO", date: "2025-01-06", c: 16.5, volume: 2600 },
@@ -265,22 +445,38 @@ function createEnv() {
 }
 
 describe("loadSnapshot relative strength pilot", () => {
-  it("populates crypto and metals-energy rows with RS 30d vs SPY and leaves non-enabled rows empty", async () => {
+  it("populates configured overview groups with RS 30d vs SPY and leaves non-enabled rows empty", async () => {
     const snapshot = await loadSnapshot(createEnv() as never);
     const macroSection = snapshot.sections[0];
     const cryptoGroup = macroSection.groups.find((group) => group.id === "g-crypto");
     const indexGroup = macroSection.groups.find((group) => group.id === "g-us-index");
     const metalsGroup = macroSection.groups.find((group) => group.id === "g-metals-energy");
+    const globalGroup = macroSection.groups.find((group) => group.id === "g-global");
+    const countryGroup = macroSection.groups.find((group) => group.id === "g-country");
+    const marketLeadersGroup = macroSection.groups.find((group) => group.id === "g-market-leaders");
+    const thematicGroup = macroSection.groups.find((group) => group.id === "g-thematic");
     const bitoRow = cryptoGroup?.rows.find((row) => row.ticker === "BITO");
     const gldRow = metalsGroup?.rows.find((row) => row.ticker === "GLD");
     const usoRow = metalsGroup?.rows.find((row) => row.ticker === "USO");
+    const ewjRow = globalGroup?.rows.find((row) => row.ticker === "EWJ");
+    const eemRow = countryGroup?.rows.find((row) => row.ticker === "EEM");
+    const metaRow = marketLeadersGroup?.rows.find((row) => row.ticker === "META");
+    const smhRow = thematicGroup?.rows.find((row) => row.ticker === "SMH");
     const spyRow = indexGroup?.rows.find((row) => row.ticker === "SPY");
 
     expect(cryptoGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(metalsGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(globalGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(countryGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(marketLeadersGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(thematicGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(bitoRow?.relativeStrength30dVsSpy).toEqual([2, 2, 2, 2]);
     expect(gldRow?.relativeStrength30dVsSpy).toEqual([3, 3, 3, 3]);
     expect(usoRow?.relativeStrength30dVsSpy).toEqual([1.5, 1.5, 1.5, 1.5]);
+    expect(ewjRow?.relativeStrength30dVsSpy).toEqual([4, 4, 4, 4]);
+    expect(eemRow?.relativeStrength30dVsSpy).toEqual([2.5, 2.5, 2.5, 2.5]);
+    expect(metaRow?.relativeStrength30dVsSpy).toEqual([5, 5, 5, 5]);
+    expect(smhRow?.relativeStrength30dVsSpy).toEqual([3.5, 3.5, 3.5, 3.5]);
     expect(spyRow?.relativeStrength30dVsSpy).toBeNull();
   });
 });

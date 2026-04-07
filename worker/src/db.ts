@@ -5,9 +5,14 @@ const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD"
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 const SYMBOL_LOOKUP_CHUNK_SIZE = 50;
-const OVERVIEW_RS_AUTO_GROUPS = new Set(["g-crypto", "g-metals-energy"]);
-const OVERVIEW_RS_CRYPTO_GROUP_ID = "g-crypto";
-const OVERVIEW_RS_CRYPTO_TICKER = "BITO";
+const OVERVIEW_RS_AUTO_GROUPS = new Set([
+  "g-crypto",
+  "g-metals-energy",
+  "g-global",
+  "g-country",
+  "g-market-leaders",
+  "g-thematic",
+]);
 
 function normalizeOverviewColumns(columns: string[]): string[] {
   const includeTicker = columns.includes("ticker");
@@ -35,11 +40,7 @@ function withOverviewPilotColumns(
   items: Array<{ ticker: string }>,
   columns: string[],
 ): string[] {
-  const hasEligibleRow = items.some((item) => {
-    const ticker = item.ticker.toUpperCase();
-    if (groupId === OVERVIEW_RS_CRYPTO_GROUP_ID) return ticker === OVERVIEW_RS_CRYPTO_TICKER;
-    return OVERVIEW_RS_AUTO_GROUPS.has(groupId);
-  });
+  const hasEligibleRow = OVERVIEW_RS_AUTO_GROUPS.has(groupId) && items.length > 0;
   if (!hasEligibleRow || columns.includes("relativeStrength30dVsSpy")) {
     return columns;
   }
