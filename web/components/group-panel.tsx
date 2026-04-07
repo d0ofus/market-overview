@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
+import { HistogramSparkline } from "./histogram-sparkline";
 import { Sparkline } from "./sparkline";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
@@ -22,6 +23,7 @@ type Row = {
   ytd: number;
   pctFrom52wHigh: number;
   sparkline: number[];
+  relativeStrength30dVsSpy: number[] | null;
   holdings: string[] | null;
 };
 
@@ -39,6 +41,7 @@ const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 const titleCase = (value: string): string => {
   if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD") return value;
   if (value === "pctFrom52WHigh") return "% From 52W High";
+  if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
 
@@ -61,27 +64,36 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [sortDir, setSortDir] = useState<"asc" | "desc">(defaultSortKey === "1D" ? "desc" : "asc");
   const sortedRows = useMemo(() => {
     const copy = [...rows];
-    const valueFor = (row: Row, key: string): number | string => {
+    const stringValueFor = (row: Row, key: string): string | null => {
       if (key === "ticker") return row.ticker ?? "";
       if (key === "name") return (row.displayName ?? row.ticker ?? "").toUpperCase();
-      if (key === "price") return row.price ?? Number.NEGATIVE_INFINITY;
-      if (key === "1D") return row.change1d ?? Number.NEGATIVE_INFINITY;
-      if (key === "1W") return row.change1w ?? Number.NEGATIVE_INFINITY;
-      if (key === "5D") return row.change5d ?? Number.NEGATIVE_INFINITY;
-      if (key === "3M") return row.change3m ?? Number.NEGATIVE_INFINITY;
-      if (key === "6M") return row.change6m ?? Number.NEGATIVE_INFINITY;
-      if (key === "YTD") return row.ytd ?? Number.NEGATIVE_INFINITY;
-      if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? Number.NEGATIVE_INFINITY;
-      if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? Number.NEGATIVE_INFINITY;
-      return row.ticker ?? "";
+      return null;
+    };
+    const numberValueFor = (row: Row, key: string): number | null => {
+      if (key === "price") return row.price ?? null;
+      if (key === "1D") return row.change1d ?? null;
+      if (key === "1W") return row.change1w ?? null;
+      if (key === "5D") return row.change5d ?? null;
+      if (key === "3M") return row.change3m ?? null;
+      if (key === "6M") return row.change6m ?? null;
+      if (key === "YTD") return row.ytd ?? null;
+      if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? null;
+      if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? null;
+      if (key === "relativeStrength30dVsSpy") return row.relativeStrength30dVsSpy?.[row.relativeStrength30dVsSpy.length - 1] ?? null;
+      return null;
     };
     copy.sort((a, b) => {
-      const av = valueFor(a, sortKey);
-      const bv = valueFor(b, sortKey);
-      if (typeof av === "string" || typeof bv === "string") {
-        const cmp = String(av).localeCompare(String(bv));
+      const avString = stringValueFor(a, sortKey);
+      const bvString = stringValueFor(b, sortKey);
+      if (avString != null || bvString != null) {
+        const cmp = String(avString ?? "").localeCompare(String(bvString ?? ""));
         return sortDir === "asc" ? cmp : -cmp;
       }
+      const av = numberValueFor(a, sortKey);
+      const bv = numberValueFor(b, sortKey);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
       const cmp = av - bv;
       return sortDir === "asc" ? cmp : -cmp;
     });
@@ -224,6 +236,11 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                         {columns.includes("sparkline") && (
                           <td className="px-3 py-2">
                             <Sparkline values={row.sparkline} />
+                          </td>
+                        )}
+                        {columns.includes("relativeStrength30dVsSpy") && (
+                          <td className="px-3 py-2">
+                            <HistogramSparkline values={row.relativeStrength30dVsSpy} />
                           </td>
                         )}
                       </tr>

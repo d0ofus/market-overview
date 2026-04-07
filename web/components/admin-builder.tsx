@@ -5,7 +5,7 @@ import { adminFetch } from "@/lib/api";
 import type { SnapshotResponse } from "@/types/dashboard";
 
 const rankingOptions = ["1D", "5D", "1W", "YTD", "52W"] as const;
-const allColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "5D", "YTD", "pctFrom52WHigh", "sparkline"];
+const allColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "5D", "YTD", "pctFrom52WHigh", "sparkline", "relativeStrength30dVsSpy"];
 const refreshTimezoneOptions = [
   { label: "Melbourne", value: "Australia/Melbourne" },
   { label: "Sydney", value: "Australia/Sydney" },

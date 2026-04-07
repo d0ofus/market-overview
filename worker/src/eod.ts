@@ -1,4 +1,4 @@
-import { computeBreadthStats, computeMetrics, rankValue, sanitizeBarSeries } from "./metrics";
+import { buildRelativeStrengthSeries, computeBreadthStats, computeMetrics, rankValue, sanitizeBarSeries } from "./metrics";
 import { loadConfig } from "./db";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
@@ -29,6 +29,9 @@ const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const MIN_BREADTH_COVERAGE_PCT = 1;
+const OVERVIEW_RS_PILOT_GROUP_ID = "g-crypto";
+const OVERVIEW_RS_PILOT_TICKER = "BITO";
+const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
 const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
@@ -140,6 +143,36 @@ async function loadWindowReturnsByTicker(
     });
   }
   return out;
+}
+
+async function loadOverviewRelativeStrengthPilot(
+  env: Env,
+  rows: Array<{ groupId: string; ticker: string }>,
+  asOfDate: string,
+): Promise<Map<string, number[] | null>> {
+  const hasPilotRow = rows.some((row) => row.groupId === OVERVIEW_RS_PILOT_GROUP_ID && row.ticker.toUpperCase() === OVERVIEW_RS_PILOT_TICKER);
+  if (!hasPilotRow) return new Map();
+
+  const bars = await loadBarsForTickers(env, [OVERVIEW_RS_PILOT_TICKER, OVERVIEW_RS_BENCHMARK_TICKER], asOfDate);
+  const seriesByTicker = new Map<string, { dates: string[]; closes: number[] }>();
+  for (const row of bars) {
+    const ticker = row.ticker.toUpperCase();
+    const series = seriesByTicker.get(ticker) ?? { dates: [], closes: [] };
+    series.dates.push(row.date);
+    series.closes.push(row.c);
+    seriesByTicker.set(ticker, series);
+  }
+
+  const tickerSeries = seriesByTicker.get(OVERVIEW_RS_PILOT_TICKER) ?? { dates: [], closes: [] };
+  const benchmarkSeries = seriesByTicker.get(OVERVIEW_RS_BENCHMARK_TICKER) ?? { dates: [], closes: [] };
+  const relativeStrength = buildRelativeStrengthSeries(
+    tickerSeries.dates,
+    tickerSeries.closes,
+    benchmarkSeries.dates,
+    benchmarkSeries.closes,
+  );
+
+  return new Map([[OVERVIEW_RS_PILOT_TICKER, relativeStrength]]);
 }
 
 async function loadUniverseTickers(env: Env, universeId: string): Promise<string[]> {
@@ -752,6 +785,11 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
     Array.from(new Set(tableRows.map((row) => row.ticker))),
     meta.asOfDate,
   );
+  const relativeStrengthByTicker = await loadOverviewRelativeStrengthPilot(
+    env,
+    tableRows.map((row) => ({ groupId: row.groupId, ticker: row.ticker })),
+    meta.asOfDate,
+  );
   return {
     asOfDate: meta.asOfDate,
     generatedAt: meta.generatedAt,
@@ -783,6 +821,10 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
             ytd: r.ytd,
             pctFrom52wHigh: r.pctFrom52wHigh,
             sparkline: JSON.parse(r.sparklineJson) as number[],
+            relativeStrength30dVsSpy:
+              r.groupId === OVERVIEW_RS_PILOT_GROUP_ID && r.ticker.toUpperCase() === OVERVIEW_RS_PILOT_TICKER
+                ? (relativeStrengthByTicker.get(OVERVIEW_RS_PILOT_TICKER) ?? null)
+                : null,
             rankKey: r.rankKey,
             holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
           })),

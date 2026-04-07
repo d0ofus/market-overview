@@ -63,6 +63,7 @@ export type SnapshotResponse = {
         ytd: number;
         pctFrom52wHigh: number;
         sparkline: number[];
+        relativeStrength30dVsSpy: number[] | null;
         rankKey: number;
         holdings: string[] | null;
       }>;

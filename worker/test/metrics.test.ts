@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeMetrics, rankValue, sanitizeBarSeries } from "../src/metrics";
+import { buildRelativeStrengthSeries, computeMetrics, rankValue, sanitizeBarSeries } from "../src/metrics";
 
 describe("computeMetrics", () => {
   it("computes core return metrics and sparkline", () => {
@@ -39,5 +39,50 @@ describe("computeMetrics", () => {
     expect(cleaned.dates).toEqual(["2025-01-16", "2025-01-17", "2025-01-21", "2025-01-22"]);
     expect(cleaned.closes).toEqual([591.7, 597.64, 602.92, 606.33]);
     expect(computeMetrics(dates, closes).sparkline).toEqual([591.7, 597.64, 602.92, 606.33]);
+  });
+
+  it("builds a 30 day relative strength series from overlapping dates", () => {
+    const tickerDates = ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"];
+    const tickerCloses = [20, 21, 22, 24];
+    const benchmarkDates = ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"];
+    const benchmarkCloses = [10, 10.5, 11, 12];
+
+    expect(buildRelativeStrengthSeries(tickerDates, tickerCloses, benchmarkDates, benchmarkCloses)).toEqual([2, 2, 2, 2]);
+  });
+
+  it("keeps fewer than 30 overlapping values when history is short", () => {
+    const tickerDates = ["2025-01-02", "2025-01-03"];
+    const tickerCloses = [20, 24];
+    const benchmarkDates = ["2025-01-02", "2025-01-03"];
+    const benchmarkCloses = [10, 12];
+
+    expect(buildRelativeStrengthSeries(tickerDates, tickerCloses, benchmarkDates, benchmarkCloses)).toEqual([2, 2]);
+  });
+
+  it("aligns relative strength using only shared dates", () => {
+    const tickerDates = ["2025-01-02", "2025-01-03", "2025-01-06"];
+    const tickerCloses = [20, 24, 30];
+    const benchmarkDates = ["2025-01-02", "2025-01-06"];
+    const benchmarkCloses = [10, 15];
+
+    expect(buildRelativeStrengthSeries(tickerDates, tickerCloses, benchmarkDates, benchmarkCloses)).toEqual([2, 2]);
+  });
+
+  it("filters isolated corrupt bars before calculating relative strength", () => {
+    const tickerDates = ["2025-01-16", "2025-01-17", "2025-01-20", "2025-01-21", "2025-01-22"];
+    const tickerCloses = [591.7, 597.64, 482.1648070476866, 602.92, 606.33];
+    const benchmarkDates = ["2025-01-16", "2025-01-17", "2025-01-20", "2025-01-21", "2025-01-22"];
+    const benchmarkCloses = [295.85, 298.82, 241.0824035238433, 301.46, 303.165];
+
+    expect(buildRelativeStrengthSeries(tickerDates, tickerCloses, benchmarkDates, benchmarkCloses)).toEqual([2, 2, 2, 2]);
+  });
+
+  it("returns null when there are no shared dates", () => {
+    const tickerDates = ["2025-01-02", "2025-01-03"];
+    const tickerCloses = [20, 24];
+    const benchmarkDates = ["2025-01-06", "2025-01-07"];
+    const benchmarkCloses = [10, 12];
+
+    expect(buildRelativeStrengthSeries(tickerDates, tickerCloses, benchmarkDates, benchmarkCloses)).toBeNull();
   });
 });

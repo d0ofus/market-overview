@@ -6,6 +6,7 @@ const pct = (now: number, then: number): number => {
 };
 
 const SPARKLINE_LOOKBACK_DAYS = 90;
+const RELATIVE_STRENGTH_LOOKBACK_DAYS = 30;
 const ISOLATED_OUTLIER_MOVE_PCT = 0.12;
 const ISOLATED_OUTLIER_NEIGHBOR_DRIFT_PCT = 0.06;
 
@@ -89,6 +90,36 @@ export function computeMetrics(dates: string[], closes: number[]): MetricBundle 
     pctFrom52wHigh: pct(price, high52w),
     sparkline: dailySparkline(seriesCloses),
   };
+}
+
+export function buildRelativeStrengthSeries(
+  tickerDates: string[],
+  tickerCloses: number[],
+  benchmarkDates: string[],
+  benchmarkCloses: number[],
+  lookback = RELATIVE_STRENGTH_LOOKBACK_DAYS,
+): number[] | null {
+  const tickerSeries = sanitizeBarSeries(tickerDates, tickerCloses);
+  const benchmarkSeries = sanitizeBarSeries(benchmarkDates, benchmarkCloses);
+  if (tickerSeries.dates.length === 0 || benchmarkSeries.dates.length === 0) return null;
+
+  const benchmarkByDate = new Map<string, number>();
+  for (let index = 0; index < benchmarkSeries.dates.length; index += 1) {
+    const close = benchmarkSeries.closes[index];
+    if (!Number.isFinite(close) || close <= 0) continue;
+    benchmarkByDate.set(benchmarkSeries.dates[index], close);
+  }
+
+  const values: number[] = [];
+  for (let index = 0; index < tickerSeries.dates.length; index += 1) {
+    const tickerClose = tickerSeries.closes[index];
+    const benchmarkClose = benchmarkByDate.get(tickerSeries.dates[index]);
+    if (!Number.isFinite(tickerClose) || tickerClose <= 0 || !Number.isFinite(benchmarkClose) || benchmarkClose <= 0) continue;
+    values.push(tickerClose / benchmarkClose);
+  }
+
+  if (values.length === 0) return null;
+  return values.slice(Math.max(0, values.length - Math.max(1, lookback)));
 }
 
 export function rankValue(metrics: MetricBundle, window: RankingWindow): number {

@@ -5,12 +5,15 @@ const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD"
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 const SYMBOL_LOOKUP_CHUNK_SIZE = 50;
+const OVERVIEW_RS_PILOT_GROUP_ID = "g-crypto";
+const OVERVIEW_RS_PILOT_TICKER = "BITO";
 
 function normalizeOverviewColumns(columns: string[]): string[] {
   const includeTicker = columns.includes("ticker");
   const includeName = columns.includes("name");
   const includePrice = columns.includes("price");
   const includeSparkline = columns.includes("sparkline");
+  const includeRelativeStrength = columns.includes("relativeStrength30dVsSpy");
   const normalized = [
     ...(includeTicker ? ["ticker"] : []),
     ...(includeName ? ["name"] : []),
@@ -21,8 +24,21 @@ function normalizeOverviewColumns(columns: string[]): string[] {
     "6M",
     "YTD",
     ...(includeSparkline ? ["sparkline"] : []),
+    ...(includeRelativeStrength ? ["relativeStrength30dVsSpy"] : []),
   ];
   return Array.from(new Set(normalized));
+}
+
+function withOverviewPilotColumns(
+  groupId: string,
+  items: Array<{ ticker: string }>,
+  columns: string[],
+): string[] {
+  const hasPilotTicker = items.some((item) => item.ticker.toUpperCase() === OVERVIEW_RS_PILOT_TICKER);
+  if (groupId !== OVERVIEW_RS_PILOT_GROUP_ID || !hasPilotTicker || columns.includes("relativeStrength30dVsSpy")) {
+    return columns;
+  }
+  return [...columns, "relativeStrength30dVsSpy"];
 }
 
 function buildRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
@@ -205,32 +221,8 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
       order: sec.sort_order,
       groups: groupRows
         .filter((g) => g.sectionId === sec.id)
-        .map((g) => ({
-          id: g.id,
-          title: g.title,
-          order: g.sort_order,
-          dataType: g.dataType,
-          rankingWindowDefault: g.rankingWindowDefault,
-          showSparkline: !!g.showSparkline,
-          pinTop10: !!g.pinTop10,
-          columns: (() => {
-            const base = colMap.get(g.id) ?? defaultColumns;
-            if (g.dataType === "macro" || g.dataType === "equities") {
-              const withName = (() => {
-                if (base.includes("name")) return base;
-                const at = base.indexOf("ticker");
-                if (at >= 0) {
-                  const next = [...base];
-                  next.splice(at + 1, 0, "name");
-                  return next;
-                }
-                return ["ticker", "name", ...base];
-              })();
-              return normalizeOverviewColumns(withName);
-            }
-            return base;
-          })(),
-          items: itemRows
+        .map((g) => {
+          const itemsForGroup = itemRows
             .filter((it) => it.groupId === g.id)
             .map((it) => ({
               id: it.id,
@@ -240,8 +232,36 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
               enabled: !!it.enabled,
               tags: parseJsonSafe<string[]>(it.tagsJson, []),
               holdings: parseJsonSafe<string[] | null>(it.holdingsJson, null),
-            })),
-        })),
+            }));
+          const baseColumns = colMap.get(g.id) ?? defaultColumns;
+          const overviewColumns = (() => {
+            if (g.dataType === "macro" || g.dataType === "equities") {
+              const withName = (() => {
+                if (baseColumns.includes("name")) return baseColumns;
+                const at = baseColumns.indexOf("ticker");
+                if (at >= 0) {
+                  const next = [...baseColumns];
+                  next.splice(at + 1, 0, "name");
+                  return next;
+                }
+                return ["ticker", "name", ...baseColumns];
+              })();
+              return normalizeOverviewColumns(withName);
+            }
+            return baseColumns;
+          })();
+          return {
+            id: g.id,
+            title: g.title,
+            order: g.sort_order,
+            dataType: g.dataType,
+            rankingWindowDefault: g.rankingWindowDefault,
+            showSparkline: !!g.showSparkline,
+            pinTop10: !!g.pinTop10,
+            columns: withOverviewPilotColumns(g.id, itemsForGroup, overviewColumns),
+            items: itemsForGroup,
+          };
+        }),
     })),
   };
 }
