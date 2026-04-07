@@ -158,7 +158,7 @@ export function SectorTracker() {
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [constituentPage, setConstituentPage] = useState(1);
-  const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("sector-etfs");
+  const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("key-movers-tracker");
   const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
   const [editSectorName, setEditSectorName] = useState("");
   const [editEventDate, setEditEventDate] = useState("");
@@ -364,6 +364,12 @@ export function SectorTracker() {
       <div className="card p-3" id="section-selector">
         <div className="flex flex-wrap gap-2">
           <button
+            className={`rounded px-3 py-1.5 text-sm ${activeSection === "key-movers-tracker" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
+            onClick={() => jumpToSection("key-movers-tracker")}
+          >
+            Key Movers Tracker
+          </button>
+          <button
             className={`rounded px-3 py-1.5 text-sm ${activeSection === "sector-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
             onClick={() => jumpToSection("sector-etfs")}
           >
@@ -375,12 +381,6 @@ export function SectorTracker() {
           >
             Industry ETFs
           </button>
-          <button
-            className={`rounded px-3 py-1.5 text-sm ${activeSection === "key-movers-tracker" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-            onClick={() => jumpToSection("key-movers-tracker")}
-          >
-            Key Movers Tracker
-          </button>
         </div>
       </div>
       <datalist id="sector-symbol-options">
@@ -388,84 +388,6 @@ export function SectorTracker() {
           <option key={`sector-symbol-option-global-${s.ticker}`} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
         ))}
       </datalist>
-
-      <div id="sector-etfs">
-      <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {sectorEtfs.map((etf) => (
-            <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-1.5">
-              <div className="mb-2 flex items-start justify-between gap-2">
-                <div>
-                <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
-                  {etf.ticker}
-                </button>
-                <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
-                </div>
-                <div className="text-right text-xs">
-                  <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
-                  <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
-                </div>
-              </div>
-              <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-              <button
-                className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                onClick={() => setActiveChartTicker(etf.ticker)}
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-                Expand chart
-              </button>
-            </div>
-          ))}
-        </div>
-      </CollapsibleSection>
-      </div>
-
-      <div id="industry-etfs">
-      <CollapsibleSection title="Industry ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{industryEtfs.length} ETFs</span>}>
-        <div className="space-y-4">
-          {industryGroups.map(({ key, rows, maxChange }) => {
-            const [parentSector, industry] = key.split(" :: ");
-            return (
-              <div key={key} className="rounded-xl border border-borderSoft/70 p-1.5">
-                <div className="mb-2 flex items-start justify-between gap-2">
-                  <div>
-                  <h4 className="text-sm font-semibold text-slate-200">{industry}</h4>
-                  <p className="text-xs text-slate-400">{parentSector}</p>
-                  </div>
-                  <div className={`text-xs ${pctCls(maxChange)}`}>Top: {maxChange.toFixed(2)}%</div>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {rows.map((etf) => (
-                    <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-1.5">
-                      <div className="mb-2 flex items-start justify-between gap-2">
-                        <div>
-                        <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
-                          {etf.ticker}
-                        </button>
-                        <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
-                        </div>
-                        <div className="text-right text-xs">
-                          <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
-                          <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
-                        </div>
-                      </div>
-                      <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                      <button
-                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                        onClick={() => setActiveChartTicker(etf.ticker)}
-                      >
-                        <Maximize2 className="h-3.5 w-3.5" />
-                        Expand chart
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </CollapsibleSection>
-      </div>
 
       <div id="key-movers-tracker">
       <CollapsibleSection title="Key Movers Tracker">
@@ -681,6 +603,84 @@ export function SectorTracker() {
             </div>
           </div>
         )}
+      </CollapsibleSection>
+      </div>
+
+      <div id="sector-etfs">
+      <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {sectorEtfs.map((etf) => (
+            <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-1.5">
+              <div className="mb-2 flex items-start justify-between gap-2">
+                <div>
+                <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
+                  {etf.ticker}
+                </button>
+                <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
+                </div>
+                <div className="text-right text-xs">
+                  <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
+                  <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
+                </div>
+              </div>
+              <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+              <button
+                className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                onClick={() => setActiveChartTicker(etf.ticker)}
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                Expand chart
+              </button>
+            </div>
+          ))}
+        </div>
+      </CollapsibleSection>
+      </div>
+
+      <div id="industry-etfs">
+      <CollapsibleSection title="Industry ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{industryEtfs.length} ETFs</span>}>
+        <div className="space-y-4">
+          {industryGroups.map(({ key, rows, maxChange }) => {
+            const [parentSector, industry] = key.split(" :: ");
+            return (
+              <div key={key} className="rounded-xl border border-borderSoft/70 p-1.5">
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <div>
+                  <h4 className="text-sm font-semibold text-slate-200">{industry}</h4>
+                  <p className="text-xs text-slate-400">{parentSector}</p>
+                  </div>
+                  <div className={`text-xs ${pctCls(maxChange)}`}>Top: {maxChange.toFixed(2)}%</div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {rows.map((etf) => (
+                    <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-1.5">
+                      <div className="mb-2 flex items-start justify-between gap-2">
+                        <div>
+                        <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
+                          {etf.ticker}
+                        </button>
+                        <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
+                        </div>
+                        <div className="text-right text-xs">
+                          <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
+                          <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
+                        </div>
+                      </div>
+                      <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <button
+                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                        onClick={() => setActiveChartTicker(etf.ticker)}
+                      >
+                        <Maximize2 className="h-3.5 w-3.5" />
+                        Expand chart
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </CollapsibleSection>
       </div>
 
