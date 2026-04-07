@@ -29,6 +29,7 @@
 
 ## Alerts
 - For industry peers view, change to liteweight charts
+- Shift paging and next button to the bottom of the pop up page when clicking on ticker
 
 ## Peer Groups
 - Remove OTC names like ABBNY, ABLZF etc.
