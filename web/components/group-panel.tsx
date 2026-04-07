@@ -38,6 +38,23 @@ type Props = {
 
 const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+const regressionSlope = (values: number[] | null): number | null => {
+  if (!values || values.length < 2) return null;
+  const count = values.length;
+  const meanX = (count - 1) / 2;
+  const meanY = values.reduce((sum, value) => sum + value, 0) / count;
+  let numerator = 0;
+  let denominator = 0;
+  for (let index = 0; index < count; index += 1) {
+    const centeredX = index - meanX;
+    numerator += centeredX * (values[index] - meanY);
+    denominator += centeredX * centeredX;
+  }
+  if (denominator === 0) return null;
+  return numerator / denominator;
+};
+const defaultSortDirectionFor = (column: string): "asc" | "desc" =>
+  column === "1D" || column === "relativeStrength30dVsSpy" ? "desc" : "asc";
 const titleCase = (value: string): string => {
   if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD") return value;
   if (value === "pctFrom52WHigh") return "% From 52W High";
@@ -61,7 +78,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       ? "ticker"
       : columns[0] ?? "ticker";
   const [sortKey, setSortKey] = useState<string>(defaultSortKey);
-  const [sortDir, setSortDir] = useState<"asc" | "desc">(defaultSortKey === "1D" ? "desc" : "asc");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(defaultSortDirectionFor(defaultSortKey));
   const sortedRows = useMemo(() => {
     const copy = [...rows];
     const stringValueFor = (row: Row, key: string): string | null => {
@@ -79,7 +96,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       if (key === "YTD") return row.ytd ?? null;
       if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? null;
       if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? null;
-      if (key === "relativeStrength30dVsSpy") return row.relativeStrength30dVsSpy?.[row.relativeStrength30dVsSpy.length - 1] ?? null;
+      if (key === "relativeStrength30dVsSpy") return regressionSlope(row.relativeStrength30dVsSpy);
       return null;
     };
     copy.sort((a, b) => {
@@ -111,7 +128,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return;
     }
     setSortKey(col);
-    setSortDir(col === "1D" ? "desc" : "asc");
+    setSortDir(defaultSortDirectionFor(col));
   };
   const toggleExpandedTicker = (ticker: string) => {
     setExpandedTicker((current) => (current === ticker ? null : ticker));
