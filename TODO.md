@@ -9,7 +9,6 @@
 - Check on EW sectors column data
 - Put the same EW Sector ETF on the same row as the non-EW one. Sort by non-EW
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
-- Add RS chart (like my google sheets dashboard)
 
 ## Breadth
 - Add volume traded on majors as a breadth metric
