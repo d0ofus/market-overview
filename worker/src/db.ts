@@ -12,7 +12,10 @@ const OVERVIEW_RS_AUTO_GROUPS = new Set([
   "g-country",
   "g-market-leaders",
   "g-thematic",
+  "g-sector-etf",
+  "g-sector-etf-eqwt",
 ]);
+const OVERVIEW_SPARKLINE_BEFORE_PRICE_GROUPS = new Set(["g-sector-etf", "g-sector-etf-eqwt"]);
 
 function normalizeOverviewColumns(columns: string[]): string[] {
   const includeTicker = columns.includes("ticker");
@@ -45,6 +48,23 @@ function withOverviewPilotColumns(
     return columns;
   }
   return [...columns, "relativeStrength30dVsSpy"];
+}
+
+function reorderOverviewColumnsForGroup(groupId: string, columns: string[]): string[] {
+  if (!OVERVIEW_SPARKLINE_BEFORE_PRICE_GROUPS.has(groupId)) return columns;
+
+  const remaining = columns.filter((column) => column !== "sparkline" && column !== "relativeStrength30dVsSpy");
+  const nameIndex = remaining.indexOf("name");
+  const insertAt = nameIndex >= 0 ? nameIndex + 1 : 0;
+  const visualColumns = [
+    ...(columns.includes("sparkline") ? ["sparkline"] : []),
+    ...(columns.includes("relativeStrength30dVsSpy") ? ["relativeStrength30dVsSpy"] : []),
+  ];
+  if (visualColumns.length === 0) return columns;
+
+  const reordered = [...remaining];
+  reordered.splice(insertAt, 0, ...visualColumns);
+  return reordered;
 }
 
 function buildRefreshLabel(localTime: string | null | undefined, timezone: string | null | undefined): string {
@@ -264,7 +284,10 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
             rankingWindowDefault: g.rankingWindowDefault,
             showSparkline: !!g.showSparkline,
             pinTop10: !!g.pinTop10,
-            columns: withOverviewPilotColumns(g.id, itemsForGroup, overviewColumns),
+            columns: reorderOverviewColumnsForGroup(
+              g.id,
+              withOverviewPilotColumns(g.id, itemsForGroup, overviewColumns),
+            ),
             items: itemsForGroup,
           };
         }),

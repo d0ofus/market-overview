@@ -36,6 +36,8 @@ const OVERVIEW_RS_ENABLED_GROUPS = new Set([
   "g-country",
   "g-market-leaders",
   "g-thematic",
+  "g-sector-etf",
+  "g-sector-etf-eqwt",
 ]);
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 

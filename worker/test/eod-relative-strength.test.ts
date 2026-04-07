@@ -90,6 +90,26 @@ function createEnv() {
       showSparkline: 1,
       pinTop10: 0,
     },
+    {
+      id: "g-sector-etf",
+      sectionId: "sec-macro",
+      title: "Sector ETFs",
+      sort_order: 8,
+      dataType: "equities",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
+    {
+      id: "g-sector-etf-eqwt",
+      sectionId: "sec-macro",
+      title: "Sector ETFs (Equal Weight)",
+      sort_order: 9,
+      dataType: "equities",
+      rankingWindowDefault: "1W",
+      showSparkline: 1,
+      pinTop10: 0,
+    },
   ];
   const items = [
     {
@@ -172,6 +192,26 @@ function createEnv() {
       tagsJson: "[]",
       holdingsJson: null,
     },
+    {
+      id: "item-xlk",
+      groupId: "g-sector-etf",
+      sort_order: 1,
+      ticker: "XLK",
+      displayName: "Technology Select Sector SPDR",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
+    {
+      id: "item-ryt",
+      groupId: "g-sector-etf-eqwt",
+      sort_order: 1,
+      ticker: "RYT",
+      displayName: "Invesco S&P 500 Equal Weight Technology ETF",
+      enabled: 1,
+      tagsJson: "[]",
+      holdingsJson: null,
+    },
   ];
   const columns = [
     {
@@ -202,6 +242,14 @@ function createEnv() {
       groupId: "g-thematic",
       columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
     },
+    {
+      groupId: "g-sector-etf",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
+    {
+      groupId: "g-sector-etf-eqwt",
+      columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]),
+    },
   ];
   const symbolRows = [
     { ticker: "SPY", name: "SPDR S&P 500 ETF" },
@@ -212,6 +260,8 @@ function createEnv() {
     { ticker: "EEM", name: "iShares MSCI Emerging Markets ETF" },
     { ticker: "META", name: "Meta Platforms Inc" },
     { ticker: "SMH", name: "VanEck Semiconductor ETF" },
+    { ticker: "XLK", name: "Technology Select Sector SPDR" },
+    { ticker: "RYT", name: "Invesco S&P 500 Equal Weight Technology ETF" },
   ];
   const snapshotMeta = {
     id: "snap-1",
@@ -348,6 +398,38 @@ function createEnv() {
       rankKey: 20,
       holdingsJson: null,
     },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-sector-etf",
+      ticker: "XLK",
+      displayName: "Technology Select Sector SPDR",
+      price: 54,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([45, 47.25, 49.5, 54]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-sector-etf-eqwt",
+      ticker: "RYT",
+      displayName: "Invesco S&P 500 Equal Weight Technology ETF",
+      price: 66,
+      change1d: 9.09,
+      change1w: 20,
+      change5d: 20,
+      change21d: 20,
+      ytd: 20,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([55, 57.75, 60.5, 66]),
+      rankKey: 20,
+      holdingsJson: null,
+    },
   ];
   const dailyBars = [
     { ticker: "BITO", date: "2025-01-02", c: 20, volume: 1000 },
@@ -378,10 +460,18 @@ function createEnv() {
     { ticker: "SMH", date: "2025-01-03", c: 36.75, volume: 2302 },
     { ticker: "SMH", date: "2025-01-06", c: 38.5, volume: 2303 },
     { ticker: "SMH", date: "2025-01-07", c: 42, volume: 2304 },
+    { ticker: "XLK", date: "2025-01-02", c: 45, volume: 2305 },
+    { ticker: "XLK", date: "2025-01-03", c: 47.25, volume: 2306 },
+    { ticker: "XLK", date: "2025-01-06", c: 49.5, volume: 2307 },
+    { ticker: "XLK", date: "2025-01-07", c: 54, volume: 2308 },
     { ticker: "USO", date: "2025-01-02", c: 15, volume: 2400 },
     { ticker: "USO", date: "2025-01-03", c: 15.75, volume: 2500 },
     { ticker: "USO", date: "2025-01-06", c: 16.5, volume: 2600 },
     { ticker: "USO", date: "2025-01-07", c: 18, volume: 2700 },
+    { ticker: "RYT", date: "2025-01-02", c: 55, volume: 2701 },
+    { ticker: "RYT", date: "2025-01-03", c: 57.75, volume: 2702 },
+    { ticker: "RYT", date: "2025-01-06", c: 60.5, volume: 2703 },
+    { ticker: "RYT", date: "2025-01-07", c: 66, volume: 2704 },
   ];
 
   const db = {
@@ -455,6 +545,8 @@ describe("loadSnapshot relative strength pilot", () => {
     const countryGroup = macroSection.groups.find((group) => group.id === "g-country");
     const marketLeadersGroup = macroSection.groups.find((group) => group.id === "g-market-leaders");
     const thematicGroup = macroSection.groups.find((group) => group.id === "g-thematic");
+    const sectorGroup = macroSection.groups.find((group) => group.id === "g-sector-etf");
+    const sectorEqGroup = macroSection.groups.find((group) => group.id === "g-sector-etf-eqwt");
     const bitoRow = cryptoGroup?.rows.find((row) => row.ticker === "BITO");
     const gldRow = metalsGroup?.rows.find((row) => row.ticker === "GLD");
     const usoRow = metalsGroup?.rows.find((row) => row.ticker === "USO");
@@ -462,6 +554,8 @@ describe("loadSnapshot relative strength pilot", () => {
     const eemRow = countryGroup?.rows.find((row) => row.ticker === "EEM");
     const metaRow = marketLeadersGroup?.rows.find((row) => row.ticker === "META");
     const smhRow = thematicGroup?.rows.find((row) => row.ticker === "SMH");
+    const xlkRow = sectorGroup?.rows.find((row) => row.ticker === "XLK");
+    const rytRow = sectorEqGroup?.rows.find((row) => row.ticker === "RYT");
     const spyRow = indexGroup?.rows.find((row) => row.ticker === "SPY");
 
     expect(cryptoGroup?.columns).toContain("relativeStrength30dVsSpy");
@@ -470,6 +564,8 @@ describe("loadSnapshot relative strength pilot", () => {
     expect(countryGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(marketLeadersGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(thematicGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(sectorGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);
+    expect(sectorEqGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);
     expect(bitoRow?.relativeStrength30dVsSpy).toEqual([2, 2, 2, 2]);
     expect(gldRow?.relativeStrength30dVsSpy).toEqual([3, 3, 3, 3]);
     expect(usoRow?.relativeStrength30dVsSpy).toEqual([1.5, 1.5, 1.5, 1.5]);
@@ -477,6 +573,8 @@ describe("loadSnapshot relative strength pilot", () => {
     expect(eemRow?.relativeStrength30dVsSpy).toEqual([2.5, 2.5, 2.5, 2.5]);
     expect(metaRow?.relativeStrength30dVsSpy).toEqual([5, 5, 5, 5]);
     expect(smhRow?.relativeStrength30dVsSpy).toEqual([3.5, 3.5, 3.5, 3.5]);
+    expect(xlkRow?.relativeStrength30dVsSpy).toEqual([4.5, 4.5, 4.5, 4.5]);
+    expect(rytRow?.relativeStrength30dVsSpy).toEqual([5.5, 5.5, 5.5, 5.5]);
     expect(spyRow?.relativeStrength30dVsSpy).toBeNull();
   });
 });
