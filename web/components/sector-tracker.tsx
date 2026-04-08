@@ -279,6 +279,7 @@ export function SectorTracker() {
   }, [month]);
 
   const monthStartWeekday = useMemo(() => getMonthStartWeekday(month), [month]);
+  const todayDate = useMemo(() => formatLocalDateInputValue(), []);
 
   const calendarCells = useMemo(() => {
     const cells: Array<{ key: string; date: string | null; day: number | null }> = [];
@@ -556,9 +557,20 @@ export function SectorTracker() {
                   return <div key={key} aria-hidden="true" className="min-h-48 rounded border border-transparent bg-transparent p-1.5" />;
                 }
                 const items = calendarMap.get(date) ?? [];
+                const isToday = date === todayDate;
                 return (
-                  <div key={date} className="min-h-48 rounded border border-borderSoft/70 bg-panelSoft/40 p-1.5">
-                    <div className="text-xs text-slate-400">{day}</div>
+                  <div
+                    key={date}
+                    className={`min-h-48 rounded border p-1.5 ${isToday ? "border-accent/70 bg-accent/10 shadow-[0_0_0_1px_rgba(244,114,182,0.18)]" : "border-borderSoft/70 bg-panelSoft/40"}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className={`text-xs ${isToday ? "font-semibold text-accent" : "text-slate-400"}`}>{day}</div>
+                      {isToday && (
+                        <span className="rounded-full border border-accent/50 bg-accent/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-accent">
+                          Today
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-1 space-y-1.5">
                       {items.slice(0, 3).map((it) => (
                         <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-xs text-slate-200">
