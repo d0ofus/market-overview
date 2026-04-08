@@ -15,6 +15,12 @@ import {
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
 } from "@/lib/api";
+import { AdminCard } from "@/components/admin/admin-card";
+import { AdminPageHeader } from "@/components/admin/admin-page-header";
+import { AdminStatCard } from "@/components/admin/admin-stat-card";
+import { ConfirmDialog } from "@/components/admin/confirm-dialog";
+import { EmptyState } from "@/components/admin/empty-state";
+import { InlineAlert } from "@/components/admin/inline-alert";
 
 const TIMEZONE_OPTIONS = [
   "Australia/Sydney",
@@ -43,6 +49,10 @@ export function WatchlistCompilerAdminPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [deleteSetOpen, setDeleteSetOpen] = useState(false);
+  const [deleteSetBusy, setDeleteSetBusy] = useState(false);
+  const [sourceToDelete, setSourceToDelete] = useState<{ id: string; label: string } | null>(null);
+  const [deleteSourceBusy, setDeleteSourceBusy] = useState(false);
 
   const flashMessage = (next: string, timeoutMs = 4000) => {
     setMessage(next);
@@ -124,31 +134,82 @@ export function WatchlistCompilerAdminPanel() {
     void load();
   }, []);
 
+  const handleDeleteSet = async () => {
+    if (!selectedSetId) return;
+    setDeleteSetBusy(true);
+    try {
+      await deleteAdminWatchlistCompilerSet(selectedSetId);
+      await load(null);
+      setDeleteSetOpen(false);
+      flashMessage("Watchlist set deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to delete watchlist set.");
+    } finally {
+      setDeleteSetBusy(false);
+    }
+  };
+
+  const handleDeleteSource = async () => {
+    if (!sourceToDelete) return;
+    setDeleteSourceBusy(true);
+    try {
+      await deleteAdminWatchlistCompilerSource(sourceToDelete.id);
+      await load(selectedSetId);
+      flashMessage("Source URL deleted.");
+      setSourceToDelete(null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to delete source URL.");
+    } finally {
+      setDeleteSourceBusy(false);
+    }
+  };
+
   return (
-    <section className="space-y-4">
-      <div>
-        <h3 className="text-lg font-semibold">Watchlist Compiler</h3>
-        <p className="text-sm text-slate-400">Manage saved TradingView watchlist sets, source URLs, and daily compile schedules.</p>
-      </div>
+    <>
+      <section className="space-y-6">
+        <AdminPageHeader
+          eyebrow="Admin"
+          title="Watchlist Compiler"
+          description="Manage saved TradingView watchlist sets, keep source URLs organised, and trigger compiles from a more focused workspace."
+          actions={(
+            <button
+              className="rounded-2xl border border-borderSoft/80 bg-panelSoft/65 px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
+              onClick={() => void load(selectedSetId)}
+              type="button"
+            >
+              Refresh Workspace
+            </button>
+          )}
+        />
 
-      {message && <div className="card border border-borderSoft/70 p-3 text-sm text-slate-300">{message}</div>}
+        {message ? <InlineAlert tone="info">{message}</InlineAlert> : null}
 
-      <div className="grid gap-4 xl:grid-cols-[20rem,minmax(0,1fr)]">
-        <div className="space-y-4">
-          <div className="card p-3">
-            <div className="mb-3 flex items-center justify-between">
-              <h4 className="text-sm font-semibold text-slate-200">Sets</h4>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <AdminStatCard label="Sets" value={sets.length} helper="Configured watchlist collections." />
+          <AdminStatCard label="Sources" value={detail?.sources.length ?? 0} helper={selectedSetId ? "Sources on the selected set." : "Select a set to inspect its sources."} />
+          <AdminStatCard label="Compile Mode" value={form.compileDaily ? "daily" : "manual"} helper="Current selected set cadence." />
+          <AdminStatCard label="Selected Set" value={selectedSetId ? "editing" : "draft"} helper={selectedSetId ? form.name || "Saved set" : "New unsaved set"} tone={selectedSetId ? "success" : "info"} />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[20rem,minmax(0,1fr)]">
+          <div className="space-y-4">
+          <AdminCard
+            title="Sets"
+            description="Choose the watchlist set you want to edit or start a new draft."
+            actions={(
               <button
-                className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
+                className="rounded-xl border border-borderSoft/80 bg-panelSoft/65 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
                 onClick={() => {
                   setSelectedSetId(null);
                   setDetail(null);
                   setForm(EMPTY_FORM);
                 }}
+                type="button"
               >
                 New
               </button>
-            </div>
+            )}
+          >
             {loading ? (
               <div className="flex items-center gap-2 text-xs text-slate-400">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -182,15 +243,17 @@ export function WatchlistCompilerAdminPanel() {
                     <div className="text-[11px] text-slate-400">{set.sourceCount} sources | {set.compileDaily ? "daily" : "manual"}</div>
                   </button>
                 ))}
-                {sets.length === 0 && <p className="text-xs text-slate-400">No watchlist sets yet.</p>}
+                {sets.length === 0 && <EmptyState title="No watchlist sets yet" description="Create your first set to begin managing source URLs and compile schedules." />}
               </div>
             )}
+          </AdminCard>
           </div>
-        </div>
 
-        <div className="space-y-4">
-          <div className="card p-3">
-            <div className="mb-2 text-sm font-semibold text-slate-200">{selectedSetId ? "Edit Set" : "Create Set"}</div>
+          <div className="space-y-4">
+            <AdminCard
+              title={selectedSetId ? "Edit Set" : "Create Set"}
+              description={selectedSetId ? "Adjust the selected set definition and compile schedule." : "Create a new watchlist set and optional first source."}
+            >
             <div className="grid gap-3 md:grid-cols-2">
               <label className="block text-xs text-slate-300">
                 Name
@@ -266,26 +329,16 @@ export function WatchlistCompilerAdminPanel() {
                   </button>
                   <button
                     className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
-                    onClick={async () => {
-                      if (!window.confirm("Delete this watchlist set and all of its source URLs?")) return;
-                      try {
-                        await deleteAdminWatchlistCompilerSet(selectedSetId);
-                        await load(null);
-                        flashMessage("Watchlist set deleted.");
-                      } catch (error) {
-                        setMessage(error instanceof Error ? error.message : "Failed to delete watchlist set.");
-                      }
-                    }}
+                    onClick={() => setDeleteSetOpen(true)}
                   >
                     Delete Set
                   </button>
                 </>
               )}
             </div>
-          </div>
+            </AdminCard>
 
-          <div className="card p-3">
-            <div className="mb-2 text-sm font-semibold text-slate-200">Source URLs</div>
+            <AdminCard title="Source URLs" description="Add, reorder, activate, or remove TradingView source URLs for the selected set.">
             <div className="space-y-3">
               <div className="flex gap-2">
                 <input
@@ -413,29 +466,45 @@ export function WatchlistCompilerAdminPanel() {
                         </button>
                         <button
                           className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300"
-                          onClick={async () => {
-                            if (!window.confirm("Delete this source URL?")) return;
-                            try {
-                              await deleteAdminWatchlistCompilerSource(source.id);
-                              await load(selectedSetId);
-                              flashMessage("Source URL deleted.");
-                            } catch (error) {
-                              setMessage(error instanceof Error ? error.message : "Failed to delete source URL.");
-                            }
-                          }}
+                          onClick={() => setSourceToDelete({ id: source.id, label: source.sourceName?.trim() || source.sourceUrl })}
                         >
                           Delete
                         </button>
                       </div>
                     </div>
                   ))}
-                  {detail.sources.length === 0 && <p className="text-sm text-slate-400">No source URLs added yet.</p>}
+                  {detail.sources.length === 0 && <EmptyState title="No source URLs yet" description="Add the first source URL to give this watchlist set something to compile." />}
                 </div>
-              ) : null}
+              ) : (
+                <EmptyState title="No set selected" description="Select a watchlist set or create a new one to start managing source URLs." />
+              )}
             </div>
+            </AdminCard>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <ConfirmDialog
+        open={deleteSetOpen}
+        title="Delete watchlist set?"
+        description={selectedSetId ? `Delete ${form.name || "this watchlist set"} and all of its source URLs?` : "Delete the selected watchlist set?"}
+        confirmLabel="Delete Set"
+        tone="danger"
+        busy={deleteSetBusy}
+        onCancel={() => setDeleteSetOpen(false)}
+        onConfirm={handleDeleteSet}
+      />
+
+      <ConfirmDialog
+        open={Boolean(sourceToDelete)}
+        title="Delete source URL?"
+        description={sourceToDelete ? `Delete ${sourceToDelete.label} from the selected watchlist set?` : ""}
+        confirmLabel="Delete Source"
+        tone="danger"
+        busy={deleteSourceBusy}
+        onCancel={() => setSourceToDelete(null)}
+        onConfirm={handleDeleteSource}
+      />
+    </>
   );
 }

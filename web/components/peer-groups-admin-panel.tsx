@@ -25,6 +25,12 @@ import {
   type PeerTickerDetail,
   type SymbolCatalogStatus,
 } from "@/lib/api";
+import { AdminCard } from "@/components/admin/admin-card";
+import { AdminPageHeader } from "@/components/admin/admin-page-header";
+import { AdminStatCard } from "@/components/admin/admin-stat-card";
+import { ConfirmDialog } from "@/components/admin/confirm-dialog";
+import { EmptyState } from "@/components/admin/empty-state";
+import { InlineAlert } from "@/components/admin/inline-alert";
 
 const EMPTY_FORM = {
   name: "",
@@ -79,6 +85,10 @@ export function PeerGroupsAdminPanel() {
   const [bootstrapProviderMode, setBootstrapProviderMode] = useState<"both" | "finnhub" | "fmp">("finnhub");
   const [bootstrapTickersText, setBootstrapTickersText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [deleteGroupOpen, setDeleteGroupOpen] = useState(false);
+  const [deleteGroupBusy, setDeleteGroupBusy] = useState(false);
+  const [memberToRemove, setMemberToRemove] = useState<PeerDirectoryRow | null>(null);
+  const [memberRemovalBusy, setMemberRemovalBusy] = useState(false);
   const formCardRef = useRef<HTMLDivElement | null>(null);
 
   const flashMessage = (next: string, timeoutMs = 4000) => {
@@ -265,32 +275,93 @@ export function PeerGroupsAdminPanel() {
       ? "Reactivate Symbol"
       : "In Directory";
 
+  const activeGroupCount = useMemo(
+    () => groups.filter((group) => group.isActive).length,
+    [groups],
+  );
+
+  const handleDeleteGroup = async () => {
+    if (!selectedGroupId) return;
+    setDeleteGroupBusy(true);
+    try {
+      await deleteAdminPeerGroup(selectedGroupId);
+      await load(null);
+      setSelectedGroupId(null);
+      setForm(EMPTY_FORM);
+      setDeleteGroupOpen(false);
+      flashMessage("Peer group deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to delete peer group.");
+    } finally {
+      setDeleteGroupBusy(false);
+    }
+  };
+
+  const handleRemoveMember = async () => {
+    if (!selectedGroupId || !memberToRemove) return;
+    setMemberRemovalBusy(true);
+    try {
+      await removeAdminPeerGroupMember(selectedGroupId, memberToRemove.ticker);
+      await load(selectedGroupId);
+      if (selectedTicker === memberToRemove.ticker) {
+        await onSelectTicker(memberToRemove.ticker);
+      }
+      flashMessage(`Removed ${memberToRemove.ticker} from the selected peer group.`);
+      setMemberToRemove(null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Failed to remove ${memberToRemove.ticker}.`);
+    } finally {
+      setMemberRemovalBusy(false);
+    }
+  };
+
   return (
-    <section className="space-y-4">
-      <div>
-        <h3 className="text-lg font-semibold">Peer Groups</h3>
-        <p className="text-sm text-slate-400">Create groups, assign tickers, and run manual bootstrap imports from seed providers.</p>
-      </div>
+    <>
+      <section className="space-y-6">
+        <AdminPageHeader
+          eyebrow="Admin"
+          title="Peer Groups"
+          description="Create groups, inspect symbols, manage memberships, and run seed workflows without changing any of the existing admin endpoints."
+          actions={(
+            <button
+              className="rounded-2xl border border-borderSoft/80 bg-panelSoft/65 px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
+              onClick={() => void load(selectedGroupId)}
+              type="button"
+            >
+              Refresh Workspace
+            </button>
+          )}
+        />
 
-      {message && <div className="card border border-borderSoft/70 p-3 text-sm text-slate-300">{message}</div>}
+        {message ? <InlineAlert tone="info">{message}</InlineAlert> : null}
 
-      <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <AdminStatCard label="Groups" value={groups.length} helper="All configured peer groups." />
+          <AdminStatCard label="Active Groups" value={activeGroupCount} helper="Groups currently marked active." />
+          <AdminStatCard label="Visible Members" value={groupMembers.length} helper={selectedGroup ? `${selectedGroup.name} member count.` : "Select a group to inspect memberships."} />
+          <AdminStatCard
+            label="Directory Health"
+            value={catalogStatus?.status ?? "unknown"}
+            helper={catalogStatus?.lastSyncedAt ? `Last sync ${new Date(catalogStatus.lastSyncedAt).toLocaleString()}` : "Symbol catalog status may be unavailable."}
+            tone={catalogStatus?.error ? "danger" : catalogStatus?.status === "ok" ? "success" : "info"}
+          />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[22rem,minmax(0,1fr)]">
         <div className="space-y-4">
-          <div className="card p-3">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <div>
-                <h4 className="text-sm font-semibold text-slate-200">Groups</h4>
-                <p className="text-[11px] text-slate-400">{groups.length} total groups</p>
-              </div>
+          <AdminCard
+            title="Groups"
+            description={`${groups.length} total groups`}
+            actions={(
               <button
-                className="rounded border border-accent/40 bg-accent/15 px-2.5 py-1.5 text-xs text-accent"
+                className="rounded-xl bg-accent px-3 py-2 text-sm font-medium text-slate-950 transition hover:brightness-110"
                 onClick={onStartNewGroup}
                 type="button"
               >
                 New Group
               </button>
-            </div>
-
+            )}
+          >
             <div className="space-y-3">
               <label className="block text-xs text-slate-300">
                 Find a group
@@ -352,9 +423,7 @@ export function PeerGroupsAdminPanel() {
                       </button>
                     ))}
                     {visibleGroups.length === 0 && (
-                      <p className="rounded border border-dashed border-borderSoft/70 px-3 py-4 text-sm text-slate-400">
-                        No groups match the current filter.
-                      </p>
+                      <EmptyState title="No groups match this filter" description="Adjust the current filter or create a new peer group." />
                     )}
                   </div>
 
@@ -386,7 +455,7 @@ export function PeerGroupsAdminPanel() {
                 </>
               )}
             </div>
-          </div>
+          </AdminCard>
         </div>
 
         <div className="space-y-4">
@@ -447,18 +516,7 @@ export function PeerGroupsAdminPanel() {
               {selectedGroupId && (
                 <button
                   className="rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300"
-                  onClick={async () => {
-                    if (!window.confirm("Delete this peer group?")) return;
-                    try {
-                      await deleteAdminPeerGroup(selectedGroupId);
-                      await load(null);
-                      setSelectedGroupId(null);
-                      setForm(EMPTY_FORM);
-                      flashMessage("Peer group deleted.");
-                    } catch (error) {
-                      setMessage(error instanceof Error ? error.message : "Failed to delete peer group.");
-                    }
-                  }}
+                  onClick={() => setDeleteGroupOpen(true)}
                   type="button"
                 >
                   Delete
@@ -856,17 +914,7 @@ export function PeerGroupsAdminPanel() {
                     {selectedGroupId && (
                       <button
                         className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300"
-                        onClick={async () => {
-                          if (!window.confirm(`Remove ${row.ticker} from this peer group?`)) return;
-                          try {
-                            await removeAdminPeerGroupMember(selectedGroupId, row.ticker);
-                            await load(selectedGroupId);
-                            if (selectedTicker === row.ticker) await onSelectTicker(row.ticker);
-                            flashMessage(`Removed ${row.ticker} from the selected peer group.`);
-                          } catch (error) {
-                            setMessage(error instanceof Error ? error.message : `Failed to remove ${row.ticker}.`);
-                          }
-                        }}
+                        onClick={() => setMemberToRemove(row)}
                         type="button"
                       >
                         Remove
@@ -879,7 +927,30 @@ export function PeerGroupsAdminPanel() {
             </div>
           </div>
         </div>
-      </div>
-    </section>
+        </div>
+      </section>
+
+      <ConfirmDialog
+        open={deleteGroupOpen}
+        title="Delete peer group?"
+        description={selectedGroup ? `Delete ${selectedGroup.name} and all of its memberships?` : "Delete the selected peer group?"}
+        confirmLabel="Delete Group"
+        tone="danger"
+        busy={deleteGroupBusy}
+        onCancel={() => setDeleteGroupOpen(false)}
+        onConfirm={handleDeleteGroup}
+      />
+
+      <ConfirmDialog
+        open={Boolean(memberToRemove)}
+        title="Remove member?"
+        description={memberToRemove ? `Remove ${memberToRemove.ticker} from ${selectedGroup?.name ?? "the selected peer group"}?` : ""}
+        confirmLabel="Remove Member"
+        tone="danger"
+        busy={memberRemovalBusy}
+        onCancel={() => setMemberToRemove(null)}
+        onConfirm={handleRemoveMember}
+      />
+    </>
   );
 }
