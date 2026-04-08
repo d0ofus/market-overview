@@ -43,7 +43,7 @@ import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { syncEtfConstituents } from "./etf";
-import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG } from "./etf-catalog";
+import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { latestUsSessionAsOfDate, parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
 import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
 import {
@@ -185,7 +185,6 @@ const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
-let lastEtfCatalogEnsureAt = 0;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
@@ -264,6 +263,14 @@ async function refreshSnapshotSafe(env: Env): Promise<void> {
   }
 }
 
+async function refreshOverviewEtfCoverageSafe(env: Env): Promise<void> {
+  try {
+    await ensureOverviewCatalogCoverage(env, { respectThrottle: false });
+  } catch (error) {
+    console.error("overview ETF coverage refresh failed after admin ETF mutation", error);
+  }
+}
+
 async function ensureBreadthRowsSafe(env: Env): Promise<void> {
   try {
     await computeAndStoreSnapshot(env, undefined, "default");
@@ -327,47 +334,11 @@ async function loadEtfSourceUrl(env: Env, ticker: string): Promise<string | null
   }
 }
 
-function catalogAssetClass(exactUrl: string): "etf" | "index" {
-  const lower = exactUrl.toLowerCase();
-  if (
-    lower.includes("indexes.nasdaqomx.com") ||
-    lower.includes("investing.com/indices/") ||
-    lower.includes("finance.yahoo.com/quote/%5e") ||
-    lower.includes("finance.yahoo.com/quote/^")
-  ) {
-    return "index";
-  }
-  return "etf";
-}
-
-async function ensureEtfCatalogCoverage(env: Env): Promise<void> {
+async function ensureOverviewCatalogCoverage(env: Env, options: { respectThrottle?: boolean } = {}): Promise<void> {
+  const respectThrottle = options.respectThrottle ?? true;
   const now = Date.now();
-  if (now - lastEtfCatalogEnsureAt < CATALOG_ENSURE_INTERVAL_MS) return;
-  lastEtfCatalogEnsureAt = now;
-
-  const statements = ETF_CATALOG.flatMap((entry, idx) => {
-    const ticker = entry.ticker.toUpperCase();
-    const defaultName = `${ticker} ${catalogAssetClass(entry.exactUrl) === "index" ? "Index" : "ETF"}`;
-    return [
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, NULL, ?, ?, ?)",
-      ).bind(ticker, defaultName, catalogAssetClass(entry.exactUrl), entry.sector, entry.industry),
-      env.DB.prepare(
-        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order) VALUES ('industry', ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = CASE WHEN COALESCE(etf_watchlists.fund_name, '') = '' OR etf_watchlists.fund_name = etf_watchlists.ticker OR etf_watchlists.fund_name LIKE '% ETF' THEN excluded.fund_name ELSE etf_watchlists.fund_name END",
-      ).bind(entry.sector, entry.industry, ticker, defaultName, 2000 + idx),
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'catalog:import', 0, CURRENT_TIMESTAMP)",
-      ).bind(ticker),
-    ];
-  });
-  if (statements.length > 0) await env.DB.batch(statements);
-}
-
-async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
-  const now = Date.now();
-  if (now - lastOverviewCatalogEnsureAt < CATALOG_ENSURE_INTERVAL_MS) return;
+  if (respectThrottle && now - lastOverviewCatalogEnsureAt < CATALOG_ENSURE_INTERVAL_MS) return;
   lastOverviewCatalogEnsureAt = now;
-  await ensureEtfCatalogCoverage(env);
 
   const equitiesSection = await env.DB.prepare(
     "SELECT id FROM dashboard_sections WHERE config_id = 'default' AND title LIKE '%Equities%' ORDER BY sort_order ASC LIMIT 1",
@@ -420,9 +391,7 @@ async function ensureOverviewCatalogCoverage(env: Env): Promise<void> {
   const industryWatchlistRows = await env.DB.prepare(
     "SELECT ticker, fund_name as fundName FROM etf_watchlists WHERE list_type = 'industry' ORDER BY COALESCE(parent_sector, '') ASC, COALESCE(industry, '') ASC, sort_order ASC, ticker ASC",
   ).all<{ ticker: string; fundName: string | null }>();
-  const thematicSeedRows = (industryWatchlistRows.results ?? []).length > 0
-    ? (industryWatchlistRows.results ?? [])
-    : ETF_CATALOG.map((row) => ({ ticker: row.ticker, fundName: `${row.ticker.toUpperCase()} ${catalogAssetClass(row.exactUrl) === "index" ? "Index" : "ETF"}` }));
+  const thematicSeedRows = industryWatchlistRows.results ?? [];
   const thematicTickers = thematicSeedRows.map((row) => row.ticker.toUpperCase()).filter(Boolean);
   const thematicNameByTicker = new Map(
     thematicSeedRows.map((row) => [row.ticker.toUpperCase(), (row.fundName ?? "").trim()]).filter((entry) => Boolean(entry[0])),
@@ -1050,6 +1019,7 @@ app.get("/api/dashboard", async (c) => {
   if (!date) {
     try {
       if (await isOverviewSnapshotStale(c.env, configId)) {
+        await ensureOverviewCatalogCoverage(c.env, { respectThrottle: false });
         const tickers = await loadOverviewTickers(c.env);
         await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
         await recomputeDashboardFromStoredBars(c.env, undefined, configId);
@@ -1479,7 +1449,6 @@ app.get("/api/etfs/sector", async (c) => {
 });
 
 app.get("/api/etfs/industry", async (c) => {
-  await ensureEtfCatalogCoverage(c.env);
   const rows = await listEtfWatchlistRows(c.env, "industry");
   await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
   const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
@@ -1493,7 +1462,6 @@ app.get("/api/etfs/industry", async (c) => {
 });
 
 app.get("/api/etf/:ticker/constituents", async (c) => {
-  await ensureEtfCatalogCoverage(c.env);
   const ticker = c.req.param("ticker").toUpperCase();
   const forceSync = c.req.query("force") === "1";
   const etf = await (async () => {
@@ -1783,6 +1751,9 @@ app.post("/api/admin/etfs", async (c) => {
     ]);
   }
   await upsertAudit(c.env, "default", "ETF_WATCHLIST_ADD", { listType, ticker, fundName, parentSector: body.parentSector, industry: body.industry, sourceUrl });
+  if (listType === "industry") {
+    await refreshOverviewEtfCoverageSafe(c.env);
+  }
   return c.json({ ok: true, ticker, sourceUrl });
 });
 
@@ -1801,6 +1772,9 @@ app.delete("/api/admin/etfs/:listType/:ticker", async (c) => {
     .bind(listType, ticker)
     .run();
   await upsertAudit(c.env, "default", "ETF_WATCHLIST_DELETE", { listType, ticker });
+  if (listType === "industry") {
+    await refreshOverviewEtfCoverageSafe(c.env);
+  }
   return c.json({ ok: true, ticker, listType });
 });
 
@@ -1828,7 +1802,6 @@ app.patch("/api/admin/etf-source/:ticker", async (c) => {
 
 app.get("/api/admin/etf-sync-status", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  await ensureEtfCatalogCoverage(c.env);
   const limit = Math.max(10, Math.min(500, Number(c.req.query("limit") ?? 200)));
   const autoSyncLimit = Math.max(0, Math.min(3, Number(c.req.query("autoSyncLimit") ?? 1)));
 
@@ -3012,7 +2985,6 @@ app.get("/api/admin/provider-check", async (c) => {
 
 app.get("/api/admin/etf-sync-diagnostics", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  await ensureEtfCatalogCoverage(c.env);
   const ticker = (c.req.query("ticker") ?? "TAN").trim().toUpperCase();
   if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
     return c.json({ error: "Valid ticker is required." }, 400);
@@ -3149,7 +3121,6 @@ app.post("/api/admin/run-eod", async (c) => {
 
 app.post("/api/admin/etf-sync-backfill", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  await ensureEtfCatalogCoverage(c.env);
   const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
   // Keep this low to avoid Cloudflare subrequest caps in one request.
   const limit = Math.max(1, Math.min(5, Number(body.limit ?? 3)));

@@ -5,6 +5,7 @@ import type { Env } from "./types";
 const DEFAULT_CONFIG_ID = "default";
 const EQUAL_WEIGHT_GROUP_ID = "g-sector-etf-eqwt";
 const SPARKLINE_LOOKBACK_POINTS = 90;
+const THEMATIC_GROUP_TITLES = ["Industry/Thematic ETFs", "Thematic ETFs"] as const;
 
 function parseSparklineValues(raw: string | null | undefined): number[] | null {
   if (!raw) return null;
@@ -34,6 +35,44 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
   for (const row of equalWeightRows.results ?? []) {
     const expected = expectedEqualWeightNames.get(row.ticker.toUpperCase());
     if (expected && row.displayName !== expected) return true;
+  }
+
+  const thematicWatchlistRows = await env.DB.prepare(
+    "SELECT ticker, fund_name as fundName FROM etf_watchlists WHERE list_type = 'industry' ORDER BY COALESCE(parent_sector, '') ASC, COALESCE(industry, '') ASC, sort_order ASC, ticker ASC",
+  ).all<{ ticker: string; fundName: string | null }>();
+  const thematicSnapshotRows = await env.DB.prepare(
+    `SELECT sr.ticker, sr.display_name as displayName
+     FROM snapshot_rows sr
+     JOIN dashboard_groups dg ON dg.id = sr.group_id
+     JOIN dashboard_sections ds ON ds.id = dg.section_id
+     WHERE sr.snapshot_id = ?
+       AND ds.config_id = ?
+       AND dg.title IN (${THEMATIC_GROUP_TITLES.map(() => "?").join(", ")})
+     ORDER BY sr.ticker ASC`,
+  ).bind(latest.id, configId, ...THEMATIC_GROUP_TITLES).all<{ ticker: string; displayName: string | null }>();
+
+  const expectedThematicRows = (thematicWatchlistRows.results ?? [])
+    .map((row) => ({
+      ticker: row.ticker.toUpperCase(),
+      displayName: row.fundName?.trim() || null,
+    }))
+    .filter((row) => Boolean(row.ticker))
+    .sort((a, b) => a.ticker.localeCompare(b.ticker));
+  const actualThematicRows = (thematicSnapshotRows.results ?? [])
+    .map((row) => ({
+      ticker: row.ticker.toUpperCase(),
+      displayName: row.displayName?.trim() || null,
+    }))
+    .filter((row) => Boolean(row.ticker))
+    .sort((a, b) => a.ticker.localeCompare(b.ticker));
+
+  if (expectedThematicRows.length !== actualThematicRows.length) return true;
+  for (let index = 0; index < expectedThematicRows.length; index += 1) {
+    const expected = expectedThematicRows[index];
+    const actual = actualThematicRows[index];
+    if (!actual) return true;
+    if (expected.ticker !== actual.ticker) return true;
+    if (expected.displayName !== actual.displayName) return true;
   }
 
   const sparklineRows = await env.DB.prepare(
