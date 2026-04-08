@@ -24,6 +24,7 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
+- Circle or highlight current date in the calendar
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -35,6 +36,9 @@
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
+
+## Correlation
+- Link correlation to peer groups
 
 ## Scans
 - Add RS scan
@@ -55,6 +59,7 @@
 
 ## Admin
 - Find out what slug means for peer-groups
+- Add function to specific exchange before ticker. For e.g., OSX chart shows the ASX listing and not the NASDAQ one
 - Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 
 - Shows pending for ETFs like JETS, but ETF consituent sync status shows 'pending', 0 records and No cached data. Clicking on it shows contituents, and checking the DB shows all ok.
 - Check why most ETFs limited to 25 tickers
@@ -62,6 +67,9 @@
 > IBIT
 > WGMI
 > ARKK: More than 25 components (https://www.ark-funds.com/funds/arkk#hold)
+- Create export function to get all teh Industry and sector ETFs in the list
+- Add/remove ETFs
+>> Remove NWX
 
 ## General
 - See what other features in google sheets dashboard that are good
@@ -69,12 +77,13 @@
 
 ## Research Lab
 ==>> Make token use more efficient
+==>> Check on database management 
 
+- Add in embedded TV chart
 - Add in comparison with peers (see peer-group groupings), analyse leader/laggard relationship with peers, performance comparison and whether the industry is trending
 - Add in primary drivers analysis in synthesis layer. What are they and where they stand, and correlation
 - Sort news by dates
 - Add in current analyst consensus
-- Check on database management 
 - See what prompts are being used
 - Link research with /peer-groups
 - Add ability to assess Relative strength to index
@@ -85,6 +94,7 @@
 - Add in morning brief section using Claude API
 - Add macro dashboard
 - Create correlation/cointegration matrix of peer-groups or manual input tickers
+>> https://www.hiddenmetrix.com/guide/correlation-analysis/
 - Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
