@@ -16,6 +16,18 @@ import {
 const LOOKBACK_OPTIONS: CorrelationLookback[] = ["60D", "120D", "252D", "2Y", "5Y"];
 const ROLLING_WINDOW_OPTIONS: CorrelationRollingWindow[] = ["20D", "60D", "120D"];
 const MAX_TICKERS = 10;
+const LOOKBACK_PERIODS: Record<CorrelationLookback, number> = {
+  "60D": 60,
+  "120D": 120,
+  "252D": 252,
+  "2Y": 504,
+  "5Y": 1260,
+};
+const ROLLING_WINDOW_PERIODS: Record<CorrelationRollingWindow, number> = {
+  "20D": 20,
+  "60D": 60,
+  "120D": 120,
+};
 
 type PairSelection = { left: string; right: string };
 type DrilldownTab = "overview" | "spread" | "dynamics";
@@ -27,7 +39,7 @@ const dateFmt = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
 });
 
-function parseTickerInput(value: string): { tickers: string[]; invalid: string[] } {
+function parseTickerInput(value: string): { tickers: string[]; invalid: string[]; overflow: boolean } {
   const tokens = value
     .split(/[,\s;\n\r\t]+/)
     .map((token) => token.trim().toUpperCase())
@@ -37,6 +49,7 @@ function parseTickerInput(value: string): { tickers: string[]; invalid: string[]
   return {
     tickers: unique.filter((ticker) => /^[A-Z.\-^]{1,20}$/.test(ticker)).slice(0, MAX_TICKERS),
     invalid,
+    overflow: unique.length > MAX_TICKERS,
   };
 }
 
@@ -58,6 +71,16 @@ function buildSearchQuery(tickers: string, lookback: CorrelationLookback, rollin
   params.set("lookback", lookback);
   params.set("rollingWindow", rollingWindow);
   return params.toString();
+}
+
+function allowedRollingWindowsForLookback(lookback: CorrelationLookback): CorrelationRollingWindow[] {
+  const lookbackPeriods = LOOKBACK_PERIODS[lookback];
+  return ROLLING_WINDOW_OPTIONS.filter((option) => ROLLING_WINDOW_PERIODS[option] <= lookbackPeriods);
+}
+
+function defaultRollingWindowForLookback(lookback: CorrelationLookback): CorrelationRollingWindow {
+  const allowed = allowedRollingWindowsForLookback(lookback);
+  return allowed.includes("60D") ? "60D" : allowed[allowed.length - 1];
 }
 
 function pickAllowedOption<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
@@ -123,7 +146,11 @@ export function CorrelationDashboard() {
   const [isRouting, startTransition] = useTransition();
   const queryTickers = searchParams.get("tickers") ?? "";
   const queryLookback = pickAllowedOption(searchParams.get("lookback"), LOOKBACK_OPTIONS, "252D");
-  const queryRollingWindow = pickAllowedOption(searchParams.get("rollingWindow"), ROLLING_WINDOW_OPTIONS, "60D");
+  const queryRollingWindow = pickAllowedOption(
+    searchParams.get("rollingWindow"),
+    allowedRollingWindowsForLookback(queryLookback),
+    defaultRollingWindowForLookback(queryLookback),
+  );
 
   const [tickerInput, setTickerInput] = useState(queryTickers);
   const [lookback, setLookback] = useState<CorrelationLookback>(queryLookback);
@@ -140,12 +167,18 @@ export function CorrelationDashboard() {
   const autoRunKeyRef = useRef<string | null>(null);
   const matrixRequestRef = useRef(0);
   const pairRequestRef = useRef(0);
+  const allowedRollingWindowOptions = useMemo(() => allowedRollingWindowsForLookback(lookback), [lookback]);
 
   useEffect(() => {
     setTickerInput(queryTickers);
     setLookback(queryLookback);
     setRollingWindow(queryRollingWindow);
   }, [queryLookback, queryRollingWindow, queryTickers]);
+
+  useEffect(() => {
+    if (allowedRollingWindowOptions.includes(rollingWindow)) return;
+    setRollingWindow(defaultRollingWindowForLookback(lookback));
+  }, [allowedRollingWindowOptions, lookback, rollingWindow]);
 
   const runPairAnalysis = async (nextPair: PairSelection, nextLookback: CorrelationLookback, nextRollingWindow: CorrelationRollingWindow) => {
     setSelectedPair(nextPair);
@@ -218,6 +251,10 @@ export function CorrelationDashboard() {
       setFormError(`Unsupported ticker format: ${parsed.invalid[0]}`);
       return;
     }
+    if (parsed.overflow) {
+      setFormError(`Correlation analysis supports up to ${MAX_TICKERS} tickers per run.`);
+      return;
+    }
     if (parsed.tickers.length < 2) {
       setFormError("Enter at least 2 valid tickers.");
       return;
@@ -264,7 +301,14 @@ export function CorrelationDashboard() {
             <select
               className="w-full rounded-xl border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-sm text-slate-100 outline-none"
               value={lookback}
-              onChange={(event) => setLookback(event.target.value as CorrelationLookback)}
+              onChange={(event) => {
+                const nextLookback = event.target.value as CorrelationLookback;
+                setLookback(nextLookback);
+                const nextAllowed = allowedRollingWindowsForLookback(nextLookback);
+                if (!nextAllowed.includes(rollingWindow)) {
+                  setRollingWindow(defaultRollingWindowForLookback(nextLookback));
+                }
+              }}
             >
               {LOOKBACK_OPTIONS.map((option) => (
                 <option key={option} value={option}>
@@ -281,11 +325,14 @@ export function CorrelationDashboard() {
               onChange={(event) => setRollingWindow(event.target.value as CorrelationRollingWindow)}
             >
               {ROLLING_WINDOW_OPTIONS.map((option) => (
-                <option key={option} value={option}>
+                <option key={option} value={option} disabled={!allowedRollingWindowOptions.includes(option)}>
                   {option}
                 </option>
               ))}
             </select>
+            <p className="mt-2 text-xs text-slate-400">
+              Available for {lookback}: {allowedRollingWindowOptions.join(", ")}
+            </p>
           </div>
           <div className="flex items-end">
             <button
@@ -382,8 +429,9 @@ export function CorrelationDashboard() {
                     </div>
                   </div>
                   <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-3">
-                    <div className="text-xs uppercase tracking-[0.08em] text-slate-400">Latest Available Date</div>
+                    <div className="text-xs uppercase tracking-[0.08em] text-slate-400">Latest / Expected</div>
                     <div className="mt-1 text-sm font-semibold text-slate-100">{formatDate(matrixData.latestAvailableDate)}</div>
+                    <div className="mt-1 text-xs text-slate-400">Expected {formatDate(matrixData.expectedAsOfDate)}</div>
                   </div>
                 </div>
               </div>

@@ -136,6 +136,9 @@ export function CorrelationPairDrilldown({
                 <div className="mt-1 text-sm font-semibold text-slate-100">
                   {formatDate(pairData.pair.overlapStartDate)} to {formatDate(pairData.pair.overlapEndDate)}
                 </div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {pairData.pair.priceObservationCount} price points / {pairData.pair.returnObservationCount} return points
+                </div>
               </div>
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-3">
                 <div className="text-xs uppercase tracking-[0.08em] text-slate-400">R / R^2</div>
