@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildLeadLagAnalysis,
   buildRollingCorrelationSeries,
   loadCorrelationPair,
+  loadCorrelationMatrix,
   ordinaryLeastSquares,
   pearsonCorrelation,
 } from "../src/correlation-service";
+import * as providerModule from "../src/provider";
+import { latestUsSessionAsOfDate } from "../src/refresh-timing";
 import type { Env } from "../src/types";
 
 type BarRow = {
@@ -28,13 +31,22 @@ function buildDates(count: number, start = "2025-01-02"): string[] {
   });
 }
 
+function addDays(isoDate: string, days: number): string {
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
 function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
+  const storedBars = [...dailyBars];
   return {
     DB: {
       prepare(sql: string) {
         return {
           bind(...args: unknown[]) {
             return {
+              __sql: sql,
+              __args: args,
               async all<T>() {
                 if (sql.includes("FROM symbols")) {
                   const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
@@ -42,6 +54,19 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                     results: symbols
                       .filter((row) => requested.has(row.ticker.toUpperCase()))
                       .map((row) => ({ ticker: row.ticker, displayName: row.displayName })) as T[],
+                  };
+                }
+                if (sql.includes("MAX(date) as lastBarDate")) {
+                  const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
+                  return {
+                    results: Array.from(requested).flatMap((ticker) => {
+                      const lastBarDate = storedBars
+                        .filter((row) => row.ticker.toUpperCase() === ticker)
+                        .map((row) => row.date)
+                        .sort()
+                        .at(-1);
+                      return lastBarDate ? [{ ticker, lastBarDate }] : [];
+                    }) as T[],
                   };
                 }
                 if (sql.includes("FROM daily_bars")) {
@@ -54,7 +79,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                       .map((value) => value.toUpperCase()),
                   );
                   const limitedRows = Array.from(requested).flatMap((ticker) =>
-                    dailyBars
+                    storedBars
                       .filter((row) => row.ticker.toUpperCase() === ticker)
                       .slice(-perTickerLimit),
                   );
@@ -72,9 +97,35 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
           },
         };
       },
+      async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+        for (const statement of statements) {
+          if (!statement.__sql?.includes("INSERT OR REPLACE INTO daily_bars")) continue;
+          const [ticker, date, o, h, l, c, volume] = statement.__args ?? [];
+          const nextRow = {
+            ticker: String(ticker),
+            date: String(date),
+            o: Number(o),
+            h: Number(h),
+            l: Number(l),
+            c: Number(c),
+            volume: Number(volume),
+          };
+          const existingIndex = storedBars.findIndex((row) => row.ticker === nextRow.ticker && row.date === nextRow.date);
+          if (existingIndex >= 0) {
+            storedBars[existingIndex] = { ticker: nextRow.ticker, date: nextRow.date, c: nextRow.c };
+          } else {
+            storedBars.push({ ticker: nextRow.ticker, date: nextRow.date, c: nextRow.c });
+          }
+        }
+        return [];
+      },
     } as D1Database,
   };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("correlation service", () => {
   it("computes Pearson correlation for positive and negative relationships", () => {
@@ -135,6 +186,10 @@ describe("correlation service", () => {
   });
 
   it("keeps flat spread z-scores null when the pair tracks at a constant ratio", async () => {
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => [],
+    });
     const dates = buildDates(30);
     const aaplBars = dates.map((date, index) => ({ ticker: "AAPL", date, c: 100 + index }));
     const msftBars = dates.map((date, index) => ({ ticker: "MSFT", date, c: (100 + index) * 2 }));
@@ -154,5 +209,67 @@ describe("correlation service", () => {
     expect(result.spread.series.length).toBe(30);
     expect(result.spread.latest.zScore).toBeNull();
     expect(result.dynamics.rollingCorrelation.some((row) => row.value != null)).toBe(true);
+  });
+
+  it("backfills stale correlation bars before analysis when newer provider data is available", async () => {
+    const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+    const latestStoredDate = addDays(expectedAsOfDate, -2);
+    const previousStoredDate = addDays(expectedAsOfDate, -3);
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => [
+        { ticker: "AAPL", date: addDays(expectedAsOfDate, -1), o: 111, h: 111, l: 111, c: 111, volume: 1 },
+        { ticker: "AAPL", date: expectedAsOfDate, o: 112, h: 112, l: 112, c: 112, volume: 1 },
+        { ticker: "MSFT", date: addDays(expectedAsOfDate, -1), o: 55, h: 55, l: 55, c: 55, volume: 1 },
+        { ticker: "MSFT", date: expectedAsOfDate, o: 56, h: 56, l: 56, c: 56, volume: 1 },
+      ],
+    });
+    const env = createCorrelationEnv(
+      [
+        { ticker: "AAPL", displayName: "Apple Inc." },
+        { ticker: "MSFT", displayName: "Microsoft Corp." },
+      ],
+      [
+        { ticker: "AAPL", date: previousStoredDate, c: 109 },
+        { ticker: "AAPL", date: latestStoredDate, c: 110 },
+        { ticker: "MSFT", date: previousStoredDate, c: 54 },
+        { ticker: "MSFT", date: latestStoredDate, c: 54.5 },
+      ],
+    );
+
+    const result = await loadCorrelationMatrix(env, ["AAPL", "MSFT"], "60D");
+
+    expect(result.latestAvailableDate).toBe(expectedAsOfDate);
+    expect(result.warnings.some((warning) => warning.includes("Stored bar history is behind"))).toBe(false);
+    expect(result.resolvedTickers.every((ticker) => ticker.status === "ok")).toBe(true);
+  });
+
+  it("falls back to stale stored bars when correlation backfill fails", async () => {
+    const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+    const latestStoredDate = addDays(expectedAsOfDate, -2);
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => {
+        throw new Error("provider unavailable");
+      },
+    });
+    const env = createCorrelationEnv(
+      [
+        { ticker: "AAPL", displayName: "Apple Inc." },
+        { ticker: "MSFT", displayName: "Microsoft Corp." },
+      ],
+      [
+        { ticker: "AAPL", date: addDays(expectedAsOfDate, -3), c: 109 },
+        { ticker: "AAPL", date: latestStoredDate, c: 110 },
+        { ticker: "MSFT", date: addDays(expectedAsOfDate, -3), c: 54 },
+        { ticker: "MSFT", date: latestStoredDate, c: 54.5 },
+      ],
+    );
+
+    const result = await loadCorrelationMatrix(env, ["AAPL", "MSFT"], "60D");
+
+    expect(result.latestAvailableDate).toBe(latestStoredDate);
+    expect(result.warnings.some((warning) => warning.includes("Live correlation backfill failed"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("Stored bar history is behind"))).toBe(true);
   });
 });

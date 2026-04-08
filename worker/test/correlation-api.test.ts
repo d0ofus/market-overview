@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import * as providerModule from "../src/provider";
 import type { Env } from "../src/types";
 
 type BarRow = {
@@ -23,12 +24,15 @@ function buildDates(count: number, start = "2025-01-02"): string[] {
 }
 
 function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
+  const storedBars = [...dailyBars];
   return {
     DB: {
       prepare(sql: string) {
         return {
           bind(...args: unknown[]) {
             return {
+              __sql: sql,
+              __args: args,
               async all<T>() {
                 if (sql.includes("FROM symbols")) {
                   const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
@@ -36,6 +40,19 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                     results: symbols
                       .filter((row) => requested.has(row.ticker.toUpperCase()))
                       .map((row) => ({ ticker: row.ticker, displayName: row.displayName })) as T[],
+                  };
+                }
+                if (sql.includes("MAX(date) as lastBarDate")) {
+                  const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
+                  return {
+                    results: Array.from(requested).flatMap((ticker) => {
+                      const lastBarDate = storedBars
+                        .filter((row) => row.ticker.toUpperCase() === ticker)
+                        .map((row) => row.date)
+                        .sort()
+                        .at(-1);
+                      return lastBarDate ? [{ ticker, lastBarDate }] : [];
+                    }) as T[],
                   };
                 }
                 if (sql.includes("FROM daily_bars")) {
@@ -48,7 +65,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                       .map((value) => value.toUpperCase()),
                   );
                   const limitedRows = Array.from(requested).flatMap((ticker) =>
-                    dailyBars
+                    storedBars
                       .filter((row) => row.ticker.toUpperCase() === ticker)
                       .slice(-perTickerLimit),
                   );
@@ -69,9 +86,27 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
           },
         };
       },
+      async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+        for (const statement of statements) {
+          if (!statement.__sql?.includes("INSERT OR REPLACE INTO daily_bars")) continue;
+          const [ticker, date, , , , c] = statement.__args ?? [];
+          const nextRow = { ticker: String(ticker), date: String(date), c: Number(c) };
+          const existingIndex = storedBars.findIndex((row) => row.ticker === nextRow.ticker && row.date === nextRow.date);
+          if (existingIndex >= 0) {
+            storedBars[existingIndex] = nextRow;
+          } else {
+            storedBars.push(nextRow);
+          }
+        }
+        return [];
+      },
     } as D1Database,
   };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function createApiEnv(): Env {
   const dates = buildDates(30);
@@ -91,6 +126,10 @@ function createApiEnv(): Env {
 
 describe("correlation API", () => {
   it("returns a matrix response with default pair selection and stale diagnostics", async () => {
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => [],
+    });
     const env = createApiEnv();
     const response = await (worker as { fetch: typeof fetch }).fetch(
       new Request("http://localhost/api/correlation/matrix?tickers=AAPL,MSFT,QQQ,ZZZZ&lookback=60D"),
@@ -114,6 +153,10 @@ describe("correlation API", () => {
   });
 
   it("returns pair drilldown payloads for valid ticker pairs", async () => {
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => [],
+    });
     const env = createApiEnv();
     const response = await (worker as { fetch: typeof fetch }).fetch(
       new Request("http://localhost/api/correlation/pair?left=AAPL&right=MSFT&lookback=60D&rollingWindow=20D"),
@@ -141,6 +184,10 @@ describe("correlation API", () => {
   });
 
   it("rejects unsupported pair query parameters", async () => {
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async () => [],
+    });
     const env = createApiEnv();
     const response = await (worker as { fetch: typeof fetch }).fetch(
       new Request("http://localhost/api/correlation/pair?left=AAPL&right=MSFT&lookback=60D&rollingWindow=120D"),

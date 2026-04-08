@@ -1,4 +1,5 @@
 import { sanitizeBarSeries } from "./metrics";
+import { getProvider, type DailyBar } from "./provider";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
 import type { Env } from "./types";
 
@@ -138,6 +139,7 @@ const MIN_CORRELATION_OBSERVATIONS = 20;
 const MAX_LEAD_LAG_DAYS = 20;
 const STABILITY_EPSILON = 1e-12;
 const BAR_FETCH_BUFFER = 30;
+const BAR_UPSERT_CHUNK_SIZE = 100;
 
 function closePeriodsForLookback(lookback: CorrelationLookback): number {
   return CORRELATION_LOOKBACKS[lookback].closePeriods;
@@ -465,6 +467,25 @@ function compareIsoDates(left: string | null, right: string | null): number {
   return left.localeCompare(right);
 }
 
+function addUtcDays(isoDate: string, days: number): string {
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+async function upsertBars(env: Env, bars: DailyBar[]): Promise<void> {
+  if (bars.length === 0) return;
+  for (let index = 0; index < bars.length; index += BAR_UPSERT_CHUNK_SIZE) {
+    const chunk = bars.slice(index, index + BAR_UPSERT_CHUNK_SIZE);
+    const statements = chunk.map((bar) =>
+      env.DB.prepare(
+        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume),
+    );
+    await env.DB.batch(statements);
+  }
+}
+
 async function loadTickerMetadata(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
   if (tickers.length === 0) return new Map();
   const placeholders = tickers.map(() => "?").join(", ");
@@ -474,6 +495,51 @@ async function loadTickerMetadata(env: Env, tickers: string[]): Promise<Map<stri
     .bind(...tickers)
     .all<TickerMetaRow>();
   return new Map((result.results ?? []).map((row) => [row.ticker.toUpperCase(), row.displayName ?? null]));
+}
+
+async function loadLatestBarDates(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
+  if (tickers.length === 0) return new Map();
+  const placeholders = tickers.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    `SELECT ticker, MAX(date) as lastBarDate FROM daily_bars WHERE ticker IN (${placeholders}) GROUP BY ticker`,
+  )
+    .bind(...tickers)
+    .all<{ ticker: string; lastBarDate: string | null }>();
+  return new Map((result.results ?? []).map((row) => [row.ticker.toUpperCase(), row.lastBarDate ?? null]));
+}
+
+async function attemptCorrelationBackfill(
+  env: Env,
+  requestedTickers: string[],
+  expectedAsOfDate: string,
+): Promise<string[]> {
+  const latestBarDates = await loadLatestBarDates(env, requestedTickers);
+  const staleTickers = requestedTickers.filter((ticker) => {
+    const lastBarDate = latestBarDates.get(ticker.toUpperCase());
+    return lastBarDate != null && lastBarDate < expectedAsOfDate;
+  });
+  if (staleTickers.length === 0) return [];
+
+  const staleStartDates = staleTickers
+    .map((ticker) => latestBarDates.get(ticker.toUpperCase()))
+    .filter((value): value is string => Boolean(value))
+    .map((value) => addUtcDays(value, 1));
+  const startDate = staleStartDates.sort().at(0);
+  if (!startDate || startDate > expectedAsOfDate) return [];
+
+  try {
+    const provider = getProvider(env);
+    const freshBars = await provider.getDailyBars(staleTickers, startDate, expectedAsOfDate);
+    if (freshBars.length > 0) {
+      await upsertBars(env, freshBars);
+      return [];
+    }
+    return [`Backfill attempted for stale correlation tickers (${staleTickers.join(", ")}), but no newer bars were returned.`];
+  } catch (error) {
+    console.error("correlation backfill failed; stored bars used", { requestedTickers: staleTickers, error });
+    const message = error instanceof Error ? error.message : "unknown provider error";
+    return [`Live correlation backfill failed; stale stored bars were used instead (${message}).`];
+  }
 }
 
 async function loadTickerBars(env: Env, tickers: string[], closePeriods: number): Promise<Map<string, PriceSeries>> {
@@ -522,6 +588,8 @@ async function loadPreparedSeries(
 }> {
   const uniqueTickers = Array.from(new Set(requestedTickers.map((ticker) => ticker.toUpperCase())));
   const closePeriods = closePeriodsForLookback(lookback);
+  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const backfillWarnings = await attemptCorrelationBackfill(env, uniqueTickers, expectedAsOfDate);
   const [metadataByTicker, rawBarsByTicker] = await Promise.all([
     loadTickerMetadata(env, uniqueTickers),
     loadTickerBars(env, uniqueTickers, closePeriods),
@@ -552,8 +620,7 @@ async function loadPreparedSeries(
   }
 
   const latestAvailableDate = Array.from(latestByTicker.values()).sort(compareIsoDates).at(-1) ?? null;
-  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const warnings: string[] = [];
+  const warnings: string[] = [...backfillWarnings];
   const datasetWarning = buildDatasetStaleWarning(latestAvailableDate, expectedAsOfDate);
   if (datasetWarning) warnings.push(datasetWarning);
 
