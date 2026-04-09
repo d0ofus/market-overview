@@ -193,7 +193,7 @@ function EtfTile({
   onExpandChart: () => void;
 }) {
   return (
-    <div className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4 shadow-[0_10px_24px_rgba(2,6,23,0.12)]">
+    <div className="flex h-full flex-col gap-4 px-1 py-2">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {eyebrow ? (
@@ -211,15 +211,15 @@ function EtfTile({
           </div>
           <p className="mt-2 line-clamp-2 text-sm text-slate-400">{etf.fundName}</p>
         </div>
-        <div className="rounded-2xl bg-panelSoft/50 px-3 py-2 text-right">
+        <div className="bg-panelSoft/35 px-3 py-2 text-right">
           <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Last</div>
           <div className="mt-1 text-sm font-semibold text-slate-100">{formatFundPrice(etf.lastPrice ?? 0)}</div>
         </div>
       </div>
-      <div className="mt-4 rounded-[22px] bg-slate-950/20 p-2.5">
+      <div className="bg-slate-950/20 p-2.5">
         <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" surface="plain" />
       </div>
-      <div className="mt-4 flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-slate-500">Click the ticker to open constituent detail.</p>
         <button className={SECONDARY_BUTTON_CLASS} onClick={onExpandChart}>
           <Maximize2 className="h-3.5 w-3.5" />
@@ -524,7 +524,7 @@ export function SectorTracker() {
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{entries.length} entries</span>}
         >
           <div className="space-y-4">
-            <div className="rounded-[24px] border border-borderSoft/60 bg-panelSoft/30 p-4">
+            <div className="bg-panelSoft/20 p-4">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                 <div className="space-y-1">
                   <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Entry Management</p>
@@ -668,7 +668,7 @@ export function SectorTracker() {
               )}
             </div>
 
-            <div className="rounded-[24px] border border-borderSoft/60 bg-panel/35 p-4 md:p-5">
+            <div className="bg-panel/20 p-4 md:p-5">
               <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div className="space-y-1">
                   <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Data View</p>
@@ -707,7 +707,7 @@ export function SectorTracker() {
               </div>
 
               {view === "list" ? (
-                <div className="overflow-hidden rounded-[22px] border border-borderSoft/60 bg-panel/45">
+                <div className="overflow-hidden bg-panel/35">
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm">
                       <thead className="bg-slate-900/60">
@@ -774,7 +774,7 @@ export function SectorTracker() {
                     {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
                       <div
                         key={d}
-                        className="rounded-xl border border-borderSoft/50 bg-panelSoft/25 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400"
+                        className="bg-panelSoft/25 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400"
                       >
                         {d}
                       </div>
@@ -783,7 +783,7 @@ export function SectorTracker() {
                   <div className="grid grid-cols-7 gap-2">
                     {calendarCells.map(({ key, date, day }) => {
                       if (!date || !day) {
-                        return <div key={key} aria-hidden="true" className="min-h-[12rem] rounded-[22px] border border-transparent bg-transparent" />;
+                        return <div key={key} aria-hidden="true" className="min-h-[12rem] bg-transparent" />;
                       }
 
                       const items = calendarMap.get(date) ?? [];
@@ -792,10 +792,10 @@ export function SectorTracker() {
                       return (
                         <div
                           key={date}
-                          className={`min-h-[12rem] rounded-[22px] border p-3 ${
+                          className={`min-h-[12rem] p-3 ${
                             isToday
-                              ? "border-accent/55 bg-accent/8 shadow-[0_0_0_1px_rgba(56,189,248,0.18)]"
-                              : "border-borderSoft/60 bg-panelSoft/30"
+                              ? "bg-accent/8 shadow-[0_0_0_1px_rgba(56,189,248,0.22)]"
+                              : "bg-panelSoft/30"
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
@@ -863,7 +863,7 @@ export function SectorTracker() {
           description="Primary sector funds with constituent drilldowns and faster chart scanning."
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{sectorEtfs.length} ETFs</span>}
         >
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-x-6 gap-y-8 md:grid-cols-2 xl:grid-cols-3">
             {sectorEtfs.map((etf) => (
               <EtfTile
                 key={etf.ticker}
@@ -888,8 +888,8 @@ export function SectorTracker() {
               const [parentSector, industry] = key.split(" :: ");
 
               return (
-                <div key={key} className="rounded-[28px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/35 to-panel/35 p-4 md:p-5">
-                  <div className="mb-4 flex flex-col gap-3 border-b border-borderSoft/50 pb-4 md:flex-row md:items-end md:justify-between">
+                <div key={key} className="space-y-5 px-1 py-2">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                     <div className="space-y-1">
                       <div className="inline-flex rounded-full bg-panelSoft/65 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
                         {parentSector}
@@ -904,7 +904,7 @@ export function SectorTracker() {
                     </div>
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <div className="grid gap-x-6 gap-y-8 md:grid-cols-2 xl:grid-cols-3">
                     {rows.map((etf) => (
                       <EtfTile
                         key={`${key}-${etf.ticker}`}
