@@ -51,6 +51,7 @@ export function TradingViewWidget({
   showStatusLine = false,
   fillContainer = false,
   initialRange = "1M",
+  surface = "card",
   className = "",
 }: {
   ticker: string;
@@ -61,6 +62,7 @@ export function TradingViewWidget({
   showStatusLine?: boolean;
   fillContainer?: boolean;
   initialRange?: "1M" | "3M" | "6M" | "12M";
+  surface?: "card" | "plain";
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -157,8 +159,12 @@ export function TradingViewWidget({
     ref.current.appendChild(script);
   }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange, theme, shouldLoad]);
 
+  const shellClassName = surface === "plain"
+    ? className
+    : `card ${denseStatusLayout ? "p-1" : "p-2"} ${className}`;
+
   return (
-    <div className={`card ${denseStatusLayout ? "p-1" : "p-2"} ${className}`}>
+    <div className={shellClassName}>
       <div className={`tradingview-widget-container ${fillContainer ? "" : "mx-auto"} ${frameClass}`} ref={ref}>
         <div id={containerId} className={`h-full ${shouldLoad ? "" : "animate-pulse rounded bg-slate-900/30"}`} />
       </div>

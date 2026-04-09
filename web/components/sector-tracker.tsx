@@ -2,8 +2,18 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { ChevronDown, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
-import { adminFetch, deleteSectorEntry, getEtfConstituents, getIndustryEtfs, getSectorCalendar, getSectorEntries, getSectorEtfs, getSectorSymbolOptions, updateSectorEntry } from "@/lib/api";
+import { CalendarDays, ChevronDown, List, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
+import {
+  adminFetch,
+  deleteSectorEntry,
+  getEtfConstituents,
+  getIndustryEtfs,
+  getSectorCalendar,
+  getSectorEntries,
+  getSectorEtfs,
+  getSectorSymbolOptions,
+  updateSectorEntry,
+} from "@/lib/api";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 
@@ -22,6 +32,19 @@ const getMonthStartWeekday = (value: string) => {
   return new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
 };
 const pctCls = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
+const signedPct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+const deltaPillCls = (n: number) =>
+  n >= 0
+    ? "bg-emerald-500/12 text-pos ring-1 ring-emerald-400/20"
+    : "bg-rose-500/12 text-neg ring-1 ring-rose-400/20";
+const INPUT_CLASS =
+  "w-full rounded-xl border border-borderSoft/70 bg-panel/75 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-accent/50 focus:ring-2 focus:ring-accent/15";
+const SECONDARY_BUTTON_CLASS =
+  "inline-flex items-center justify-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55";
+const ICON_BUTTON_CLASS =
+  "inline-flex h-7 w-7 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-300 transition hover:bg-panelSoft/55";
+const TICKER_CHIP_CLASS =
+  "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
 const CHARTS_PER_PAGE = 20;
 
 type EntrySymbol = { ticker: string; name: string | null };
@@ -107,29 +130,103 @@ const FALLBACK_KEY_MOVERS: SectorEntry[] = [
   },
 ];
 
+function navigationButtonClass(active: boolean) {
+  return active
+    ? "bg-accent/16 text-accent shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
+    : "bg-panelSoft/45 text-slate-300 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)] hover:bg-panelSoft/65";
+}
+
+function segmentedButtonClass(active: boolean) {
+  return active
+    ? "bg-accent/16 text-accent shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
+    : "text-slate-300 hover:bg-panelSoft/45";
+}
+
+function formatFundPrice(value: number) {
+  return Number.isFinite(value) ? value.toFixed(2) : "-";
+}
+
 function CollapsibleSection({
   title,
+  description,
   defaultOpen = true,
   children,
   rightSlot,
 }: {
   title: string;
+  description?: string;
   defaultOpen?: boolean;
   children: ReactNode;
   rightSlot?: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className="card overflow-hidden">
-      <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft/70 px-4 py-3 text-left">
-        <div className="flex items-center gap-3">
-          <span className="text-base font-semibold">{title}</span>
-          {rightSlot}
+      <Collapsible.Trigger className="flex w-full items-center justify-between gap-4 border-b border-borderSoft/70 bg-gradient-to-r from-panelSoft/55 to-panel/35 px-5 py-4 text-left transition hover:from-panelSoft/65 hover:to-panel/45">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Section</div>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <span className="text-base font-semibold text-slate-100">{title}</span>
+            {rightSlot}
+          </div>
+          {description ? <p className="mt-1 max-w-3xl text-sm text-slate-400">{description}</p> : null}
         </div>
-        <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35">
+          <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
       </Collapsible.Trigger>
-      <Collapsible.Content className="p-4">{children}</Collapsible.Content>
+      <Collapsible.Content className="bg-panel/25 p-4 md:p-5">{children}</Collapsible.Content>
     </Collapsible.Root>
+  );
+}
+
+function EtfTile({
+  etf,
+  eyebrow,
+  onOpenEtf,
+  onExpandChart,
+}: {
+  etf: WatchlistEtf;
+  eyebrow?: string | null;
+  onOpenEtf: () => void;
+  onExpandChart: () => void;
+}) {
+  return (
+    <div className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4 shadow-[0_10px_24px_rgba(2,6,23,0.12)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          {eyebrow ? (
+            <span className="inline-flex rounded-full bg-panelSoft/70 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+              {eyebrow}
+            </span>
+          ) : null}
+          <div className={`${eyebrow ? "mt-3" : ""} flex flex-wrap items-center gap-2`}>
+            <button className="text-left text-lg font-semibold text-accent transition hover:underline" onClick={onOpenEtf}>
+              {etf.ticker}
+            </button>
+            <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${deltaPillCls(etf.change1d ?? 0)}`}>
+              {signedPct(etf.change1d ?? 0)}
+            </span>
+          </div>
+          <p className="mt-2 line-clamp-2 text-sm text-slate-400">{etf.fundName}</p>
+        </div>
+        <div className="rounded-2xl bg-panelSoft/50 px-3 py-2 text-right">
+          <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Last</div>
+          <div className="mt-1 text-sm font-semibold text-slate-100">{formatFundPrice(etf.lastPrice ?? 0)}</div>
+        </div>
+      </div>
+      <div className="mt-4 rounded-[22px] bg-slate-950/20 p-2.5">
+        <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" surface="plain" />
+      </div>
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <p className="text-xs text-slate-500">Click the ticker to open constituent detail.</p>
+        <button className={SECONDARY_BUTTON_CLASS} onClick={onExpandChart}>
+          <Maximize2 className="h-3.5 w-3.5" />
+          Expand chart
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -179,8 +276,8 @@ export function SectorTracker() {
     const entriesRows = entriesRes.status === "fulfilled" ? entriesRes.value.rows ?? [] : [];
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
-    const sectorRows = sectorEtfRes.status === "fulfilled" ? (sectorEtfRes.value.rows ?? []) : [];
-    const industryRows = industryEtfRes.status === "fulfilled" ? (industryEtfRes.value.rows ?? []) : [];
+    const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
+    const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
@@ -274,10 +371,7 @@ export function SectorTracker() {
     }
   };
 
-  const daysInMonth = useMemo(() => {
-    return getDaysInMonth(month);
-  }, [month]);
-
+  const daysInMonth = useMemo(() => getDaysInMonth(month), [month]);
   const monthStartWeekday = useMemo(() => getMonthStartWeekday(month), [month]);
   const todayDate = useMemo(() => formatLocalDateInputValue(), []);
 
@@ -316,6 +410,7 @@ export function SectorTracker() {
       existing.maxChange = Math.max(existing.maxChange, row.change1d ?? 0);
       groups.set(key, existing);
     }
+
     return [...groups.entries()]
       .map(([key, value]) => ({
         key,
@@ -334,6 +429,7 @@ export function SectorTracker() {
     rows.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
     return rows;
   }, [constituents, constituentSort]);
+
   const pagedConstituents = useMemo(
     () => sortedConstituents.slice((constituentPage - 1) * CHARTS_PER_PAGE, constituentPage * CHARTS_PER_PAGE),
     [constituentPage, sortedConstituents],
@@ -361,80 +457,529 @@ export function SectorTracker() {
   }, [activeEtf?.ticker, constituentSort, sortedConstituents.length]);
 
   return (
-    <div className="space-y-4">
-      <div className="card p-3" id="section-selector">
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={`rounded px-3 py-1.5 text-sm ${activeSection === "key-movers-tracker" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-            onClick={() => jumpToSection("key-movers-tracker")}
-          >
-            Key Movers Tracker
-          </button>
-          <button
-            className={`rounded px-3 py-1.5 text-sm ${activeSection === "sector-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-            onClick={() => jumpToSection("sector-etfs")}
-          >
-            Sector ETFs
-          </button>
-          <button
-            className={`rounded px-3 py-1.5 text-sm ${activeSection === "industry-etfs" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-            onClick={() => jumpToSection("industry-etfs")}
-          >
-            Industry ETFs
-          </button>
+    <div className="space-y-5">
+      <div className="card overflow-hidden" id="section-selector">
+        <div className="border-b border-borderSoft/60 bg-gradient-to-r from-panelSoft/55 via-panel/35 to-panelSoft/20 px-4 py-4 md:px-5">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div className="space-y-1">
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Sector Dashboard</p>
+              <h3 className="text-lg font-semibold text-slate-100">Move between narratives, sector funds, and industry drilldowns.</h3>
+              <p className="max-w-3xl text-sm text-slate-400">
+                The layout keeps the current workflow intact while making each region easier to scan and compare.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "key-movers-tracker")}`}
+                onClick={() => jumpToSection("key-movers-tracker")}
+              >
+                Key Movers Tracker
+              </button>
+              <button
+                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "sector-etfs")}`}
+                onClick={() => jumpToSection("sector-etfs")}
+              >
+                Sector ETFs
+              </button>
+              <button
+                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "industry-etfs")}`}
+                onClick={() => jumpToSection("industry-etfs")}
+              >
+                Industry ETFs
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-3 px-4 py-4 md:grid-cols-3 md:px-5">
+          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Narratives</div>
+            <div className="mt-1 text-lg font-semibold text-slate-100">{entries.length}</div>
+            <p className="text-sm text-slate-400">List and calendar tracking stay in sync.</p>
+          </div>
+          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Sector Funds</div>
+            <div className="mt-1 text-lg font-semibold text-slate-100">{sectorEtfs.length}</div>
+            <p className="text-sm text-slate-400">Primary sector ETFs with constituent drilldowns.</p>
+          </div>
+          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Industry Funds</div>
+            <div className="mt-1 text-lg font-semibold text-slate-100">{industryEtfs.length}</div>
+            <p className="text-sm text-slate-400">Grouped by parent sector for quicker comparison.</p>
+          </div>
         </div>
       </div>
+
       <datalist id="sector-symbol-options">
         {symbolOptions.map((s) => (
-          <option key={`sector-symbol-option-global-${s.ticker}`} value={s.ticker}>{s.name ? `${s.ticker} - ${s.name}` : s.ticker}</option>
+          <option key={`sector-symbol-option-global-${s.ticker}`} value={s.ticker}>
+            {s.name ? `${s.ticker} - ${s.name}` : s.ticker}
+          </option>
         ))}
       </datalist>
 
       <div id="key-movers-tracker">
-      <CollapsibleSection title="Key Movers Tracker">
-        <div className="mb-3 rounded-xl border border-borderSoft/70 bg-panelSoft/25 p-3">
-          <button className="mb-2 inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-sm text-slate-200" onClick={() => setAddFormOpen((v) => !v)}>
-            <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
-            Add Entry
-          </button>
-          {addFormOpen && (
-          <div className="grid gap-2 md:grid-cols-7">
-            <select className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" value={sectorNarrativeExisting} onChange={(e) => setSectorNarrativeExisting(e.target.value)}>
-              <option value="">Select existing Sector/Narrative...</option>
-              {sectorNarrativeOptions.map((opt) => (
-                <option key={`sector-narrative-${opt}`} value={opt}>{opt}</option>
-              ))}
-            </select>
-            <input className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2" placeholder="Or add new Sector/Narrative" value={sectorNarrativeNew} onChange={(e) => setSectorNarrativeNew(e.target.value)} />
-            <input type="date" className="rounded border border-borderSoft bg-panelSoft px-2 py-1" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
-            <input
-              className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
-              placeholder="Add tickers (comma-separated)"
-              value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value)}
-              list="sector-symbol-options"
-            />
-            <textarea className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-5" placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
-            <button
-              className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200"
-              onClick={() => {
-                addTicker(tickerInput);
-                setTickerInput("");
-              }}
-            >
-              Add Tickers
-            </button>
+        <CollapsibleSection
+          title="Key Movers Tracker"
+          description="Capture sector narratives, keep a running calendar, and jump straight into the tickers that matter."
+          rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{entries.length} entries</span>}
+        >
+          <div className="space-y-4">
+            <div className="rounded-[24px] border border-borderSoft/60 bg-panelSoft/30 p-4">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                <div className="space-y-1">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Entry Management</p>
+                  <h3 className="text-base font-semibold text-slate-100">Stage a new sector narrative without leaving the tracker.</h3>
+                  <p className="max-w-2xl text-sm text-slate-400">
+                    Add a new event, reuse an existing narrative label, and attach the symbols you want to revisit later.
+                  </p>
+                </div>
+                <button className={SECONDARY_BUTTON_CLASS} onClick={() => setAddFormOpen((v) => !v)}>
+                  <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
+                  {addFormOpen ? "Hide entry form" : "Add entry"}
+                </button>
+              </div>
+
+              {addFormOpen ? (
+                <div className="mt-4 space-y-4">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+                    <label className="space-y-1 xl:col-span-2">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Existing Narrative</span>
+                      <select className={INPUT_CLASS} value={sectorNarrativeExisting} onChange={(e) => setSectorNarrativeExisting(e.target.value)}>
+                        <option value="">Select existing Sector/Narrative...</option>
+                        {sectorNarrativeOptions.map((opt) => (
+                          <option key={`sector-narrative-${opt}`} value={opt}>
+                            {opt}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-1 xl:col-span-2">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">New Narrative</span>
+                      <input
+                        className={INPUT_CLASS}
+                        placeholder="Or add new Sector/Narrative"
+                        value={sectorNarrativeNew}
+                        onChange={(e) => setSectorNarrativeNew(e.target.value)}
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Event Date</span>
+                      <input type="date" className={INPUT_CLASS} value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
+                    </label>
+                    <label className="space-y-1 xl:col-span-2">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Tickers</span>
+                      <input
+                        className={INPUT_CLASS}
+                        placeholder="Add tickers (comma-separated)"
+                        value={tickerInput}
+                        onChange={(e) => setTickerInput(e.target.value)}
+                        list="sector-symbol-options"
+                      />
+                    </label>
+                    <label className="space-y-1 xl:col-span-5">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Notes</span>
+                      <textarea className={`${INPUT_CLASS} min-h-24 resize-y`} placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+                    </label>
+                    <div className="flex items-end">
+                      <button
+                        className={`${SECONDARY_BUTTON_CLASS} w-full`}
+                        onClick={() => {
+                          addTicker(tickerInput);
+                          setTickerInput("");
+                        }}
+                      >
+                        Add tickers
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {selectedTickers.map((ticker) => (
+                      <span key={ticker} className="inline-flex items-center gap-1 rounded-full bg-slate-800/70 px-3 py-1.5 text-xs text-slate-200">
+                        {ticker}
+                        <button
+                          className="rounded-full p-0.5 text-slate-400 transition hover:bg-slate-700/70 hover:text-slate-100"
+                          onClick={() => setSelectedTickers((prev) => prev.filter((t) => t !== ticker))}
+                          aria-label={`Remove ${ticker}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                    {selectedTickers.length === 0 ? <p className="text-sm text-slate-500">No tickers attached yet.</p> : null}
+                  </div>
+
+                  {formError ? <p className="text-sm text-red-300">{formError}</p> : null}
+
+                  <div className="flex justify-end">
+                    <button
+                      className="inline-flex items-center justify-center rounded-xl bg-accent/18 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/24"
+                      onClick={async () => {
+                        setFormError(null);
+                        const sectorNarrative = (sectorNarrativeNew.trim() || sectorNarrativeExisting.trim()).trim();
+                        if (!sectorNarrative || !eventDate) {
+                          setFormError("Sector/Narrative and date are required.");
+                          return;
+                        }
+                        try {
+                          await adminFetch("/api/sectors/entries", {
+                            method: "POST",
+                            body: JSON.stringify({
+                              sectorName: sectorNarrative.trim(),
+                              eventDate,
+                              trendScore: 0,
+                              notes: notes.trim() || null,
+                              symbols: selectedTickers,
+                            }),
+                          });
+                          setSectorNarrativeExisting("");
+                          setSectorNarrativeNew("");
+                          setNotes("");
+                          setSelectedTickers([]);
+                          setTickerInput("");
+                          await load();
+                        } catch (err) {
+                          setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
+                        }
+                      }}
+                    >
+                      Save entry
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Coverage</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{entries.length} narratives tracked</div>
+                    <p className="mt-1 text-sm text-slate-400">Open the form when you need to capture a new theme.</p>
+                  </div>
+                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Symbols</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">{symbolOptions.length} lookup options</div>
+                    <p className="mt-1 text-sm text-slate-400">Use the symbol datalist to attach tickers quickly.</p>
+                  </div>
+                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Workflow</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">List and calendar stay aligned</div>
+                    <p className="mt-1 text-sm text-slate-400">No data paths changed, only the surface and spacing.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-[24px] border border-borderSoft/60 bg-panel/35 p-4 md:p-5">
+              <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div className="space-y-1">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Data View</p>
+                  <h3 className="text-base font-semibold text-slate-100">
+                    {view === "list" ? "Narrative list" : "Sector / narrative calendar"}
+                  </h3>
+                  <p className="text-sm text-slate-400">
+                    Switch between a compact table view and the monthly calendar without changing the underlying dataset.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="inline-flex rounded-2xl border border-borderSoft/60 bg-panelSoft/35 p-1">
+                    <button
+                      className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(view === "list")}`}
+                      onClick={() => setView("list")}
+                    >
+                      <List className="h-4 w-4" />
+                      List
+                    </button>
+                    <button
+                      className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(view === "calendar")}`}
+                      onClick={() => setView("calendar")}
+                    >
+                      <CalendarDays className="h-4 w-4" />
+                      Calendar
+                    </button>
+                  </div>
+                  {view === "calendar" ? (
+                    <label className="inline-flex items-center gap-2 rounded-2xl border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-sm text-slate-300">
+                      <CalendarDays className="h-4 w-4 text-slate-400" />
+                      <span className="text-slate-400">Month</span>
+                      <input type="month" className="bg-transparent text-slate-100 outline-none" value={month} onChange={(e) => setMonth(e.target.value)} />
+                    </label>
+                  ) : null}
+                </div>
+              </div>
+
+              {view === "list" ? (
+                <div className="overflow-hidden rounded-[22px] border border-borderSoft/60 bg-panel/45">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-slate-900/60">
+                        <tr>
+                          {["Date", "Sector/Narrative", "Tickers", "Notes", "Actions"].map((h) => (
+                            <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entries.map((e) => (
+                          <tr key={e.id} className="border-t border-borderSoft/60 align-top transition hover:bg-panelSoft/25">
+                            <td className="whitespace-nowrap px-4 py-3 text-slate-300">{e.eventDate}</td>
+                            <td className="px-4 py-3 font-medium text-slate-100">{e.sectorName}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-1.5">
+                                {(e.symbols ?? []).length === 0 ? <span className="text-slate-500">-</span> : null}
+                                {(e.symbols ?? []).map((s) => (
+                                  <button
+                                    key={`${e.id}-${s.ticker}`}
+                                    className={TICKER_CHIP_CLASS}
+                                    onClick={() => setActiveChartTicker(s.ticker)}
+                                    title={s.name ?? s.ticker}
+                                  >
+                                    {s.ticker}
+                                  </button>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="max-w-xl px-4 py-3 text-slate-300">{e.notes ?? "-"}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-2">
+                                <button className={SECONDARY_BUTTON_CLASS} onClick={() => openEditEntry(e)}>
+                                  <Pencil className="h-3.5 w-3.5" />
+                                  Edit
+                                </button>
+                                <button
+                                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/35 bg-red-500/8 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/14"
+                                  onClick={() => void removeEntry(e.id)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                        {entries.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-400">
+                              No sector narratives available yet.
+                            </td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-7 gap-2">
+                    {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                      <div
+                        key={d}
+                        className="rounded-xl border border-borderSoft/50 bg-panelSoft/25 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400"
+                      >
+                        {d}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-7 gap-2">
+                    {calendarCells.map(({ key, date, day }) => {
+                      if (!date || !day) {
+                        return <div key={key} aria-hidden="true" className="min-h-[12rem] rounded-[22px] border border-transparent bg-transparent" />;
+                      }
+
+                      const items = calendarMap.get(date) ?? [];
+                      const isToday = date === todayDate;
+
+                      return (
+                        <div
+                          key={date}
+                          className={`min-h-[12rem] rounded-[22px] border p-3 ${
+                            isToday
+                              ? "border-accent/55 bg-accent/8 shadow-[0_0_0_1px_rgba(56,189,248,0.18)]"
+                              : "border-borderSoft/60 bg-panelSoft/30"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className={`text-sm font-semibold ${isToday ? "text-accent" : "text-slate-300"}`}>{day}</div>
+                            {isToday ? (
+                              <span className="rounded-full bg-accent/14 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-accent">
+                                Today
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {items.slice(0, 3).map((it) => (
+                              <div key={it.id} className="rounded-2xl bg-panel/70 p-2.5 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.06)]">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="text-xs font-semibold text-slate-100">{it.sectorName}</div>
+                                  <div className="flex gap-1">
+                                    <button className={ICON_BUTTON_CLASS} onClick={() => openEditEntry(it)} title="Edit entry">
+                                      <Pencil className="h-3 w-3" />
+                                    </button>
+                                    <button
+                                      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-red-500/35 bg-red-500/8 text-red-300 transition hover:bg-red-500/14"
+                                      onClick={() => void removeEntry(it.id)}
+                                      title="Delete entry"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {(it.symbols ?? []).map((s) => (
+                                    <button
+                                      key={`${it.id}-${s.ticker}`}
+                                      className={TICKER_CHIP_CLASS}
+                                      onClick={() => setActiveChartTicker(s.ticker)}
+                                      title={s.name ?? s.ticker}
+                                    >
+                                      {s.ticker}
+                                    </button>
+                                  ))}
+                                </div>
+                                {it.notes ? <p className="mt-2 text-xs leading-relaxed text-slate-400">{it.notes}</p> : null}
+                              </div>
+                            ))}
+                            {items.length > 3 ? (
+                              <div className="rounded-xl bg-panel/35 px-2.5 py-2 text-xs text-slate-400">
+                                +{items.length - 3} more entr{items.length - 3 === 1 ? "y" : "ies"}
+                              </div>
+                            ) : null}
+                            {items.length === 0 ? <p className="text-xs text-slate-500">No narratives scheduled.</p> : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-          )}
-          {addFormOpen && (
-            <>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {selectedTickers.map((ticker) => (
-                  <span key={ticker} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
+        </CollapsibleSection>
+      </div>
+
+      <div id="sector-etfs">
+        <CollapsibleSection
+          title="Sector ETFs"
+          description="Primary sector funds with constituent drilldowns and faster chart scanning."
+          rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{sectorEtfs.length} ETFs</span>}
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {sectorEtfs.map((etf) => (
+              <EtfTile
+                key={etf.ticker}
+                etf={etf}
+                eyebrow={etf.parentSector}
+                onOpenEtf={() => void openEtfPopup(etf.ticker, etf.fundName)}
+                onExpandChart={() => setActiveChartTicker(etf.ticker)}
+              />
+            ))}
+          </div>
+        </CollapsibleSection>
+      </div>
+
+      <div id="industry-etfs">
+        <CollapsibleSection
+          title="Industry ETFs"
+          description="Industry funds stay grouped by parent sector so the distinctions read clearly before you drill into charts."
+          rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{industryEtfs.length} ETFs</span>}
+        >
+          <div className="space-y-4">
+            {industryGroups.map(({ key, rows, maxChange }) => {
+              const [parentSector, industry] = key.split(" :: ");
+
+              return (
+                <div key={key} className="rounded-[28px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/35 to-panel/35 p-4 md:p-5">
+                  <div className="mb-4 flex flex-col gap-3 border-b border-borderSoft/50 pb-4 md:flex-row md:items-end md:justify-between">
+                    <div className="space-y-1">
+                      <div className="inline-flex rounded-full bg-panelSoft/65 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                        {parentSector}
+                      </div>
+                      <h4 className="text-lg font-semibold text-slate-100">{industry}</h4>
+                      <p className="text-sm text-slate-400">{rows.length} related fund{rows.length === 1 ? "" : "s"} in this group.</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(maxChange)}`}>
+                        Top move {signedPct(maxChange)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {rows.map((etf) => (
+                      <EtfTile
+                        key={`${key}-${etf.ticker}`}
+                        etf={etf}
+                        onOpenEtf={() => void openEtfPopup(etf.ticker, etf.fundName)}
+                        onExpandChart={() => setActiveChartTicker(etf.ticker)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CollapsibleSection>
+      </div>
+      {editingEntry ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setEditingEntry(null)}>
+          <div
+            className="w-full max-w-3xl overflow-hidden rounded-[28px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Edit Entry</p>
+                <h4 className="mt-1 text-base font-semibold text-slate-100">Update sector / narrative details</h4>
+              </div>
+              <button className={SECONDARY_BUTTON_CLASS} onClick={() => setEditingEntry(null)}>
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-4 px-5 py-5">
+              <div className="grid gap-3 md:grid-cols-6">
+                <label className="space-y-1 md:col-span-2">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Narrative</span>
+                  <input className={INPUT_CLASS} value={editSectorName} onChange={(e) => setEditSectorName(e.target.value)} placeholder="Sector/Narrative" />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Event Date</span>
+                  <input type="date" className={INPUT_CLASS} value={editEventDate} onChange={(e) => setEditEventDate(e.target.value)} />
+                </label>
+                <label className="space-y-1 md:col-span-2">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Tickers</span>
+                  <input
+                    className={INPUT_CLASS}
+                    placeholder="Add tickers (comma-separated)"
+                    value={editTickerInput}
+                    onChange={(e) => setEditTickerInput(e.target.value)}
+                    list="sector-symbol-options"
+                  />
+                </label>
+                <div className="flex items-end">
+                  <button
+                    className={`${SECONDARY_BUTTON_CLASS} w-full`}
+                    onClick={() => {
+                      addEditTicker(editTickerInput);
+                      setEditTickerInput("");
+                    }}
+                  >
+                    Add tickers
+                  </button>
+                </div>
+                <label className="space-y-1 md:col-span-6">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Notes</span>
+                  <textarea className={`${INPUT_CLASS} min-h-28 resize-y`} placeholder="Notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} />
+                </label>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {editTickers.map((ticker) => (
+                  <span key={`edit-${ticker}`} className="inline-flex items-center gap-1 rounded-full bg-slate-800/70 px-3 py-1.5 text-xs text-slate-200">
                     {ticker}
                     <button
-                      className="rounded px-1 text-slate-400 hover:text-slate-100"
-                      onClick={() => setSelectedTickers((prev) => prev.filter((t) => t !== ticker))}
+                      className="rounded-full p-0.5 text-slate-400 transition hover:bg-slate-700/70 hover:text-slate-100"
+                      onClick={() => setEditTickers((prev) => prev.filter((t) => t !== ticker))}
                       aria-label={`Remove ${ticker}`}
                     >
                       <X className="h-3 w-3" />
@@ -442,367 +987,71 @@ export function SectorTracker() {
                   </span>
                 ))}
               </div>
-              {formError && <p className="mt-2 text-xs text-red-300">{formError}</p>}
-              <div className="mt-2">
+
+              {editError ? <p className="text-sm text-red-300">{editError}</p> : null}
+
+              <div className="flex justify-end gap-2">
+                <button className={SECONDARY_BUTTON_CLASS} onClick={() => setEditingEntry(null)}>
+                  Cancel
+                </button>
                 <button
-                  className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-                  onClick={async () => {
-                    setFormError(null);
-                    const sectorNarrative = (sectorNarrativeNew.trim() || sectorNarrativeExisting.trim()).trim();
-                    if (!sectorNarrative || !eventDate) {
-                      setFormError("Sector/Narrative and date are required.");
-                      return;
-                    }
-                    try {
-                      await adminFetch("/api/sectors/entries", {
-                        method: "POST",
-                        body: JSON.stringify({
-                          sectorName: sectorNarrative.trim(),
-                          eventDate,
-                          trendScore: 0,
-                          notes: notes.trim() || null,
-                          symbols: selectedTickers,
-                        }),
-                      });
-                      setSectorNarrativeExisting("");
-                      setSectorNarrativeNew("");
-                      setNotes("");
-                      setSelectedTickers([]);
-                      setTickerInput("");
-                      await load();
-                    } catch (err) {
-                      setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
-                    }
-                  }}
+                  className="inline-flex items-center justify-center rounded-xl bg-accent/18 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/24"
+                  onClick={() => void saveEntryEdit()}
                 >
-                  Save Entry
+                  Save changes
                 </button>
               </div>
-            </>
-          )}
-        </div>
-
-        <div className="mb-3 flex flex-wrap gap-2">
-          <button className={`rounded px-2 py-1 text-xs ${view === "list" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`} onClick={() => setView("list")}>List</button>
-          <button className={`rounded px-2 py-1 text-xs ${view === "calendar" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`} onClick={() => setView("calendar")}>Calendar</button>
-        </div>
-        {view === "list" ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-900/60">
-                <tr>
-                  {["Date", "Sector/Narrative", "Tickers", "Notes", "Actions"].map((h) => (
-                    <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {entries.map((e) => (
-                  <tr key={e.id} className="border-t border-borderSoft/60">
-                    <td className="px-3 py-2">{e.eventDate}</td>
-                    <td className="px-3 py-2">{e.sectorName}</td>
-                    <td className="px-3 py-2 text-slate-300">
-                      <div className="flex flex-wrap gap-1">
-                        {(e.symbols ?? []).length === 0 && <span>-</span>}
-                        {(e.symbols ?? []).map((s) => (
-                          <button
-                            key={`${e.id}-${s.ticker}`}
-                            className="rounded bg-accent/15 px-2 py-0.5 text-xs text-accent hover:bg-accent/25"
-                            onClick={() => setActiveChartTicker(s.ticker)}
-                            title={s.name ?? s.ticker}
-                          >
-                            {s.ticker}
-                          </button>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-slate-300">{e.notes ?? "-"}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex gap-2">
-                        <button
-                          className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/60"
-                          onClick={() => openEditEntry(e)}
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                          Edit
-                        </button>
-                        <button
-                          className="inline-flex items-center gap-1 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
-                          onClick={() => void removeEntry(e.id)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div>
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-base font-semibold">Sector/Narrative Calendar</h3>
-              <input type="month" className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm" value={month} onChange={(e) => setMonth(e.target.value)} />
-            </div>
-            <div className="grid grid-cols-7 gap-2 text-xs text-slate-400">
-              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
-                <div key={d} className="px-1 py-1 text-center">{d}</div>
-              ))}
-            </div>
-            <div className="mt-1 grid grid-cols-7 gap-2">
-              {calendarCells.map(({ key, date, day }) => {
-                if (!date || !day) {
-                  return <div key={key} aria-hidden="true" className="min-h-48 rounded border border-transparent bg-transparent p-1.5" />;
-                }
-                const items = calendarMap.get(date) ?? [];
-                const isToday = date === todayDate;
-                return (
-                  <div
-                    key={date}
-                    className={`min-h-48 rounded border p-1.5 ${isToday ? "border-accent/70 bg-accent/10 shadow-[0_0_0_1px_rgba(244,114,182,0.18)]" : "border-borderSoft/70 bg-panelSoft/40"}`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className={`text-xs ${isToday ? "font-semibold text-accent" : "text-slate-400"}`}>{day}</div>
-                      {isToday && (
-                        <span className="rounded-full border border-accent/50 bg-accent/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-accent">
-                          Today
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 space-y-1.5">
-                      {items.slice(0, 3).map((it) => (
-                        <div key={it.id} className="rounded bg-slate-900/60 px-1.5 py-1 text-xs text-slate-200">
-                          <div className="flex items-start justify-between gap-1">
-                            <div className="font-semibold">{it.sectorName}</div>
-                            <div className="flex gap-1">
-                              <button
-                                className="rounded border border-borderSoft/80 px-1 py-0.5 text-[10px] text-slate-200 hover:bg-slate-800/70"
-                                onClick={() => openEditEntry(it)}
-                                title="Edit entry"
-                              >
-                                <Pencil className="h-3 w-3" />
-                              </button>
-                              <button
-                                className="rounded border border-red-500/40 px-1 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
-                                onClick={() => void removeEntry(it.id)}
-                                title="Delete entry"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </div>
-                          </div>
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {(it.symbols ?? []).map((s) => (
-                              <button
-                                key={`${it.id}-${s.ticker}`}
-                                className="rounded bg-accent/15 px-1.5 py-0.5 text-xs text-accent hover:bg-accent/25"
-                                onClick={() => setActiveChartTicker(s.ticker)}
-                                title={s.name ?? s.ticker}
-                              >
-                                {s.ticker}
-                              </button>
-                            ))}
-                          </div>
-                          {it.notes && <p className="mt-1 whitespace-normal break-words text-xs leading-snug text-slate-300">{it.notes}</p>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </CollapsibleSection>
-      </div>
-
-      <div id="sector-etfs">
-      <CollapsibleSection title="Sector ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{sectorEtfs.length} ETFs</span>}>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {sectorEtfs.map((etf) => (
-            <div key={etf.ticker} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-1.5">
-              <div className="mb-2 flex items-start justify-between gap-2">
-                <div>
-                <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
-                  {etf.ticker}
-                </button>
-                <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
-                </div>
-                <div className="text-right text-xs">
-                  <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
-                  <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
-                </div>
-              </div>
-              <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-              <button
-                className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                onClick={() => setActiveChartTicker(etf.ticker)}
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-                Expand chart
-              </button>
-            </div>
-          ))}
-        </div>
-      </CollapsibleSection>
-      </div>
-
-      <div id="industry-etfs">
-      <CollapsibleSection title="Industry ETFs" rightSlot={<span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent">{industryEtfs.length} ETFs</span>}>
-        <div className="space-y-4">
-          {industryGroups.map(({ key, rows, maxChange }) => {
-            const [parentSector, industry] = key.split(" :: ");
-            return (
-              <div key={key} className="rounded-xl border border-borderSoft/70 p-1.5">
-                <div className="mb-2 flex items-start justify-between gap-2">
-                  <div>
-                  <h4 className="text-sm font-semibold text-slate-200">{industry}</h4>
-                  <p className="text-xs text-slate-400">{parentSector}</p>
-                  </div>
-                  <div className={`text-xs ${pctCls(maxChange)}`}>Top: {maxChange.toFixed(2)}%</div>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {rows.map((etf) => (
-                    <div key={`${key}-${etf.ticker}`} className="rounded-lg border border-borderSoft/60 bg-panelSoft/20 p-1.5">
-                      <div className="mb-2 flex items-start justify-between gap-2">
-                        <div>
-                        <button className="text-sm font-semibold text-accent hover:underline" onClick={() => void openEtfPopup(etf.ticker, etf.fundName)}>
-                          {etf.ticker}
-                        </button>
-                        <p className="line-clamp-2 text-xs text-slate-400">{etf.fundName}</p>
-                        </div>
-                        <div className="text-right text-xs">
-                          <div className={pctCls(etf.change1d ?? 0)}>{(etf.change1d ?? 0).toFixed(2)}%</div>
-                          <div className="text-slate-400">{(etf.lastPrice ?? 0).toFixed(2)}</div>
-                        </div>
-                      </div>
-                      <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                      <button
-                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                        onClick={() => setActiveChartTicker(etf.ticker)}
-                      >
-                        <Maximize2 className="h-3.5 w-3.5" />
-                        Expand chart
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </CollapsibleSection>
-      </div>
-
-      {editingEntry && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setEditingEntry(null)}>
-          <div className="w-full max-w-3xl rounded border border-borderSoft bg-panel p-4" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <h4 className="text-sm font-semibold text-slate-100">Edit Sector/Narrative Entry</h4>
-              <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setEditingEntry(null)}>
-                Close
-              </button>
-            </div>
-            <div className="grid gap-2 md:grid-cols-6">
-              <input
-                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
-                value={editSectorName}
-                onChange={(e) => setEditSectorName(e.target.value)}
-                placeholder="Sector/Narrative"
-              />
-              <input
-                type="date"
-                className="rounded border border-borderSoft bg-panelSoft px-2 py-1"
-                value={editEventDate}
-                onChange={(e) => setEditEventDate(e.target.value)}
-              />
-              <input
-                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-2"
-                placeholder="Add tickers (comma-separated)"
-                value={editTickerInput}
-                onChange={(e) => setEditTickerInput(e.target.value)}
-                list="sector-symbol-options"
-              />
-              <button
-                className="rounded border border-borderSoft px-2 py-1 text-sm text-slate-200"
-                onClick={() => {
-                  addEditTicker(editTickerInput);
-                  setEditTickerInput("");
-                }}
-              >
-                Add Tickers
-              </button>
-              <textarea
-                className="rounded border border-borderSoft bg-panelSoft px-2 py-1 md:col-span-6"
-                placeholder="Notes"
-                value={editNotes}
-                onChange={(e) => setEditNotes(e.target.value)}
-              />
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {editTickers.map((ticker) => (
-                <span key={`edit-${ticker}`} className="inline-flex items-center gap-1 rounded bg-slate-800/70 px-2 py-1 text-xs text-slate-200">
-                  {ticker}
-                  <button
-                    className="rounded px-1 text-slate-400 hover:text-slate-100"
-                    onClick={() => setEditTickers((prev) => prev.filter((t) => t !== ticker))}
-                    aria-label={`Remove ${ticker}`}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-            {editError && <p className="mt-2 text-xs text-red-300">{editError}</p>}
-            <div className="mt-3 flex justify-end gap-2">
-              <button className="rounded border border-borderSoft px-3 py-1 text-sm text-slate-200" onClick={() => setEditingEntry(null)}>
-                Cancel
-              </button>
-              <button className="rounded bg-accent/20 px-3 py-1 text-sm text-accent" onClick={() => void saveEntryEdit()}>
-                Save Changes
-              </button>
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
-      {activeEtf && (
+      {activeEtf ? (
         <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveEtf(null)}>
-          <div className="flex h-[calc(100vh-2rem)] w-[80vw] max-w-[80vw] flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
-              <h4 className="text-sm font-semibold text-slate-100">
-                {activeEtf.ticker} Constituents {activeEtf.fundName ? `- ${activeEtf.fundName}` : ""}
-              </h4>
-              <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveEtf(null)}>
+          <div
+            className="flex h-[calc(100vh-2rem)] w-full max-w-6xl flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">ETF Drilldown</p>
+                <h4 className="mt-1 text-base font-semibold text-slate-100">
+                  {activeEtf.ticker} Constituents {activeEtf.fundName ? `- ${activeEtf.fundName}` : ""}
+                </h4>
+              </div>
+              <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveEtf(null)}>
                 Close
               </button>
             </div>
-            <div className="mb-2 flex items-center gap-2 rounded border border-slate-300/70 bg-slate-100/95 px-3 py-2 text-xs text-slate-700 dark:border-borderSoft/70 dark:bg-panelSoft/30 dark:text-slate-200">
-              <span className="text-slate-700 dark:text-slate-400">Sort constituents by:</span>
-              <button
-                className={`rounded px-2 py-1 ${constituentSort === "weight" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-                onClick={() => setConstituentSort("weight")}
-              >
-                Weight %
-              </button>
-              <button
-                className={`rounded px-2 py-1 ${constituentSort === "change1d" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
-                onClick={() => setConstituentSort("change1d")}
-              >
-                1D %
-              </button>
-              <span className="ml-auto rounded bg-white/90 px-2 py-1 text-slate-700 shadow-sm dark:bg-slate-800/80 dark:text-slate-200 dark:shadow-none">
-                {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
-              </span>
+
+            <div className="border-b border-borderSoft/50 px-5 py-4">
+              <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
+                <span className="text-slate-400">Sort constituents by:</span>
+                <button
+                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "weight")}`}
+                  onClick={() => setConstituentSort("weight")}
+                >
+                  Weight %
+                </button>
+                <button
+                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "change1d")}`}
+                  onClick={() => setConstituentSort("change1d")}
+                >
+                  1D %
+                </button>
+                <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
+                  {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
+                </span>
+              </div>
             </div>
-            <div className="overflow-y-auto pr-1">
-              {constituentWarning && (
-                <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
+
+            <div className="overflow-y-auto px-5 py-5">
+              {constituentWarning ? (
+                <div className="mb-3 rounded-2xl border border-yellow-700/45 bg-yellow-900/15 px-4 py-3 text-sm text-yellow-200">
                   Constituent sync warning: {constituentWarning}
                 </div>
-              )}
+              ) : null}
+
               <ChartGridPager
                 totalItems={sortedConstituents.length}
                 page={constituentPage}
@@ -810,64 +1059,86 @@ export function SectorTracker() {
                 itemLabel="tickers"
                 onPageChange={setConstituentPage}
               />
+
               {constituentLoading ? (
                 <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Loading constituents...
                 </div>
               ) : (
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
+                <div className="grid gap-4 md:grid-cols-2">
                   {pagedConstituents.map((row) => (
-                    <div key={`${activeEtf.ticker}-${row.ticker}`} className="card p-1.5">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="font-semibold text-accent">{row.ticker}</span>
-                        <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
+                    <div key={`${activeEtf.ticker}-${row.ticker}`} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
+                      <div className="mb-3 flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-lg font-semibold text-accent">{row.ticker}</div>
+                          <p className="mt-1 text-sm text-slate-400">{row.name ?? row.ticker}</p>
+                        </div>
+                        <div className="text-right text-xs">
+                          <div className="text-slate-500">Weight</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-100">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</div>
+                        </div>
                       </div>
-                      <div className="mb-1 text-xs">
-                        <span className={pctCls(row.change1d ?? 0)}>{(row.change1d ?? 0).toFixed(2)}%</span>
-                        <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
+
+                      <div className="mb-4 flex items-center gap-2 text-sm">
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(row.change1d ?? 0)}`}>
+                          {signedPct(row.change1d ?? 0)}
+                        </span>
+                        <span className="text-slate-400">{formatFundPrice(row.lastPrice ?? 0)}</span>
                       </div>
-                      <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                      <TradingViewWidget
-                        ticker={row.ticker}
-                        size="small"
-                        chartOnly
-                        showStatusLine
-                        fillContainer
-                        initialRange="3M"
-                        className="!border-0 !bg-transparent !shadow-none !p-0"
-                      />
-                      <button
-                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                        onClick={() => setActiveChartTicker(row.ticker)}
-                      >
-                        <Maximize2 className="h-3.5 w-3.5" />
-                        Expand chart
-                      </button>
+
+                      <div className="rounded-[22px] bg-slate-950/20 p-2.5">
+                        <TradingViewWidget
+                          ticker={row.ticker}
+                          size="small"
+                          chartOnly
+                          showStatusLine
+                          fillContainer
+                          initialRange="3M"
+                          surface="plain"
+                        />
+                      </div>
+
+                      <div className="mt-4 flex justify-end">
+                        <button className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveChartTicker(row.ticker)}>
+                          <Maximize2 className="h-3.5 w-3.5" />
+                          Expand chart
+                        </button>
+                      </div>
                     </div>
                   ))}
-                  {constituents.length === 0 && (
-                    <div className="card p-4 text-sm text-slate-300">No constituents available for this ETF.</div>
-                  )}
+                  {constituents.length === 0 ? (
+                    <div className="rounded-[24px] border border-borderSoft/60 bg-panelSoft/30 p-5 text-sm text-slate-300">
+                      No constituents available for this ETF.
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
           </div>
         </div>
-      )}
-      {activeChartTicker && (
+      ) : null}
+
+      {activeChartTicker ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartTicker(null)}>
-          <div className="w-full max-w-5xl" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
-              <h4 className="text-sm font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
-              <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveChartTicker(null)}>
+          <div className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
+                <h4 className="mt-1 text-base font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
+              </div>
+              <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveChartTicker(null)}>
                 Close
               </button>
             </div>
-            <TradingViewWidget ticker={activeChartTicker} chartOnly showStatusLine fillContainer initialRange="3M" />
+            <div className="p-4">
+              <div className="rounded-[24px] bg-panelSoft/25 p-3">
+                <TradingViewWidget ticker={activeChartTicker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+              </div>
+            </div>
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
