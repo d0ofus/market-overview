@@ -217,6 +217,11 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
   const itemRows = items.results ?? [];
   const tickers = Array.from(new Set(itemRows.map((item) => item.ticker).filter(Boolean)));
   const symbolNameMap = new Map<string, string>();
+  const etfUniverseMetaByTicker = new Map<string, {
+    isManaged: true;
+    listType: "sector" | "industry";
+    fundName: string | null;
+  }>();
   for (let index = 0; index < tickers.length; index += SYMBOL_LOOKUP_CHUNK_SIZE) {
     const batch = tickers.slice(index, index + SYMBOL_LOOKUP_CHUNK_SIZE);
     if (batch.length === 0) continue;
@@ -227,6 +232,24 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
       .all<{ ticker: string; name: string | null }>();
     for (const row of rows.results ?? []) {
       symbolNameMap.set(row.ticker, row.name ?? "");
+    }
+    const etfRows = await env.DB.prepare(
+      `SELECT ticker, list_type as listType, fund_name as fundName
+       FROM etf_watchlists
+       WHERE ticker IN (${batch.map(() => "?").join(",")})
+       ORDER BY CASE WHEN list_type = 'industry' THEN 0 ELSE 1 END, ticker ASC`,
+    )
+      .bind(...batch)
+      .all<{ ticker: string; listType: "sector" | "industry"; fundName: string | null }>();
+    for (const row of etfRows.results ?? []) {
+      const ticker = row.ticker.toUpperCase();
+      if (!etfUniverseMetaByTicker.has(ticker)) {
+        etfUniverseMetaByTicker.set(ticker, {
+          isManaged: true,
+          listType: row.listType === "industry" ? "industry" : "sector",
+          fundName: row.fundName?.trim() || null,
+        });
+      }
     }
   }
 
@@ -250,15 +273,23 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
         .map((g) => {
           const itemsForGroup = itemRows
             .filter((it) => it.groupId === g.id)
-            .map((it) => ({
-              id: it.id,
-              ticker: it.ticker,
-              displayName: it.displayName ?? symbolNameMap.get(it.ticker) ?? it.ticker,
-              order: it.sort_order,
-              enabled: !!it.enabled,
-              tags: parseJsonSafe<string[]>(it.tagsJson, []),
-              holdings: parseJsonSafe<string[] | null>(it.holdingsJson, null),
-            }));
+            .map((it) => {
+              const ticker = it.ticker.toUpperCase();
+              const etfUniverseMeta = etfUniverseMetaByTicker.get(ticker) ?? null;
+              const managedDisplayName = etfUniverseMeta?.fundName ?? symbolNameMap.get(it.ticker) ?? it.ticker;
+              return {
+                id: it.id,
+                ticker: it.ticker,
+                displayName: etfUniverseMeta ? managedDisplayName : (it.displayName ?? symbolNameMap.get(it.ticker) ?? it.ticker),
+                isEtfUniverseManaged: Boolean(etfUniverseMeta?.isManaged),
+                etfUniverseListType: etfUniverseMeta?.listType ?? null,
+                etfUniverseFundName: etfUniverseMeta?.fundName ?? null,
+                order: it.sort_order,
+                enabled: !!it.enabled,
+                tags: parseJsonSafe<string[]>(it.tagsJson, []),
+                holdings: parseJsonSafe<string[] | null>(it.holdingsJson, null),
+              };
+            });
           const baseColumns = colMap.get(g.id) ?? defaultColumns;
           const overviewColumns = (() => {
             if (g.dataType === "macro" || g.dataType === "equities") {

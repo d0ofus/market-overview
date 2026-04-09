@@ -6,7 +6,7 @@ import { AdminCard } from "./admin-card";
 import { ConfirmDialog } from "./confirm-dialog";
 import { EmptyState } from "./empty-state";
 import { InlineAlert } from "./inline-alert";
-import { allColumns, isOverviewAdminSection, rankingOptions } from "./overview-admin-shared";
+import { allColumns, isIndustryThematicGroup, isOverviewAdminSection, rankingOptions } from "./overview-admin-shared";
 import { useOverviewAdminConfig } from "./use-overview-admin-config";
 
 type Props = {
@@ -59,6 +59,7 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
   );
 
   const selectedGroupIndex = selectedSection?.groups.findIndex((group) => group.id === selectedGroupId) ?? -1;
+  const selectedGroupIsThematic = isIndustryThematicGroup(selectedGroup?.title ?? "");
 
   const handleDelete = async () => {
     if (!deleteIntent) return;
@@ -251,7 +252,8 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
                 <span className="inline-flex items-center gap-2"><Save className="h-4 w-4" />Save Group</span>
               </button>
               <button
-                className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-100 transition hover:bg-rose-500/20"
+                className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-100 transition hover:bg-rose-500/20 disabled:opacity-50"
+                disabled={selectedGroupIsThematic}
                 onClick={() => setDeleteIntent({ type: "group", id: selectedGroup.id, title: selectedGroup.title })}
                 type="button"
               >
@@ -262,12 +264,18 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
         >
           {selectedGroup && selectedSection ? (
             <div className="space-y-5">
+              {selectedGroupIsThematic ? (
+                <InlineAlert tone="info">
+                  Industry/Thematic ETFs is derived from ETF Universe. Manage ticker membership, names, parent sector, and industry from ETF Universe instead of Layouts & Groups.
+                </InlineAlert>
+              ) : null}
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr),12rem,12rem]">
                 <label className="text-xs text-slate-300">
                   Group title
                   <input
-                    className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                    className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
                     value={selectedGroup.title}
+                    disabled={selectedGroupIsThematic}
                     onChange={(event) => state.updateGroupDraft(selectedSection.id, selectedGroup.id, { title: event.target.value })}
                   />
                 </label>
@@ -323,19 +331,24 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
                 <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Add tickers</p>
                 <div className="flex flex-wrap gap-3">
                   <input
-                    className="h-11 min-w-[18rem] flex-1 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                    className="h-11 min-w-[18rem] flex-1 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
                     value={state.tickerInput[selectedGroup.id] ?? ""}
+                    disabled={selectedGroupIsThematic}
                     onChange={(event) => state.setTickerInput((current) => ({ ...current, [selectedGroup.id]: event.target.value }))}
                     placeholder="Add tickers: XBI, TLT, EFA"
                   />
                   <button
-                    className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-slate-950 transition hover:brightness-110"
+                    className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-slate-950 transition hover:brightness-110 disabled:opacity-50"
+                    disabled={selectedGroupIsThematic}
                     onClick={() => void state.addTicker(selectedGroup.id)}
                     type="button"
                   >
                     Add Tickers
                   </button>
                 </div>
+                {selectedGroupIsThematic ? (
+                  <p className="text-xs text-slate-400">Ticker membership for this group is synced from ETF Universe.</p>
+                ) : null}
                 {state.tickerErrors[selectedGroup.id] ? <InlineAlert tone="danger">{state.tickerErrors[selectedGroup.id]}</InlineAlert> : null}
               </div>
 
@@ -347,16 +360,25 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
                   <div className="space-y-3">
                     {selectedGroup.items.map((item, index) => (
                       <div key={item.id} className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 px-4 py-4">
+                        {item.isEtfUniverseManaged ? (
+                          <div className="mb-3">
+                            <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 text-[11px] uppercase tracking-[0.16em] text-sky-100">
+                              Managed from ETF Universe{item.etfUniverseListType ? ` · ${item.etfUniverseListType}` : ""}
+                            </span>
+                          </div>
+                        ) : null}
                         <div className="flex flex-wrap items-center gap-3">
                           <div className="min-w-12 text-sm font-semibold text-accent">{item.ticker}</div>
                           <input
-                            className="h-10 min-w-[18rem] flex-1 rounded-xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={state.itemDisplayNames[item.id] ?? ""}
+                            className="h-10 min-w-[18rem] flex-1 rounded-xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
+                            value={item.isEtfUniverseManaged ? (item.etfUniverseFundName ?? item.displayName ?? item.ticker) : (state.itemDisplayNames[item.id] ?? "")}
+                            disabled={item.isEtfUniverseManaged}
                             onChange={(event) => state.setItemDisplayNameDraft(item.id, event.target.value)}
                             placeholder="Display name"
                           />
                           <button
-                            className="rounded-xl border border-borderSoft/80 bg-panelSoft/70 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
+                            className="rounded-xl border border-borderSoft/80 bg-panelSoft/70 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft disabled:opacity-50"
+                            disabled={item.isEtfUniverseManaged}
                             onClick={() => void state.updateItemDisplayName(item.id)}
                             type="button"
                           >
@@ -364,7 +386,7 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
                           </button>
                           <button
                             className="rounded-xl border border-borderSoft/80 bg-panelSoft/70 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft disabled:opacity-50"
-                            disabled={index === 0}
+                            disabled={index === 0 || selectedGroupIsThematic}
                             onClick={() => void state.move("item", selectedGroup.items.map((groupItem) => groupItem.id), index, -1)}
                             type="button"
                           >
@@ -372,24 +394,32 @@ export function OverviewLayoutGroupsPanel({ state }: Props) {
                           </button>
                           <button
                             className="rounded-xl border border-borderSoft/80 bg-panelSoft/70 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft disabled:opacity-50"
-                            disabled={index === selectedGroup.items.length - 1}
+                            disabled={index === selectedGroup.items.length - 1 || selectedGroupIsThematic}
                             onClick={() => void state.move("item", selectedGroup.items.map((groupItem) => groupItem.id), index, 1)}
                             type="button"
                           >
                             <ArrowDown className="h-4 w-4" />
                           </button>
                           <button
-                            className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-100 transition hover:bg-rose-500/20"
+                            className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-100 transition hover:bg-rose-500/20 disabled:opacity-50"
+                            disabled={selectedGroupIsThematic}
                             onClick={() => setDeleteIntent({ type: "item", id: item.id, title: item.ticker })}
                             type="button"
                           >
                             Delete
                           </button>
                         </div>
+                        {item.isEtfUniverseManaged ? (
+                          <p className="mt-3 text-xs text-slate-400">
+                            This ETF name is synced from ETF Universe and cannot be changed here.
+                          </p>
+                        ) : null}
                         {state.itemDisplayNameStatus[item.id] ? (
                           <p className={`mt-3 text-xs ${
                             state.itemDisplayNameStatus[item.id]?.includes("Saved")
                               ? "text-emerald-300"
+                              : state.itemDisplayNameStatus[item.id]?.includes("Managed")
+                                ? "text-sky-200"
                               : state.itemDisplayNameStatus[item.id]?.includes("No database")
                                 ? "text-slate-400"
                                 : "text-rose-300"

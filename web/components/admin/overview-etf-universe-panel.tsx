@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, MoveRight, Pencil, RefreshCw, Trash2, X } from "lucide-react";
+import { Loader2, Pencil, RefreshCw, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { AdminCard } from "./admin-card";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -372,110 +372,6 @@ export function OverviewEtfUniversePanel({ state }: Props) {
               ))}
             </div>
           )}
-        </AdminCard>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr),minmax(0,0.8fr)]">
-        <AdminCard title="Industry Organizer" description="Drag industry ETFs between grouped buckets, then drop into an existing category or a new target.">
-          {state.industryCategoryGroups.length === 0 ? (
-            <EmptyState title="No industry groups available" description="Add industry ETFs before trying to reorganise their categories." />
-          ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              {state.industryCategoryGroups.map((group) => (
-                <div
-                  key={`${group.parentSector}-${group.industry}`}
-                  className="rounded-2xl border border-borderSoft/70 bg-panelSoft/30 p-4"
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const ticker = event.dataTransfer.getData("text/plain") || state.dragTicker;
-                    if (!ticker) return;
-                    void state.moveIndustryTicker(ticker, group.parentSector, group.industry);
-                    state.setDragTicker(null);
-                  }}
-                >
-                  <div className="mb-3 text-sm font-semibold text-text">{group.parentSector} / {group.industry}</div>
-                  <div className="space-y-2">
-                    {group.rows.map((row) => (
-                      <div
-                        key={`${group.parentSector}-${group.industry}-${row.ticker}`}
-                        className="flex cursor-grab items-center justify-between rounded-xl border border-borderSoft/60 bg-panel px-3 py-2 text-sm"
-                        draggable
-                        onDragStart={(event) => {
-                          state.setDragTicker(row.ticker);
-                          event.dataTransfer.setData("text/plain", row.ticker);
-                        }}
-                        onDragEnd={() => state.setDragTicker(null)}
-                      >
-                        <div>
-                          <div className="font-semibold text-accent">{row.ticker}</div>
-                          <div className="text-xs text-slate-400">{row.fundName ?? "Unnamed ETF"}</div>
-                        </div>
-                        <MoveRight className="h-4 w-4 text-slate-500" />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </AdminCard>
-
-        <AdminCard title="Move To New Target" description="Define a destination bucket, then drop a dragged ETF into this panel to reassign it.">
-          <div
-            className="rounded-2xl border border-dashed border-borderSoft/80 bg-panelSoft/30 p-4"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => {
-              event.preventDefault();
-              const ticker = event.dataTransfer.getData("text/plain") || state.dragTicker;
-              const parentSector = state.moveTarget.parentSectorNew.trim() || state.moveTarget.parentSectorSelect.trim();
-              const industry = state.moveTarget.industryNew.trim() || state.moveTarget.industrySelect.trim();
-              if (!ticker || !parentSector || !industry) {
-                state.setMessage({ tone: "danger", text: "Set the target parent sector and industry before dropping into New Target." });
-                return;
-              }
-              void state.moveIndustryTicker(ticker, parentSector, industry);
-              state.setDragTicker(null);
-            }}
-          >
-            <div className="space-y-3">
-              <select
-                className="h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                value={state.moveTarget.parentSectorSelect}
-                onChange={(event) => state.setMoveTarget((current) => ({ ...current, parentSectorSelect: event.target.value }))}
-              >
-                <option value="">Target parent sector...</option>
-                {state.parentSectorOptions.map((option) => (
-                  <option key={`move-parent-${option}`} value={option}>{option}</option>
-                ))}
-              </select>
-              <input
-                className="h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                placeholder="Or enter new parent sector"
-                value={state.moveTarget.parentSectorNew}
-                onChange={(event) => state.setMoveTarget((current) => ({ ...current, parentSectorNew: event.target.value }))}
-              />
-              <select
-                className="h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                value={state.moveTarget.industrySelect}
-                onChange={(event) => state.setMoveTarget((current) => ({ ...current, industrySelect: event.target.value }))}
-              >
-                <option value="">Target industry...</option>
-                {state.industryOptions.map((option) => (
-                  <option key={`move-industry-${option}`} value={option}>{option}</option>
-                ))}
-              </select>
-              <input
-                className="h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                placeholder="Or enter new industry category"
-                value={state.moveTarget.industryNew}
-                onChange={(event) => state.setMoveTarget((current) => ({ ...current, industryNew: event.target.value }))}
-              />
-              <div className="rounded-2xl border border-dashed border-accent/30 bg-accent/5 px-4 py-6 text-center text-sm text-slate-300">
-                {state.dragTicker ? `Drop ${state.dragTicker} here to move it.` : "Drag an industry ETF card here."}
-              </div>
-            </div>
-          </div>
         </AdminCard>
       </div>
 

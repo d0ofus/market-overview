@@ -3224,6 +3224,12 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
   const payload = itemCreateSchema.parse(await c.req.json());
+  const groupMeta = await c.env.DB.prepare("SELECT title FROM dashboard_groups WHERE id = ? LIMIT 1")
+    .bind(groupId)
+    .first<{ title: string | null }>();
+  if (groupMeta?.title === "Industry/Thematic ETFs" || groupMeta?.title === "Thematic ETFs") {
+    return c.json({ error: "Industry/Thematic ETFs is managed from ETF Universe." }, 409);
+  }
   const resolved = await resolveTickerMeta(payload.ticker, c.env);
   if (!resolved) return c.json({ error: `Ticker '${payload.ticker}' was not found in supported data sources.` }, 400);
 
@@ -3333,6 +3339,12 @@ app.post("/api/admin/section/:sectionId/group", async (c) => {
 app.delete("/api/admin/group/:groupId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
+  const groupMeta = await c.env.DB.prepare("SELECT title FROM dashboard_groups WHERE id = ? LIMIT 1")
+    .bind(groupId)
+    .first<{ title: string | null }>();
+  if (groupMeta?.title === "Industry/Thematic ETFs" || groupMeta?.title === "Thematic ETFs") {
+    return c.json({ error: "Industry/Thematic ETFs is managed from ETF Universe." }, 409);
+  }
   await c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM dashboard_items WHERE group_id = ?").bind(groupId),
     c.env.DB.prepare("DELETE FROM dashboard_columns WHERE group_id = ?").bind(groupId),
@@ -3346,6 +3358,18 @@ app.delete("/api/admin/group/:groupId", async (c) => {
 app.delete("/api/admin/item/:itemId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const itemId = c.req.param("itemId");
+  const itemMeta = await c.env.DB.prepare(
+    `SELECT g.title as groupTitle
+     FROM dashboard_items i
+     JOIN dashboard_groups g ON g.id = i.group_id
+     WHERE i.id = ?
+     LIMIT 1`,
+  )
+    .bind(itemId)
+    .first<{ groupTitle: string | null }>();
+  if (itemMeta?.groupTitle === "Industry/Thematic ETFs" || itemMeta?.groupTitle === "Thematic ETFs") {
+    return c.json({ error: "Industry/Thematic ETFs is managed from ETF Universe." }, 409);
+  }
   await c.env.DB.prepare("DELETE FROM dashboard_items WHERE id = ?").bind(itemId).run();
   await upsertAudit(c.env, "default", "ITEM_DELETE", { itemId });
   await refreshSnapshotSafe(c.env);
@@ -3363,12 +3387,14 @@ app.patch("/api/admin/item/:itemId", async (c) => {
        i.ticker as ticker,
        g.title as groupTitle,
        s.name as symbolName,
+       w.list_type as watchlistListType,
        w.fund_name as watchlistFundName
      FROM dashboard_items i
      LEFT JOIN dashboard_groups g ON g.id = i.group_id
      LEFT JOIN symbols s ON s.ticker = i.ticker
-     LEFT JOIN etf_watchlists w ON w.list_type = 'industry' AND w.ticker = i.ticker
+     LEFT JOIN etf_watchlists w ON w.ticker = i.ticker
      WHERE i.id = ?
+     ORDER BY CASE WHEN w.list_type = 'industry' THEN 0 WHEN w.list_type = 'sector' THEN 1 ELSE 2 END
      LIMIT 1`,
   )
     .bind(itemId)
@@ -3377,9 +3403,14 @@ app.patch("/api/admin/item/:itemId", async (c) => {
       ticker: string;
       groupTitle: string | null;
       symbolName: string | null;
+      watchlistListType: "sector" | "industry" | null;
       watchlistFundName: string | null;
     }>();
   if (!existing) return c.json({ error: "Item not found." }, 404);
+
+  if (existing.watchlistListType === "sector" || existing.watchlistListType === "industry") {
+    return c.json({ ok: true, itemId, updated: false, reason: "managed_by_etf_universe" });
+  }
 
   const isThematicGroup = existing.groupTitle === "Industry/Thematic ETFs" || existing.groupTitle === "Thematic ETFs";
   const nextThematicFundName = nextDisplayName ?? existing.symbolName?.trim() ?? existing.ticker;
@@ -3429,6 +3460,20 @@ app.post("/api/admin/upload-bars", async (c) => {
 app.post("/api/admin/reorder", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const body = (await c.req.json()) as { type: "group" | "item"; orderedIds: string[] };
+  if (body.type === "item" && body.orderedIds.length > 0) {
+    const placeholders = body.orderedIds.map(() => "?").join(", ");
+    const themedRows = await c.env.DB.prepare(
+      `SELECT DISTINCT g.title as groupTitle
+       FROM dashboard_items i
+       JOIN dashboard_groups g ON g.id = i.group_id
+       WHERE i.id IN (${placeholders})`,
+    )
+      .bind(...body.orderedIds)
+      .all<{ groupTitle: string | null }>();
+    if ((themedRows.results ?? []).some((row) => row.groupTitle === "Industry/Thematic ETFs" || row.groupTitle === "Thematic ETFs")) {
+      return c.json({ error: "Industry/Thematic ETFs is managed from ETF Universe." }, 409);
+    }
+  }
   const table = body.type === "group" ? "dashboard_groups" : "dashboard_items";
   const stmts = body.orderedIds.map((id, i) =>
     c.env.DB.prepare(`UPDATE ${table} SET sort_order = ? WHERE id = ?`).bind(i + 1, id),

@@ -76,6 +76,59 @@ export function useOverviewAdminConfig() {
     });
   };
 
+  const removeItemDraft = (itemId: string) => {
+    setData((current) => {
+      if (!current) return current;
+      const next = structuredClone(current);
+      for (const section of next.sections) {
+        for (const group of section.groups) {
+          const existingLength = group.items.length;
+          group.items = group.items.filter((item) => item.id !== itemId);
+          if (group.items.length !== existingLength) {
+            return next;
+          }
+        }
+      }
+      return current;
+    });
+    setItemDisplayNames((current) => {
+      const next = { ...current };
+      delete next[itemId];
+      return next;
+    });
+    setItemDisplayNameStatus((current) => {
+      const next = { ...current };
+      delete next[itemId];
+      return next;
+    });
+  };
+
+  const removeGroupDraft = (groupId: string) => {
+    setData((current) => {
+      if (!current) return current;
+      const next = structuredClone(current);
+      for (const section of next.sections) {
+        const existingLength = section.groups.length;
+        section.groups = section.groups.filter((group) => group.id !== groupId);
+        if (section.groups.length !== existingLength) {
+          return next;
+        }
+      }
+      return current;
+    });
+  };
+
+  const removeSectionDraft = (sectionId: string) => {
+    setData((current) => {
+      if (!current) return current;
+      const next = structuredClone(current);
+      const filtered = next.sections.filter((section) => section.id !== sectionId);
+      if (filtered.length === next.sections.length) return current;
+      next.sections = filtered;
+      return next;
+    });
+  };
+
   const setItemDisplayNameDraft = (itemId: string, value: string) => {
     setItemDisplayNames((current) => ({ ...current, [itemId]: value }));
   };
@@ -144,8 +197,9 @@ export function useOverviewAdminConfig() {
   const removeItem = async (itemId: string) => {
     try {
       await adminFetch("/api/admin/item/" + itemId, { method: "DELETE" });
-      await load();
+      removeItemDraft(itemId);
       flashMessage({ tone: "success", text: "Ticker removed from group." });
+      void load({ silent: true });
     } catch (error) {
       flashMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to delete item." }, 5000);
     }
@@ -154,10 +208,16 @@ export function useOverviewAdminConfig() {
   const updateItemDisplayName = async (itemId: string) => {
     try {
       setItemDisplayNameStatus((current) => ({ ...current, [itemId]: null }));
-      const result = await adminFetch<{ ok: boolean; itemId: string; updated: boolean }>("/api/admin/item/" + itemId, {
+      const result = await adminFetch<{ ok: boolean; itemId: string; updated: boolean; reason?: string }>("/api/admin/item/" + itemId, {
         method: "PATCH",
         body: JSON.stringify({ displayName: (itemDisplayNames[itemId] ?? "").trim() || null }),
       });
+      if (result.reason === "managed_by_etf_universe") {
+        setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Managed from ETF Universe." }));
+        flashMessage({ tone: "info", text: "This ticker name is managed from ETF Universe." });
+        await load({ silent: true });
+        return;
+      }
       if (result.updated) {
         setItemDisplayNameStatus((current) => ({ ...current, [itemId]: "Saved to database." }));
         const meta = itemMetaById.get(itemId);
@@ -234,8 +294,9 @@ export function useOverviewAdminConfig() {
   const deleteSection = async (sectionId: string) => {
     try {
       await adminFetch("/api/admin/section/" + sectionId, { method: "DELETE" });
-      await load();
+      removeSectionDraft(sectionId);
       flashMessage({ tone: "success", text: "Section deleted." });
+      void load({ silent: true });
     } catch (error) {
       flashMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to delete section." }, 5000);
     }
@@ -244,8 +305,9 @@ export function useOverviewAdminConfig() {
   const deleteGroup = async (groupId: string) => {
     try {
       await adminFetch("/api/admin/group/" + groupId, { method: "DELETE" });
-      await load();
+      removeGroupDraft(groupId);
       flashMessage({ tone: "success", text: "Group deleted." });
+      void load({ silent: true });
     } catch (error) {
       flashMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to delete group." }, 5000);
     }

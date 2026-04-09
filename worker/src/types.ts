@@ -75,6 +75,9 @@ export type DashboardConfigPayload = {
         id: string;
         ticker: string;
         displayName: string | null;
+        isEtfUniverseManaged: boolean;
+        etfUniverseListType: "sector" | "industry" | null;
+        etfUniverseFundName: string | null;
         order: number;
         enabled: boolean;
         tags: string[];
