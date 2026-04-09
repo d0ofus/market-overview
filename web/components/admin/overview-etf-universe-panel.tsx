@@ -249,32 +249,11 @@ export function OverviewEtfUniversePanel({ state }: Props) {
 
             <div className="border-t border-borderSoft/70 pt-6">
               <div className="grid gap-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
-                      {state.editingIndustryTicker ? "Edit industry ETF" : "Add industry ETF"}
-                    </p>
-                    {state.editingIndustryTicker ? (
-                      <p className="mt-1 text-xs text-slate-400">
-                        Updating {state.editingIndustryTicker}. Saving here updates the industry ETF master entry used across overview and sector views.
-                      </p>
-                    ) : null}
-                  </div>
-                  {state.editingIndustryTicker ? (
-                    <button
-                      className="rounded-xl border border-borderSoft/80 bg-panelSoft/65 px-3 py-2 text-xs text-slate-200 transition hover:bg-panelSoft"
-                      onClick={() => state.cancelIndustryEdit()}
-                      type="button"
-                    >
-                      <span className="inline-flex items-center gap-2"><X className="h-4 w-4" />Cancel Edit</span>
-                    </button>
-                  ) : null}
-                </div>
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Add industry ETF</p>
                 <input
-                  className="h-11 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-11 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
                   placeholder="Ticker (e.g. SMH)"
                   value={state.industryEtfForm.ticker}
-                  disabled={Boolean(state.editingIndustryTicker)}
                   onBlur={() => void state.resolveFundName(state.industryEtfForm.ticker, "industry")}
                   onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, ticker: event.target.value }))}
                 />
@@ -321,7 +300,7 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                   onClick={() => void state.addIndustryEtf()}
                   type="button"
                 >
-                  {state.editingIndustryTicker ? "Save Industry ETF" : "Add Industry ETF"}
+                  Add Industry ETF
                 </button>
               </div>
             </div>
@@ -562,6 +541,111 @@ export function OverviewEtfUniversePanel({ state }: Props) {
         onCancel={() => setDeleteIntent(null)}
         onConfirm={handleDelete}
       />
+
+      {state.editingIndustryTicker ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" onClick={() => state.cancelIndustryEdit()}>
+          <div className="admin-surface w-full max-w-2xl px-5 py-5" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-2">
+                <h3 className="text-lg font-semibold text-text">Edit Industry ETF</h3>
+                <p className="text-sm text-slate-400">
+                  Update the fund name, parent sector, and industry bucket for {state.editingIndustryTicker}. Saving here updates the shared industry ETF master list used across overview and sectors.
+                </p>
+              </div>
+              <button
+                data-modal-close="true"
+                className="rounded-xl border border-borderSoft/70 p-2 text-slate-300 transition hover:bg-panelSoft/70"
+                onClick={() => state.cancelIndustryEdit()}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-slate-300">
+                Ticker
+                <input
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
+                  value={state.industryEtfForm.ticker}
+                  disabled
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Fund name
+                <input
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  value={state.industryEtfForm.fundName}
+                  onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, fundName: event.target.value }))}
+                  placeholder="Fund name"
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Parent sector
+                <select
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  value={state.industryEtfForm.parentSectorSelect}
+                  onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, parentSectorSelect: event.target.value }))}
+                >
+                  <option value="">Select parent sector...</option>
+                  {state.parentSectorOptions.map((option) => (
+                    <option key={`edit-industry-parent-${option}`} value={option}>{option}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-300">
+                New parent sector override
+                <input
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  value={state.industryEtfForm.parentSectorNew}
+                  onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, parentSectorNew: event.target.value }))}
+                  placeholder="Or enter new parent sector"
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Industry category
+                <select
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  value={state.industryEtfForm.industrySelect}
+                  onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, industrySelect: event.target.value }))}
+                >
+                  <option value="">Select industry category...</option>
+                  {state.industryOptions.map((option) => (
+                    <option key={`edit-industry-category-${option}`} value={option}>{option}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-300">
+                New industry override
+                <input
+                  className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  value={state.industryEtfForm.industryNew}
+                  onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, industryNew: event.target.value }))}
+                  placeholder="Or enter new industry category"
+                />
+              </label>
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                data-modal-close="true"
+                className="rounded-xl border border-borderSoft/80 bg-panelSoft/65 px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
+                onClick={() => state.cancelIndustryEdit()}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-slate-950 transition hover:brightness-110"
+                onClick={() => void state.addIndustryEtf()}
+                type="button"
+              >
+                Save Industry ETF
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }
