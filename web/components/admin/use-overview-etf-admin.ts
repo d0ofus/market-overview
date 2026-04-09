@@ -11,6 +11,14 @@ type Message = {
 } | null;
 
 export function useOverviewEtfAdmin() {
+  const emptyIndustryEtfForm = {
+    ticker: "",
+    fundName: "",
+    parentSectorSelect: "",
+    parentSectorNew: "",
+    industrySelect: "",
+    industryNew: "",
+  };
   const [sectorEtfs, setSectorEtfs] = useState<EtfListRow[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<EtfListRow[]>([]);
   const [etfSyncStatus, setEtfSyncStatus] = useState<EtfSyncStatusRow[]>([]);
@@ -25,6 +33,7 @@ export function useOverviewEtfAdmin() {
     industrySelect: "",
     industryNew: "",
   });
+  const [editingIndustryTicker, setEditingIndustryTicker] = useState<string | null>(null);
   const [dragTicker, setDragTicker] = useState<string | null>(null);
   const [moveTarget, setMoveTarget] = useState({
     parentSectorSelect: "",
@@ -154,16 +163,35 @@ export function useOverviewEtfAdmin() {
         industry,
       }),
     });
+    const editedTicker = industryEtfForm.ticker.trim().toUpperCase();
+    setIndustryEtfForm(emptyIndustryEtfForm);
+    setEditingIndustryTicker(null);
+    await load();
+    flashMessage({
+      tone: "success",
+      text: editingIndustryTicker
+        ? `${editedTicker} updated across the ETF universe.`
+        : "Industry ETF added.",
+    });
+  };
+
+  const editIndustryEtf = (row: EtfListRow) => {
+    const parentSector = row.parentSector?.trim() ?? "";
+    const industry = row.industry?.trim() ?? "";
+    setEditingIndustryTicker(row.ticker);
     setIndustryEtfForm({
-      ticker: "",
-      fundName: "",
-      parentSectorSelect: "",
+      ticker: row.ticker,
+      fundName: row.fundName?.trim() ?? "",
+      parentSectorSelect: parentSector,
       parentSectorNew: "",
-      industrySelect: "",
+      industrySelect: industry,
       industryNew: "",
     });
-    await load();
-    flashMessage({ tone: "success", text: "Industry ETF added." });
+  };
+
+  const cancelIndustryEdit = () => {
+    setEditingIndustryTicker(null);
+    setIndustryEtfForm(emptyIndustryEtfForm);
   };
 
   const runBackfill = async () => {
@@ -260,6 +288,7 @@ export function useOverviewEtfAdmin() {
     setSectorEtfForm,
     industryEtfForm,
     setIndustryEtfForm,
+    editingIndustryTicker,
     parentSectorOptions,
     industryOptions,
     industryCategoryGroups,
@@ -281,6 +310,8 @@ export function useOverviewEtfAdmin() {
     deleteEtf,
     addSectorEtf,
     addIndustryEtf,
+    editIndustryEtf,
+    cancelIndustryEdit,
     runBackfill,
     runDiagnostics,
     saveSourceUrl,

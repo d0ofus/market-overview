@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, MoveRight, RefreshCw, Trash2 } from "lucide-react";
+import { Loader2, MoveRight, Pencil, RefreshCw, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { AdminCard } from "./admin-card";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -249,11 +249,32 @@ export function OverviewEtfUniversePanel({ state }: Props) {
 
             <div className="border-t border-borderSoft/70 pt-6">
               <div className="grid gap-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Add industry ETF</p>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
+                      {state.editingIndustryTicker ? "Edit industry ETF" : "Add industry ETF"}
+                    </p>
+                    {state.editingIndustryTicker ? (
+                      <p className="mt-1 text-xs text-slate-400">
+                        Updating {state.editingIndustryTicker}. Saving here updates the industry ETF master entry used across overview and sector views.
+                      </p>
+                    ) : null}
+                  </div>
+                  {state.editingIndustryTicker ? (
+                    <button
+                      className="rounded-xl border border-borderSoft/80 bg-panelSoft/65 px-3 py-2 text-xs text-slate-200 transition hover:bg-panelSoft"
+                      onClick={() => state.cancelIndustryEdit()}
+                      type="button"
+                    >
+                      <span className="inline-flex items-center gap-2"><X className="h-4 w-4" />Cancel Edit</span>
+                    </button>
+                  ) : null}
+                </div>
                 <input
-                  className="h-11 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                  className="h-11 rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text disabled:cursor-not-allowed disabled:opacity-60"
                   placeholder="Ticker (e.g. SMH)"
                   value={state.industryEtfForm.ticker}
+                  disabled={Boolean(state.editingIndustryTicker)}
                   onBlur={() => void state.resolveFundName(state.industryEtfForm.ticker, "industry")}
                   onChange={(event) => state.setIndustryEtfForm((current) => ({ ...current, ticker: event.target.value }))}
                 />
@@ -300,7 +321,7 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                   onClick={() => void state.addIndustryEtf()}
                   type="button"
                 >
-                  Add Industry ETF
+                  {state.editingIndustryTicker ? "Save Industry ETF" : "Add Industry ETF"}
                 </button>
               </div>
             </div>
@@ -352,13 +373,22 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                       {row.industry ? ` / ${row.industry}` : ""}
                     </div>
                   </div>
-                  <button
-                    className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100 transition hover:bg-rose-500/20"
-                    onClick={() => setDeleteIntent({ listType: "industry", ticker: row.ticker, label: `${row.ticker}${row.industry ? ` (${row.industry})` : ""}` })}
-                    type="button"
-                  >
-                    Delete
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-xl border border-borderSoft/80 bg-panelSoft/65 px-3 py-2 text-xs text-slate-100 transition hover:bg-panelSoft"
+                      onClick={() => state.editIndustryEtf(row)}
+                      type="button"
+                    >
+                      <span className="inline-flex items-center gap-2"><Pencil className="h-3.5 w-3.5" />Edit</span>
+                    </button>
+                    <button
+                      className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100 transition hover:bg-rose-500/20"
+                      onClick={() => setDeleteIntent({ listType: "industry", ticker: row.ticker, label: `${row.ticker}${row.industry ? ` (${row.industry})` : ""}` })}
+                      type="button"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

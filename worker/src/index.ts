@@ -1697,7 +1697,9 @@ app.post("/api/admin/etfs", async (c) => {
   const ticker = body.ticker?.trim().toUpperCase();
   if (!ticker) return c.json({ error: "ticker is required" }, 400);
   const meta = await resolveTickerMeta(ticker, c.env);
-  const fundName = body.fundName?.trim() || meta?.name || ticker;
+  const explicitFundName = body.fundName?.trim() || null;
+  const fundName = explicitFundName ?? meta?.name ?? ticker;
+  const preferredSymbolName = explicitFundName ?? meta?.name ?? ticker;
   const sourceUrl = body.sourceUrl?.trim() || null;
   const order = await c.env.DB.prepare(
     "SELECT COALESCE(MAX(sort_order), 0) + 1 as nextOrder FROM etf_watchlists WHERE list_type = ? AND COALESCE(parent_sector, '') = COALESCE(?, '') AND COALESCE(industry, '') = COALESCE(?, '')",
@@ -1709,13 +1711,21 @@ app.post("/api/admin/etfs", async (c) => {
       `INSERT INTO symbols (ticker, name, exchange, asset_class, sector, industry)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(ticker) DO UPDATE SET
-         name = COALESCE(excluded.name, symbols.name),
+         name = CASE WHEN ? = 1 THEN excluded.name ELSE COALESCE(symbols.name, excluded.name) END,
          exchange = COALESCE(excluded.exchange, symbols.exchange),
          asset_class = COALESCE(symbols.asset_class, excluded.asset_class),
          sector = COALESCE(excluded.sector, symbols.sector),
          industry = COALESCE(excluded.industry, symbols.industry)`,
     )
-      .bind(ticker, meta?.name ?? fundName, meta?.exchange ?? "NYSEARCA", "etf", body.parentSector ?? null, body.industry ?? null),
+      .bind(
+        ticker,
+        preferredSymbolName,
+        meta?.exchange ?? "NYSEARCA",
+        "etf",
+        body.parentSector ?? null,
+        body.industry ?? null,
+        explicitFundName ? 1 : 0,
+      ),
     c.env.DB.prepare(
       "INSERT OR IGNORE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, NULL, 'pending', NULL, 'watchlist:add', 0, CURRENT_TIMESTAMP)",
     ).bind(ticker),
@@ -1723,7 +1733,7 @@ app.post("/api/admin/etfs", async (c) => {
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order, source_url) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name, source_url = excluded.source_url",
+        "INSERT INTO etf_watchlists (list_type, parent_sector, industry, ticker, fund_name, sort_order, source_url) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(list_type, ticker) DO UPDATE SET parent_sector = excluded.parent_sector, industry = excluded.industry, fund_name = excluded.fund_name, source_url = COALESCE(excluded.source_url, etf_watchlists.source_url)",
       ).bind(
         listType,
         body.parentSector ?? null,
