@@ -109,6 +109,7 @@ class StooqProvider implements MarketDataProvider {
   constructor(
     private readonly yahooPreferredTickers = new Set<string>(),
     private readonly fmpApiKey = "",
+    private readonly alphaVantageApiKey = "",
   ) {}
 
   private readonly aliases: Record<string, string> = {
@@ -184,14 +185,16 @@ class StooqProvider implements MarketDataProvider {
 
   private async fetchYahooIndexBars(ticker: string): Promise<DailyBar[]> {
     const symbol = this.yahooSymbolForTicker(ticker);
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "market-command-centre/1.0",
-      },
-    });
-    if (!res.ok) return [];
-    const json = (await res.json()) as {
+    const hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+    for (const host of hosts) {
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "market-command-centre/1.0",
+        },
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
       chart?: {
         result?: Array<{
           timestamp?: number[];
@@ -210,55 +213,45 @@ class StooqProvider implements MarketDataProvider {
         }>;
       };
     };
-    const result = json.chart?.result?.[0];
-    const ts = result?.timestamp ?? [];
-    const quote = result?.indicators?.quote?.[0];
-    if (!quote || ts.length === 0) return [];
-    const adjCloses = result?.indicators?.adjclose?.[0]?.adjclose ?? [];
-    const opens = quote.open ?? [];
-    const highs = quote.high ?? [];
-    const lows = quote.low ?? [];
-    const closes = quote.close ?? [];
-    const volumes = quote.volume ?? [];
-    const out: DailyBar[] = [];
-    for (let i = 0; i < ts.length; i += 1) {
-      const open = opens[i];
-      const high = highs[i];
-      const low = lows[i];
-      const close = closes[i];
-      const adjustedClose = adjCloses[i];
-      if (![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n as number))) continue;
-      out.push({
-        ticker: ticker.toUpperCase(),
-        date: new Date(ts[i] * 1000).toISOString().slice(0, 10),
-        o: open as number,
-        h: high as number,
-        l: low as number,
-        c: typeof adjustedClose === "number" && Number.isFinite(adjustedClose) ? adjustedClose : close as number,
-        volume: typeof volumes[i] === "number" && Number.isFinite(volumes[i] as number) ? (volumes[i] as number) : 0,
-      });
+      const result = json.chart?.result?.[0];
+      const ts = result?.timestamp ?? [];
+      const quote = result?.indicators?.quote?.[0];
+      if (!quote || ts.length === 0) continue;
+      const adjCloses = result?.indicators?.adjclose?.[0]?.adjclose ?? [];
+      const opens = quote.open ?? [];
+      const highs = quote.high ?? [];
+      const lows = quote.low ?? [];
+      const closes = quote.close ?? [];
+      const volumes = quote.volume ?? [];
+      const out: DailyBar[] = [];
+      for (let i = 0; i < ts.length; i += 1) {
+        const open = opens[i];
+        const high = highs[i];
+        const low = lows[i];
+        const close = closes[i];
+        const adjustedClose = adjCloses[i];
+        if (![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n as number))) continue;
+        out.push({
+          ticker: ticker.toUpperCase(),
+          date: new Date(ts[i] * 1000).toISOString().slice(0, 10),
+          o: open as number,
+          h: high as number,
+          l: low as number,
+          c: typeof adjustedClose === "number" && Number.isFinite(adjustedClose) ? adjustedClose : close as number,
+          volume: typeof volumes[i] === "number" && Number.isFinite(volumes[i] as number) ? (volumes[i] as number) : 0,
+        });
+      }
+      if (out.length > 0) return out;
     }
-    return out;
+    return [];
   }
 
-  private async fetchFmpBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
-    if (!this.fmpApiKey) return [];
-    const params = new URLSearchParams({
-      symbol: ticker.trim().toUpperCase(),
-      apikey: this.fmpApiKey,
-    });
-    if (startDate) params.set("from", startDate);
-    if (endDate) params.set("to", endDate);
-    const res = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, {
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "market-command-centre/1.0",
-      },
-    });
-    if (!res.ok) return [];
-    const json = (await res.json()) as
+  private parseFmpBars(
+    ticker: string,
+    json:
       | Array<{ date?: string; open?: number; high?: number; low?: number; close?: number; adjClose?: number; volume?: number }>
-      | { historical?: Array<{ date?: string; open?: number; high?: number; low?: number; close?: number; adjClose?: number; volume?: number }> };
+      | { historical?: Array<{ date?: string; open?: number; high?: number; low?: number; close?: number; adjClose?: number; volume?: number }> },
+  ): DailyBar[] {
     const rows = Array.isArray(json) ? json : json.historical ?? [];
     const out: DailyBar[] = [];
     for (const row of rows) {
@@ -287,6 +280,111 @@ class StooqProvider implements MarketDataProvider {
     return out;
   }
 
+  private parseFmpLightBars(
+    ticker: string,
+    json: Array<{ date?: string; price?: number; close?: number; volume?: number }>,
+  ): DailyBar[] {
+    const out: DailyBar[] = [];
+    for (const row of json) {
+      const date = row.date;
+      const close = row.price ?? row.close;
+      if (
+        typeof date !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+        typeof close !== "number" ||
+        !Number.isFinite(close)
+      ) {
+        continue;
+      }
+      out.push({
+        ticker: ticker.toUpperCase(),
+        date,
+        o: close,
+        h: close,
+        l: close,
+        c: close,
+        volume: typeof row.volume === "number" && Number.isFinite(row.volume) ? row.volume : 0,
+      });
+    }
+    return out;
+  }
+
+  private async fetchFmpBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
+    if (!this.fmpApiKey) return [];
+    const params = new URLSearchParams({
+      symbol: ticker.trim().toUpperCase(),
+      apikey: this.fmpApiKey,
+    });
+    if (startDate) params.set("from", startDate);
+    if (endDate) params.set("to", endDate);
+    const headers = {
+      Accept: "application/json",
+      "User-Agent": "market-command-centre/1.0",
+    };
+    const stable = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, { headers });
+    if (stable.ok) {
+      const rows = this.parseFmpBars(ticker, await stable.json() as never);
+      if (rows.length > 0) return rows;
+    }
+
+    const light = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/light?${params.toString()}`, { headers });
+    if (light.ok) {
+      const rows = this.parseFmpLightBars(ticker, await light.json() as never);
+      if (rows.length > 0) return rows;
+    }
+
+    const legacyParams = new URLSearchParams({
+      apikey: this.fmpApiKey,
+    });
+    if (startDate) legacyParams.set("from", startDate);
+    if (endDate) legacyParams.set("to", endDate);
+    const symbol = encodeURIComponent(ticker.trim().toUpperCase());
+    const legacy = await fetch(`https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?${legacyParams.toString()}`, { headers });
+    if (!legacy.ok) return [];
+    return this.parseFmpBars(ticker, await legacy.json() as never);
+  }
+
+  private async fetchAlphaVantageBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
+    if (!this.alphaVantageApiKey) return [];
+    const params = new URLSearchParams({
+      function: "TIME_SERIES_DAILY_ADJUSTED",
+      symbol: ticker.trim().toUpperCase(),
+      outputsize: "compact",
+      apikey: this.alphaVantageApiKey,
+    });
+    const res = await fetch(`https://www.alphavantage.co/query?${params.toString()}`, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "market-command-centre/1.0",
+      },
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      "Time Series (Daily)"?: Record<string, Record<string, string>>;
+    };
+    const series = json["Time Series (Daily)"] ?? {};
+    const out: DailyBar[] = [];
+    for (const [date, row] of Object.entries(series)) {
+      if ((startDate && date < startDate) || (endDate && date > endDate)) continue;
+      const open = Number(row["1. open"]);
+      const high = Number(row["2. high"]);
+      const low = Number(row["3. low"]);
+      const close = Number(row["5. adjusted close"] ?? row["4. close"]);
+      const volume = Number(row["6. volume"] ?? "0");
+      if ([open, high, low, close].some((n) => !Number.isFinite(n))) continue;
+      out.push({
+        ticker: ticker.toUpperCase(),
+        date,
+        o: open,
+        h: high,
+        l: low,
+        c: close,
+        volume: Number.isFinite(volume) ? volume : 0,
+      });
+    }
+    return out;
+  }
+
   private async fetchTickerBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
     try {
       const upper = ticker.trim().toUpperCase();
@@ -306,6 +404,10 @@ class StooqProvider implements MarketDataProvider {
         const fmpRows = await this.fetchFmpBars(ticker, startDate, endDate);
         const fmpLatest = latestBarDate(fmpRows);
         if (fmpLatest && (!endDate || fmpLatest >= endDate)) return fmpRows;
+        const alphaVantageRows = await this.fetchAlphaVantageBars(ticker, startDate, endDate);
+        const alphaVantageLatest = latestBarDate(alphaVantageRows);
+        if (alphaVantageLatest && (!endDate || alphaVantageLatest >= endDate)) return alphaVantageRows;
+        return [];
       }
       const symbol = this.symbolForStooq(ticker);
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
@@ -356,6 +458,9 @@ class StooqProvider implements MarketDataProvider {
         const fmpRows = await this.fetchFmpBars(ticker, startDate, endDate);
         const fmpLatest = latestBarDate(fmpRows);
         if (fmpLatest && fmpLatest > stooqLatest) return fmpRows;
+        const alphaVantageRows = await this.fetchAlphaVantageBars(ticker, startDate, endDate);
+        const alphaVantageLatest = latestBarDate(alphaVantageRows);
+        if (alphaVantageLatest && alphaVantageLatest > stooqLatest) return alphaVantageRows;
       }
       return out;
     } catch (error) {
@@ -363,7 +468,9 @@ class StooqProvider implements MarketDataProvider {
       try {
         const yahooRows = await this.fetchYahooIndexBars(ticker);
         if (yahooRows.length > 0) return yahooRows;
-        return await this.fetchFmpBars(ticker, startDate, endDate);
+        const fmpRows = await this.fetchFmpBars(ticker, startDate, endDate);
+        if (fmpRows.length > 0) return fmpRows;
+        return await this.fetchAlphaVantageBars(ticker, startDate, endDate);
       } catch {
         return [];
       }
@@ -402,7 +509,7 @@ class AlpacaProvider implements MarketDataProvider {
     this.secret = env.ALPACA_API_SECRET ?? "";
     this.feed = env.ALPACA_FEED ?? "iex";
     this.fallbackPreferredTickers = buildFallbackPreferredTickers(options.yahooPreferredTickers);
-    this.stooqFallback = new StooqProvider(this.fallbackPreferredTickers, env.FMP_API_KEY ?? "");
+    this.stooqFallback = new StooqProvider(this.fallbackPreferredTickers, env.FMP_API_KEY ?? "", env.ALPHA_VANTAGE_API_KEY ?? "");
     if (!this.key || !this.secret) {
       throw new Error("ALPACA_API_KEY and ALPACA_API_SECRET are required when DATA_PROVIDER=alpaca");
     }
@@ -500,7 +607,6 @@ class AlpacaProvider implements MarketDataProvider {
         const latest = latestByTicker.get(ticker);
         if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
       }
-      const replacedByConsolidated = new Set<string>();
       if (this.feed === "iex") {
         const preferredBatch = batch.filter((ticker) => this.fallbackPreferredTickers.has(ticker.toUpperCase()));
         if (preferredBatch.length > 0) {
@@ -512,11 +618,6 @@ class AlpacaProvider implements MarketDataProvider {
               const latest = latestByTicker.get(ticker);
               if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
             }
-            for (const ticker of preferredBatch) {
-              if ((latestByTicker.get(ticker.toUpperCase()) ?? "") >= endDate) {
-                replacedByConsolidated.add(ticker.toUpperCase());
-              }
-            }
           } catch (error) {
             console.error("alpaca sip fallback failed for preferred tickers", { count: preferredBatch.length, error });
           }
@@ -525,7 +626,7 @@ class AlpacaProvider implements MarketDataProvider {
       const missingOrStale = batch.filter((ticker) => {
         const normalized = ticker.toUpperCase();
         const latest = latestByTicker.get(normalized);
-        return !latest || latest < endDate || (this.feed === "iex" && this.fallbackPreferredTickers.has(normalized) && !replacedByConsolidated.has(normalized));
+        return !latest || latest < endDate || (this.feed === "iex" && this.fallbackPreferredTickers.has(normalized));
       });
       if (missingOrStale.length > 0) {
         try {

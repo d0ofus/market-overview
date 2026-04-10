@@ -944,7 +944,9 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
   try {
-    const yahooPreferredTickers = await loadYahooPreferredDailyBarTickers(env, unique);
+    const yahooPreferredTickers = replaceExisting
+      ? unique
+      : await loadYahooPreferredDailyBarTickers(env, unique);
     provider = getProvider(env, { yahooPreferredTickers });
   } catch (error) {
     console.error("market data provider unavailable for recent bar refresh", error);
