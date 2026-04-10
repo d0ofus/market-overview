@@ -1,5 +1,6 @@
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { sanitizeBarSeries } from "./metrics";
+import { latestUsSessionAsOfDate } from "./refresh-timing";
 import type { Env } from "./types";
 
 const DEFAULT_CONFIG_ID = "default";
@@ -24,6 +25,7 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
     "SELECT id, as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, datetime(generated_at) DESC LIMIT 1",
   ).bind(configId).first<{ id: string; asOfDate: string }>();
   if (!latest?.id) return false;
+  if (latest.asOfDate > latestUsSessionAsOfDate(new Date())) return true;
 
   const expectedEqualWeightNames = new Map(
     EQUAL_WEIGHT_SECTOR_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]),

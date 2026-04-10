@@ -62,6 +62,20 @@ function createEnv(state: FakeDbState) {
 }
 
 describe("overview snapshot staleness", () => {
+  it("marks snapshot stale when its as-of date is later than the latest completed US session", async () => {
+    const stale = await isOverviewSnapshotStale(createEnv({
+      snapshotId: "snap-future",
+      asOfDate: "2999-01-01",
+      equalWeightRows: [],
+      thematicWatchlistRows: [],
+      thematicSnapshotRows: [],
+      sparklineRows: [],
+      barSeries: {},
+    }) as never);
+
+    expect(stale).toBe(true);
+  });
+
   it("marks snapshot stale when equal-weight names use the old format", async () => {
     const stale = await isOverviewSnapshotStale(createEnv({
       snapshotId: "snap-1",

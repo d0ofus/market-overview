@@ -3,6 +3,7 @@ import { loadConfig } from "./db";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
+import { latestUsSessionAsOfDate } from "./refresh-timing";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
 import type { Env, SnapshotResponse } from "./types";
 
@@ -23,6 +24,11 @@ function previousWeekday(date: Date): Date {
     d.setUTCDate(d.getUTCDate() - 1);
   }
   return d;
+}
+
+function resolveAsOfDate(asOfDateInput?: string): string {
+  if (!asOfDateInput) return latestUsSessionAsOfDate(new Date());
+  return toISODate(previousWeekday(new Date(`${asOfDateInput}T00:00:00Z`)));
 }
 
 const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
@@ -453,8 +459,7 @@ export async function computeAndStoreSnapshot(
 ): Promise<{ snapshotId: string; asOfDate: string }> {
   const includeBreadth = options.includeBreadth ?? true;
   const pullProviderBars = options.pullProviderBars ?? true;
-  const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
-  const asOfDate = toISODate(previousWeekday(today));
+  const asOfDate = resolveAsOfDate(asOfDateInput);
   const generatedAt = new Date().toISOString();
   const config = await loadConfig(env, configId);
   let providerLabel = "Stored Daily Bars";
@@ -610,8 +615,7 @@ export async function recomputeBreadthFromStoredBars(
   env: Env,
   asOfDateInput?: string,
 ): Promise<{ asOfDate: string; universeCount: number; unavailable: Array<{ id: string; name: string; reason: string }> }> {
-  const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
-  const asOfDate = toISODate(previousWeekday(today));
+  const asOfDate = resolveAsOfDate(asOfDateInput);
   const generatedAt = new Date().toISOString();
   const breadthState = await ensureBreadthUniverseMemberships(env);
   const universeIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
@@ -626,8 +630,7 @@ export async function recomputeBreadthFromStoredBars(
 }
 
 export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string): Promise<{ asOfDate: string; barCount: number }> {
-  const today = asOfDateInput ? new Date(`${asOfDateInput}T00:00:00Z`) : new Date();
-  const asOfDate = toISODate(previousWeekday(today));
+  const asOfDate = resolveAsOfDate(asOfDateInput);
   let tickers: string[] = [];
   try {
     const nasdaqUniverse = await loadNasdaqTraderUniverses();

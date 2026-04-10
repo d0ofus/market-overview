@@ -565,10 +565,9 @@ async function loadOverviewTickers(env: Env): Promise<string[]> {
   return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
 }
 
-async function loadTickersMissingRecentBars(env: Env, tickers: string[], maxAgeDays = 14): Promise<string[]> {
+async function loadTickersMissingRecentBars(env: Env, tickers: string[], expectedAsOfDate = latestUsSessionAsOfDate(new Date())): Promise<string[]> {
   const unique = uniqueTickers(tickers);
   if (unique.length === 0) return [];
-  const thresholdDate = new Date(Date.now() - maxAgeDays * 86400_000).toISOString().slice(0, 10);
   const lastDateByTicker = new Map<string, string | null>();
   const chunkSize = 80;
   for (let i = 0; i < unique.length; i += chunkSize) {
@@ -581,7 +580,7 @@ async function loadTickersMissingRecentBars(env: Env, tickers: string[], maxAgeD
   }
   return unique.filter((ticker) => {
     const lastDate = lastDateByTicker.get(ticker) ?? null;
-    return !lastDate || lastDate < thresholdDate;
+    return !lastDate || lastDate < expectedAsOfDate;
   });
 }
 
@@ -609,7 +608,8 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   lastOverviewBarRefreshAt = now;
   const tickers = await loadOverviewTickers(env);
   if (tickers.length === 0) return;
-  const staleTickers = await loadTickersMissingRecentBars(env, tickers, 14);
+  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const staleTickers = await loadTickersMissingRecentBars(env, tickers, expectedAsOfDate);
   const shortHistoryTickers = await loadTickersMissingBarHistory(env, tickers, OVERVIEW_SPARKLINE_MIN_POINTS);
   const refreshTickers = uniqueTickers([...staleTickers, ...shortHistoryTickers]);
   if (refreshTickers.length === 0) return;
