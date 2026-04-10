@@ -139,39 +139,50 @@ export function PeerGroupModal({
                 Loading peer group...
               </div>
             ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {pagedMembers.map((member) => (
-                  <div key={`${ticker}-${member.ticker}`} className="card p-2">
-                    <div className="mb-2 flex items-center justify-between">
-                      <span className="font-semibold text-accent">{member.ticker}</span>
-                      <span className={`text-xs ${(metrics[member.ticker]?.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>
-                        {typeof metrics[member.ticker]?.change1d === "number"
-                          ? `${metrics[member.ticker]!.change1d!.toFixed(2)}%`
-                          : "-"}
-                      </span>
-                    </div>
-                    <div className="mb-1 text-xs text-slate-300">
-                      <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
-                        <div>Price: <span className="text-slate-200">{formatPrice(metrics[member.ticker]?.price)}</span></div>
-                        <div>Mkt Cap: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.marketCap)}</span></div>
-                        <div>Avg Vol: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.avgVolume)}</span></div>
+              <>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {pagedMembers.map((member) => (
+                    <div key={`${ticker}-${member.ticker}`} className="card p-2">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="font-semibold text-accent">{member.ticker}</span>
+                        <span className={`text-xs ${(metrics[member.ticker]?.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>
+                          {typeof metrics[member.ticker]?.change1d === "number"
+                            ? `${metrics[member.ticker]!.change1d!.toFixed(2)}%`
+                            : "-"}
+                        </span>
                       </div>
+                      <div className="mb-1 text-xs text-slate-300">
+                        <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
+                          <div>Price: <span className="text-slate-200">{formatPrice(metrics[member.ticker]?.price)}</span></div>
+                          <div>Mkt Cap: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.marketCap)}</span></div>
+                          <div>Avg Vol: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.avgVolume)}</span></div>
+                        </div>
+                      </div>
+                      <p className="mb-2 line-clamp-2 text-xs text-slate-400">{member.name ?? member.ticker}</p>
+                      <TradingViewWidget ticker={member.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                      <button
+                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                        onClick={() => setActiveChartTicker(member.ticker)}
+                      >
+                        <Maximize2 className="h-3.5 w-3.5" />
+                        Expand chart
+                      </button>
                     </div>
-                    <p className="mb-2 line-clamp-2 text-xs text-slate-400">{member.name ?? member.ticker}</p>
-                    <TradingViewWidget ticker={member.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                    <button
-                      className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                      onClick={() => setActiveChartTicker(member.ticker)}
-                    >
-                      <Maximize2 className="h-3.5 w-3.5" />
-                      Expand chart
-                    </button>
-                  </div>
-                ))}
-                {!loading && sortedMembers.length === 0 && (
-                  <div className="card p-4 text-sm text-slate-300">No peer group members available for this ticker.</div>
-                )}
-              </div>
+                  ))}
+                  {!loading && sortedMembers.length === 0 && (
+                    <div className="card p-4 text-sm text-slate-300">No peer group members available for this ticker.</div>
+                  )}
+                </div>
+                <div className="mt-3">
+                  <ChartGridPager
+                    totalItems={sortedMembers.length}
+                    page={memberPage}
+                    pageSize={CHARTS_PER_PAGE}
+                    itemLabel="tickers"
+                    onPageChange={setMemberPage}
+                  />
+                </div>
+              </>
             )}
           </div>
         </div>
