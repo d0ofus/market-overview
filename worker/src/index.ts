@@ -613,7 +613,7 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   const shortHistoryTickers = await loadTickersMissingBarHistory(env, tickers, OVERVIEW_SPARKLINE_MIN_POINTS);
   const refreshTickers = uniqueTickers([...staleTickers, ...shortHistoryTickers]);
   if (refreshTickers.length === 0) return;
-  await refreshRecentBarsForTickers(env, refreshTickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
+  await refreshRecentBarsForTickers(env, refreshTickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
   await recomputeDashboardFromStoredBars(env);
 }
 
@@ -658,7 +658,7 @@ async function refreshPageScopedData(
   if (page === "overview") {
     const tickers = await loadOverviewTickers(env);
     try {
-      await refreshRecentBarsForTickers(env, tickers);
+      await refreshRecentBarsForTickers(env, tickers, 1600, 21, true);
       await recomputeDashboardFromStoredBars(env);
       return { page, refreshedTickers: tickers.length };
     } catch (error) {
@@ -914,19 +914,46 @@ async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, {
   return map;
 }
 
-async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600, lookbackDays = 21): Promise<void> {
+async function loadYahooPreferredDailyBarTickers(env: Env, tickers: string[]): Promise<string[]> {
+  const preferred = new Set<string>();
+  for (let i = 0; i < tickers.length; i += 80) {
+    const batch = tickers.slice(i, i + 80).map((ticker) => ticker.toUpperCase()).filter(Boolean);
+    if (batch.length === 0) continue;
+    const placeholders = batch.map(() => "?").join(",");
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT ticker FROM symbols WHERE ticker IN (${placeholders}) AND lower(COALESCE(asset_class, '')) = 'etf'
+         UNION
+         SELECT ticker FROM etf_watchlists WHERE ticker IN (${placeholders})`,
+      )
+        .bind(...batch, ...batch)
+        .all<{ ticker: string }>();
+      for (const row of rows.results ?? []) {
+        const ticker = row.ticker?.trim().toUpperCase();
+        if (ticker) preferred.add(ticker);
+      }
+    } catch (error) {
+      console.error("load yahoo preferred daily-bar tickers failed", { batchSize: batch.length, error });
+    }
+  }
+  return Array.from(preferred);
+}
+
+async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600, lookbackDays = 21, replaceExisting = false): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean))).slice(0, Math.max(1, maxTickers));
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
   try {
-    provider = getProvider(env);
-  } catch {
+    const yahooPreferredTickers = await loadYahooPreferredDailyBarTickers(env, unique);
+    provider = getProvider(env, { yahooPreferredTickers });
+  } catch (error) {
+    console.error("market data provider unavailable for recent bar refresh", error);
     return;
   }
   try {
-    const end = new Date().toISOString().slice(0, 10);
+    const end = latestUsSessionAsOfDate(new Date());
     const start = new Date(Date.now() - Math.max(1, lookbackDays) * 86400_000).toISOString().slice(0, 10);
-    await refreshDailyBarsIncremental(env, { provider, tickers: unique, startDate: start, endDate: end });
+    await refreshDailyBarsIncremental(env, { provider, tickers: unique, startDate: start, endDate: end, replaceExisting });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);
   }
@@ -962,10 +989,11 @@ app.get("/api/status", async (c) => {
       : null;
   }
 
+  const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
   const overviewLatest = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
-    .bind(config?.id ?? "default")
+    .bind(config?.id ?? "default", latestAllowedAsOfDate)
     .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
   const breadthLatest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
@@ -1015,7 +1043,7 @@ app.get("/api/dashboard", async (c) => {
       if (await isOverviewSnapshotStale(c.env, configId)) {
         await ensureOverviewCatalogCoverage(c.env, { respectThrottle: false });
         const tickers = await loadOverviewTickers(c.env);
-        await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS);
+        await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
         await recomputeDashboardFromStoredBars(c.env, undefined, configId);
       }
     } catch (error) {

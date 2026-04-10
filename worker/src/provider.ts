@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG_TICKERS } from "./etf-catalog";
 
 export type DailyBar = {
   ticker: string;
@@ -22,6 +23,45 @@ export interface MarketDataProvider {
   getDailyBars(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]>;
   getQuoteSnapshot?(tickers: string[]): Promise<Record<string, { price: number; prevClose: number }>>;
   getPremarketSnapshot?(tickers: string[]): Promise<Record<string, PremarketSnapshot>>;
+}
+
+export type ProviderOptions = {
+  yahooPreferredTickers?: Iterable<string>;
+};
+
+function latestBarDate(bars: DailyBar[]): string | null {
+  let latest: string | null = null;
+  for (const bar of bars) {
+    if (!latest || bar.date > latest) latest = bar.date;
+  }
+  return latest;
+}
+
+const IEX_FALLBACK_PREFERRED_TICKERS = new Set([
+  ...ETF_CATALOG_TICKERS,
+  ...EQUAL_WEIGHT_SECTOR_ETFS.map((row) => row.ticker),
+  "SPY",
+  "QQQ",
+  "IWM",
+  "DIA",
+  "RSP",
+  "QQQE",
+  "EQAL",
+  "EDOW",
+  "VIXY",
+  "GLD",
+  "SLV",
+  "USO",
+  "TLT",
+].map((ticker) => ticker.toUpperCase()));
+
+function buildFallbackPreferredTickers(extraTickers?: Iterable<string>): Set<string> {
+  const out = new Set(IEX_FALLBACK_PREFERRED_TICKERS);
+  for (const ticker of extraTickers ?? []) {
+    const normalized = ticker.trim().toUpperCase();
+    if (normalized) out.add(normalized);
+  }
+  return out;
 }
 
 type AlpacaPremarketSnapshotInput = {
@@ -66,6 +106,11 @@ class SyntheticProvider implements MarketDataProvider {
 
 class StooqProvider implements MarketDataProvider {
   label = "Stooq (Free Delayed EOD)";
+  constructor(
+    private readonly yahooPreferredTickers = new Set<string>(),
+    private readonly fmpApiKey = "",
+  ) {}
+
   private readonly aliases: Record<string, string> = {
     VIX: "^vix",
     VXN: "^vxn",
@@ -158,6 +203,9 @@ class StooqProvider implements MarketDataProvider {
               close?: Array<number | null>;
               volume?: Array<number | null>;
             }>;
+            adjclose?: Array<{
+              adjclose?: Array<number | null>;
+            }>;
           };
         }>;
       };
@@ -166,6 +214,7 @@ class StooqProvider implements MarketDataProvider {
     const ts = result?.timestamp ?? [];
     const quote = result?.indicators?.quote?.[0];
     if (!quote || ts.length === 0) return [];
+    const adjCloses = result?.indicators?.adjclose?.[0]?.adjclose ?? [];
     const opens = quote.open ?? [];
     const highs = quote.high ?? [];
     const lows = quote.low ?? [];
@@ -177,6 +226,7 @@ class StooqProvider implements MarketDataProvider {
       const high = highs[i];
       const low = lows[i];
       const close = closes[i];
+      const adjustedClose = adjCloses[i];
       if (![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n as number))) continue;
       out.push({
         ticker: ticker.toUpperCase(),
@@ -184,14 +234,60 @@ class StooqProvider implements MarketDataProvider {
         o: open as number,
         h: high as number,
         l: low as number,
-        c: close as number,
+        c: typeof adjustedClose === "number" && Number.isFinite(adjustedClose) ? adjustedClose : close as number,
         volume: typeof volumes[i] === "number" && Number.isFinite(volumes[i] as number) ? (volumes[i] as number) : 0,
       });
     }
     return out;
   }
 
-  private async fetchTickerBars(ticker: string): Promise<DailyBar[]> {
+  private async fetchFmpBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
+    if (!this.fmpApiKey) return [];
+    const params = new URLSearchParams({
+      symbol: ticker.trim().toUpperCase(),
+      apikey: this.fmpApiKey,
+    });
+    if (startDate) params.set("from", startDate);
+    if (endDate) params.set("to", endDate);
+    const res = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "market-command-centre/1.0",
+      },
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as
+      | Array<{ date?: string; open?: number; high?: number; low?: number; close?: number; adjClose?: number; volume?: number }>
+      | { historical?: Array<{ date?: string; open?: number; high?: number; low?: number; close?: number; adjClose?: number; volume?: number }> };
+    const rows = Array.isArray(json) ? json : json.historical ?? [];
+    const out: DailyBar[] = [];
+    for (const row of rows) {
+      const date = row.date;
+      const open = row.open;
+      const high = row.high;
+      const low = row.low;
+      const close = row.adjClose ?? row.close;
+      if (
+        typeof date !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+        ![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n as number))
+      ) {
+        continue;
+      }
+      out.push({
+        ticker: ticker.toUpperCase(),
+        date,
+        o: open as number,
+        h: high as number,
+        l: low as number,
+        c: close as number,
+        volume: typeof row.volume === "number" && Number.isFinite(row.volume) ? row.volume : 0,
+      });
+    }
+    return out;
+  }
+
+  private async fetchTickerBars(ticker: string, startDate?: string, endDate?: string): Promise<DailyBar[]> {
     try {
       const upper = ticker.trim().toUpperCase();
       if (upper === "VIX" || upper === "^VIX") {
@@ -202,6 +298,14 @@ class StooqProvider implements MarketDataProvider {
       } else {
         const cboeVix = await this.fetchCboeVixBars(ticker);
         if (cboeVix.length > 0) return cboeVix;
+      }
+      if (this.yahooPreferredTickers.has(upper)) {
+        const yahooRows = await this.fetchYahooIndexBars(ticker);
+        const yahooLatest = latestBarDate(yahooRows);
+        if (yahooLatest && (!endDate || yahooLatest >= endDate)) return yahooRows;
+        const fmpRows = await this.fetchFmpBars(ticker, startDate, endDate);
+        const fmpLatest = latestBarDate(fmpRows);
+        if (fmpLatest && (!endDate || fmpLatest >= endDate)) return fmpRows;
       }
       const symbol = this.symbolForStooq(ticker);
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
@@ -244,11 +348,22 @@ class StooqProvider implements MarketDataProvider {
       if (out.length === 0) {
         return await this.fetchYahooIndexBars(ticker);
       }
+      const stooqLatest = latestBarDate(out);
+      if (endDate && stooqLatest && stooqLatest < endDate) {
+        const yahooRows = await this.fetchYahooIndexBars(ticker);
+        const yahooLatest = latestBarDate(yahooRows);
+        if (yahooLatest && yahooLatest > stooqLatest) return yahooRows;
+        const fmpRows = await this.fetchFmpBars(ticker, startDate, endDate);
+        const fmpLatest = latestBarDate(fmpRows);
+        if (fmpLatest && fmpLatest > stooqLatest) return fmpRows;
+      }
       return out;
     } catch (error) {
       console.error("stooq ticker fetch failed", { ticker, error });
       try {
-        return await this.fetchYahooIndexBars(ticker);
+        const yahooRows = await this.fetchYahooIndexBars(ticker);
+        if (yahooRows.length > 0) return yahooRows;
+        return await this.fetchFmpBars(ticker, startDate, endDate);
       } catch {
         return [];
       }
@@ -260,7 +375,7 @@ class StooqProvider implements MarketDataProvider {
     const batchSize = 4;
     for (let i = 0; i < tickers.length; i += batchSize) {
       const chunk = tickers.slice(i, i + batchSize);
-      const settled = await Promise.allSettled(chunk.map((ticker) => this.fetchTickerBars(ticker)));
+      const settled = await Promise.allSettled(chunk.map((ticker) => this.fetchTickerBars(ticker, startDate, endDate)));
       for (const item of settled) {
         if (item.status !== "fulfilled") continue;
         const tickerBars = item.value;
@@ -279,12 +394,15 @@ class AlpacaProvider implements MarketDataProvider {
   private readonly key: string;
   private readonly secret: string;
   private readonly feed: string;
-  private readonly stooqFallback = new StooqProvider();
+  private readonly fallbackPreferredTickers: Set<string>;
+  private readonly stooqFallback: StooqProvider;
 
-  constructor(env: Env) {
+  constructor(env: Env, options: ProviderOptions = {}) {
     this.key = env.ALPACA_API_KEY ?? "";
     this.secret = env.ALPACA_API_SECRET ?? "";
     this.feed = env.ALPACA_FEED ?? "iex";
+    this.fallbackPreferredTickers = buildFallbackPreferredTickers(options.yahooPreferredTickers);
+    this.stooqFallback = new StooqProvider(this.fallbackPreferredTickers, env.FMP_API_KEY ?? "");
     if (!this.key || !this.secret) {
       throw new Error("ALPACA_API_KEY and ALPACA_API_SECRET are required when DATA_PROVIDER=alpaca");
     }
@@ -300,10 +418,10 @@ class AlpacaProvider implements MarketDataProvider {
     return ts.slice(0, 10);
   }
 
-  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
+  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
     if (tickers.length === 0) return [];
     try {
-      return await this.fetchChunk(tickers, startDate, endDate);
+      return await this.fetchChunk(tickers, startDate, endDate, feed);
     } catch (error) {
       if (tickers.length === 1) {
         console.error("alpaca ticker fetch failed", { ticker: tickers[0], error });
@@ -313,14 +431,14 @@ class AlpacaProvider implements MarketDataProvider {
       const left = tickers.slice(0, mid);
       const right = tickers.slice(mid);
       const [leftRows, rightRows] = await Promise.all([
-        this.fetchChunkWithIsolation(left, startDate, endDate),
-        this.fetchChunkWithIsolation(right, startDate, endDate),
+        this.fetchChunkWithIsolation(left, startDate, endDate, feed),
+        this.fetchChunkWithIsolation(right, startDate, endDate, feed),
       ]);
       return [...leftRows, ...rightRows];
     }
   }
 
-  private async fetchChunk(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]> {
+  private async fetchChunk(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
     const out: DailyBar[] = [];
     let pageToken: string | undefined;
     do {
@@ -329,10 +447,10 @@ class AlpacaProvider implements MarketDataProvider {
         symbols: tickers.join(","),
         start: `${startDate}T00:00:00Z`,
         end: `${endDate}T23:59:59Z`,
-        adjustment: "raw",
+        adjustment: "all",
         sort: "asc",
         limit: "10000",
-        feed: this.feed,
+        feed,
       });
       if (pageToken) params.set("page_token", pageToken);
       const res = await fetch(`${this.baseUrl}?${params.toString()}`, {
@@ -376,14 +494,48 @@ class AlpacaProvider implements MarketDataProvider {
       const rows = await this.fetchChunkWithIsolation(batch, startDate, endDate);
       all.push(...rows);
 
-      const present = new Set(rows.map((r) => r.ticker.toUpperCase()));
-      const missing = batch.filter((ticker) => !present.has(ticker.toUpperCase()));
-      if (missing.length > 0) {
+      const latestByTicker = new Map<string, string>();
+      for (const row of rows) {
+        const ticker = row.ticker.toUpperCase();
+        const latest = latestByTicker.get(ticker);
+        if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
+      }
+      const replacedByConsolidated = new Set<string>();
+      if (this.feed === "iex") {
+        const preferredBatch = batch.filter((ticker) => this.fallbackPreferredTickers.has(ticker.toUpperCase()));
+        if (preferredBatch.length > 0) {
+          try {
+            const sipRows = await this.fetchChunk(preferredBatch, startDate, endDate, "sip");
+            all.push(...sipRows);
+            for (const row of sipRows) {
+              const ticker = row.ticker.toUpperCase();
+              const latest = latestByTicker.get(ticker);
+              if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
+            }
+            for (const ticker of preferredBatch) {
+              if ((latestByTicker.get(ticker.toUpperCase()) ?? "") >= endDate) {
+                replacedByConsolidated.add(ticker.toUpperCase());
+              }
+            }
+          } catch (error) {
+            console.error("alpaca sip fallback failed for preferred tickers", { count: preferredBatch.length, error });
+          }
+        }
+      }
+      const missingOrStale = batch.filter((ticker) => {
+        const normalized = ticker.toUpperCase();
+        const latest = latestByTicker.get(normalized);
+        return !latest || latest < endDate || (this.feed === "iex" && this.fallbackPreferredTickers.has(normalized) && !replacedByConsolidated.has(normalized));
+      });
+      if (missingOrStale.length > 0) {
         try {
-          const fallbackRows = await this.stooqFallback.getDailyBars(missing, startDate, endDate);
-          all.push(...fallbackRows.map((row) => ({ ...row, ticker: row.ticker.toUpperCase() })));
+          const fallbackRows = await this.stooqFallback.getDailyBars(missingOrStale, startDate, endDate);
+          all.push(
+            ...fallbackRows
+              .map((row) => ({ ...row, ticker: row.ticker.toUpperCase() })),
+          );
         } catch (error) {
-          console.error("stooq fallback failed for alpaca missing tickers", { missingCount: missing.length, error });
+          console.error("stooq fallback failed for alpaca missing/stale tickers", { missingCount: missingOrStale.length, error });
         }
       }
     }
@@ -461,18 +613,18 @@ class AlpacaProvider implements MarketDataProvider {
   }
 }
 
-export function getProvider(env: Env): MarketDataProvider {
+export function getProvider(env: Env, options: ProviderOptions = {}): MarketDataProvider {
   const mode = (env.DATA_PROVIDER ?? "alpaca").toLowerCase();
   if (mode === "alpaca") {
     if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
       return new StooqProvider();
     }
-    return new AlpacaProvider(env);
+    return new AlpacaProvider(env, options);
   }
   if (mode === "stooq") return new StooqProvider();
   if (mode === "synthetic" || mode === "csv") return new SyntheticProvider();
   if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
     return new StooqProvider();
   }
-  return new AlpacaProvider(env);
+  return new AlpacaProvider(env, options);
 }

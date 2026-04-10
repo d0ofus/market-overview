@@ -75,13 +75,14 @@ function dedupeFetchedBars(
   latestByTicker: Map<string, string | null>,
   desiredStartDate: string,
   endDate: string,
+  replaceExisting = false,
 ): DailyBar[] {
   const byTickerDate = new Map<string, DailyBar>();
   for (const bar of bars) {
     const ticker = bar.ticker.toUpperCase();
     const latest = latestByTicker.get(ticker) ?? null;
     if (bar.date < desiredStartDate || bar.date > endDate) continue;
-    if (latest && bar.date <= latest) continue;
+    if (!replaceExisting && latest && bar.date <= latest) continue;
     byTickerDate.set(`${ticker}|${bar.date}`, { ...bar, ticker });
   }
   return Array.from(byTickerDate.values());
@@ -93,6 +94,7 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   endDate: string;
   maxTickers?: number;
   provider?: MarketDataProvider;
+  replaceExisting?: boolean;
 }): Promise<{ requestedTickers: number; fetchedRows: number; writtenRows: number; skippedCurrentTickers: number }> {
   const tickers = normalizeTickers(input.tickers, input.maxTickers);
   if (tickers.length === 0) {
@@ -101,8 +103,12 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
 
   const provider = input.provider ?? getProvider(env);
   const latestByTicker = await loadLatestBarDates(env, tickers);
-  const grouped = groupTickersByRefreshStart(tickers, latestByTicker, input.startDate, input.endDate);
-  const skippedCurrentTickers = tickers.length - Array.from(grouped.values()).reduce((sum, rows) => sum + rows.length, 0);
+  const grouped = input.replaceExisting
+    ? new Map([[input.startDate, tickers]])
+    : groupTickersByRefreshStart(tickers, latestByTicker, input.startDate, input.endDate);
+  const skippedCurrentTickers = input.replaceExisting
+    ? 0
+    : tickers.length - Array.from(grouped.values()).reduce((sum, rows) => sum + rows.length, 0);
   const fetchedBars: DailyBar[] = [];
 
   for (const [startDate, groupTickers] of grouped) {
@@ -110,7 +116,7 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
     fetchedBars.push(...rows);
   }
 
-  const barsToWrite = dedupeFetchedBars(fetchedBars, latestByTicker, input.startDate, input.endDate);
+  const barsToWrite = dedupeFetchedBars(fetchedBars, latestByTicker, input.startDate, input.endDate, input.replaceExisting ?? false);
   if (barsToWrite.length > 0) {
     await ensureSymbolsExist(env, barsToWrite.map((bar) => bar.ticker));
     await runStatementsInChunks(

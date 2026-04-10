@@ -22,7 +22,7 @@ function parseSparklineValues(raw: string | null | undefined): number[] | null {
 
 export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFIG_ID): Promise<boolean> {
   const latest = await env.DB.prepare(
-    "SELECT id, as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, datetime(generated_at) DESC LIMIT 1",
+    "SELECT id, as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   ).bind(configId).first<{ id: string; asOfDate: string }>();
   if (!latest?.id) return false;
   if (latest.asOfDate > latestUsSessionAsOfDate(new Date())) return true;

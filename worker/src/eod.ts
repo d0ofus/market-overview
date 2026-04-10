@@ -747,6 +747,7 @@ export async function computeAndStoreBreadth(
 
 export async function loadSnapshot(env: Env, configId = "default", requestedDate?: string): Promise<SnapshotResponse> {
   const config = await loadConfig(env, configId);
+  const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
   const meta = requestedDate
     ? await env.DB.prepare(
         "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date = ?",
@@ -754,9 +755,9 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
         .bind(configId, requestedDate)
         .first<{ id: string; asOfDate: string; generatedAt: string; providerLabel: string }>()
     : await env.DB.prepare(
-        "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC LIMIT 1",
+        "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
       )
-        .bind(configId)
+        .bind(configId, latestAllowedAsOfDate)
         .first<{ id: string; asOfDate: string; generatedAt: string; providerLabel: string }>();
 
   if (!meta) {

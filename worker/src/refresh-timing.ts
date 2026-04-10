@@ -17,14 +17,15 @@ export function zonedParts(now: Date, timezone: string): { weekday: string; day:
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   });
   const parts = dtf.formatToParts(now);
   const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
   const year = Number(get("year") || "1970");
   const month = Number(get("month") || "1");
   const day = Number(get("day") || "1");
-  const hour = Number(get("hour") || "0");
+  const rawHour = Number(get("hour") || "0");
+  const hour = rawHour === 24 ? 0 : rawHour;
   const minute = Number(get("minute") || "0");
   const weekday = get("weekday");
   return {
