@@ -2,6 +2,7 @@
 
 ## Overview
 - Fix sparklines
+- Check source of data for EQ Index Futures, they seem wrong.
 - Add macro stuff like 10Y yields
 - Add yield curve structure
 - Amend implied rate path to intervals of 0.1% on the y-axis
@@ -24,7 +25,9 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-- Circle or highlight current date in the calendar
+> Change pop up window when clicking on sector/narrative calendar ticker to be a push out on the right that shows the chart, so that can click other tickers after without having to close a pop up
+> Remove redundant info on sector/narrative claendar
+> Increase the size of pop up window when clicking ETF constituents, to fit 3 in the pop up page
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -38,6 +41,7 @@
 - Learn how to add/remove tickers from peer groups
 
 ## Correlation
+>> https://www.hiddenmetrix.com/guide/correlation-analysis/
 - Link correlation to peer groups
 
 ## Scans
@@ -77,7 +81,6 @@
 
 ## Research Lab
 ==>> Make token use more efficient
-==>> Check on database management 
 
 - Add in embedded TV chart
 - Add in comparison with peers (see peer-group groupings), analyse leader/laggard relationship with peers, performance comparison and whether the industry is trending
@@ -93,8 +96,6 @@
 ## New Functions
 - Add in morning brief section using Claude API
 - Add macro dashboard
-- Create correlation/cointegration matrix of peer-groups or manual input tickers
->> https://www.hiddenmetrix.com/guide/correlation-analysis/
 - Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
