@@ -1,5 +1,6 @@
 import { buildRelativeStrengthSeries, computeBreadthStats, computeMetrics, rankValue, sanitizeBarSeries } from "./metrics";
 import { loadConfig } from "./db";
+import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
@@ -504,16 +505,7 @@ export async function computeAndStoreSnapshot(
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
   if (provider) {
     try {
-      const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
-      if (freshBars.length > 0) {
-        await ensureSymbolsExist(env, freshBars.map((b) => b.ticker));
-        const stmts = freshBars.map((b) =>
-          env.DB.prepare(
-            "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume),
-        );
-        await runStatementsInChunks(env, stmts);
-      }
+      await refreshDailyBarsIncremental(env, { provider, tickers, startDate, endDate });
     } catch (error) {
       providerLabel = `${provider.label} (refresh failed; stored bars used)`;
       console.error("provider refresh failed", error);
@@ -664,16 +656,8 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
     const provider = getProvider(env);
     const endDate = asOfDate;
     const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
-    const freshBars = await provider.getDailyBars(tickers, startDate, endDate);
-    if (freshBars.length > 0) {
-      barCount = freshBars.length;
-      const statements = freshBars.map((b) =>
-        env.DB.prepare(
-          "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume),
-      );
-      await runStatementsInChunks(env, statements);
-    }
+    const refresh = await refreshDailyBarsIncremental(env, { provider, tickers, startDate, endDate });
+    barCount = refresh.writtenRows;
   } catch (error) {
     console.error("sp500 core breadth refresh provider pull failed; using stored bars", error);
   }

@@ -39,6 +39,7 @@ import {
   watchlistSourcePatchSchema,
 } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
+import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
@@ -925,14 +926,7 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
   try {
     const end = new Date().toISOString().slice(0, 10);
     const start = new Date(Date.now() - Math.max(1, lookbackDays) * 86400_000).toISOString().slice(0, 10);
-    const bars = await provider.getDailyBars(unique, start, end);
-    if (bars.length === 0) return;
-    const stmts = bars.map((b) =>
-      env.DB.prepare(
-        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(b.ticker.toUpperCase(), b.date, b.o, b.h, b.l, b.c, b.volume ?? 0),
-    );
-    await env.DB.batch(stmts);
+    await refreshDailyBarsIncremental(env, { provider, tickers: unique, startDate: start, endDate: end });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);
   }
