@@ -46,6 +46,7 @@ const ICON_BUTTON_CLASS =
 const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
 const CHARTS_PER_PAGE = 20;
+const CALENDAR_COLLAPSED_ITEM_COUNT = 3;
 
 type EntrySymbol = { ticker: string; name: string | null };
 type SectorEntry = {
@@ -263,6 +264,7 @@ export function SectorTracker() {
   const [editTickerInput, setEditTickerInput] = useState("");
   const [editTickers, setEditTickers] = useState<string[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
+  const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -288,6 +290,10 @@ export function SectorTracker() {
 
   useEffect(() => {
     void load();
+  }, [month]);
+
+  useEffect(() => {
+    setExpandedCalendarDates([]);
   }, [month]);
 
   const openEtfPopup = async (ticker: string, fundName?: string | null) => {
@@ -450,6 +456,10 @@ export function SectorTracker() {
     setActiveSection(id);
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const toggleCalendarDateExpansion = (date: string) => {
+    setExpandedCalendarDates((prev) => (prev.includes(date) ? prev.filter((value) => value !== date) : [...prev, date]));
   };
 
   useEffect(() => {
@@ -788,6 +798,9 @@ export function SectorTracker() {
 
                       const items = calendarMap.get(date) ?? [];
                       const isToday = date === todayDate;
+                      const isExpanded = expandedCalendarDates.includes(date);
+                      const visibleItems = isExpanded ? items : items.slice(0, CALENDAR_COLLAPSED_ITEM_COUNT);
+                      const hiddenItemCount = Math.max(0, items.length - CALENDAR_COLLAPSED_ITEM_COUNT);
 
                       return (
                         <div
@@ -807,7 +820,7 @@ export function SectorTracker() {
                             ) : null}
                           </div>
                           <div className="mt-3 space-y-2">
-                            {items.slice(0, 3).map((it) => (
+                            {visibleItems.map((it) => (
                               <div key={it.id} className="rounded-2xl bg-panel/70 p-2.5 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.06)]">
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="text-xs font-semibold text-slate-100">{it.sectorName}</div>
@@ -839,10 +852,26 @@ export function SectorTracker() {
                                 {it.notes ? <p className="mt-2 text-xs leading-relaxed text-slate-400">{it.notes}</p> : null}
                               </div>
                             ))}
-                            {items.length > 3 ? (
-                              <div className="rounded-xl bg-panel/35 px-2.5 py-2 text-xs text-slate-400">
-                                +{items.length - 3} more entr{items.length - 3 === 1 ? "y" : "ies"}
-                              </div>
+                            {hiddenItemCount > 0 ? (
+                              <button
+                                type="button"
+                                className="w-full rounded-xl bg-panel/35 px-2.5 py-2 text-left text-xs text-slate-400 transition hover:bg-panel/55 hover:text-slate-200"
+                                onClick={() => toggleCalendarDateExpansion(date)}
+                                aria-expanded={isExpanded}
+                              >
+                                {isExpanded
+                                  ? "Show fewer entries"
+                                  : `+${hiddenItemCount} more entr${hiddenItemCount === 1 ? "y" : "ies"}`}
+                              </button>
+                            ) : isExpanded && items.length > CALENDAR_COLLAPSED_ITEM_COUNT ? (
+                              <button
+                                type="button"
+                                className="w-full rounded-xl bg-panel/35 px-2.5 py-2 text-left text-xs text-slate-400 transition hover:bg-panel/55 hover:text-slate-200"
+                                onClick={() => toggleCalendarDateExpansion(date)}
+                                aria-expanded={isExpanded}
+                              >
+                                Show fewer entries
+                              </button>
                             ) : null}
                             {items.length === 0 ? <p className="text-xs text-slate-500">No narratives scheduled.</p> : null}
                           </div>
