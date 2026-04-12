@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   createScanPreset,
@@ -368,6 +368,8 @@ export function ScansPageDashboard() {
   const [fieldOptionsByQuery, setFieldOptionsByQuery] = useState<Record<string, TradingViewFieldOption[]>>({});
   const [fieldLabelMap, setFieldLabelMap] = useState<Record<string, string>>(FIELD_LABELS);
   const [compareMultiplierInputByRule, setCompareMultiplierInputByRule] = useState<Record<string, string>>({});
+  const compilePresetDetailRequestId = useRef(0);
+  const compiledSnapshotRequestId = useRef(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -485,6 +487,7 @@ export function ScansPageDashboard() {
   };
 
   const loadCompiled = async (compilePresetId: string | null) => {
+    const requestId = ++compiledSnapshotRequestId.current;
     if (!compilePresetId) {
       setCompiledSnapshot(null);
       setCompiledError(null);
@@ -493,11 +496,15 @@ export function ScansPageDashboard() {
     setCompiledLoading(true);
     setCompiledError(null);
     try {
-      setCompiledSnapshot(await getScanCompilePresetSnapshot(compilePresetId));
+      const nextSnapshot = await getScanCompilePresetSnapshot(compilePresetId);
+      if (compiledSnapshotRequestId.current !== requestId) return;
+      setCompiledSnapshot(nextSnapshot);
     } catch (loadError) {
+      if (compiledSnapshotRequestId.current !== requestId) return;
       setCompiledError(loadError instanceof Error ? loadError.message : "Failed to load compiled scan preset.");
       setCompiledSnapshot(null);
     } finally {
+      if (compiledSnapshotRequestId.current !== requestId) return;
       setCompiledLoading(false);
     }
   };
@@ -513,15 +520,20 @@ export function ScansPageDashboard() {
 
   useEffect(() => {
     if (!selectedCompilePresetId) {
+      compilePresetDetailRequestId.current += 1;
       setDraftCompilePreset(emptyDraftCompilePreset());
+      setCompiledError(null);
       return;
     }
+    const requestId = ++compilePresetDetailRequestId.current;
     void (async () => {
       try {
         const detail = await getScanCompilePreset(selectedCompilePresetId);
+        if (compilePresetDetailRequestId.current !== requestId) return;
         setCompiledError(null);
         setDraftCompilePreset(detail);
       } catch (loadError) {
+        if (compilePresetDetailRequestId.current !== requestId) return;
         setCompiledError(loadError instanceof Error ? loadError.message : "Failed to load compile preset.");
         setDraftCompilePreset(emptyDraftCompilePreset());
       }
