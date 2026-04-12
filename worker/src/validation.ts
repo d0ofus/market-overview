@@ -209,6 +209,18 @@ export const scanPresetPatchSchema = z.object({
   rowLimit: z.number().int().min(1).max(250).optional(),
 });
 
+const scanCompilePresetIdsSchema = z.array(z.string().min(1)).min(1, "Choose at least one scan preset.");
+
+export const scanCompilePresetCreateSchema = z.object({
+  name: z.string().min(1),
+  scanPresetIds: scanCompilePresetIdsSchema,
+});
+
+export const scanCompilePresetPatchSchema = z.object({
+  name: z.string().min(1).optional(),
+  scanPresetIds: scanCompilePresetIdsSchema.optional(),
+});
+
 export const scanRefreshSchema = z.object({
   presetId: z.string().min(1).nullable().optional(),
 });

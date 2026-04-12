@@ -175,6 +175,26 @@ export type ScanPreset = {
   updatedAt: string;
 };
 
+export type ScanCompilePresetMember = {
+  scanPresetId: string;
+  scanPresetName: string;
+  sortOrder: number;
+};
+
+export type ScanCompilePresetRow = {
+  id: string;
+  name: string;
+  memberCount: number;
+  presetIds: string[];
+  presetNames: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ScanCompilePresetDetail = ScanCompilePresetRow & {
+  members: ScanCompilePresetMember[];
+};
+
 export type ScanRow = {
   ticker: string;
   name: string | null;
@@ -216,6 +236,8 @@ export type CompiledScanUniqueTickerRow = {
 };
 
 export type CompiledScansSnapshot = {
+  compilePresetId: string | null;
+  compilePresetName: string | null;
   presetIds: string[];
   presetNames: string[];
   generatedAt: string;
@@ -1083,6 +1105,14 @@ export function getScanPresets() {
   return getJson<{ rows: ScanPreset[] }>("/api/scans/presets");
 }
 
+export function getScanCompilePresets() {
+  return getJson<{ rows: ScanCompilePresetRow[] }>("/api/scans/compile-presets");
+}
+
+export function getScanCompilePreset(id: string) {
+  return getJson<ScanCompilePresetDetail>(`/api/scans/compile-presets/${encodeURIComponent(id)}`);
+}
+
 export function getCompiledScansSnapshot(presetIds: string[]) {
   return getJson<CompiledScansSnapshot>(appendQuery("/api/scans/compiled", {
     presetIds: presetIds.join(","),
@@ -1092,6 +1122,16 @@ export function getCompiledScansSnapshot(presetIds: string[]) {
 export function getCompiledScansExportUrl(presetIds: string[], dateSuffix?: string | null) {
   return apiUrl(appendQuery("/api/scans/compiled/export.txt", {
     presetIds: presetIds.join(","),
+    dateSuffix: dateSuffix ?? undefined,
+  }));
+}
+
+export function getScanCompilePresetSnapshot(id: string) {
+  return getJson<CompiledScansSnapshot>(`/api/scans/compile-presets/${encodeURIComponent(id)}/compiled`);
+}
+
+export function getScanCompilePresetExportUrl(id: string, dateSuffix?: string | null) {
+  return apiUrl(appendQuery(`/api/scans/compile-presets/${encodeURIComponent(id)}/export.txt`, {
     dateSuffix: dateSuffix ?? undefined,
   }));
 }
@@ -1133,8 +1173,40 @@ export function updateScanPreset(id: string, payload: {
   });
 }
 
+export function duplicateScanPreset(id: string) {
+  return adminFetch<{ ok: boolean; preset: ScanPreset }>(`/api/admin/scans/presets/${encodeURIComponent(id)}/duplicate`, {
+    method: "POST",
+  });
+}
+
 export function deleteScanPreset(id: string) {
   return adminFetch<{ ok: boolean; presetId: string }>(`/api/admin/scans/presets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function createScanCompilePreset(payload: {
+  name: string;
+  scanPresetIds: string[];
+}) {
+  return adminFetch<{ ok: boolean; preset: ScanCompilePresetDetail }>("/api/admin/scans/compile-presets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateScanCompilePreset(id: string, payload: {
+  name?: string;
+  scanPresetIds?: string[];
+}) {
+  return adminFetch<{ ok: boolean; preset: ScanCompilePresetDetail }>(`/api/admin/scans/compile-presets/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteScanCompilePreset(id: string) {
+  return adminFetch<{ ok: boolean; compilePresetId: string }>(`/api/admin/scans/compile-presets/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }

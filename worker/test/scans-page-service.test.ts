@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildTradingViewScanPayload,
+  deleteScanPreset,
+  duplicateScanPreset,
   fetchTradingViewScanRows,
   loadCompiledScansSnapshot,
+  loadCompiledScansSnapshotForCompilePreset,
   normalizeScanRows,
   type ScanPreset,
 } from "../src/scans-page-service";
@@ -320,5 +323,175 @@ describe("scans page service", () => {
       latestPrice: 101,
       latestRelativeVolume: 2.3,
     });
+  });
+
+  it("duplicates presets with copied settings, a fresh id, and incremented copy naming", async () => {
+    const presetRows = [
+      { id: "preset-a", name: "Momentum", isDefault: 1, isActive: 1, rulesJson: JSON.stringify(topGainersPreset.rules), sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+      { id: "preset-b", name: "Momentum Copy", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 50, createdAt: "", updatedAt: "" },
+      { id: "preset-c", name: "Momentum Copy 2", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "ticker", sortDirection: "asc", rowLimit: 25, createdAt: "", updatedAt: "" },
+    ];
+    let insertedRow: any = null;
+
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(...args: any[]) {
+              return {
+                async first() {
+                  if (query.includes("FROM scan_presets WHERE id = ?")) {
+                    const id = args[0];
+                    if (insertedRow?.id === id) return insertedRow;
+                    return presetRows.find((row) => row.id === id) ?? null;
+                  }
+                  return null;
+                },
+                async all() {
+                  if (query.includes("FROM scan_presets ORDER BY")) {
+                    return { results: insertedRow ? [...presetRows, insertedRow] : presetRows };
+                  }
+                  return { results: [] };
+                },
+                async run() {
+                  if (query.includes("UPDATE scan_presets SET is_default = 0")) return {};
+                  if (query.includes("INSERT INTO scan_presets")) {
+                    insertedRow = {
+                      id: args[0],
+                      name: args[1],
+                      isDefault: args[2],
+                      isActive: args[3],
+                      rulesJson: args[4],
+                      sortField: args[5],
+                      sortDirection: args[6],
+                      rowLimit: args[7],
+                      createdAt: "",
+                      updatedAt: "",
+                    };
+                  }
+                  return {};
+                },
+              };
+            },
+            async all() {
+              if (query.includes("FROM scan_presets ORDER BY")) {
+                return { results: insertedRow ? [...presetRows, insertedRow] : presetRows };
+              }
+              return { results: [] };
+            },
+            async run() {
+              if (query.includes("UPDATE scan_presets SET is_default = 0")) return {};
+              return {};
+            },
+          };
+        },
+      },
+    } as any;
+
+    const result = await duplicateScanPreset(env, "preset-a");
+
+    expect(result.id).not.toBe("preset-a");
+    expect(result.name).toBe("Momentum Copy 3");
+    expect(result.isDefault).toBe(false);
+    expect(result.isActive).toBe(true);
+    expect(result.sortField).toBe("change");
+    expect(result.sortDirection).toBe("desc");
+    expect(result.rowLimit).toBe(100);
+    expect(result.rules).toEqual(topGainersPreset.rules);
+  });
+
+  it("loads compiled rows from a saved compile preset", async () => {
+    const compilePresetRows = [
+      { id: "compile-daily", name: "Daily", createdAt: "", updatedAt: "", scanPresetId: "preset-a", scanPresetName: "Leaders", sortOrder: 1 },
+      { id: "compile-daily", name: "Daily", createdAt: "", updatedAt: "", scanPresetId: "preset-b", scanPresetName: "Breakouts", sortOrder: 2 },
+    ];
+    const presetRows = [
+      { id: "preset-a", name: "Leaders", isDefault: 1, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+      { id: "preset-b", name: "Breakouts", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+    ];
+    const snapshotRows = {
+      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, status: "ok", error: null },
+      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 1, status: "ok", error: null },
+    } as const;
+    const scanRows = {
+      "snap-a": [
+        { ticker: "NVDA", name: "NVIDIA", sector: "Technology", industry: "Semiconductors", change1d: 4.5, marketCap: 1, price: 100, avgVolume: 10, priceAvgVolume: 1000, rawJson: JSON.stringify({ relative_volume_10d_calc: 2.1 }) },
+      ],
+      "snap-b": [
+        { ticker: "SNOW", name: "Snowflake", sector: "Technology", industry: "Software", change1d: 3.1, marketCap: 1, price: 30, avgVolume: 10, priceAvgVolume: 300, rawJson: JSON.stringify({ relative_volume_10d_calc: 1.8 }) },
+      ],
+    } as const;
+
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(value: string) {
+              return {
+                async first() {
+                  if (query.includes("FROM scan_presets WHERE id = ?")) {
+                    return presetRows.find((row) => row.id === value) ?? null;
+                  }
+                  if (query.includes("FROM scan_snapshots WHERE preset_id = ?")) {
+                    return snapshotRows[value as keyof typeof snapshotRows] ?? null;
+                  }
+                  return null;
+                },
+                async all() {
+                  if (query.includes("FROM scan_compile_presets cp")) {
+                    return { results: compilePresetRows };
+                  }
+                  if (query.includes("FROM scan_rows WHERE snapshot_id = ?")) {
+                    return { results: scanRows[value as keyof typeof scanRows] ?? [] };
+                  }
+                  return { results: [] };
+                },
+              };
+            },
+          };
+        },
+      },
+    } as any;
+
+    const result = await loadCompiledScansSnapshotForCompilePreset(env, "compile-daily");
+
+    expect(result.compilePresetId).toBe("compile-daily");
+    expect(result.compilePresetName).toBe("Daily");
+    expect(result.presetNames).toEqual(["Leaders", "Breakouts"]);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA", "SNOW"]);
+  });
+
+  it("blocks deleting a scan preset that is used by a compile preset", async () => {
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(value: string) {
+              return {
+                async first() {
+                  if (query.includes("FROM scan_presets WHERE id = ?")) {
+                    return { id: value, name: "Leaders", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" };
+                  }
+                  return null;
+                },
+                async all() {
+                  if (query.includes("FROM scan_compile_presets cp")) {
+                    return { results: [{ name: "Daily" }] };
+                  }
+                  return { results: [] };
+                },
+              };
+            },
+            async batch() {
+              throw new Error("batch should not be called");
+            },
+          };
+        },
+      },
+    } as any;
+
+    await expect(deleteScanPreset(env, "preset-a")).rejects.toThrow(
+      "Cannot delete scan preset because it is used by compile presets: Daily",
+    );
   });
 });

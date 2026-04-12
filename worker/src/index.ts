@@ -21,6 +21,8 @@ import {
   researchRunCreateSchema,
   rubricVersionCreateSchema,
   scanPresetCreateSchema,
+  scanCompilePresetCreateSchema,
+  scanCompilePresetPatchSchema,
   scanPresetPatchSchema,
   scanRefreshSchema,
   searchTemplateVersionCreateSchema,
@@ -70,13 +72,19 @@ import {
 } from "./fedwatch-service";
 import {
   cleanupOldScansPageData,
+  deleteScanCompilePreset,
   loadCompiledScansSnapshot,
+  loadCompiledScansSnapshotForCompilePreset,
+  duplicateScanPreset,
   deleteScanPreset,
+  listScanCompilePresets,
   listScanPresets,
+  loadScanCompilePreset,
   loadDefaultScanPreset,
   loadLatestScansSnapshot,
   loadScanPreset,
   refreshScansSnapshot,
+  upsertScanCompilePreset,
   upsertScanPreset,
 } from "./scans-page-service";
 import { isOverviewSnapshotStale } from "./overview-snapshot";
@@ -2122,6 +2130,19 @@ app.get("/api/scans/presets", async (c) => {
   return c.json({ rows });
 });
 
+app.get("/api/scans/compile-presets", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const rows = await listScanCompilePresets(c.env);
+  return c.json({ rows });
+});
+
+app.get("/api/scans/compile-presets/:compilePresetId", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const detail = await loadScanCompilePreset(c.env, c.req.param("compilePresetId"));
+  if (!detail) return c.json({ error: "Scan compile preset not found." }, 404);
+  return c.json(detail);
+});
+
 app.get("/api/scans/compiled", async (c) => {
   await maybeRunScansPageHousekeeping(c.env);
   const presetIds = (c.req.query("presetIds") ?? "")
@@ -2153,6 +2174,38 @@ app.get("/api/scans/compiled/export.txt", async (c) => {
   return c.body(payload.rows.map((row) => row.ticker).join("\n"));
 });
 
+app.get("/api/scans/compile-presets/:compilePresetId/compiled", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  try {
+    return c.json(await loadCompiledScansSnapshotForCompilePreset(c.env, c.req.param("compilePresetId")));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load compiled scan preset." }, 404);
+  }
+});
+
+app.get("/api/scans/compile-presets/:compilePresetId/export.txt", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  try {
+    const payload = await loadCompiledScansSnapshotForCompilePreset(c.env, c.req.param("compilePresetId"));
+    const dateSuffix = (c.req.query("dateSuffix") ?? "").trim() || new Date().toISOString().slice(0, 10);
+    const formattedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateSuffix)
+      ? dateSuffix.slice(5)
+      : dateSuffix;
+    const safeCompilePresetName = (payload.compilePresetName ?? "compiled-scans")
+      .replace(/[<>:"/\\|?*]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const fileName = safeCompilePresetName
+      ? `${safeCompilePresetName}-${formattedDate}.txt`
+      : `compiled-scans-${formattedDate}.txt`;
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Content-Disposition", `attachment; filename="${fileName}"`);
+    return c.body(payload.rows.map((row) => row.ticker).join("\n"));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to export compiled scan preset." }, 404);
+  }
+});
+
 app.post("/api/admin/scans/refresh", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   await maybeRunScansPageHousekeeping(c.env);
@@ -2176,6 +2229,16 @@ app.post("/api/admin/scans/presets", async (c) => {
       return c.json({ error: error.issues[0]?.message ?? "Invalid scan preset payload." }, 400);
     }
     return c.json({ error: error instanceof Error ? error.message : "Failed to save scan preset." }, 500);
+  }
+});
+
+app.post("/api/admin/scans/presets/:presetId/duplicate", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const preset = await duplicateScanPreset(c.env, c.req.param("presetId"));
+    return c.json({ ok: true, preset });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to duplicate scan preset." }, 400);
   }
 });
 
@@ -2212,6 +2275,51 @@ app.delete("/api/admin/scans/presets/:presetId", async (c) => {
     return c.json({ ok: true, presetId: c.req.param("presetId") });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to delete scan preset." }, 400);
+  }
+});
+
+app.post("/api/admin/scans/compile-presets", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = scanCompilePresetCreateSchema.parse(await c.req.json());
+    const preset = await upsertScanCompilePreset(c.env, payload);
+    return c.json({ ok: true, preset });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid scan compile preset payload." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to save scan compile preset." }, 500);
+  }
+});
+
+app.patch("/api/admin/scans/compile-presets/:compilePresetId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const compilePresetId = c.req.param("compilePresetId");
+  const existing = await loadScanCompilePreset(c.env, compilePresetId);
+  if (!existing) return c.json({ error: "Scan compile preset not found." }, 404);
+  try {
+    const payload = scanCompilePresetPatchSchema.parse(await c.req.json());
+    const preset = await upsertScanCompilePreset(c.env, {
+      id: compilePresetId,
+      name: payload.name ?? existing.name,
+      scanPresetIds: payload.scanPresetIds ?? existing.presetIds,
+    });
+    return c.json({ ok: true, preset });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid scan compile preset payload." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to save scan compile preset." }, 500);
+  }
+});
+
+app.delete("/api/admin/scans/compile-presets/:compilePresetId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    await deleteScanCompilePreset(c.env, c.req.param("compilePresetId"));
+    return c.json({ ok: true, compilePresetId: c.req.param("compilePresetId") });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to delete scan compile preset." }, 400);
   }
 });
 

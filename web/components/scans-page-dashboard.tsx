@@ -4,16 +4,24 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   createScanPreset,
+  createScanCompilePreset,
+  deleteScanCompilePreset,
   deleteScanPreset,
-  getCompiledScansExportUrl,
-  getCompiledScansSnapshot,
+  duplicateScanPreset,
+  getScanCompilePreset,
+  getScanCompilePresetExportUrl,
+  getScanCompilePresetSnapshot,
+  getScanCompilePresets,
   getScanPresets,
   getScansSnapshot,
   getTickerNews,
   refreshScansSnapshot,
+  updateScanCompilePreset,
   updateScanPreset,
   type AlertNewsRow,
   type CompiledScansSnapshot,
+  type ScanCompilePresetDetail,
+  type ScanCompilePresetRow,
   type ScanPreset,
   type ScanRow,
   type ScanRule,
@@ -122,6 +130,17 @@ const emptyDraftPreset = (): ScanPreset => ({
   rowLimit: 100,
   createdAt: "",
   updatedAt: "",
+});
+
+const emptyDraftCompilePreset = (): ScanCompilePresetDetail => ({
+  id: "",
+  name: "",
+  memberCount: 0,
+  presetIds: [],
+  presetNames: [],
+  createdAt: "",
+  updatedAt: "",
+  members: [],
 });
 
 function formatDateTime(value: string | null | undefined): string {
@@ -324,8 +343,10 @@ function NewsList({ items }: { items: AlertNewsRow[] }) {
 export function ScansPageDashboard() {
   const [presets, setPresets] = useState<ScanPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
-  const [compiledPresetIds, setCompiledPresetIds] = useState<string[]>([]);
+  const [compilePresets, setCompilePresets] = useState<ScanCompilePresetRow[]>([]);
+  const [selectedCompilePresetId, setSelectedCompilePresetId] = useState<string | null>(null);
   const [draftPreset, setDraftPreset] = useState<ScanPreset>(emptyDraftPreset);
+  const [draftCompilePreset, setDraftCompilePreset] = useState<ScanCompilePresetDetail>(emptyDraftCompilePreset);
   const [snapshot, setSnapshot] = useState<ScanSnapshot | null>(null);
   const [compiledSnapshot, setCompiledSnapshot] = useState<CompiledScansSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -406,6 +427,10 @@ export function ScansPageDashboard() {
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
     [presets, selectedPresetId],
   );
+  const selectedCompilePreset = useMemo(
+    () => compilePresets.find((preset) => preset.id === selectedCompilePresetId) ?? null,
+    [compilePresets, selectedCompilePresetId],
+  );
 
   const sortedRows = useMemo(
     () => sortRows(snapshot?.rows ?? [], sortKey, sortDir),
@@ -417,26 +442,35 @@ export function ScansPageDashboard() {
   );
   const compiledExportUrl = useMemo(
     () => (
-      compiledPresetIds.length > 0
-        ? getCompiledScansExportUrl(compiledPresetIds, new Date().toISOString().slice(0, 10))
+      selectedCompilePresetId
+        ? getScanCompilePresetExportUrl(selectedCompilePresetId, new Date().toISOString().slice(0, 10))
         : null
     ),
-    [compiledPresetIds],
+    [selectedCompilePresetId],
   );
 
-  const loadAll = async (preferredPresetId?: string | null) => {
+  const loadAll = async (preferredPresetId?: string | null, preferredCompilePresetId?: string | null) => {
     setLoading(true);
     setError(null);
     try {
-      const presetsRes = await getScanPresets();
+      const [presetsRes, compilePresetsRes] = await Promise.all([
+        getScanPresets(),
+        getScanCompilePresets(),
+      ]);
       const rows = presetsRes.rows ?? [];
+      const compileRows = compilePresetsRes.rows ?? [];
       setPresets(rows);
-      const nextPresetId = preferredPresetId ?? selectedPresetId ?? rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null;
+      setCompilePresets(compileRows);
+      const requestedPresetId = preferredPresetId === undefined ? selectedPresetId : preferredPresetId;
+      const requestedCompilePresetId = preferredCompilePresetId === undefined ? selectedCompilePresetId : preferredCompilePresetId;
+      const nextPresetId = (requestedPresetId && rows.some((row) => row.id === requestedPresetId))
+        ? requestedPresetId
+        : rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null;
+      const nextCompilePresetId = (requestedCompilePresetId && compileRows.some((row) => row.id === requestedCompilePresetId))
+        ? requestedCompilePresetId
+        : compileRows[0]?.id ?? null;
       setSelectedPresetId(nextPresetId);
-      setCompiledPresetIds((current) => {
-        const available = new Set(rows.map((row) => row.id));
-        return current.filter((id) => available.has(id));
-      });
+      setSelectedCompilePresetId(nextCompilePresetId);
       if (nextPresetId) {
         const nextSnapshot = await getScansSnapshot(nextPresetId);
         setSnapshot(nextSnapshot);
@@ -450,8 +484,8 @@ export function ScansPageDashboard() {
     }
   };
 
-  const loadCompiled = async (presetIds: string[]) => {
-    if (presetIds.length === 0) {
+  const loadCompiled = async (compilePresetId: string | null) => {
+    if (!compilePresetId) {
       setCompiledSnapshot(null);
       setCompiledError(null);
       return;
@@ -459,9 +493,9 @@ export function ScansPageDashboard() {
     setCompiledLoading(true);
     setCompiledError(null);
     try {
-      setCompiledSnapshot(await getCompiledScansSnapshot(presetIds));
+      setCompiledSnapshot(await getScanCompilePresetSnapshot(compilePresetId));
     } catch (loadError) {
-      setCompiledError(loadError instanceof Error ? loadError.message : "Failed to compile selected scans.");
+      setCompiledError(loadError instanceof Error ? loadError.message : "Failed to load compiled scan preset.");
       setCompiledSnapshot(null);
     } finally {
       setCompiledLoading(false);
@@ -476,6 +510,23 @@ export function ScansPageDashboard() {
     if (selectedPreset) setDraftPreset(structuredClone(selectedPreset));
     else setDraftPreset(emptyDraftPreset());
   }, [selectedPreset]);
+
+  useEffect(() => {
+    if (!selectedCompilePresetId) {
+      setDraftCompilePreset(emptyDraftCompilePreset());
+      return;
+    }
+    void (async () => {
+      try {
+        const detail = await getScanCompilePreset(selectedCompilePresetId);
+        setCompiledError(null);
+        setDraftCompilePreset(detail);
+      } catch (loadError) {
+        setCompiledError(loadError instanceof Error ? loadError.message : "Failed to load compile preset.");
+        setDraftCompilePreset(emptyDraftCompilePreset());
+      }
+    })();
+  }, [selectedCompilePresetId]);
 
   useEffect(() => {
     if (!selectedPreset) return;
@@ -496,8 +547,8 @@ export function ScansPageDashboard() {
   }, [selectedPresetId]);
 
   useEffect(() => {
-    void loadCompiled(compiledPresetIds);
-  }, [compiledPresetIds]);
+    void loadCompiled(selectedCompilePresetId);
+  }, [selectedCompilePresetId]);
 
   const loadTickerNews = async (ticker: string) => {
     if (newsByTicker[ticker]) return;
@@ -583,6 +634,65 @@ export function ScansPageDashboard() {
     }
   };
 
+  const onDuplicatePreset = async (presetId: string) => {
+    try {
+      setError(null);
+      setMessage(null);
+      const response = await duplicateScanPreset(presetId);
+      await loadAll(response.preset.id, selectedCompilePresetId);
+      setMessage(`Duplicated ${response.preset.name}.`);
+    } catch (duplicateError) {
+      setError(duplicateError instanceof Error ? duplicateError.message : "Failed to duplicate preset.");
+    }
+  };
+
+  const onSaveCompilePreset = async () => {
+    const trimmedName = draftCompilePreset.name.trim();
+    const scanPresetIds = draftCompilePreset.members.map((member) => member.scanPresetId);
+    if (!trimmedName) {
+      setCompiledError("Compile preset name is required.");
+      setMessage(null);
+      return;
+    }
+    if (scanPresetIds.length === 0) {
+      setCompiledError("Choose at least one saved scan preset.");
+      setMessage(null);
+      return;
+    }
+    setSaving(true);
+    setCompiledError(null);
+    setMessage(null);
+    try {
+      const payload = { name: trimmedName, scanPresetIds };
+      const response = draftCompilePreset.id
+        ? await updateScanCompilePreset(draftCompilePreset.id, payload)
+        : await createScanCompilePreset(payload);
+      await loadAll(selectedPresetId, response.preset.id);
+      setMessage("Compile preset saved.");
+    } catch (saveError) {
+      setCompiledError(saveError instanceof Error ? saveError.message : "Failed to save compile preset.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDeleteCompilePreset = async () => {
+    if (!draftCompilePreset.id) {
+      setDraftCompilePreset(emptyDraftCompilePreset());
+      return;
+    }
+    try {
+      setCompiledError(null);
+      setMessage(null);
+      await deleteScanCompilePreset(draftCompilePreset.id);
+      await loadAll(selectedPresetId, null);
+      setDraftCompilePreset(emptyDraftCompilePreset());
+      setMessage("Compile preset deleted.");
+    } catch (deleteError) {
+      setCompiledError(deleteError instanceof Error ? deleteError.message : "Failed to delete compile preset.");
+    }
+  };
+
   const onRefresh = async () => {
     if (!selectedPresetId) return;
     setRefreshing(true);
@@ -591,8 +701,8 @@ export function ScansPageDashboard() {
     try {
       const response = await refreshScansSnapshot(selectedPresetId);
       setSnapshot(response.snapshot);
-      if (compiledPresetIds.includes(selectedPresetId)) {
-        await loadCompiled(compiledPresetIds);
+      if (selectedCompilePreset?.presetIds.includes(selectedPresetId)) {
+        await loadCompiled(selectedCompilePresetId);
       }
       setExpandedTicker(null);
       setNewsByTicker({});
@@ -623,12 +733,39 @@ export function ScansPageDashboard() {
     });
   };
 
-  const toggleCompiledPreset = (presetId: string) => {
-    setCompiledPresetIds((current) => (
-      current.includes(presetId)
-        ? current.filter((id) => id !== presetId)
-        : [...current, presetId]
-    ));
+  const toggleCompilePresetMember = (scanPresetId: string) => {
+    setDraftCompilePreset((current) => {
+      const existing = current.members.find((member) => member.scanPresetId === scanPresetId);
+      if (existing) {
+        const members = current.members
+          .filter((member) => member.scanPresetId !== scanPresetId)
+          .map((member, index) => ({ ...member, sortOrder: index + 1 }));
+        return {
+          ...current,
+          members,
+          memberCount: members.length,
+          presetIds: members.map((member) => member.scanPresetId),
+          presetNames: members.map((member) => member.scanPresetName),
+        };
+      }
+      const preset = presets.find((row) => row.id === scanPresetId);
+      if (!preset) return current;
+      const members = [
+        ...current.members,
+        {
+          scanPresetId: preset.id,
+          scanPresetName: preset.name,
+          sortOrder: current.members.length + 1,
+        },
+      ];
+      return {
+        ...current,
+        members,
+        memberCount: members.length,
+        presetIds: members.map((member) => member.scanPresetId),
+        presetNames: members.map((member) => member.scanPresetName),
+      };
+    });
   };
 
   const renderCell = (row: ScanRow, key: ResultColumnKey) => {
@@ -673,7 +810,7 @@ export function ScansPageDashboard() {
       <aside className="space-y-4">
         <section className="card p-3">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Saved Presets</h3>
+            <h3 className="text-sm font-semibold text-slate-200">Scan Presets</h3>
             <button
               className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
               onClick={() => {
@@ -694,17 +831,17 @@ export function ScansPageDashboard() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="text-sm font-semibold text-accent">{preset.name}</div>
-                  <label
-                    className="inline-flex items-center gap-1 text-[11px] text-slate-400"
-                    onClick={(event) => event.stopPropagation()}
+                  <button
+                    className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-900/40"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void onDuplicatePreset(preset.id);
+                    }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={compiledPresetIds.includes(preset.id)}
-                      onChange={() => toggleCompiledPreset(preset.id)}
-                    />
-                    Compile
-                  </label>
+                    <Copy className="h-3.5 w-3.5" />
+                    Duplicate
+                  </button>
                 </div>
                 <div className="text-[11px] text-slate-400">
                   {preset.rules.length} rule{preset.rules.length === 1 ? "" : "s"} - {preset.rowLimit} rows - {preset.sortField} {preset.sortDirection}
@@ -716,19 +853,39 @@ export function ScansPageDashboard() {
             ))}
             {presets.length === 0 && <p className="text-xs text-slate-400">No scan presets saved yet.</p>}
           </div>
-          <div className="mt-3 flex flex-wrap gap-2">
+        </section>
+
+        <section className="card p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Compile Presets</h3>
             <button
-              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-              onClick={() => setCompiledPresetIds(presets.map((preset) => preset.id))}
+              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
+              onClick={() => {
+                setSelectedCompilePresetId(null);
+                setDraftCompilePreset(emptyDraftCompilePreset());
+              }}
             >
-              Select All
+              <Plus className="h-3.5 w-3.5" />
+              New
             </button>
-            <button
-              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-              onClick={() => setCompiledPresetIds([])}
-            >
-              Clear
-            </button>
+          </div>
+          <div className="space-y-2">
+            {compilePresets.map((preset) => (
+              <button
+                key={preset.id}
+                className={`w-full rounded border px-3 py-2 text-left ${preset.id === selectedCompilePresetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
+                onClick={() => setSelectedCompilePresetId(preset.id)}
+              >
+                <div className="text-sm font-semibold text-accent">{preset.name}</div>
+                <div className="text-[11px] text-slate-400">
+                  {preset.memberCount} scan preset{preset.memberCount === 1 ? "" : "s"}
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  {preset.presetNames.join(", ") || "No member presets"}
+                </div>
+              </button>
+            ))}
+            {compilePresets.length === 0 && <p className="text-xs text-slate-400">No compile presets saved yet.</p>}
           </div>
         </section>
 
@@ -1014,6 +1171,86 @@ export function ScansPageDashboard() {
             </div>
           </div>
         </section>
+
+        <section className="card p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">{draftCompilePreset.id ? "Edit Compile Preset" : "Create Compile Preset"}</h3>
+            <div className="flex items-center gap-2">
+              <button
+                className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-2 py-1 text-xs font-medium text-accent disabled:opacity-60"
+                disabled={saving}
+                onClick={() => void onSaveCompilePreset()}
+              >
+                <Save className="h-3.5 w-3.5" />
+                {saving ? "Saving..." : "Save"}
+              </button>
+              <button
+                className="inline-flex items-center gap-1 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 disabled:opacity-50"
+                disabled={!draftCompilePreset.id}
+                onClick={() => void onDeleteCompilePreset()}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-3 text-xs text-slate-300">
+            <label className="block">
+              Name
+              <input
+                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                value={draftCompilePreset.name}
+                onChange={(event) => setDraftCompilePreset((current) => ({ ...current, name: event.target.value }))}
+              />
+            </label>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Member Scan Presets</h4>
+                <span className="text-[11px] text-slate-500">{draftCompilePreset.members.length} selected</span>
+              </div>
+              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                {presets.map((preset) => {
+                  const checked = draftCompilePreset.members.some((member) => member.scanPresetId === preset.id);
+                  return (
+                    <label
+                      key={preset.id}
+                      className={`flex items-start gap-2 rounded border px-2 py-2 text-sm ${checked ? "border-accent/40 bg-accent/10 text-slate-100" : "border-borderSoft/70 bg-panelSoft/20 text-slate-300"}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleCompilePresetMember(preset.id)}
+                      />
+                      <span className="min-w-0">
+                        <span className="block font-medium">{preset.name}</span>
+                        <span className="block text-[11px] text-slate-400">
+                          {preset.rules.length} rule{preset.rules.length === 1 ? "" : "s"} - {preset.rowLimit} rows
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+                {presets.length === 0 && <p className="text-xs text-slate-400">Create a scan preset first, then add it to a compile preset.</p>}
+              </div>
+            </div>
+
+            {draftCompilePreset.members.length > 0 ? (
+              <div className="rounded border border-borderSoft/70 bg-panelSoft/20 p-2">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Compile Order</div>
+                <div className="mt-2 space-y-1 text-sm text-slate-300">
+                  {draftCompilePreset.members.map((member, index) => (
+                    <div key={member.scanPresetId} className="flex items-center gap-2">
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-800/70 text-[11px] text-slate-300">{index + 1}</span>
+                      <span>{member.scanPresetName}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </section>
       </aside>
 
       <section className="space-y-4">
@@ -1046,9 +1283,9 @@ export function ScansPageDashboard() {
         <div className="card p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">Compiled Unique Tickers</h3>
+              <h3 className="text-sm font-semibold text-slate-200">{selectedCompilePreset?.name ?? "Compiled Unique Tickers"}</h3>
               <p className="text-xs text-slate-400">
-                Combine the latest saved results from multiple presets and export a TradingView-ready watchlist file.
+                Saved compile presets combine the latest member scan snapshots into a TradingView-ready watchlist file.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1076,9 +1313,9 @@ export function ScansPageDashboard() {
             </div>
           </div>
           <p className="mt-2 text-xs text-slate-400">
-            {compiledPresetIds.length === 0
-              ? "Select one or more saved presets with the Compile checkbox."
-              : `${compiledPresetIds.length} preset${compiledPresetIds.length === 1 ? "" : "s"} selected`}
+            {selectedCompilePreset
+              ? `${selectedCompilePreset.memberCount} scan preset${selectedCompilePreset.memberCount === 1 ? "" : "s"} in ${selectedCompilePreset.name}`
+              : "Select a saved compile preset to load a combined watchlist."}
             {compiledSnapshot ? ` - ${compiledSnapshot.rows.length} unique ticker${compiledSnapshot.rows.length === 1 ? "" : "s"}` : ""}
             {compiledSnapshot?.generatedAt ? ` - latest snapshot ${formatDateTime(compiledSnapshot.generatedAt)}` : ""}
           </p>
@@ -1127,7 +1364,7 @@ export function ScansPageDashboard() {
           ) : compiledLoading ? (
             <div className="flex items-center gap-2 p-4 text-sm text-slate-300">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Compiling selected scan snapshots...
+              Loading compiled scan preset...
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1155,9 +1392,9 @@ export function ScansPageDashboard() {
                   {(compiledSnapshot?.rows.length ?? 0) === 0 && (
                     <tr>
                       <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-400">
-                        {compiledPresetIds.length === 0
-                          ? "Choose saved presets with the Compile checkbox to build a combined watchlist."
-                          : "No compiled tickers are available yet for the selected presets."}
+                        {selectedCompilePresetId
+                          ? "No compiled tickers are available yet for the selected compile preset."
+                          : "Choose a saved compile preset to build a combined watchlist."}
                       </td>
                     </tr>
                   )}

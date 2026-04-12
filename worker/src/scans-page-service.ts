@@ -32,6 +32,26 @@ export type ScanPreset = {
   updatedAt: string;
 };
 
+export type ScanCompilePresetMember = {
+  scanPresetId: string;
+  scanPresetName: string;
+  sortOrder: number;
+};
+
+export type ScanCompilePresetRow = {
+  id: string;
+  name: string;
+  memberCount: number;
+  presetIds: string[];
+  presetNames: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ScanCompilePresetDetail = ScanCompilePresetRow & {
+  members: ScanCompilePresetMember[];
+};
+
 export type ScanSnapshotRow = {
   ticker: string;
   name: string | null;
@@ -73,6 +93,8 @@ export type CompiledScanUniqueTickerRow = {
 };
 
 export type CompiledScansSnapshot = {
+  compilePresetId: string | null;
+  compilePresetName: string | null;
   presetIds: string[];
   presetNames: string[];
   generatedAt: string;
@@ -406,6 +428,157 @@ function mapPresetRow(row: {
   };
 }
 
+type ScanCompilePresetQueryRow = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  scanPresetId: string | null;
+  scanPresetName: string | null;
+  sortOrder: number | null;
+};
+
+function aggregateCompilePresets(rows: ScanCompilePresetQueryRow[]): ScanCompilePresetDetail[] {
+  const map = new Map<string, ScanCompilePresetDetail>();
+  for (const row of rows) {
+    let current = map.get(row.id);
+    if (!current) {
+      current = {
+        id: row.id,
+        name: row.name,
+        memberCount: 0,
+        presetIds: [],
+        presetNames: [],
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        members: [],
+      };
+      map.set(row.id, current);
+    }
+    if (!row.scanPresetId || !row.scanPresetName) continue;
+    current.members.push({
+      scanPresetId: row.scanPresetId,
+      scanPresetName: row.scanPresetName,
+      sortOrder: Number(row.sortOrder ?? current.members.length + 1),
+    });
+    current.presetIds.push(row.scanPresetId);
+    current.presetNames.push(row.scanPresetName);
+  }
+  return Array.from(map.values()).map((preset) => ({
+    ...preset,
+    memberCount: preset.members.length,
+    members: [...preset.members].sort((left, right) => left.sortOrder - right.sortOrder),
+  }));
+}
+
+async function queryScanCompilePresets(env: Env, compilePresetId?: string): Promise<ScanCompilePresetDetail[]> {
+  const baseQuery = `
+    SELECT
+      cp.id,
+      cp.name,
+      cp.created_at as createdAt,
+      cp.updated_at as updatedAt,
+      m.scan_preset_id as scanPresetId,
+      sp.name as scanPresetName,
+      m.sort_order as sortOrder
+    FROM scan_compile_presets cp
+    LEFT JOIN scan_compile_preset_members m
+      ON m.compile_preset_id = cp.id
+    LEFT JOIN scan_presets sp
+      ON sp.id = m.scan_preset_id
+    ${compilePresetId ? "WHERE cp.id = ?" : ""}
+    ORDER BY datetime(cp.updated_at) DESC, datetime(cp.created_at) DESC, m.sort_order ASC, sp.name ASC
+  `;
+  const request = env.DB.prepare(baseQuery);
+  const rows = compilePresetId
+    ? await request.bind(compilePresetId).all<ScanCompilePresetQueryRow>()
+    : await request.all<ScanCompilePresetQueryRow>();
+  return aggregateCompilePresets(rows.results ?? []);
+}
+
+export async function listScanCompilePresets(env: Env): Promise<ScanCompilePresetRow[]> {
+  return (await queryScanCompilePresets(env)).map(({ members, ...preset }) => preset);
+}
+
+export async function loadScanCompilePreset(env: Env, compilePresetId: string): Promise<ScanCompilePresetDetail | null> {
+  return (await queryScanCompilePresets(env, compilePresetId))[0] ?? null;
+}
+
+async function resolveCompilePresetMemberIds(env: Env, scanPresetIds: string[]): Promise<string[]> {
+  const normalized = Array.from(new Set(
+    scanPresetIds
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ));
+  if (normalized.length === 0) throw new Error("Choose at least one scan preset.");
+  const existingPresets = await Promise.all(normalized.map((presetId) => loadScanPreset(env, presetId)));
+  const missingIds = normalized.filter((_, index) => !existingPresets[index]);
+  if (missingIds.length > 0) {
+    throw new Error(`Unknown scan preset: ${missingIds[0]}`);
+  }
+  return normalized;
+}
+
+export async function upsertScanCompilePreset(env: Env, input: {
+  id?: string | null;
+  name: string;
+  scanPresetIds: string[];
+}): Promise<ScanCompilePresetDetail> {
+  const id = input.id?.trim() || crypto.randomUUID();
+  const scanPresetIds = await resolveCompilePresetMemberIds(env, input.scanPresetIds);
+  const name = input.name.trim();
+  if (!name) throw new Error("Compile preset name is required.");
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO scan_compile_presets (id, name, created_at, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).bind(id, name),
+    env.DB.prepare("DELETE FROM scan_compile_preset_members WHERE compile_preset_id = ?").bind(id),
+    ...scanPresetIds.map((presetId, index) =>
+      env.DB.prepare(
+        "INSERT INTO scan_compile_preset_members (compile_preset_id, scan_preset_id, sort_order) VALUES (?, ?, ?)",
+      ).bind(id, presetId, index + 1),
+    ),
+  ]);
+  const saved = await loadScanCompilePreset(env, id);
+  if (!saved) throw new Error("Failed to persist scan compile preset.");
+  return saved;
+}
+
+export async function deleteScanCompilePreset(env: Env, compilePresetId: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM scan_compile_preset_members WHERE compile_preset_id = ?").bind(compilePresetId),
+    env.DB.prepare("DELETE FROM scan_compile_presets WHERE id = ?").bind(compilePresetId),
+  ]);
+}
+
+async function listReferencingCompilePresetNames(env: Env, scanPresetId: string): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    `SELECT cp.name as name
+     FROM scan_compile_presets cp
+     JOIN scan_compile_preset_members m
+       ON m.compile_preset_id = cp.id
+     WHERE m.scan_preset_id = ?
+     ORDER BY datetime(cp.updated_at) DESC, datetime(cp.created_at) DESC, cp.name ASC`,
+  ).bind(scanPresetId).all<{ name: string }>();
+  return (rows.results ?? []).map((row) => row.name).filter(Boolean);
+}
+
+function nextDuplicatePresetName(sourceName: string, existingNames: string[]): string {
+  const trimmedSourceName = sourceName.trim();
+  const occupied = new Set(existingNames.map((name) => name.trim().toLowerCase()));
+  const firstCandidate = `${trimmedSourceName} Copy`;
+  if (!occupied.has(firstCandidate.toLowerCase())) return firstCandidate;
+  let counter = 2;
+  while (occupied.has(`${trimmedSourceName} Copy ${counter}`.toLowerCase())) {
+    counter += 1;
+  }
+  return `${trimmedSourceName} Copy ${counter}`;
+}
+
 export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
   const rows = await env.DB.prepare(
     "SELECT id, name, is_default as isDefault, is_active as isActive, rules_json as rulesJson, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets ORDER BY is_default DESC, updated_at DESC, created_at DESC",
@@ -509,10 +682,29 @@ export async function upsertScanPreset(env: Env, input: {
   return saved;
 }
 
+export async function duplicateScanPreset(env: Env, presetId: string): Promise<ScanPreset> {
+  const existing = await loadScanPreset(env, presetId);
+  if (!existing) throw new Error("Scan preset not found.");
+  const name = nextDuplicatePresetName(existing.name, (await listScanPresets(env)).map((preset) => preset.name));
+  return upsertScanPreset(env, {
+    name,
+    isDefault: false,
+    isActive: existing.isActive,
+    rules: JSON.parse(JSON.stringify(existing.rules)) as ScanPresetRule[],
+    sortField: existing.sortField,
+    sortDirection: existing.sortDirection,
+    rowLimit: existing.rowLimit,
+  });
+}
+
 export async function deleteScanPreset(env: Env, presetId: string): Promise<void> {
   const preset = await loadScanPreset(env, presetId);
   if (!preset) return;
   if (preset.isDefault) throw new Error("Default preset cannot be deleted.");
+  const compilePresetNames = await listReferencingCompilePresetNames(env, presetId);
+  if (compilePresetNames.length > 0) {
+    throw new Error(`Cannot delete scan preset because it is used by compile presets: ${compilePresetNames.join(", ")}`);
+  }
   await env.DB.batch([
     env.DB.prepare("DELETE FROM scan_rows WHERE snapshot_id IN (SELECT id FROM scan_snapshots WHERE preset_id = ?)").bind(presetId),
     env.DB.prepare("DELETE FROM scan_snapshots WHERE preset_id = ?").bind(presetId),
@@ -763,7 +955,11 @@ export async function loadLatestScansSnapshot(env: Env, presetId?: string | null
   };
 }
 
-export async function loadCompiledScansSnapshot(env: Env, presetIds: string[]): Promise<CompiledScansSnapshot> {
+export async function loadCompiledScansSnapshot(
+  env: Env,
+  presetIds: string[],
+  options?: { compilePresetId?: string | null; compilePresetName?: string | null },
+): Promise<CompiledScansSnapshot> {
   const uniquePresetIds = Array.from(new Set(
     presetIds
       .map((value) => value.trim())
@@ -818,6 +1014,8 @@ export async function loadCompiledScansSnapshot(env: Env, presetIds: string[]): 
   });
 
   return {
+    compilePresetId: options?.compilePresetId ?? null,
+    compilePresetName: options?.compilePresetName ?? null,
     presetIds: presets.map((preset) => preset.id),
     presetNames: presets.map((preset) => preset.name),
     generatedAt: latestGeneratedAt || new Date().toISOString(),
@@ -829,6 +1027,15 @@ export async function loadCompiledScansSnapshot(env: Env, presetIds: string[]): 
       return a.ticker.localeCompare(b.ticker);
     }),
   };
+}
+
+export async function loadCompiledScansSnapshotForCompilePreset(env: Env, compilePresetId: string): Promise<CompiledScansSnapshot> {
+  const compilePreset = await loadScanCompilePreset(env, compilePresetId);
+  if (!compilePreset) throw new Error("Scan compile preset not found.");
+  return loadCompiledScansSnapshot(env, compilePreset.presetIds, {
+    compilePresetId: compilePreset.id,
+    compilePresetName: compilePreset.name,
+  });
 }
 
 export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<void> {
