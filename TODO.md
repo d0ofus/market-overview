@@ -25,9 +25,6 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-> Hover to show chart of tickers on sector/narrative calendar
-> Change pop up window when clicking on sector/narrative calendar ticker to be a push out on the right that shows the chart, so that can click other tickers after without having to close a pop up
-> Remove redundant info on sector/narrative claendar
 > Increase the size of pop up window when clicking ETF constituents, to fit 3 in the pop up page
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
