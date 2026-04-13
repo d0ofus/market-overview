@@ -161,32 +161,41 @@ function formatFundPrice(value: number) {
 
 function computeHoverPreviewStyle(anchorRect: DOMRect): CSSProperties {
   if (typeof window === "undefined") {
-    return { top: 16, left: 16, width: 560 };
+    return { top: 16, left: 16, width: 960 };
   }
 
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
   const gutter = 16;
   const previewGap = 14;
-  const width = Math.min(560, Math.max(360, viewportWidth - gutter * 2));
-  const estimatedHeight = Math.min(460, Math.max(320, Math.round(width * 0.76)));
+  const minWidth = 420;
+  const maxWidth = Math.min(960, viewportWidth - gutter * 2);
+  const availableRight = viewportWidth - anchorRect.right - previewGap - gutter;
+  const availableLeft = anchorRect.left - previewGap - gutter;
+  const preferredSide = availableRight >= availableLeft ? "right" : "left";
+  const bestSideSpace = Math.max(availableRight, availableLeft);
 
-  let left = anchorRect.right + previewGap;
+  let width = maxWidth;
+  let left = gutter;
   let top = anchorRect.top - 20;
 
-  if (left + width + gutter > viewportWidth) {
-    left = anchorRect.left - width - previewGap;
-  }
-
-  if (left < gutter) {
+  if (bestSideSpace >= minWidth) {
+    width = Math.min(maxWidth, bestSideSpace);
+    left = preferredSide === "right"
+      ? anchorRect.right + previewGap
+      : anchorRect.left - width - previewGap;
+  } else {
     left = Math.min(
       Math.max(gutter, anchorRect.left + anchorRect.width / 2 - width / 2),
       viewportWidth - width - gutter,
     );
     top = anchorRect.bottom + previewGap;
-    if (top + estimatedHeight + gutter > viewportHeight) {
-      top = anchorRect.top - estimatedHeight - previewGap;
-    }
+  }
+
+  const estimatedHeight = Math.min(viewportHeight - gutter * 2, Math.max(420, Math.round(width * 0.7)));
+
+  if (top + estimatedHeight + gutter > viewportHeight) {
+    top = anchorRect.top - estimatedHeight - previewGap;
   }
 
   top = Math.min(Math.max(gutter, top), viewportHeight - estimatedHeight - gutter);
@@ -1332,23 +1341,23 @@ export function SectorTracker() {
 
       {hoverChartPreview ? (
         <div
-          className="fixed z-40 hidden overflow-hidden rounded-[28px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.48)] xl:block"
+          className="fixed z-40 hidden max-h-[calc(100vh-2rem)] overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.48)] xl:block"
           style={hoverChartPreview.style}
           onMouseEnter={() => setIsHoverPreviewHovered(true)}
           onMouseLeave={() => setIsHoverPreviewHovered(false)}
         >
-          <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-4 py-3">
+          <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Hover Preview</p>
-              <h4 className="mt-1 text-sm font-semibold text-slate-100">TradingView: {hoverChartPreview.ticker}</h4>
+              <h4 className="mt-1 text-base font-semibold text-slate-100">TradingView: {hoverChartPreview.ticker}</h4>
             </div>
             <button className={SECONDARY_BUTTON_CLASS} onClick={() => openExpandedChart(hoverChartPreview.ticker)}>
               <Maximize2 className="h-3.5 w-3.5" />
               Pin chart
             </button>
           </div>
-          <div className="p-3">
-            <div className="rounded-[22px] bg-panelSoft/25 p-3">
+          <div className="p-4">
+            <div className="rounded-[24px] bg-panelSoft/25 p-3">
               <TradingViewWidget ticker={hoverChartPreview.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
             </div>
           </div>
