@@ -694,14 +694,7 @@ export function SectorTracker() {
         >
           <div className="space-y-4">
             <div className="bg-panelSoft/20 p-4">
-              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-                <div className="space-y-1">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Entry Management</p>
-                  <h3 className="text-base font-semibold text-slate-100">Stage a new sector narrative without leaving the tracker.</h3>
-                  <p className="max-w-2xl text-sm text-slate-400">
-                    Add a new event, reuse an existing narrative label, and attach the symbols you want to revisit later.
-                  </p>
-                </div>
+              <div className="flex justify-end">
                 <button className={SECONDARY_BUTTON_CLASS} onClick={() => setAddFormOpen((v) => !v)}>
                   <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
                   {addFormOpen ? "Hide entry form" : "Add entry"}
@@ -816,25 +809,7 @@ export function SectorTracker() {
                     </button>
                   </div>
                 </div>
-              ) : (
-                <div className="mt-4 grid gap-3 md:grid-cols-3">
-                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
-                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Coverage</div>
-                    <div className="mt-1 text-sm font-semibold text-slate-100">{entries.length} narratives tracked</div>
-                    <p className="mt-1 text-sm text-slate-400">Open the form when you need to capture a new theme.</p>
-                  </div>
-                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
-                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Symbols</div>
-                    <div className="mt-1 text-sm font-semibold text-slate-100">{symbolOptions.length} lookup options</div>
-                    <p className="mt-1 text-sm text-slate-400">Use the symbol datalist to attach tickers quickly.</p>
-                  </div>
-                  <div className="rounded-2xl bg-panel/45 px-4 py-3">
-                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Workflow</div>
-                    <div className="mt-1 text-sm font-semibold text-slate-100">List and calendar stay aligned</div>
-                    <p className="mt-1 text-sm text-slate-400">No data paths changed, only the surface and spacing.</p>
-                  </div>
-                </div>
-              )}
+              ) : null}
             </div>
 
             <div className="bg-panel/20 p-4 md:p-5">
