@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { CalendarDays, ChevronDown, List, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
@@ -47,6 +47,8 @@ const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
 const CHARTS_PER_PAGE = 20;
 const CALENDAR_COLLAPSED_ITEM_COUNT = 3;
+const HOVER_CHART_OPEN_DELAY_MS = 180;
+const HOVER_CHART_CLOSE_DELAY_MS = 180;
 
 type EntrySymbol = { ticker: string; name: string | null };
 type SectorEntry = {
@@ -75,6 +77,11 @@ type EtfConstituent = {
   weight: number | null;
   change1d?: number;
   lastPrice?: number;
+};
+
+type ActiveChartState = {
+  ticker: string;
+  source: "hover" | "click";
 };
 
 const FALLBACK_SECTOR_ETFS: WatchlistEtf[] = [
@@ -252,7 +259,10 @@ export function SectorTracker() {
   const [constituents, setConstituents] = useState<EtfConstituent[]>([]);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
-  const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [activeChart, setActiveChart] = useState<ActiveChartState | null>(null);
+  const [hoveredChartTicker, setHoveredChartTicker] = useState<string | null>(null);
+  const [isChartModalHovered, setIsChartModalHovered] = useState(false);
+  const [supportsTickerHover, setSupportsTickerHover] = useState(false);
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [constituentPage, setConstituentPage] = useState(1);
@@ -265,6 +275,9 @@ export function SectorTracker() {
   const [editTickers, setEditTickers] = useState<string[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
+  const hoverOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeChartTicker = activeChart?.ticker ?? null;
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -295,6 +308,72 @@ export function SectorTracker() {
   useEffect(() => {
     setExpandedCalendarDates([]);
   }, [month]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const syncHoverSupport = () => setSupportsTickerHover(mediaQuery.matches);
+    syncHoverSupport();
+    mediaQuery.addEventListener?.("change", syncHoverSupport);
+    return () => mediaQuery.removeEventListener?.("change", syncHoverSupport);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hoverOpenTimeoutRef.current) clearTimeout(hoverOpenTimeoutRef.current);
+      if (hoverCloseTimeoutRef.current) clearTimeout(hoverCloseTimeoutRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supportsTickerHover || !hoveredChartTicker || activeChart?.source === "click") {
+      if (hoverOpenTimeoutRef.current) {
+        clearTimeout(hoverOpenTimeoutRef.current);
+        hoverOpenTimeoutRef.current = null;
+      }
+      return;
+    }
+    if (activeChart?.source === "hover" && activeChart.ticker === hoveredChartTicker) return;
+    if (hoverOpenTimeoutRef.current) clearTimeout(hoverOpenTimeoutRef.current);
+    hoverOpenTimeoutRef.current = setTimeout(() => {
+      setActiveChart((current) => (current?.source === "click" ? current : { ticker: hoveredChartTicker, source: "hover" }));
+      hoverOpenTimeoutRef.current = null;
+    }, HOVER_CHART_OPEN_DELAY_MS);
+    return () => {
+      if (hoverOpenTimeoutRef.current) {
+        clearTimeout(hoverOpenTimeoutRef.current);
+        hoverOpenTimeoutRef.current = null;
+      }
+    };
+  }, [activeChart, hoveredChartTicker, supportsTickerHover]);
+
+  useEffect(() => {
+    if (activeChart?.source !== "hover") {
+      if (hoverCloseTimeoutRef.current) {
+        clearTimeout(hoverCloseTimeoutRef.current);
+        hoverCloseTimeoutRef.current = null;
+      }
+      return;
+    }
+    if (hoveredChartTicker || isChartModalHovered) {
+      if (hoverCloseTimeoutRef.current) {
+        clearTimeout(hoverCloseTimeoutRef.current);
+        hoverCloseTimeoutRef.current = null;
+      }
+      return;
+    }
+    if (hoverCloseTimeoutRef.current) clearTimeout(hoverCloseTimeoutRef.current);
+    hoverCloseTimeoutRef.current = setTimeout(() => {
+      setActiveChart((current) => (current?.source === "hover" ? null : current));
+      hoverCloseTimeoutRef.current = null;
+    }, HOVER_CHART_CLOSE_DELAY_MS);
+    return () => {
+      if (hoverCloseTimeoutRef.current) {
+        clearTimeout(hoverCloseTimeoutRef.current);
+        hoverCloseTimeoutRef.current = null;
+      }
+    };
+  }, [activeChart?.source, hoveredChartTicker, isChartModalHovered]);
 
   const openEtfPopup = async (ticker: string, fundName?: string | null) => {
     setActiveEtf({ ticker, fundName: fundName ?? null });
@@ -456,6 +535,44 @@ export function SectorTracker() {
     setActiveSection(id);
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const openExpandedChart = (ticker: string) => {
+    if (hoverOpenTimeoutRef.current) {
+      clearTimeout(hoverOpenTimeoutRef.current);
+      hoverOpenTimeoutRef.current = null;
+    }
+    if (hoverCloseTimeoutRef.current) {
+      clearTimeout(hoverCloseTimeoutRef.current);
+      hoverCloseTimeoutRef.current = null;
+    }
+    setHoveredChartTicker(null);
+    setIsChartModalHovered(false);
+    setActiveChart({ ticker, source: "click" });
+  };
+
+  const closeExpandedChart = () => {
+    if (hoverOpenTimeoutRef.current) {
+      clearTimeout(hoverOpenTimeoutRef.current);
+      hoverOpenTimeoutRef.current = null;
+    }
+    if (hoverCloseTimeoutRef.current) {
+      clearTimeout(hoverCloseTimeoutRef.current);
+      hoverCloseTimeoutRef.current = null;
+    }
+    setHoveredChartTicker(null);
+    setIsChartModalHovered(false);
+    setActiveChart(null);
+  };
+
+  const handleTickerChipMouseEnter = (ticker: string) => {
+    if (!supportsTickerHover) return;
+    setHoveredChartTicker(ticker);
+  };
+
+  const handleTickerChipMouseLeave = (ticker: string) => {
+    if (!supportsTickerHover) return;
+    setHoveredChartTicker((current) => (current === ticker ? null : current));
   };
 
   const toggleCalendarDateExpansion = (date: string) => {
@@ -741,7 +858,9 @@ export function SectorTracker() {
                                   <button
                                     key={`${e.id}-${s.ticker}`}
                                     className={TICKER_CHIP_CLASS}
-                                    onClick={() => setActiveChartTicker(s.ticker)}
+                                    onClick={() => openExpandedChart(s.ticker)}
+                                    onMouseEnter={() => handleTickerChipMouseEnter(s.ticker)}
+                                    onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                     title={s.name ?? s.ticker}
                                   >
                                     {s.ticker}
@@ -842,7 +961,9 @@ export function SectorTracker() {
                                     <button
                                       key={`${it.id}-${s.ticker}`}
                                       className={TICKER_CHIP_CLASS}
-                                      onClick={() => setActiveChartTicker(s.ticker)}
+                                      onClick={() => openExpandedChart(s.ticker)}
+                                      onMouseEnter={() => handleTickerChipMouseEnter(s.ticker)}
+                                      onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                       title={s.name ?? s.ticker}
                                     >
                                       {s.ticker}
@@ -899,7 +1020,7 @@ export function SectorTracker() {
                 etf={etf}
                 eyebrow={etf.parentSector}
                 onOpenEtf={() => void openEtfPopup(etf.ticker, etf.fundName)}
-                onExpandChart={() => setActiveChartTicker(etf.ticker)}
+                onExpandChart={() => openExpandedChart(etf.ticker)}
               />
             ))}
           </div>
@@ -939,7 +1060,7 @@ export function SectorTracker() {
                         key={`${key}-${etf.ticker}`}
                         etf={etf}
                         onOpenEtf={() => void openEtfPopup(etf.ticker, etf.fundName)}
-                        onExpandChart={() => setActiveChartTicker(etf.ticker)}
+                        onExpandChart={() => openExpandedChart(etf.ticker)}
                       />
                     ))}
                   </div>
@@ -1129,7 +1250,7 @@ export function SectorTracker() {
                       </div>
 
                       <div className="mt-4 flex justify-end">
-                        <button className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveChartTicker(row.ticker)}>
+                        <button className={SECONDARY_BUTTON_CLASS} onClick={() => openExpandedChart(row.ticker)}>
                           <Maximize2 className="h-3.5 w-3.5" />
                           Expand chart
                         </button>
@@ -1149,14 +1270,25 @@ export function SectorTracker() {
       ) : null}
 
       {activeChartTicker ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartTicker(null)}>
-          <div className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={closeExpandedChart}>
+          <div
+            className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]"
+            onClick={(e) => e.stopPropagation()}
+            onMouseEnter={() => {
+              if (activeChart?.source !== "hover") return;
+              setIsChartModalHovered(true);
+            }}
+            onMouseLeave={() => {
+              if (activeChart?.source !== "hover") return;
+              setIsChartModalHovered(false);
+            }}
+          >
             <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
                 <h4 className="mt-1 text-base font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
               </div>
-              <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveChartTicker(null)}>
+              <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={closeExpandedChart}>
                 Close
               </button>
             </div>
