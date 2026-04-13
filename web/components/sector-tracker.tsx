@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { CalendarDays, ChevronDown, List, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
@@ -79,9 +79,14 @@ type EtfConstituent = {
   lastPrice?: number;
 };
 
-type ActiveChartState = {
+type HoverChartTarget = {
   ticker: string;
-  source: "hover" | "click";
+  rect: DOMRect;
+};
+
+type HoverChartPreview = {
+  ticker: string;
+  style: CSSProperties;
 };
 
 const FALLBACK_SECTOR_ETFS: WatchlistEtf[] = [
@@ -152,6 +157,45 @@ function segmentedButtonClass(active: boolean) {
 
 function formatFundPrice(value: number) {
   return Number.isFinite(value) ? value.toFixed(2) : "-";
+}
+
+function computeHoverPreviewStyle(anchorRect: DOMRect): CSSProperties {
+  if (typeof window === "undefined") {
+    return { top: 16, left: 16, width: 560 };
+  }
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const gutter = 16;
+  const previewGap = 14;
+  const width = Math.min(560, Math.max(360, viewportWidth - gutter * 2));
+  const estimatedHeight = Math.min(460, Math.max(320, Math.round(width * 0.76)));
+
+  let left = anchorRect.right + previewGap;
+  let top = anchorRect.top - 20;
+
+  if (left + width + gutter > viewportWidth) {
+    left = anchorRect.left - width - previewGap;
+  }
+
+  if (left < gutter) {
+    left = Math.min(
+      Math.max(gutter, anchorRect.left + anchorRect.width / 2 - width / 2),
+      viewportWidth - width - gutter,
+    );
+    top = anchorRect.bottom + previewGap;
+    if (top + estimatedHeight + gutter > viewportHeight) {
+      top = anchorRect.top - estimatedHeight - previewGap;
+    }
+  }
+
+  top = Math.min(Math.max(gutter, top), viewportHeight - estimatedHeight - gutter);
+
+  return {
+    top,
+    left,
+    width,
+  };
 }
 
 function CollapsibleSection({
@@ -259,9 +303,10 @@ export function SectorTracker() {
   const [constituents, setConstituents] = useState<EtfConstituent[]>([]);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
-  const [activeChart, setActiveChart] = useState<ActiveChartState | null>(null);
-  const [hoveredChartTicker, setHoveredChartTicker] = useState<string | null>(null);
-  const [isChartModalHovered, setIsChartModalHovered] = useState(false);
+  const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [hoverChartTarget, setHoverChartTarget] = useState<HoverChartTarget | null>(null);
+  const [hoverChartPreview, setHoverChartPreview] = useState<HoverChartPreview | null>(null);
+  const [isHoverPreviewHovered, setIsHoverPreviewHovered] = useState(false);
   const [supportsTickerHover, setSupportsTickerHover] = useState(false);
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
@@ -277,7 +322,6 @@ export function SectorTracker() {
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
   const hoverOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeChartTicker = activeChart?.ticker ?? null;
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -326,17 +370,20 @@ export function SectorTracker() {
   }, []);
 
   useEffect(() => {
-    if (!supportsTickerHover || !hoveredChartTicker || activeChart?.source === "click") {
+    if (!supportsTickerHover || !hoverChartTarget || activeChartTicker) {
       if (hoverOpenTimeoutRef.current) {
         clearTimeout(hoverOpenTimeoutRef.current);
         hoverOpenTimeoutRef.current = null;
       }
       return;
     }
-    if (activeChart?.source === "hover" && activeChart.ticker === hoveredChartTicker) return;
+    if (hoverChartPreview?.ticker === hoverChartTarget.ticker) return;
     if (hoverOpenTimeoutRef.current) clearTimeout(hoverOpenTimeoutRef.current);
     hoverOpenTimeoutRef.current = setTimeout(() => {
-      setActiveChart((current) => (current?.source === "click" ? current : { ticker: hoveredChartTicker, source: "hover" }));
+      setHoverChartPreview({
+        ticker: hoverChartTarget.ticker,
+        style: computeHoverPreviewStyle(hoverChartTarget.rect),
+      });
       hoverOpenTimeoutRef.current = null;
     }, HOVER_CHART_OPEN_DELAY_MS);
     return () => {
@@ -345,17 +392,17 @@ export function SectorTracker() {
         hoverOpenTimeoutRef.current = null;
       }
     };
-  }, [activeChart, hoveredChartTicker, supportsTickerHover]);
+  }, [activeChartTicker, hoverChartPreview?.ticker, hoverChartTarget, supportsTickerHover]);
 
   useEffect(() => {
-    if (activeChart?.source !== "hover") {
+    if (!hoverChartPreview) {
       if (hoverCloseTimeoutRef.current) {
         clearTimeout(hoverCloseTimeoutRef.current);
         hoverCloseTimeoutRef.current = null;
       }
       return;
     }
-    if (hoveredChartTicker || isChartModalHovered) {
+    if (hoverChartTarget || isHoverPreviewHovered || activeChartTicker) {
       if (hoverCloseTimeoutRef.current) {
         clearTimeout(hoverCloseTimeoutRef.current);
         hoverCloseTimeoutRef.current = null;
@@ -364,7 +411,7 @@ export function SectorTracker() {
     }
     if (hoverCloseTimeoutRef.current) clearTimeout(hoverCloseTimeoutRef.current);
     hoverCloseTimeoutRef.current = setTimeout(() => {
-      setActiveChart((current) => (current?.source === "hover" ? null : current));
+      setHoverChartPreview(null);
       hoverCloseTimeoutRef.current = null;
     }, HOVER_CHART_CLOSE_DELAY_MS);
     return () => {
@@ -373,7 +420,19 @@ export function SectorTracker() {
         hoverCloseTimeoutRef.current = null;
       }
     };
-  }, [activeChart?.source, hoveredChartTicker, isChartModalHovered]);
+  }, [activeChartTicker, hoverChartPreview, hoverChartTarget, isHoverPreviewHovered]);
+
+  useEffect(() => {
+    if (!supportsTickerHover || !hoverChartTarget || !hoverChartPreview) return;
+    if (hoverChartPreview.ticker !== hoverChartTarget.ticker) return;
+    setHoverChartPreview((current) => {
+      if (!current || current.ticker !== hoverChartTarget.ticker) return current;
+      return {
+        ticker: current.ticker,
+        style: computeHoverPreviewStyle(hoverChartTarget.rect),
+      };
+    });
+  }, [hoverChartPreview, hoverChartTarget, supportsTickerHover]);
 
   const openEtfPopup = async (ticker: string, fundName?: string | null) => {
     setActiveEtf({ ticker, fundName: fundName ?? null });
@@ -546,9 +605,10 @@ export function SectorTracker() {
       clearTimeout(hoverCloseTimeoutRef.current);
       hoverCloseTimeoutRef.current = null;
     }
-    setHoveredChartTicker(null);
-    setIsChartModalHovered(false);
-    setActiveChart({ ticker, source: "click" });
+    setHoverChartTarget(null);
+    setHoverChartPreview(null);
+    setIsHoverPreviewHovered(false);
+    setActiveChartTicker(ticker);
   };
 
   const closeExpandedChart = () => {
@@ -560,19 +620,20 @@ export function SectorTracker() {
       clearTimeout(hoverCloseTimeoutRef.current);
       hoverCloseTimeoutRef.current = null;
     }
-    setHoveredChartTicker(null);
-    setIsChartModalHovered(false);
-    setActiveChart(null);
+    setHoverChartTarget(null);
+    setHoverChartPreview(null);
+    setIsHoverPreviewHovered(false);
+    setActiveChartTicker(null);
   };
 
-  const handleTickerChipMouseEnter = (ticker: string) => {
+  const handleTickerChipMouseEnter = (ticker: string, event: MouseEvent<HTMLButtonElement>) => {
     if (!supportsTickerHover) return;
-    setHoveredChartTicker(ticker);
+    setHoverChartTarget({ ticker, rect: event.currentTarget.getBoundingClientRect() });
   };
 
   const handleTickerChipMouseLeave = (ticker: string) => {
     if (!supportsTickerHover) return;
-    setHoveredChartTicker((current) => (current === ticker ? null : current));
+    setHoverChartTarget((current) => (current?.ticker === ticker ? null : current));
   };
 
   const toggleCalendarDateExpansion = (date: string) => {
@@ -859,7 +920,7 @@ export function SectorTracker() {
                                     key={`${e.id}-${s.ticker}`}
                                     className={TICKER_CHIP_CLASS}
                                     onClick={() => openExpandedChart(s.ticker)}
-                                    onMouseEnter={() => handleTickerChipMouseEnter(s.ticker)}
+                                    onMouseEnter={(event) => handleTickerChipMouseEnter(s.ticker, event)}
                                     onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                     title={s.name ?? s.ticker}
                                   >
@@ -962,7 +1023,7 @@ export function SectorTracker() {
                                       key={`${it.id}-${s.ticker}`}
                                       className={TICKER_CHIP_CLASS}
                                       onClick={() => openExpandedChart(s.ticker)}
-                                      onMouseEnter={() => handleTickerChipMouseEnter(s.ticker)}
+                                      onMouseEnter={(event) => handleTickerChipMouseEnter(s.ticker, event)}
                                       onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                       title={s.name ?? s.ticker}
                                     >
@@ -1269,20 +1330,34 @@ export function SectorTracker() {
         </div>
       ) : null}
 
+      {hoverChartPreview ? (
+        <div
+          className="fixed z-40 hidden overflow-hidden rounded-[28px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.48)] xl:block"
+          style={hoverChartPreview.style}
+          onMouseEnter={() => setIsHoverPreviewHovered(true)}
+          onMouseLeave={() => setIsHoverPreviewHovered(false)}
+        >
+          <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-4 py-3">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Hover Preview</p>
+              <h4 className="mt-1 text-sm font-semibold text-slate-100">TradingView: {hoverChartPreview.ticker}</h4>
+            </div>
+            <button className={SECONDARY_BUTTON_CLASS} onClick={() => openExpandedChart(hoverChartPreview.ticker)}>
+              <Maximize2 className="h-3.5 w-3.5" />
+              Pin chart
+            </button>
+          </div>
+          <div className="p-3">
+            <div className="rounded-[22px] bg-panelSoft/25 p-3">
+              <TradingViewWidget ticker={hoverChartPreview.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {activeChartTicker ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={closeExpandedChart}>
-          <div
-            className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]"
-            onClick={(e) => e.stopPropagation()}
-            onMouseEnter={() => {
-              if (activeChart?.source !== "hover") return;
-              setIsChartModalHovered(true);
-            }}
-            onMouseLeave={() => {
-              if (activeChart?.source !== "hover") return;
-              setIsChartModalHovered(false);
-            }}
-          >
+          <div className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
