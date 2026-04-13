@@ -655,54 +655,26 @@ export function SectorTracker() {
 
   return (
     <div className="space-y-5">
-      <div className="card overflow-hidden" id="section-selector">
-        <div className="border-b border-borderSoft/60 bg-gradient-to-r from-panelSoft/55 via-panel/35 to-panelSoft/20 px-4 py-4 md:px-5">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="space-y-1">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Sector Dashboard</p>
-              <h3 className="text-lg font-semibold text-slate-100">Move between narratives, sector funds, and industry drilldowns.</h3>
-              <p className="max-w-3xl text-sm text-slate-400">
-                The layout keeps the current workflow intact while making each region easier to scan and compare.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "key-movers-tracker")}`}
-                onClick={() => jumpToSection("key-movers-tracker")}
-              >
-                Key Movers Tracker
-              </button>
-              <button
-                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "sector-etfs")}`}
-                onClick={() => jumpToSection("sector-etfs")}
-              >
-                Sector ETFs
-              </button>
-              <button
-                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "industry-etfs")}`}
-                onClick={() => jumpToSection("industry-etfs")}
-              >
-                Industry ETFs
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="grid gap-3 px-4 py-4 md:grid-cols-3 md:px-5">
-          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Narratives</div>
-            <div className="mt-1 text-lg font-semibold text-slate-100">{entries.length}</div>
-            <p className="text-sm text-slate-400">List and calendar tracking stay in sync.</p>
-          </div>
-          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Sector Funds</div>
-            <div className="mt-1 text-lg font-semibold text-slate-100">{sectorEtfs.length}</div>
-            <p className="text-sm text-slate-400">Primary sector ETFs with constituent drilldowns.</p>
-          </div>
-          <div className="rounded-2xl bg-panelSoft/35 px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Industry Funds</div>
-            <div className="mt-1 text-lg font-semibold text-slate-100">{industryEtfs.length}</div>
-            <p className="text-sm text-slate-400">Grouped by parent sector for quicker comparison.</p>
-          </div>
+      <div className="card px-4 py-4 md:px-5" id="section-selector">
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "key-movers-tracker")}`}
+            onClick={() => jumpToSection("key-movers-tracker")}
+          >
+            Key Movers Tracker
+          </button>
+          <button
+            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "sector-etfs")}`}
+            onClick={() => jumpToSection("sector-etfs")}
+          >
+            Sector ETFs
+          </button>
+          <button
+            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "industry-etfs")}`}
+            onClick={() => jumpToSection("industry-etfs")}
+          >
+            Industry ETFs
+          </button>
         </div>
       </div>
 
