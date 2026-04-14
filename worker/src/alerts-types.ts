@@ -26,6 +26,7 @@ export type AlertFilterInput = {
   endDate?: string | null;
   session?: string | null;
   limit?: number | null;
+  offset?: number | null;
 };
 
 export type NormalizedAlertFilters = {

@@ -11,6 +11,7 @@ import {
   type AlertTickerDayRow,
   type AlertsSessionFilter,
 } from "@/lib/api";
+import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 import { TickerMultiGrid } from "./ticker-multi-grid";
 import { PeerGroupModal } from "./peer-group-modal";
@@ -23,6 +24,7 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
 ];
 
 const QUICK_RANGE_OPTIONS = [3, 5, 10, 30] as const;
+const DEFAULT_CHARTS_PER_PAGE = 12;
 
 const localIsoDate = (value = new Date()) =>
   `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
@@ -148,6 +150,7 @@ export function AlertsDashboard() {
   const [showUniqueOnly, setShowUniqueOnly] = useState(true);
   const [alerts, setAlerts] = useState<AlertLogRow[]>([]);
   const [tickerDays, setTickerDays] = useState<AlertTickerDayRow[]>([]);
+  const [tickerDayTotal, setTickerDayTotal] = useState(0);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedNews, setSelectedNews] = useState<AlertNewsRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -155,6 +158,8 @@ export function AlertsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
   const [activePeerTicker, setActivePeerTicker] = useState<string | null>(null);
+  const [chartPage, setChartPage] = useState(1);
+  const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -162,12 +167,19 @@ export function AlertsDashboard() {
     try {
       const [alertsRes, uniqueRes] = await Promise.all([
         getAlerts({ startDate, endDate, session, limit: 2000 }),
-        getAlertTickerDays({ startDate, endDate, session, limit: 1000 }),
+        getAlertTickerDays({
+          startDate,
+          endDate,
+          session,
+          limit: chartsPerPage,
+          offset: (chartPage - 1) * chartsPerPage,
+        }),
       ]);
       const rows = alertsRes.rows ?? [];
       const uniqueRows = uniqueRes.rows ?? [];
       setAlerts(rows);
       setTickerDays(uniqueRows);
+      setTickerDayTotal(uniqueRes.total ?? uniqueRows.length);
 
       const defaultPair = uniqueRows[0]
         ? keyFor(uniqueRows[0].ticker, uniqueRows[0].tradingDay)
@@ -175,15 +187,22 @@ export function AlertsDashboard() {
           ? keyFor(rows[0].ticker, rows[0].tradingDay)
           : null;
 
-      setSelectedKey((current) => current ?? defaultPair);
+      setSelectedKey((current) => {
+        if (!current) return defaultPair;
+        const currentExists =
+          uniqueRows.some((row) => keyFor(row.ticker, row.tradingDay) === current) ||
+          rows.some((row) => keyFor(row.ticker, row.tradingDay) === current);
+        return currentExists ? current : defaultPair;
+      });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load alerts.");
       setAlerts([]);
       setTickerDays([]);
+      setTickerDayTotal(0);
     } finally {
       setLoading(false);
     }
-  }, [endDate, session, startDate]);
+  }, [chartPage, chartsPerPage, endDate, session, startDate]);
 
   useEffect(() => {
     void load();
@@ -218,7 +237,8 @@ export function AlertsDashboard() {
       .finally(() => setNewsLoading(false));
   }, [selectedTickerDay?.ticker, selectedTickerDay?.tradingDay]);
 
-  const uniqueTickers = useMemo(() => Array.from(new Set(tickerDays.map((row) => row.ticker))), [tickerDays]);
+  const uniqueTickers = useMemo(() => Array.from(new Set(alerts.map((row) => row.ticker))), [alerts]);
+  const totalChartPages = Math.max(1, Math.ceil(tickerDayTotal / chartsPerPage));
   const visibleAlerts = useMemo(() => {
     if (!showUniqueOnly) return alerts;
     const seen = new Set<string>();
@@ -257,8 +277,14 @@ export function AlertsDashboard() {
   };
 
   const applyQuickRange = (days: number) => {
+    setChartPage(1);
     setStartDate(rangeStartDate(endDate, days));
   };
+
+  useEffect(() => {
+    if (chartPage <= totalChartPages) return;
+    setChartPage(totalChartPages);
+  }, [chartPage, totalChartPages]);
 
   const isQuickRangeActive = (days: number) => startDate === rangeStartDate(endDate, days);
 
@@ -274,7 +300,10 @@ export function AlertsDashboard() {
               type="date"
               className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
               value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
+              onChange={(e) => {
+                setChartPage(1);
+                setStartDate(e.target.value);
+              }}
             />
             <div className="mt-2 flex flex-wrap gap-2">
               {QUICK_RANGE_OPTIONS.map((days) => (
@@ -297,7 +326,10 @@ export function AlertsDashboard() {
               type="date"
               className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
               value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
+              onChange={(e) => {
+                setChartPage(1);
+                setEndDate(e.target.value);
+              }}
             />
           </label>
           <label className="text-xs text-slate-300">
@@ -305,7 +337,10 @@ export function AlertsDashboard() {
             <select
               className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
               value={session}
-              onChange={(e) => setSession(e.target.value as AlertsSessionFilter)}
+              onChange={(e) => {
+                setChartPage(1);
+                setSession(e.target.value as AlertsSessionFilter);
+              }}
             >
               {SESSION_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -343,7 +378,7 @@ export function AlertsDashboard() {
           </div>
         </div>
         <div className="mt-3 text-xs text-slate-400">
-          {loading ? "Loading alerts..." : `${visibleAlerts.length}${showUniqueOnly ? " visible unique" : ""} alerts, ${tickerDays.length} unique ticker-days, ${uniqueTickers.length} unique tickers`}
+          {loading ? "Loading alerts..." : `${visibleAlerts.length}${showUniqueOnly ? " visible unique" : ""} alerts, ${tickerDayTotal} unique ticker-days, ${uniqueTickers.length} unique tickers`}
         </div>
       </div>
 
@@ -395,22 +430,59 @@ export function AlertsDashboard() {
               </div>
             </>
           ) : (
-            <TickerMultiGrid
-              title="Multi-Chart Grid (Top 9)"
-              selectedKey={selectedKey}
-              onSelect={setSelectedKey}
-              emptyMessage="No tickers match current filters."
-              showChartStatusLine
-              enableChartPopup
-              items={tickerDays.slice(0, 9).map((row) => ({
-                key: keyFor(row.ticker, row.tradingDay),
-                ticker: row.ticker,
-                title: row.ticker,
-                onTitleClick: () => setActivePeerTicker(row.ticker),
-                subtitle: `${formatAlertStamp(row.latestReceivedAt, row.marketSession)} • ${alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}`,
-                detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
-              }))}
-            />
+            <div className="space-y-3">
+              <div className="card p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                    <span>Charts per page</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={48}
+                      className="w-20 rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                      value={chartsPerPage}
+                      onChange={(event) => {
+                        const next = Math.max(1, Math.min(48, Number(event.target.value) || DEFAULT_CHARTS_PER_PAGE));
+                        setChartsPerPage(next);
+                        setChartPage(1);
+                      }}
+                    />
+                  </label>
+                  <ChartGridPager
+                    totalItems={tickerDayTotal}
+                    page={chartPage}
+                    pageSize={chartsPerPage}
+                    itemLabel="ticker-days"
+                    onPageChange={setChartPage}
+                  />
+                </div>
+              </div>
+              <TickerMultiGrid
+                title={`Multi-Chart Grid (${tickerDayTotal} ticker-days)`}
+                selectedKey={selectedKey}
+                onSelect={setSelectedKey}
+                emptyMessage="No tickers match current filters."
+                showChartStatusLine
+                enableChartPopup
+                items={tickerDays.map((row) => ({
+                  key: keyFor(row.ticker, row.tradingDay),
+                  ticker: row.ticker,
+                  title: row.ticker,
+                  onTitleClick: () => setActivePeerTicker(row.ticker),
+                  subtitle: `${formatAlertStamp(row.latestReceivedAt, row.marketSession)} • ${alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}`,
+                  detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
+                }))}
+              />
+              <div className="flex justify-end px-1">
+                <ChartGridPager
+                  totalItems={tickerDayTotal}
+                  page={chartPage}
+                  pageSize={chartsPerPage}
+                  itemLabel="ticker-days"
+                  onPageChange={setChartPage}
+                />
+              </div>
+            </div>
           )}
         </section>
 

@@ -2059,6 +2059,7 @@ app.get("/api/alerts/unique-tickers", async (c) => {
       endDate: c.req.query("endDate"),
       session: c.req.query("session"),
       limit: Number(c.req.query("limit") ?? 150),
+      offset: Number(c.req.query("offset") ?? 0),
     });
     return c.json(payload);
   } catch (error) {

@@ -1073,8 +1073,15 @@ export function getAlertTickerDays(params: {
   endDate?: string;
   session?: AlertsSessionFilter;
   limit?: number;
+  offset?: number;
 }) {
-  return getJson<{ filters: { startDate: string; endDate: string; session: AlertsSessionFilter; limit: number }; rows: AlertTickerDayRow[] }>(
+  return getJson<{
+    filters: { startDate: string; endDate: string; session: AlertsSessionFilter; limit: number };
+    total: number;
+    limit: number;
+    offset: number;
+    rows: AlertTickerDayRow[];
+  }>(
     appendQuery("/api/alerts/unique-tickers", params),
   );
 }

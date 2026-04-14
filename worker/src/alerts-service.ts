@@ -24,6 +24,11 @@ const SESSION_VALUES: AlertsSessionFilter[] = ["all", "premarket", "regular", "a
 let lastAlertTickerRepairAt = 0;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const normalizeOffset = (value: number | null | undefined): number => {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.floor(parsed));
+};
 
 function toIsoDate(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -568,15 +573,26 @@ async function loadNewsForTickerDays(env: Env, pairs: Array<{ ticker: string; tr
 
 export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: AlertFilterInput): Promise<{
   filters: NormalizedAlertFilters;
+  total: number;
+  limit: number;
+  offset: number;
   rows: AlertTickerDayRow[];
 }> {
   await repairMisparsedExchangeTickers(env);
   const filters = normalizeAlertFilters(filterInput);
+  const offset = normalizeOffset(filterInput.offset);
+
+  const countRow = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM (SELECT 1 FROM tv_alerts t1 WHERE t1.trading_day >= ? AND t1.trading_day <= ? AND (? = 'all' OR t1.market_session = ?) GROUP BY t1.ticker, t1.trading_day) grouped",
+  )
+    .bind(filters.startDate, filters.endDate, filters.session, filters.session)
+    .first<{ count: number }>();
+  const total = Number(countRow?.count ?? 0);
 
   const grouped = await env.DB.prepare(
-    "SELECT t1.ticker as ticker, t1.trading_day as tradingDay, MAX(t1.received_at) as latestReceivedAt, COUNT(*) as alertCount, (SELECT t2.market_session FROM tv_alerts t2 WHERE t2.ticker = t1.ticker AND t2.trading_day = t1.trading_day ORDER BY datetime(t2.received_at) DESC LIMIT 1) as marketSession FROM tv_alerts t1 WHERE t1.trading_day >= ? AND t1.trading_day <= ? AND (? = 'all' OR t1.market_session = ?) GROUP BY t1.ticker, t1.trading_day ORDER BY datetime(latestReceivedAt) DESC LIMIT ?",
+    "SELECT t1.ticker as ticker, t1.trading_day as tradingDay, MAX(t1.received_at) as latestReceivedAt, COUNT(*) as alertCount, (SELECT t2.market_session FROM tv_alerts t2 WHERE t2.ticker = t1.ticker AND t2.trading_day = t1.trading_day ORDER BY datetime(t2.received_at) DESC LIMIT 1) as marketSession FROM tv_alerts t1 WHERE t1.trading_day >= ? AND t1.trading_day <= ? AND (? = 'all' OR t1.market_session = ?) GROUP BY t1.ticker, t1.trading_day ORDER BY datetime(latestReceivedAt) DESC LIMIT ? OFFSET ?",
   )
-    .bind(filters.startDate, filters.endDate, filters.session, filters.session, filters.limit)
+    .bind(filters.startDate, filters.endDate, filters.session, filters.session, filters.limit, offset)
     .all<{
       ticker: string;
       tradingDay: string;
@@ -590,6 +606,9 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
 
   return {
     filters,
+    total,
+    limit: filters.limit,
+    offset,
     rows: rows.map((row) => ({
       ticker: row.ticker,
       tradingDay: row.tradingDay,
