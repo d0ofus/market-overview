@@ -1,6 +1,8 @@
 import { sanitizeBarSeries } from "./metrics";
-import { getProvider, type DailyBar } from "./provider";
+import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getProvider } from "./provider";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
+import { resolveTickerMeta, type ResolvedSymbol } from "./symbol-resolver";
 import type { Env } from "./types";
 
 export const CORRELATION_LOOKBACKS = {
@@ -139,7 +141,6 @@ const MIN_CORRELATION_OBSERVATIONS = 20;
 const MAX_LEAD_LAG_DAYS = 20;
 const STABILITY_EPSILON = 1e-12;
 const BAR_FETCH_BUFFER = 30;
-const BAR_UPSERT_CHUNK_SIZE = 100;
 
 function closePeriodsForLookback(lookback: CorrelationLookback): number {
   return CORRELATION_LOOKBACKS[lookback].closePeriods;
@@ -473,17 +474,29 @@ function addUtcDays(isoDate: string, days: number): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-async function upsertBars(env: Env, bars: DailyBar[]): Promise<void> {
-  if (bars.length === 0) return;
-  for (let index = 0; index < bars.length; index += BAR_UPSERT_CHUNK_SIZE) {
-    const chunk = bars.slice(index, index + BAR_UPSERT_CHUNK_SIZE);
-    const statements = chunk.map((bar) =>
-      env.DB.prepare(
-        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume),
-    );
-    await env.DB.batch(statements);
-  }
+function normalizeRequestedTickers(tickers: string[]): string[] {
+  return Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean)));
+}
+
+function correlationHistoryStartDate(expectedAsOfDate: string, lookback: CorrelationLookback): string {
+  const closePeriods = closePeriodsForLookback(lookback);
+  const bufferDays = Math.ceil(closePeriods * 1.6) + BAR_FETCH_BUFFER;
+  return addUtcDays(expectedAsOfDate, -bufferDays);
+}
+
+async function upsertResolvedSymbols(env: Env, symbols: ResolvedSymbol[]): Promise<void> {
+  if (symbols.length === 0) return;
+  const statements = symbols.map((symbol) =>
+    env.DB.prepare(
+      `INSERT INTO symbols (ticker, name, exchange, asset_class)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(ticker) DO UPDATE SET
+         name = COALESCE(excluded.name, symbols.name),
+         exchange = COALESCE(excluded.exchange, symbols.exchange),
+         asset_class = COALESCE(excluded.asset_class, symbols.asset_class)`,
+    ).bind(symbol.ticker, symbol.name, symbol.exchange, symbol.assetClass),
+  );
+  await env.DB.batch(statements);
 }
 
 async function loadTickerMetadata(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
@@ -508,38 +521,65 @@ async function loadLatestBarDates(env: Env, tickers: string[]): Promise<Map<stri
   return new Map((result.results ?? []).map((row) => [row.ticker.toUpperCase(), row.lastBarDate ?? null]));
 }
 
-async function attemptCorrelationBackfill(
+async function hydrateCorrelationHistory(
   env: Env,
   requestedTickers: string[],
+  lookback: CorrelationLookback,
   expectedAsOfDate: string,
 ): Promise<string[]> {
-  const latestBarDates = await loadLatestBarDates(env, requestedTickers);
-  const staleTickers = requestedTickers.filter((ticker) => {
-    const lastBarDate = latestBarDates.get(ticker.toUpperCase());
-    return lastBarDate != null && lastBarDate < expectedAsOfDate;
-  });
-  if (staleTickers.length === 0) return [];
+  const metadataByTicker = await loadTickerMetadata(env, requestedTickers);
+  const unresolvedMetadataTickers = requestedTickers.filter((ticker) => !metadataByTicker.has(ticker));
+  if (unresolvedMetadataTickers.length > 0) {
+    const resolvedSymbols = (await Promise.all(unresolvedMetadataTickers.map(async (ticker) => {
+      try {
+        return await resolveTickerMeta(ticker, env);
+      } catch (error) {
+        console.error("correlation symbol resolution failed", { ticker, error });
+        return null;
+      }
+    }))).filter((value): value is ResolvedSymbol => value != null);
+    await upsertResolvedSymbols(env, resolvedSymbols);
+  }
 
-  const staleStartDates = staleTickers
-    .map((ticker) => latestBarDates.get(ticker.toUpperCase()))
-    .filter((value): value is string => Boolean(value))
-    .map((value) => addUtcDays(value, 1));
-  const startDate = staleStartDates.sort().at(0);
-  if (!startDate || startDate > expectedAsOfDate) return [];
+  const hydratedMetadataByTicker = await loadTickerMetadata(env, requestedTickers);
+  const latestBarDates = await loadLatestBarDates(env, requestedTickers);
+  const hydrationTickers = requestedTickers.filter((ticker) => {
+    if (!hydratedMetadataByTicker.has(ticker)) return false;
+    const lastBarDate = latestBarDates.get(ticker.toUpperCase());
+    return lastBarDate == null || lastBarDate < expectedAsOfDate;
+  });
+  if (hydrationTickers.length === 0) return [];
+
+  const startDate = correlationHistoryStartDate(expectedAsOfDate, lookback);
 
   try {
-    const provider = getProvider(env);
-    const freshBars = await provider.getDailyBars(staleTickers, startDate, expectedAsOfDate);
-    if (freshBars.length > 0) {
-      await upsertBars(env, freshBars);
+    const provider = getProvider(env, { yahooPreferredTickers: requestedTickers });
+    const refresh = await refreshDailyBarsIncremental(env, {
+      provider,
+      tickers: hydrationTickers,
+      startDate,
+      endDate: expectedAsOfDate,
+    });
+    if (refresh.writtenRows > 0) {
       return [];
     }
-    return [`Backfill attempted for stale correlation tickers (${staleTickers.join(", ")}), but no newer bars were returned.`];
+    return [`Correlation history hydration attempted for ${hydrationTickers.join(", ")}, but no bars were stored.`];
   } catch (error) {
-    console.error("correlation backfill failed; stored bars used", { requestedTickers: staleTickers, error });
+    console.error("correlation history hydration failed; stored bars used", { requestedTickers: hydrationTickers, error });
     const message = error instanceof Error ? error.message : "unknown provider error";
-    return [`Live correlation backfill failed; stale stored bars were used instead (${message}).`];
+    return [`Live correlation history hydration failed; stored bars were used instead (${message}).`];
   }
+}
+
+function buildUnresolvedTickerMessage(unresolvedTickers: CorrelationUnresolvedTicker[]): string {
+  return unresolvedTickers
+    .map((ticker) => `${ticker.ticker} (${ticker.reason === "unknown_ticker" ? "unknown ticker" : "missing history"})`)
+    .join(", ");
+}
+
+function buildResolutionError(baseMessage: string, unresolvedTickers: CorrelationUnresolvedTicker[]): string {
+  if (unresolvedTickers.length === 0) return baseMessage;
+  return `${baseMessage} Unresolved: ${buildUnresolvedTickerMessage(unresolvedTickers)}.`;
 }
 
 async function loadTickerBars(env: Env, tickers: string[], closePeriods: number): Promise<Map<string, PriceSeries>> {
@@ -586,10 +626,10 @@ async function loadPreparedSeries(
   returnSeriesByTicker: Map<string, ReturnSeries>;
   warnings: string[];
 }> {
-  const uniqueTickers = Array.from(new Set(requestedTickers.map((ticker) => ticker.toUpperCase())));
+  const uniqueTickers = normalizeRequestedTickers(requestedTickers);
   const closePeriods = closePeriodsForLookback(lookback);
   const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const backfillWarnings = await attemptCorrelationBackfill(env, uniqueTickers, expectedAsOfDate);
+  const backfillWarnings = await hydrateCorrelationHistory(env, uniqueTickers, lookback, expectedAsOfDate);
   const [metadataByTicker, rawBarsByTicker] = await Promise.all([
     loadTickerMetadata(env, uniqueTickers),
     loadTickerBars(env, uniqueTickers, closePeriods),
@@ -658,7 +698,7 @@ export async function loadCorrelationMatrix(
 ): Promise<CorrelationMatrixResponse> {
   const prepared = await loadPreparedSeries(env, requestedTickers, lookback);
   if (prepared.resolvedTickers.length < 2) {
-    throw new Error("At least 2 valid tickers with stored history are required.");
+    throw new Error(buildResolutionError("At least 2 valid tickers with stored history are required.", prepared.unresolvedTickers));
   }
 
   const matrix: Array<Array<number | null>> = [];
@@ -714,13 +754,13 @@ export async function loadCorrelationPair(
   const requestedTickers = [tickers[0].toUpperCase(), tickers[1].toUpperCase()];
   const prepared = await loadPreparedSeries(env, requestedTickers, lookback);
   if (prepared.resolvedTickers.length < 2) {
-    throw new Error("Both selected tickers require stored history.");
+    throw new Error(buildResolutionError("Both selected tickers require stored history.", prepared.unresolvedTickers));
   }
 
   const leftMeta = prepared.resolvedTickers.find((ticker) => ticker.ticker === requestedTickers[0]);
   const rightMeta = prepared.resolvedTickers.find((ticker) => ticker.ticker === requestedTickers[1]);
   if (!leftMeta || !rightMeta) {
-    throw new Error("Both selected tickers require stored history.");
+    throw new Error(buildResolutionError("Both selected tickers require stored history.", prepared.unresolvedTickers));
   }
 
   const leftPrices = prepared.priceSeriesByTicker.get(leftMeta.ticker)!;

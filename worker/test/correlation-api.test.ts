@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import * as providerModule from "../src/provider";
+import { latestUsSessionAsOfDate } from "../src/refresh-timing";
+import * as symbolResolverModule from "../src/symbol-resolver";
 import type { Env } from "../src/types";
 
 type BarRow = {
@@ -14,6 +16,12 @@ type SymbolRow = {
   displayName: string | null;
 };
 
+function addDays(isoDate: string, days: number): string {
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
 function buildDates(count: number, start = "2025-01-02"): string[] {
   const startDate = new Date(`${start}T00:00:00Z`);
   return Array.from({ length: count }, (_, index) => {
@@ -23,7 +31,12 @@ function buildDates(count: number, start = "2025-01-02"): string[] {
   });
 }
 
+function buildRecentDates(count: number, endDate: string): string[] {
+  return Array.from({ length: count }, (_, index) => addDays(endDate, -(count - index - 1)));
+}
+
 function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
+  const storedSymbols = [...symbols];
   const storedBars = [...dailyBars];
   return {
     DB: {
@@ -37,21 +50,22 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                 if (sql.includes("FROM symbols")) {
                   const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
                   return {
-                    results: symbols
+                    results: storedSymbols
                       .filter((row) => requested.has(row.ticker.toUpperCase()))
                       .map((row) => ({ ticker: row.ticker, displayName: row.displayName })) as T[],
                   };
                 }
-                if (sql.includes("MAX(date) as lastBarDate")) {
+                if (sql.includes("MAX(date) as lastBarDate") || sql.includes("MAX(date) as lastDate")) {
                   const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
+                  const fieldName = sql.includes("MAX(date) as lastDate") ? "lastDate" : "lastBarDate";
                   return {
                     results: Array.from(requested).flatMap((ticker) => {
-                      const lastBarDate = storedBars
+                      const latestDate = storedBars
                         .filter((row) => row.ticker.toUpperCase() === ticker)
                         .map((row) => row.date)
                         .sort()
                         .at(-1);
-                      return lastBarDate ? [{ ticker, lastBarDate }] : [];
+                      return latestDate ? [{ ticker, [fieldName]: latestDate }] : [];
                     }) as T[],
                   };
                 }
@@ -88,14 +102,26 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
       },
       async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
         for (const statement of statements) {
-          if (!statement.__sql?.includes("INSERT OR REPLACE INTO daily_bars")) continue;
-          const [ticker, date, , , , c] = statement.__args ?? [];
-          const nextRow = { ticker: String(ticker), date: String(date), c: Number(c) };
-          const existingIndex = storedBars.findIndex((row) => row.ticker === nextRow.ticker && row.date === nextRow.date);
-          if (existingIndex >= 0) {
-            storedBars[existingIndex] = nextRow;
-          } else {
-            storedBars.push(nextRow);
+          if (statement.__sql?.includes("INTO symbols")) {
+            const [ticker, name] = statement.__args ?? [];
+            const normalizedTicker = String(ticker).toUpperCase();
+            const existingSymbolIndex = storedSymbols.findIndex((row) => row.ticker.toUpperCase() === normalizedTicker);
+            if (existingSymbolIndex >= 0) {
+              storedSymbols[existingSymbolIndex] = { ticker: normalizedTicker, displayName: String(name ?? normalizedTicker) };
+            } else {
+              storedSymbols.push({ ticker: normalizedTicker, displayName: String(name ?? normalizedTicker) });
+            }
+            continue;
+          }
+          if (statement.__sql?.includes("INSERT OR REPLACE INTO daily_bars")) {
+            const [ticker, date, , , , c] = statement.__args ?? [];
+            const nextRow = { ticker: String(ticker), date: String(date), c: Number(c) };
+            const existingIndex = storedBars.findIndex((row) => row.ticker === nextRow.ticker && row.date === nextRow.date);
+            if (existingIndex >= 0) {
+              storedBars[existingIndex] = nextRow;
+            } else {
+              storedBars.push(nextRow);
+            }
           }
         }
         return [];
@@ -197,5 +223,118 @@ describe("correlation API", () => {
     expect(response.status).toBe(400);
     const body = await response.json() as { error: string };
     expect(body.error).toContain("Rolling window cannot be larger than the selected lookback.");
+  });
+
+  it("hydrates cold-start matrix requests before returning data", async () => {
+    const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
+      ticker,
+      name: `${ticker} Inc.`,
+      exchange: "NYSE",
+      assetClass: "equity",
+    }));
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async (tickers) => {
+        const dates = buildRecentDates(35, expectedAsOfDate);
+        return tickers.flatMap((ticker, tickerIndex) =>
+          dates.map((date, index) => ({
+            ticker,
+            date,
+            o: 90 + index + tickerIndex * 5,
+            h: 90 + index + tickerIndex * 5,
+            l: 90 + index + tickerIndex * 5,
+            c: 90 + index + tickerIndex * 5,
+            volume: 250,
+          })));
+      },
+    });
+    const env = createCorrelationEnv([], []);
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/correlation/matrix?tickers=AVT,ARW&lookback=60D"),
+      env as never,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { resolvedTickers: Array<{ ticker: string }>; unresolvedTickers: unknown[] };
+    expect(body.resolvedTickers.map((ticker) => ticker.ticker)).toEqual(["AVT", "ARW"]);
+    expect(body.unresolvedTickers).toEqual([]);
+  });
+
+  it("hydrates cold-start pair requests before returning data", async () => {
+    const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
+      ticker,
+      name: `${ticker} Inc.`,
+      exchange: "NYSE",
+      assetClass: "equity",
+    }));
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async (tickers) => {
+        const dates = buildRecentDates(40, expectedAsOfDate);
+        return tickers.flatMap((ticker, tickerIndex) =>
+          dates.map((date, index) => ({
+            ticker,
+            date,
+            o: 110 + index + tickerIndex * 7,
+            h: 110 + index + tickerIndex * 7,
+            l: 110 + index + tickerIndex * 7,
+            c: 110 + index + tickerIndex * 7,
+            volume: 400,
+          })));
+      },
+    });
+    const env = createCorrelationEnv([], []);
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/correlation/pair?left=AVT&right=ARW&lookback=60D&rollingWindow=20D"),
+      env as never,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { pair: { left: { ticker: string }; right: { ticker: string } } };
+    expect(body.pair.left.ticker).toBe("AVT");
+    expect(body.pair.right.ticker).toBe("ARW");
+  });
+
+  it("includes unresolved ticker reasons when hydration still leaves fewer than two usable series", async () => {
+    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => {
+      if (ticker === "BAD") return null;
+      return {
+        ticker,
+        name: `${ticker} Inc.`,
+        exchange: "NYSE",
+        assetClass: "equity",
+      };
+    });
+    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+      label: "test-provider",
+      getDailyBars: async (tickers) =>
+        tickers.flatMap((ticker) => {
+          if (ticker !== "AVT") return [];
+          return [{
+            ticker,
+            date: buildDates(1).at(0)!,
+            o: 101,
+            h: 101,
+            l: 101,
+            c: 101,
+            volume: 100,
+          }];
+        }),
+    });
+    const env = createCorrelationEnv([], []);
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/correlation/matrix?tickers=AVT,BAD&lookback=60D"),
+      env as never,
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: string };
+    expect(body.error).toContain("AVT (missing history)");
+    expect(body.error).toContain("BAD (unknown ticker)");
   });
 });
