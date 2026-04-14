@@ -244,6 +244,27 @@ export type CompiledScansSnapshot = {
   rows: CompiledScanUniqueTickerRow[];
 };
 
+export type ScanCompilePresetRefreshMemberResult = {
+  presetId: string;
+  presetName: string;
+  status: "ok" | "warning" | "error" | "empty";
+  rowCount: number;
+  error: string | null;
+  snapshot: ScanSnapshot | null;
+  usableSnapshot: ScanSnapshot | null;
+  usedFallback: boolean;
+  includedInCompiled: boolean;
+};
+
+export type ScanCompilePresetRefreshResult = {
+  compilePresetId: string;
+  compilePresetName: string;
+  refreshedCount: number;
+  failedCount: number;
+  snapshot: CompiledScansSnapshot;
+  memberResults: ScanCompilePresetRefreshMemberResult[];
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
 export type WatchlistCompilerSetRow = {
@@ -1148,6 +1169,13 @@ export function refreshScansSnapshot(presetId?: string | null) {
     method: "POST",
     body: JSON.stringify({ presetId: presetId ?? null }),
   });
+}
+
+export function refreshScanCompilePreset(id: string) {
+  return adminFetch<{ ok: boolean } & ScanCompilePresetRefreshResult>(
+    `/api/admin/scans/compile-presets/${encodeURIComponent(id)}/refresh`,
+    { method: "POST" },
+  );
 }
 
 export function createScanPreset(payload: {

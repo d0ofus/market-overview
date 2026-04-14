@@ -16,6 +16,7 @@ import {
   getScansSnapshot,
   getTickerNews,
   refreshScansSnapshot,
+  refreshScanCompilePreset,
   updateScanCompilePreset,
   updateScanPreset,
   type AlertNewsRow,
@@ -352,12 +353,15 @@ export function ScansPageDashboard() {
   const [loading, setLoading] = useState(true);
   const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [compiledRefreshing, setCompiledRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [compiledListCollapsed, setCompiledListCollapsed] = useState(true);
   const [resultsTableCollapsed, setResultsTableCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compiledError, setCompiledError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [compiledMessage, setCompiledMessage] = useState<string | null>(null);
+  const [compiledWarnings, setCompiledWarnings] = useState<string[]>([]);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [newsByTicker, setNewsByTicker] = useState<Record<string, AlertNewsRow[]>>({});
   const [newsLoadingTicker, setNewsLoadingTicker] = useState<string | null>(null);
@@ -538,6 +542,11 @@ export function ScansPageDashboard() {
         setDraftCompilePreset(emptyDraftCompilePreset());
       }
     })();
+  }, [selectedCompilePresetId]);
+
+  useEffect(() => {
+    setCompiledMessage(null);
+    setCompiledWarnings([]);
   }, [selectedCompilePresetId]);
 
   useEffect(() => {
@@ -723,6 +732,42 @@ export function ScansPageDashboard() {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh scans.");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const onRefreshCompiledPreset = async () => {
+    if (!selectedCompilePresetId) return;
+    setCompiledRefreshing(true);
+    setCompiledError(null);
+    setCompiledMessage(null);
+    setCompiledWarnings([]);
+    try {
+      const response = await refreshScanCompilePreset(selectedCompilePresetId);
+      setCompiledSnapshot(response.snapshot);
+      const selectedMember = selectedPresetId
+        ? response.memberResults.find((result) => result.presetId === selectedPresetId)
+        : null;
+      if (selectedMember?.snapshot) {
+        setSnapshot(selectedMember.snapshot);
+      }
+      setExpandedTicker(null);
+      setNewsByTicker({});
+      setCompiledWarnings(
+        response.memberResults
+          .filter((result) => result.status === "error")
+          .map((result) => {
+            const fallbackNote = result.usedFallback
+              ? ` Using the previous usable snapshot with ${result.usableSnapshot?.rowCount ?? 0} rows.`
+              : " No usable prior snapshot was available.";
+            return `${result.presetName}: ${result.error ?? "Refresh failed."}${fallbackNote}`;
+          }),
+      );
+      const memberLabel = response.refreshedCount === 1 ? "member scan" : "member scans";
+      setCompiledMessage(`Refreshed ${response.refreshedCount} ${memberLabel}; ${response.failedCount} failed.`);
+    } catch (refreshError) {
+      setCompiledError(refreshError instanceof Error ? refreshError.message : "Failed to refresh compiled scan preset.");
+    } finally {
+      setCompiledRefreshing(false);
     }
   };
 
@@ -1301,6 +1346,14 @@ export function ScansPageDashboard() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50"
+                disabled={!selectedCompilePresetId || draftCompilePreset.members.length === 0 || compiledRefreshing}
+                onClick={() => void onRefreshCompiledPreset()}
+              >
+                <RefreshCw className={`h-4 w-4 ${compiledRefreshing ? "animate-spin" : ""}`} />
+                {compiledRefreshing ? "Refreshing..." : "Refresh Compiled Preset"}
+              </button>
               {compiledExportUrl && (
                 <a
                   className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
@@ -1316,7 +1369,7 @@ export function ScansPageDashboard() {
                 disabled={(compiledSnapshot?.rows.length ?? 0) === 0}
                 onClick={async () => {
                   await navigator.clipboard.writeText((compiledSnapshot?.rows ?? []).map((row) => row.ticker).join("\n"));
-                  setMessage("Compiled tickers copied.");
+                  setCompiledMessage("Compiled tickers copied.");
                 }}
               >
                 <Copy className="h-4 w-4" />
@@ -1331,6 +1384,14 @@ export function ScansPageDashboard() {
             {compiledSnapshot ? ` - ${compiledSnapshot.rows.length} unique ticker${compiledSnapshot.rows.length === 1 ? "" : "s"}` : ""}
             {compiledSnapshot?.generatedAt ? ` - latest snapshot ${formatDateTime(compiledSnapshot.generatedAt)}` : ""}
           </p>
+          {compiledMessage && <p className="mt-2 text-xs text-slate-300">{compiledMessage}</p>}
+          {compiledWarnings.length > 0 && (
+            <div className="mt-2 space-y-1 text-xs text-yellow-200">
+              {compiledWarnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </div>
+          )}
           {compiledError && <p className="mt-2 text-xs text-red-300">{compiledError}</p>}
         </div>
 

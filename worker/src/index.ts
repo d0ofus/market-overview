@@ -83,6 +83,7 @@ import {
   loadDefaultScanPreset,
   loadLatestScansSnapshot,
   loadScanPreset,
+  refreshScanCompilePreset,
   refreshScansSnapshot,
   upsertScanCompilePreset,
   upsertScanPreset,
@@ -2216,6 +2217,18 @@ app.post("/api/admin/scans/refresh", async (c) => {
     return c.json({ ok: true, snapshot });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh scans." }, 500);
+  }
+});
+
+app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  await maybeRunScansPageHousekeeping(c.env);
+  try {
+    const result = await refreshScanCompilePreset(c.env, c.req.param("compilePresetId"));
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to refresh compiled scan preset.";
+    return c.json({ error: message }, message === "Scan compile preset not found." ? 404 : 500);
   }
 });
 

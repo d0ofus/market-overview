@@ -101,6 +101,27 @@ export type CompiledScansSnapshot = {
   rows: CompiledScanUniqueTickerRow[];
 };
 
+export type ScanCompilePresetRefreshMemberResult = {
+  presetId: string;
+  presetName: string;
+  status: "ok" | "warning" | "error" | "empty";
+  rowCount: number;
+  error: string | null;
+  snapshot: ScanSnapshot | null;
+  usableSnapshot: ScanSnapshot | null;
+  usedFallback: boolean;
+  includedInCompiled: boolean;
+};
+
+export type ScanCompilePresetRefreshResult = {
+  compilePresetId: string;
+  compilePresetName: string;
+  refreshedCount: number;
+  failedCount: number;
+  snapshot: CompiledScansSnapshot;
+  memberResults: ScanCompilePresetRefreshMemberResult[];
+};
+
 type TradingViewFilter = {
   left: string;
   operation: string;
@@ -863,6 +884,78 @@ async function upsertSymbolsFromRows(env: Env, rows: ScanSnapshotRow[]): Promise
   if (statements.length > 0) await env.DB.batch(statements);
 }
 
+type ScanSnapshotHeader = {
+  id: string;
+  presetId: string;
+  providerLabel: string;
+  generatedAt: string;
+  rowCount: number;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+};
+
+async function loadLatestScanSnapshotHeader(
+  env: Env,
+  presetId: string,
+  options?: { usableOnly?: boolean },
+): Promise<ScanSnapshotHeader | null> {
+  const clauses = ["preset_id = ?"];
+  if (options?.usableOnly) clauses.push("status != 'error'");
+  return env.DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       provider_label as providerLabel,
+       generated_at as generatedAt,
+       row_count as rowCount,
+       status,
+       error
+     FROM scan_snapshots
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY datetime(generated_at) DESC
+     LIMIT 1`,
+  )
+    .bind(presetId)
+    .first<ScanSnapshotHeader>();
+}
+
+async function loadScanSnapshotRows(env: Env, snapshotId: string): Promise<ScanSnapshotRow[]> {
+  const rows = await env.DB.prepare(
+    "SELECT ticker, name, sector, industry, change_1d as change1d, market_cap as marketCap, price, avg_volume as avgVolume, price_avg_volume as priceAvgVolume, raw_json as rawJson FROM scan_rows WHERE snapshot_id = ? ORDER BY change_1d DESC, ticker ASC",
+  )
+    .bind(snapshotId)
+    .all<ScanSnapshotRow>();
+  return (rows.results ?? []).map((row) => {
+    let relativeVolume: number | null = null;
+    try {
+      const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+      const candidate = raw?.relative_volume_10d_calc ?? raw?.relative_volume;
+      relativeVolume = asFiniteNumber(candidate);
+    } catch {
+      relativeVolume = null;
+    }
+    return { ...row, relativeVolume };
+  });
+}
+
+async function hydrateScanSnapshot(
+  env: Env,
+  preset: ScanPreset,
+  snapshot: ScanSnapshotHeader,
+): Promise<ScanSnapshot> {
+  return {
+    id: snapshot.id,
+    presetId: preset.id,
+    presetName: preset.name,
+    providerLabel: snapshot.providerLabel,
+    generatedAt: snapshot.generatedAt,
+    rowCount: snapshot.rowCount,
+    status: snapshot.status,
+    error: snapshot.error,
+    rows: await loadScanSnapshotRows(env, snapshot.id),
+  };
+}
+
 export async function refreshScansSnapshot(env: Env, presetId?: string | null): Promise<ScanSnapshot> {
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) throw new Error("No scan preset is configured.");
@@ -912,47 +1005,17 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
 export async function loadLatestScansSnapshot(env: Env, presetId?: string | null): Promise<ScanSnapshot | null> {
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) return null;
-  const snapshot = await env.DB.prepare(
-    "SELECT id, preset_id as presetId, provider_label as providerLabel, generated_at as generatedAt, row_count as rowCount, status, error FROM scan_snapshots WHERE preset_id = ? ORDER BY datetime(generated_at) DESC LIMIT 1",
-  )
-    .bind(preset.id)
-    .first<{
-      id: string;
-      presetId: string;
-      providerLabel: string;
-      generatedAt: string;
-      rowCount: number;
-      status: "ok" | "warning" | "error" | "empty";
-      error: string | null;
-    }>();
+  const snapshot = await loadLatestScanSnapshotHeader(env, preset.id);
   if (!snapshot) return null;
-  const rows = await env.DB.prepare(
-    "SELECT ticker, name, sector, industry, change_1d as change1d, market_cap as marketCap, price, avg_volume as avgVolume, price_avg_volume as priceAvgVolume, raw_json as rawJson FROM scan_rows WHERE snapshot_id = ? ORDER BY change_1d DESC, ticker ASC",
-  )
-    .bind(snapshot.id)
-    .all<ScanSnapshotRow>();
-  const normalizedRows = (rows.results ?? []).map((row) => {
-    let relativeVolume: number | null = null;
-    try {
-      const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
-      const candidate = raw?.relative_volume_10d_calc ?? raw?.relative_volume;
-      relativeVolume = asFiniteNumber(candidate);
-    } catch {
-      relativeVolume = null;
-    }
-    return { ...row, relativeVolume };
-  });
-  return {
-    id: snapshot.id,
-    presetId: preset.id,
-    presetName: preset.name,
-    providerLabel: snapshot.providerLabel,
-    generatedAt: snapshot.generatedAt,
-    rowCount: snapshot.rowCount,
-    status: snapshot.status,
-    error: snapshot.error,
-    rows: normalizedRows,
-  };
+  return hydrateScanSnapshot(env, preset, snapshot);
+}
+
+export async function loadLatestUsableScansSnapshot(env: Env, presetId?: string | null): Promise<ScanSnapshot | null> {
+  const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
+  if (!preset) return null;
+  const snapshot = await loadLatestScanSnapshotHeader(env, preset.id, { usableOnly: true });
+  if (!snapshot) return null;
+  return hydrateScanSnapshot(env, preset, snapshot);
 }
 
 export async function loadCompiledScansSnapshot(
@@ -967,7 +1030,7 @@ export async function loadCompiledScansSnapshot(
   ));
   const presets = (await Promise.all(uniquePresetIds.map((presetId) => loadScanPreset(env, presetId))))
     .filter((preset): preset is ScanPreset => Boolean(preset));
-  const snapshots = await Promise.all(presets.map((preset) => loadLatestScansSnapshot(env, preset.id)));
+  const snapshots = await Promise.all(presets.map((preset) => loadLatestUsableScansSnapshot(env, preset.id)));
   const rowMap = new Map<string, CompiledScanUniqueTickerRow>();
   const rowTimestampMap = new Map<string, string>();
   let latestGeneratedAt = "";
@@ -1036,6 +1099,44 @@ export async function loadCompiledScansSnapshotForCompilePreset(env: Env, compil
     compilePresetId: compilePreset.id,
     compilePresetName: compilePreset.name,
   });
+}
+
+export async function refreshScanCompilePreset(env: Env, compilePresetId: string): Promise<ScanCompilePresetRefreshResult> {
+  const compilePreset = await loadScanCompilePreset(env, compilePresetId);
+  if (!compilePreset) throw new Error("Scan compile preset not found.");
+
+  const memberResults: ScanCompilePresetRefreshMemberResult[] = [];
+  for (const member of compilePreset.members) {
+    const refreshedSnapshot = await refreshScansSnapshot(env, member.scanPresetId);
+    const usableSnapshot = refreshedSnapshot.status === "error"
+      ? await loadLatestUsableScansSnapshot(env, member.scanPresetId)
+      : refreshedSnapshot;
+    memberResults.push({
+      presetId: member.scanPresetId,
+      presetName: member.scanPresetName,
+      status: refreshedSnapshot.status,
+      rowCount: usableSnapshot?.rowCount ?? 0,
+      error: refreshedSnapshot.error,
+      snapshot: refreshedSnapshot,
+      usableSnapshot,
+      usedFallback: refreshedSnapshot.status === "error" && Boolean(usableSnapshot),
+      includedInCompiled: Boolean(usableSnapshot),
+    });
+  }
+
+  const snapshot = await loadCompiledScansSnapshot(env, compilePreset.presetIds, {
+    compilePresetId: compilePreset.id,
+    compilePresetName: compilePreset.name,
+  });
+
+  return {
+    compilePresetId: compilePreset.id,
+    compilePresetName: compilePreset.name,
+    refreshedCount: memberResults.filter((result) => result.status !== "error").length,
+    failedCount: memberResults.filter((result) => result.status === "error").length,
+    snapshot,
+    memberResults,
+  };
 }
 
 export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<void> {
