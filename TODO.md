@@ -12,6 +12,7 @@
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 
 ## Breadth
+- Add sparklines above columns (30D) on 'Historical Metrics Table' for quick view. Use hover over if no space
 - Add volume traded on majors as a breadth metric
 - Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
