@@ -1414,14 +1414,6 @@ export function SectorTracker() {
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
-          controls={(
-            <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
-              <span className="text-slate-400">Charts in this entry</span>
-              <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
-                {activeNarrativeEntry.symbols.length} ticker{activeNarrativeEntry.symbols.length === 1 ? "" : "s"}
-              </span>
-            </div>
-          )}
           emptyMessage="No tickers are attached to this narrative entry yet."
           onPageChange={setNarrativePage}
           onClose={() => setActiveNarrativeEntry(null)}
