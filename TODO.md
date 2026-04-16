@@ -12,7 +12,6 @@
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 
 ## Breadth
-- Add sparklines above columns (30D) on 'Historical Metrics Table' for quick view. Use hover over if no space
 - Add volume traded on majors as a breadth metric
 - Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
@@ -26,13 +25,13 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-> Increase the size of pop up window when clicking ETF constituents, to fit 3 in the pop up page
+> When clicking on individual sector/narrative, show all charts within the box
+> Change default event date on key movers tracker to the last trading session (i.e. one day before)
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
 - For industry peers view, change to liteweight charts
-- Shift paging and next button to the bottom of the pop up page when clicking on ticker
 
 ## Peer Groups
 - Remove OTC names like ABBNY, ABLZF etc.
