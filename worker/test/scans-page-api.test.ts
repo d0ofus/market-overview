@@ -188,6 +188,80 @@ afterEach(() => {
 });
 
 describe("scans page API", () => {
+  it("exports compiled preset files with the compiled-scan filename format", async () => {
+    const env = createApiScansEnv({
+      presets: [{
+        id: "preset-a",
+        name: "Leaders",
+        isDefault: true,
+        isActive: true,
+        rules: [],
+        sortField: "change",
+        sortDirection: "desc",
+        rowLimit: 100,
+        createdAt: "",
+        updatedAt: "",
+      }],
+      compilePresets: [{
+        id: "compile-daily",
+        name: "Daily",
+        createdAt: "",
+        updatedAt: "",
+        members: [
+          { scanPresetId: "preset-a", scanPresetName: "Leaders", sortOrder: 1 },
+        ],
+      }],
+      snapshots: [{
+        id: "snap-a",
+        presetId: "preset-a",
+        providerLabel: "TV",
+        generatedAt: "2026-03-18T01:00:00.000Z",
+        rowCount: 2,
+        status: "ok",
+        error: null,
+      }],
+      rowsBySnapshotId: {
+        "snap-a": [
+          {
+            ticker: "NVDA",
+            name: "NVIDIA",
+            sector: "Technology",
+            industry: "Semiconductors",
+            change1d: 5.3,
+            marketCap: 1,
+            price: 120,
+            avgVolume: 10,
+            priceAvgVolume: 1200,
+            rawJson: JSON.stringify({ relative_volume_10d_calc: 2.1 }),
+          },
+          {
+            ticker: "META",
+            name: "Meta Platforms",
+            sector: "Communication Services",
+            industry: "Internet Content & Information",
+            change1d: 3.1,
+            marketCap: 1,
+            price: 500,
+            avgVolume: 10,
+            priceAvgVolume: 5000,
+            rawJson: JSON.stringify({ relative_volume_10d_calc: 1.4 }),
+          },
+        ],
+      },
+    });
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/scans/compile-presets/compile-daily/export.txt?dateSuffix=2026-03-18"),
+      env as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toBe(
+      'attachment; filename="Compiled-Scan-Daily_03_18.txt"',
+    );
+    await expect(response.text()).resolves.toBe("NVDA\nMETA");
+  });
+
   it("rejects compiled preset refresh when unauthorized", async () => {
     const env = createApiScansEnv({ adminSecret: "secret" });
 

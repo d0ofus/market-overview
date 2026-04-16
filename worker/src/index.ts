@@ -2191,15 +2191,15 @@ app.get("/api/scans/compile-presets/:compilePresetId/export.txt", async (c) => {
     const payload = await loadCompiledScansSnapshotForCompilePreset(c.env, c.req.param("compilePresetId"));
     const dateSuffix = (c.req.query("dateSuffix") ?? "").trim() || new Date().toISOString().slice(0, 10);
     const formattedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateSuffix)
-      ? dateSuffix.slice(5)
-      : dateSuffix;
+      ? dateSuffix.slice(5).replace("-", "_")
+      : dateSuffix.replace(/-/g, "_");
     const safeCompilePresetName = (payload.compilePresetName ?? "compiled-scans")
       .replace(/[<>:"/\\|?*]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
     const fileName = safeCompilePresetName
-      ? `${safeCompilePresetName}-${formattedDate}.txt`
-      : `compiled-scans-${formattedDate}.txt`;
+      ? `Compiled-Scan-${safeCompilePresetName}_${formattedDate}.txt`
+      : `Compiled-Scan_${formattedDate}.txt`;
     c.header("Content-Type", "text/plain; charset=utf-8");
     c.header("Content-Disposition", `attachment; filename="${fileName}"`);
     return c.body(payload.rows.map((row) => row.ticker).join("\n"));
