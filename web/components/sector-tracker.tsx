@@ -89,6 +89,14 @@ type HoverChartPreview = {
   style: CSSProperties;
 };
 
+type SectionId = "sector-etfs" | "industry-etfs" | "key-movers-tracker";
+
+const SECTION_NAV_ITEMS: Array<{ id: SectionId; label: string }> = [
+  { id: "key-movers-tracker", label: "Key Movers Tracker" },
+  { id: "sector-etfs", label: "Sector ETFs" },
+  { id: "industry-etfs", label: "Industry ETFs" },
+];
+
 const FALLBACK_SECTOR_ETFS: WatchlistEtf[] = [
   { listType: "sector", parentSector: "Materials", industry: "Sector ETF", ticker: "XLB", fundName: "Materials Select Sector SPDR Fund", sortOrder: 1, change1d: 0, lastPrice: 0 },
   { listType: "sector", parentSector: "Communication Services", industry: "Sector ETF", ticker: "XLC", fundName: "Communication Services Select Sector SPDR Fund", sortOrder: 2, change1d: 0, lastPrice: 0 },
@@ -291,6 +299,40 @@ function EtfTile({
   );
 }
 
+function SectionSubnav({
+  activeSection,
+  onJump,
+}: {
+  activeSection: SectionId;
+  onJump: (id: SectionId) => void;
+}) {
+  return (
+    <div className="sticky top-4 z-20">
+      <nav className="overflow-x-auto rounded-[26px] border border-borderSoft/70 bg-panel/88 shadow-[0_18px_44px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+        <div className="flex min-w-max items-center gap-3 px-4 py-4 md:px-5">
+          <div className="pr-1">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Jump to</div>
+            <div className="mt-1 text-sm font-medium text-slate-300">Sections</div>
+          </div>
+          <div className="h-8 w-px bg-borderSoft/70" aria-hidden="true" />
+          <div className="flex min-w-max gap-2">
+            {SECTION_NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === item.id)}`}
+                onClick={() => onJump(item.id)}
+                aria-pressed={activeSection === item.id}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </nav>
+    </div>
+  );
+}
+
 export function SectorTracker() {
   const [view, setView] = useState<"list" | "calendar">("calendar");
   const [month, setMonth] = useState(formatLocalMonthKey());
@@ -320,7 +362,7 @@ export function SectorTracker() {
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [constituentPage, setConstituentPage] = useState(1);
-  const [activeSection, setActiveSection] = useState<"sector-etfs" | "industry-etfs" | "key-movers-tracker">("key-movers-tracker");
+  const [activeSection, setActiveSection] = useState<SectionId>("key-movers-tracker");
   const [editingEntry, setEditingEntry] = useState<SectorEntry | null>(null);
   const [editSectorName, setEditSectorName] = useState("");
   const [editEventDate, setEditEventDate] = useState("");
@@ -331,6 +373,11 @@ export function SectorTracker() {
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
   const hoverOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sectionRefs = useRef<Record<SectionId, HTMLDivElement | null>>({
+    "key-movers-tracker": null,
+    "sector-etfs": null,
+    "industry-etfs": null,
+  });
 
   const load = async () => {
     const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
@@ -599,9 +646,66 @@ export function SectorTracker() {
     return Array.from(options).sort((a, b) => a.localeCompare(b));
   }, [entries, calendarRows]);
 
-  const jumpToSection = (id: "sector-etfs" | "industry-etfs" | "key-movers-tracker") => {
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof IntersectionObserver === "undefined") return;
+
+    const stickyOffset = 148;
+    const getSections = () =>
+      SECTION_NAV_ITEMS.map(({ id }) => {
+        const element = sectionRefs.current[id];
+        if (!element) return null;
+        return { id, element };
+      }).filter((section): section is { id: SectionId; element: HTMLDivElement } => section !== null);
+
+    const updateActiveFromViewport = () => {
+      const sections = getSections();
+      if (sections.length === 0) return;
+
+      let nextActive = sections[0].id;
+      let nearestPassedTop = Number.NEGATIVE_INFINITY;
+      let nearestUpcomingTop = Number.POSITIVE_INFINITY;
+
+      for (const section of sections) {
+        const offsetTop = section.element.getBoundingClientRect().top - stickyOffset;
+        if (offsetTop <= 0 && offsetTop > nearestPassedTop) {
+          nearestPassedTop = offsetTop;
+          nextActive = section.id;
+        } else if (nearestPassedTop === Number.NEGATIVE_INFINITY && offsetTop < nearestUpcomingTop) {
+          nearestUpcomingTop = offsetTop;
+          nextActive = section.id;
+        }
+      }
+
+      setActiveSection((current) => (current === nextActive ? current : nextActive));
+    };
+
+    const observer = new IntersectionObserver(
+      () => {
+        updateActiveFromViewport();
+      },
+      {
+        root: null,
+        rootMargin: "-120px 0px -55% 0px",
+        threshold: [0, 0.1, 0.35, 0.65, 1],
+      },
+    );
+
+    for (const section of getSections()) {
+      observer.observe(section.element);
+    }
+
+    updateActiveFromViewport();
+    window.addEventListener("resize", updateActiveFromViewport);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateActiveFromViewport);
+    };
+  }, []);
+
+  const jumpToSection = (id: SectionId) => {
     setActiveSection(id);
-    const el = document.getElementById(id);
+    const el = sectionRefs.current[id];
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
@@ -655,28 +759,7 @@ export function SectorTracker() {
 
   return (
     <div className="space-y-5">
-      <div className="card px-4 py-4 md:px-5" id="section-selector">
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "key-movers-tracker")}`}
-            onClick={() => jumpToSection("key-movers-tracker")}
-          >
-            Key Movers Tracker
-          </button>
-          <button
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "sector-etfs")}`}
-            onClick={() => jumpToSection("sector-etfs")}
-          >
-            Sector ETFs
-          </button>
-          <button
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === "industry-etfs")}`}
-            onClick={() => jumpToSection("industry-etfs")}
-          >
-            Industry ETFs
-          </button>
-        </div>
-      </div>
+      <SectionSubnav activeSection={activeSection} onJump={jumpToSection} />
 
       <datalist id="sector-symbol-options">
         {symbolOptions.map((s) => (
@@ -686,7 +769,13 @@ export function SectorTracker() {
         ))}
       </datalist>
 
-      <div id="key-movers-tracker">
+      <div
+        id="key-movers-tracker"
+        ref={(element) => {
+          sectionRefs.current["key-movers-tracker"] = element;
+        }}
+        className="scroll-mt-28 md:scroll-mt-32"
+      >
         <CollapsibleSection
           title="Key Movers Tracker"
           description="Capture sector narratives, keep a running calendar, and jump straight into the tickers that matter."
@@ -1024,7 +1113,13 @@ export function SectorTracker() {
         </CollapsibleSection>
       </div>
 
-      <div id="sector-etfs">
+      <div
+        id="sector-etfs"
+        ref={(element) => {
+          sectionRefs.current["sector-etfs"] = element;
+        }}
+        className="scroll-mt-28 md:scroll-mt-32"
+      >
         <CollapsibleSection
           title="Sector ETFs"
           description="Primary sector funds with constituent drilldowns and faster chart scanning."
@@ -1044,7 +1139,13 @@ export function SectorTracker() {
         </CollapsibleSection>
       </div>
 
-      <div id="industry-etfs">
+      <div
+        id="industry-etfs"
+        ref={(element) => {
+          sectionRefs.current["industry-etfs"] = element;
+        }}
+        className="scroll-mt-28 md:scroll-mt-32"
+      >
         <CollapsibleSection
           title="Industry ETFs"
           description="Industry funds stay grouped by parent sector so the distinctions read clearly before you drill into charts."
