@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { CalendarDays, ChevronDown, List, Loader2, Maximize2, Pencil, Trash2, X } from "lucide-react";
+import { CalendarDays, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
   adminFetch,
   deleteSectorEntry,
@@ -14,7 +14,7 @@ import {
   getSectorSymbolOptions,
   updateSectorEntry,
 } from "@/lib/api";
-import { ChartGridPager } from "./chart-grid-pager";
+import { TickerCollectionModal, type TickerCollectionModalItem } from "./ticker-collection-modal";
 import { TradingViewWidget } from "./tradingview-widget";
 
 const formatLocalMonthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -354,6 +354,8 @@ export function SectorTracker() {
   const [constituents, setConstituents] = useState<EtfConstituent[]>([]);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
+  const [activeNarrativeEntry, setActiveNarrativeEntry] = useState<SectorEntry | null>(null);
+  const [narrativePage, setNarrativePage] = useState(1);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const [hoverChartTarget, setHoverChartTarget] = useState<HoverChartTarget | null>(null);
   const [hoverChartPreview, setHoverChartPreview] = useState<HoverChartPreview | null>(null);
@@ -508,6 +510,29 @@ export function SectorTracker() {
     }
   };
 
+  const openNarrativeEntry = (entry: SectorEntry) => {
+    if (hoverOpenTimeoutRef.current) {
+      clearTimeout(hoverOpenTimeoutRef.current);
+      hoverOpenTimeoutRef.current = null;
+    }
+    if (hoverCloseTimeoutRef.current) {
+      clearTimeout(hoverCloseTimeoutRef.current);
+      hoverCloseTimeoutRef.current = null;
+    }
+    setHoverChartTarget(null);
+    setHoverChartPreview(null);
+    setIsHoverPreviewHovered(false);
+    setActiveNarrativeEntry(entry);
+    setNarrativePage(1);
+  };
+
+  const handleNarrativeEntryKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>, entry: SectorEntry) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openNarrativeEntry(entry);
+  };
+
   const addTicker = (inputRaw: string) => {
     const parsed = inputRaw
       .split(",")
@@ -565,6 +590,7 @@ export function SectorTracker() {
     try {
       await deleteSectorEntry(entryId);
       if (editingEntry?.id === entryId) setEditingEntry(null);
+      if (activeNarrativeEntry?.id === entryId) setActiveNarrativeEntry(null);
       await load();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to delete entry.");
@@ -633,6 +659,41 @@ export function SectorTracker() {
   const pagedConstituents = useMemo(
     () => sortedConstituents.slice((constituentPage - 1) * CHARTS_PER_PAGE, constituentPage * CHARTS_PER_PAGE),
     [constituentPage, sortedConstituents],
+  );
+
+  const pagedNarrativeSymbols = useMemo(
+    () => (activeNarrativeEntry?.symbols ?? []).slice((narrativePage - 1) * CHARTS_PER_PAGE, narrativePage * CHARTS_PER_PAGE),
+    [activeNarrativeEntry, narrativePage],
+  );
+
+  const etfModalItems = useMemo<TickerCollectionModalItem[]>(
+    () =>
+      pagedConstituents.map((row) => ({
+        key: `${activeEtf?.ticker ?? "etf"}-${row.ticker}`,
+        ticker: row.ticker,
+        name: row.name ?? row.ticker,
+        metricLabel: "Weight",
+        metricValue: row.weight != null ? `${row.weight.toFixed(2)}%` : "-",
+        badges: (
+          <>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(row.change1d ?? 0)}`}>
+              {signedPct(row.change1d ?? 0)}
+            </span>
+            <span className="text-slate-400">{formatFundPrice(row.lastPrice ?? 0)}</span>
+          </>
+        ),
+      })),
+    [activeEtf?.ticker, pagedConstituents],
+  );
+
+  const narrativeModalItems = useMemo<TickerCollectionModalItem[]>(
+    () =>
+      pagedNarrativeSymbols.map((symbol) => ({
+        key: `${activeNarrativeEntry?.id ?? "entry"}-${symbol.ticker}`,
+        ticker: symbol.ticker,
+        name: symbol.name ?? symbol.ticker,
+      })),
+    [activeNarrativeEntry?.id, pagedNarrativeSymbols],
   );
 
   const sectorNarrativeOptions = useMemo(() => {
@@ -756,6 +817,10 @@ export function SectorTracker() {
   useEffect(() => {
     setConstituentPage(1);
   }, [activeEtf?.ticker, constituentSort, sortedConstituents.length]);
+
+  useEffect(() => {
+    setNarrativePage(1);
+  }, [activeNarrativeEntry?.id, activeNarrativeEntry?.symbols.length]);
 
   return (
     <div className="space-y-5">
@@ -1046,16 +1111,34 @@ export function SectorTracker() {
                           </div>
                           <div className="mt-3 space-y-2">
                             {visibleItems.map((it) => (
-                              <div key={it.id} className="rounded-2xl bg-panel/70 p-2.5 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.06)]">
+                              <div
+                                key={it.id}
+                                className="rounded-2xl bg-panel/70 p-2.5 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.06)] transition hover:bg-panel/80 focus:outline-none focus:ring-2 focus:ring-accent/25"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => openNarrativeEntry(it)}
+                                onKeyDown={(event) => handleNarrativeEntryKeyDown(event, it)}
+                                aria-label={`Open chart grid for ${it.sectorName} on ${it.eventDate}`}
+                              >
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="text-xs font-semibold text-slate-100">{it.sectorName}</div>
                                   <div className="flex gap-1">
-                                    <button className={ICON_BUTTON_CLASS} onClick={() => openEditEntry(it)} title="Edit entry">
+                                    <button
+                                      className={ICON_BUTTON_CLASS}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openEditEntry(it);
+                                      }}
+                                      title="Edit entry"
+                                    >
                                       <Pencil className="h-3 w-3" />
                                     </button>
                                     <button
                                       className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-red-500/35 bg-red-500/8 text-red-300 transition hover:bg-red-500/14"
-                                      onClick={() => void removeEntry(it.id)}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void removeEntry(it.id);
+                                      }}
                                       title="Delete entry"
                                     >
                                       <Trash2 className="h-3 w-3" />
@@ -1067,7 +1150,10 @@ export function SectorTracker() {
                                     <button
                                       key={`${it.id}-${s.ticker}`}
                                       className={TICKER_CHIP_CLASS}
-                                      onClick={() => openExpandedChart(s.ticker)}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openExpandedChart(s.ticker);
+                                      }}
                                       onMouseEnter={(event) => handleTickerChipMouseEnter(s.ticker, event)}
                                       onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                       title={s.name ?? s.ticker}
@@ -1275,116 +1361,72 @@ export function SectorTracker() {
       ) : null}
 
       {activeEtf ? (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveEtf(null)}>
-          <div
-            className="flex h-[calc(100vh-2rem)] w-full max-w-[96vw] flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] 2xl:max-w-[150rem]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">ETF Drilldown</p>
-                <h4 className="mt-1 text-base font-semibold text-slate-100">
-                  {activeEtf.ticker} Constituents {activeEtf.fundName ? `- ${activeEtf.fundName}` : ""}
-                </h4>
-              </div>
-              <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={() => setActiveEtf(null)}>
-                Close
+        <TickerCollectionModal
+          eyebrow="ETF Drilldown"
+          title={`${activeEtf.ticker} Constituents${activeEtf.fundName ? ` - ${activeEtf.fundName}` : ""}`}
+          items={etfModalItems}
+          totalItems={sortedConstituents.length}
+          page={constituentPage}
+          pageSize={CHARTS_PER_PAGE}
+          itemLabel="tickers"
+          controls={(
+            <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
+              <span className="text-slate-400">Sort constituents by:</span>
+              <button
+                className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "weight")}`}
+                onClick={() => setConstituentSort("weight")}
+              >
+                Weight %
               </button>
+              <button
+                className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "change1d")}`}
+                onClick={() => setConstituentSort("change1d")}
+              >
+                1D %
+              </button>
+              <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
+                {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
+              </span>
             </div>
+          )}
+          warning={constituentWarning ? `Constituent sync warning: ${constituentWarning}` : null}
+          loading={constituentLoading}
+          loadingLabel="Loading constituents..."
+          emptyMessage="No constituents available for this ETF."
+          onPageChange={setConstituentPage}
+          onClose={() => setActiveEtf(null)}
+          onExpandChart={openExpandedChart}
+        />
+      ) : null}
 
-            <div className="border-b border-borderSoft/50 px-5 py-4">
-              <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
-                <span className="text-slate-400">Sort constituents by:</span>
-                <button
-                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "weight")}`}
-                  onClick={() => setConstituentSort("weight")}
-                >
-                  Weight %
-                </button>
-                <button
-                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(constituentSort === "change1d")}`}
-                  onClick={() => setConstituentSort("change1d")}
-                >
-                  1D %
-                </button>
-                <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
-                  {sortedConstituents.length} ticker{sortedConstituents.length === 1 ? "" : "s"}
-                </span>
-              </div>
+      {activeNarrativeEntry ? (
+        <TickerCollectionModal
+          eyebrow="Sector / Narrative"
+          title={activeNarrativeEntry.sectorName}
+          description={
+            <div className="space-y-1">
+              <p>{activeNarrativeEntry.eventDate}</p>
+              {activeNarrativeEntry.notes ? <p className="max-w-3xl leading-relaxed text-slate-400">{activeNarrativeEntry.notes}</p> : null}
             </div>
-
-            <div className="overflow-y-auto px-5 py-5">
-              {constituentWarning ? (
-                <div className="mb-3 rounded-2xl border border-yellow-700/45 bg-yellow-900/15 px-4 py-3 text-sm text-yellow-200">
-                  Constituent sync warning: {constituentWarning}
-                </div>
-              ) : null}
-
-              <ChartGridPager
-                totalItems={sortedConstituents.length}
-                page={constituentPage}
-                pageSize={CHARTS_PER_PAGE}
-                itemLabel="tickers"
-                onPageChange={setConstituentPage}
-              />
-
-              {constituentLoading ? (
-                <div className="card flex items-center gap-2 p-4 text-sm text-slate-300">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading constituents...
-                </div>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                  {pagedConstituents.map((row) => (
-                    <div key={`${activeEtf.ticker}-${row.ticker}`} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
-                      <div className="mb-3 flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-lg font-semibold text-accent">{row.ticker}</div>
-                          <p className="mt-1 text-sm text-slate-400">{row.name ?? row.ticker}</p>
-                        </div>
-                        <div className="text-right text-xs">
-                          <div className="text-slate-500">Weight</div>
-                          <div className="mt-1 text-sm font-semibold text-slate-100">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</div>
-                        </div>
-                      </div>
-
-                      <div className="mb-4 flex items-center gap-2 text-sm">
-                        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(row.change1d ?? 0)}`}>
-                          {signedPct(row.change1d ?? 0)}
-                        </span>
-                        <span className="text-slate-400">{formatFundPrice(row.lastPrice ?? 0)}</span>
-                      </div>
-
-                      <div className="rounded-[22px] bg-slate-950/20 p-2.5">
-                        <TradingViewWidget
-                          ticker={row.ticker}
-                          size="small"
-                          chartOnly
-                          showStatusLine
-                          fillContainer
-                          initialRange="3M"
-                          surface="plain"
-                        />
-                      </div>
-
-                      <div className="mt-4 flex justify-end">
-                        <button className={SECONDARY_BUTTON_CLASS} onClick={() => openExpandedChart(row.ticker)}>
-                          <Maximize2 className="h-3.5 w-3.5" />
-                          Expand chart
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {constituents.length === 0 ? (
-                    <div className="rounded-[24px] border border-borderSoft/60 bg-panelSoft/30 p-5 text-sm text-slate-300">
-                      No constituents available for this ETF.
-                    </div>
-                  ) : null}
-                </div>
-              )}
+          }
+          items={narrativeModalItems}
+          totalItems={activeNarrativeEntry.symbols.length}
+          page={narrativePage}
+          pageSize={CHARTS_PER_PAGE}
+          itemLabel="tickers"
+          controls={(
+            <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
+              <span className="text-slate-400">Charts in this entry</span>
+              <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
+                {activeNarrativeEntry.symbols.length} ticker{activeNarrativeEntry.symbols.length === 1 ? "" : "s"}
+              </span>
             </div>
-          </div>
-        </div>
+          )}
+          emptyMessage="No tickers are attached to this narrative entry yet."
+          onPageChange={setNarrativePage}
+          onClose={() => setActiveNarrativeEntry(null)}
+          onExpandChart={openExpandedChart}
+        />
       ) : null}
 
       {hoverChartPreview ? (
