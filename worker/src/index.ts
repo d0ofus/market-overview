@@ -2401,7 +2401,7 @@ app.get("/api/watchlist-compiler/sets/:id/export.txt", async (c) => {
     ? payload.rows.map((row: any) => row.ticker)
     : payload.rows.map((row: any) => row.ticker);
   c.header("Content-Type", "text/plain; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, mode, extension: "txt", dateSuffix })}"`);
+  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, setName: payload.set.name, mode, extension: "txt", dateSuffix })}"`);
   return c.body(tickersToTxt(tickers));
 });
 
@@ -2417,7 +2417,7 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
     ? payload.rows.map((row: any) => row.ticker)
     : payload.rows.map((row: any) => row.ticker);
   c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, mode, extension: "csv", dateSuffix })}"`);
+  c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, setName: payload.set.name, mode, extension: "csv", dateSuffix })}"`);
   return c.body(tickersToSingleColumnCsv(tickers));
 });
 

@@ -23,6 +23,16 @@ describe("watchlist compiler service helpers", () => {
     })).toBe("growth-watchlists-2026-03-13.txt");
   });
 
+  it("uses saved set names for compiled watchlist export file names", () => {
+    expect(resolveExportFileName({
+      slug: "growth-watchlists",
+      setName: "Growth Watchlists",
+      mode: "compiled",
+      extension: "txt",
+      dateSuffix: "2026-03-13",
+    })).toBe("WatchlistComp-Growth Watchlists_03_13.txt");
+  });
+
   it("runs a scheduled compile only once per local day inside the configured window", () => {
     const now = new Date("2026-03-13T00:20:00.000Z");
 

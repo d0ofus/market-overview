@@ -650,10 +650,23 @@ export async function runDueWatchlistCompiles(env: Env, now: Date): Promise<{ co
 
 export function resolveExportFileName(input: {
   slug: string;
+  setName?: string | null;
   mode: "compiled" | "unique";
   extension: "csv" | "txt";
   dateSuffix?: string | null;
 }): string {
   const dateSuffix = input.dateSuffix?.trim() || localDateString();
+  if (input.mode === "compiled") {
+    const formattedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateSuffix)
+      ? dateSuffix.slice(5).replace("-", "_")
+      : dateSuffix.replace(/-/g, "_");
+    const safeSetName = String(input.setName ?? "")
+      .replace(/[<>:"/\\|?*]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return safeSetName
+      ? `WatchlistComp-${safeSetName}_${formattedDate}.${input.extension}`
+      : `WatchlistComp_${formattedDate}.${input.extension}`;
+  }
   return `${input.slug}-${dateSuffix}.${input.extension}`;
 }
