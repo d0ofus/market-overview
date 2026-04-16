@@ -2,14 +2,19 @@ type Props = {
   values: number[] | null;
   width?: number;
   height?: number;
+  ariaLabel?: string;
 };
 
 const BASE_BAR_COLOR = "#3347A8";
 const LATEST_BAR_COLOR = "#DC2626";
 
-export function HistogramSparkline({ values, width = 120, height = 28 }: Props) {
+export function HistogramSparkline({ values, width = 120, height = 28, ariaLabel = "Histogram sparkline" }: Props) {
   if (!values?.length) {
-    return <div className="flex h-7 w-[120px] items-center text-xs text-slate-500">-</div>;
+    return (
+      <div className="flex items-center text-xs text-slate-500" style={{ width, height }}>
+        -
+      </div>
+    );
   }
 
   const min = Math.min(...values);
@@ -21,7 +26,7 @@ export function HistogramSparkline({ values, width = 120, height = 28 }: Props) 
   const minBarHeight = 3;
 
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-label="Relative strength 30 day histogram">
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-label={ariaLabel}>
       {values.map((value, index) => {
         const normalizedHeight = range === 0
           ? height * 0.6

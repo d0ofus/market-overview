@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { HistogramSparkline } from "./histogram-sparkline";
 
 type BreadthMetrics = {
   memberCount: number;
@@ -67,6 +68,7 @@ type SummaryPayload = {
 type Lookback = 30 | 60 | 90;
 const lookbacks: Lookback[] = [30, 60, 90];
 const HISTORY_DAYS = 90;
+const PREVIEW_TREND_POINTS = 30;
 
 const metricOptions = [
   { key: "advancers", label: "Advancers", format: (value: number) => numFmt.format(Math.round(value)) },
@@ -91,6 +93,26 @@ const metricOptions = [
   { key: "stocksGtPos25Q", label: "# > +25% Quarter", format: (value: number) => numFmt.format(Math.round(value)) },
   { key: "stocksLtNeg25Q", label: "# < -25% Quarter", format: (value: number) => numFmt.format(Math.round(value)) },
 ] as const;
+type MetricKey = (typeof metricOptions)[number]["key"];
+
+type HistoricalColumn = {
+  key: "asOfDate" | MetricKey;
+  label: string;
+  trendable: boolean;
+  getMetricValue: ((metrics: BreadthMetrics) => number | null) | null;
+  formatValue: (value: number | null) => string;
+};
+
+type MetricTrend = {
+  key: MetricKey;
+  label: string;
+  values: number[];
+  latest: number | null;
+  previous: number | null;
+  low: number | null;
+  high: number | null;
+  formatValue: (value: number | null) => string;
+};
 
 const positive = "text-pos";
 const negative = "text-neg";
@@ -178,7 +200,7 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
   };
 }
 
-function metricValue(metrics: BreadthMetrics, key: (typeof metricOptions)[number]["key"]): number {
+function metricValue(metrics: BreadthMetrics, key: MetricKey): number {
   const value = metrics[key];
   return typeof value === "number" ? value : 0;
 }
@@ -191,6 +213,54 @@ function ratioText(value: number | null): string {
 function highCell(count: number, pctValue: number): string {
   return `${count} (${pctValue.toFixed(1)}%)`;
 }
+
+function formatWholeNumber(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return numFmt.format(Math.round(value));
+}
+
+function formatPercentValue(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return pct(value);
+}
+
+function formatPercentReturn(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${value.toFixed(2)}%`;
+}
+
+function formatSignedDelta(value: number | null, formatter: (raw: number | null) => string): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  const absText = formatter(Math.abs(value));
+  if (absText === "N/A") return absText;
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${absText}`;
+}
+
+const historicalColumns: HistoricalColumn[] = [
+  { key: "asOfDate", label: "Date", trendable: false, getMetricValue: null, formatValue: () => "" },
+  { key: "advancers", label: "Adv", trendable: true, getMetricValue: (metrics) => metrics.advancers, formatValue: formatWholeNumber },
+  { key: "decliners", label: "Dec", trendable: true, getMetricValue: (metrics) => metrics.decliners, formatValue: formatWholeNumber },
+  { key: "unchanged", label: "Unc", trendable: true, getMetricValue: (metrics) => metrics.unchanged, formatValue: formatWholeNumber },
+  { key: "advDecRatio", label: "A/D", trendable: true, getMetricValue: (metrics) => metrics.advDecRatio, formatValue: (value) => ratioText(value) },
+  { key: "pctAbove5MA", label: "%>5", trendable: true, getMetricValue: (metrics) => metrics.pctAbove5MA, formatValue: formatPercentValue },
+  { key: "pctAbove20MA", label: "%>20", trendable: true, getMetricValue: (metrics) => metrics.pctAbove20MA, formatValue: formatPercentValue },
+  { key: "pctAbove50MA", label: "%>50", trendable: true, getMetricValue: (metrics) => metrics.pctAbove50MA, formatValue: formatPercentValue },
+  { key: "pctAbove100MA", label: "%>100", trendable: true, getMetricValue: (metrics) => metrics.pctAbove100MA, formatValue: formatPercentValue },
+  { key: "pctAbove200MA", label: "%>200", trendable: true, getMetricValue: (metrics) => metrics.pctAbove200MA, formatValue: formatPercentValue },
+  { key: "new5DHighs", label: "5D Highs", trendable: true, getMetricValue: (metrics) => metrics.new5DHighs, formatValue: formatWholeNumber },
+  { key: "new1MHighs", label: "1M Highs", trendable: true, getMetricValue: (metrics) => metrics.new1MHighs, formatValue: formatWholeNumber },
+  { key: "new3MHighs", label: "3M Highs", trendable: true, getMetricValue: (metrics) => metrics.new3MHighs, formatValue: formatWholeNumber },
+  { key: "new6MHighs", label: "6M Highs", trendable: true, getMetricValue: (metrics) => metrics.new6MHighs, formatValue: formatWholeNumber },
+  { key: "new52WHighs", label: "52W Highs", trendable: true, getMetricValue: (metrics) => metrics.new52WHighs, formatValue: formatWholeNumber },
+  { key: "totalVolume", label: "Vol", trendable: true, getMetricValue: (metrics) => metrics.totalVolume, formatValue: formatWholeNumber },
+  { key: "medianReturn1D", label: "Med 1D", trendable: true, getMetricValue: (metrics) => metrics.medianReturn1D, formatValue: formatPercentReturn },
+  { key: "medianReturn5D", label: "Med 5D", trendable: true, getMetricValue: (metrics) => metrics.medianReturn5D, formatValue: formatPercentReturn },
+  { key: "stocksGtPos4Pct", label: ">+4%", trendable: true, getMetricValue: (metrics) => metrics.stocksGtPos4Pct, formatValue: formatWholeNumber },
+  { key: "stocksLtNeg4Pct", label: "<-4%", trendable: true, getMetricValue: (metrics) => metrics.stocksLtNeg4Pct, formatValue: formatWholeNumber },
+  { key: "stocksGtPos25Q", label: ">+25Q", trendable: true, getMetricValue: (metrics) => metrics.stocksGtPos25Q, formatValue: formatWholeNumber },
+  { key: "stocksLtNeg25Q", label: "<-25Q", trendable: true, getMetricValue: (metrics) => metrics.stocksLtNeg25Q, formatValue: formatWholeNumber },
+];
 
 function CollapsibleInfoSection({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -217,19 +287,29 @@ export function BreadthPanels({
   footer?: React.ReactNode;
 }) {
   const [lookback, setLookback] = useState<Lookback>(90);
-  const [metricKey, setMetricKey] = useState<(typeof metricOptions)[number]["key"]>("pctAbove20MA");
+  const [metricKey, setMetricKey] = useState<MetricKey>("pctAbove20MA");
+  const [activeHistoricalMetricKey, setActiveHistoricalMetricKey] = useState<MetricKey>("pctAbove20MA");
 
   const historyRows = useMemo(() => rows.slice(-HISTORY_DAYS), [rows]);
-  const scoped = useMemo(() => historyRows.slice(-lookback), [historyRows, lookback]);
+  const normalizedHistoryRows = useMemo(() => {
+    const normalized = historyRows.map((row) => ({
+      row,
+      metrics: normalizeMetrics(row),
+    }));
+    return normalized.map((entry, index) => ({
+      ...entry,
+      prevMetrics: index > 0 ? normalized[index - 1]?.metrics ?? null : null,
+    }));
+  }, [historyRows]);
+  const scoped = useMemo(() => normalizedHistoryRows.slice(-lookback), [normalizedHistoryRows, lookback]);
   const latest = scoped[scoped.length - 1];
-  const latestMetrics = latest ? normalizeMetrics(latest) : null;
+  const latestMetrics = latest?.metrics ?? null;
 
   const chartData = useMemo(
     () =>
-      scoped.map((r) => {
-        const metrics = normalizeMetrics(r);
+      scoped.map(({ row, metrics }) => {
         return {
-          asOfDate: r.asOfDate,
+          asOfDate: row.asOfDate,
           metricValue: metricValue(metrics, metricKey),
         };
       }),
@@ -263,16 +343,40 @@ export function BreadthPanels({
     return summaryRows.find((r) => r.universeId === "sp500-core") ?? summaryRows[0] ?? null;
   }, [summaryRows]);
 
+  const metricTrendByKey = useMemo(() => {
+    const recentRows = normalizedHistoryRows.slice(-PREVIEW_TREND_POINTS);
+    const entries = historicalColumns
+      .filter((column): column is HistoricalColumn & { key: MetricKey; getMetricValue: (metrics: BreadthMetrics) => number | null } => column.trendable && column.getMetricValue != null)
+      .map((column) => {
+        const rawValues = recentRows.map(({ metrics }) => column.getMetricValue(metrics));
+        const numericValues = rawValues.filter((value): value is number => value != null && Number.isFinite(value));
+        const latestValue = rawValues[rawValues.length - 1] ?? null;
+        const previousValue = [...rawValues.slice(0, -1)].reverse().find((value): value is number => value != null && Number.isFinite(value)) ?? null;
+        return [
+          column.key,
+          {
+            key: column.key,
+            label: column.label,
+            values: numericValues,
+            latest: latestValue,
+            previous: previousValue,
+            low: numericValues.length ? Math.min(...numericValues) : null,
+            high: numericValues.length ? Math.max(...numericValues) : null,
+            formatValue: column.formatValue,
+          },
+        ] as const;
+      });
+    return Object.fromEntries(entries) as Record<MetricKey, MetricTrend>;
+  }, [normalizedHistoryRows]);
+
+  const activeHistoricalTrend = metricTrendByKey[activeHistoricalMetricKey] ?? null;
+  const activeHistoricalDelta = activeHistoricalTrend && activeHistoricalTrend.latest != null && activeHistoricalTrend.previous != null
+    ? activeHistoricalTrend.latest - activeHistoricalTrend.previous
+    : null;
+
   const historicalRows = useMemo(
-    () =>
-      historyRows
-        .map((row, i) => ({
-          row,
-          metrics: normalizeMetrics(row),
-          prevMetrics: i > 0 ? normalizeMetrics(historyRows[i - 1]) : null,
-        }))
-        .reverse(),
-    [historyRows],
+    () => [...normalizedHistoryRows].reverse(),
+    [normalizedHistoryRows],
   );
 
   return (
@@ -482,43 +586,91 @@ export function BreadthPanels({
 
       <div className="card p-4">
         <div className="mb-3 text-sm font-semibold">Historical Metrics Table (90 days)</div>
+        <div className="mb-4 rounded-2xl border border-borderSoft/70 bg-panelSoft/70 p-3">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">30 Session Preview</div>
+              <div className="text-sm font-semibold text-slate-100">{activeHistoricalTrend?.label ?? "No metric selected"}</div>
+            </div>
+            {activeHistoricalTrend && (
+              <div className="text-right">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Latest</div>
+                <div className="text-sm font-semibold text-slate-100">{activeHistoricalTrend.formatValue(activeHistoricalTrend.latest)}</div>
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <HistogramSparkline
+              values={activeHistoricalTrend?.values ?? null}
+              width={220}
+              height={56}
+              ariaLabel={`${activeHistoricalTrend?.label ?? "Historical metric"} 30 session histogram`}
+            />
+            <div className="grid flex-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-xl border border-borderSoft/60 bg-slate-950/40 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">1D Change</div>
+                <div className={`text-sm font-semibold ${colorVsPrevious(activeHistoricalTrend?.latest ?? 0, activeHistoricalTrend?.previous)}`}>
+                  {activeHistoricalTrend ? formatSignedDelta(activeHistoricalDelta, activeHistoricalTrend.formatValue) : "N/A"}
+                </div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/60 bg-slate-950/40 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">30D Low</div>
+                <div className="text-sm font-semibold text-slate-100">{activeHistoricalTrend?.formatValue(activeHistoricalTrend.low) ?? "N/A"}</div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/60 bg-slate-950/40 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">30D High</div>
+                <div className="text-sm font-semibold text-slate-100">{activeHistoricalTrend?.formatValue(activeHistoricalTrend.high) ?? "N/A"}</div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-900/60">
               <tr>
-                {["Date", "Adv", "Dec", "Unc", "A/D", "%>5", "%>20", "%>50", "%>100", "%>200", "5D Highs", "1M Highs", "3M Highs", "6M Highs", "52W Highs", "Vol", "Med 1D", "Med 5D", ">+4%", "<-4%", ">+25Q", "<-25Q"].map((h) => (
-                  <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
-                    {h}
-                  </th>
-                ))}
+                {historicalColumns.map((column) => {
+                  const isActive = column.trendable && column.key === activeHistoricalMetricKey;
+                  return (
+                    <th key={column.key} className="text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
+                      {column.trendable ? (
+                        <button
+                          type="button"
+                          className={`w-full px-3 py-2 text-left transition ${isActive ? "bg-accent/15 text-accent" : "text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"}`}
+                          onMouseEnter={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
+                          onFocus={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
+                          onClick={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
+                          aria-pressed={isActive}
+                        >
+                          {column.label}
+                        </button>
+                      ) : (
+                        <div className="px-3 py-2">{column.label}</div>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
               {historicalRows.map(({ row, metrics, prevMetrics }) => {
                 return (
                   <tr key={row.asOfDate} className="border-t border-borderSoft/60">
-                    <td className="px-3 py-2">{row.asOfDate}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.advancers, prevMetrics?.advancers)}`}>{metrics.advancers}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.decliners, prevMetrics?.decliners)}`}>{metrics.decliners}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.unchanged, prevMetrics?.unchanged)}`}>{metrics.unchanged}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.advDecRatio ?? 0, prevMetrics?.advDecRatio ?? null)}`}>{ratioText(metrics.advDecRatio)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove5MA, prevMetrics?.pctAbove5MA)}`}>{pct(metrics.pctAbove5MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove20MA, prevMetrics?.pctAbove20MA)}`}>{pct(metrics.pctAbove20MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove50MA, prevMetrics?.pctAbove50MA)}`}>{pct(metrics.pctAbove50MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove100MA, prevMetrics?.pctAbove100MA)}`}>{pct(metrics.pctAbove100MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.pctAbove200MA, prevMetrics?.pctAbove200MA)}`}>{pct(metrics.pctAbove200MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new5DHighs, prevMetrics?.new5DHighs)}`}>{metrics.new5DHighs}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new1MHighs, prevMetrics?.new1MHighs)}`}>{metrics.new1MHighs}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new3MHighs, prevMetrics?.new3MHighs)}`}>{metrics.new3MHighs}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new6MHighs, prevMetrics?.new6MHighs)}`}>{metrics.new6MHighs}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.new52WHighs, prevMetrics?.new52WHighs)}`}>{metrics.new52WHighs}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.totalVolume, prevMetrics?.totalVolume)}`}>{numFmt.format(Math.round(metrics.totalVolume))}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.medianReturn1D, prevMetrics?.medianReturn1D)}`}>{metrics.medianReturn1D.toFixed(2)}%</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.medianReturn5D, prevMetrics?.medianReturn5D)}`}>{metrics.medianReturn5D.toFixed(2)}%</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksGtPos4Pct, prevMetrics?.stocksGtPos4Pct)}`}>{metrics.stocksGtPos4Pct}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksLtNeg4Pct, prevMetrics?.stocksLtNeg4Pct)}`}>{metrics.stocksLtNeg4Pct}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksGtPos25Q, prevMetrics?.stocksGtPos25Q)}`}>{metrics.stocksGtPos25Q}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(metrics.stocksLtNeg25Q, prevMetrics?.stocksLtNeg25Q)}`}>{metrics.stocksLtNeg25Q}</td>
+                    {historicalColumns.map((column) => {
+                      if (!column.trendable || !column.getMetricValue) {
+                        return (
+                          <td key={`${row.asOfDate}-${column.key}`} className="px-3 py-2">
+                            {row.asOfDate}
+                          </td>
+                        );
+                      }
+                      const currentValue = column.getMetricValue(metrics);
+                      const previousValue = prevMetrics ? column.getMetricValue(prevMetrics) : null;
+                      return (
+                        <td key={`${row.asOfDate}-${column.key}`} className={`px-3 py-2 ${colorVsPrevious(currentValue ?? 0, previousValue)}`}>
+                          {column.formatValue(currentValue)}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
