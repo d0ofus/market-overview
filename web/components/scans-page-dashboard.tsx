@@ -12,6 +12,7 @@ import {
   getScanCompilePresetExportUrl,
   getScanCompilePresetSnapshot,
   getScanCompilePresets,
+  getScanExportUrl,
   getScanPresets,
   getScansSnapshot,
   getTickerNews,
@@ -453,6 +454,14 @@ export function ScansPageDashboard() {
         : null
     ),
     [selectedCompilePresetId],
+  );
+  const scanExportUrl = useMemo(
+    () => (
+      selectedPresetId
+        ? getScanExportUrl(selectedPresetId, new Date().toISOString().slice(0, 10))
+        : null
+    ),
+    [selectedPresetId],
   );
 
   const loadAll = async (preferredPresetId?: string | null, preferredCompilePresetId?: string | null) => {
@@ -1323,6 +1332,16 @@ export function ScansPageDashboard() {
               <span className={`rounded px-2 py-1 text-xs ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : snapshot?.status === "warning" ? "bg-yellow-500/15 text-yellow-200" : "bg-slate-800/60 text-slate-300"}`}>
                 Status: {snapshot?.status ?? "empty"}
               </span>
+              {scanExportUrl && (
+                <a
+                  className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
+                  href={scanExportUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Export TXT
+                </a>
+              )}
               <button
                 className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
                 disabled={!selectedPresetId || refreshing}

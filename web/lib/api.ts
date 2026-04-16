@@ -1129,6 +1129,13 @@ export function getScansSnapshot(presetId?: string | null) {
   return getJson<ScanSnapshot>(appendQuery("/api/scans", { presetId: presetId ?? undefined }));
 }
 
+export function getScanExportUrl(presetId?: string | null, dateSuffix?: string | null) {
+  return apiUrl(appendQuery("/api/scans/export.txt", {
+    presetId: presetId ?? undefined,
+    dateSuffix: dateSuffix ?? undefined,
+  }));
+}
+
 export function getScanPresets() {
   return getJson<{ rows: ScanPreset[] }>("/api/scans/presets");
 }

@@ -2126,6 +2126,27 @@ app.get("/api/scans", async (c) => {
   });
 });
 
+app.get("/api/scans/export.txt", async (c) => {
+  await maybeRunScansPageHousekeeping(c.env);
+  const presetId = c.req.query("presetId") ?? null;
+  const preset = presetId ? await loadScanPreset(c.env, presetId) : await loadDefaultScanPreset(c.env);
+  const dateSuffix = (c.req.query("dateSuffix") ?? "").trim() || new Date().toISOString().slice(0, 10);
+  const formattedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateSuffix)
+    ? dateSuffix.slice(5).replace("-", "_")
+    : dateSuffix.replace(/-/g, "_");
+  const safePresetName = (preset?.name ?? "scan")
+    .replace(/[<>:"/\\|?*]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fileName = safePresetName
+    ? `Scan-${safePresetName}_${formattedDate}.txt`
+    : `Scan_${formattedDate}.txt`;
+  const snapshot = preset ? await loadLatestScansSnapshot(c.env, preset.id) : null;
+  c.header("Content-Type", "text/plain; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${fileName}"`);
+  return c.body((snapshot?.rows ?? []).map((row) => row.ticker).join("\n"));
+});
+
 app.get("/api/scans/presets", async (c) => {
   await maybeRunScansPageHousekeeping(c.env);
   const rows = await listScanPresets(c.env);
