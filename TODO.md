@@ -1,8 +1,6 @@
 # TODO
 
 ## Overview
-> Do hover like sector calendar view for tickers in /overview
-- Fix sparklines
 - Check source of data for EQ Index Futures, they seem wrong.
 - Add macro stuff like 10Y yields
 - Add yield curve structure
@@ -26,7 +24,6 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-> When clicking on individual sector/narrative, show all charts within the box
 > Change default event date on key movers tracker to the last trading session (i.e. one day before)
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
