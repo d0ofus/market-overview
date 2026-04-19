@@ -294,7 +294,11 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
 
   return (
     <>
-      <Collapsible.Root id={anchorId} defaultOpen={defaultOpen} className="card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)]">
+      <Collapsible.Root
+        id={anchorId}
+        defaultOpen={defaultOpen}
+        className={`card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)] ${anchorId ? "scroll-mt-28 md:scroll-mt-32" : ""}`}
+      >
         <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft px-4 py-3 text-left">
           <span className="font-medium tracking-wide">{title}</span>
           <ChevronDown className="h-4 w-4" />

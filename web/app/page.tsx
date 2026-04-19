@@ -1,3 +1,4 @@
+import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { StatusBar } from "@/components/status-bar";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
@@ -64,10 +65,14 @@ export default async function HomePage() {
   const dashboardValue = dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
+  const macroRatesAnchorId = "overview-macro-rates";
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
   const jumpGroups = sectionLayouts.flatMap((entry) =>
-    entry.ordered.map((group) => ({ id: group.id, title: overviewGroupLabel(group.title) })),
+    entry.ordered
+      .filter((group) => group.title !== "US Index Futures (Equal Weight)" && group.title !== "Sector ETFs (Equal Weight)")
+      .map((group) => ({ id: groupAnchorId(group.id), label: overviewGroupLabel(group.title) })),
   );
+  const jumpItems = [...jumpGroups, { id: macroRatesAnchorId, label: "Macro Rates" }];
 
   return (
     <div className="space-y-4">
@@ -79,21 +84,7 @@ export default async function HomePage() {
         providerLabel={statusValue.providerLabel}
         actions={<ManualRefreshButton page="overview" />}
       />
-      {focusedSections.length > 0 && (
-        <div className="card p-3">
-          <div className="flex flex-wrap gap-2">
-            {jumpGroups.map((group) => (
-              <a
-                key={`overview-jump-${group.id}`}
-                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-slate-300 hover:bg-accent/20 hover:text-accent"
-                href={`#${groupAnchorId(group.id)}`}
-              >
-                {group.title}
-              </a>
-            ))}
-          </div>
-        </div>
-      )}
+      <FloatingSectionNav items={jumpItems} showHeading={false} />
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">
           Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.
@@ -178,7 +169,9 @@ export default async function HomePage() {
             )}
           </section>
         ))}
-        <FedFundsRatePanel snapshot={fedWatch} />
+        <div id={macroRatesAnchorId} className="scroll-mt-28 md:scroll-mt-32">
+          <FedFundsRatePanel snapshot={fedWatch} />
+        </div>
       </div>
       <p className="text-xs text-slate-400">Research dashboard only. Not investment advice.</p>
     </div>
