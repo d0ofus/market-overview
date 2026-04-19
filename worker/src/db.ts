@@ -5,7 +5,7 @@ const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD"
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 const SYMBOL_LOOKUP_CHUNK_SIZE = 50;
-const OVERVIEW_SMA_PILOT_GROUPS = new Set(["g-crypto"]);
+const OVERVIEW_SMA_PILOT_GROUPS = new Set(["g-crypto", "g-thematic"]);
 const OVERVIEW_SMA_COLUMNS = ["20SMA", "50SMA", "200SMA"] as const;
 const OVERVIEW_RS_AUTO_GROUPS = new Set([
   "g-crypto",

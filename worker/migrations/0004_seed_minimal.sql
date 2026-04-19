@@ -26,7 +26,7 @@ INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES
 ('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline"]'),
 ('g-global', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
 ('g-sector-etf', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]'),
-('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline"]'),
+('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline","20SMA","50SMA","200SMA"]'),
 ('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]');
 
 INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES
