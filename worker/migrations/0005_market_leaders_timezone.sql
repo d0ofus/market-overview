@@ -16,7 +16,7 @@ INSERT OR IGNORE INTO dashboard_groups (id, section_id, sort_order, title, data_
 VALUES ('g-market-leaders', 'sec-equities', 5, 'Market Leaders (FAANG)', 'equities', '1W', 1, 1);
 
 INSERT OR REPLACE INTO dashboard_columns (group_id, columns_json)
-VALUES ('g-market-leaders', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]');
+VALUES ('g-market-leaders', '["ticker","name","price","1D","1W","5D","YTD","sparkline","20SMA","50SMA","200SMA"]');
 
 INSERT OR IGNORE INTO dashboard_items (id, group_id, sort_order, ticker, display_name, enabled, tags_json, holdings_json) VALUES
 ('i37','g-market-leaders',1,'META',NULL,1,'[]',NULL),

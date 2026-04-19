@@ -560,10 +560,10 @@ describe("loadSnapshot relative strength pilot", () => {
 
     expect(cryptoGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(cryptoGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
-    expect(metalsGroup?.columns).toContain("relativeStrength30dVsSpy");
-    expect(globalGroup?.columns).toContain("relativeStrength30dVsSpy");
-    expect(countryGroup?.columns).toContain("relativeStrength30dVsSpy");
-    expect(marketLeadersGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(metalsGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
+    expect(globalGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
+    expect(countryGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
+    expect(marketLeadersGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
     expect(thematicGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
     expect(sectorGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);
     expect(sectorEqGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);

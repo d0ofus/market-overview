@@ -23,11 +23,11 @@ INSERT OR IGNORE INTO dashboard_columns (group_id, columns_json) VALUES
 ('g-us-index-eqwt', '["ticker","name","price","1D","1W","5D","YTD","pctFrom52WHigh","sparkline"]'),
 ('g-vol-dollar', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
 ('g-crypto', '["ticker","name","price","1D","1W","5D","sparkline","20SMA","50SMA","200SMA"]'),
-('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline"]'),
-('g-global', '["ticker","name","price","1D","1W","YTD","sparkline"]'),
+('g-metals-energy', '["ticker","name","price","1D","5D","1W","sparkline","20SMA","50SMA","200SMA"]'),
+('g-global', '["ticker","name","price","1D","1W","YTD","sparkline","20SMA","50SMA","200SMA"]'),
 ('g-sector-etf', '["ticker","name","price","1D","1W","5D","YTD","sparkline"]'),
 ('g-thematic', '["ticker","name","price","1D","5D","1W","YTD","sparkline","20SMA","50SMA","200SMA"]'),
-('g-country', '["ticker","name","price","1D","1W","YTD","sparkline"]');
+('g-country', '["ticker","name","price","1D","1W","YTD","sparkline","20SMA","50SMA","200SMA"]');
 
 INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES
 ('SPY', 'SPDR S&P 500 ETF', 'NYSEARCA', 'etf', 'Broad Market', 'Large Blend'),
