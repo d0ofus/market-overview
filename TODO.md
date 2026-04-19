@@ -38,7 +38,6 @@
 
 ## Correlation
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
-- Link correlation to peer groups
 
 ## Scans
 - Add RS scan
@@ -91,7 +90,7 @@
 
 ## New Functions
 - Add in morning brief section using Claude API
-- Add macro dashboard
+- Add macro dashboard (https://x.com/investingluc/status/2044560364424032433?s=20)
 - Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs
 - Add news impact page (on dashboard(?))
