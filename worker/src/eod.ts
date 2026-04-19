@@ -1,4 +1,4 @@
-import { buildRelativeStrengthSeries, computeBreadthStats, computeMetrics, rankValue, sanitizeBarSeries } from "./metrics";
+import { buildRelativeStrengthSeries, computeBreadthStats, computeMetrics, isPriceAboveSma, rankValue, sanitizeBarSeries } from "./metrics";
 import { loadConfig } from "./db";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
@@ -113,11 +113,17 @@ async function loadBarsForTickers(
   return rows;
 }
 
-async function loadWindowReturnsByTicker(
+async function loadOverviewDerivedMetricsByTicker(
   env: Env,
   tickers: string[],
   asOfDate: string,
-): Promise<Map<string, { change3m: number; change6m: number }>> {
+): Promise<Map<string, {
+  change3m: number;
+  change6m: number;
+  above20Sma: boolean | null;
+  above50Sma: boolean | null;
+  above200Sma: boolean | null;
+}>> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return new Map();
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 420 * 86400_000));
@@ -139,13 +145,25 @@ async function loadWindowReturnsByTicker(
     values.closes.push(row.c);
     seriesByTicker.set(key, values);
   }
-  const out = new Map<string, { change3m: number; change6m: number }>();
+  const out = new Map<string, {
+    change3m: number;
+    change6m: number;
+    above20Sma: boolean | null;
+    above50Sma: boolean | null;
+    above200Sma: boolean | null;
+  }>();
   for (const ticker of unique) {
     const series = seriesByTicker.get(ticker) ?? { dates: [], closes: [] };
     const cleaned = sanitizeBarSeries(series.dates, series.closes);
     const closes = cleaned.closes;
     if (closes.length === 0) {
-      out.set(ticker, { change3m: 0, change6m: 0 });
+      out.set(ticker, {
+        change3m: 0,
+        change6m: 0,
+        above20Sma: null,
+        above50Sma: null,
+        above200Sma: null,
+      });
       continue;
     }
     const last = closes.length - 1;
@@ -155,6 +173,9 @@ async function loadWindowReturnsByTicker(
     out.set(ticker, {
       change3m: pctChange(price, prev3m),
       change6m: pctChange(price, prev6m),
+      above20Sma: isPriceAboveSma(closes, 20),
+      above50Sma: isPriceAboveSma(closes, 50),
+      above200Sma: isPriceAboveSma(closes, 200),
     });
   }
   return out;
@@ -787,7 +808,7 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
     }>();
 
   const tableRows = rows.results ?? [];
-  const windowReturns = await loadWindowReturnsByTicker(
+  const derivedMetrics = await loadOverviewDerivedMetricsByTicker(
     env,
     Array.from(new Set(tableRows.map((row) => row.ticker))),
     meta.asOfDate,
@@ -814,10 +835,16 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
         showSparkline: g.showSparkline,
         pinTop10: g.pinTop10,
         columns: g.columns,
-      rows: tableRows
+        rows: tableRows
           .filter((r) => r.sectionId === sec.id && r.groupId === g.id)
           .map((r) => ({
-            ...(windowReturns.get(r.ticker.toUpperCase()) ?? { change3m: 0, change6m: 0 }),
+            ...(derivedMetrics.get(r.ticker.toUpperCase()) ?? {
+              change3m: 0,
+              change6m: 0,
+              above20Sma: null,
+              above50Sma: null,
+              above200Sma: null,
+            }),
             ticker: r.ticker,
             displayName: r.displayName,
             price: r.price,

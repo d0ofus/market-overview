@@ -517,7 +517,7 @@ function createEnv() {
               if (sql.includes("FROM dashboard_configs WHERE id = ?")) {
                 return dashboardConfig as T;
               }
-              if (sql.includes("FROM snapshots_meta WHERE config_id = ? ORDER BY as_of_date DESC LIMIT 1")) {
+              if (sql.includes("FROM snapshots_meta WHERE config_id = ?") && sql.includes("ORDER BY as_of_date DESC, generated_at DESC LIMIT 1")) {
                 return snapshotMeta as T;
               }
               return null as T;
@@ -559,6 +559,7 @@ describe("loadSnapshot relative strength pilot", () => {
     const spyRow = indexGroup?.rows.find((row) => row.ticker === "SPY");
 
     expect(cryptoGroup?.columns).toContain("relativeStrength30dVsSpy");
+    expect(cryptoGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
     expect(metalsGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(globalGroup?.columns).toContain("relativeStrength30dVsSpy");
     expect(countryGroup?.columns).toContain("relativeStrength30dVsSpy");
@@ -576,5 +577,8 @@ describe("loadSnapshot relative strength pilot", () => {
     expect(xlkRow?.relativeStrength30dVsSpy).toEqual([4.5, 4.5, 4.5, 4.5]);
     expect(rytRow?.relativeStrength30dVsSpy).toEqual([5.5, 5.5, 5.5, 5.5]);
     expect(spyRow?.relativeStrength30dVsSpy).toBeNull();
+    expect(bitoRow?.above20Sma).toBeNull();
+    expect(bitoRow?.above50Sma).toBeNull();
+    expect(bitoRow?.above200Sma).toBeNull();
   });
 });

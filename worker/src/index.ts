@@ -190,7 +190,7 @@ const API_REVISION = "2026-03-07-alerts-email-ingestion";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_SPARKLINE_MIN_POINTS = 90;
-const OVERVIEW_HISTORY_LOOKBACK_DAYS = 180;
+const OVERVIEW_HISTORY_LOOKBACK_DAYS = 320;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
@@ -211,6 +211,11 @@ const isAuthed = (req: Request, env: Env): boolean => {
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
 };
+
+function isOverviewSectionTitle(title: string | null | undefined): boolean {
+  if (!title) return false;
+  return title.includes("Macro") || title.includes("Equities");
+}
 
 function readGappersLlmOverride(req: Request): {
   provider?: "openai" | "anthropic";
@@ -3391,9 +3396,15 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
   const payload = itemCreateSchema.parse(await c.req.json());
-  const groupMeta = await c.env.DB.prepare("SELECT title FROM dashboard_groups WHERE id = ? LIMIT 1")
+  const groupMeta = await c.env.DB.prepare(
+    `SELECT dg.title as title, ds.title as sectionTitle
+     FROM dashboard_groups dg
+     LEFT JOIN dashboard_sections ds ON ds.id = dg.section_id
+     WHERE dg.id = ?
+     LIMIT 1`,
+  )
     .bind(groupId)
-    .first<{ title: string | null }>();
+    .first<{ title: string | null; sectionTitle: string | null }>();
   if (groupMeta?.title === "Industry/Thematic ETFs" || groupMeta?.title === "Thematic ETFs") {
     return c.json({ error: "Industry/Thematic ETFs is managed from ETF Universe." }, 409);
   }
@@ -3443,6 +3454,9 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
     ),
   ]);
   await upsertAudit(c.env, "default", "ITEM_ADD", { groupId, payload });
+  if (isOverviewSectionTitle(groupMeta?.sectionTitle)) {
+    await refreshRecentBarsForTickers(c.env, [resolved.ticker], 1, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
+  }
   await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });
 });

@@ -5,6 +5,8 @@ const defaultColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD"
 const DEFAULT_REFRESH_TIME = "08:15";
 const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 const SYMBOL_LOOKUP_CHUNK_SIZE = 50;
+const OVERVIEW_SMA_PILOT_GROUPS = new Set(["g-crypto"]);
+const OVERVIEW_SMA_COLUMNS = ["20SMA", "50SMA", "200SMA"] as const;
 const OVERVIEW_RS_AUTO_GROUPS = new Set([
   "g-crypto",
   "g-metals-energy",
@@ -23,6 +25,9 @@ function normalizeOverviewColumns(columns: string[]): string[] {
   const includePrice = columns.includes("price");
   const includeSparkline = columns.includes("sparkline");
   const includeRelativeStrength = columns.includes("relativeStrength30dVsSpy");
+  const include20Sma = columns.includes("20SMA");
+  const include50Sma = columns.includes("50SMA");
+  const include200Sma = columns.includes("200SMA");
   const normalized = [
     ...(includeTicker ? ["ticker"] : []),
     ...(includeName ? ["name"] : []),
@@ -34,6 +39,9 @@ function normalizeOverviewColumns(columns: string[]): string[] {
     "YTD",
     ...(includeSparkline ? ["sparkline"] : []),
     ...(includeRelativeStrength ? ["relativeStrength30dVsSpy"] : []),
+    ...(include20Sma ? ["20SMA"] : []),
+    ...(include50Sma ? ["50SMA"] : []),
+    ...(include200Sma ? ["200SMA"] : []),
   ];
   return Array.from(new Set(normalized));
 }
@@ -48,6 +56,15 @@ function withOverviewPilotColumns(
     return columns;
   }
   return [...columns, "relativeStrength30dVsSpy"];
+}
+
+function withOverviewSmaPilotColumns(groupId: string, columns: string[]): string[] {
+  if (!OVERVIEW_SMA_PILOT_GROUPS.has(groupId)) return columns;
+  const next = [...columns];
+  for (const column of OVERVIEW_SMA_COLUMNS) {
+    if (!next.includes(column)) next.push(column);
+  }
+  return next;
 }
 
 function reorderOverviewColumnsForGroup(groupId: string, columns: string[]): string[] {
@@ -317,7 +334,7 @@ export async function loadConfig(env: Env, configId = "default"): Promise<Dashbo
             pinTop10: !!g.pinTop10,
             columns: reorderOverviewColumnsForGroup(
               g.id,
-              withOverviewPilotColumns(g.id, itemsForGroup, overviewColumns),
+              withOverviewSmaPilotColumns(g.id, withOverviewPilotColumns(g.id, itemsForGroup, overviewColumns)),
             ),
             items: itemsForGroup,
           };

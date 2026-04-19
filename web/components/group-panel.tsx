@@ -24,6 +24,9 @@ type Row = {
   pctFrom52wHigh: number;
   sparkline: number[];
   relativeStrength30dVsSpy: number[] | null;
+  above20Sma: boolean | null;
+  above50Sma: boolean | null;
+  above200Sma: boolean | null;
   holdings: string[] | null;
 };
 
@@ -38,6 +41,11 @@ type Props = {
 
 const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+const isSmaColumn = (column: string) => column === "20SMA" || column === "50SMA" || column === "200SMA";
+const smaSortValue = (value: boolean | null): number | null => {
+  if (value == null) return null;
+  return value ? 1 : 0;
+};
 const regressionSlope = (values: number[] | null): number | null => {
   if (!values || values.length < 2) return null;
   const count = values.length;
@@ -54,13 +62,33 @@ const regressionSlope = (values: number[] | null): number | null => {
   return numerator / denominator;
 };
 const defaultSortDirectionFor = (column: string): "asc" | "desc" =>
-  column === "1D" || column === "relativeStrength30dVsSpy" ? "desc" : "asc";
+  column === "1D" || column === "relativeStrength30dVsSpy" || isSmaColumn(column) ? "desc" : "asc";
 const titleCase = (value: string): string => {
-  if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD") return value;
+  if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD" || isSmaColumn(value)) return value;
   if (value === "pctFrom52WHigh") return "% From 52W High";
   if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
+
+function SmaStatusIndicator({ value }: { value: boolean | null }) {
+  if (value == null) {
+    return <span className="inline-block h-3 w-3" title="Not enough history" />;
+  }
+  if (value) {
+    return (
+      <span
+        className="inline-block h-0 w-0 border-x-[6px] border-b-[10px] border-x-transparent border-b-emerald-400"
+        title="Price above SMA"
+      />
+    );
+  }
+  return (
+    <span
+      className="inline-block h-0 w-0 border-x-[6px] border-t-[10px] border-x-transparent border-t-rose-400"
+      title="Price below SMA"
+    />
+  );
+}
 
 export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false, anchorId }: Props) {
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
@@ -97,6 +125,9 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? null;
       if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? null;
       if (key === "relativeStrength30dVsSpy") return regressionSlope(row.relativeStrength30dVsSpy);
+      if (key === "20SMA") return smaSortValue(row.above20Sma);
+      if (key === "50SMA") return smaSortValue(row.above50Sma);
+      if (key === "200SMA") return smaSortValue(row.above200Sma);
       return null;
     };
     copy.sort((a, b) => {
@@ -172,6 +203,15 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     }
     if (column === "price") {
       return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{row.price.toFixed(2)}</td>;
+    }
+    if (column === "20SMA") {
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above20Sma} /></td>;
+    }
+    if (column === "50SMA") {
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above50Sma} /></td>;
+    }
+    if (column === "200SMA") {
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above200Sma} /></td>;
     }
     if (column === "1D") {
       return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change1d)}`}>{pct(row.change1d)}</td>;

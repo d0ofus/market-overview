@@ -14,6 +14,9 @@ export const allColumns = [
   "pctFrom52WHigh",
   "sparkline",
   "relativeStrength30dVsSpy",
+  "20SMA",
+  "50SMA",
+  "200SMA",
 ];
 
 export const refreshTimezoneOptions = [

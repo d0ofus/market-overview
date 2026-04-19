@@ -145,6 +145,13 @@ export function sma(values: number[], period: number): number {
   return window.reduce((a, b) => a + b, 0) / period;
 }
 
+export function isPriceAboveSma(values: number[], period: number): boolean | null {
+  if (period <= 0 || values.length < period) return null;
+  const last = values[values.length - 1];
+  if (!Number.isFinite(last)) return null;
+  return last > sma(values, period);
+}
+
 type BreadthSeries = {
   closes: number[];
   volumes: number[];
