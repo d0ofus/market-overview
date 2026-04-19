@@ -103,10 +103,15 @@ type HistoricalColumn = {
   formatValue: (value: number | null) => string;
 };
 
+type MetricTrendPoint = {
+  asOfDate: string;
+  value: number;
+};
+
 type MetricTrend = {
   key: MetricKey;
   label: string;
-  values: number[];
+  points: MetricTrendPoint[];
   latest: number | null;
   previous: number | null;
   low: number | null;
@@ -348,20 +353,22 @@ export function BreadthPanels({
     const entries = historicalColumns
       .filter((column): column is HistoricalColumn & { key: MetricKey; getMetricValue: (metrics: BreadthMetrics) => number | null } => column.trendable && column.getMetricValue != null)
       .map((column) => {
-        const rawValues = recentRows.map(({ metrics }) => column.getMetricValue(metrics));
-        const numericValues = rawValues.filter((value): value is number => value != null && Number.isFinite(value));
-        const latestValue = rawValues[rawValues.length - 1] ?? null;
-        const previousValue = [...rawValues.slice(0, -1)].reverse().find((value): value is number => value != null && Number.isFinite(value)) ?? null;
+        const points = recentRows.flatMap(({ row, metrics }) => {
+          const value = column.getMetricValue(metrics);
+          return value != null && Number.isFinite(value) ? [{ asOfDate: row.asOfDate, value }] : [];
+        });
+        const latestValue = points[points.length - 1]?.value ?? null;
+        const previousValue = points.length > 1 ? points[points.length - 2]?.value ?? null : null;
         return [
           column.key,
           {
             key: column.key,
             label: column.label,
-            values: numericValues,
+            points,
             latest: latestValue,
             previous: previousValue,
-            low: numericValues.length ? Math.min(...numericValues) : null,
-            high: numericValues.length ? Math.max(...numericValues) : null,
+            low: points.length ? Math.min(...points.map((point) => point.value)) : null,
+            high: points.length ? Math.max(...points.map((point) => point.value)) : null,
             formatValue: column.formatValue,
           },
         ] as const;
@@ -601,7 +608,10 @@ export function BreadthPanels({
           </div>
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <HistogramSparkline
-              values={activeHistoricalTrend?.values ?? null}
+              values={activeHistoricalTrend?.points.map((point) => point.value) ?? null}
+              barLabels={activeHistoricalTrend?.points.map((point) => point.asOfDate) ?? undefined}
+              valueFormatter={(value) => activeHistoricalTrend?.formatValue(value) ?? value.toString()}
+              tooltipEnabled
               width={220}
               height={56}
               ariaLabel={`${activeHistoricalTrend?.label ?? "Historical metric"} 30 session histogram`}
