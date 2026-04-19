@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Loader2, Search } from "lucide-react";
 import {
@@ -16,6 +17,9 @@ import { TickerMultiGrid } from "./ticker-multi-grid";
 
 type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
 type MultiChartSortKey = "change1d" | "marketCap";
+const CORRELATION_DEFAULT_LOOKBACK = "252D";
+const CORRELATION_DEFAULT_ROLLING_WINDOW = "60D";
+const CORRELATION_LAUNCH_MAX_TICKERS = 10;
 
 function fmtCompact(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
@@ -64,7 +68,23 @@ function MultiChartPager({
   );
 }
 
+function normalizeCorrelationTickers(tickers: string[]): string[] {
+  return Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+}
+
+function buildCorrelationLaunchHref(tickers: string[], groupId: string, groupName: string): string {
+  const params = new URLSearchParams();
+  params.set("tickers", tickers.join(","));
+  params.set("lookback", CORRELATION_DEFAULT_LOOKBACK);
+  params.set("rollingWindow", CORRELATION_DEFAULT_ROLLING_WINDOW);
+  params.set("source", "peer-group");
+  params.set("peerGroupId", groupId);
+  params.set("peerGroupName", groupName);
+  return `/correlation?${params.toString()}`;
+}
+
 export function PeerGroupsDashboard() {
+  const router = useRouter();
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [directory, setDirectory] = useState<PeerDirectoryRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -86,6 +106,13 @@ export function PeerGroupsDashboard() {
   const [chartPage, setChartPage] = useState(1);
   const [memberSortKey, setMemberSortKey] = useState<PeerMemberSortKey>("ticker");
   const [memberSortDir, setMemberSortDir] = useState<"asc" | "desc">("asc");
+  const [correlationPickerState, setCorrelationPickerState] = useState<{
+    groupId: string;
+    groupName: string;
+    tickers: string[];
+  } | null>(null);
+  const [correlationSelection, setCorrelationSelection] = useState<string[]>([]);
+  const [correlationSelectionError, setCorrelationSelectionError] = useState<string | null>(null);
   const deferredQuery = useDeferredValue(query);
   const pageSize = 50;
 
@@ -224,6 +251,15 @@ export function PeerGroupsDashboard() {
     () => Math.max(1, Math.ceil(sortedMemberRows.length / chartsPerPage)),
     [chartsPerPage, sortedMemberRows.length],
   );
+  const correlationLaunchTickers = useMemo(
+    () => normalizeCorrelationTickers(sortedMemberRows.map((row) => row.ticker)),
+    [sortedMemberRows],
+  );
+  const recommendedCorrelationTickers = useMemo(
+    () => correlationLaunchTickers.slice(0, CORRELATION_LAUNCH_MAX_TICKERS),
+    [correlationLaunchTickers],
+  );
+  const canLaunchCorrelation = !!activeGroup && correlationLaunchTickers.length >= 2;
 
   useEffect(() => {
     setChartPage(1);
@@ -234,6 +270,12 @@ export function PeerGroupsDashboard() {
     setChartPage(totalChartPages);
   }, [chartPage, totalChartPages]);
 
+  useEffect(() => {
+    setCorrelationPickerState(null);
+    setCorrelationSelection([]);
+    setCorrelationSelectionError(null);
+  }, [activeGroup?.id, detail?.symbol.ticker]);
+
   const onMemberSort = (key: PeerMemberSortKey) => {
     if (memberSortKey === key) {
       setMemberSortDir((current) => (current === "asc" ? "desc" : "asc"));
@@ -241,6 +283,51 @@ export function PeerGroupsDashboard() {
     }
     setMemberSortKey(key);
     setMemberSortDir(key === "ticker" || key === "name" ? "asc" : "desc");
+  };
+
+  const launchCorrelation = (tickers: string[], groupId: string, groupName: string) => {
+    const normalizedTickers = normalizeCorrelationTickers(tickers);
+    if (normalizedTickers.length < 2) return;
+    router.push(buildCorrelationLaunchHref(normalizedTickers, groupId, groupName));
+  };
+
+  const openCorrelationPicker = () => {
+    if (!activeGroup) return;
+    if (correlationLaunchTickers.length <= CORRELATION_LAUNCH_MAX_TICKERS) {
+      launchCorrelation(correlationLaunchTickers, activeGroup.id, activeGroup.name);
+      return;
+    }
+    setCorrelationPickerState({
+      groupId: activeGroup.id,
+      groupName: activeGroup.name,
+      tickers: correlationLaunchTickers,
+    });
+    setCorrelationSelection(recommendedCorrelationTickers);
+    setCorrelationSelectionError(null);
+  };
+
+  const toggleCorrelationSelection = (ticker: string) => {
+    setCorrelationSelectionError(null);
+    setCorrelationSelection((current) => {
+      if (current.includes(ticker)) {
+        return current.filter((value) => value !== ticker);
+      }
+      if (current.length >= CORRELATION_LAUNCH_MAX_TICKERS) {
+        setCorrelationSelectionError(`Select up to ${CORRELATION_LAUNCH_MAX_TICKERS} tickers for a correlation run.`);
+        return current;
+      }
+      return [...current, ticker];
+    });
+  };
+
+  const submitCorrelationPicker = () => {
+    if (!correlationPickerState) return;
+    const normalizedSelection = correlationPickerState.tickers.filter((ticker) => correlationSelection.includes(ticker));
+    if (normalizedSelection.length < 2) {
+      setCorrelationSelectionError("Select at least 2 tickers to run correlation.");
+      return;
+    }
+    launchCorrelation(normalizedSelection, correlationPickerState.groupId, correlationPickerState.groupName);
   };
 
   return (
@@ -402,9 +489,24 @@ export function PeerGroupsDashboard() {
 
           {detail && activeGroup && (
             <div className="card p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-200">{activeGroup.name}</h3>
-                <span className="text-xs text-slate-400">{activeGroup.members.length} members</span>
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-200">{activeGroup.name}</h3>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {correlationLaunchTickers.length} ticker{correlationLaunchTickers.length === 1 ? "" : "s"} ready for correlation launch.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">{activeGroup.members.length} members</span>
+                  <button
+                    type="button"
+                    className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={openCorrelationPicker}
+                    disabled={!canLaunchCorrelation}
+                  >
+                    {correlationLaunchTickers.length > CORRELATION_LAUNCH_MAX_TICKERS ? "Choose Tickers For Correlation" : "Run Correlation"}
+                  </button>
+                </div>
               </div>
               {loadingMetrics ? (
                 <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -496,6 +598,117 @@ export function PeerGroupsDashboard() {
           />
           <div className="flex justify-end px-1">
             <MultiChartPager page={chartPage} totalPages={totalChartPages} onPageChange={setChartPage} />
+          </div>
+        </div>
+      )}
+
+      {correlationPickerState && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setCorrelationPickerState(null)}>
+          <div
+            className="w-full max-w-2xl rounded-2xl border border-borderSoft/80 bg-panel p-4 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Peer Group Launch</div>
+                <h3 className="mt-1 text-lg font-semibold text-slate-100">{correlationPickerState.groupName}</h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  Select 2 to {CORRELATION_LAUNCH_MAX_TICKERS} tickers to run in correlation. Recommended selections follow the current peer-group sort order.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300"
+                onClick={() => setCorrelationPickerState(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-sm text-slate-300">
+              <div>
+                Selected <span className="font-semibold text-slate-100">{correlationSelection.length}</span> of {correlationPickerState.tickers.length}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
+                  onClick={() => {
+                    setCorrelationSelection(recommendedCorrelationTickers);
+                    setCorrelationSelectionError(null);
+                  }}
+                >
+                  Select Recommended 10
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
+                  onClick={() => {
+                    setCorrelationSelection([]);
+                    setCorrelationSelectionError(null);
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 max-h-[26rem] overflow-auto rounded-xl border border-borderSoft/70">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-900/60">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Use</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Ticker</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Company</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Price</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Mkt Cap</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedMemberRows.map(({ ticker, name, metric }) => {
+                    const checked = correlationSelection.includes(ticker);
+                    const disableUnchecked = !checked && correlationSelection.length >= CORRELATION_LAUNCH_MAX_TICKERS;
+                    return (
+                      <tr key={`correlation-launch-${ticker}`} className="border-t border-borderSoft/60">
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+                            checked={checked}
+                            disabled={disableUnchecked}
+                            onChange={() => toggleCorrelationSelection(ticker)}
+                          />
+                        </td>
+                        <td className="px-3 py-2 font-semibold text-accent">{ticker}</td>
+                        <td className="px-3 py-2 text-slate-300">{name ?? "-"}</td>
+                        <td className="px-3 py-2 text-slate-300">{fmtPrice(metric?.price)}</td>
+                        <td className="px-3 py-2 text-slate-300">{fmtCompact(metric?.marketCap)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {correlationSelectionError && <p className="mt-3 text-sm text-rose-300">{correlationSelectionError}</p>}
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
+                onClick={() => setCorrelationPickerState(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={submitCorrelationPicker}
+                disabled={correlationSelection.length < 2 || correlationSelection.length > CORRELATION_LAUNCH_MAX_TICKERS}
+              >
+                Run Correlation
+              </button>
+            </div>
           </div>
         </div>
       )}

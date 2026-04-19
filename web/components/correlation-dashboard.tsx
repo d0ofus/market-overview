@@ -151,6 +151,10 @@ export function CorrelationDashboard() {
     allowedRollingWindowsForLookback(queryLookback),
     defaultRollingWindowForLookback(queryLookback),
   );
+  const peerGroupLaunchName = searchParams.get("source") === "peer-group"
+    ? (searchParams.get("peerGroupName")?.trim() || "Selected Peer Group")
+    : null;
+  const peerGroupLaunchTickerCount = parseTickerInput(queryTickers).tickers.length;
 
   const [tickerInput, setTickerInput] = useState(queryTickers);
   const [lookback, setLookback] = useState<CorrelationLookback>(queryLookback);
@@ -284,6 +288,16 @@ export function CorrelationDashboard() {
 
   return (
     <div className="space-y-4">
+      {peerGroupLaunchName && queryTickers && (
+        <div className="rounded-xl border border-sky-500/25 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-sky-200">Peer Group Launch</div>
+          <div className="mt-1 font-medium">Launched from peer group: {peerGroupLaunchName}</div>
+          <div className="mt-1 text-xs text-sky-100/80">
+            {peerGroupLaunchTickerCount} ticker{peerGroupLaunchTickerCount === 1 ? "" : "s"} loaded into this correlation run.
+          </div>
+        </div>
+      )}
+
       <div className="card p-4">
         <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_180px_180px_auto]">
           <div>
