@@ -1,6 +1,7 @@
 # TODO
 
 ## Overview
+> Do hover like sector calendar view for tickers in /overview
 - Fix sparklines
 - Check source of data for EQ Index Futures, they seem wrong.
 - Add macro stuff like 10Y yields
