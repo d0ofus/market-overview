@@ -20,6 +20,39 @@ import { TradingViewWidget } from "./tradingview-widget";
 
 const formatLocalMonthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 const formatLocalDateInputValue = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const US_MARKET_TIMEZONE = "America/New_York";
+const US_MARKET_CLOSE_HOUR = 16;
+const getZonedDateParts = (d: Date, timeZone: string) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return {
+    weekday: get("weekday"),
+    hour: Number(get("hour") || "0"),
+    isoDate: `${get("year")}-${get("month")}-${get("day")}`,
+  };
+};
+const previousWeekdayIso = (isoDate: string) => {
+  const value = new Date(`${isoDate}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - 1);
+  while (value.getUTCDay() === 0 || value.getUTCDay() === 6) {
+    value.setUTCDate(value.getUTCDate() - 1);
+  }
+  return value.toISOString().slice(0, 10);
+};
+const getDefaultSectorEventDate = (now = new Date()) => {
+  const ny = getZonedDateParts(now, US_MARKET_TIMEZONE);
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(ny.weekday);
+  if (!isWeekday) return previousWeekdayIso(ny.isoDate);
+  return ny.hour >= US_MARKET_CLOSE_HOUR ? ny.isoDate : previousWeekdayIso(ny.isoDate);
+};
 const parseMonthKey = (value: string) => {
   const [year, month] = value.split("-").map(Number);
   return { year, month };
@@ -303,7 +336,7 @@ export function SectorTracker() {
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
-  const [eventDate, setEventDate] = useState(formatLocalDateInputValue());
+  const [eventDate, setEventDate] = useState(() => getDefaultSectorEventDate());
   const [notes, setNotes] = useState("");
   const [tickerInput, setTickerInput] = useState("");
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
@@ -763,7 +796,7 @@ export function SectorTracker() {
                       />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Event Date</span>
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Date</span>
                       <input type="date" className={INPUT_CLASS} value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
                     </label>
                     <label className="space-y-1 xl:col-span-2">
@@ -834,6 +867,7 @@ export function SectorTracker() {
                           });
                           setSectorNarrativeExisting("");
                           setSectorNarrativeNew("");
+                          setEventDate(getDefaultSectorEventDate());
                           setNotes("");
                           setSelectedTickers([]);
                           setTickerInput("");
@@ -1169,7 +1203,7 @@ export function SectorTracker() {
                   <input className={INPUT_CLASS} value={editSectorName} onChange={(e) => setEditSectorName(e.target.value)} placeholder="Sector/Narrative" />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Event Date</span>
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Date</span>
                   <input type="date" className={INPUT_CLASS} value={editEventDate} onChange={(e) => setEditEventDate(e.target.value)} />
                 </label>
                 <label className="space-y-1 md:col-span-2">
