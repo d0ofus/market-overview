@@ -819,7 +819,11 @@ export function ScansPageDashboard() {
       }
       setExpandedTicker(null);
       setNewsByTicker({});
-      setMessage(`Refreshed ${response.snapshot.rowCount} rows.`);
+      setMessage(
+        response.snapshot.matchedRowCount > response.snapshot.rowCount
+          ? `Refreshed ${response.snapshot.rowCount} displayed rows from ${response.snapshot.matchedRowCount} matched rows.`
+          : `Refreshed ${response.snapshot.rowCount} rows.`,
+      );
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh scans.");
     } finally {
@@ -1534,6 +1538,11 @@ export function ScansPageDashboard() {
               <h3 className="text-sm font-semibold text-slate-200">{snapshot?.presetName ?? selectedPreset?.name ?? "Scans"}</h3>
               <p className="text-xs text-slate-400">
                 Last updated: {formatDateTime(snapshot?.generatedAt)} - Source: {snapshot?.providerLabel ?? "TradingView Screener (Python)"}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {snapshot
+                  ? `Showing ${snapshot.rowCount} row${snapshot.rowCount === 1 ? "" : "s"}${snapshot.matchedRowCount > snapshot.rowCount ? ` of ${snapshot.matchedRowCount} matched` : ""}.`
+                  : "No scan snapshot loaded yet."}
               </p>
             </div>
             <div className="flex items-center gap-2">

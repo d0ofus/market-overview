@@ -8,6 +8,7 @@ type MutableSnapshot = {
   providerLabel: string;
   generatedAt: string;
   rowCount: number;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
 };
@@ -119,16 +120,17 @@ function createApiScansEnv(input?: {
           },
           async run() {
             if (sql.includes("INSERT INTO scan_snapshots")) {
-              const [id, presetId, providerLabel, errorOrRowCount, maybeStatus, maybeError] = args;
+              const [id, presetId, providerLabel, rowCountArg, matchedRowCountArg, statusArg, errorArg] = args;
               const isErrorInsert = args.length === 4;
               snapshots.push({
                 id: String(id),
                 presetId: String(presetId),
                 providerLabel: String(providerLabel),
                 generatedAt: nextGeneratedAt(),
-                rowCount: isErrorInsert ? 0 : Number(errorOrRowCount ?? 0),
-                status: (isErrorInsert ? "error" : String(maybeStatus ?? "ok")) as MutableSnapshot["status"],
-                error: isErrorInsert ? String(errorOrRowCount ?? "") : (maybeError == null ? null : String(maybeError)),
+                rowCount: isErrorInsert ? 0 : Number(rowCountArg ?? 0),
+                matchedRowCount: isErrorInsert ? 0 : Number(matchedRowCountArg ?? rowCountArg ?? 0),
+                status: (isErrorInsert ? "error" : String(statusArg ?? "ok")) as MutableSnapshot["status"],
+                error: isErrorInsert ? String(rowCountArg ?? "") : (errorArg == null ? null : String(errorArg)),
               });
             }
             return {};
@@ -154,13 +156,14 @@ function createApiScansEnv(input?: {
         for (const statement of statements) {
           if (!statement.__sql) continue;
           if (statement.__sql.includes("INSERT INTO scan_snapshots")) {
-            const [id, presetId, providerLabel, rowCount, status, error] = statement.__args ?? [];
+            const [id, presetId, providerLabel, rowCount, matchedRowCount, status, error] = statement.__args ?? [];
             snapshots.push({
               id: String(id),
               presetId: String(presetId),
               providerLabel: String(providerLabel),
               generatedAt: nextGeneratedAt(),
               rowCount: Number(rowCount ?? 0),
+              matchedRowCount: Number(matchedRowCount ?? rowCount ?? 0),
               status: String(status ?? "ok") as MutableSnapshot["status"],
               error: error == null ? null : String(error),
             });
@@ -224,6 +227,7 @@ describe("scans page API", () => {
         providerLabel: "TV",
         generatedAt: "2026-03-18T01:00:00.000Z",
         rowCount: 2,
+        matchedRowCount: 2,
         status: "ok",
         error: null,
       }],
@@ -306,6 +310,7 @@ describe("scans page API", () => {
         providerLabel: "TV",
         generatedAt: "2026-03-18T01:00:00.000Z",
         rowCount: 2,
+        matchedRowCount: 2,
         status: "ok",
         error: null,
       }],
@@ -440,6 +445,7 @@ describe("scans page API", () => {
           providerLabel: "TV",
           generatedAt: "2026-03-18T01:00:00.000Z",
           rowCount: 1,
+          matchedRowCount: 1,
           status: "ok",
           error: null,
         },

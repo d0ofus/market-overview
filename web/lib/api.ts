@@ -239,6 +239,7 @@ export type ScanSnapshot = {
   providerLabel: string;
   generatedAt: string;
   rowCount: number;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
   rows: ScanRow[];

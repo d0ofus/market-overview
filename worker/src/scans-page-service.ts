@@ -97,6 +97,7 @@ export type ScanSnapshot = {
   providerLabel: string;
   generatedAt: string;
   rowCount: number;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
   rows: ScanSnapshotRow[];
@@ -957,6 +958,7 @@ async function fetchTradingViewScanRows(
   options?: { rules?: ScanPresetRule[]; sortField?: string; sortDirection?: "asc" | "desc"; rowLimit?: number },
 ): Promise<{
   providerLabel: string;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
   rows: ScanSnapshotRow[];
@@ -1011,6 +1013,7 @@ async function fetchTradingViewScanRows(
     .slice(0, activeRowLimit);
   return {
     providerLabel: TV_PROVIDER_LABEL,
+    matchedRowCount: candidates.length,
     status: rows.length > 0 ? "ok" : "empty",
     error: null,
     rows,
@@ -1209,6 +1212,7 @@ function rowMatchesOutputMode(row: RelativeStrengthLatestRow, outputMode: Relati
 
 async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Promise<{
   providerLabel: string;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
   rows: ScanSnapshotRow[];
@@ -1217,6 +1221,7 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   if (prefilterRows.length === 0) {
     return {
       providerLabel: RS_PROVIDER_LABEL,
+      matchedRowCount: 0,
       status: "empty",
       error: null,
       rows: [],
@@ -1225,12 +1230,16 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
 
   const benchmarkTicker = preset.benchmarkTicker?.trim().toUpperCase() || "SPY";
   const provider = getProvider(env);
-  const tickers = Array.from(new Set([...prefilterRows.map((row) => row.ticker.toUpperCase()), benchmarkTicker]));
+  const tickers = Array.from(new Set(prefilterRows.map((row) => row.ticker.toUpperCase())));
   const endDate = latestUsSessionAsOfDate(new Date());
   const startDate = isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
-  const bars = await provider.getDailyBars(tickers, startDate, endDate);
-  const barsByTicker = groupBarsByTicker(bars);
-  const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];
+  const stockBars = await provider.getDailyBars(tickers, startDate, endDate);
+  const barsByTicker = groupBarsByTicker(stockBars);
+  let benchmarkBars = await provider.getDailyBars([benchmarkTicker], startDate, endDate);
+  if (benchmarkBars.length === 0) {
+    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+    benchmarkBars = await fallbackProvider.getDailyBars([benchmarkTicker], startDate, endDate);
+  }
   if (benchmarkBars.length === 0) {
     throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
   }
@@ -1273,6 +1282,7 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   const rows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
   return {
     providerLabel: RS_PROVIDER_LABEL,
+    matchedRowCount: mergedRows.length,
     status: rows.length > 0 ? "ok" : "empty",
     error: null,
     rows,
@@ -1295,6 +1305,7 @@ type ScanSnapshotHeader = {
   providerLabel: string;
   generatedAt: string;
   rowCount: number;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
 };
@@ -1313,6 +1324,7 @@ async function loadLatestScanSnapshotHeader(
        provider_label as providerLabel,
        generated_at as generatedAt,
        row_count as rowCount,
+       COALESCE(matched_row_count, row_count) as matchedRowCount,
        status,
        error
      FROM scan_snapshots
@@ -1379,6 +1391,7 @@ async function hydrateScanSnapshot(
     providerLabel: snapshot.providerLabel,
     generatedAt: snapshot.generatedAt,
     rowCount: snapshot.rowCount,
+    matchedRowCount: snapshot.matchedRowCount,
     status: snapshot.status,
     error: snapshot.error,
     rows: await loadScanSnapshotRows(env, snapshot.id),
@@ -1397,8 +1410,8 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
     await upsertSymbolsFromRows(env, result.rows);
     const statements = [
       env.DB.prepare(
-        "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)",
-      ).bind(snapshotId, preset.id, result.providerLabel, result.rows.length, result.status, result.error),
+        "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)",
+      ).bind(snapshotId, preset.id, result.providerLabel, result.rows.length, result.matchedRowCount, result.status, result.error),
       ...result.rows.map((row) =>
         env.DB.prepare(
           "INSERT INTO scan_rows (id, snapshot_id, ticker, name, sector, industry, change_1d, market_cap, price, avg_volume, price_avg_volume, raw_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
@@ -1422,7 +1435,7 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
   } catch (error) {
     const message = error instanceof Error ? error.message : "Scan refresh failed.";
     await env.DB.prepare(
-      "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 'error', ?)",
+      "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 0, 'error', ?)",
     )
       .bind(snapshotId, preset.id, preset.scanType === "relative-strength" ? RS_PROVIDER_LABEL : TV_PROVIDER_LABEL, message)
       .run();

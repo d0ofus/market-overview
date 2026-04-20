@@ -66,6 +66,7 @@ type MutableSnapshot = {
   providerLabel: string;
   generatedAt: string;
   rowCount: number;
+  matchedRowCount: number;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
 };
@@ -168,17 +169,20 @@ function createMutableScansEnv(input: {
           },
           async run() {
             if (sql.includes("INSERT INTO scan_snapshots")) {
-              const [id, presetId, providerLabel, errorOrRowCount, maybeStatus, maybeError] = args;
+              const [id, presetId, providerLabel, rowCountArg, matchedRowCountArg, statusArg, errorArg] = args;
               if (args.length >= 4) {
-                const rowCount = args.length === 4 ? 0 : Number(errorOrRowCount ?? 0);
-                const status = args.length === 4 ? "error" : String(maybeStatus ?? "ok");
-                const error = args.length === 4 ? String(errorOrRowCount ?? "") : (maybeError == null ? null : String(maybeError));
+                const isLegacyErrorInsert = args.length === 4;
+                const rowCount = isLegacyErrorInsert ? 0 : Number(rowCountArg ?? 0);
+                const matchedRowCount = isLegacyErrorInsert ? 0 : Number(matchedRowCountArg ?? rowCountArg ?? 0);
+                const status = isLegacyErrorInsert ? "error" : String(statusArg ?? "ok");
+                const error = isLegacyErrorInsert ? String(rowCountArg ?? "") : (errorArg == null ? null : String(errorArg));
                 snapshots.push({
                   id: String(id),
                   presetId: String(presetId),
                   providerLabel: String(providerLabel),
                   generatedAt: nextGeneratedAt(),
                   rowCount,
+                  matchedRowCount,
                   status: status as MutableSnapshot["status"],
                   error,
                 });
@@ -210,13 +214,14 @@ function createMutableScansEnv(input: {
         for (const statement of statements) {
           if (!statement.__sql) continue;
           if (statement.__sql.includes("INSERT INTO scan_snapshots")) {
-            const [id, presetId, providerLabel, rowCount, status, error] = statement.__args ?? [];
+            const [id, presetId, providerLabel, rowCount, matchedRowCount, status, error] = statement.__args ?? [];
             snapshots.push({
               id: String(id),
               presetId: String(presetId),
               providerLabel: String(providerLabel),
               generatedAt: nextGeneratedAt(),
               rowCount: Number(rowCount ?? 0),
+              matchedRowCount: Number(matchedRowCount ?? rowCount ?? 0),
               status: String(status ?? "ok") as MutableSnapshot["status"],
               error: error == null ? null : String(error),
             });
@@ -482,8 +487,8 @@ describe("scans page service", () => {
       { id: "preset-b", name: "Breakouts", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
     ];
     const snapshotRows = {
-      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 2, status: "ok", error: null },
-      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 2, status: "ok", error: null },
+      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 2, matchedRowCount: 2, status: "ok", error: null },
+      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 2, matchedRowCount: 2, status: "ok", error: null },
     } as const;
     const scanRows = {
       "snap-a": [
@@ -634,8 +639,8 @@ describe("scans page service", () => {
       { id: "preset-b", name: "Breakouts", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
     ];
     const snapshotRows = {
-      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, status: "ok", error: null },
-      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 1, status: "ok", error: null },
+      "preset-a": { id: "snap-a", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
+      "preset-b": { id: "snap-b", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
     } as const;
     const scanRows = {
       "snap-a": [
@@ -692,9 +697,9 @@ describe("scans page service", () => {
         { ...topGainersPreset, id: "preset-b", name: "Breakouts", sortField: "close" },
       ],
       snapshots: [
-        { id: "snap-a-usable", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, status: "ok", error: null },
-        { id: "snap-a-error", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 0, status: "error", error: "TV unavailable" },
-        { id: "snap-b-usable", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T03:00:00.000Z", rowCount: 1, status: "ok", error: null },
+        { id: "snap-a-usable", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
+        { id: "snap-a-error", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T02:00:00.000Z", rowCount: 0, matchedRowCount: 0, status: "error", error: "TV unavailable" },
+        { id: "snap-b-usable", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T03:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
       ],
       rowsBySnapshotId: {
         "snap-a-usable": [
@@ -728,7 +733,7 @@ describe("scans page service", () => {
         ],
       }],
       snapshots: [
-        { id: "snap-b-prev", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, status: "ok", error: null },
+        { id: "snap-b-prev", presetId: "preset-b", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
       ],
       rowsBySnapshotId: {
         "snap-b-prev": [
