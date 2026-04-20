@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as providerModule from "../src/provider";
 import {
   buildTradingViewScanPayload,
   deleteScanPreset,
@@ -7,6 +8,7 @@ import {
   loadCompiledScansSnapshot,
   loadCompiledScansSnapshotForCompilePreset,
   normalizeScanRows,
+  refreshScansSnapshot,
   refreshScanCompilePreset,
   type ScanPreset,
   type ScanSnapshot,
@@ -71,15 +73,40 @@ type MutableSnapshot = {
   error: string | null;
 };
 
+function makeBars(ticker: string, count: number, closeBase: number, closeStep: number) {
+  const rows: Array<{ ticker: string; date: string; o: number; h: number; l: number; c: number; volume: number }> = [];
+  const start = new Date("2025-01-02T00:00:00Z");
+  let current = new Date(start);
+  while (rows.length < count) {
+    const weekday = current.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) {
+      const close = closeBase + rows.length * closeStep;
+      rows.push({
+        ticker,
+        date: current.toISOString().slice(0, 10),
+        o: close,
+        h: close,
+        l: close,
+        c: close,
+        volume: 1_000_000 + rows.length * 1000,
+      });
+    }
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return rows;
+}
+
 function createMutableScansEnv(input: {
   presets: ScanPreset[];
   compilePresets?: MutableCompilePreset[];
   snapshots?: MutableSnapshot[];
+  symbols?: string[];
   rowsBySnapshotId?: Record<string, Array<Partial<ScanSnapshotRow> & Pick<ScanSnapshotRow, "ticker">>>;
 }) {
   const presets = [...input.presets];
   const compilePresets = [...(input.compilePresets ?? [])];
   const snapshots = [...(input.snapshots ?? [])];
+  const symbols = new Set((input.symbols ?? []).map((ticker) => ticker.toUpperCase()));
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -155,6 +182,9 @@ function createMutableScansEnv(input: {
             return null as T;
           },
           async all<T>() {
+            if (sql.includes("FROM symbols")) {
+              return { results: Array.from(symbols).map((ticker) => ({ ticker })) as T[] };
+            }
             if (sql.includes("FROM scan_compile_presets cp")) {
               const compilePresetId = sql.includes("WHERE cp.id = ?") ? String(args[0] ?? "") : undefined;
               return { results: buildCompilePresetRows(compilePresetId) as T[] };
@@ -199,6 +229,9 @@ function createMutableScansEnv(input: {
           async all<T>() {
             if (sql.includes("FROM scan_presets ORDER BY")) {
               return { results: presets as T[] };
+            }
+            if (sql.includes("FROM symbols")) {
+              return { results: Array.from(symbols).map((ticker) => ({ ticker })) as T[] };
             }
             return { results: [] as T[] };
           },
@@ -544,6 +577,66 @@ describe("scans page service", () => {
       latestPrice: 101,
       latestRelativeVolume: 2.3,
     });
+  });
+
+  it("retries relative strength benchmark history on earlier sessions when the latest benchmark day is unavailable", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stockBars = makeBars("NVDA", 260, 100, 1);
+    const benchmarkBars = makeBars("SPY", 260, 90, 0.5);
+    const primaryProvider = {
+      label: "primary",
+      getDailyBars: vi.fn(async (tickers: string[]) => (tickers[0] === "NVDA" ? stockBars : [])),
+    };
+    let fallbackBenchmarkCalls = 0;
+    const fallbackProvider = {
+      label: "fallback",
+      getDailyBars: vi.fn(async (tickers: string[]) => {
+        if (tickers[0] !== "SPY") return [];
+        fallbackBenchmarkCalls += 1;
+        return fallbackBenchmarkCalls >= 2 ? benchmarkBars : [];
+      }),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation((providerEnv: any) =>
+      providerEnv.DATA_PROVIDER === "stooq" ? fallbackProvider as any : primaryProvider as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs");
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(fallbackProvider.getDailyBars).toHaveBeenCalledTimes(2);
+
+    vi.unstubAllGlobals();
   });
 
   it("duplicates presets with copied settings, a fresh id, and incremented copy naming", async () => {

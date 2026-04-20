@@ -1,5 +1,5 @@
 import { getProvider } from "./provider";
-import { latestUsSessionAsOfDate } from "./refresh-timing";
+import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import {
   buildRelativeStrengthCacheRows,
   type RelativeStrengthConfig,
@@ -1210,6 +1210,29 @@ function rowMatchesOutputMode(row: RelativeStrengthLatestRow, outputMode: Relati
   return true;
 }
 
+async function fetchBenchmarkBarsWithFallback(
+  env: Env,
+  benchmarkTicker: string,
+  startDate: string,
+  endDate: string,
+): Promise<RelativeStrengthDailyBar[]> {
+  const primaryProvider = getProvider(env);
+  const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+  let candidateEndDate = endDate;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const primaryBars = await primaryProvider.getDailyBars([benchmarkTicker], startDate, candidateEndDate);
+    if (primaryBars.length > 0) return primaryBars;
+
+    const fallbackBars = await fallbackProvider.getDailyBars([benchmarkTicker], startDate, candidateEndDate);
+    if (fallbackBars.length > 0) return fallbackBars;
+
+    candidateEndDate = previousWeekdayIso(candidateEndDate);
+  }
+
+  return [];
+}
+
 async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Promise<{
   providerLabel: string;
   matchedRowCount: number;
@@ -1235,11 +1258,7 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   const startDate = isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
   const stockBars = await provider.getDailyBars(tickers, startDate, endDate);
   const barsByTicker = groupBarsByTicker(stockBars);
-  let benchmarkBars = await provider.getDailyBars([benchmarkTicker], startDate, endDate);
-  if (benchmarkBars.length === 0) {
-    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
-    benchmarkBars = await fallbackProvider.getDailyBars([benchmarkTicker], startDate, endDate);
-  }
+  const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkTicker, startDate, endDate);
   if (benchmarkBars.length === 0) {
     throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
   }
