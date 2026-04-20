@@ -79,6 +79,10 @@ export type AlertTickerDayRow = {
   latestReceivedAt: string;
   alertCount: number;
   marketSession: "premarket" | "regular" | "after-hours";
+  price: number | null;
+  change1d: number | null;
+  marketCap: number | null;
+  avgVolume: number | null;
   news: AlertNewsRow[];
 };
 

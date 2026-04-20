@@ -13,6 +13,7 @@ import type { Env } from "./types";
 import { classifyAlertTimestamp, defaultTradingDayNow, subtractDaysIso } from "./alerts-time";
 import { isLikelyExchangeCode, parseTradingViewAlertEmail } from "./alerts-parser";
 import { fetchTickerNews } from "./alerts-news";
+import { loadPeerMetrics } from "./peer-metrics-service";
 
 const DEFAULT_RETENTION_DAYS = 30;
 const ALERT_TICKER_REPAIR_INTERVAL_MS = 5 * 60_000;
@@ -571,6 +572,31 @@ async function loadNewsForTickerDays(env: Env, pairs: Array<{ ticker: string; tr
   return newsByKey;
 }
 
+async function loadMetricsForAlertTickerDays(
+  env: Env,
+  tickers: string[],
+): Promise<Map<string, { price: number | null; change1d: number | null; marketCap: number | null; avgVolume: number | null }>> {
+  const normalizedTickers = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
+  if (normalizedTickers.length === 0) return new Map();
+
+  const metrics = await loadPeerMetrics(
+    env,
+    normalizedTickers.map((ticker) => ({ ticker, exchange: null })),
+  );
+
+  return new Map(
+    metrics.rows.map((row) => [
+      row.ticker,
+      {
+        price: row.price,
+        change1d: row.change1d,
+        marketCap: row.marketCap,
+        avgVolume: row.avgVolume,
+      },
+    ]),
+  );
+}
+
 export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: AlertFilterInput): Promise<{
   filters: NormalizedAlertFilters;
   total: number;
@@ -603,6 +629,7 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
 
   const rows = grouped.results ?? [];
   const newsMap = await loadNewsForTickerDays(env, rows.map((row) => ({ ticker: row.ticker, tradingDay: row.tradingDay })));
+  const metricMap = await loadMetricsForAlertTickerDays(env, rows.map((row) => row.ticker));
 
   return {
     filters,
@@ -615,6 +642,10 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
       latestReceivedAt: row.latestReceivedAt,
       alertCount: row.alertCount,
       marketSession: row.marketSession,
+      price: metricMap.get(row.ticker)?.price ?? null,
+      change1d: metricMap.get(row.ticker)?.change1d ?? null,
+      marketCap: metricMap.get(row.ticker)?.marketCap ?? null,
+      avgVolume: metricMap.get(row.ticker)?.avgVolume ?? null,
       news: newsMap.get(`${row.ticker}|${row.tradingDay}`) ?? [],
     })),
   };

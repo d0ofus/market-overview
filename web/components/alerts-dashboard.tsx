@@ -470,6 +470,19 @@ export function AlertsDashboard() {
                   title: row.ticker,
                   onTitleClick: () => setActivePeerTicker(row.ticker),
                   subtitle: `${formatAlertStamp(row.latestReceivedAt, row.marketSession)} • ${alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}`,
+                  popupTitle: row.ticker,
+                  popupSubtitle: (
+                    <div className="space-y-1">
+                      <div>{formatAlertStamp(row.latestReceivedAt, row.marketSession)}</div>
+                      <div>{alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}</div>
+                    </div>
+                  ),
+                  popupMetrics: {
+                    price: row.price,
+                    change1d: row.change1d,
+                    marketCap: row.marketCap,
+                    avgVolume: row.avgVolume,
+                  },
                   detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
                 }))}
               />
