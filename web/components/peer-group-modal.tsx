@@ -23,6 +23,16 @@ function formatCompact(value: number | null | undefined): string {
   return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
 }
 
+function formatPct(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function metricChangeClass(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "text-slate-100";
+  return value < 0 ? "text-neg" : "text-pos";
+}
+
 export function PeerGroupModal({
   ticker,
   onClose,
@@ -35,7 +45,14 @@ export function PeerGroupModal({
   const [error, setError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const [activeChartTicker, setActiveChartTicker] = useState<{
+    ticker: string;
+    name: string | null;
+    price: number | null;
+    change1d: number | null;
+    marketCap: number | null;
+    avgVolume: number | null;
+  } | null>(null);
   const [memberPage, setMemberPage] = useState(1);
 
   useEffect(() => {
@@ -99,23 +116,35 @@ export function PeerGroupModal({
   return (
     <>
       <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={onClose}>
-        <div className="flex h-[calc(100vh-2rem)] w-[80vw] max-w-[80vw] flex-col overflow-hidden" onClick={(event) => event.stopPropagation()}>
-          <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
-            <h4 className="text-sm font-semibold text-slate-100">
-              {ticker} Peer Group {activeGroup ? `- ${activeGroup.name}` : ""}
-            </h4>
-            <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={onClose}>
+        <div
+          className="flex h-[calc(100vh-2rem)] w-full max-w-[96vw] flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] 2xl:max-w-[140rem]"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Peer Group</p>
+              <h4 className="mt-1 text-base font-semibold text-slate-100">
+                {ticker} {activeGroup ? `- ${activeGroup.name}` : "Peer Group"}
+              </h4>
+            </div>
+            <button
+              data-modal-close="true"
+              className="inline-flex items-center justify-center rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+              onClick={onClose}
+            >
               Close
             </button>
           </div>
-          <div className="mb-2 flex items-center gap-2 rounded border border-slate-300/70 bg-slate-100/95 px-3 py-2 text-xs text-slate-700 dark:border-borderSoft/70 dark:bg-panelSoft/30 dark:text-slate-200">
-            <span className="text-slate-700 dark:text-slate-400">Source:</span>
-            <span className="rounded bg-accent/20 px-2 py-1 text-accent">{activeGroup?.name ?? "Peer database"}</span>
-            <span className="ml-auto rounded bg-white/90 px-2 py-1 text-slate-700 shadow-sm dark:bg-slate-800/80 dark:text-slate-200 dark:shadow-none">
+          <div className="border-b border-borderSoft/50 px-5 py-4">
+            <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
+              <span className="text-slate-400">Source:</span>
+              <span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{activeGroup?.name ?? "Peer database"}</span>
+              <span className="ml-auto rounded-full bg-panel/55 px-3 py-1.5 text-xs text-slate-300">
               {sortedMembers.length} ticker{sortedMembers.length === 1 ? "" : "s"}
-            </span>
+              </span>
+            </div>
           </div>
-          <div className="overflow-y-auto pr-1">
+          <div className="overflow-y-auto px-5 py-5">
             {error && (
               <div className="mb-2 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
                 {error}
@@ -140,33 +169,61 @@ export function PeerGroupModal({
               </div>
             ) : (
               <>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {pagedMembers.map((member) => (
-                    <div key={`${ticker}-${member.ticker}`} className="card p-2">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="font-semibold text-accent">{member.ticker}</span>
-                        <span className={`text-xs ${(metrics[member.ticker]?.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>
-                          {typeof metrics[member.ticker]?.change1d === "number"
-                            ? `${metrics[member.ticker]!.change1d!.toFixed(2)}%`
-                            : "-"}
+                    <div
+                      key={`${ticker}-${member.ticker}`}
+                      className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4"
+                    >
+                      <div className="mb-3 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-lg font-semibold text-accent">{member.ticker}</div>
+                          <p className="mt-1 line-clamp-1 text-sm text-slate-400">{member.name ?? member.ticker}</p>
+                        </div>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${metricChangeClass(metrics[member.ticker]?.change1d)}`}>
+                          {formatPct(metrics[member.ticker]?.change1d)}
                         </span>
                       </div>
-                      <div className="mb-1 text-xs text-slate-300">
-                        <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
-                          <div>Price: <span className="text-slate-200">{formatPrice(metrics[member.ticker]?.price)}</span></div>
-                          <div>Mkt Cap: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.marketCap)}</span></div>
-                          <div>Avg Vol: <span className="text-slate-200">{formatCompact(metrics[member.ticker]?.avgVolume)}</span></div>
+                      <div className="mb-4 grid gap-3 sm:grid-cols-3">
+                        <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
+                          <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Price</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-100">{formatPrice(metrics[member.ticker]?.price)}</div>
+                        </div>
+                        <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
+                          <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Mkt Cap</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(metrics[member.ticker]?.marketCap)}</div>
+                        </div>
+                        <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
+                          <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg Vol</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(metrics[member.ticker]?.avgVolume)}</div>
                         </div>
                       </div>
-                      <p className="mb-2 line-clamp-2 text-xs text-slate-400">{member.name ?? member.ticker}</p>
-                      <TradingViewWidget ticker={member.ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
-                      <button
-                        className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                        onClick={() => setActiveChartTicker(member.ticker)}
-                      >
-                        <Maximize2 className="h-3.5 w-3.5" />
-                        Expand chart
-                      </button>
+                      <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
+                        <TradingViewWidget
+                          ticker={member.ticker}
+                          chartOnly
+                          showStatusLine
+                          fillContainer
+                          initialRange="3M"
+                          surface="plain"
+                        />
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <button
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                          onClick={() => setActiveChartTicker({
+                            ticker: member.ticker,
+                            name: member.name ?? null,
+                            price: metrics[member.ticker]?.price ?? null,
+                            change1d: metrics[member.ticker]?.change1d ?? null,
+                            marketCap: metrics[member.ticker]?.marketCap ?? null,
+                            avgVolume: metrics[member.ticker]?.avgVolume ?? null,
+                          })}
+                        >
+                          <Maximize2 className="h-3.5 w-3.5" />
+                          Expand chart
+                        </button>
+                      </div>
                     </div>
                   ))}
                   {!loading && sortedMembers.length === 0 && (
@@ -189,15 +246,57 @@ export function PeerGroupModal({
       </div>
 
       {activeChartTicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartTicker(null)}>
-          <div className="w-full max-w-5xl" onClick={(event) => event.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
-              <h4 className="text-sm font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
-              <button data-modal-close="true" className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveChartTicker(null)}>
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartTicker(null)}>
+          <div
+            className="flex h-[calc(100vh-2rem)] w-full max-w-[96vw] flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] 2xl:max-w-[140rem]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
+                <h4 className="mt-1 text-base font-semibold text-slate-100">{activeChartTicker.ticker}</h4>
+                {activeChartTicker.name ? <div className="mt-2 text-sm text-slate-400">{activeChartTicker.name}</div> : null}
+              </div>
+              <button
+                data-modal-close="true"
+                className="inline-flex items-center justify-center rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                onClick={() => setActiveChartTicker(null)}
+              >
                 Close
               </button>
             </div>
-            <TradingViewWidget ticker={activeChartTicker} chartOnly initialRange="3M" />
+            <div className="border-b border-borderSoft/50 px-5 py-4">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Price</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatPrice(activeChartTicker.price)}</div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">1D %</div>
+                  <div className={`mt-1 text-sm font-semibold ${metricChangeClass(activeChartTicker.change1d)}`}>{formatPct(activeChartTicker.change1d)}</div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Market Cap</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartTicker.marketCap)}</div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg Vol</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartTicker.avgVolume)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              <div className="rounded-[24px] bg-panelSoft/25 p-3">
+                <TradingViewWidget
+                  ticker={activeChartTicker.ticker}
+                  chartOnly
+                  showStatusLine
+                  fillContainer
+                  initialRange="3M"
+                  surface="plain"
+                />
+              </div>
+            </div>
           </div>
         </div>
       )}
