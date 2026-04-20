@@ -425,6 +425,7 @@ export function ScansPageDashboard() {
   const [fieldOptionsByQuery, setFieldOptionsByQuery] = useState<Record<string, TradingViewFieldOption[]>>({});
   const [fieldLabelMap, setFieldLabelMap] = useState<Record<string, string>>(FIELD_LABELS);
   const [compareMultiplierInputByRule, setCompareMultiplierInputByRule] = useState<Record<string, string>>({});
+  const [ruleValueInputByRule, setRuleValueInputByRule] = useState<Record<string, string>>({});
   const compilePresetDetailRequestId = useRef(0);
   const compiledSnapshotRequestId = useRef(0);
   const draftRules = draftPreset.scanType === "relative-strength" ? draftPreset.prefilterRules : draftPreset.rules;
@@ -456,6 +457,18 @@ export function ScansPageDashboard() {
 
   useEffect(() => {
     setCompareMultiplierInputByRule((current) => {
+      const next: Record<string, string> = {};
+      for (const rule of draftRules) {
+        if (current[rule.id] != null) {
+          next[rule.id] = current[rule.id];
+        }
+      }
+      return next;
+    });
+  }, [draftRules]);
+
+  useEffect(() => {
+    setRuleValueInputByRule((current) => {
       const next: Record<string, string> = {};
       for (const rule of draftRules) {
         if (current[rule.id] != null) {
@@ -1249,6 +1262,7 @@ export function ScansPageDashboard() {
                   ? RULE_OPERATORS.filter((option) => option.value !== "in" && option.value !== "not_in")
                   : RULE_OPERATORS;
                 const compareMultiplierInput = compareMultiplierInputByRule[rule.id] ?? compareMultiplierToInput(rule);
+                const rawRuleValueInput = ruleValueInputByRule[rule.id] ?? valueToInput(rule);
                 return (
                 <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
                   <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
@@ -1288,7 +1302,17 @@ export function ScansPageDashboard() {
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                         value={rule.operator}
-                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, operator: event.target.value as ScanRuleOperator } : row))}
+                        onChange={(event) => {
+                          const nextOperator = event.target.value as ScanRuleOperator;
+                          setRuleValueInputByRule((current) => {
+                            const next = { ...current };
+                            if (nextOperator !== "in" && nextOperator !== "not_in") {
+                              delete next[rule.id];
+                            }
+                            return next;
+                          });
+                          updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, operator: nextOperator } : row));
+                        }}
                       >
                         {operatorOptions.map((option) => (
                           <option key={option.value} value={option.value}>{option.label}</option>
@@ -1302,7 +1326,17 @@ export function ScansPageDashboard() {
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm md:max-w-48"
                         value={valueMode}
-                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleValueMode(row, event.target.value === FIELD_VALUE_MODE ? "field" : "literal") : row))}
+                        onChange={(event) => {
+                          const nextMode = event.target.value === FIELD_VALUE_MODE ? "field" : "literal";
+                          if (nextMode === "field") {
+                            setRuleValueInputByRule((current) => {
+                              const next = { ...current };
+                              delete next[rule.id];
+                              return next;
+                            });
+                          }
+                          updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleValueMode(row, nextMode) : row));
+                        }}
                       >
                         <option value={LITERAL_VALUE_MODE}>Fixed value</option>
                         <option value={FIELD_VALUE_MODE}>Another field</option>
@@ -1369,8 +1403,22 @@ export function ScansPageDashboard() {
                         Value
                         <input
                           className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                          value={valueToInput(rule)}
-                          onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromInput(row, event.target.value) : row))}
+                          value={rawRuleValueInput}
+                          onChange={(event) => {
+                            const rawValue = event.target.value;
+                            if (rule.operator === "in" || rule.operator === "not_in") {
+                              setRuleValueInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
+                            }
+                            updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromInput(row, rawValue) : row));
+                          }}
+                          onBlur={() => {
+                            if (rule.operator !== "in" && rule.operator !== "not_in") return;
+                            setRuleValueInputByRule((current) => {
+                              const next = { ...current };
+                              delete next[rule.id];
+                              return next;
+                            });
+                          }}
                           placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
                         />
                       </label>
@@ -1380,7 +1428,14 @@ export function ScansPageDashboard() {
                     <button
                       className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"
                       disabled={draftRules.length === 1}
-                      onClick={() => updateDraftRules((rules) => rules.filter((row) => row.id !== rule.id))}
+                      onClick={() => {
+                        setRuleValueInputByRule((current) => {
+                          const next = { ...current };
+                          delete next[rule.id];
+                          return next;
+                        });
+                        updateDraftRules((rules) => rules.filter((row) => row.id !== rule.id));
+                      }}
                     >
                       Remove Rule
                     </button>
