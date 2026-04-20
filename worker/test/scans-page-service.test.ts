@@ -16,6 +16,7 @@ import {
 const topGainersPreset: ScanPreset = {
   id: "scan-preset-top-gainers",
   name: "Top Gainers",
+  scanType: "tradingview",
   isDefault: true,
   isActive: true,
   rules: [
@@ -37,6 +38,13 @@ const topGainersPreset: ScanPreset = {
       ],
     },
   ],
+  prefilterRules: [],
+  benchmarkTicker: null,
+  verticalOffset: 30,
+  rsMaLength: 21,
+  rsMaType: "EMA",
+  newHighLookback: 252,
+  outputMode: "all",
   sortField: "change",
   sortDirection: "desc",
   rowLimit: 100,
@@ -66,13 +74,32 @@ function createMutableScansEnv(input: {
   presets: ScanPreset[];
   compilePresets?: MutableCompilePreset[];
   snapshots?: MutableSnapshot[];
-  rowsBySnapshotId?: Record<string, ScanSnapshotRow[]>;
+  rowsBySnapshotId?: Record<string, Array<Partial<ScanSnapshotRow> & Pick<ScanSnapshotRow, "ticker">>>;
 }) {
   const presets = [...input.presets];
   const compilePresets = [...(input.compilePresets ?? [])];
   const snapshots = [...(input.snapshots ?? [])];
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
-    Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, [...rows]]),
+    Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
+      name: null,
+      sector: null,
+      industry: null,
+      change1d: null,
+      marketCap: null,
+      relativeVolume: null,
+      price: null,
+      avgVolume: null,
+      priceAvgVolume: null,
+      rsClose: null,
+      rsMa: null,
+      rsAboveMa: false,
+      rsNewHigh: false,
+      rsNewHighBeforePrice: false,
+      bullCross: false,
+      approxRsRating: null,
+      rawJson: null,
+      ...row,
+    }))]),
   );
   let generatedCounter = snapshots.length;
 
@@ -209,6 +236,13 @@ function createMutableScansEnv(input: {
               price: price == null ? null : Number(price),
               avgVolume: avgVolume == null ? null : Number(avgVolume),
               priceAvgVolume: priceAvgVolume == null ? null : Number(priceAvgVolume),
+              rsClose: null,
+              rsMa: null,
+              rsAboveMa: false,
+              rsNewHigh: false,
+              rsNewHighBeforePrice: false,
+              bullCross: false,
+              approxRsRating: null,
               rawJson: rawJson == null ? null : String(rawJson),
             });
             rowsBySnapshotId.set(String(snapshotId), rows);
@@ -541,12 +575,20 @@ describe("scans page service", () => {
                     insertedRow = {
                       id: args[0],
                       name: args[1],
-                      isDefault: args[2],
-                      isActive: args[3],
-                      rulesJson: args[4],
-                      sortField: args[5],
-                      sortDirection: args[6],
-                      rowLimit: args[7],
+                      scanType: args[2],
+                      isDefault: args[3],
+                      isActive: args[4],
+                      rulesJson: args[5],
+                      prefilterRulesJson: args[6],
+                      benchmarkTicker: args[7],
+                      verticalOffset: args[8],
+                      rsMaLength: args[9],
+                      rsMaType: args[10],
+                      newHighLookback: args[11],
+                      outputMode: args[12],
+                      sortField: args[13],
+                      sortDirection: args[14],
+                      rowLimit: args[15],
                       createdAt: "",
                       updatedAt: "",
                     };

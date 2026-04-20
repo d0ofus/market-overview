@@ -84,6 +84,7 @@ import {
   loadLatestScansSnapshot,
   loadScanPreset,
   refreshScanCompilePreset,
+  refreshActiveRelativeStrengthPresets,
   refreshScansSnapshot,
   upsertScanCompilePreset,
   upsertScanPreset,
@@ -2292,9 +2293,17 @@ app.patch("/api/admin/scans/presets/:presetId", async (c) => {
     const preset = await upsertScanPreset(c.env, {
       id: presetId,
       name: payload.name ?? existing.name,
+      scanType: payload.scanType ?? existing.scanType,
       isDefault: payload.isDefault ?? existing.isDefault,
       isActive: payload.isActive ?? existing.isActive,
       rules: payload.rules ?? existing.rules,
+      prefilterRules: payload.prefilterRules ?? existing.prefilterRules,
+      benchmarkTicker: payload.benchmarkTicker ?? existing.benchmarkTicker,
+      verticalOffset: payload.verticalOffset ?? existing.verticalOffset,
+      rsMaLength: payload.rsMaLength ?? existing.rsMaLength,
+      rsMaType: payload.rsMaType ?? existing.rsMaType,
+      newHighLookback: payload.newHighLookback ?? existing.newHighLookback,
+      outputMode: payload.outputMode ?? existing.outputMode,
       sortField: payload.sortField ?? existing.sortField,
       sortDirection: payload.sortDirection ?? existing.sortDirection,
       rowLimit: payload.rowLimit ?? existing.rowLimit,
@@ -3733,6 +3742,11 @@ export default {
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
     if (latestOverview?.asOfDate !== expectedAsOf || !breadthIsComplete) {
       await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+    }
+    try {
+      await refreshActiveRelativeStrengthPresets(env);
+    } catch (error) {
+      console.error("scheduled relative strength refresh failed", error);
     }
     await syncMonthlyEtfSlice(env);
   },

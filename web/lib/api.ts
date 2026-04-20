@@ -166,12 +166,24 @@ export type ScanRule = {
   value: ScanRuleScalar | Array<ScanRuleScalar> | ScanRuleFieldReference;
 };
 
+export type ScanPresetType = "tradingview" | "relative-strength";
+export type RelativeStrengthMaType = "SMA" | "EMA";
+export type RelativeStrengthOutputMode = "all" | "rs_new_high_only" | "rs_new_high_before_price_only" | "both";
+
 export type ScanPreset = {
   id: string;
   name: string;
+  scanType: ScanPresetType;
   isDefault: boolean;
   isActive: boolean;
   rules: ScanRule[];
+  prefilterRules: ScanRule[];
+  benchmarkTicker: string | null;
+  verticalOffset: number;
+  rsMaLength: number;
+  rsMaType: RelativeStrengthMaType;
+  newHighLookback: number;
+  outputMode: RelativeStrengthOutputMode;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -210,6 +222,13 @@ export type ScanRow = {
   price: number | null;
   avgVolume: number | null;
   priceAvgVolume: number | null;
+  rsClose: number | null;
+  rsMa: number | null;
+  rsAboveMa: boolean;
+  rsNewHigh: boolean;
+  rsNewHighBeforePrice: boolean;
+  bullCross: boolean;
+  approxRsRating: number | null;
   rawJson: string | null;
 };
 
@@ -1191,9 +1210,17 @@ export function refreshScanCompilePreset(id: string) {
 
 export function createScanPreset(payload: {
   name: string;
+  scanType?: ScanPresetType;
   isDefault?: boolean;
   isActive?: boolean;
-  rules: ScanRule[];
+  rules?: ScanRule[];
+  prefilterRules?: ScanRule[];
+  benchmarkTicker?: string | null;
+  verticalOffset?: number;
+  rsMaLength?: number;
+  rsMaType?: RelativeStrengthMaType;
+  newHighLookback?: number;
+  outputMode?: RelativeStrengthOutputMode;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;
@@ -1206,9 +1233,17 @@ export function createScanPreset(payload: {
 
 export function updateScanPreset(id: string, payload: {
   name?: string;
+  scanType?: ScanPresetType;
   isDefault?: boolean;
   isActive?: boolean;
   rules?: ScanRule[];
+  prefilterRules?: ScanRule[];
+  benchmarkTicker?: string | null;
+  verticalOffset?: number;
+  rsMaLength?: number;
+  rsMaType?: RelativeStrengthMaType;
+  newHighLookback?: number;
+  outputMode?: RelativeStrengthOutputMode;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;

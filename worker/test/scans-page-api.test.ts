@@ -15,9 +15,17 @@ type MutableSnapshot = {
 type MutablePreset = {
   id: string;
   name: string;
+  scanType?: "tradingview" | "relative-strength";
   isDefault: boolean;
   isActive: boolean;
   rules: Array<{ id: string; field: string; operator: string; value: unknown }>;
+  prefilterRules?: Array<{ id: string; field: string; operator: string; value: unknown }>;
+  benchmarkTicker?: string | null;
+  verticalOffset?: number;
+  rsMaLength?: number;
+  rsMaType?: "SMA" | "EMA";
+  newHighLookback?: number;
+  outputMode?: "all" | "rs_new_high_only" | "rs_new_high_before_price_only" | "both";
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -193,9 +201,17 @@ describe("scans page API", () => {
       presets: [{
         id: "preset-a",
         name: "Daily",
+        scanType: "tradingview",
         isDefault: true,
         isActive: true,
         rules: [],
+        prefilterRules: [],
+        benchmarkTicker: null,
+        verticalOffset: 30,
+        rsMaLength: 21,
+        rsMaType: "EMA",
+        newHighLookback: 252,
+        outputMode: "all",
         sortField: "change",
         sortDirection: "desc",
         rowLimit: 100,
@@ -258,9 +274,17 @@ describe("scans page API", () => {
       presets: [{
         id: "preset-a",
         name: "Leaders",
+        scanType: "tradingview",
         isDefault: true,
         isActive: true,
         rules: [],
+        prefilterRules: [],
+        benchmarkTicker: null,
+        verticalOffset: 30,
+        rsMaLength: 21,
+        rsMaType: "EMA",
+        newHighLookback: 252,
+        outputMode: "all",
         sortField: "change",
         sortDirection: "desc",
         rowLimit: 100,
@@ -361,9 +385,17 @@ describe("scans page API", () => {
         {
           id: "preset-a",
           name: "Leaders",
+          scanType: "tradingview",
           isDefault: true,
           isActive: true,
           rules: [{ id: "change", field: "change", operator: "gt", value: 3 }],
+          prefilterRules: [],
+          benchmarkTicker: null,
+          verticalOffset: 30,
+          rsMaLength: 21,
+          rsMaType: "EMA",
+          newHighLookback: 252,
+          outputMode: "all",
           sortField: "change",
           sortDirection: "desc",
           rowLimit: 100,
@@ -373,9 +405,17 @@ describe("scans page API", () => {
         {
           id: "preset-b",
           name: "Breakouts",
+          scanType: "tradingview",
           isDefault: false,
           isActive: true,
           rules: [{ id: "close", field: "close", operator: "gt", value: 10 }],
+          prefilterRules: [],
+          benchmarkTicker: null,
+          verticalOffset: 30,
+          rsMaLength: 21,
+          rsMaType: "EMA",
+          newHighLookback: 252,
+          outputMode: "all",
           sortField: "close",
           sortDirection: "desc",
           rowLimit: 100,

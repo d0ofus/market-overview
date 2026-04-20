@@ -189,24 +189,65 @@ export const scanPresetRuleSchema = z.object({
   }
 });
 
-export const scanPresetCreateSchema = z.object({
+const scanTypeSchema = z.enum(["tradingview", "relative-strength"]);
+const rsMaTypeSchema = z.enum(["SMA", "EMA"]);
+const rsOutputModeSchema = z.enum(["all", "rs_new_high_only", "rs_new_high_before_price_only", "both"]);
+
+const scanPresetBaseFieldsSchema = z.object({
   name: z.string().min(1),
+  scanType: scanTypeSchema.optional().default("tradingview"),
   isDefault: z.boolean().optional().default(false),
   isActive: z.boolean().optional().default(true),
-  rules: z.array(scanPresetRuleSchema).min(1),
+  rules: z.array(scanPresetRuleSchema).optional().default([]),
+  prefilterRules: z.array(scanPresetRuleSchema).optional().default([]),
+  benchmarkTicker: z.string().trim().min(1).max(20).optional().default("SPY").transform((value) => value.toUpperCase()),
+  verticalOffset: z.number().finite().min(0.25).max(500).optional().default(30),
+  rsMaLength: z.number().int().min(1).max(250).optional().default(21),
+  rsMaType: rsMaTypeSchema.optional().default("EMA"),
+  newHighLookback: z.number().int().min(1).max(520).optional().default(252),
+  outputMode: rsOutputModeSchema.optional().default("all"),
   sortField: z.string().min(1).optional().default("change"),
   sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
   rowLimit: z.number().int().min(1).max(250).optional().default(100),
 });
 
-export const scanPresetPatchSchema = z.object({
-  name: z.string().min(1).optional(),
-  isDefault: z.boolean().optional(),
-  isActive: z.boolean().optional(),
-  rules: z.array(scanPresetRuleSchema).min(1).optional(),
-  sortField: z.string().min(1).optional(),
-  sortDirection: z.enum(["asc", "desc"]).optional(),
-  rowLimit: z.number().int().min(1).max(250).optional(),
+const scanPresetCreateValidatedSchema = scanPresetBaseFieldsSchema.superRefine((value, ctx) => {
+  if (value.scanType === "relative-strength") {
+    if (value.prefilterRules.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["prefilterRules"],
+        message: "Add at least one prefilter rule before saving a relative strength preset.",
+      });
+    }
+    return;
+  }
+  if (value.rules.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rules"],
+      message: "Add at least one scan rule before saving.",
+    });
+  }
+});
+
+export const scanPresetCreateSchema = scanPresetCreateValidatedSchema;
+
+export const scanPresetPatchSchema = scanPresetBaseFieldsSchema.partial().superRefine((value, ctx) => {
+  if (value.scanType === "relative-strength" && value.prefilterRules && value.prefilterRules.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["prefilterRules"],
+      message: "Add at least one prefilter rule before saving a relative strength preset.",
+    });
+  }
+  if ((value.scanType === undefined || value.scanType === "tradingview") && value.rules && value.rules.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rules"],
+      message: "Add at least one scan rule before saving.",
+    });
+  }
 });
 
 const scanCompilePresetIdsSchema = z.array(z.string().min(1)).min(1, "Choose at least one scan preset.");

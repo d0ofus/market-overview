@@ -24,7 +24,10 @@ import {
   type CompiledScansSnapshot,
   type ScanCompilePresetDetail,
   type ScanCompilePresetRow,
+  type RelativeStrengthMaType,
+  type RelativeStrengthOutputMode,
   type ScanPreset,
+  type ScanPresetType,
   type ScanRow,
   type ScanRule,
   type ScanRuleFieldReference,
@@ -43,7 +46,10 @@ type SortKey =
   | "marketCap"
   | "relativeVolume"
   | "price"
-  | "priceAvgVolume";
+  | "priceAvgVolume"
+  | "rsClose"
+  | "rsMa"
+  | "approxRsRating";
 
 type ResultColumnKey =
   | "ticker"
@@ -54,7 +60,10 @@ type ResultColumnKey =
   | "marketCap"
   | "relativeVolume"
   | "price"
-  | "priceAvgVolume";
+  | "priceAvgVolume"
+  | "rsClose"
+  | "rsMa"
+  | "approxRsRating";
 
 type TradingViewFieldOption = {
   value: string;
@@ -83,6 +92,9 @@ const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
   { key: "relativeVolume", label: "Relative Volume" },
   { key: "price", label: "Price" },
   { key: "priceAvgVolume", label: "Price * Avg Vol" },
+  { key: "rsClose", label: "RS Line" },
+  { key: "rsMa", label: "RS MA" },
+  { key: "approxRsRating", label: "RS Rating" },
 ];
 
 const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
@@ -95,9 +107,35 @@ const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "relative_volume_10d_calc", label: "Relative Volume" },
   { value: "close", label: "Price" },
   { value: "Value.Traded", label: "Price * Avg Vol" },
+  { value: "rs_close", label: "RS Line" },
+  { value: "rs_ma", label: "RS MA" },
+  { value: "approx_rs_rating", label: "RS Rating" },
 ];
 
-const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = RESULT_COLUMNS.map((column) => column.key);
+const SCAN_TYPE_OPTIONS: Array<{ value: ScanPresetType; label: string }> = [
+  { value: "tradingview", label: "TradingView Screener" },
+  { value: "relative-strength", label: "Relative Strength" },
+];
+
+const RS_MA_TYPE_OPTIONS: RelativeStrengthMaType[] = ["EMA", "SMA"];
+const RS_OUTPUT_MODE_OPTIONS: Array<{ value: RelativeStrengthOutputMode; label: string }> = [
+  { value: "all", label: "All Rows" },
+  { value: "rs_new_high_only", label: "RS New High Only" },
+  { value: "rs_new_high_before_price_only", label: "RS New High Before Price Only" },
+  { value: "both", label: "Either RS High Signal" },
+];
+
+const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = [
+  "ticker",
+  "name",
+  "sector",
+  "industry",
+  "change1d",
+  "marketCap",
+  "relativeVolume",
+  "price",
+  "priceAvgVolume",
+];
 const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 const DEFAULT_FIELD_SEARCH_LIMIT = 50;
 
@@ -124,9 +162,17 @@ const emptyDraftRule = (): ScanRule => ({
 const emptyDraftPreset = (): ScanPreset => ({
   id: "",
   name: "",
+  scanType: "tradingview",
   isDefault: false,
   isActive: true,
   rules: [emptyDraftRule()],
+  prefilterRules: [emptyDraftRule()],
+  benchmarkTicker: "SPY",
+  verticalOffset: 30,
+  rsMaLength: 21,
+  rsMaType: "EMA",
+  newHighLookback: 252,
+  outputMode: "all",
   sortField: "change",
   sortDirection: "desc",
   rowLimit: 100,
@@ -296,6 +342,9 @@ function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): S
       if (sortKey === "marketCap") return row.marketCap ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "relativeVolume") return row.relativeVolume ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "price") return row.price ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "rsClose") return row.rsClose ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "rsMa") return row.rsMa ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "approxRsRating") return row.approxRsRating ?? Number.NEGATIVE_INFINITY;
       return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
     };
     const left = valueFor(a);
@@ -320,6 +369,9 @@ function sortKeyFromPresetField(field: string | null | undefined): SortKey {
   if (normalized === "relative_volume_10d_calc") return "relativeVolume";
   if (normalized === "close") return "price";
   if (normalized === "Value.Traded") return "priceAvgVolume";
+  if (normalized === "rs_close") return "rsClose";
+  if (normalized === "rs_ma") return "rsMa";
+  if (normalized === "approx_rs_rating") return "approxRsRating";
   return "change1d";
 }
 
@@ -375,6 +427,14 @@ export function ScansPageDashboard() {
   const [compareMultiplierInputByRule, setCompareMultiplierInputByRule] = useState<Record<string, string>>({});
   const compilePresetDetailRequestId = useRef(0);
   const compiledSnapshotRequestId = useRef(0);
+  const draftRules = draftPreset.scanType === "relative-strength" ? draftPreset.prefilterRules : draftPreset.rules;
+  const updateDraftRules = (updater: (rules: ScanRule[]) => ScanRule[]) => {
+    setDraftPreset((current) => (
+      current.scanType === "relative-strength"
+        ? { ...current, prefilterRules: updater(current.prefilterRules) }
+        : { ...current, rules: updater(current.rules) }
+    ));
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -397,17 +457,17 @@ export function ScansPageDashboard() {
   useEffect(() => {
     setCompareMultiplierInputByRule((current) => {
       const next: Record<string, string> = {};
-      for (const rule of draftPreset.rules) {
+      for (const rule of draftRules) {
         if (current[rule.id] != null) {
           next[rule.id] = current[rule.id];
         }
       }
       return next;
     });
-  }, [draftPreset.rules]);
+  }, [draftRules]);
 
   useEffect(() => {
-    const queries = Array.from(new Set(["", ...draftPreset.rules.map((rule) => rule.field.trim())]));
+    const queries = Array.from(new Set(["", ...draftRules.map((rule) => rule.field.trim())]));
     for (const query of queries) {
       const key = query.toLowerCase();
       if (fieldOptionsByQuery[key]) continue;
@@ -428,7 +488,7 @@ export function ScansPageDashboard() {
         }
       })();
     }
-  }, [draftPreset.rules, fieldOptionsByQuery]);
+  }, [draftRules, fieldOptionsByQuery]);
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -603,7 +663,7 @@ export function ScansPageDashboard() {
 
   const onSavePreset = async () => {
     const trimmedName = draftPreset.name.trim();
-    const rules = draftPreset.rules
+    const activeRules = draftRules
       .filter((rule) => rule.field.trim())
       .map((rule) => normalizeRuleForSave(rule, compareMultiplierInputByRule[rule.id]));
     if (!trimmedName) {
@@ -611,12 +671,14 @@ export function ScansPageDashboard() {
       setMessage(null);
       return;
     }
-    if (rules.length === 0) {
-      setError("Add at least one scan rule before saving.");
+    if (activeRules.length === 0) {
+      setError(draftPreset.scanType === "relative-strength"
+        ? "Add at least one prefilter rule before saving."
+        : "Add at least one scan rule before saving.");
       setMessage(null);
       return;
     }
-    const incompleteFieldRule = rules.find((rule) => isFieldReferenceValue(rule.value) && !rule.value.field.trim());
+    const incompleteFieldRule = activeRules.find((rule) => isFieldReferenceValue(rule.value) && !rule.value.field.trim());
     if (incompleteFieldRule) {
       setError(`Rule "${getFieldLabel(incompleteFieldRule.field)}" needs a comparison field.`);
       setMessage(null);
@@ -628,9 +690,17 @@ export function ScansPageDashboard() {
     try {
       const payload = {
         name: trimmedName,
+        scanType: draftPreset.scanType,
         isDefault: draftPreset.isDefault,
         isActive: draftPreset.isActive,
-        rules,
+        rules: draftPreset.scanType === "relative-strength" ? [] : activeRules,
+        prefilterRules: draftPreset.scanType === "relative-strength" ? activeRules : draftPreset.prefilterRules,
+        benchmarkTicker: draftPreset.benchmarkTicker,
+        verticalOffset: draftPreset.verticalOffset,
+        rsMaLength: draftPreset.rsMaLength,
+        rsMaType: draftPreset.rsMaType,
+        newHighLookback: draftPreset.newHighLookback,
+        outputMode: draftPreset.outputMode,
         sortField: draftPreset.sortField.trim() || "change",
         sortDirection: draftPreset.sortDirection,
         rowLimit: draftPreset.rowLimit,
@@ -838,15 +908,27 @@ export function ScansPageDashboard() {
     if (key === "ticker") {
       return (
         <td className="px-3 py-2 font-semibold text-accent">
-          <button
-            className="hover:underline"
-            onClick={(event) => {
-              event.stopPropagation();
-              setPeerTicker(row.ticker);
-            }}
-          >
-            {row.ticker}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="hover:underline"
+              onClick={(event) => {
+                event.stopPropagation();
+                setPeerTicker(row.ticker);
+              }}
+            >
+              {row.ticker}
+            </button>
+            {row.rsNewHigh ? (
+              <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-emerald-200">
+                RS High
+              </span>
+            ) : null}
+            {row.rsNewHighBeforePrice ? (
+              <span className="rounded-full border border-fuchsia-400/40 bg-fuchsia-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-fuchsia-200">
+                RS Lead
+              </span>
+            ) : null}
+          </div>
         </td>
       );
     }
@@ -859,6 +941,9 @@ export function ScansPageDashboard() {
     if (key === "marketCap") return <td className="px-3 py-2 text-slate-300">{formatCompact(row.marketCap)}</td>;
     if (key === "relativeVolume") return <td className="px-3 py-2 text-slate-300">{formatRatio(row.relativeVolume)}</td>;
     if (key === "price") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.price)}</td>;
+    if (key === "rsClose") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.rsClose)}</td>;
+    if (key === "rsMa") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.rsMa)}</td>;
+    if (key === "approxRsRating") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.approxRsRating, 0)}</td>;
     return <td className="px-3 py-2 text-slate-300">{formatCompact(row.priceAvgVolume)}</td>;
   };
 
@@ -910,10 +995,10 @@ export function ScansPageDashboard() {
                   </button>
                 </div>
                 <div className="text-[11px] text-slate-400">
-                  {preset.rules.length} rule{preset.rules.length === 1 ? "" : "s"} - {preset.rowLimit} rows - {preset.sortField} {preset.sortDirection}
+                  {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} - {preset.rowLimit} rows - {preset.sortField} {preset.sortDirection}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  {preset.isDefault ? "Default" : "Preset"} {preset.isActive ? "- Active" : "- Inactive"}
+                  {preset.scanType === "relative-strength" ? "Relative Strength" : "TradingView"} {preset.isDefault ? "- Default" : "- Preset"} {preset.isActive ? "- Active" : "- Inactive"}
                 </div>
               </button>
             ))}
@@ -988,6 +1073,25 @@ export function ScansPageDashboard() {
               />
             </label>
 
+            <label className="block">
+              Preset Type
+              <select
+                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                value={draftPreset.scanType}
+                onChange={(event) => setDraftPreset((current) => ({
+                  ...current,
+                  scanType: event.target.value as ScanPresetType,
+                  sortField: event.target.value === "relative-strength" && current.sortField === "change"
+                    ? "rs_close"
+                    : current.sortField,
+                }))}
+              >
+                {SCAN_TYPE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+
             <div className="grid gap-2 md:grid-cols-2">
               <label className="block">
                 Sort Field
@@ -1014,17 +1118,94 @@ export function ScansPageDashboard() {
               </label>
             </div>
 
-            <label className="block">
-              Row Limit
-              <input
-                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                type="number"
-                min={1}
-                max={250}
-                value={draftPreset.rowLimit}
-                onChange={(event) => setDraftPreset((current) => ({ ...current, rowLimit: Math.max(1, Math.min(250, Number(event.target.value) || 100)) }))}
-              />
-            </label>
+            <div className="grid gap-2 md:grid-cols-2">
+              <label className="block">
+                Row Limit
+                <input
+                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                  type="number"
+                  min={1}
+                  max={250}
+                  value={draftPreset.rowLimit}
+                  onChange={(event) => setDraftPreset((current) => ({ ...current, rowLimit: Math.max(1, Math.min(250, Number(event.target.value) || 100)) }))}
+                />
+              </label>
+              <label className="block">
+                Benchmark
+                <input
+                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm disabled:opacity-60"
+                  value={draftPreset.benchmarkTicker ?? "SPY"}
+                  disabled={draftPreset.scanType !== "relative-strength"}
+                  onChange={(event) => setDraftPreset((current) => ({ ...current, benchmarkTicker: event.target.value.toUpperCase() }))}
+                />
+              </label>
+            </div>
+
+            {draftPreset.scanType === "relative-strength" ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                <label className="block">
+                  RS MA Length
+                  <input
+                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                    type="number"
+                    min={1}
+                    max={250}
+                    value={draftPreset.rsMaLength}
+                    onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaLength: Math.max(1, Math.min(250, Number(event.target.value) || 21)) }))}
+                  />
+                </label>
+                <label className="block">
+                  RS MA Type
+                  <select
+                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                    value={draftPreset.rsMaType}
+                    onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaType: event.target.value as RelativeStrengthMaType }))}
+                  >
+                    {RS_MA_TYPE_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  New High Lookback
+                  <input
+                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                    type="number"
+                    min={1}
+                    max={520}
+                    value={draftPreset.newHighLookback}
+                    onChange={(event) => setDraftPreset((current) => ({ ...current, newHighLookback: Math.max(1, Math.min(520, Number(event.target.value) || 252)) }))}
+                  />
+                </label>
+                <label className="block">
+                  Vertical Offset
+                  <input
+                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                    type="number"
+                    min={0.25}
+                    step={0.25}
+                    max={500}
+                    value={draftPreset.verticalOffset}
+                    onChange={(event) => setDraftPreset((current) => ({ ...current, verticalOffset: Math.max(0.25, Math.min(500, Number(event.target.value) || 30)) }))}
+                  />
+                </label>
+              </div>
+            ) : null}
+
+            {draftPreset.scanType === "relative-strength" ? (
+              <label className="block">
+                Output Filter
+                <select
+                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                  value={draftPreset.outputMode}
+                  onChange={(event) => setDraftPreset((current) => ({ ...current, outputMode: event.target.value as RelativeStrengthOutputMode }))}
+                >
+                  {RS_OUTPUT_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
 
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -1045,15 +1226,17 @@ export function ScansPageDashboard() {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Rules</h4>
+                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                  {draftPreset.scanType === "relative-strength" ? "Prefilter Rules" : "Rules"}
+                </h4>
                 <button
                   className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                  onClick={() => setDraftPreset((current) => ({ ...current, rules: [...current.rules, emptyDraftRule()] }))}
+                  onClick={() => updateDraftRules((rules) => [...rules, emptyDraftRule()])}
                 >
                   Add Rule
                 </button>
               </div>
-              {draftPreset.rules.map((rule) => {
+              {draftRules.map((rule) => {
                 const fieldQuery = rule.field.trim().toLowerCase();
                 const fieldOptions = fieldOptionsByQuery[fieldQuery] ?? fieldOptionsByQuery[""] ?? [];
                 const selectedFieldLabel = fieldLabelMap[rule.field.trim()] ?? getFieldLabel(rule.field);
@@ -1074,16 +1257,13 @@ export function ScansPageDashboard() {
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                         value={isSuggestedField(rule.field, fieldOptions) ? rule.field : CUSTOM_FIELD_OPTION}
-                        onChange={(event) => setDraftPreset((current) => ({
-                          ...current,
-                          rules: current.rules.map((row) => {
+                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
                             if (row.id !== rule.id) return row;
                             return {
                               ...row,
                               field: event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value,
                             };
-                          }),
-                        }))}
+                          }))}
                       >
                         {fieldOptions.map((field) => (
                           <option key={field.value} value={field.value}>{field.label}</option>
@@ -1099,10 +1279,7 @@ export function ScansPageDashboard() {
                       <input
                         className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
                         value={rule.field}
-                        onChange={(event) => setDraftPreset((current) => ({
-                          ...current,
-                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row),
-                        }))}
+                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row))}
                         placeholder="Field ID"
                       />
                     </label>
@@ -1111,10 +1288,7 @@ export function ScansPageDashboard() {
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                         value={rule.operator}
-                        onChange={(event) => setDraftPreset((current) => ({
-                          ...current,
-                          rules: current.rules.map((row) => row.id === rule.id ? { ...row, operator: event.target.value as ScanRuleOperator } : row),
-                        }))}
+                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, operator: event.target.value as ScanRuleOperator } : row))}
                       >
                         {operatorOptions.map((option) => (
                           <option key={option.value} value={option.value}>{option.label}</option>
@@ -1128,10 +1302,7 @@ export function ScansPageDashboard() {
                       <select
                         className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm md:max-w-48"
                         value={valueMode}
-                        onChange={(event) => setDraftPreset((current) => ({
-                          ...current,
-                          rules: current.rules.map((row) => row.id === rule.id ? setRuleValueMode(row, event.target.value === FIELD_VALUE_MODE ? "field" : "literal") : row),
-                        }))}
+                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleValueMode(row, event.target.value === FIELD_VALUE_MODE ? "field" : "literal") : row))}
                       >
                         <option value={LITERAL_VALUE_MODE}>Fixed value</option>
                         <option value={FIELD_VALUE_MODE}>Another field</option>
@@ -1145,13 +1316,10 @@ export function ScansPageDashboard() {
                             <select
                               className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                               value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
-                              onChange={(event) => setDraftPreset((current) => ({
-                                ...current,
-                                rules: current.rules.map((row) => {
+                              onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
                                   if (row.id !== rule.id) return row;
                                   return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
-                                }),
-                              }))}
+                                }))}
                             >
                               {compareFieldOptions.map((field) => (
                                 <option key={field.value} value={field.value}>{field.label}</option>
@@ -1167,10 +1335,7 @@ export function ScansPageDashboard() {
                             <input
                               className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
                               value={compareField}
-                              onChange={(event) => setDraftPreset((current) => ({
-                                ...current,
-                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row),
-                              }))}
+                              onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row))}
                               placeholder="Reference field ID"
                             />
                           </label>
@@ -1185,16 +1350,10 @@ export function ScansPageDashboard() {
                               setCompareMultiplierInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
                               const trimmed = rawValue.trim();
                               if (!trimmed || trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) return;
-                              setDraftPreset((current) => ({
-                                ...current,
-                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, rawValue) : row),
-                              }));
+                              updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, rawValue) : row));
                             }}
                             onBlur={() => {
-                              setDraftPreset((current) => ({
-                                ...current,
-                                rules: current.rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, compareMultiplierInput) : row),
-                              }));
+                              updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, compareMultiplierInput) : row));
                               setCompareMultiplierInputByRule((current) => {
                                 const next = { ...current };
                                 delete next[rule.id];
@@ -1211,10 +1370,7 @@ export function ScansPageDashboard() {
                         <input
                           className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
                           value={valueToInput(rule)}
-                          onChange={(event) => setDraftPreset((current) => ({
-                            ...current,
-                            rules: current.rules.map((row) => row.id === rule.id ? ruleFromInput(row, event.target.value) : row),
-                          }))}
+                          onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromInput(row, event.target.value) : row))}
                           placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
                         />
                       </label>
@@ -1223,11 +1379,8 @@ export function ScansPageDashboard() {
                   <div className="mt-2 flex justify-end">
                     <button
                       className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"
-                      disabled={draftPreset.rules.length === 1}
-                      onClick={() => setDraftPreset((current) => ({
-                        ...current,
-                        rules: current.rules.filter((row) => row.id !== rule.id),
-                      }))}
+                      disabled={draftRules.length === 1}
+                      onClick={() => updateDraftRules((rules) => rules.filter((row) => row.id !== rule.id))}
                     >
                       Remove Rule
                     </button>
@@ -1292,7 +1445,7 @@ export function ScansPageDashboard() {
                       <span className="min-w-0">
                         <span className="block font-medium">{preset.name}</span>
                         <span className="block text-[11px] text-slate-400">
-                          {preset.rules.length} rule{preset.rules.length === 1 ? "" : "s"} - {preset.rowLimit} rows
+                          {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} - {preset.rowLimit} rows
                         </span>
                       </span>
                     </label>

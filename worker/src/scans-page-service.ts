@@ -1,3 +1,12 @@
+import { getProvider } from "./provider";
+import { latestUsSessionAsOfDate } from "./refresh-timing";
+import {
+  buildRelativeStrengthCacheRows,
+  type RelativeStrengthConfig,
+  type RelativeStrengthDailyBar,
+  type RelativeStrengthMaType,
+  type RelativeStrengthOutputMode,
+} from "./relative-strength";
 import type { Env } from "./types";
 
 export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
@@ -22,9 +31,17 @@ export type ScanPresetRule = {
 export type ScanPreset = {
   id: string;
   name: string;
+  scanType: "tradingview" | "relative-strength";
   isDefault: boolean;
   isActive: boolean;
   rules: ScanPresetRule[];
+  prefilterRules: ScanPresetRule[];
+  benchmarkTicker: string | null;
+  verticalOffset: number;
+  rsMaLength: number;
+  rsMaType: RelativeStrengthMaType;
+  newHighLookback: number;
+  outputMode: RelativeStrengthOutputMode;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -63,6 +80,13 @@ export type ScanSnapshotRow = {
   price: number | null;
   avgVolume: number | null;
   priceAvgVolume: number | null;
+  rsClose: number | null;
+  rsMa: number | null;
+  rsAboveMa: boolean;
+  rsNewHigh: boolean;
+  rsNewHighBeforePrice: boolean;
+  bullCross: boolean;
+  approxRsRating: number | null;
   rawJson: string | null;
 };
 
@@ -157,10 +181,14 @@ type TradingViewScanRow = {
 
 const DEFAULT_LIMIT = 100;
 const RETENTION_DAYS = 7;
+const RS_CACHE_RETENTION_SESSIONS = 520;
+const RS_HISTORY_LOOKBACK_DAYS = 800;
+const RS_PREFILTER_FETCH_LIMIT = 1000;
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
+const RS_PROVIDER_LABEL = "Relative Strength Scan (Alpaca/Provider)";
 
 const FIELD_ALIASES: Record<string, string> = {
   ticker: "ticker",
@@ -187,20 +215,38 @@ const FIELD_ALIASES: Record<string, string> = {
   Exchange: "exchange",
   average_day_range_14: "ADR",
   averageDayRange14: "ADR",
+  relativeStrengthScore: "rs_close",
+  rsClose: "rs_close",
+  relativeStrengthMa: "rs_ma",
+  rsMa: "rs_ma",
+  approxRsRating: "approx_rs_rating",
 };
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function parseRules(raw: string | null | undefined): ScanPresetRule[] {
-  if (!raw?.trim()) return [];
+function parseRules(raw: unknown): ScanPresetRule[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
   try {
     const parsed = JSON.parse(raw) as ScanPresetRule[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
+}
+
+function normalizeScanType(value: string | null | undefined): "tradingview" | "relative-strength" {
+  return value === "relative-strength" ? "relative-strength" : "tradingview";
+}
+
+function normalizeOutputMode(value: string | null | undefined): RelativeStrengthOutputMode {
+  if (value === "rs_new_high_only" || value === "rs_new_high_before_price_only" || value === "both") return value;
+  return "all";
+}
+
+function normalizeRsMaType(value: string | null | undefined): RelativeStrengthMaType {
+  return value === "SMA" ? "SMA" : "EMA";
 }
 
 function toJson(value: unknown): string | null {
@@ -374,6 +420,7 @@ function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
   const priceAvgVolume = asFiniteNumber(row.priceAvgVolume) ?? (
     price != null && avgVolume != null ? price * avgVolume : null
   );
+  const raw = (row.raw as Record<string, unknown> | null) ?? null;
   return {
     ticker,
     name: typeof row.name === "string" && row.name.trim() ? row.name.trim() : null,
@@ -385,6 +432,13 @@ function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
     price,
     avgVolume,
     priceAvgVolume,
+    rsClose: asFiniteNumber(raw?.rsClose ?? raw?.rs_close),
+    rsMa: asFiniteNumber(raw?.rsMa ?? raw?.rs_ma),
+    rsAboveMa: Boolean(raw?.rsAboveMa ?? raw?.rs_above_ma),
+    rsNewHigh: Boolean(raw?.rsNewHigh ?? raw?.rs_new_high),
+    rsNewHighBeforePrice: Boolean(raw?.rsNewHighBeforePrice ?? raw?.rs_new_high_before_price),
+    bullCross: Boolean(raw?.bullCross ?? raw?.bull_cross),
+    approxRsRating: asFiniteNumber(raw?.approxRsRating ?? raw?.approx_rs_rating),
     rawJson: toJson(row.raw ?? row),
   };
 }
@@ -407,6 +461,9 @@ function sortSnapshotRows(rows: ScanSnapshotRow[], sortField: string, sortDirect
     if (normalized === "relative_volume_10d_calc") return row.relativeVolume ?? Number.NEGATIVE_INFINITY;
     if (normalized === "close") return row.price ?? Number.NEGATIVE_INFINITY;
     if (normalized === "Value.Traded") return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "rs_close") return row.rsClose ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "rs_ma") return row.rsMa ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "approx_rs_rating") return row.approxRsRating ?? Number.NEGATIVE_INFINITY;
     return row.change1d ?? Number.NEGATIVE_INFINITY;
   };
   return [...rows].sort((a, b) => {
@@ -426,9 +483,17 @@ function sortSnapshotRows(rows: ScanSnapshotRow[], sortField: string, sortDirect
 function mapPresetRow(row: {
   id: string;
   name: string;
+  scanType?: string | null;
   isDefault: number;
   isActive: number;
   rulesJson: string;
+  prefilterRulesJson?: string | null;
+  benchmarkTicker?: string | null;
+  verticalOffset?: number | null;
+  rsMaLength?: number | null;
+  rsMaType?: string | null;
+  newHighLookback?: number | null;
+  outputMode?: string | null;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -438,9 +503,17 @@ function mapPresetRow(row: {
   return {
     id: row.id,
     name: row.name,
+    scanType: normalizeScanType(row.scanType),
     isDefault: Boolean(row.isDefault),
     isActive: Boolean(row.isActive),
     rules: parseRules(row.rulesJson),
+    prefilterRules: parseRules(row.prefilterRulesJson ?? row.rulesJson),
+    benchmarkTicker: row.benchmarkTicker?.trim().toUpperCase() || null,
+    verticalOffset: Number.isFinite(Number(row.verticalOffset)) ? Number(row.verticalOffset) : 30,
+    rsMaLength: clamp(Number(row.rsMaLength ?? 21), 1, 250),
+    rsMaType: normalizeRsMaType(row.rsMaType),
+    newHighLookback: clamp(Number(row.newHighLookback ?? 252), 1, 520),
+    outputMode: normalizeOutputMode(row.outputMode),
     sortField: row.sortField,
     sortDirection: row.sortDirection === "asc" ? "asc" : "desc",
     rowLimit: clamp(Number(row.rowLimit ?? DEFAULT_LIMIT), 1, 250),
@@ -602,13 +675,21 @@ function nextDuplicatePresetName(sourceName: string, existingNames: string[]): s
 
 export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, name, is_default as isDefault, is_active as isActive, rules_json as rulesJson, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets ORDER BY is_default DESC, updated_at DESC, created_at DESC",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets ORDER BY is_default DESC, updated_at DESC, created_at DESC",
   ).all<{
     id: string;
     name: string;
+    scanType: string | null;
     isDefault: number;
     isActive: number;
     rulesJson: string;
+    prefilterRulesJson: string | null;
+    benchmarkTicker: string | null;
+    verticalOffset: number | null;
+    rsMaLength: number | null;
+    rsMaType: string | null;
+    newHighLookback: number | null;
+    outputMode: string | null;
     sortField: string;
     sortDirection: "asc" | "desc";
     rowLimit: number;
@@ -620,15 +701,23 @@ export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
 
 export async function loadScanPreset(env: Env, presetId: string): Promise<ScanPreset | null> {
   const row = await env.DB.prepare(
-    "SELECT id, name, is_default as isDefault, is_active as isActive, rules_json as rulesJson, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE id = ? LIMIT 1",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE id = ? LIMIT 1",
   )
     .bind(presetId)
     .first<{
       id: string;
       name: string;
+      scanType: string | null;
       isDefault: number;
       isActive: number;
       rulesJson: string;
+      prefilterRulesJson: string | null;
+      benchmarkTicker: string | null;
+      verticalOffset: number | null;
+      rsMaLength: number | null;
+      rsMaType: string | null;
+      newHighLookback: number | null;
+      outputMode: string | null;
       sortField: string;
       sortDirection: "asc" | "desc";
       rowLimit: number;
@@ -640,13 +729,21 @@ export async function loadScanPreset(env: Env, presetId: string): Promise<ScanPr
 
 export async function loadDefaultScanPreset(env: Env): Promise<ScanPreset | null> {
   const row = await env.DB.prepare(
-    "SELECT id, name, is_default as isDefault, is_active as isActive, rules_json as rulesJson, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE is_default = 1 LIMIT 1",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE is_default = 1 LIMIT 1",
   ).first<{
     id: string;
     name: string;
+    scanType: string | null;
     isDefault: number;
     isActive: number;
     rulesJson: string;
+    prefilterRulesJson: string | null;
+    benchmarkTicker: string | null;
+    verticalOffset: number | null;
+    rsMaLength: number | null;
+    rsMaType: string | null;
+    newHighLookback: number | null;
+    outputMode: string | null;
     sortField: string;
     sortDirection: "asc" | "desc";
     rowLimit: number;
@@ -661,26 +758,45 @@ export async function loadDefaultScanPreset(env: Env): Promise<ScanPreset | null
 export async function upsertScanPreset(env: Env, input: {
   id?: string | null;
   name: string;
+  scanType?: "tradingview" | "relative-strength";
   isDefault?: boolean;
   isActive?: boolean;
-  rules: ScanPresetRule[];
+  rules?: ScanPresetRule[];
+  prefilterRules?: ScanPresetRule[];
+  benchmarkTicker?: string | null;
+  verticalOffset?: number;
+  rsMaLength?: number;
+  rsMaType?: RelativeStrengthMaType;
+  newHighLookback?: number;
+  outputMode?: RelativeStrengthOutputMode;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;
 }): Promise<ScanPreset> {
   const id = input.id?.trim() || crypto.randomUUID();
+  const scanType = normalizeScanType(input.scanType);
   const isDefault = input.isDefault === true;
+  const rules = input.rules ?? [];
+  const prefilterRules = input.prefilterRules ?? rules;
   if (isDefault) {
     await env.DB.prepare("UPDATE scan_presets SET is_default = 0 WHERE is_default = 1").run();
   }
   await env.DB.prepare(
-    `INSERT INTO scan_presets (id, name, is_default, is_active, rules_json, sort_field, sort_direction, row_limit, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `INSERT INTO scan_presets (id, name, scan_type, is_default, is_active, rules_json, prefilter_rules_json, benchmark_ticker, vertical_offset, rs_ma_length, rs_ma_type, new_high_lookback, output_mode, sort_field, sort_direction, row_limit, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
+       scan_type = excluded.scan_type,
        is_default = excluded.is_default,
        is_active = excluded.is_active,
        rules_json = excluded.rules_json,
+       prefilter_rules_json = excluded.prefilter_rules_json,
+       benchmark_ticker = excluded.benchmark_ticker,
+       vertical_offset = excluded.vertical_offset,
+       rs_ma_length = excluded.rs_ma_length,
+       rs_ma_type = excluded.rs_ma_type,
+       new_high_lookback = excluded.new_high_lookback,
+       output_mode = excluded.output_mode,
        sort_field = excluded.sort_field,
        sort_direction = excluded.sort_direction,
        row_limit = excluded.row_limit,
@@ -689,9 +805,17 @@ export async function upsertScanPreset(env: Env, input: {
     .bind(
       id,
       input.name.trim(),
+      scanType,
       isDefault ? 1 : 0,
       input.isActive === false ? 0 : 1,
-      JSON.stringify(input.rules),
+      JSON.stringify(rules),
+      JSON.stringify(prefilterRules),
+      scanType === "relative-strength" ? (input.benchmarkTicker?.trim().toUpperCase() || "SPY") : null,
+      Number.isFinite(Number(input.verticalOffset)) ? Number(input.verticalOffset) : 30,
+      clamp(Number(input.rsMaLength ?? 21), 1, 250),
+      normalizeRsMaType(input.rsMaType),
+      clamp(Number(input.newHighLookback ?? 252), 1, 520),
+      normalizeOutputMode(input.outputMode),
       input.sortField?.trim() || "change",
       input.sortDirection === "asc" ? "asc" : "desc",
       clamp(Number(input.rowLimit ?? DEFAULT_LIMIT), 1, 250),
@@ -709,9 +833,17 @@ export async function duplicateScanPreset(env: Env, presetId: string): Promise<S
   const name = nextDuplicatePresetName(existing.name, (await listScanPresets(env)).map((preset) => preset.name));
   return upsertScanPreset(env, {
     name,
+    scanType: existing.scanType,
     isDefault: false,
     isActive: existing.isActive,
     rules: JSON.parse(JSON.stringify(existing.rules)) as ScanPresetRule[],
+    prefilterRules: JSON.parse(JSON.stringify(existing.prefilterRules)) as ScanPresetRule[],
+    benchmarkTicker: existing.benchmarkTicker,
+    verticalOffset: existing.verticalOffset,
+    rsMaLength: existing.rsMaLength,
+    rsMaType: existing.rsMaType,
+    newHighLookback: existing.newHighLookback,
+    outputMode: existing.outputMode,
     sortField: existing.sortField,
     sortDirection: existing.sortDirection,
     rowLimit: existing.rowLimit,
@@ -743,8 +875,11 @@ function paginatedFetchTarget(preset: ScanPreset): number {
 
 function buildTradingViewScanPayload(
   preset: ScanPreset,
-  options?: { rangeOffset?: number; rangeLimit?: number },
+  options?: { rangeOffset?: number; rangeLimit?: number; rules?: ScanPresetRule[]; sortField?: string; sortDirection?: "asc" | "desc" },
 ): TradingViewScanPayload {
+  const activeRules = options?.rules ?? preset.rules;
+  const activeSortField = options?.sortField ?? preset.sortField;
+  const activeSortDirection = options?.sortDirection ?? preset.sortDirection;
   const baseColumns = [
     "name",
     "sector",
@@ -760,18 +895,18 @@ function buildTradingViewScanPayload(
     "type",
   ];
   const extraColumns = Array.from(new Set(
-    preset.rules
+    activeRules
       .flatMap((rule) => {
         const fields = [normalizeFieldName(rule.field)];
         if (isFieldReferenceValue(rule.value)) fields.push(normalizeFieldName(rule.value.field));
         return fields;
       })
-      .concat([normalizeFieldName(preset.sortField)])
+      .concat([normalizeFieldName(activeSortField)])
       .filter((field) => field && field !== "ticker" && !baseColumns.includes(field)),
   ));
   const rangeOffset = Math.max(0, options?.rangeOffset ?? 0);
   const rangeLimit = Math.max(1, options?.rangeLimit ?? (
-    hasPostFilters(preset)
+    hasPostFilters({ ...preset, rules: activeRules })
       ? Math.min(paginatedFetchTarget(preset), MAX_FETCH_RANGE)
       : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE)
   ));
@@ -781,11 +916,11 @@ function buildTradingViewScanPayload(
     options: { lang: "en" },
     columns: [...baseColumns, ...extraColumns],
     sort: {
-      sortBy: normalizeFieldName(preset.sortField) || "change",
-      sortOrder: preset.sortDirection === "asc" ? "asc" : "desc",
+      sortBy: normalizeFieldName(activeSortField) || "change",
+      sortOrder: activeSortDirection === "asc" ? "asc" : "desc",
     },
     range: [rangeOffset, rangeLimit],
-    filter: preset.rules
+    filter: activeRules
       .map(mapRuleToTradingViewFilter)
       .filter((filter): filter is TradingViewFilter => Boolean(filter)),
   };
@@ -817,20 +952,33 @@ function mapTradingViewResponse(payload: TradingViewScanPayload, body: {
   });
 }
 
-async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
+async function fetchTradingViewScanRows(
+  preset: ScanPreset,
+  options?: { rules?: ScanPresetRule[]; sortField?: string; sortDirection?: "asc" | "desc"; rowLimit?: number },
+): Promise<{
   providerLabel: string;
   status: "ok" | "warning" | "error" | "empty";
   error: string | null;
   rows: ScanSnapshotRow[];
 }> {
   const candidates: TradingViewScanRow[] = [];
-  const usePagination = hasPostFilters(preset);
-  let targetFetchCount = usePagination ? paginatedFetchTarget(preset) : clamp(preset.rowLimit, 1, MAX_FETCH_RANGE);
+  const activeRules = options?.rules ?? preset.rules;
+  const activeSortField = options?.sortField ?? preset.sortField;
+  const activeSortDirection = options?.sortDirection ?? preset.sortDirection;
+  const activeRowLimit = clamp(options?.rowLimit ?? preset.rowLimit, 1, MAX_FETCH_RANGE);
+  const usePagination = hasPostFilters({ ...preset, rules: activeRules });
+  let targetFetchCount = usePagination ? clamp(Math.max(activeRowLimit * 20, MAX_FETCH_RANGE * 2), MAX_FETCH_RANGE * 2, MAX_PAGINATED_FETCH_TOTAL) : activeRowLimit;
   let hasKnownTotalCount = false;
 
   for (let rangeOffset = 0; rangeOffset < targetFetchCount; rangeOffset += MAX_FETCH_RANGE) {
     const rangeLimit = Math.min(MAX_FETCH_RANGE, targetFetchCount - rangeOffset);
-    const payload = buildTradingViewScanPayload(preset, { rangeOffset, rangeLimit });
+    const payload = buildTradingViewScanPayload(preset, {
+      rangeOffset,
+      rangeLimit,
+      rules: activeRules,
+      sortField: activeSortField,
+      sortDirection: activeSortDirection,
+    });
     const response = await fetch(TV_SCAN_URL, {
       method: "POST",
       headers: {
@@ -851,7 +999,7 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
       hasKnownTotalCount = true;
     }
     const pageRows = mapTradingViewResponse(payload, body);
-    const pageMatches = pageRows.filter((row) => rowMatchesRules(row, preset.rules));
+    const pageMatches = pageRows.filter((row) => rowMatchesRules(row, activeRules));
     candidates.push(...pageMatches);
 
     if (!usePagination || pageRows.length === 0 || (!hasKnownTotalCount && pageRows.length < rangeLimit)) {
@@ -859,8 +1007,8 @@ async function fetchTradingViewScanRows(preset: ScanPreset): Promise<{
     }
   }
 
-  const rows = sortSnapshotRows(normalizeScanRows(candidates), preset.sortField, preset.sortDirection)
-    .slice(0, preset.rowLimit);
+  const rows = sortSnapshotRows(normalizeScanRows(candidates), activeSortField, activeSortDirection)
+    .slice(0, activeRowLimit);
   return {
     providerLabel: TV_PROVIDER_LABEL,
     status: rows.length > 0 ? "ok" : "empty",
@@ -882,6 +1030,263 @@ async function upsertSymbolsFromRows(env: Env, rows: ScanSnapshotRow[]): Promise
     ).bind(row.ticker, row.name ?? row.ticker, row.sector ?? null, row.industry ?? null),
   );
   if (statements.length > 0) await env.DB.batch(statements);
+}
+
+function isoDateDaysAgo(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function loadActiveUsCommonStockTickers(env: Env): Promise<Set<string>> {
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT ticker
+       FROM symbols
+       WHERE COALESCE(is_active, 1) = 1
+         AND COALESCE(asset_class, 'equity') IN ('equity', 'stock')
+         AND COALESCE(exchange, '') <> 'OTC'
+       ORDER BY ticker ASC`,
+    ).all<{ ticker: string }>();
+    return new Set((rows.results ?? []).map((row) => row.ticker.toUpperCase()).filter(Boolean));
+  } catch {
+    const rows = await env.DB.prepare(
+      "SELECT ticker FROM symbols WHERE COALESCE(asset_class, 'equity') IN ('equity', 'stock') ORDER BY ticker ASC",
+    ).all<{ ticker: string }>();
+    return new Set((rows.results ?? []).map((row) => row.ticker.toUpperCase()).filter(Boolean));
+  }
+}
+
+async function fetchRelativeStrengthPrefilterRows(
+  env: Env,
+  preset: ScanPreset,
+): Promise<ScanSnapshotRow[]> {
+  const activeUniverse = await loadActiveUsCommonStockTickers(env);
+  const prefilterRules = preset.prefilterRules.length > 0 ? preset.prefilterRules : preset.rules;
+  const candidateLimit = clamp(Math.max(preset.rowLimit * 5, 250), preset.rowLimit, RS_PREFILTER_FETCH_LIMIT);
+  const result = await fetchTradingViewScanRows(preset, {
+    rules: prefilterRules,
+    sortField: "Value.Traded",
+    sortDirection: "desc",
+    rowLimit: candidateLimit,
+  });
+  return result.rows.filter((row) => activeUniverse.has(row.ticker.toUpperCase()));
+}
+
+function groupBarsByTicker(bars: RelativeStrengthDailyBar[]): Map<string, RelativeStrengthDailyBar[]> {
+  const map = new Map<string, RelativeStrengthDailyBar[]>();
+  for (const bar of bars) {
+    const key = bar.ticker.toUpperCase();
+    const current = map.get(key) ?? [];
+    current.push({ ...bar, ticker: key });
+    map.set(key, current);
+  }
+  for (const value of map.values()) {
+    value.sort((left, right) => left.date.localeCompare(right.date));
+  }
+  return map;
+}
+
+type RelativeStrengthLatestRow = ScanSnapshotRow & {
+  tradingDate: string;
+};
+
+async function upsertRelativeStrengthCache(
+  env: Env,
+  preset: ScanPreset,
+  rowsByTicker: Map<string, RelativeStrengthDailyBar[]>,
+  benchmarkBars: RelativeStrengthDailyBar[],
+): Promise<RelativeStrengthLatestRow[]> {
+  const config: RelativeStrengthConfig = {
+    benchmarkTicker: preset.benchmarkTicker?.trim().toUpperCase() || "SPY",
+    verticalOffset: preset.verticalOffset,
+    rsMaLength: preset.rsMaLength,
+    rsMaType: preset.rsMaType,
+    newHighLookback: preset.newHighLookback,
+  };
+  const statements: D1PreparedStatement[] = [];
+  const latestRows = new Map<string, RelativeStrengthLatestRow>();
+  const benchmarkDates = benchmarkBars.map((bar) => bar.date).sort((left, right) => left.localeCompare(right));
+  const retentionAnchor = benchmarkDates[Math.max(0, benchmarkDates.length - RS_CACHE_RETENTION_SESSIONS)] ?? isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
+
+  for (const [ticker, bars] of rowsByTicker) {
+    if (ticker === config.benchmarkTicker) continue;
+    const computedRows = buildRelativeStrengthCacheRows(bars, benchmarkBars, config);
+    for (const row of computedRows) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO relative_strength_cache (
+             ticker,
+             benchmark_ticker,
+             trading_date,
+             price_close,
+             change_1d,
+             rs_open,
+             rs_high,
+             rs_low,
+             rs_close,
+             rs_ma,
+             rs_above_ma,
+             rs_new_high,
+             rs_new_high_before_price,
+             bull_cross,
+             approx_rs_rating,
+             created_at,
+             updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT(ticker, benchmark_ticker, trading_date) DO UPDATE SET
+             price_close = excluded.price_close,
+             change_1d = excluded.change_1d,
+             rs_open = excluded.rs_open,
+             rs_high = excluded.rs_high,
+             rs_low = excluded.rs_low,
+             rs_close = excluded.rs_close,
+             rs_ma = excluded.rs_ma,
+             rs_above_ma = excluded.rs_above_ma,
+             rs_new_high = excluded.rs_new_high,
+             rs_new_high_before_price = excluded.rs_new_high_before_price,
+             bull_cross = excluded.bull_cross,
+             approx_rs_rating = excluded.approx_rs_rating,
+             updated_at = CURRENT_TIMESTAMP`,
+        ).bind(
+          row.ticker,
+          row.benchmarkTicker,
+          row.tradingDate,
+          row.priceClose,
+          row.change1d,
+          row.rsOpen,
+          row.rsHigh,
+          row.rsLow,
+          row.rsClose,
+          row.rsMa,
+          row.rsAboveMa ? 1 : 0,
+          row.rsNewHigh ? 1 : 0,
+          row.rsNewHighBeforePrice ? 1 : 0,
+          row.bullCross ? 1 : 0,
+          row.approxRsRating,
+        ),
+      );
+    }
+    const latest = computedRows[computedRows.length - 1];
+    if (latest) {
+      latestRows.set(ticker, {
+        ticker,
+        name: null,
+        sector: null,
+        industry: null,
+        change1d: latest.change1d,
+        marketCap: null,
+        relativeVolume: null,
+        price: latest.priceClose,
+        avgVolume: null,
+        priceAvgVolume: null,
+        rsClose: latest.rsClose,
+        rsMa: latest.rsMa,
+        rsAboveMa: latest.rsAboveMa,
+        rsNewHigh: latest.rsNewHigh,
+        rsNewHighBeforePrice: latest.rsNewHighBeforePrice,
+        bullCross: latest.bullCross,
+        approxRsRating: latest.approxRsRating,
+        rawJson: null,
+        tradingDate: latest.tradingDate,
+      });
+    }
+  }
+
+  if (statements.length > 0) await env.DB.batch(statements);
+  await env.DB.prepare(
+    "DELETE FROM relative_strength_cache WHERE benchmark_ticker = ? AND trading_date < ?",
+  ).bind(config.benchmarkTicker, retentionAnchor).run();
+  return Array.from(latestRows.values());
+}
+
+function rowMatchesOutputMode(row: RelativeStrengthLatestRow, outputMode: RelativeStrengthOutputMode): boolean {
+  if (outputMode === "rs_new_high_only") return row.rsNewHigh;
+  if (outputMode === "rs_new_high_before_price_only") return row.rsNewHighBeforePrice;
+  if (outputMode === "both") return row.rsNewHigh || row.rsNewHighBeforePrice;
+  return true;
+}
+
+async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Promise<{
+  providerLabel: string;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+  rows: ScanSnapshotRow[];
+}> {
+  const prefilterRows = await fetchRelativeStrengthPrefilterRows(env, preset);
+  if (prefilterRows.length === 0) {
+    return {
+      providerLabel: RS_PROVIDER_LABEL,
+      status: "empty",
+      error: null,
+      rows: [],
+    };
+  }
+
+  const benchmarkTicker = preset.benchmarkTicker?.trim().toUpperCase() || "SPY";
+  const provider = getProvider(env);
+  const tickers = Array.from(new Set([...prefilterRows.map((row) => row.ticker.toUpperCase()), benchmarkTicker]));
+  const endDate = latestUsSessionAsOfDate(new Date());
+  const startDate = isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
+  const bars = await provider.getDailyBars(tickers, startDate, endDate);
+  const barsByTicker = groupBarsByTicker(bars);
+  const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];
+  if (benchmarkBars.length === 0) {
+    throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
+  }
+
+  const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
+  const metadataByTicker = new Map(prefilterRows.map((row) => [row.ticker.toUpperCase(), row]));
+  const mergedRows: ScanSnapshotRow[] = latestRows
+    .filter((row) => rowMatchesOutputMode(row, preset.outputMode))
+    .map((row) => {
+      const metadata = metadataByTicker.get(row.ticker);
+      if (!metadata) return null;
+      const merged: ScanSnapshotRow = {
+        ...metadata,
+        change1d: row.change1d,
+        price: row.price,
+        rsClose: row.rsClose,
+        rsMa: row.rsMa,
+        rsAboveMa: row.rsAboveMa,
+        rsNewHigh: row.rsNewHigh,
+        rsNewHighBeforePrice: row.rsNewHighBeforePrice,
+        bullCross: row.bullCross,
+        approxRsRating: row.approxRsRating,
+        rawJson: JSON.stringify({
+          benchmarkTicker,
+          tradingDate: row.tradingDate,
+          rsClose: row.rsClose,
+          rsMa: row.rsMa,
+          rsAboveMa: row.rsAboveMa,
+          rsNewHigh: row.rsNewHigh,
+          rsNewHighBeforePrice: row.rsNewHighBeforePrice,
+          bullCross: row.bullCross,
+          approxRsRating: row.approxRsRating,
+          relative_volume_10d_calc: metadata.relativeVolume,
+        }),
+      };
+      return merged;
+    })
+    .filter((row): row is ScanSnapshotRow => Boolean(row));
+
+  const rows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
+  return {
+    providerLabel: RS_PROVIDER_LABEL,
+    status: rows.length > 0 ? "ok" : "empty",
+    error: null,
+    rows,
+  };
+}
+
+export async function refreshActiveRelativeStrengthPresets(env: Env): Promise<ScanSnapshot[]> {
+  const presets = (await listScanPresets(env))
+    .filter((preset) => preset.isActive && preset.scanType === "relative-strength");
+  const snapshots: ScanSnapshot[] = [];
+  for (const preset of presets) {
+    snapshots.push(await refreshScansSnapshot(env, preset.id));
+  }
+  return snapshots;
 }
 
 type ScanSnapshotHeader = {
@@ -927,14 +1332,38 @@ async function loadScanSnapshotRows(env: Env, snapshotId: string): Promise<ScanS
     .all<ScanSnapshotRow>();
   return (rows.results ?? []).map((row) => {
     let relativeVolume: number | null = null;
+    let rsClose: number | null = null;
+    let rsMa: number | null = null;
+    let approxRsRating: number | null = null;
+    let rsAboveMa = false;
+    let rsNewHigh = false;
+    let rsNewHighBeforePrice = false;
+    let bullCross = false;
     try {
       const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
       const candidate = raw?.relative_volume_10d_calc ?? raw?.relative_volume;
       relativeVolume = asFiniteNumber(candidate);
+      rsClose = asFiniteNumber(raw?.rsClose ?? raw?.rs_close);
+      rsMa = asFiniteNumber(raw?.rsMa ?? raw?.rs_ma);
+      approxRsRating = asFiniteNumber(raw?.approxRsRating ?? raw?.approx_rs_rating);
+      rsAboveMa = Boolean(raw?.rsAboveMa ?? raw?.rs_above_ma);
+      rsNewHigh = Boolean(raw?.rsNewHigh ?? raw?.rs_new_high);
+      rsNewHighBeforePrice = Boolean(raw?.rsNewHighBeforePrice ?? raw?.rs_new_high_before_price);
+      bullCross = Boolean(raw?.bullCross ?? raw?.bull_cross);
     } catch {
       relativeVolume = null;
     }
-    return { ...row, relativeVolume };
+    return {
+      ...row,
+      relativeVolume,
+      rsClose,
+      rsMa,
+      approxRsRating,
+      rsAboveMa,
+      rsNewHigh,
+      rsNewHighBeforePrice,
+      bullCross,
+    };
   });
 }
 
@@ -962,7 +1391,9 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
   const snapshotId = crypto.randomUUID();
 
   try {
-    const result = await fetchTradingViewScanRows(preset);
+    const result = preset.scanType === "relative-strength"
+      ? await refreshRelativeStrengthSnapshot(env, preset)
+      : await fetchTradingViewScanRows(preset);
     await upsertSymbolsFromRows(env, result.rows);
     const statements = [
       env.DB.prepare(
@@ -993,7 +1424,7 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
     await env.DB.prepare(
       "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 'error', ?)",
     )
-      .bind(snapshotId, preset.id, TV_PROVIDER_LABEL, message)
+      .bind(snapshotId, preset.id, preset.scanType === "relative-strength" ? RS_PROVIDER_LABEL : TV_PROVIDER_LABEL, message)
       .run();
   }
 
