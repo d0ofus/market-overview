@@ -182,9 +182,10 @@ type TradingViewScanRow = {
 
 const DEFAULT_LIMIT = 100;
 const RETENTION_DAYS = 7;
-const RS_CACHE_RETENTION_SESSIONS = 520;
 const RS_HISTORY_LOOKBACK_DAYS = 800;
-const RS_PREFILTER_FETCH_LIMIT = 1000;
+const RS_PREFILTER_FETCH_LIMIT = 120;
+const RS_LIVE_TOP_UP_LIMIT = 25;
+const RS_STORED_BAR_QUERY_CHUNK_SIZE = 80;
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -1066,7 +1067,8 @@ async function fetchRelativeStrengthPrefilterRows(
 ): Promise<ScanSnapshotRow[]> {
   const activeUniverse = await loadActiveUsCommonStockTickers(env);
   const prefilterRules = preset.prefilterRules.length > 0 ? preset.prefilterRules : preset.rules;
-  const candidateLimit = clamp(Math.max(preset.rowLimit * 5, 250), preset.rowLimit, RS_PREFILTER_FETCH_LIMIT);
+  const effectiveRowLimit = Math.min(preset.rowLimit, RS_PREFILTER_FETCH_LIMIT);
+  const candidateLimit = clamp(Math.max(effectiveRowLimit * 2, effectiveRowLimit), effectiveRowLimit, RS_PREFILTER_FETCH_LIMIT);
   const result = await fetchTradingViewScanRows(preset, {
     rules: prefilterRules,
     sortField: "Value.Traded",
@@ -1095,7 +1097,7 @@ type RelativeStrengthLatestRow = ScanSnapshotRow & {
 };
 
 async function upsertRelativeStrengthCache(
-  env: Env,
+  _env: Env,
   preset: ScanPreset,
   rowsByTicker: Map<string, RelativeStrengthDailyBar[]>,
   benchmarkBars: RelativeStrengthDailyBar[],
@@ -1107,69 +1109,11 @@ async function upsertRelativeStrengthCache(
     rsMaType: preset.rsMaType,
     newHighLookback: preset.newHighLookback,
   };
-  const statements: D1PreparedStatement[] = [];
   const latestRows = new Map<string, RelativeStrengthLatestRow>();
-  const benchmarkDates = benchmarkBars.map((bar) => bar.date).sort((left, right) => left.localeCompare(right));
-  const retentionAnchor = benchmarkDates[Math.max(0, benchmarkDates.length - RS_CACHE_RETENTION_SESSIONS)] ?? isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
 
   for (const [ticker, bars] of rowsByTicker) {
     if (ticker === config.benchmarkTicker) continue;
     const computedRows = buildRelativeStrengthCacheRows(bars, benchmarkBars, config);
-    for (const row of computedRows) {
-      statements.push(
-        env.DB.prepare(
-          `INSERT INTO relative_strength_cache (
-             ticker,
-             benchmark_ticker,
-             trading_date,
-             price_close,
-             change_1d,
-             rs_open,
-             rs_high,
-             rs_low,
-             rs_close,
-             rs_ma,
-             rs_above_ma,
-             rs_new_high,
-             rs_new_high_before_price,
-             bull_cross,
-             approx_rs_rating,
-             created_at,
-             updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-           ON CONFLICT(ticker, benchmark_ticker, trading_date) DO UPDATE SET
-             price_close = excluded.price_close,
-             change_1d = excluded.change_1d,
-             rs_open = excluded.rs_open,
-             rs_high = excluded.rs_high,
-             rs_low = excluded.rs_low,
-             rs_close = excluded.rs_close,
-             rs_ma = excluded.rs_ma,
-             rs_above_ma = excluded.rs_above_ma,
-             rs_new_high = excluded.rs_new_high,
-             rs_new_high_before_price = excluded.rs_new_high_before_price,
-             bull_cross = excluded.bull_cross,
-             approx_rs_rating = excluded.approx_rs_rating,
-             updated_at = CURRENT_TIMESTAMP`,
-        ).bind(
-          row.ticker,
-          row.benchmarkTicker,
-          row.tradingDate,
-          row.priceClose,
-          row.change1d,
-          row.rsOpen,
-          row.rsHigh,
-          row.rsLow,
-          row.rsClose,
-          row.rsMa,
-          row.rsAboveMa ? 1 : 0,
-          row.rsNewHigh ? 1 : 0,
-          row.rsNewHighBeforePrice ? 1 : 0,
-          row.bullCross ? 1 : 0,
-          row.approxRsRating,
-        ),
-      );
-    }
     const latest = computedRows[computedRows.length - 1];
     if (latest) {
       latestRows.set(ticker, {
@@ -1196,10 +1140,6 @@ async function upsertRelativeStrengthCache(
     }
   }
 
-  if (statements.length > 0) await env.DB.batch(statements);
-  await env.DB.prepare(
-    "DELETE FROM relative_strength_cache WHERE benchmark_ticker = ? AND trading_date < ?",
-  ).bind(config.benchmarkTicker, retentionAnchor).run();
   return Array.from(latestRows.values());
 }
 
@@ -1242,26 +1182,33 @@ async function loadStoredDailyBars(
       .filter(Boolean),
   ));
   if (uniqueTickers.length === 0) return [];
-  const placeholders = uniqueTickers.map(() => "?").join(",");
-  const rows = await env.DB.prepare(
-    `SELECT ticker, date, o, h, l, c, volume
-     FROM daily_bars
-     WHERE ticker IN (${placeholders})
-       AND date >= ?
-       AND date <= ?
-     ORDER BY ticker ASC, date ASC`,
-  )
-    .bind(...uniqueTickers, startDate, endDate)
-    .all<RelativeStrengthDailyBar>();
-  return (rows.results ?? []).map((row) => ({
-    ticker: row.ticker.toUpperCase(),
-    date: row.date,
-    o: row.o,
-    h: row.h,
-    l: row.l,
-    c: row.c,
-    volume: row.volume ?? 0,
-  }));
+  const out: RelativeStrengthDailyBar[] = [];
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT ticker, date, o, h, l, c, volume
+       FROM daily_bars
+       WHERE ticker IN (${placeholders})
+         AND date >= ?
+         AND date <= ?
+       ORDER BY ticker ASC, date ASC`,
+    )
+      .bind(...chunk, startDate, endDate)
+      .all<RelativeStrengthDailyBar>();
+    out.push(
+      ...(rows.results ?? []).map((row) => ({
+        ticker: row.ticker.toUpperCase(),
+        date: row.date,
+        o: row.o,
+        h: row.h,
+        l: row.l,
+        c: row.c,
+        volume: row.volume ?? 0,
+      })),
+    );
+  }
+  return out;
 }
 
 async function fetchBenchmarkBarsWithFallback(
@@ -1272,6 +1219,7 @@ async function fetchBenchmarkBarsWithFallback(
 ): Promise<RelativeStrengthDailyBar[]> {
   const primaryProvider = getProvider(env);
   const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+  const storedBars = await loadStoredDailyBars(env, [benchmarkTicker], startDate, endDate);
   let candidateEndDate = endDate;
   let bestBars: RelativeStrengthDailyBar[] = [];
 
@@ -1284,10 +1232,13 @@ async function fetchBenchmarkBarsWithFallback(
     bestBars = chooseFresherBars(bestBars, fallbackBars);
     if (latestBarDate(fallbackBars) === candidateEndDate) return fallbackBars;
 
+    if (storedBars.length > 0) {
+      return chooseFresherBars(bestBars, storedBars);
+    }
+
     candidateEndDate = previousWeekdayIso(candidateEndDate);
   }
 
-  const storedBars = await loadStoredDailyBars(env, [benchmarkTicker], startDate, endDate);
   return chooseFresherBars(bestBars, storedBars);
 }
 
@@ -1314,12 +1265,17 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   const tickers = Array.from(new Set(prefilterRows.map((row) => row.ticker.toUpperCase())));
   const endDate = latestUsSessionAsOfDate(new Date());
   const startDate = isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
-  const stockBars = await provider.getDailyBars(tickers, startDate, endDate);
-  const barsByTicker = groupBarsByTicker(stockBars);
   const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkTicker, startDate, endDate);
   if (benchmarkBars.length === 0) {
     throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
   }
+  const storedStockBars = await loadStoredDailyBars(env, tickers, startDate, endDate);
+  const storedBarsByTicker = groupBarsByTicker(storedStockBars);
+  const missingTickers = tickers.filter((ticker) => !storedBarsByTicker.has(ticker));
+  const liveTopUpBars = missingTickers.length > 0 && missingTickers.length <= RS_LIVE_TOP_UP_LIMIT
+    ? await provider.getDailyBars(missingTickers, startDate, endDate)
+    : [];
+  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveTopUpBars]);
 
   const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
   const metadataByTicker = new Map(prefilterRows.map((row) => [row.ticker.toUpperCase(), row]));
@@ -1356,7 +1312,8 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
     })
     .filter((row): row is ScanSnapshotRow => Boolean(row));
 
-  const rows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
+  const effectiveRowLimit = Math.min(preset.rowLimit, RS_PREFILTER_FETCH_LIMIT);
+  const rows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, effectiveRowLimit);
   return {
     providerLabel: RS_PROVIDER_LABEL,
     matchedRowCount: mergedRows.length,
