@@ -31,6 +31,7 @@
 ## Alerts
 
 ## Peer Groups
+> Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups

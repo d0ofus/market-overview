@@ -1110,6 +1110,7 @@ export async function deleteScanPreset(env: Env, presetId: string): Promise<void
     throw new Error(`Cannot delete scan preset because it is used by compile presets: ${compilePresetNames.join(", ")}`);
   }
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM scan_refresh_jobs WHERE preset_id = ?").bind(presetId),
     env.DB.prepare("DELETE FROM scan_rows WHERE snapshot_id IN (SELECT id FROM scan_snapshots WHERE preset_id = ?)").bind(presetId),
     env.DB.prepare("DELETE FROM scan_snapshots WHERE preset_id = ?").bind(presetId),
     env.DB.prepare("DELETE FROM scan_presets WHERE id = ?").bind(presetId),

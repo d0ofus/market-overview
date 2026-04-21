@@ -1435,8 +1435,31 @@ describe("scans page service", () => {
   });
 
   it("duplicates presets with copied settings, a fresh id, and incremented copy naming", async () => {
+    const originalPrefilterRules = [
+      { id: "prefilter-cap", field: "market_cap", operator: "gt", value: 1_000_000_000 },
+      { id: "prefilter-price", field: "close", operator: "gt", value: 20 },
+    ];
     const presetRows = [
-      { id: "preset-a", name: "Momentum", isDefault: 1, isActive: 1, rulesJson: JSON.stringify(topGainersPreset.rules), sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },
+      {
+        id: "preset-a",
+        name: "Momentum",
+        scanType: "relative-strength",
+        isDefault: 1,
+        isActive: 1,
+        rulesJson: JSON.stringify(topGainersPreset.rules),
+        prefilterRulesJson: JSON.stringify(originalPrefilterRules),
+        benchmarkTicker: "SPY",
+        verticalOffset: 30,
+        rsMaLength: 21,
+        rsMaType: "EMA",
+        newHighLookback: 252,
+        outputMode: "rs_new_high_only",
+        sortField: "change",
+        sortDirection: "desc",
+        rowLimit: 100,
+        createdAt: "",
+        updatedAt: "",
+      },
       { id: "preset-b", name: "Momentum Copy", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "change", sortDirection: "desc", rowLimit: 50, createdAt: "", updatedAt: "" },
       { id: "preset-c", name: "Momentum Copy 2", isDefault: 0, isActive: 1, rulesJson: "[]", sortField: "ticker", sortDirection: "asc", rowLimit: 25, createdAt: "", updatedAt: "" },
     ];
@@ -1514,6 +1537,10 @@ describe("scans page service", () => {
     expect(result.sortField).toBe("change");
     expect(result.sortDirection).toBe("desc");
     expect(result.rowLimit).toBe(100);
+    expect(result.scanType).toBe("relative-strength");
+    expect(result.prefilterRules).toEqual(originalPrefilterRules);
+    expect(result.benchmarkTicker).toBe("SPY");
+    expect(result.outputMode).toBe("rs_new_high_only");
     expect(result.rules).toEqual(topGainersPreset.rules);
   });
 
@@ -1755,5 +1782,65 @@ describe("scans page service", () => {
     await expect(deleteScanPreset(env, "preset-a")).rejects.toThrow(
       "Cannot delete scan preset because it is used by compile presets: Daily",
     );
+  });
+
+  it("deletes scan refresh jobs before snapshots and the preset itself", async () => {
+    const batchQueries: string[] = [];
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            __query: query,
+            bind(value: string) {
+              return {
+                __query: query,
+                async first() {
+                  if (query.includes("FROM scan_presets WHERE id = ?")) {
+                    return {
+                      id: value,
+                      name: "Relative Strength Copy",
+                      scanType: "relative-strength",
+                      isDefault: 0,
+                      isActive: 1,
+                      rulesJson: "[]",
+                      prefilterRulesJson: "[]",
+                      benchmarkTicker: "SPY",
+                      verticalOffset: 30,
+                      rsMaLength: 21,
+                      rsMaType: "EMA",
+                      newHighLookback: 252,
+                      outputMode: "all",
+                      sortField: "change",
+                      sortDirection: "desc",
+                      rowLimit: 100,
+                      createdAt: "",
+                      updatedAt: "",
+                    };
+                  }
+                  return null;
+                },
+                async all() {
+                  if (query.includes("FROM scan_compile_presets cp")) {
+                    return { results: [] };
+                  }
+                  return { results: [] };
+                },
+              };
+            },
+          };
+        },
+        async batch(statements: Array<{ __query?: string }>) {
+          batchQueries.push(...statements.map((statement) => statement.__query ?? ""));
+          return [];
+        },
+      },
+    } as any;
+
+    await deleteScanPreset(env, "preset-a");
+
+    expect(batchQueries[0]).toContain("DELETE FROM scan_refresh_jobs");
+    expect(batchQueries[1]).toContain("DELETE FROM scan_rows");
+    expect(batchQueries[2]).toContain("DELETE FROM scan_snapshots");
+    expect(batchQueries[3]).toContain("DELETE FROM scan_presets");
   });
 });
