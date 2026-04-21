@@ -709,6 +709,134 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("tops up stale stored stock bars and only returns RS rows aligned to the latest benchmark session", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-stale-top-up",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+      outputMode: "rs_new_high_only",
+    };
+    const benchmarkBars = makeBars("SPY", 260, 100, 0.1);
+    const stockValues = Array.from({ length: 260 }, (_, index) => 80 + index * 0.4);
+    stockValues[258] = 200;
+    stockValues[259] = 199;
+    benchmarkBars[259] = { ...benchmarkBars[259], o: 90, h: 90, l: 90, c: 90, volume: benchmarkBars[259]?.volume ?? 0 };
+    const stockBars = makeBars("NVDA", 260, 80, 0.4).map((bar, index) => ({ ...bar, c: stockValues[index], o: stockValues[index], h: stockValues[index], l: stockValues[index] }));
+    const storedStockBars = stockBars.slice(0, -5);
+    const liveRecentBars = stockBars.slice(-12);
+    const latestTradingDate = benchmarkBars.at(-1)?.date;
+    const latestPriceClose = stockBars.at(-1)?.c;
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+      dailyBarsByTicker: {
+        NVDA: storedStockBars.map(({ date, o, h, l, c, volume }) => ({ date, o, h, l, c, volume })),
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = {
+      label: "provider-with-stale-top-up",
+      getDailyBars: vi.fn(async (tickers: string[]) => {
+        if (tickers[0] === "SPY") return benchmarkBars;
+        if (tickers[0] === "NVDA") return liveRecentBars;
+        return [];
+      }),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => provider as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs-stale-top-up");
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(result.rows[0]?.price).toBe(latestPriceClose);
+    expect(result.rows[0]?.rsNewHigh).toBe(true);
+    expect(result.rows[0]?.rawJson).toContain(`"tradingDate":"${latestTradingDate}"`);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("drops stale RS rows when a ticker cannot be refreshed to the benchmark's latest session", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-stale-drop",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+      outputMode: "rs_new_high_only",
+    };
+    const benchmarkBars = makeBars("SPY", 260, 100, 0.1);
+    const stockValues = Array.from({ length: 260 }, (_, index) => 80 + index * 0.4);
+    stockValues[258] = 200;
+    stockValues[259] = 199;
+    benchmarkBars[259] = { ...benchmarkBars[259], o: 90, h: 90, l: 90, c: 90, volume: benchmarkBars[259]?.volume ?? 0 };
+    const stockBars = makeBars("NVDA", 260, 80, 0.4).map((bar, index) => ({ ...bar, c: stockValues[index], o: stockValues[index], h: stockValues[index], l: stockValues[index] }));
+    const storedStockBars = stockBars.slice(0, -5);
+    const staleTradingDate = storedStockBars.at(-1)?.date;
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+      dailyBarsByTicker: {
+        NVDA: storedStockBars.map(({ date, o, h, l, c, volume }) => ({ date, o, h, l, c, volume })),
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = {
+      label: "provider-without-stale-top-up",
+      getDailyBars: vi.fn(async (tickers: string[]) => (tickers[0] === "SPY" ? benchmarkBars : [])),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => provider as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs-stale-drop");
+
+    expect(result.status).toBe("empty");
+    expect(result.rows).toEqual([]);
+    expect(staleTradingDate).not.toBe(benchmarkBars.at(-1)?.date);
+
+    vi.unstubAllGlobals();
+  });
+
   it("duplicates presets with copied settings, a fresh id, and incremented copy naming", async () => {
     const presetRows = [
       { id: "preset-a", name: "Momentum", isDefault: 1, isActive: 1, rulesJson: JSON.stringify(topGainersPreset.rules), sortField: "change", sortDirection: "desc", rowLimit: 100, createdAt: "", updatedAt: "" },

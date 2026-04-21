@@ -185,6 +185,8 @@ const RETENTION_DAYS = 7;
 const RS_HISTORY_LOOKBACK_DAYS = 800;
 const RS_PREFILTER_FETCH_LIMIT = 120;
 const RS_LIVE_TOP_UP_LIMIT = 25;
+const RS_STALE_TOP_UP_LOOKBACK_DAYS = 30;
+const RS_STALE_TOP_UP_LIMIT = RS_PREFILTER_FETCH_LIMIT;
 const RS_STORED_BAR_QUERY_CHUNK_SIZE = 80;
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
@@ -1042,6 +1044,12 @@ function isoDateDaysAgo(days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function isoDateDaysBefore(isoDate: string, days: number): string {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function loadActiveUsCommonStockTickers(env: Env): Promise<Set<string>> {
   try {
     const rows = await env.DB.prepare(
@@ -1079,17 +1087,21 @@ async function fetchRelativeStrengthPrefilterRows(
 }
 
 function groupBarsByTicker(bars: RelativeStrengthDailyBar[]): Map<string, RelativeStrengthDailyBar[]> {
-  const map = new Map<string, RelativeStrengthDailyBar[]>();
+  const map = new Map<string, Map<string, RelativeStrengthDailyBar>>();
   for (const bar of bars) {
     const key = bar.ticker.toUpperCase();
-    const current = map.get(key) ?? [];
-    current.push({ ...bar, ticker: key });
+    const current = map.get(key) ?? new Map<string, RelativeStrengthDailyBar>();
+    current.set(bar.date, { ...bar, ticker: key });
     map.set(key, current);
   }
-  for (const value of map.values()) {
-    value.sort((left, right) => left.date.localeCompare(right.date));
+  const out = new Map<string, RelativeStrengthDailyBar[]>();
+  for (const [ticker, value] of map.entries()) {
+    out.set(
+      ticker,
+      Array.from(value.values()).sort((left, right) => left.date.localeCompare(right.date)),
+    );
   }
-  return map;
+  return out;
 }
 
 type RelativeStrengthLatestRow = ScanSnapshotRow & {
@@ -1269,17 +1281,27 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   if (benchmarkBars.length === 0) {
     throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
   }
+  const expectedTradingDate = latestBarDate(benchmarkBars) ?? endDate;
   const storedStockBars = await loadStoredDailyBars(env, tickers, startDate, endDate);
   const storedBarsByTicker = groupBarsByTicker(storedStockBars);
   const missingTickers = tickers.filter((ticker) => !storedBarsByTicker.has(ticker));
-  const liveTopUpBars = missingTickers.length > 0 && missingTickers.length <= RS_LIVE_TOP_UP_LIMIT
-    ? await provider.getDailyBars(missingTickers, startDate, endDate)
+  const staleTickers = tickers.filter((ticker) => {
+    const latestStoredDate = latestBarDate(storedBarsByTicker.get(ticker) ?? []);
+    return latestStoredDate != null && latestStoredDate < expectedTradingDate;
+  });
+  const liveMissingBars = missingTickers.length > 0 && missingTickers.length <= RS_LIVE_TOP_UP_LIMIT
+    ? await provider.getDailyBars(missingTickers, startDate, expectedTradingDate)
     : [];
-  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveTopUpBars]);
+  const staleTopUpStartDate = isoDateDaysBefore(expectedTradingDate, RS_STALE_TOP_UP_LOOKBACK_DAYS);
+  const liveStaleBars = staleTickers.length > 0 && staleTickers.length <= RS_STALE_TOP_UP_LIMIT
+    ? await provider.getDailyBars(staleTickers, staleTopUpStartDate, expectedTradingDate)
+    : [];
+  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveMissingBars, ...liveStaleBars]);
 
   const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
   const metadataByTicker = new Map(prefilterRows.map((row) => [row.ticker.toUpperCase(), row]));
   const mergedRows: ScanSnapshotRow[] = latestRows
+    .filter((row) => row.tradingDate === expectedTradingDate)
     .filter((row) => rowMatchesOutputMode(row, preset.outputMode))
     .map((row) => {
       const metadata = metadataByTicker.get(row.ticker);
