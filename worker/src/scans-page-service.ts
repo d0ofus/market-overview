@@ -247,7 +247,8 @@ const DEFAULT_LIMIT = 100;
 const DEFAULT_RS_BENCHMARK = "SPY";
 const RETENTION_DAYS = 7;
 const RS_REQUIRED_BAR_FLOOR = 504;
-const RS_JOB_BATCH_SIZE = 40;
+const RS_JOB_BATCH_SIZE = 20;
+const RS_JOB_PROVIDER_CHUNK_SIZE = 10;
 const RS_STORED_BAR_QUERY_CHUNK_SIZE = 80;
 const RS_JOB_INSERT_CHUNK_SIZE = 250;
 const RS_JOB_TIME_BUDGET_MS = 15000;
@@ -1938,13 +1939,16 @@ async function mergeLatestRelativeStrengthBatch(
     const barCount = coverage.barCount ?? 0;
     return lastDate !== expectedTradingDate || barCount < requiredBarCount;
   });
-  const liveBars = staleOrSparseOrMissing.length > 0 && staleOrSparseOrMissing.length <= Math.max(RS_STALE_TOP_UP_LIMIT, RS_JOB_BATCH_SIZE)
-    ? await getProvider(env).getDailyBars(
-      staleOrSparseOrMissing,
-      isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount)),
-      expectedTradingDate,
-    )
-    : [];
+  const liveBars: RelativeStrengthDailyBar[] = [];
+  if (staleOrSparseOrMissing.length > 0 && staleOrSparseOrMissing.length <= Math.max(RS_STALE_TOP_UP_LIMIT, RS_JOB_BATCH_SIZE)) {
+    const provider = getProvider(env);
+    const liveStartDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
+    for (let index = 0; index < staleOrSparseOrMissing.length; index += RS_JOB_PROVIDER_CHUNK_SIZE) {
+      const chunk = staleOrSparseOrMissing.slice(index, index + RS_JOB_PROVIDER_CHUNK_SIZE);
+      const chunkBars = await provider.getDailyBars(chunk, liveStartDate, expectedTradingDate);
+      liveBars.push(...chunkBars);
+    }
+  }
   const barsByTicker = groupBarsByTicker([...storedBars, ...liveBars]);
   const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
   const metadataByTicker = new Map(candidates.map((row) => [row.ticker, row]));
@@ -2030,7 +2034,7 @@ async function storeScanSnapshotResult(
 export async function processRelativeStrengthRefreshJob(
   env: Env,
   jobId: string,
-  options?: { timeBudgetMs?: number },
+  options?: { timeBudgetMs?: number; maxBatches?: number },
 ): Promise<ScanRefreshJob | null> {
   const job = await loadScanRefreshJobRecord(env, jobId);
   if (!job) return null;
@@ -2048,14 +2052,17 @@ export async function processRelativeStrengthRefreshJob(
     let topRows = await loadRelativeStrengthJobTopRows(env, job.id);
     const startedAt = Date.now();
     const timeBudgetMs = options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS;
+    const maxBatches = Math.max(1, options?.maxBatches ?? Number.POSITIVE_INFINITY);
+    let processedBatchCount = 0;
 
-    while (cursorOffset < job.totalCandidates && Date.now() - startedAt < timeBudgetMs) {
+    while (cursorOffset < job.totalCandidates && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
       const batchCandidates = await loadRelativeStrengthJobCandidates(env, job.id, cursorOffset, RS_JOB_BATCH_SIZE);
       if (batchCandidates.length === 0) break;
       const batchRows = await mergeLatestRelativeStrengthBatch(env, preset, batchCandidates, benchmarkBars);
       matchedCandidates += batchRows.length;
       topRows = sortSnapshotRows([...topRows, ...batchRows], preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
       cursorOffset += batchCandidates.length;
+      processedBatchCount += 1;
       await replaceRelativeStrengthJobTopRows(env, job.id, topRows);
       await updateScanRefreshJobRecord(env, job.id, {
         status: "running",

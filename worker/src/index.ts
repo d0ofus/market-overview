@@ -2258,18 +2258,18 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
-  c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id));
-  return c.json({ ok: true, ...payload });
+  const job = await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 });
+  return c.json({ ok: true, job, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
 });
 
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
-  if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id));
-  }
-  return c.json({ ok: true, ...payload });
+  const job = payload.job.status === "queued" || payload.job.status === "running"
+    ? await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 })
+    : payload.job;
+  return c.json({ ok: true, job, snapshot: await loadLatestUsableScansSnapshot(c.env, payload.job.presetId) });
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {
