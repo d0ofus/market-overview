@@ -181,10 +181,12 @@ type TradingViewScanRow = {
 };
 
 const DEFAULT_LIMIT = 100;
+const DEFAULT_RS_BENCHMARK = "SPY";
 const RETENTION_DAYS = 7;
 const RS_HISTORY_LOOKBACK_DAYS = 800;
 const RS_PREFILTER_FETCH_LIMIT = 120;
 const RS_LIVE_TOP_UP_LIMIT = 25;
+const RS_DEEP_HISTORY_TOP_UP_LIMIT = 40;
 const RS_STALE_TOP_UP_LOOKBACK_DAYS = 30;
 const RS_STALE_TOP_UP_LIMIT = RS_PREFILTER_FETCH_LIMIT;
 const RS_STORED_BAR_QUERY_CHUNK_SIZE = 80;
@@ -251,6 +253,22 @@ function normalizeOutputMode(value: string | null | undefined): RelativeStrength
 
 function normalizeRsMaType(value: string | null | undefined): RelativeStrengthMaType {
   return value === "SMA" ? "SMA" : "EMA";
+}
+
+function normalizeBenchmarkTicker(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return normalized || null;
+}
+
+function benchmarkTickerForPreset(preset: Pick<ScanPreset, "benchmarkTicker"> | { benchmarkTicker?: string | null }): string {
+  return normalizeBenchmarkTicker(preset.benchmarkTicker) ?? DEFAULT_RS_BENCHMARK;
+}
+
+function resolveBenchmarkTickerForData(benchmarkTicker: string): string {
+  if (benchmarkTicker === "SP:SPX" || benchmarkTicker === "SPX" || benchmarkTicker === "GSPC" || benchmarkTicker === "^GSPC") {
+    return "^GSPC";
+  }
+  return benchmarkTicker;
 }
 
 function toJson(value: unknown): string | null {
@@ -512,7 +530,7 @@ function mapPresetRow(row: {
     isActive: Boolean(row.isActive),
     rules: parseRules(row.rulesJson),
     prefilterRules: parseRules(row.prefilterRulesJson ?? row.rulesJson),
-    benchmarkTicker: row.benchmarkTicker?.trim().toUpperCase() || null,
+    benchmarkTicker: normalizeBenchmarkTicker(row.benchmarkTicker),
     verticalOffset: Number.isFinite(Number(row.verticalOffset)) ? Number(row.verticalOffset) : 30,
     rsMaLength: clamp(Number(row.rsMaLength ?? 21), 1, 250),
     rsMaType: normalizeRsMaType(row.rsMaType),
@@ -814,7 +832,7 @@ export async function upsertScanPreset(env: Env, input: {
       input.isActive === false ? 0 : 1,
       JSON.stringify(rules),
       JSON.stringify(prefilterRules),
-      scanType === "relative-strength" ? (input.benchmarkTicker?.trim().toUpperCase() || "SPY") : null,
+      scanType === "relative-strength" ? (normalizeBenchmarkTicker(input.benchmarkTicker) ?? DEFAULT_RS_BENCHMARK) : null,
       Number.isFinite(Number(input.verticalOffset)) ? Number(input.verticalOffset) : 30,
       clamp(Number(input.rsMaLength ?? 21), 1, 250),
       normalizeRsMaType(input.rsMaType),
@@ -1115,16 +1133,17 @@ async function upsertRelativeStrengthCache(
   benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<RelativeStrengthLatestRow[]> {
   const config: RelativeStrengthConfig = {
-    benchmarkTicker: preset.benchmarkTicker?.trim().toUpperCase() || "SPY",
+    benchmarkTicker: benchmarkTickerForPreset(preset),
     verticalOffset: preset.verticalOffset,
     rsMaLength: preset.rsMaLength,
     rsMaType: preset.rsMaType,
     newHighLookback: preset.newHighLookback,
   };
   const latestRows = new Map<string, RelativeStrengthLatestRow>();
+  const resolvedBenchmarkTicker = resolveBenchmarkTickerForData(config.benchmarkTicker);
 
   for (const [ticker, bars] of rowsByTicker) {
-    if (ticker === config.benchmarkTicker) continue;
+    if (ticker === config.benchmarkTicker || ticker === resolvedBenchmarkTicker) continue;
     const computedRows = buildRelativeStrengthCacheRows(bars, benchmarkBars, config);
     const latest = computedRows[computedRows.length - 1];
     if (latest) {
@@ -1272,12 +1291,13 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
     };
   }
 
-  const benchmarkTicker = preset.benchmarkTicker?.trim().toUpperCase() || "SPY";
+  const benchmarkTicker = benchmarkTickerForPreset(preset);
+  const benchmarkDataTicker = resolveBenchmarkTickerForData(benchmarkTicker);
   const provider = getProvider(env);
   const tickers = Array.from(new Set(prefilterRows.map((row) => row.ticker.toUpperCase())));
   const endDate = latestUsSessionAsOfDate(new Date());
   const startDate = isoDateDaysAgo(RS_HISTORY_LOOKBACK_DAYS);
-  const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkTicker, startDate, endDate);
+  const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkDataTicker, startDate, endDate);
   if (benchmarkBars.length === 0) {
     throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
   }
@@ -1285,6 +1305,13 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   const storedStockBars = await loadStoredDailyBars(env, tickers, startDate, endDate);
   const storedBarsByTicker = groupBarsByTicker(storedStockBars);
   const missingTickers = tickers.filter((ticker) => !storedBarsByTicker.has(ticker));
+  const deepHistoryTickers = tickers
+    .filter((ticker) => {
+      const storedBars = storedBarsByTicker.get(ticker) ?? [];
+      return storedBars.length > 0 && storedBars.length < preset.newHighLookback;
+    })
+    .sort((left, right) => ((storedBarsByTicker.get(left) ?? []).length - (storedBarsByTicker.get(right) ?? []).length))
+    .slice(0, RS_DEEP_HISTORY_TOP_UP_LIMIT);
   const staleTickers = tickers.filter((ticker) => {
     const latestStoredDate = latestBarDate(storedBarsByTicker.get(ticker) ?? []);
     return latestStoredDate != null && latestStoredDate < expectedTradingDate;
@@ -1292,11 +1319,14 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   const liveMissingBars = missingTickers.length > 0 && missingTickers.length <= RS_LIVE_TOP_UP_LIMIT
     ? await provider.getDailyBars(missingTickers, startDate, expectedTradingDate)
     : [];
+  const liveDeepHistoryBars = deepHistoryTickers.length > 0
+    ? await provider.getDailyBars(deepHistoryTickers, startDate, expectedTradingDate)
+    : [];
   const staleTopUpStartDate = isoDateDaysBefore(expectedTradingDate, RS_STALE_TOP_UP_LOOKBACK_DAYS);
   const liveStaleBars = staleTickers.length > 0 && staleTickers.length <= RS_STALE_TOP_UP_LIMIT
     ? await provider.getDailyBars(staleTickers, staleTopUpStartDate, expectedTradingDate)
     : [];
-  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveMissingBars, ...liveStaleBars]);
+  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveMissingBars, ...liveDeepHistoryBars, ...liveStaleBars]);
 
   const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
   const metadataByTicker = new Map(prefilterRows.map((row) => [row.ticker.toUpperCase(), row]));

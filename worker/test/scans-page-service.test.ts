@@ -709,6 +709,129 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("maps the SP:SPX benchmark preset to ^GSPC market data while preserving the preset value in scan output", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-spx",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SP:SPX",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const stockBars = makeBars("NVDA", 260, 100, 1);
+    const benchmarkBars = makeBars("^GSPC", 260, 90, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = {
+      label: "provider-with-spx-alias",
+      getDailyBars: vi.fn(async (tickers: string[]) => {
+        if (tickers[0] === "^GSPC") return benchmarkBars;
+        if (tickers[0] === "NVDA") return stockBars;
+        return [];
+      }),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => provider as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs-spx");
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(result.rows[0]?.rawJson).toContain("\"benchmarkTicker\":\"SP:SPX\"");
+    expect(provider.getDailyBars.mock.calls.some((call) => (call[0] as string[])[0] === "^GSPC")).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("backfills full history for sparse stored bars before evaluating RS new highs", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-sparse-history",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+      outputMode: "rs_new_high_only",
+    };
+    const benchmarkBars = makeBars("SPY", 260, 100, 0.1);
+    const stockValues = Array.from({ length: 260 }, (_, index) => 140 + index * 0.2);
+    stockValues[40] = 455.9;
+    stockValues[259] = 170.81;
+    const stockBars = makeBars("MSTR", 260, 140, 0.2).map((bar, index) => ({
+      ...bar,
+      c: stockValues[index],
+      o: stockValues[index],
+      h: stockValues[index],
+      l: stockValues[index],
+    }));
+    const sparseStoredBars = stockBars.slice(-29);
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["MSTR"],
+      dailyBarsByTicker: {
+        MSTR: sparseStoredBars.map(({ date, o, h, l, c, volume }) => ({ date, o, h, l, c, volume })),
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:MSTR",
+            d: ["MicroStrategy", "Technology Services", "Internet Software/Services", 2.5, 1, 1.1, 170.81, 10, 1708.1, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = {
+      label: "provider-with-full-history-backfill",
+      getDailyBars: vi.fn(async (tickers: string[]) => {
+        if (tickers[0] === "SPY") return benchmarkBars;
+        if (tickers[0] === "MSTR") return stockBars;
+        return [];
+      }),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => provider as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs-sparse-history");
+
+    expect(result.status).toBe("empty");
+    expect(result.rows).toEqual([]);
+    expect(provider.getDailyBars.mock.calls.some((call) => (call[0] as string[])[0] === "MSTR" && String(call[1]) < String(sparseStoredBars[0]?.date ?? ""))).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
   it("tops up stale stored stock bars and only returns RS rows aligned to the latest benchmark session", async () => {
     const relativeStrengthPreset: ScanPreset = {
       ...topGainersPreset,
