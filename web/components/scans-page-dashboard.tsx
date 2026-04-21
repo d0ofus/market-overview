@@ -13,8 +13,10 @@ import {
   getScanCompilePresetSnapshot,
   getScanCompilePresets,
   getScanExportUrl,
+  getScanRefreshJob,
   getScanPresets,
   getScansSnapshot,
+  getLatestScanRefreshJob,
   getTickerNews,
   refreshScansSnapshot,
   refreshScanCompilePreset,
@@ -26,6 +28,7 @@ import {
   type ScanCompilePresetRow,
   type RelativeStrengthMaType,
   type RelativeStrengthOutputMode,
+  type ScanRefreshJob,
   type ScanPreset,
   type ScanPresetType,
   type ScanRow,
@@ -402,6 +405,7 @@ export function ScansPageDashboard() {
   const [draftPreset, setDraftPreset] = useState<ScanPreset>(emptyDraftPreset);
   const [draftCompilePreset, setDraftCompilePreset] = useState<ScanCompilePresetDetail>(emptyDraftCompilePreset);
   const [snapshot, setSnapshot] = useState<ScanSnapshot | null>(null);
+  const [refreshJob, setRefreshJob] = useState<ScanRefreshJob | null>(null);
   const [compiledSnapshot, setCompiledSnapshot] = useState<CompiledScansSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [compiledLoading, setCompiledLoading] = useState(false);
@@ -562,8 +566,16 @@ export function ScansPageDashboard() {
       if (nextPresetId) {
         const nextSnapshot = await getScansSnapshot(nextPresetId);
         setSnapshot(nextSnapshot);
+        try {
+          const refreshResponse = await getLatestScanRefreshJob(nextPresetId);
+          setRefreshJob(refreshResponse.job ?? null);
+          if (refreshResponse.snapshot) setSnapshot(refreshResponse.snapshot);
+        } catch {
+          setRefreshJob(null);
+        }
       } else {
         setSnapshot(null);
+        setRefreshJob(null);
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load scans.");
@@ -643,11 +655,37 @@ export function ScansPageDashboard() {
       try {
         const nextSnapshot = await getScansSnapshot(selectedPresetId);
         setSnapshot(nextSnapshot);
+        try {
+          const refreshResponse = await getLatestScanRefreshJob(selectedPresetId);
+          setRefreshJob(refreshResponse.job ?? null);
+          if (refreshResponse.snapshot) setSnapshot(refreshResponse.snapshot);
+        } catch {
+          setRefreshJob(null);
+        }
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load scan snapshot.");
       }
     })();
-  }, [selectedPresetId]);
+  }, [loading, selectedPresetId]);
+
+  useEffect(() => {
+    if (!refreshJob || (refreshJob.status !== "queued" && refreshJob.status !== "running")) return;
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await getScanRefreshJob(refreshJob.id);
+          setRefreshJob(response.job ?? null);
+          if (response.snapshot) setSnapshot(response.snapshot);
+          if (response.job?.status === "completed" && selectedCompilePreset?.presetIds.includes(response.job.presetId)) {
+            await loadCompiled(selectedCompilePresetId);
+          }
+        } catch {
+          // Keep the current snapshot visible while the background refresh continues.
+        }
+      })();
+    }, 2000);
+    return () => window.clearTimeout(timeoutId);
+  }, [loadCompiled, refreshJob, selectedCompilePreset, selectedCompilePresetId]);
 
   useEffect(() => {
     void loadCompiled(selectedCompilePresetId);
@@ -813,17 +851,24 @@ export function ScansPageDashboard() {
     setMessage(null);
     try {
       const response = await refreshScansSnapshot(selectedPresetId);
-      setSnapshot(response.snapshot);
-      if (selectedCompilePreset?.presetIds.includes(selectedPresetId)) {
+      if (response.snapshot) setSnapshot(response.snapshot);
+      setRefreshJob(response.job ?? null);
+      if (!response.async && selectedCompilePreset?.presetIds.includes(selectedPresetId)) {
         await loadCompiled(selectedCompilePresetId);
       }
       setExpandedTicker(null);
       setNewsByTicker({});
-      setMessage(
-        response.snapshot.matchedRowCount > response.snapshot.rowCount
-          ? `Refreshed ${response.snapshot.rowCount} displayed rows from ${response.snapshot.matchedRowCount} matched rows.`
-          : `Refreshed ${response.snapshot.rowCount} rows.`,
-      );
+      if (response.async && response.job) {
+        setMessage(`Started background refresh: ${response.job.processedCandidates}/${response.job.totalCandidates} candidates processed so far.`);
+      } else if (response.snapshot) {
+        setMessage(
+          response.snapshot.matchedRowCount > response.snapshot.rowCount
+            ? `Refreshed ${response.snapshot.rowCount} displayed rows from ${response.snapshot.matchedRowCount} matched rows.`
+            : `Refreshed ${response.snapshot.rowCount} rows.`,
+        );
+      } else {
+        setMessage("Refresh started.");
+      }
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh scans.");
     } finally {
@@ -843,8 +888,8 @@ export function ScansPageDashboard() {
       const selectedMember = selectedPresetId
         ? response.memberResults.find((result) => result.presetId === selectedPresetId)
         : null;
-      if (selectedMember?.snapshot) {
-        setSnapshot(selectedMember.snapshot);
+      if (selectedMember?.snapshot ?? selectedMember?.usableSnapshot) {
+        setSnapshot(selectedMember.snapshot ?? selectedMember.usableSnapshot ?? null);
       }
       setExpandedTicker(null);
       setNewsByTicker({});
@@ -1544,11 +1589,22 @@ export function ScansPageDashboard() {
                   ? `Showing ${snapshot.rowCount} row${snapshot.rowCount === 1 ? "" : "s"}${snapshot.matchedRowCount > snapshot.rowCount ? ` of ${snapshot.matchedRowCount} matched` : ""}.`
                   : "No scan snapshot loaded yet."}
               </p>
+              {refreshJob ? (
+                <p className="mt-1 text-xs text-slate-400">
+                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.totalCandidates} candidates processed, {refreshJob.matchedCandidates} matched.
+                  {snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <span className={`rounded px-2 py-1 text-xs ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : snapshot?.status === "warning" ? "bg-yellow-500/15 text-yellow-200" : "bg-slate-800/60 text-slate-300"}`}>
                 Status: {snapshot?.status ?? "empty"}
               </span>
+              {refreshJob ? (
+                <span className={`rounded px-2 py-1 text-xs ${refreshJob.status === "failed" ? "bg-red-500/15 text-red-300" : refreshJob.status === "completed" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent/15 text-accent"}`}>
+                  Refresh: {refreshJob.status}
+                </span>
+              ) : null}
               {scanExportUrl && (
                 <a
                   className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"

@@ -82,10 +82,15 @@ import {
   loadScanCompilePreset,
   loadDefaultScanPreset,
   loadLatestScansSnapshot,
+  loadLatestUsableScansSnapshot,
+  loadLatestActiveScanRefreshJob,
+  loadScanRefreshJob,
   loadScanPreset,
+  processRelativeStrengthRefreshJob,
   refreshScanCompilePreset,
   refreshActiveRelativeStrengthPresets,
   refreshScansSnapshot,
+  requestScansRefresh,
   upsertScanCompilePreset,
   upsertScanPreset,
 } from "./scans-page-service";
@@ -2240,11 +2245,31 @@ app.post("/api/admin/scans/refresh", async (c) => {
   await maybeRunScansPageHousekeeping(c.env);
   const payload = scanRefreshSchema.parse(await c.req.json().catch(() => ({})));
   try {
-    const snapshot = await refreshScansSnapshot(c.env, payload.presetId ?? null);
-    return c.json({ ok: true, snapshot });
+    const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
+    return c.json({ ok: true, ...result });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh scans." }, 500);
   }
+});
+
+app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const presetId = (c.req.query("presetId") ?? "").trim();
+  if (!presetId) return c.json({ error: "presetId is required." }, 400);
+  const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
+  if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
+  c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id));
+  return c.json({ ok: true, ...payload });
+});
+
+app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
+  if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
+  if (payload.job.status === "queued" || payload.job.status === "running") {
+    c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id));
+  }
+  return c.json({ ok: true, ...payload });
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {

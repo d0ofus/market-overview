@@ -271,7 +271,7 @@ export type CompiledScansSnapshot = {
 export type ScanCompilePresetRefreshMemberResult = {
   presetId: string;
   presetName: string;
-  status: "ok" | "warning" | "error" | "empty";
+  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed";
   rowCount: number;
   error: string | null;
   snapshot: ScanSnapshot | null;
@@ -287,6 +287,33 @@ export type ScanCompilePresetRefreshResult = {
   failedCount: number;
   snapshot: CompiledScansSnapshot;
   memberResults: ScanCompilePresetRefreshMemberResult[];
+};
+
+export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed";
+
+export type ScanRefreshJob = {
+  id: string;
+  presetId: string;
+  presetName: string;
+  jobType: "relative-strength";
+  status: ScanRefreshJobStatus;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  totalCandidates: number;
+  processedCandidates: number;
+  matchedCandidates: number;
+  cursorOffset: number;
+  latestSnapshotId: string | null;
+  requestedBy: string | null;
+};
+
+export type ScanRefreshResponse = {
+  ok: boolean;
+  async: boolean;
+  snapshot: ScanSnapshot | null;
+  job: ScanRefreshJob | null;
 };
 
 export type WatchlistCompilerRunSummary = ScanRunSummary;
@@ -1196,10 +1223,22 @@ export function getScanCompilePresetExportUrl(id: string, dateSuffix?: string | 
 }
 
 export function refreshScansSnapshot(presetId?: string | null) {
-  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot }>("/api/admin/scans/refresh", {
+  return adminFetch<ScanRefreshResponse>("/api/admin/scans/refresh", {
     method: "POST",
     body: JSON.stringify({ presetId: presetId ?? null }),
   });
+}
+
+export function getLatestScanRefreshJob(presetId: string) {
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob | null }>(
+    appendQuery("/api/admin/scans/refresh-jobs/latest", { presetId }),
+  );
+}
+
+export function getScanRefreshJob(jobId: string) {
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob | null }>(
+    `/api/admin/scans/refresh-jobs/${encodeURIComponent(jobId)}`,
+  );
 }
 
 export function refreshScanCompilePreset(id: string) {
