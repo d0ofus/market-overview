@@ -307,6 +307,8 @@ export type ScanRefreshJob = {
   cursorOffset: number;
   latestSnapshotId: string | null;
   requestedBy: string | null;
+  configKey: string | null;
+  expectedTradingDate: string | null;
 };
 
 export type ScanRefreshResponse = {

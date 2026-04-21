@@ -13,7 +13,6 @@ import {
   getScanCompilePresetSnapshot,
   getScanCompilePresets,
   getScanExportUrl,
-  getScanRefreshJob,
   getScanPresets,
   getScansSnapshot,
   getLatestScanRefreshJob,
@@ -670,10 +669,11 @@ export function ScansPageDashboard() {
 
   useEffect(() => {
     if (!refreshJob || (refreshJob.status !== "queued" && refreshJob.status !== "running")) return;
+    if (!selectedPresetId) return;
     const timeoutId = window.setTimeout(() => {
       void (async () => {
         try {
-          const response = await getScanRefreshJob(refreshJob.id);
+          const response = await getLatestScanRefreshJob(selectedPresetId);
           setRefreshJob(response.job ?? null);
           if (response.snapshot) setSnapshot(response.snapshot);
           if (response.job?.status === "completed" && selectedCompilePreset?.presetIds.includes(response.job.presetId)) {
@@ -685,7 +685,7 @@ export function ScansPageDashboard() {
       })();
     }, 2000);
     return () => window.clearTimeout(timeoutId);
-  }, [loadCompiled, refreshJob, selectedCompilePreset, selectedCompilePresetId]);
+  }, [loadCompiled, refreshJob, selectedCompilePreset, selectedCompilePresetId, selectedPresetId]);
 
   useEffect(() => {
     void loadCompiled(selectedCompilePresetId);
@@ -859,7 +859,9 @@ export function ScansPageDashboard() {
       setExpandedTicker(null);
       setNewsByTicker({});
       if (response.async && response.job) {
-        setMessage(`Started background refresh: ${response.job.processedCandidates}/${response.job.totalCandidates} candidates processed so far.`);
+        setMessage(
+          `Started RS cache materialization for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.totalCandidates} tickers processed so far.`,
+        );
       } else if (response.snapshot) {
         setMessage(
           response.snapshot.matchedRowCount > response.snapshot.rowCount
@@ -1591,7 +1593,7 @@ export function ScansPageDashboard() {
               </p>
               {refreshJob ? (
                 <p className="mt-1 text-xs text-slate-400">
-                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.totalCandidates} candidates processed, {refreshJob.matchedCandidates} matched.
+                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.totalCandidates} tickers materialized, {refreshJob.matchedCandidates} cached for {refreshJob.expectedTradingDate ?? "the latest session"}.
                   {snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}
                 </p>
               ) : null}

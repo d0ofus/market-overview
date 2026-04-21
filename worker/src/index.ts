@@ -2259,7 +2259,10 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
   const job = await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 });
-  return c.json({ ok: true, job, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
+  const snapshot = job?.status === "completed"
+    ? await requestScansRefresh(c.env, presetId, "poll-completed").then((result) => result.snapshot)
+    : await loadLatestUsableScansSnapshot(c.env, presetId);
+  return c.json({ ok: true, job, snapshot });
 });
 
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
@@ -2269,7 +2272,10 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   const job = payload.job.status === "queued" || payload.job.status === "running"
     ? await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 })
     : payload.job;
-  return c.json({ ok: true, job, snapshot: await loadLatestUsableScansSnapshot(c.env, payload.job.presetId) });
+  const snapshot = job?.status === "completed"
+    ? await requestScansRefresh(c.env, payload.job.presetId, "poll-completed").then((result) => result.snapshot)
+    : await loadLatestUsableScansSnapshot(c.env, payload.job.presetId);
+  return c.json({ ok: true, job, snapshot });
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {

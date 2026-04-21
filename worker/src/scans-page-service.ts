@@ -1,4 +1,5 @@
 import { getProvider } from "./provider";
+import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import {
   buildRelativeStrengthCacheRows,
@@ -165,6 +166,8 @@ export type ScanRefreshJob = {
   cursorOffset: number;
   latestSnapshotId: string | null;
   requestedBy: string | null;
+  configKey: string | null;
+  expectedTradingDate: string | null;
 };
 
 export type ScanRefreshResponse = {
@@ -190,6 +193,41 @@ type ScanRefreshJobRecord = {
   requestedBy: string | null;
   benchmarkBarsJson: string | null;
   requiredBarCount: number;
+  configKey: string | null;
+  expectedTradingDate: string | null;
+  benchmarkTicker: string | null;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+};
+
+type RelativeStrengthLatestCacheRecord = {
+  ticker: string;
+  benchmarkTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+  tradingDate: string;
+  priceClose: number | null;
+  change1d: number | null;
+  rsRatioClose: number | null;
+  rsRatioMa: number | null;
+  rsAboveMa: number | boolean;
+  rsNewHigh: number | boolean;
+  rsNewHighBeforePrice: number | boolean;
+  bullCross: number | boolean;
+  approxRsRating: number | null;
+};
+
+type RelativeStrengthConfigIdentity = {
+  benchmarkTicker: string;
+  benchmarkDataTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+  configKey: string;
+  requiredBarCount: number;
+  expectedTradingDate: string;
 };
 
 type RelativeStrengthJobCandidateRow = {
@@ -261,6 +299,7 @@ const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 const RS_PROVIDER_LABEL = "Relative Strength Scan (Alpaca/Provider)";
+const RS_RAW_RATIO_VERTICAL_OFFSET = 0.01;
 
 const FIELD_ALIASES: Record<string, string> = {
   ticker: "ticker",
@@ -337,6 +376,67 @@ function resolveBenchmarkTickerForData(benchmarkTicker: string): string {
   return benchmarkTicker;
 }
 
+function relativeStrengthConfigKey(input: {
+  benchmarkTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+}): string {
+  return [
+    normalizeBenchmarkTicker(input.benchmarkTicker) ?? DEFAULT_RS_BENCHMARK,
+    normalizeRsMaType(input.rsMaType),
+    Math.max(1, Math.trunc(input.rsMaLength)),
+    Math.max(1, Math.trunc(input.newHighLookback)),
+  ].join("|");
+}
+
+function buildRelativeStrengthConfigIdentity(
+  preset: Pick<ScanPreset, "benchmarkTicker" | "rsMaType" | "rsMaLength" | "newHighLookback">,
+  expectedTradingDate = latestUsSessionAsOfDate(new Date()),
+): RelativeStrengthConfigIdentity {
+  const benchmarkTicker = benchmarkTickerForPreset(preset);
+  const rsMaType = normalizeRsMaType(preset.rsMaType);
+  const rsMaLength = Math.max(1, Math.trunc(preset.rsMaLength));
+  const newHighLookback = Math.max(1, Math.trunc(preset.newHighLookback));
+  return {
+    benchmarkTicker,
+    benchmarkDataTicker: resolveBenchmarkTickerForData(benchmarkTicker),
+    rsMaType,
+    rsMaLength,
+    newHighLookback,
+    configKey: relativeStrengthConfigKey({ benchmarkTicker, rsMaType, rsMaLength, newHighLookback }),
+    requiredBarCount: Math.max(newHighLookback, RS_REQUIRED_BAR_FLOOR),
+    expectedTradingDate,
+  };
+}
+
+function rawRelativeStrengthConfig(identity: RelativeStrengthConfigIdentity): RelativeStrengthConfig {
+  return {
+    benchmarkTicker: identity.benchmarkTicker,
+    verticalOffset: RS_RAW_RATIO_VERTICAL_OFFSET,
+    rsMaLength: identity.rsMaLength,
+    rsMaType: identity.rsMaType,
+    newHighLookback: identity.newHighLookback,
+  };
+}
+
+function buildRelativeStrengthConfigIdentityFromJobRecord(job: ScanRefreshJobRecord): RelativeStrengthConfigIdentity {
+  const benchmarkTicker = normalizeBenchmarkTicker(job.benchmarkTicker) ?? DEFAULT_RS_BENCHMARK;
+  const rsMaType = normalizeRsMaType(job.rsMaType);
+  const rsMaLength = Math.max(1, Math.trunc(job.rsMaLength || 21));
+  const newHighLookback = Math.max(1, Math.trunc(job.newHighLookback || 252));
+  return {
+    benchmarkTicker,
+    benchmarkDataTicker: resolveBenchmarkTickerForData(benchmarkTicker),
+    rsMaType,
+    rsMaLength,
+    newHighLookback,
+    configKey: job.configKey ?? relativeStrengthConfigKey({ benchmarkTicker, rsMaType, rsMaLength, newHighLookback }),
+    requiredBarCount: Math.max(1, Math.trunc(job.requiredBarCount || Math.max(newHighLookback, RS_REQUIRED_BAR_FLOOR))),
+    expectedTradingDate: job.expectedTradingDate ?? latestUsSessionAsOfDate(new Date()),
+  };
+}
+
 function toJson(value: unknown): string | null {
   if (value == null) return null;
   try {
@@ -353,6 +453,13 @@ function asFiniteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function asBooleanFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value === "1" || value.toLowerCase() === "true";
+  return false;
 }
 
 function asComparableString(value: unknown): string | null {
@@ -408,7 +515,7 @@ function snapshotRowToJobCandidate(row: ScanSnapshotRow, cursorOffset: number): 
 function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): ScanRefreshJob {
   return {
     id: record.id,
-    presetId: record.presetId,
+    presetId: preset.id,
     presetName: preset.name,
     jobType: "relative-strength",
     status: record.status,
@@ -422,6 +529,8 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     cursorOffset: record.cursorOffset,
     latestSnapshotId: record.latestSnapshotId,
     requestedBy: record.requestedBy,
+    configKey: record.configKey ?? null,
+    expectedTradingDate: record.expectedTradingDate ?? null,
   };
 }
 
@@ -1208,6 +1317,12 @@ function isoDateDaysBefore(isoDate: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function toTimestampMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 async function fetchRelativeStrengthPrefilterRows(
   preset: ScanPreset,
 ): Promise<ScanSnapshotRow[]> {
@@ -1299,11 +1414,170 @@ async function upsertRelativeStrengthCache(
   return Array.from(latestRows.values());
 }
 
+function buildRelativeStrengthLatestCacheRows(
+  rowsByTicker: Map<string, RelativeStrengthDailyBar[]>,
+  benchmarkBars: RelativeStrengthDailyBar[],
+  identity: RelativeStrengthConfigIdentity,
+): RelativeStrengthLatestCacheRecord[] {
+  const latestRows = new Map<string, RelativeStrengthLatestCacheRecord>();
+  const config = rawRelativeStrengthConfig(identity);
+  const resolvedBenchmarkTicker = resolveBenchmarkTickerForData(identity.benchmarkTicker);
+
+  for (const [ticker, bars] of rowsByTicker) {
+    if (ticker === identity.benchmarkTicker || ticker === resolvedBenchmarkTicker) continue;
+    const computedRows = buildRelativeStrengthCacheRows(bars, benchmarkBars, config);
+    const latest = computedRows[computedRows.length - 1];
+    if (!latest || latest.tradingDate !== identity.expectedTradingDate) continue;
+    latestRows.set(ticker, {
+      ticker,
+      benchmarkTicker: identity.benchmarkTicker,
+      rsMaType: identity.rsMaType,
+      rsMaLength: identity.rsMaLength,
+      newHighLookback: identity.newHighLookback,
+      tradingDate: latest.tradingDate,
+      priceClose: latest.priceClose,
+      change1d: latest.change1d,
+      rsRatioClose: latest.rsClose,
+      rsRatioMa: latest.rsMa,
+      rsAboveMa: latest.rsAboveMa,
+      rsNewHigh: latest.rsNewHigh,
+      rsNewHighBeforePrice: latest.rsNewHighBeforePrice,
+      bullCross: latest.bullCross,
+      approxRsRating: latest.approxRsRating,
+    });
+  }
+
+  return Array.from(latestRows.values());
+}
+
 function rowMatchesOutputMode(row: RelativeStrengthLatestRow, outputMode: RelativeStrengthOutputMode): boolean {
   if (outputMode === "rs_new_high_only") return row.rsNewHigh;
   if (outputMode === "rs_new_high_before_price_only") return row.rsNewHighBeforePrice;
   if (outputMode === "both") return row.rsNewHigh || row.rsNewHighBeforePrice;
   return true;
+}
+
+function cachedRowMatchesOutputMode(row: RelativeStrengthLatestCacheRecord, outputMode: RelativeStrengthOutputMode): boolean {
+  if (outputMode === "rs_new_high_only") return asBooleanFlag(row.rsNewHigh);
+  if (outputMode === "rs_new_high_before_price_only") return asBooleanFlag(row.rsNewHighBeforePrice);
+  if (outputMode === "both") return asBooleanFlag(row.rsNewHigh) || asBooleanFlag(row.rsNewHighBeforePrice);
+  return true;
+}
+
+async function loadRelativeStrengthLatestCacheRows(
+  env: Env,
+  configKey: string,
+  tickers: string[],
+  tradingDate: string,
+): Promise<Map<string, RelativeStrengthLatestCacheRecord>> {
+  const uniqueTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  const rowsByTicker = new Map<string, RelativeStrengthLatestCacheRecord>();
+  if (uniqueTickers.length === 0) return rowsByTicker;
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT
+         ticker,
+         benchmark_ticker as benchmarkTicker,
+         rs_ma_type as rsMaType,
+         rs_ma_length as rsMaLength,
+         new_high_lookback as newHighLookback,
+         trading_date as tradingDate,
+         price_close as priceClose,
+         change_1d as change1d,
+         rs_ratio_close as rsRatioClose,
+         rs_ratio_ma as rsRatioMa,
+         rs_above_ma as rsAboveMa,
+         rs_new_high as rsNewHigh,
+         rs_new_high_before_price as rsNewHighBeforePrice,
+         bull_cross as bullCross,
+         approx_rs_rating as approxRsRating
+       FROM relative_strength_latest_cache
+       WHERE config_key = ?
+         AND trading_date = ?
+         AND ticker IN (${placeholders})`,
+    )
+      .bind(configKey, tradingDate, ...chunk)
+      .all<RelativeStrengthLatestCacheRecord>();
+    for (const row of rows.results ?? []) {
+      rowsByTicker.set(row.ticker.toUpperCase(), {
+        ...row,
+        ticker: row.ticker.toUpperCase(),
+      });
+    }
+  }
+  return rowsByTicker;
+}
+
+async function countRelativeStrengthLatestCacheRows(
+  env: Env,
+  configKey: string,
+  tradingDate: string,
+): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count
+     FROM relative_strength_latest_cache
+     WHERE config_key = ?
+       AND trading_date = ?`,
+  )
+    .bind(configKey, tradingDate)
+    .first<{ count: number | string | null }>();
+  return Math.max(0, Number(row?.count ?? 0) || 0);
+}
+
+async function upsertRelativeStrengthLatestCacheRows(
+  env: Env,
+  configKey: string,
+  rows: RelativeStrengthLatestCacheRecord[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  for (let index = 0; index < rows.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = rows.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    await env.DB.batch(chunk.map((row) =>
+      env.DB.prepare(
+        `INSERT INTO relative_strength_latest_cache
+          (config_key, ticker, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, trading_date, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(config_key, ticker) DO UPDATE SET
+           benchmark_ticker = excluded.benchmark_ticker,
+           rs_ma_type = excluded.rs_ma_type,
+           rs_ma_length = excluded.rs_ma_length,
+           new_high_lookback = excluded.new_high_lookback,
+           trading_date = excluded.trading_date,
+           price_close = excluded.price_close,
+           change_1d = excluded.change_1d,
+           rs_ratio_close = excluded.rs_ratio_close,
+           rs_ratio_ma = excluded.rs_ratio_ma,
+           rs_above_ma = excluded.rs_above_ma,
+           rs_new_high = excluded.rs_new_high,
+           rs_new_high_before_price = excluded.rs_new_high_before_price,
+           bull_cross = excluded.bull_cross,
+           approx_rs_rating = excluded.approx_rs_rating,
+           updated_at = CURRENT_TIMESTAMP`,
+      ).bind(
+        configKey,
+        row.ticker,
+        row.benchmarkTicker,
+        row.rsMaType,
+        row.rsMaLength,
+        row.newHighLookback,
+        row.tradingDate,
+        row.priceClose,
+        row.change1d,
+        row.rsRatioClose,
+        row.rsRatioMa,
+        asBooleanFlag(row.rsAboveMa) ? 1 : 0,
+        asBooleanFlag(row.rsNewHigh) ? 1 : 0,
+        asBooleanFlag(row.rsNewHighBeforePrice) ? 1 : 0,
+        asBooleanFlag(row.bullCross) ? 1 : 0,
+        row.approxRsRating,
+      )));
+  }
 }
 
 function latestBarDate(bars: RelativeStrengthDailyBar[]): string | null {
@@ -1454,6 +1728,95 @@ async function loadStoredDailyBarsByCount(
   return out;
 }
 
+async function storeDailyBars(env: Env, bars: RelativeStrengthDailyBar[]): Promise<void> {
+  if (bars.length === 0) return;
+  const statements = bars.map((bar) =>
+    env.DB.prepare(
+      "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, (bar as { volume?: number }).volume ?? 0),
+  );
+  for (let index = 0; index < statements.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = statements.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    await env.DB.batch(chunk);
+  }
+}
+
+async function loadRelativeStrengthUniverseCount(env: Env): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count
+     FROM symbols s
+     WHERE COALESCE(s.is_active, 1) = 1
+       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
+       AND EXISTS (SELECT 1 FROM daily_bars d WHERE d.ticker = s.ticker)`,
+  )
+    .first<{ count: number | string | null }>();
+  return Math.max(0, Number(row?.count ?? 0) || 0);
+}
+
+async function loadRelativeStrengthUniverseBatch(
+  env: Env,
+  cursorOffset: number,
+  limit: number,
+): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    `SELECT s.ticker as ticker
+     FROM symbols s
+     WHERE COALESCE(s.is_active, 1) = 1
+       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
+       AND EXISTS (SELECT 1 FROM daily_bars d WHERE d.ticker = s.ticker)
+     ORDER BY s.ticker ASC
+     LIMIT ?
+     OFFSET ?`,
+  )
+    .bind(limit, cursorOffset)
+    .all<{ ticker: string }>();
+  return (rows.results ?? [])
+    .map((row) => row.ticker.toUpperCase())
+    .filter(Boolean);
+}
+
+async function ensureStoredDailyBarsCurrent(
+  env: Env,
+  tickers: string[],
+  expectedTradingDate: string,
+  requiredBarCount: number,
+): Promise<void> {
+  const uniqueTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (uniqueTickers.length === 0) return;
+  const coverageByTicker = await loadDailyBarCoverage(env, uniqueTickers, expectedTradingDate);
+  const staleOrMissingTickers = uniqueTickers.filter((ticker) => {
+    const coverage = coverageByTicker.get(ticker);
+    if (!coverage) return true;
+    return coverage.lastDate !== expectedTradingDate;
+  });
+  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
+  if (staleOrMissingTickers.length > 0) {
+    await refreshDailyBarsIncremental(env, {
+      tickers: staleOrMissingTickers,
+      startDate,
+      endDate: expectedTradingDate,
+      provider: getProvider(env),
+    });
+  }
+  const sparseTickers = uniqueTickers.filter((ticker) => {
+    const coverage = coverageByTicker.get(ticker);
+    return Boolean(coverage) && coverage.lastDate === expectedTradingDate && (coverage.barCount ?? 0) < requiredBarCount;
+  });
+  if (sparseTickers.length > 0) {
+    await refreshDailyBarsIncremental(env, {
+      tickers: sparseTickers,
+      startDate,
+      endDate: expectedTradingDate,
+      provider: getProvider(env),
+      replaceExisting: true,
+    });
+  }
+}
+
 async function fetchBenchmarkBarsWithFallback(
   env: Env,
   benchmarkTicker: string,
@@ -1503,7 +1866,13 @@ async function loadScanRefreshJobRecord(env: Env, jobId: string): Promise<ScanRe
        latest_snapshot_id as latestSnapshotId,
        requested_by as requestedBy,
        benchmark_bars_json as benchmarkBarsJson,
-       required_bar_count as requiredBarCount
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback
      FROM scan_refresh_jobs
      WHERE id = ?
      LIMIT 1`,
@@ -1536,13 +1905,106 @@ async function loadLatestScanRefreshJobRecordForPreset(
        latest_snapshot_id as latestSnapshotId,
        requested_by as requestedBy,
        benchmark_bars_json as benchmarkBarsJson,
-       required_bar_count as requiredBarCount
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback
      FROM scan_refresh_jobs
      WHERE ${clauses.join(" AND ")}
      ORDER BY datetime(started_at) DESC
      LIMIT 1`,
   )
     .bind(presetId)
+    .first<ScanRefreshJobRecord>();
+}
+
+async function loadLatestScanRefreshJobRecordForConfigKey(
+  env: Env,
+  configKey: string,
+  options?: { activeOnly?: boolean; expectedTradingDate?: string | null },
+): Promise<ScanRefreshJobRecord | null> {
+  const clauses = ["config_key = ?"];
+  const values: unknown[] = [configKey];
+  if (options?.expectedTradingDate) {
+    clauses.push("expected_trading_date = ?");
+    values.push(options.expectedTradingDate);
+  }
+  if (options?.activeOnly) {
+    clauses.push("status IN ('queued', 'running')");
+  }
+  return env.DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       job_type as jobType,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       total_candidates as totalCandidates,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       requested_by as requestedBy,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback
+     FROM scan_refresh_jobs
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY datetime(started_at) DESC
+     LIMIT 1`,
+  )
+    .bind(...values)
+    .first<ScanRefreshJobRecord>();
+}
+
+async function loadLatestCompletedScanRefreshJobRecordForConfigKey(
+  env: Env,
+  configKey: string,
+  expectedTradingDate: string,
+): Promise<ScanRefreshJobRecord | null> {
+  return env.DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       job_type as jobType,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       total_candidates as totalCandidates,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       requested_by as requestedBy,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback
+     FROM scan_refresh_jobs
+     WHERE config_key = ?
+       AND expected_trading_date = ?
+       AND status = 'completed'
+     ORDER BY datetime(completed_at) DESC, datetime(updated_at) DESC
+     LIMIT 1`,
+  )
+    .bind(configKey, expectedTradingDate)
     .first<ScanRefreshJobRecord>();
 }
 
@@ -1769,6 +2231,17 @@ async function updateScanRefreshJobRecord(
     .run();
 }
 
+function snapshotIsFreshForCompletedJob(
+  snapshot: Pick<ScanSnapshot, "generatedAt"> | null,
+  job: Pick<ScanRefreshJobRecord, "completedAt" | "updatedAt" | "expectedTradingDate"> | null,
+): boolean {
+  if (!snapshot || !job) return false;
+  const snapshotMs = toTimestampMs(snapshot.generatedAt);
+  const jobMs = toTimestampMs(job.completedAt ?? job.updatedAt);
+  if (snapshotMs == null || jobMs == null) return false;
+  return snapshotMs >= jobMs;
+}
+
 async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Promise<{
   providerLabel: string;
   matchedRowCount: number;
@@ -1776,6 +2249,12 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
   error: string | null;
   rows: ScanSnapshotRow[];
 }> {
+  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const completedJob = await loadLatestCompletedScanRefreshJobRecordForConfigKey(env, identity.configKey, identity.expectedTradingDate);
+  if (!completedJob) {
+    throw new Error(`Relative strength cache is not ready for ${identity.expectedTradingDate}.`);
+  }
+
   const prefilterRows = await fetchRelativeStrengthPrefilterRows(preset);
   if (prefilterRows.length === 0) {
     return {
@@ -1787,77 +2266,55 @@ async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Pr
     };
   }
 
-  const benchmarkTicker = benchmarkTickerForPreset(preset);
-  const benchmarkDataTicker = resolveBenchmarkTickerForData(benchmarkTicker);
-  const provider = getProvider(env);
-  const tickers = Array.from(new Set(prefilterRows.map((row) => row.ticker.toUpperCase())));
-  const endDate = latestUsSessionAsOfDate(new Date());
-  const requiredBarCount = requiredRelativeStrengthBarCount(preset);
-  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
-  const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkDataTicker, startDate, endDate);
-  if (benchmarkBars.length === 0) {
-    throw new Error(`No benchmark bars were available for ${benchmarkTicker}.`);
-  }
-  const expectedTradingDate = latestBarDate(benchmarkBars) ?? endDate;
-  const storedStockBars = await loadStoredDailyBarsInRange(env, tickers, startDate, endDate);
-  const storedBarsByTicker = groupBarsByTicker(storedStockBars);
-  const missingTickers = tickers.filter((ticker) => !storedBarsByTicker.has(ticker));
-  const deepHistoryTickers = tickers
-    .filter((ticker) => {
-      const storedBars = storedBarsByTicker.get(ticker) ?? [];
-      return storedBars.length > 0 && storedBars.length < preset.newHighLookback;
-    })
-    .sort((left, right) => ((storedBarsByTicker.get(left) ?? []).length - (storedBarsByTicker.get(right) ?? []).length))
-    .slice(0, RS_DEEP_HISTORY_TOP_UP_LIMIT);
-  const staleTickers = tickers.filter((ticker) => {
-    const latestStoredDate = latestBarDate(storedBarsByTicker.get(ticker) ?? []);
-    return latestStoredDate != null && latestStoredDate < expectedTradingDate;
-  });
-  const liveMissingBars = missingTickers.length > 0 && missingTickers.length <= RS_LIVE_TOP_UP_LIMIT
-    ? await provider.getDailyBars(missingTickers, startDate, expectedTradingDate)
-    : [];
-  const liveDeepHistoryBars = deepHistoryTickers.length > 0
-    ? await provider.getDailyBars(deepHistoryTickers, startDate, expectedTradingDate)
-    : [];
-  const staleTopUpStartDate = isoDateDaysBefore(expectedTradingDate, RS_STALE_TOP_UP_LOOKBACK_DAYS);
-  const liveStaleBars = staleTickers.length > 0 && staleTickers.length <= RS_STALE_TOP_UP_LIMIT
-    ? await provider.getDailyBars(staleTickers, staleTopUpStartDate, expectedTradingDate)
-    : [];
-  const barsByTicker = groupBarsByTicker([...storedStockBars, ...liveMissingBars, ...liveDeepHistoryBars, ...liveStaleBars]);
-
-  const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
-  const metadataByTicker = new Map(prefilterRows.map((row) => [row.ticker.toUpperCase(), row]));
-  const mergedRows: ScanSnapshotRow[] = latestRows
-    .filter((row) => row.tradingDate === expectedTradingDate)
-    .filter((row) => rowMatchesOutputMode(row, preset.outputMode))
+  const metadataByTicker = new Map(
+    prefilterRows
+      .map((row) => [row.ticker.toUpperCase(), row] as const),
+  );
+  const cacheRowsByTicker = await loadRelativeStrengthLatestCacheRows(
+    env,
+    identity.configKey,
+    Array.from(metadataByTicker.keys()),
+    identity.expectedTradingDate,
+  );
+  const scaleFactor = preset.verticalOffset * 100;
+  const mergedRows = Array.from(cacheRowsByTicker.values())
+    .filter((row) => cachedRowMatchesOutputMode(row, preset.outputMode))
     .map((row) => {
       const metadata = metadataByTicker.get(row.ticker);
       if (!metadata) return null;
-      const merged: ScanSnapshotRow = {
-        ...metadata,
+      const rsClose = row.rsRatioClose == null ? null : row.rsRatioClose * scaleFactor;
+      const rsMa = row.rsRatioMa == null ? null : row.rsRatioMa * scaleFactor;
+      return {
+        ticker: row.ticker,
+        name: metadata.name,
+        sector: metadata.sector,
+        industry: metadata.industry,
         change1d: row.change1d,
-        price: row.price,
-        rsClose: row.rsClose,
-        rsMa: row.rsMa,
-        rsAboveMa: row.rsAboveMa,
-        rsNewHigh: row.rsNewHigh,
-        rsNewHighBeforePrice: row.rsNewHighBeforePrice,
-        bullCross: row.bullCross,
+        marketCap: metadata.marketCap,
+        relativeVolume: metadata.relativeVolume,
+        price: row.priceClose,
+        avgVolume: metadata.avgVolume,
+        priceAvgVolume: metadata.priceAvgVolume,
+        rsClose,
+        rsMa,
+        rsAboveMa: asBooleanFlag(row.rsAboveMa),
+        rsNewHigh: asBooleanFlag(row.rsNewHigh),
+        rsNewHighBeforePrice: asBooleanFlag(row.rsNewHighBeforePrice),
+        bullCross: asBooleanFlag(row.bullCross),
         approxRsRating: row.approxRsRating,
         rawJson: JSON.stringify({
-          benchmarkTicker,
+          benchmarkTicker: identity.benchmarkTicker,
           tradingDate: row.tradingDate,
-          rsClose: row.rsClose,
-          rsMa: row.rsMa,
-          rsAboveMa: row.rsAboveMa,
-          rsNewHigh: row.rsNewHigh,
-          rsNewHighBeforePrice: row.rsNewHighBeforePrice,
-          bullCross: row.bullCross,
+          rsClose,
+          rsMa,
+          rsAboveMa: asBooleanFlag(row.rsAboveMa),
+          rsNewHigh: asBooleanFlag(row.rsNewHigh),
+          rsNewHighBeforePrice: asBooleanFlag(row.rsNewHighBeforePrice),
+          bullCross: asBooleanFlag(row.bullCross),
           approxRsRating: row.approxRsRating,
           relative_volume_10d_calc: metadata.relativeVolume,
         }),
-      };
-      return merged;
+      } satisfies ScanSnapshotRow;
     })
     .filter((row): row is ScanSnapshotRow => Boolean(row));
 
@@ -1876,24 +2333,34 @@ async function createRelativeStrengthRefreshJob(
   preset: ScanPreset,
   requestedBy?: string | null,
 ): Promise<ScanRefreshJobRecord> {
-  const existing = await loadLatestScanRefreshJobRecordForPreset(env, preset.id, { activeOnly: true });
+  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const existing = await loadLatestScanRefreshJobRecordForConfigKey(env, identity.configKey, {
+    activeOnly: true,
+    expectedTradingDate: identity.expectedTradingDate,
+  });
   if (existing) return existing;
 
-  const prefilterRows = await fetchRelativeStrengthPrefilterRows(preset);
   const jobId = crypto.randomUUID();
-  const requiredBarCount = requiredRelativeStrengthBarCount(preset);
+  const totalTickers = await loadRelativeStrengthUniverseCount(env);
   await env.DB.prepare(
     `INSERT INTO scan_refresh_jobs
-      (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count)
-     VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, 0, 0, NULL, ?, NULL, ?)`,
+      (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count, config_key, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback)
+     VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, 0, 0, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(jobId, preset.id, prefilterRows.length, requestedBy ?? null, requiredBarCount)
+    .bind(
+      jobId,
+      preset.id,
+      totalTickers,
+      requestedBy ?? null,
+      identity.requiredBarCount,
+      identity.configKey,
+      identity.expectedTradingDate,
+      identity.benchmarkTicker,
+      identity.rsMaType,
+      identity.rsMaLength,
+      identity.newHighLookback,
+    )
     .run();
-  await insertRelativeStrengthJobCandidates(
-    env,
-    jobId,
-    prefilterRows.map((row, index) => snapshotRowToJobCandidate(row, index)),
-  );
   const created = await loadScanRefreshJobRecord(env, jobId);
   if (!created) throw new Error("Failed to create scan refresh job.");
   return created;
@@ -1901,96 +2368,87 @@ async function createRelativeStrengthRefreshJob(
 
 async function ensureRelativeStrengthJobBenchmarkBars(
   env: Env,
-  preset: ScanPreset,
   job: ScanRefreshJobRecord,
 ): Promise<RelativeStrengthDailyBar[]> {
+  const identity = buildRelativeStrengthConfigIdentityFromJobRecord(job);
   const cached = deserializeBenchmarkBars(job.benchmarkBarsJson);
-  if (cached.length > 0) return cached;
-  const requiredBarCount = requiredRelativeStrengthBarCount(preset);
-  const benchmarkTicker = resolveBenchmarkTickerForData(benchmarkTickerForPreset(preset));
-  const endDate = latestUsSessionAsOfDate(new Date());
-  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
-  const benchmarkBars = await fetchBenchmarkBarsWithFallback(env, benchmarkTicker, startDate, endDate);
-  if (benchmarkBars.length === 0) {
-    throw new Error(`No benchmark bars were available for ${benchmarkTickerForPreset(preset)}.`);
+  if (cached.length > 0 && latestBarDate(cached) === identity.expectedTradingDate) return cached;
+
+  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(identity.requiredBarCount));
+  await refreshDailyBarsIncremental(env, {
+    tickers: [identity.benchmarkDataTicker],
+    startDate,
+    endDate: identity.expectedTradingDate,
+    maxTickers: 1,
+    provider: getProvider(env),
+  });
+
+  let benchmarkBars = await loadStoredDailyBarsByCount(
+    env,
+    [identity.benchmarkDataTicker],
+    identity.expectedTradingDate,
+    identity.requiredBarCount,
+  );
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length < identity.requiredBarCount) {
+    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+    await refreshDailyBarsIncremental(env, {
+      tickers: [identity.benchmarkDataTicker],
+      startDate,
+      endDate: identity.expectedTradingDate,
+      maxTickers: 1,
+      provider: fallbackProvider,
+    });
+    benchmarkBars = await loadStoredDailyBarsByCount(
+      env,
+      [identity.benchmarkDataTicker],
+      identity.expectedTradingDate,
+      identity.requiredBarCount,
+    );
+  }
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
+    const fallbackBars = await fetchBenchmarkBarsWithFallback(
+      env,
+      identity.benchmarkDataTicker,
+      startDate,
+      identity.expectedTradingDate,
+    );
+    if (fallbackBars.length > 0) {
+      await storeDailyBars(env, fallbackBars);
+      benchmarkBars = chooseFresherBars(benchmarkBars, fallbackBars);
+    }
+  }
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
+    throw new Error(`No benchmark bars were available for ${identity.benchmarkTicker}.`);
   }
   await updateScanRefreshJobRecord(env, job.id, {
     benchmarkBarsJson: JSON.stringify(benchmarkBars),
-    requiredBarCount,
+    requiredBarCount: identity.requiredBarCount,
   });
   return benchmarkBars;
 }
 
-async function mergeLatestRelativeStrengthBatch(
+async function materializeRelativeStrengthBatch(
   env: Env,
-  preset: ScanPreset,
-  candidates: RelativeStrengthJobCandidateRow[],
+  job: ScanRefreshJobRecord,
+  tickers: string[],
   benchmarkBars: RelativeStrengthDailyBar[],
-): Promise<ScanSnapshotRow[]> {
-  const tickers = Array.from(new Set(candidates.map((row) => row.ticker)));
-  const expectedTradingDate = latestBarDate(benchmarkBars) ?? latestUsSessionAsOfDate(new Date());
-  const requiredBarCount = requiredRelativeStrengthBarCount(preset);
-  const coverageByTicker = await loadDailyBarCoverage(env, tickers, expectedTradingDate);
-  const storedBars = await loadStoredDailyBarsByCount(env, tickers, expectedTradingDate, requiredBarCount);
-  const staleOrSparseOrMissing = tickers.filter((ticker) => {
-    const coverage = coverageByTicker.get(ticker);
-    if (!coverage) return true;
-    const lastDate = coverage.lastDate ?? null;
-    const barCount = coverage.barCount ?? 0;
-    return lastDate !== expectedTradingDate || barCount < requiredBarCount;
-  });
-  const liveBars: RelativeStrengthDailyBar[] = [];
-  if (staleOrSparseOrMissing.length > 0 && staleOrSparseOrMissing.length <= Math.max(RS_STALE_TOP_UP_LIMIT, RS_JOB_BATCH_SIZE)) {
-    const provider = getProvider(env);
-    const liveStartDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
-    for (let index = 0; index < staleOrSparseOrMissing.length; index += RS_JOB_PROVIDER_CHUNK_SIZE) {
-      const chunk = staleOrSparseOrMissing.slice(index, index + RS_JOB_PROVIDER_CHUNK_SIZE);
-      const chunkBars = await provider.getDailyBars(chunk, liveStartDate, expectedTradingDate);
-      liveBars.push(...chunkBars);
-    }
-  }
-  const barsByTicker = groupBarsByTicker([...storedBars, ...liveBars]);
-  const latestRows = await upsertRelativeStrengthCache(env, preset, barsByTicker, benchmarkBars);
-  const metadataByTicker = new Map(candidates.map((row) => [row.ticker, row]));
-  return latestRows
-    .filter((row) => row.tradingDate === expectedTradingDate)
-    .filter((row) => rowMatchesOutputMode(row, preset.outputMode))
-    .map((row) => {
-      const metadata = metadataByTicker.get(row.ticker);
-      if (!metadata) return null;
-      return {
-        ticker: row.ticker,
-        name: metadata.name,
-        sector: metadata.sector,
-        industry: metadata.industry,
-        change1d: row.change1d,
-        marketCap: metadata.marketCap,
-        relativeVolume: metadata.relativeVolume,
-        price: row.price,
-        avgVolume: metadata.avgVolume,
-        priceAvgVolume: metadata.priceAvgVolume,
-        rsClose: row.rsClose,
-        rsMa: row.rsMa,
-        rsAboveMa: row.rsAboveMa,
-        rsNewHigh: row.rsNewHigh,
-        rsNewHighBeforePrice: row.rsNewHighBeforePrice,
-        bullCross: row.bullCross,
-        approxRsRating: row.approxRsRating,
-        rawJson: JSON.stringify({
-          benchmarkTicker: benchmarkTickerForPreset(preset),
-          tradingDate: row.tradingDate,
-          rsClose: row.rsClose,
-          rsMa: row.rsMa,
-          rsAboveMa: row.rsAboveMa,
-          rsNewHigh: row.rsNewHigh,
-          rsNewHighBeforePrice: row.rsNewHighBeforePrice,
-          bullCross: row.bullCross,
-          approxRsRating: row.approxRsRating,
-          relative_volume_10d_calc: metadata.relativeVolume,
-        }),
-      } satisfies ScanSnapshotRow;
-    })
-    .filter((row): row is ScanSnapshotRow => Boolean(row));
+): Promise<number> {
+  const identity = buildRelativeStrengthConfigIdentityFromJobRecord(job);
+  const benchmarkTicker = identity.benchmarkDataTicker;
+  const candidateTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
+  ));
+  if (candidateTickers.length === 0) return 0;
+  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
+  const storedBars = await loadStoredDailyBarsByCount(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
+  const cacheRows = buildRelativeStrengthLatestCacheRows(groupBarsByTicker(storedBars), benchmarkBars, identity);
+  await upsertRelativeStrengthLatestCacheRows(env, identity.configKey, cacheRows);
+  return cacheRows.length;
 }
 
 async function storeScanSnapshotResult(
@@ -2031,6 +2489,23 @@ async function storeScanSnapshotResult(
   return snapshotId;
 }
 
+async function ensureRelativeStrengthSnapshotCurrent(
+  env: Env,
+  preset: ScanPreset,
+  completedJob: ScanRefreshJobRecord,
+): Promise<ScanSnapshot> {
+  const usableSnapshot = await loadLatestUsableScansSnapshot(env, preset.id);
+  if (snapshotIsFreshForCompletedJob(usableSnapshot, completedJob)) {
+    return usableSnapshot;
+  }
+  const result = await refreshRelativeStrengthSnapshot(env, preset);
+  await upsertSymbolsFromRows(env, result.rows);
+  await storeScanSnapshotResult(env, preset, result);
+  const snapshot = await loadLatestScansSnapshot(env, preset.id);
+  if (!snapshot) throw new Error("Failed to load refreshed scan snapshot.");
+  return snapshot;
+}
+
 export async function processRelativeStrengthRefreshJob(
   env: Env,
   jobId: string,
@@ -2046,24 +2521,20 @@ export async function processRelativeStrengthRefreshJob(
 
   try {
     await updateScanRefreshJobRecord(env, job.id, { status: "running" });
-    const benchmarkBars = await ensureRelativeStrengthJobBenchmarkBars(env, preset, job);
+    const benchmarkBars = await ensureRelativeStrengthJobBenchmarkBars(env, job);
     let cursorOffset = job.cursorOffset;
     let matchedCandidates = job.matchedCandidates;
-    let topRows = await loadRelativeStrengthJobTopRows(env, job.id);
     const startedAt = Date.now();
     const timeBudgetMs = options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS;
     const maxBatches = Math.max(1, options?.maxBatches ?? Number.POSITIVE_INFINITY);
     let processedBatchCount = 0;
 
     while (cursorOffset < job.totalCandidates && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
-      const batchCandidates = await loadRelativeStrengthJobCandidates(env, job.id, cursorOffset, RS_JOB_BATCH_SIZE);
-      if (batchCandidates.length === 0) break;
-      const batchRows = await mergeLatestRelativeStrengthBatch(env, preset, batchCandidates, benchmarkBars);
-      matchedCandidates += batchRows.length;
-      topRows = sortSnapshotRows([...topRows, ...batchRows], preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
-      cursorOffset += batchCandidates.length;
+      const batchTickers = await loadRelativeStrengthUniverseBatch(env, cursorOffset, RS_JOB_BATCH_SIZE);
+      if (batchTickers.length === 0) break;
+      matchedCandidates += await materializeRelativeStrengthBatch(env, job, batchTickers, benchmarkBars);
+      cursorOffset += batchTickers.length;
       processedBatchCount += 1;
-      await replaceRelativeStrengthJobTopRows(env, job.id, topRows);
       await updateScanRefreshJobRecord(env, job.id, {
         status: "running",
         processedCandidates: cursorOffset,
@@ -2073,21 +2544,11 @@ export async function processRelativeStrengthRefreshJob(
     }
 
     if (cursorOffset >= job.totalCandidates) {
-      const rows = sortSnapshotRows(topRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
-      await upsertSymbolsFromRows(env, rows);
-      const snapshotId = await storeScanSnapshotResult(env, preset, {
-        providerLabel: RS_PROVIDER_LABEL,
-        matchedRowCount: matchedCandidates,
-        status: rows.length > 0 ? "ok" : "empty",
-        error: null,
-        rows,
-      });
       await updateScanRefreshJobRecord(env, job.id, {
         status: "completed",
         processedCandidates: cursorOffset,
         matchedCandidates,
         cursorOffset,
-        latestSnapshotId: snapshotId,
         completedAt: new Date().toISOString(),
       });
     }
@@ -2117,6 +2578,26 @@ export async function requestScansRefresh(
       job: null,
     };
   }
+  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const activeJob = await loadLatestScanRefreshJobRecordForConfigKey(env, identity.configKey, {
+    activeOnly: true,
+    expectedTradingDate: identity.expectedTradingDate,
+  });
+  if (activeJob) {
+    return {
+      async: true,
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+      job: mapJobRecordToJob(activeJob, preset),
+    };
+  }
+  const completedJob = await loadLatestCompletedScanRefreshJobRecordForConfigKey(env, identity.configKey, identity.expectedTradingDate);
+  if (completedJob) {
+    return {
+      async: false,
+      snapshot: await ensureRelativeStrengthSnapshotCurrent(env, preset, completedJob),
+      job: null,
+    };
+  }
   const jobRecord = await createRelativeStrengthRefreshJob(env, preset, requestedBy);
   return {
     async: true,
@@ -2134,7 +2615,7 @@ export async function loadScanRefreshJob(
   const preset = await loadScanPreset(env, record.presetId);
   if (!preset) return null;
   const snapshot = record.status === "completed"
-    ? await loadLatestScansSnapshot(env, preset.id)
+    ? await ensureRelativeStrengthSnapshotCurrent(env, preset, record)
     : await loadLatestUsableScansSnapshot(env, preset.id);
   return {
     job: mapJobRecordToJob(record, preset),
@@ -2146,10 +2627,14 @@ export async function loadLatestActiveScanRefreshJob(
   env: Env,
   presetId: string,
 ): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
-  const record = await loadLatestScanRefreshJobRecordForPreset(env, presetId, { activeOnly: true });
-  if (!record) return null;
   const preset = await loadScanPreset(env, presetId);
-  if (!preset) return null;
+  if (!preset || preset.scanType !== "relative-strength") return null;
+  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const record = await loadLatestScanRefreshJobRecordForConfigKey(env, identity.configKey, {
+    activeOnly: true,
+    expectedTradingDate: identity.expectedTradingDate,
+  });
+  if (!record) return null;
   return {
     job: mapJobRecordToJob(record, preset),
     snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
@@ -2160,11 +2645,40 @@ export async function refreshActiveRelativeStrengthPresets(env: Env): Promise<Sc
   const presets = (await listScanPresets(env))
     .filter((preset) => preset.isActive && preset.scanType === "relative-strength");
   const jobs: ScanRefreshJob[] = [];
+  const completedJobsByConfigKey = new Map<string, ScanRefreshJobRecord>();
+  const seenConfigKeys = new Set<string>();
   for (const preset of presets) {
-    const response = await requestScansRefresh(env, preset.id, "scheduled");
-    if (!response.job) continue;
-    const processed = await processRelativeStrengthRefreshJob(env, response.job.id, { timeBudgetMs: RS_JOB_TIME_BUDGET_MS });
+    const identity = buildRelativeStrengthConfigIdentity(preset);
+    if (seenConfigKeys.has(identity.configKey)) continue;
+    seenConfigKeys.add(identity.configKey);
+    const completed = await loadLatestCompletedScanRefreshJobRecordForConfigKey(
+      env,
+      identity.configKey,
+      identity.expectedTradingDate,
+    );
+    if (completed) {
+      completedJobsByConfigKey.set(identity.configKey, completed);
+      continue;
+    }
+    const active = await loadLatestScanRefreshJobRecordForConfigKey(env, identity.configKey, {
+      activeOnly: true,
+      expectedTradingDate: identity.expectedTradingDate,
+    });
+    const jobRecord = active ?? await createRelativeStrengthRefreshJob(env, preset, "scheduled");
+    const processed = await processRelativeStrengthRefreshJob(env, jobRecord.id, { timeBudgetMs: RS_JOB_TIME_BUDGET_MS });
     if (processed) jobs.push(processed);
+    const completedAfterProcessing = await loadLatestCompletedScanRefreshJobRecordForConfigKey(
+      env,
+      identity.configKey,
+      identity.expectedTradingDate,
+    );
+    if (completedAfterProcessing) completedJobsByConfigKey.set(identity.configKey, completedAfterProcessing);
+  }
+  for (const preset of presets) {
+    const identity = buildRelativeStrengthConfigIdentity(preset);
+    const completed = completedJobsByConfigKey.get(identity.configKey);
+    if (!completed) continue;
+    await ensureRelativeStrengthSnapshotCurrent(env, preset, completed);
   }
   return jobs;
 }
@@ -2249,10 +2763,17 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) throw new Error("No scan preset is configured.");
 
+  if (preset.scanType === "relative-strength") {
+    const response = await requestScansRefresh(env, preset.id, "sync-refresh");
+    if (response.snapshot) return response.snapshot;
+    if (response.job) {
+      throw new Error(`Relative strength cache materialization is ${response.job.status} for ${response.job.expectedTradingDate ?? "the latest session"}.`);
+    }
+    throw new Error("Relative strength refresh could not load a snapshot.");
+  }
+
   try {
-    const result = preset.scanType === "relative-strength"
-      ? await refreshRelativeStrengthSnapshot(env, preset)
-      : await fetchTradingViewScanRows(preset);
+    const result = await fetchTradingViewScanRows(preset);
     await upsertSymbolsFromRows(env, result.rows);
     await storeScanSnapshotResult(env, preset, result);
   } catch (error) {
@@ -2260,7 +2781,7 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
     await env.DB.prepare(
       "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 0, 'error', ?)",
     )
-      .bind(crypto.randomUUID(), preset.id, preset.scanType === "relative-strength" ? RS_PROVIDER_LABEL : TV_PROVIDER_LABEL, message)
+      .bind(crypto.randomUUID(), preset.id, TV_PROVIDER_LABEL, message)
       .run();
   }
 
