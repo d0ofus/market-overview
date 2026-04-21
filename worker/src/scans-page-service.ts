@@ -2008,6 +2008,39 @@ async function loadLatestCompletedScanRefreshJobRecordForConfigKey(
     .first<ScanRefreshJobRecord>();
 }
 
+async function listActiveScanRefreshJobRecords(env: Env): Promise<ScanRefreshJobRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       job_type as jobType,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       total_candidates as totalCandidates,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       requested_by as requestedBy,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback
+     FROM scan_refresh_jobs
+     WHERE status IN ('queued', 'running')
+     ORDER BY datetime(updated_at) ASC, datetime(started_at) ASC`,
+  )
+    .all<ScanRefreshJobRecord>();
+  return rows.results ?? [];
+}
+
 async function insertRelativeStrengthJobCandidates(
   env: Env,
   jobId: string,
@@ -2641,10 +2674,66 @@ export async function loadLatestActiveScanRefreshJob(
   };
 }
 
-export async function refreshActiveRelativeStrengthPresets(env: Env): Promise<ScanRefreshJob[]> {
+export async function processQueuedRelativeStrengthRefreshJobs(
+  env: Env,
+  options?: { timeBudgetMs?: number; maxBatches?: number },
+): Promise<ScanRefreshJob[]> {
+  const startedAt = Date.now();
+  const totalTimeBudgetMs = Math.max(1_000, options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS);
+  let remainingBatches = options?.maxBatches == null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, options.maxBatches);
+  const processedByJobId = new Map<string, ScanRefreshJob>();
+
+  while (remainingBatches > 0 && Date.now() - startedAt < totalTimeBudgetMs) {
+    const activeJobs = await listActiveScanRefreshJobRecords(env);
+    if (activeJobs.length === 0) break;
+
+    let advancedAny = false;
+    for (const activeJob of activeJobs) {
+      if (remainingBatches <= 0 || Date.now() - startedAt >= totalTimeBudgetMs) break;
+      const remainingTimeBudgetMs = Math.max(1_000, totalTimeBudgetMs - (Date.now() - startedAt));
+      const processed = await processRelativeStrengthRefreshJob(env, activeJob.id, {
+        maxBatches: 1,
+        timeBudgetMs: remainingTimeBudgetMs,
+      });
+      if (!processed) continue;
+      processedByJobId.set(processed.id, processed);
+
+      const advanced = processed.status === "completed"
+        || processed.status === "failed"
+        || processed.processedCandidates > activeJob.processedCandidates
+        || processed.cursorOffset > activeJob.cursorOffset;
+      if (advanced) {
+        remainingBatches -= 1;
+        advancedAny = true;
+      }
+
+      if (processed.status === "completed") {
+        try {
+          await requestScansRefresh(env, processed.presetId, "background-completed");
+        } catch (error) {
+          console.error("background RS snapshot rebuild failed", {
+            jobId: processed.id,
+            presetId: processed.presetId,
+            error,
+          });
+        }
+      }
+    }
+
+    if (!advancedAny) break;
+  }
+
+  return Array.from(processedByJobId.values());
+}
+
+export async function refreshActiveRelativeStrengthPresets(
+  env: Env,
+  options?: { timeBudgetMs?: number; maxBatches?: number },
+): Promise<ScanRefreshJob[]> {
   const presets = (await listScanPresets(env))
     .filter((preset) => preset.isActive && preset.scanType === "relative-strength");
-  const jobs: ScanRefreshJob[] = [];
   const completedJobsByConfigKey = new Map<string, ScanRefreshJobRecord>();
   const seenConfigKeys = new Set<string>();
   for (const preset of presets) {
@@ -2664,15 +2753,22 @@ export async function refreshActiveRelativeStrengthPresets(env: Env): Promise<Sc
       activeOnly: true,
       expectedTradingDate: identity.expectedTradingDate,
     });
-    const jobRecord = active ?? await createRelativeStrengthRefreshJob(env, preset, "scheduled");
-    const processed = await processRelativeStrengthRefreshJob(env, jobRecord.id, { timeBudgetMs: RS_JOB_TIME_BUDGET_MS });
-    if (processed) jobs.push(processed);
-    const completedAfterProcessing = await loadLatestCompletedScanRefreshJobRecordForConfigKey(
-      env,
-      identity.configKey,
-      identity.expectedTradingDate,
-    );
-    if (completedAfterProcessing) completedJobsByConfigKey.set(identity.configKey, completedAfterProcessing);
+    if (!active) {
+      await createRelativeStrengthRefreshJob(env, preset, "scheduled");
+    }
+  }
+  const jobs = await processQueuedRelativeStrengthRefreshJobs(env, options);
+  for (const preset of presets) {
+    const identity = buildRelativeStrengthConfigIdentity(preset);
+    const completed = completedJobsByConfigKey.get(identity.configKey)
+      ?? await loadLatestCompletedScanRefreshJobRecordForConfigKey(
+        env,
+        identity.configKey,
+        identity.expectedTradingDate,
+      );
+    if (completed) {
+      completedJobsByConfigKey.set(identity.configKey, completed);
+    }
   }
   for (const preset of presets) {
     const identity = buildRelativeStrengthConfigIdentity(preset);
@@ -2680,7 +2776,7 @@ export async function refreshActiveRelativeStrengthPresets(env: Env): Promise<Sc
     if (!completed) continue;
     await ensureRelativeStrengthSnapshotCurrent(env, preset, completed);
   }
-  return jobs;
+  return jobs.filter((job) => seenConfigKeys.has(job.configKey ?? ""));
 }
 
 type ScanSnapshotHeader = {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminWorkerSchedulePatchSchema,
   correlationMatrixQuerySchema,
   correlationPairQuerySchema,
   groupPatchSchema,
@@ -87,5 +88,21 @@ describe("validation", () => {
         rollingWindow: "120D",
       })
     ).toThrow("Rolling window cannot be larger than the selected lookback.");
+  });
+
+  it("validates worker schedule runtime controls", () => {
+    const parsed = adminWorkerSchedulePatchSchema.parse({
+      id: "default",
+      rsBackgroundEnabled: true,
+      rsBackgroundMaxBatchesPerTick: 12,
+      rsBackgroundTimeBudgetMs: 12000,
+      postCloseBarsEnabled: true,
+      postCloseBarsOffsetMinutes: 60,
+      postCloseBarsBatchSize: 400,
+      postCloseBarsMaxBatchesPerTick: 4,
+    });
+
+    expect(parsed.rsBackgroundMaxBatchesPerTick).toBe(12);
+    expect(parsed.postCloseBarsOffsetMinutes).toBe(60);
   });
 });

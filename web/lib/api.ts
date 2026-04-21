@@ -894,6 +894,18 @@ export type SymbolCatalogStatus = {
   catalogManagedCount: number;
 };
 
+export type WorkerScheduleSettings = {
+  id: string;
+  cronExpression: string;
+  rsBackgroundEnabled: boolean;
+  rsBackgroundMaxBatchesPerTick: number;
+  rsBackgroundTimeBudgetMs: number;
+  postCloseBarsEnabled: boolean;
+  postCloseBarsOffsetMinutes: number;
+  postCloseBarsBatchSize: number;
+  postCloseBarsMaxBatchesPerTick: number;
+};
+
 export type PeerMetricRow = {
   ticker: string;
   price: number | null;
@@ -1715,6 +1727,17 @@ export function addAdminSymbolToDirectory(ticker: string) {
 
 export function getAdminSymbolCatalogStatus() {
   return adminFetch<SymbolCatalogStatus>("/api/admin/symbols/status");
+}
+
+export function getAdminWorkerSchedule() {
+  return adminFetch<WorkerScheduleSettings>("/api/admin/worker-schedule");
+}
+
+export function updateAdminWorkerSchedule(payload: Omit<WorkerScheduleSettings, "cronExpression">) {
+  return adminFetch<{ ok: boolean; settings: WorkerScheduleSettings }>("/api/admin/worker-schedule", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function syncAdminSymbolCatalog() {

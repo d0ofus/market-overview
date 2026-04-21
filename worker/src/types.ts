@@ -87,6 +87,32 @@ export type DashboardConfigPayload = {
   }>;
 };
 
+export type WorkerScheduleSettings = {
+  id: string;
+  cronExpression: string;
+  rsBackgroundEnabled: boolean;
+  rsBackgroundMaxBatchesPerTick: number;
+  rsBackgroundTimeBudgetMs: number;
+  postCloseBarsEnabled: boolean;
+  postCloseBarsOffsetMinutes: number;
+  postCloseBarsBatchSize: number;
+  postCloseBarsMaxBatchesPerTick: number;
+};
+
+export type PostCloseDailyBarRefreshJob = {
+  id: string;
+  tradingDate: string;
+  scope: string;
+  status: "queued" | "running" | "completed" | "failed";
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  totalTickers: number;
+  processedTickers: number;
+  cursorOffset: number;
+};
+
 export type SnapshotResponse = {
   asOfDate: string;
   generatedAt: string;

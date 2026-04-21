@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { ZodError } from "zod";
 import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
-import type { Env } from "./types";
+import type { Env, PostCloseDailyBarRefreshJob } from "./types";
 import {
   configPatchSchema,
   correlationMatrixQuerySchema,
@@ -35,6 +35,7 @@ import {
   adminSymbolAddSchema,
   adminSymbolCatalogSyncSchema,
   adminSymbolCatalogScheduleSchema,
+  adminWorkerSchedulePatchSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -87,6 +88,7 @@ import {
   loadScanRefreshJob,
   loadScanPreset,
   processRelativeStrengthRefreshJob,
+  processQueuedRelativeStrengthRefreshJobs,
   refreshScanCompilePreset,
   refreshActiveRelativeStrengthPresets,
   refreshScansSnapshot,
@@ -115,6 +117,12 @@ import {
   maybeRunScheduledSymbolCatalogSync,
   syncSymbolCatalogFromNasdaqTrader,
 } from "./symbol-directory-service";
+import {
+  loadLatestPostCloseDailyBarRefreshJobForDate,
+  loadWorkerScheduleSettings,
+  maybeRunScheduledPostCloseDailyBarRefresh,
+  updateWorkerScheduleSettings,
+} from "./worker-schedule-service";
 import {
   compileActiveWatchlistSets,
   compileWatchlistSet,
@@ -2246,6 +2254,20 @@ app.post("/api/admin/scans/refresh", async (c) => {
   const payload = scanRefreshSchema.parse(await c.req.json().catch(() => ({})));
   try {
     const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
+    if (result.async && result.job) {
+      const settings = await loadWorkerScheduleSettings(c.env);
+      if (settings.rsBackgroundEnabled) {
+        c.executionCtx.waitUntil((async () => {
+          const processed = await processRelativeStrengthRefreshJob(c.env, result.job!.id, {
+            maxBatches: settings.rsBackgroundMaxBatchesPerTick,
+            timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
+          });
+          if (processed?.status === "completed") {
+            await requestScansRefresh(c.env, processed.presetId, "background-completed");
+          }
+        })());
+      }
+    }
     return c.json({ ok: true, ...result });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh scans." }, 500);
@@ -2687,6 +2709,17 @@ app.get("/api/admin/config", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load admin config.";
     console.error("admin config load failed", { configId, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/admin/worker-schedule", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const settings = await loadWorkerScheduleSettings(c.env);
+    return c.json(settings);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load worker schedule settings.";
     return c.json({ error: message }, 500);
   }
 });
@@ -3416,6 +3449,22 @@ app.patch("/api/admin/config", async (c) => {
   return c.json({ ok: true });
 });
 
+app.patch("/api/admin/worker-schedule", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = adminWorkerSchedulePatchSchema.parse(await c.req.json());
+    const settings = await updateWorkerScheduleSettings(c.env, payload);
+    await upsertAudit(c.env, "default", "WORKER_SCHEDULE_PATCH", payload);
+    return c.json({ ok: true, settings });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid worker schedule payload." }, 400);
+    }
+    const message = error instanceof Error ? error.message : "Failed to update worker schedule.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.patch("/api/admin/group/:groupId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
@@ -3750,12 +3799,47 @@ export default {
     } catch (error) {
       console.error("scheduled symbol catalog sync failed", error);
     }
+    const workerSchedule = await loadWorkerScheduleSettings(env);
+    if (workerSchedule.rsBackgroundEnabled) {
+      try {
+        await processQueuedRelativeStrengthRefreshJobs(env, {
+          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
+          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+        });
+      } catch (error) {
+        console.error("scheduled RS background processing failed", error);
+      }
+    }
+    let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
+    try {
+      postCloseJob = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
+    } catch (error) {
+      console.error("scheduled post-close daily bar refresh failed", error);
+    }
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
+    const expectedAsOf = latestUsSessionAsOfDate(now);
+    if (!postCloseJob && workerSchedule.postCloseBarsEnabled) {
+      postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, expectedAsOf);
+    }
+    const shouldRunScheduledRelativeStrength = workerSchedule.rsBackgroundEnabled && (
+      workerSchedule.postCloseBarsEnabled
+        ? postCloseJob?.status === "completed"
+        : shouldRunScheduledEod(now, timezone, refreshTime)
+    );
+    if (shouldRunScheduledRelativeStrength) {
+      try {
+        await refreshActiveRelativeStrengthPresets(env, {
+          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
+          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+        });
+      } catch (error) {
+        console.error("scheduled relative strength refresh failed", error);
+      }
+    }
     if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 
-    const expectedAsOf = latestUsSessionAsOfDate(now);
     const latestOverview = await env.DB.prepare(
       "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
     )
@@ -3773,11 +3857,6 @@ export default {
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
     if (latestOverview?.asOfDate !== expectedAsOf || !breadthIsComplete) {
       await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
-    }
-    try {
-      await refreshActiveRelativeStrengthPresets(env);
-    } catch (error) {
-      console.error("scheduled relative strength refresh failed", error);
     }
     await syncMonthlyEtfSlice(env);
   },

@@ -27,6 +27,17 @@ export const configPatchSchema = z.object({
   eodRunTimeLabel: z.string().min(1),
 });
 
+export const adminWorkerSchedulePatchSchema = z.object({
+  id: z.string().min(1).default("default"),
+  rsBackgroundEnabled: z.boolean(),
+  rsBackgroundMaxBatchesPerTick: z.number().int().min(1).max(100),
+  rsBackgroundTimeBudgetMs: z.number().int().min(1_000).max(30_000),
+  postCloseBarsEnabled: z.boolean(),
+  postCloseBarsOffsetMinutes: z.number().int().min(0).max(240),
+  postCloseBarsBatchSize: z.number().int().min(20).max(2_000),
+  postCloseBarsMaxBatchesPerTick: z.number().int().min(1).max(20),
+});
+
 export const groupPatchSchema = z.object({
   title: z.string().min(1),
   rankingWindowDefault: rankingWindowSchema,
