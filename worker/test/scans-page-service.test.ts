@@ -101,12 +101,16 @@ function createMutableScansEnv(input: {
   compilePresets?: MutableCompilePreset[];
   snapshots?: MutableSnapshot[];
   symbols?: string[];
+  dailyBarsByTicker?: Record<string, Array<{ date: string; o: number; h: number; l: number; c: number; volume: number }>>;
   rowsBySnapshotId?: Record<string, Array<Partial<ScanSnapshotRow> & Pick<ScanSnapshotRow, "ticker">>>;
 }) {
   const presets = [...input.presets];
   const compilePresets = [...(input.compilePresets ?? [])];
   const snapshots = [...(input.snapshots ?? [])];
   const symbols = new Set((input.symbols ?? []).map((ticker) => ticker.toUpperCase()));
+  const dailyBarsByTicker = new Map(
+    Object.entries(input.dailyBarsByTicker ?? {}).map(([ticker, bars]) => [ticker.toUpperCase(), [...bars]]),
+  );
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -184,6 +188,17 @@ function createMutableScansEnv(input: {
           async all<T>() {
             if (sql.includes("FROM symbols")) {
               return { results: Array.from(symbols).map((ticker) => ({ ticker })) as T[] };
+            }
+            if (sql.includes("FROM daily_bars")) {
+              const endDate = String(args[args.length - 1] ?? "");
+              const startDate = String(args[args.length - 2] ?? "");
+              const requestedTickers = args.slice(0, -2).map((value) => String(value).toUpperCase());
+              const results = requestedTickers.flatMap((ticker) =>
+                (dailyBarsByTicker.get(ticker) ?? [])
+                  .filter((row) => row.date >= startDate && row.date <= endDate)
+                  .map((row) => ({ ticker, ...row })),
+              );
+              return { results: results as T[] };
             }
             if (sql.includes("FROM scan_compile_presets cp")) {
               const compilePresetId = sql.includes("WHERE cp.id = ?") ? String(args[0] ?? "") : undefined;
@@ -631,10 +646,65 @@ describe("scans page service", () => {
       providerEnv.DATA_PROVIDER === "stooq" ? fallbackProvider as any : primaryProvider as any);
 
     const result = await refreshScansSnapshot(env, "preset-rs");
+    const attemptedEndDates = new Set(fallbackProvider.getDailyBars.mock.calls.map((call) => String(call[2] ?? "")));
 
     expect(result.status).toBe("ok");
     expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
-    expect(fallbackProvider.getDailyBars).toHaveBeenCalledTimes(2);
+    expect(fallbackProvider.getDailyBars).toHaveBeenCalled();
+    expect(attemptedEndDates.size).toBeGreaterThan(1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to stored benchmark bars when live providers cannot return the benchmark ticker", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-stored",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const stockBars = makeBars("NVDA", 260, 100, 1);
+    const storedBenchmarkBars = makeBars("SPY", 260, 90, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA", "SPY"],
+      dailyBarsByTicker: {
+        SPY: storedBenchmarkBars.map(({ date, o, h, l, c, volume }) => ({ date, o, h, l, c, volume })),
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const providerWithoutBenchmark = {
+      label: "provider-without-benchmark",
+      getDailyBars: vi.fn(async (tickers: string[]) => (tickers[0] === "NVDA" ? stockBars : [])),
+    };
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => providerWithoutBenchmark as any);
+
+    const result = await refreshScansSnapshot(env, "preset-rs-stored");
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(providerWithoutBenchmark.getDailyBars).toHaveBeenCalled();
 
     vi.unstubAllGlobals();
   });

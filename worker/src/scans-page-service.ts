@@ -1210,6 +1210,60 @@ function rowMatchesOutputMode(row: RelativeStrengthLatestRow, outputMode: Relati
   return true;
 }
 
+function latestBarDate(bars: RelativeStrengthDailyBar[]): string | null {
+  let latest: string | null = null;
+  for (const bar of bars) {
+    if (!latest || bar.date > latest) latest = bar.date;
+  }
+  return latest;
+}
+
+function chooseFresherBars(
+  current: RelativeStrengthDailyBar[],
+  candidate: RelativeStrengthDailyBar[],
+): RelativeStrengthDailyBar[] {
+  const currentLatest = latestBarDate(current);
+  const candidateLatest = latestBarDate(candidate);
+  if (!candidateLatest) return current;
+  if (!currentLatest || candidateLatest > currentLatest) return candidate;
+  if (candidateLatest === currentLatest && candidate.length > current.length) return candidate;
+  return current;
+}
+
+async function loadStoredDailyBars(
+  env: Env,
+  tickers: string[],
+  startDate: string,
+  endDate: string,
+): Promise<RelativeStrengthDailyBar[]> {
+  const uniqueTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (uniqueTickers.length === 0) return [];
+  const placeholders = uniqueTickers.map(() => "?").join(",");
+  const rows = await env.DB.prepare(
+    `SELECT ticker, date, o, h, l, c, volume
+     FROM daily_bars
+     WHERE ticker IN (${placeholders})
+       AND date >= ?
+       AND date <= ?
+     ORDER BY ticker ASC, date ASC`,
+  )
+    .bind(...uniqueTickers, startDate, endDate)
+    .all<RelativeStrengthDailyBar>();
+  return (rows.results ?? []).map((row) => ({
+    ticker: row.ticker.toUpperCase(),
+    date: row.date,
+    o: row.o,
+    h: row.h,
+    l: row.l,
+    c: row.c,
+    volume: row.volume ?? 0,
+  }));
+}
+
 async function fetchBenchmarkBarsWithFallback(
   env: Env,
   benchmarkTicker: string,
@@ -1219,18 +1273,22 @@ async function fetchBenchmarkBarsWithFallback(
   const primaryProvider = getProvider(env);
   const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
   let candidateEndDate = endDate;
+  let bestBars: RelativeStrengthDailyBar[] = [];
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const primaryBars = await primaryProvider.getDailyBars([benchmarkTicker], startDate, candidateEndDate);
-    if (primaryBars.length > 0) return primaryBars;
+    bestBars = chooseFresherBars(bestBars, primaryBars);
+    if (latestBarDate(primaryBars) === candidateEndDate) return primaryBars;
 
     const fallbackBars = await fallbackProvider.getDailyBars([benchmarkTicker], startDate, candidateEndDate);
-    if (fallbackBars.length > 0) return fallbackBars;
+    bestBars = chooseFresherBars(bestBars, fallbackBars);
+    if (latestBarDate(fallbackBars) === candidateEndDate) return fallbackBars;
 
     candidateEndDate = previousWeekdayIso(candidateEndDate);
   }
 
-  return [];
+  const storedBars = await loadStoredDailyBars(env, [benchmarkTicker], startDate, endDate);
+  return chooseFresherBars(bestBars, storedBars);
 }
 
 async function refreshRelativeStrengthSnapshot(env: Env, preset: ScanPreset): Promise<{
