@@ -404,6 +404,14 @@ function createMutableScansEnv(input: {
             if (sql.includes("FROM scan_presets WHERE id = ?")) {
               return presets.find((row) => row.id === args[0]) ?? null as T;
             }
+            if (sql.includes("FROM scan_refresh_job_candidates") && sql.includes("COUNT(*) as candidateCount")) {
+              const jobId = String(args[0] ?? "");
+              const rows = scanRefreshJobCandidates.filter((row) => row.jobId === jobId);
+              return {
+                candidateCount: rows.length,
+                materializationCount: rows.filter((row) => row.materializationRequired === 1).length,
+              } as T;
+            }
             if (sql.includes("FROM scan_refresh_jobs") && sql.includes("WHERE id = ?")) {
               return scanRefreshJobs.find((row) => row.id === args[0]) ?? null as T;
             }
@@ -1635,6 +1643,169 @@ describe("scans page service", () => {
     expect(result?.rows[0]?.rawJson).toContain(`"tradingDate":"${latestTradingDate}"`);
 
     vi.unstubAllGlobals();
+  });
+
+  it("resets malformed active RS jobs that are missing candidate rows before creating a fresh job", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-reset-broken-job",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+    });
+
+    env.__testState.scanRefreshJobs.push({
+      id: "broken-rs-job",
+      presetId: relativeStrengthPreset.id,
+      jobType: "relative-strength",
+      status: "running",
+      startedAt: "2026-04-22T10:30:00.000Z",
+      updatedAt: "2026-04-22T10:30:00.000Z",
+      completedAt: null,
+      error: null,
+      totalCandidates: 1,
+      processedCandidates: 0,
+      matchedCandidates: 0,
+      cursorOffset: 0,
+      latestSnapshotId: null,
+      requestedBy: "test",
+      benchmarkBarsJson: null,
+      requiredBarCount: 504,
+      configKey: "SPY|EMA|21|252",
+      expectedTradingDate: CURRENT_RS_SESSION,
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      fullCandidateCount: 1,
+      materializationCandidateCount: 1,
+      alreadyCurrentCandidateCount: 0,
+      lastAdvancedAt: null,
+    });
+    env.__testState.relativeStrengthRefreshQueue.set("broken-rs-job", {
+      jobId: "broken-rs-job",
+      source: "continuation",
+      enqueuedAt: "2026-04-22T10:30:00.000Z",
+      lastAttemptedAt: null,
+      attempts: 3,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await requestScansRefresh(env, relativeStrengthPreset.id, "test");
+
+    expect(response.async).toBe(true);
+    expect(response.job).not.toBeNull();
+    expect(response.job?.id).not.toBe("broken-rs-job");
+    const brokenJob = env.__testState.scanRefreshJobs.find((job: MutableScanRefreshJob) => job.id === "broken-rs-job");
+    expect(brokenJob?.status).toBe("failed");
+    expect(brokenJob?.error).toContain("missing candidate rows");
+    expect(env.__testState.relativeStrengthRefreshQueue.has("broken-rs-job")).toBe(false);
+    expect(env.__testState.scanRefreshJobCandidates.filter((row: MutableScanRefreshJobCandidate) => row.jobId === response.job?.id)).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("completes RS jobs immediately when there are no stale candidates left to materialize", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-zero-stale",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+    });
+
+    env.__testState.scanRefreshJobs.push({
+      id: "zero-stale-job",
+      presetId: relativeStrengthPreset.id,
+      jobType: "relative-strength",
+      status: "running",
+      startedAt: "2026-04-22T10:35:00.000Z",
+      updatedAt: "2026-04-22T10:35:00.000Z",
+      completedAt: null,
+      error: null,
+      totalCandidates: 1,
+      processedCandidates: 0,
+      matchedCandidates: 0,
+      cursorOffset: 0,
+      latestSnapshotId: null,
+      requestedBy: "test",
+      benchmarkBarsJson: null,
+      requiredBarCount: 504,
+      configKey: "SPY|EMA|21|252",
+      expectedTradingDate: CURRENT_RS_SESSION,
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      fullCandidateCount: 1,
+      materializationCandidateCount: 0,
+      alreadyCurrentCandidateCount: 1,
+      lastAdvancedAt: null,
+    });
+    env.__testState.scanRefreshJobCandidates.push({
+      jobId: "zero-stale-job",
+      cursorOffset: 0,
+      ticker: "NVDA",
+      name: "NVIDIA",
+      sector: "Technology",
+      industry: "Semiconductors",
+      marketCap: 1,
+      relativeVolume: 1,
+      avgVolume: 1,
+      priceAvgVolume: 1,
+      materializationRequired: 0,
+    });
+    env.__testState.relativeStrengthRefreshQueue.set("zero-stale-job", {
+      jobId: "zero-stale-job",
+      source: "continuation",
+      enqueuedAt: "2026-04-22T10:35:00.000Z",
+      lastAttemptedAt: null,
+      attempts: 0,
+    });
+
+    const processed = await processRelativeStrengthRefreshJob(env, "zero-stale-job", {
+      maxBatches: 1,
+      timeBudgetMs: 60_000,
+    });
+
+    expect(processed?.status).toBe("completed");
+    expect(processed?.matchedCandidates).toBe(1);
+    expect(processed?.materializationCandidateCount).toBe(0);
+    expect(env.__testState.relativeStrengthRefreshQueue.has("zero-stale-job")).toBe(false);
   });
 
   it("drops stale RS rows when a ticker cannot be refreshed to the benchmark's latest session", async () => {
