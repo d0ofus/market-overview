@@ -98,6 +98,10 @@ type MutableScanRefreshJob = {
   rsMaType: "SMA" | "EMA";
   rsMaLength: number;
   newHighLookback: number;
+  fullCandidateCount: number;
+  materializationCandidateCount: number;
+  alreadyCurrentCandidateCount: number;
+  lastAdvancedAt: string | null;
 };
 
 type MutableRelativeStrengthLatestCacheRow = {
@@ -139,6 +143,46 @@ type MutableScanRefreshJobCandidate = {
   relativeVolume: number | null;
   avgVolume: number | null;
   priceAvgVolume: number | null;
+  materializationRequired: number;
+};
+
+type MutableRelativeStrengthConfigState = {
+  configKey: string;
+  ticker: string;
+  benchmarkTicker: string;
+  rsMaType: "SMA" | "EMA";
+  rsMaLength: number;
+  newHighLookback: number;
+  stateVersion: number;
+  latestTradingDate: string;
+  updatedAt: string | null;
+  priceClose: number | null;
+  change1d: number | null;
+  rsRatioClose: number | null;
+  rsRatioMa: number | null;
+  rsAboveMa: number;
+  rsNewHigh: number;
+  rsNewHighBeforePrice: number;
+  bullCross: number;
+  approxRsRating: number | null;
+  priceCloseHistoryJson: string | null;
+  benchmarkCloseHistoryJson: string | null;
+  weightedScoreHistoryJson: string | null;
+  rsNewHighWindowJson: string | null;
+  priceNewHighWindowJson: string | null;
+  smaWindowJson: string | null;
+  smaSum: number | null;
+  emaValue: number | null;
+  previousRsClose: number | null;
+  previousRsMa: number | null;
+};
+
+type MutableRelativeStrengthRefreshQueueRow = {
+  jobId: string;
+  source: string | null;
+  enqueuedAt: string;
+  lastAttemptedAt: string | null;
+  attempts: number;
 };
 
 const CURRENT_RS_SESSION = "2026-04-21";
@@ -215,6 +259,8 @@ function createMutableScansEnv(input: {
   const scanRefreshJobCandidates: MutableScanRefreshJobCandidate[] = [];
   const relativeStrengthLatestCache = new Map<string, MutableRelativeStrengthLatestCacheRow>();
   const relativeStrengthRatioCache = new Map<string, MutableRelativeStrengthRatioCacheRow>();
+  const relativeStrengthConfigState = new Map<string, MutableRelativeStrengthConfigState>();
+  const relativeStrengthRefreshQueue = new Map<string, MutableRelativeStrengthRefreshQueueRow>();
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -238,13 +284,17 @@ function createMutableScansEnv(input: {
     }))]),
   );
   let generatedCounter = snapshots.length;
+  let timestampCounter = 0;
 
   const nextTimestamp = () => {
+    timestampCounter += 1;
+    return new Date(Date.UTC(2026, 2, 18, 12, 0, timestampCounter)).toISOString();
+  };
+
+  const nextGeneratedAt = () => {
     generatedCounter += 1;
     return `2026-03-18T${String(generatedCounter).padStart(2, "0")}:00:00.000Z`;
   };
-
-  const nextGeneratedAt = () => nextTimestamp();
 
   const buildCompilePresetRows = (compilePresetId?: string) =>
     compilePresets
@@ -327,6 +377,10 @@ function createMutableScansEnv(input: {
       else if (column === "latest_snapshot_id") job.latestSnapshotId = value == null ? null : String(value);
       else if (column === "benchmark_bars_json") job.benchmarkBarsJson = value == null ? null : String(value);
       else if (column === "required_bar_count") job.requiredBarCount = Number(value ?? job.requiredBarCount);
+      else if (column === "full_candidate_count") job.fullCandidateCount = Number(value ?? job.fullCandidateCount);
+      else if (column === "materialization_candidate_count") job.materializationCandidateCount = Number(value ?? job.materializationCandidateCount);
+      else if (column === "already_current_candidate_count") job.alreadyCurrentCandidateCount = Number(value ?? job.alreadyCurrentCandidateCount);
+      else if (column === "last_advanced_at") job.lastAdvancedAt = value == null ? null : String(value);
       else if (column === "completed_at") job.completedAt = value == null ? null : String(value);
     }
   };
@@ -337,6 +391,8 @@ function createMutableScansEnv(input: {
       scanRefreshJobCandidates,
       relativeStrengthLatestCache,
       relativeStrengthRatioCache,
+      relativeStrengthConfigState,
+      relativeStrengthRefreshQueue,
       dailyBarsByTicker,
     },
     DB: {
@@ -419,18 +475,30 @@ function createMutableScansEnv(input: {
                 .filter((row) => row.configKey === configKey && row.tradingDate === tradingDate && tickers.includes(row.ticker));
               return { results: results as T[] };
             }
+            if (sql.includes("FROM relative_strength_config_state")) {
+              const configKey = String(args[0] ?? "");
+              const tickers = args.slice(1).map((value) => String(value).toUpperCase());
+              const results = Array.from(relativeStrengthConfigState.values())
+                .filter((row) => row.configKey === configKey && tickers.includes(row.ticker));
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM relative_strength_refresh_queue")) {
+              const results = Array.from(relativeStrengthRefreshQueue.values())
+                .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt));
+              return { results: results as T[] };
+            }
             if (sql.includes("FROM scan_refresh_job_candidates")) {
               const jobId = String(args[0] ?? "");
               const results = scanRefreshJobCandidates
                 .filter((row) => row.jobId === jobId)
                 .sort((left, right) => left.cursorOffset - right.cursorOffset);
-              if (sql.includes("cursor_offset >= ?")) {
-                const cursorOffset = Number(args[1] ?? 0);
-                const limit = Number(args[2] ?? results.length);
+              if (sql.includes("materialization_required = 1")) {
+                const limit = Number(args[1] ?? results.length);
+                const offset = Number(args[2] ?? 0);
                 return {
                   results: results
-                    .filter((row) => row.cursorOffset >= cursorOffset)
-                    .slice(0, limit) as T[],
+                    .filter((row) => row.materializationRequired === 1)
+                    .slice(offset, offset + limit) as T[],
                 };
               }
               return { results: results as T[] };
@@ -521,6 +589,7 @@ function createMutableScansEnv(input: {
                 id,
                 presetId,
                 totalCandidates,
+                matchedCandidates,
                 requestedBy,
                 requiredBarCount,
                 configKey,
@@ -529,6 +598,9 @@ function createMutableScansEnv(input: {
                 rsMaType,
                 rsMaLength,
                 newHighLookback,
+                fullCandidateCount,
+                materializationCandidateCount,
+                alreadyCurrentCandidateCount,
               ] = args;
               scanRefreshJobs.push({
                 id: String(id),
@@ -541,7 +613,7 @@ function createMutableScansEnv(input: {
                 error: null,
                 totalCandidates: Number(totalCandidates ?? 0),
                 processedCandidates: 0,
-                matchedCandidates: 0,
+                matchedCandidates: Number(matchedCandidates ?? 0),
                 cursorOffset: 0,
                 latestSnapshotId: null,
                 requestedBy: requestedBy == null ? null : String(requestedBy),
@@ -553,10 +625,35 @@ function createMutableScansEnv(input: {
                 rsMaType: String(rsMaType ?? "EMA") as "SMA" | "EMA",
                 rsMaLength: Number(rsMaLength ?? 21),
                 newHighLookback: Number(newHighLookback ?? 252),
+                fullCandidateCount: Number(fullCandidateCount ?? totalCandidates ?? 0),
+                materializationCandidateCount: Number(materializationCandidateCount ?? totalCandidates ?? 0),
+                alreadyCurrentCandidateCount: Number(alreadyCurrentCandidateCount ?? 0),
+                lastAdvancedAt: null,
               });
             }
             if (sql.includes("UPDATE scan_refresh_jobs SET")) {
               updateJob(sql, args);
+            }
+            if (sql.includes("INSERT INTO relative_strength_refresh_queue")) {
+              const [jobId, source] = args;
+              relativeStrengthRefreshQueue.set(String(jobId), {
+                jobId: String(jobId),
+                source: source == null ? null : String(source),
+                enqueuedAt: nextTimestamp(),
+                lastAttemptedAt: null,
+                attempts: 0,
+              });
+            }
+            if (sql.includes("UPDATE relative_strength_refresh_queue")) {
+              const [jobId] = args;
+              const row = relativeStrengthRefreshQueue.get(String(jobId));
+              if (row) {
+                row.lastAttemptedAt = nextTimestamp();
+                row.attempts += 1;
+              }
+            }
+            if (sql.includes("DELETE FROM relative_strength_refresh_queue WHERE job_id = ?")) {
+              relativeStrengthRefreshQueue.delete(String(args[0] ?? ""));
             }
             if (sql.includes("DELETE FROM rs_ratio_cache")) {
               const benchmarkTicker = String(args[0] ?? "").toUpperCase();
@@ -692,7 +789,7 @@ function createMutableScansEnv(input: {
             continue;
           }
           if (statement.__sql.includes("INSERT INTO scan_refresh_job_candidates")) {
-            const [jobId, cursorOffset, ticker, name, sector, industry, marketCap, relativeVolume, avgVolume, priceAvgVolume] = statement.__args ?? [];
+            const [jobId, cursorOffset, ticker, name, sector, industry, marketCap, relativeVolume, avgVolume, priceAvgVolume, materializationRequired] = statement.__args ?? [];
             scanRefreshJobCandidates.push({
               jobId: String(jobId),
               cursorOffset: Number(cursorOffset ?? 0),
@@ -704,6 +801,69 @@ function createMutableScansEnv(input: {
               relativeVolume: relativeVolume == null ? null : Number(relativeVolume),
               avgVolume: avgVolume == null ? null : Number(avgVolume),
               priceAvgVolume: priceAvgVolume == null ? null : Number(priceAvgVolume),
+              materializationRequired: Number(materializationRequired ?? 1),
+            });
+            continue;
+          }
+          if (statement.__sql.includes("INSERT INTO relative_strength_config_state")) {
+            const [
+              configKey,
+              ticker,
+              benchmarkTicker,
+              rsMaType,
+              rsMaLength,
+              newHighLookback,
+              stateVersion,
+              latestTradingDate,
+              priceClose,
+              change1d,
+              rsRatioClose,
+              rsRatioMa,
+              rsAboveMa,
+              rsNewHigh,
+              rsNewHighBeforePrice,
+              bullCross,
+              approxRsRating,
+              priceCloseHistoryJson,
+              benchmarkCloseHistoryJson,
+              weightedScoreHistoryJson,
+              rsNewHighWindowJson,
+              priceNewHighWindowJson,
+              smaWindowJson,
+              smaSum,
+              emaValue,
+              previousRsClose,
+              previousRsMa,
+            ] = statement.__args ?? [];
+            relativeStrengthConfigState.set(`${String(configKey)}|${String(ticker).toUpperCase()}`, {
+              configKey: String(configKey),
+              ticker: String(ticker).toUpperCase(),
+              benchmarkTicker: String(benchmarkTicker).toUpperCase(),
+              rsMaType: String(rsMaType ?? "EMA") as "SMA" | "EMA",
+              rsMaLength: Number(rsMaLength ?? 21),
+              newHighLookback: Number(newHighLookback ?? 252),
+              stateVersion: Number(stateVersion ?? 0),
+              latestTradingDate: String(latestTradingDate),
+              updatedAt: nextTimestamp(),
+              priceClose: priceClose == null ? null : Number(priceClose),
+              change1d: change1d == null ? null : Number(change1d),
+              rsRatioClose: rsRatioClose == null ? null : Number(rsRatioClose),
+              rsRatioMa: rsRatioMa == null ? null : Number(rsRatioMa),
+              rsAboveMa: Number(rsAboveMa ?? 0),
+              rsNewHigh: Number(rsNewHigh ?? 0),
+              rsNewHighBeforePrice: Number(rsNewHighBeforePrice ?? 0),
+              bullCross: Number(bullCross ?? 0),
+              approxRsRating: approxRsRating == null ? null : Number(approxRsRating),
+              priceCloseHistoryJson: priceCloseHistoryJson == null ? null : String(priceCloseHistoryJson),
+              benchmarkCloseHistoryJson: benchmarkCloseHistoryJson == null ? null : String(benchmarkCloseHistoryJson),
+              weightedScoreHistoryJson: weightedScoreHistoryJson == null ? null : String(weightedScoreHistoryJson),
+              rsNewHighWindowJson: rsNewHighWindowJson == null ? null : String(rsNewHighWindowJson),
+              priceNewHighWindowJson: priceNewHighWindowJson == null ? null : String(priceNewHighWindowJson),
+              smaWindowJson: smaWindowJson == null ? null : String(smaWindowJson),
+              smaSum: smaSum == null ? null : Number(smaSum),
+              emaValue: emaValue == null ? null : Number(emaValue),
+              previousRsClose: previousRsClose == null ? null : Number(previousRsClose),
+              previousRsMa: previousRsMa == null ? null : Number(previousRsMa),
             });
             continue;
           }
@@ -813,6 +973,10 @@ function seedCompletedRelativeStrengthCache(
     rsMaType: preset.rsMaType,
     rsMaLength: preset.rsMaLength,
     newHighLookback: preset.newHighLookback,
+    fullCandidateCount: rows.length,
+    materializationCandidateCount: 0,
+    alreadyCurrentCandidateCount: rows.length,
+    lastAdvancedAt: "2026-04-21T00:05:00.000Z",
   });
   rows.forEach((row, index) => {
     env.__testState.scanRefreshJobCandidates.push({
@@ -826,6 +990,7 @@ function seedCompletedRelativeStrengthCache(
       relativeVolume: 1,
       avgVolume: 1,
       priceAvgVolume: 1,
+      materializationRequired: 0,
     });
   });
   for (const row of rows) {
@@ -846,6 +1011,36 @@ function seedCompletedRelativeStrengthCache(
       rsNewHighBeforePrice: row.rsNewHighBeforePrice ? 1 : 0,
       bullCross: row.bullCross ? 1 : 0,
       approxRsRating: row.approxRsRating ?? null,
+    });
+    env.__testState.relativeStrengthConfigState.set(`${configKey}|${row.ticker.toUpperCase()}`, {
+      configKey,
+      ticker: row.ticker.toUpperCase(),
+      benchmarkTicker,
+      rsMaType: preset.rsMaType,
+      rsMaLength: preset.rsMaLength,
+      newHighLookback: preset.newHighLookback,
+      stateVersion: 1,
+      latestTradingDate: row.tradingDate,
+      updatedAt: "2026-04-21T00:05:00.000Z",
+      priceClose: row.priceClose,
+      change1d: row.change1d ?? null,
+      rsRatioClose: row.rsRatioClose,
+      rsRatioMa: row.rsRatioMa ?? null,
+      rsAboveMa: row.rsAboveMa ? 1 : 0,
+      rsNewHigh: row.rsNewHigh ? 1 : 0,
+      rsNewHighBeforePrice: row.rsNewHighBeforePrice ? 1 : 0,
+      bullCross: row.bullCross ? 1 : 0,
+      approxRsRating: row.approxRsRating ?? null,
+      priceCloseHistoryJson: JSON.stringify([row.priceClose]),
+      benchmarkCloseHistoryJson: JSON.stringify([100]),
+      weightedScoreHistoryJson: JSON.stringify([0]),
+      rsNewHighWindowJson: JSON.stringify([row.rsRatioClose]),
+      priceNewHighWindowJson: JSON.stringify([row.priceClose]),
+      smaWindowJson: JSON.stringify(row.rsRatioMa == null ? [] : [row.rsRatioClose]),
+      smaSum: row.rsRatioMa == null ? null : row.rsRatioClose,
+      emaValue: row.rsRatioMa ?? row.rsRatioClose,
+      previousRsClose: row.rsRatioClose,
+      previousRsMa: row.rsRatioMa ?? row.rsRatioClose,
     });
   }
   return { configKey, expectedTradingDate };
@@ -1504,7 +1699,7 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
-  it("treats RS materialization jobs as preset-specific even when configs match", async () => {
+  it("reuses current RS config state across presets when the config matches", async () => {
     const sharedBasePreset: ScanPreset = {
       ...topGainersPreset,
       scanType: "relative-strength",
@@ -1567,10 +1762,11 @@ describe("scans page service", () => {
     const warmedB = await requestScansRefresh(env, presetB.id, "test");
 
     expect(warmedA.async).toBe(false);
-    expect(warmedB.async).toBe(true);
+    expect(warmedB.async).toBe(false);
     expect(warmedA.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
     expect(warmedA.snapshot?.rows[0]?.rawJson).toContain(`"tradingDate":"${seeded.expectedTradingDate}"`);
-    expect(warmedB.job?.presetId).toBe(presetB.id);
+    expect(warmedB.job).toBeNull();
+    expect(warmedB.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
 
     vi.unstubAllGlobals();
   });

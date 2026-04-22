@@ -25,10 +25,13 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
+> Add finviz themes map (https://finviz.com/map.ashx?t=themes)
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
+> Make keyboard shortcut to expand chart (Alt + Enter) (?)
+> See if there can be tradingview financials widgets shown in the expanded chart
 
 ## Peer Groups
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
@@ -40,7 +43,8 @@
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
 ## Scans
-- Add RS scan
+> Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
+> Do a big overhaul to improve the UI to be more user friendly
 - Add strongest FA scan
 - Add Strong earnings scanner
 - Colour by industry

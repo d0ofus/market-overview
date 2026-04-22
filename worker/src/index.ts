@@ -2258,14 +2258,11 @@ app.post("/api/admin/scans/refresh", async (c) => {
       const settings = await loadWorkerScheduleSettings(c.env);
       if (settings.rsBackgroundEnabled) {
         c.executionCtx.waitUntil((async () => {
-          const processed = await processRelativeStrengthRefreshJob(c.env, result.job!.id, {
+          await processQueuedRelativeStrengthRefreshJobs(c.env, {
             batchSize: settings.rsBackgroundBatchSize,
             maxBatches: settings.rsBackgroundMaxBatchesPerTick,
             timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
           });
-          if (processed?.status === "completed") {
-            await requestScansRefresh(c.env, processed.presetId, "background-completed");
-          }
         })());
       }
     }
@@ -2280,6 +2277,16 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const presetId = (c.req.query("presetId") ?? "").trim();
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
+  if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
+    const settings = await loadWorkerScheduleSettings(c.env);
+    if (settings.rsBackgroundEnabled) {
+      c.executionCtx.waitUntil(processQueuedRelativeStrengthRefreshJobs(c.env, {
+        batchSize: settings.rsBackgroundBatchSize,
+        maxBatches: settings.rsBackgroundMaxBatchesPerTick,
+        timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
+      }));
+    }
+  }
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
@@ -2287,6 +2294,16 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
+  if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
+    const settings = await loadWorkerScheduleSettings(c.env);
+    if (settings.rsBackgroundEnabled) {
+      c.executionCtx.waitUntil(processQueuedRelativeStrengthRefreshJobs(c.env, {
+        batchSize: settings.rsBackgroundBatchSize,
+        maxBatches: settings.rsBackgroundMaxBatchesPerTick,
+        timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
+      }));
+    }
+  }
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });

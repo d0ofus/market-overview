@@ -309,6 +309,10 @@ export type ScanRefreshJob = {
   requestedBy: string | null;
   configKey: string | null;
   expectedTradingDate: string | null;
+  fullCandidateCount: number;
+  materializationCandidateCount: number;
+  alreadyCurrentCandidateCount: number;
+  lastAdvancedAt: string | null;
 };
 
 export type ScanRefreshResponse = {

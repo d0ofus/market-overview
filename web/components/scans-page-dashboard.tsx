@@ -862,7 +862,7 @@ export function ScansPageDashboard() {
       setNewsByTicker({});
       if (response.async && response.job) {
         setMessage(
-          `Started RS cache materialization for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.totalCandidates} tickers processed so far.`,
+          `Started RS cache materialization for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.materializationCandidateCount} stale tickers processed so far, ${response.job.alreadyCurrentCandidateCount} already current out of ${response.job.fullCandidateCount}.`,
         );
       } else if (response.snapshot) {
         setMessage(
@@ -1595,7 +1595,7 @@ export function ScansPageDashboard() {
               </p>
               {refreshJob ? (
                 <p className="mt-1 text-xs text-slate-400">
-                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.totalCandidates} tickers materialized, {refreshJob.matchedCandidates} cached for {refreshJob.expectedTradingDate ?? "the latest session"}.
+                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.materializationCandidateCount} stale tickers materialized, {refreshJob.alreadyCurrentCandidateCount} already current out of {refreshJob.fullCandidateCount} total, {refreshJob.matchedCandidates} cached for {refreshJob.expectedTradingDate ?? "the latest session"}{refreshJob.lastAdvancedAt ? `, last advanced ${formatDateTime(refreshJob.lastAdvancedAt)}.` : "."}
                   {snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}
                 </p>
               ) : null}

@@ -104,6 +104,7 @@ describe("validation", () => {
     const parsed = adminWorkerSchedulePatchSchema.parse({
       id: "default",
       rsBackgroundEnabled: true,
+      rsBackgroundBatchSize: 40,
       rsBackgroundMaxBatchesPerTick: 12,
       rsBackgroundTimeBudgetMs: 12000,
       postCloseBarsEnabled: true,
@@ -112,6 +113,7 @@ describe("validation", () => {
       postCloseBarsMaxBatchesPerTick: 4,
     });
 
+    expect(parsed.rsBackgroundBatchSize).toBe(40);
     expect(parsed.rsBackgroundMaxBatchesPerTick).toBe(12);
     expect(parsed.postCloseBarsOffsetMinutes).toBe(60);
   });

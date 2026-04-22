@@ -50,6 +50,39 @@ export type RelativeStrengthRatioRow = {
   rsRatioClose: number;
 };
 
+export type RelativeStrengthConfigState = {
+  configKey: string;
+  ticker: string;
+  benchmarkTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+  stateVersion: number;
+  latestTradingDate: string;
+  updatedAt: string | null;
+  priceClose: number | null;
+  change1d: number | null;
+  rsRatioClose: number | null;
+  rsRatioMa: number | null;
+  rsAboveMa: boolean;
+  rsNewHigh: boolean;
+  rsNewHighBeforePrice: boolean;
+  bullCross: boolean;
+  approxRsRating: number | null;
+  priceCloseHistory: number[];
+  benchmarkCloseHistory: number[];
+  weightedScoreHistory: number[];
+  rsNewHighWindow: number[];
+  priceNewHighWindow: number[];
+  smaWindow: number[];
+  smaSum: number | null;
+  emaValue: number | null;
+  previousRsClose: number | null;
+  previousRsMa: number | null;
+};
+
+export const RS_STATE_VERSION = 1;
+
 type AlignedSeries = {
   tradingDate: string;
   priceClose: number;
@@ -170,6 +203,56 @@ function relPerformance(closeSeries: number[], benchmarkSeries: number[], index:
   return closeNow / closeThen / (benchmarkNow / benchmarkThen) - 1;
 }
 
+function relPerformanceFromHistory(closeSeries: number[], benchmarkSeries: number[], lookback: number): number | null {
+  if (closeSeries.length <= lookback || benchmarkSeries.length <= lookback) return null;
+  const index = closeSeries.length - 1;
+  return relPerformance(closeSeries, benchmarkSeries, index, lookback);
+}
+
+function trimWindow(values: number[], maxLength: number): number[] {
+  if (maxLength <= 0) return [];
+  return values.length > maxLength ? values.slice(values.length - maxLength) : [...values];
+}
+
+function appendWindow(values: number[], nextValue: number, maxLength: number): number[] {
+  return trimWindow([...values, nextValue], maxLength);
+}
+
+function buildWeightedScoreSeries(priceCloseSeries: number[], benchmarkCloseSeries: number[]): number[] {
+  const weightedScoreSeries: number[] = [];
+  for (let index = 0; index < priceCloseSeries.length; index += 1) {
+    const score =
+      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 63) ?? 0) * 0.4 +
+      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 126) ?? 0) * 0.2 +
+      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 189) ?? 0) * 0.2 +
+      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 252) ?? 0) * 0.2;
+    weightedScoreSeries.push(Number.isFinite(score) ? score : 0);
+  }
+  return weightedScoreSeries;
+}
+
+function computeApproxRsRating(weightedScoreHistory: number[]): number {
+  if (weightedScoreHistory.length === 0) return 50;
+  const current = weightedScoreHistory[weightedScoreHistory.length - 1];
+  let scoreMin = Number.POSITIVE_INFINITY;
+  let scoreMax = Number.NEGATIVE_INFINITY;
+  for (const value of weightedScoreHistory) {
+    if (!Number.isFinite(value)) continue;
+    scoreMin = Math.min(scoreMin, value);
+    scoreMax = Math.max(scoreMax, value);
+  }
+  if (!Number.isFinite(current) || !Number.isFinite(scoreMin) || !Number.isFinite(scoreMax) || scoreMax === scoreMin) {
+    return 50;
+  }
+  return Math.max(1, Math.min(99, Math.round(1 + 98 * ((current - scoreMin) / (scoreMax - scoreMin)))));
+}
+
+function latestValue(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const value = values[values.length - 1];
+  return Number.isFinite(value) ? value : null;
+}
+
 export function buildRelativeStrengthRatioRows(
   tickerBars: RelativeStrengthDailyBar[],
   benchmarkBars: RelativeStrengthDailyBar[],
@@ -210,16 +293,7 @@ export function buildRelativeStrengthCacheRowsFromRatioRows(
   const priceCloseSeries = aligned.map((row) => row.priceClose);
   const benchmarkCloseSeries = aligned.map((row) => row.benchmarkClose);
   const movingAverageSeries = calculateMovingAverage(rsCloseSeries, config.rsMaLength, config.rsMaType);
-  const weightedScoreSeries: Array<number | null> = [];
-
-  for (let index = 0; index < aligned.length; index += 1) {
-    const score =
-      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 63) ?? 0) * 0.4 +
-      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 126) ?? 0) * 0.2 +
-      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 189) ?? 0) * 0.2 +
-      (relPerformance(priceCloseSeries, benchmarkCloseSeries, index, 252) ?? 0) * 0.2;
-    weightedScoreSeries.push(Number.isFinite(score) ? score : null);
-  }
+  const weightedScoreSeries = buildWeightedScoreSeries(priceCloseSeries, benchmarkCloseSeries);
 
   return aligned.map((row, index) => {
     const rsClose = toFinite(rsCloseSeries[index]);
@@ -258,6 +332,170 @@ export function buildRelativeStrengthCacheRowsFromRatioRows(
       approxRsRating,
     };
   }).filter((row) => row.ticker);
+}
+
+export function bootstrapRelativeStrengthStateFromRatioRows(
+  ratioRows: RelativeStrengthRatioRow[],
+  config: RelativeStrengthConfig,
+  options: { configKey: string; updatedAt?: string | null },
+): { state: RelativeStrengthConfigState; latestCacheRow: RelativeStrengthCacheRow } | null {
+  const aligned = [...ratioRows]
+    .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate))
+    .filter((row) => Number.isFinite(row.priceClose) && Number.isFinite(row.benchmarkClose) && row.benchmarkClose !== 0 && Number.isFinite(row.rsRatioClose));
+  if (aligned.length === 0) return null;
+
+  const cacheRows = buildRelativeStrengthCacheRowsFromRatioRows(aligned, config);
+  const latestCacheRow = cacheRows[cacheRows.length - 1];
+  if (!latestCacheRow) return null;
+
+  const scaleFactor = config.verticalOffset * 100;
+  const priceCloseSeries = aligned.map((row) => row.priceClose);
+  const benchmarkCloseSeries = aligned.map((row) => row.benchmarkClose);
+  const rsCloseSeries = aligned.map((row) => row.rsRatioClose * scaleFactor);
+  const movingAverageSeries = calculateMovingAverage(rsCloseSeries, config.rsMaLength, config.rsMaType);
+  const weightedScoreSeries = buildWeightedScoreSeries(priceCloseSeries, benchmarkCloseSeries);
+  const smaWindow = config.rsMaType === "SMA"
+    ? trimWindow(rsCloseSeries, config.rsMaLength)
+    : [];
+  const smaSum = config.rsMaType === "SMA" && smaWindow.length >= config.rsMaLength
+    ? smaWindow.reduce((sum, value) => sum + value, 0)
+    : null;
+  const emaValue = config.rsMaType === "EMA"
+    ? toFinite(movingAverageSeries[movingAverageSeries.length - 1])
+    : null;
+
+  return {
+    state: {
+      configKey: options.configKey,
+      ticker: latestCacheRow.ticker.toUpperCase(),
+      benchmarkTicker: config.benchmarkTicker.toUpperCase(),
+      rsMaType: config.rsMaType,
+      rsMaLength: config.rsMaLength,
+      newHighLookback: config.newHighLookback,
+      stateVersion: RS_STATE_VERSION,
+      latestTradingDate: latestCacheRow.tradingDate,
+      updatedAt: options.updatedAt ?? null,
+      priceClose: latestCacheRow.priceClose,
+      change1d: latestCacheRow.change1d,
+      rsRatioClose: latestCacheRow.rsClose,
+      rsRatioMa: latestCacheRow.rsMa,
+      rsAboveMa: latestCacheRow.rsAboveMa,
+      rsNewHigh: latestCacheRow.rsNewHigh,
+      rsNewHighBeforePrice: latestCacheRow.rsNewHighBeforePrice,
+      bullCross: latestCacheRow.bullCross,
+      approxRsRating: latestCacheRow.approxRsRating,
+      priceCloseHistory: trimWindow(priceCloseSeries, 253),
+      benchmarkCloseHistory: trimWindow(benchmarkCloseSeries, 253),
+      weightedScoreHistory: trimWindow(weightedScoreSeries, 252),
+      rsNewHighWindow: trimWindow(rsCloseSeries, config.newHighLookback),
+      priceNewHighWindow: trimWindow(priceCloseSeries, config.newHighLookback),
+      smaWindow,
+      smaSum,
+      emaValue,
+      previousRsClose: rsCloseSeries.length > 1 ? rsCloseSeries[rsCloseSeries.length - 2] : null,
+      previousRsMa: movingAverageSeries.length > 1 ? toFinite(movingAverageSeries[movingAverageSeries.length - 2]) : null,
+    },
+    latestCacheRow,
+  };
+}
+
+export function advanceRelativeStrengthState(
+  state: RelativeStrengthConfigState,
+  ratioRow: RelativeStrengthRatioRow,
+  config: RelativeStrengthConfig,
+  options?: { updatedAt?: string | null },
+): { state: RelativeStrengthConfigState; latestCacheRow: RelativeStrengthCacheRow } {
+  const scaleFactor = config.verticalOffset * 100;
+  const rsClose = ratioRow.rsRatioClose * scaleFactor;
+  const nextPriceHistory = appendWindow(state.priceCloseHistory, ratioRow.priceClose, 253);
+  const nextBenchmarkHistory = appendWindow(state.benchmarkCloseHistory, ratioRow.benchmarkClose, 253);
+  const previousPriceClose = nextPriceHistory.length > 1 ? nextPriceHistory[nextPriceHistory.length - 2] : NaN;
+
+  let rsMa: number | null = null;
+  let nextSmaWindow = state.smaWindow;
+  let nextSmaSum = state.smaSum;
+  let nextEmaValue = state.emaValue;
+  if (config.rsMaType === "EMA") {
+    const multiplier = 2 / (Math.max(1, config.rsMaLength) + 1);
+    nextEmaValue = nextEmaValue == null ? rsClose : (rsClose - nextEmaValue) * multiplier + nextEmaValue;
+    rsMa = nextEmaValue;
+  } else {
+    nextSmaWindow = appendWindow(state.smaWindow, rsClose, config.rsMaLength);
+    nextSmaSum = nextSmaWindow.reduce((sum, value) => sum + value, 0);
+    rsMa = nextSmaWindow.length >= config.rsMaLength ? nextSmaSum / config.rsMaLength : null;
+  }
+
+  const nextRsWindow = appendWindow(state.rsNewHighWindow, rsClose, config.newHighLookback);
+  const nextPriceWindow = appendWindow(state.priceNewHighWindow, ratioRow.priceClose, config.newHighLookback);
+  const rsWindowHigh = nextRsWindow.length > 0 ? Math.max(...nextRsWindow) : null;
+  const priceWindowHigh = nextPriceWindow.length > 0 ? Math.max(...nextPriceWindow) : null;
+  const rsNewHigh = rsWindowHigh != null && rsClose >= rsWindowHigh;
+  const priceNewHigh = priceWindowHigh != null && ratioRow.priceClose >= priceWindowHigh;
+
+  const weightedScore =
+    (relPerformanceFromHistory(nextPriceHistory, nextBenchmarkHistory, 63) ?? 0) * 0.4 +
+    (relPerformanceFromHistory(nextPriceHistory, nextBenchmarkHistory, 126) ?? 0) * 0.2 +
+    (relPerformanceFromHistory(nextPriceHistory, nextBenchmarkHistory, 189) ?? 0) * 0.2 +
+    (relPerformanceFromHistory(nextPriceHistory, nextBenchmarkHistory, 252) ?? 0) * 0.2;
+  const nextWeightedScores = appendWindow(state.weightedScoreHistory, Number.isFinite(weightedScore) ? weightedScore : 0, 252);
+  const approxRsRating = computeApproxRsRating(nextWeightedScores);
+  const previousRsClose = state.rsRatioClose;
+  const previousRsMa = state.rsRatioMa;
+  const bullCross = previousRsClose != null && previousRsMa != null && rsMa != null
+    ? previousRsClose <= previousRsMa && rsClose > rsMa
+    : false;
+  const change1d = Number.isFinite(previousPriceClose) ? pctChange(ratioRow.priceClose, previousPriceClose) : null;
+
+  const latestCacheRow: RelativeStrengthCacheRow = {
+    ticker: state.ticker.toUpperCase(),
+    benchmarkTicker: config.benchmarkTicker.toUpperCase(),
+    tradingDate: ratioRow.tradingDate,
+    priceClose: ratioRow.priceClose,
+    change1d,
+    rsOpen: null,
+    rsHigh: null,
+    rsLow: null,
+    rsClose,
+    rsMa,
+    rsAboveMa: rsMa != null ? rsClose >= rsMa : false,
+    rsNewHigh,
+    rsNewHighBeforePrice: rsNewHigh && !priceNewHigh,
+    bullCross,
+    approxRsRating,
+  };
+
+  return {
+    state: {
+      ...state,
+      benchmarkTicker: config.benchmarkTicker.toUpperCase(),
+      rsMaType: config.rsMaType,
+      rsMaLength: config.rsMaLength,
+      newHighLookback: config.newHighLookback,
+      stateVersion: RS_STATE_VERSION,
+      latestTradingDate: ratioRow.tradingDate,
+      updatedAt: options?.updatedAt ?? state.updatedAt,
+      priceClose: latestCacheRow.priceClose,
+      change1d: latestCacheRow.change1d,
+      rsRatioClose: latestCacheRow.rsClose,
+      rsRatioMa: latestCacheRow.rsMa,
+      rsAboveMa: latestCacheRow.rsAboveMa,
+      rsNewHigh: latestCacheRow.rsNewHigh,
+      rsNewHighBeforePrice: latestCacheRow.rsNewHighBeforePrice,
+      bullCross: latestCacheRow.bullCross,
+      approxRsRating: latestCacheRow.approxRsRating,
+      priceCloseHistory: nextPriceHistory,
+      benchmarkCloseHistory: nextBenchmarkHistory,
+      weightedScoreHistory: nextWeightedScores,
+      rsNewHighWindow: nextRsWindow,
+      priceNewHighWindow: nextPriceWindow,
+      smaWindow: nextSmaWindow,
+      smaSum: nextSmaSum,
+      emaValue: nextEmaValue,
+      previousRsClose,
+      previousRsMa,
+    },
+    latestCacheRow,
+  };
 }
 
 export function buildRelativeStrengthCacheRows(

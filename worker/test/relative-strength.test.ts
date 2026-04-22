@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildRelativeStrengthCacheRows } from "../src/relative-strength";
+import {
+  advanceRelativeStrengthState,
+  bootstrapRelativeStrengthStateFromRatioRows,
+  buildRelativeStrengthCacheRows,
+  buildRelativeStrengthCacheRowsFromRatioRows,
+  buildRelativeStrengthRatioRows,
+} from "../src/relative-strength";
 
 function makeBars(values: number[], ticker: string, baseDate = new Date("2024-01-02T00:00:00Z")) {
   return values.map((close, index) => {
@@ -70,5 +76,64 @@ describe("relative strength", () => {
     const firstCross = rows.find((row) => row.bullCross);
     expect(firstCross?.rsClose).not.toBeNull();
     expect(firstCross?.rsMa).not.toBeNull();
+  });
+
+  it("keeps EMA incremental state in parity with the full-history recomputation", () => {
+    const benchmarkBars = makeBars(Array.from({ length: 270 }, (_, index) => 100 + index * 0.15), "SPY");
+    const stockBars = makeBars(Array.from({ length: 270 }, (_, index) => 75 + index * 0.38), "MSFT");
+    const config = {
+      benchmarkTicker: "SPY",
+      verticalOffset: 0.01,
+      rsMaLength: 21,
+      rsMaType: "EMA" as const,
+      newHighLookback: 252,
+    };
+    const ratioRows = buildRelativeStrengthRatioRows(stockBars, benchmarkBars, "SPY");
+    const bootstrap = bootstrapRelativeStrengthStateFromRatioRows(
+      ratioRows.slice(0, -1),
+      config,
+      { configKey: "SPY|EMA|21|252" },
+    );
+    expect(bootstrap).toBeTruthy();
+
+    const advanced = advanceRelativeStrengthState(bootstrap!.state, ratioRows.at(-1)!, config);
+    const expected = buildRelativeStrengthCacheRowsFromRatioRows(ratioRows, config).at(-1);
+
+    expect(expected).toBeTruthy();
+    expect(advanced.latestCacheRow.rsClose).toBeCloseTo(expected!.rsClose ?? 0, 10);
+    expect(advanced.latestCacheRow.rsMa).toBeCloseTo(expected!.rsMa ?? 0, 10);
+    expect(advanced.latestCacheRow.rsNewHigh).toBe(expected!.rsNewHigh);
+    expect(advanced.latestCacheRow.rsNewHighBeforePrice).toBe(expected!.rsNewHighBeforePrice);
+    expect(advanced.latestCacheRow.bullCross).toBe(expected!.bullCross);
+    expect(advanced.latestCacheRow.approxRsRating).toBe(expected!.approxRsRating);
+  });
+
+  it("keeps SMA incremental state in parity with the full-history recomputation", () => {
+    const benchmarkBars = makeBars(Array.from({ length: 70 }, () => 100), "SPY");
+    const stockBars = makeBars(Array.from({ length: 70 }, (_, index) => 50 + Math.sin(index / 4) * 3 + index * 0.2), "AMD");
+    const config = {
+      benchmarkTicker: "SPY",
+      verticalOffset: 0.01,
+      rsMaLength: 10,
+      rsMaType: "SMA" as const,
+      newHighLookback: 30,
+    };
+    const ratioRows = buildRelativeStrengthRatioRows(stockBars, benchmarkBars, "SPY");
+    const bootstrap = bootstrapRelativeStrengthStateFromRatioRows(
+      ratioRows.slice(0, -1),
+      config,
+      { configKey: "SPY|SMA|10|30" },
+    );
+    expect(bootstrap).toBeTruthy();
+
+    const advanced = advanceRelativeStrengthState(bootstrap!.state, ratioRows.at(-1)!, config);
+    const expected = buildRelativeStrengthCacheRowsFromRatioRows(ratioRows, config).at(-1);
+
+    expect(expected).toBeTruthy();
+    expect(advanced.latestCacheRow.rsClose).toBeCloseTo(expected!.rsClose ?? 0, 10);
+    expect(advanced.latestCacheRow.rsMa).toBeCloseTo(expected!.rsMa ?? 0, 10);
+    expect(advanced.latestCacheRow.rsAboveMa).toBe(expected!.rsAboveMa);
+    expect(advanced.latestCacheRow.bullCross).toBe(expected!.bullCross);
+    expect(advanced.latestCacheRow.approxRsRating).toBe(expected!.approxRsRating);
   });
 });
