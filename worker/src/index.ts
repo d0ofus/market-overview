@@ -2258,7 +2258,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
       const settings = await loadWorkerScheduleSettings(c.env);
       if (settings.rsBackgroundEnabled) {
         c.executionCtx.waitUntil((async () => {
-          await processQueuedRelativeStrengthRefreshJobs(c.env, {
+          await processRelativeStrengthRefreshJob(c.env, result.job!.id, {
             batchSize: settings.rsBackgroundBatchSize,
             maxBatches: settings.rsBackgroundMaxBatchesPerTick,
             timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
@@ -2280,9 +2280,9 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
     const settings = await loadWorkerScheduleSettings(c.env);
     if (settings.rsBackgroundEnabled) {
-      c.executionCtx.waitUntil(processQueuedRelativeStrengthRefreshJobs(c.env, {
+      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id, {
         batchSize: settings.rsBackgroundBatchSize,
-        maxBatches: settings.rsBackgroundMaxBatchesPerTick,
+        maxBatches: 1,
         timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
       }));
     }
@@ -2297,9 +2297,9 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
     const settings = await loadWorkerScheduleSettings(c.env);
     if (settings.rsBackgroundEnabled) {
-      c.executionCtx.waitUntil(processQueuedRelativeStrengthRefreshJobs(c.env, {
+      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id, {
         batchSize: settings.rsBackgroundBatchSize,
-        maxBatches: settings.rsBackgroundMaxBatchesPerTick,
+        maxBatches: 1,
         timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
       }));
     }

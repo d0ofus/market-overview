@@ -173,6 +173,7 @@ export type ScanRefreshJob = {
   latestSnapshotId: string | null;
   requestedBy: string | null;
   configKey: string | null;
+  sharedRunId: string | null;
   expectedTradingDate: string | null;
   fullCandidateCount: number;
   materializationCandidateCount: number;
@@ -204,6 +205,7 @@ type ScanRefreshJobRecord = {
   benchmarkBarsJson: string | null;
   requiredBarCount: number;
   configKey: string | null;
+  sharedRunId: string | null;
   expectedTradingDate: string | null;
   benchmarkTicker: string | null;
   rsMaType: RelativeStrengthMaType;
@@ -212,6 +214,30 @@ type ScanRefreshJobRecord = {
   fullCandidateCount: number;
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
+  lastAdvancedAt: string | null;
+};
+
+type RelativeStrengthMaterializationRunRecord = {
+  id: string;
+  configKey: string;
+  expectedTradingDate: string;
+  benchmarkTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+  status: ScanRefreshJobStatus;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  benchmarkBarsJson: string | null;
+  requiredBarCount: number;
+  fullCandidateCount: number;
+  materializationCandidateCount: number;
+  alreadyCurrentCandidateCount: number;
+  processedCandidates: number;
+  matchedCandidates: number;
+  cursorOffset: number;
   lastAdvancedAt: string | null;
 };
 
@@ -289,7 +315,9 @@ type RelativeStrengthConfigStateRecord = {
 };
 
 type RelativeStrengthRefreshQueueRow = {
-  jobId: string;
+  jobId?: string;
+  runId?: string;
+  priority?: number;
   source: string | null;
   enqueuedAt: string;
   lastAttemptedAt: string | null;
@@ -504,6 +532,25 @@ function buildRelativeStrengthConfigIdentityFromJobRecord(job: ScanRefreshJobRec
   };
 }
 
+function buildRelativeStrengthConfigIdentityFromRunRecord(
+  run: RelativeStrengthMaterializationRunRecord,
+): RelativeStrengthConfigIdentity {
+  const benchmarkTicker = normalizeBenchmarkTicker(run.benchmarkTicker) ?? DEFAULT_RS_BENCHMARK;
+  const rsMaType = normalizeRsMaType(run.rsMaType);
+  const rsMaLength = Math.max(1, Math.trunc(run.rsMaLength || 21));
+  const newHighLookback = Math.max(1, Math.trunc(run.newHighLookback || 252));
+  return {
+    benchmarkTicker,
+    benchmarkDataTicker: resolveBenchmarkTickerForData(benchmarkTicker),
+    rsMaType,
+    rsMaLength,
+    newHighLookback,
+    configKey: run.configKey,
+    requiredBarCount: Math.max(1, Math.trunc(run.requiredBarCount || Math.max(newHighLookback, RS_REQUIRED_BAR_FLOOR, RS_RATIO_RETENTION_BARS))),
+    expectedTradingDate: run.expectedTradingDate ?? latestUsSessionAsOfDate(new Date()),
+  };
+}
+
 function toJson(value: unknown): string | null {
   if (value == null) return null;
   try {
@@ -669,6 +716,7 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     latestSnapshotId: record.latestSnapshotId,
     requestedBy: record.requestedBy,
     configKey: record.configKey ?? null,
+    sharedRunId: record.sharedRunId ?? null,
     expectedTradingDate: record.expectedTradingDate ?? null,
     fullCandidateCount: record.fullCandidateCount,
     materializationCandidateCount: record.materializationCandidateCount,
@@ -2286,6 +2334,7 @@ async function loadScanRefreshJobRecord(env: Env, jobId: string): Promise<ScanRe
        benchmark_bars_json as benchmarkBarsJson,
        required_bar_count as requiredBarCount,
        config_key as configKey,
+       shared_run_id as sharedRunId,
        expected_trading_date as expectedTradingDate,
        benchmark_ticker as benchmarkTicker,
        rs_ma_type as rsMaType,
@@ -2329,6 +2378,7 @@ async function loadLatestScanRefreshJobRecordForPreset(
        benchmark_bars_json as benchmarkBarsJson,
        required_bar_count as requiredBarCount,
        config_key as configKey,
+       shared_run_id as sharedRunId,
        expected_trading_date as expectedTradingDate,
        benchmark_ticker as benchmarkTicker,
        rs_ma_type as rsMaType,
@@ -2371,6 +2421,7 @@ async function loadLatestCompletedScanRefreshJobRecordForPreset(
        benchmark_bars_json as benchmarkBarsJson,
        required_bar_count as requiredBarCount,
        config_key as configKey,
+       shared_run_id as sharedRunId,
        expected_trading_date as expectedTradingDate,
        benchmark_ticker as benchmarkTicker,
        rs_ma_type as rsMaType,
@@ -2411,6 +2462,7 @@ async function listActiveScanRefreshJobRecords(env: Env): Promise<ScanRefreshJob
        benchmark_bars_json as benchmarkBarsJson,
        required_bar_count as requiredBarCount,
        config_key as configKey,
+       shared_run_id as sharedRunId,
        expected_trading_date as expectedTradingDate,
        benchmark_ticker as benchmarkTicker,
        rs_ma_type as rsMaType,
@@ -2426,6 +2478,309 @@ async function listActiveScanRefreshJobRecords(env: Env): Promise<ScanRefreshJob
   )
     .all<ScanRefreshJobRecord>();
   return rows.results ?? [];
+}
+
+async function loadRelativeStrengthMaterializationRun(
+  env: Env,
+  runId: string,
+): Promise<RelativeStrengthMaterializationRunRecord | null> {
+  return env.DB.prepare(
+    `SELECT
+       id,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       full_candidate_count as fullCandidateCount,
+       materialization_candidate_count as materializationCandidateCount,
+       already_current_candidate_count as alreadyCurrentCandidateCount,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       last_advanced_at as lastAdvancedAt
+     FROM relative_strength_materialization_runs
+     WHERE id = ?
+     LIMIT 1`,
+  )
+    .bind(runId)
+    .first<RelativeStrengthMaterializationRunRecord>();
+}
+
+async function loadActiveRelativeStrengthMaterializationRunForConfig(
+  env: Env,
+  configKey: string,
+  expectedTradingDate: string,
+): Promise<RelativeStrengthMaterializationRunRecord | null> {
+  return env.DB.prepare(
+    `SELECT
+       id,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       full_candidate_count as fullCandidateCount,
+       materialization_candidate_count as materializationCandidateCount,
+       already_current_candidate_count as alreadyCurrentCandidateCount,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       last_advanced_at as lastAdvancedAt
+     FROM relative_strength_materialization_runs
+     WHERE config_key = ?
+       AND expected_trading_date = ?
+       AND status IN ('queued', 'running')
+     ORDER BY datetime(started_at) DESC
+     LIMIT 1`,
+  )
+    .bind(configKey, expectedTradingDate)
+    .first<RelativeStrengthMaterializationRunRecord>();
+}
+
+async function listActiveRelativeStrengthMaterializationRuns(
+  env: Env,
+): Promise<RelativeStrengthMaterializationRunRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       id,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       full_candidate_count as fullCandidateCount,
+       materialization_candidate_count as materializationCandidateCount,
+       already_current_candidate_count as alreadyCurrentCandidateCount,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       last_advanced_at as lastAdvancedAt
+     FROM relative_strength_materialization_runs
+     WHERE status IN ('queued', 'running')
+     ORDER BY datetime(updated_at) ASC, datetime(started_at) ASC`,
+  ).all<RelativeStrengthMaterializationRunRecord>();
+  return rows.results ?? [];
+}
+
+async function updateRelativeStrengthMaterializationRun(
+  env: Env,
+  runId: string,
+  updates: Partial<RelativeStrengthMaterializationRunRecord>,
+): Promise<void> {
+  const fields: string[] = ["updated_at = CURRENT_TIMESTAMP"];
+  const values: unknown[] = [];
+  if (updates.status != null) {
+    fields.push("status = ?");
+    values.push(updates.status);
+  }
+  if (updates.error !== undefined) {
+    fields.push("error = ?");
+    values.push(updates.error);
+  }
+  if (updates.benchmarkBarsJson !== undefined) {
+    fields.push("benchmark_bars_json = ?");
+    values.push(updates.benchmarkBarsJson);
+  }
+  if (updates.requiredBarCount != null) {
+    fields.push("required_bar_count = ?");
+    values.push(updates.requiredBarCount);
+  }
+  if (updates.fullCandidateCount != null) {
+    fields.push("full_candidate_count = ?");
+    values.push(updates.fullCandidateCount);
+  }
+  if (updates.materializationCandidateCount != null) {
+    fields.push("materialization_candidate_count = ?");
+    values.push(updates.materializationCandidateCount);
+  }
+  if (updates.alreadyCurrentCandidateCount != null) {
+    fields.push("already_current_candidate_count = ?");
+    values.push(updates.alreadyCurrentCandidateCount);
+  }
+  if (updates.processedCandidates != null) {
+    fields.push("processed_candidates = ?");
+    values.push(updates.processedCandidates);
+  }
+  if (updates.matchedCandidates != null) {
+    fields.push("matched_candidates = ?");
+    values.push(updates.matchedCandidates);
+  }
+  if (updates.cursorOffset != null) {
+    fields.push("cursor_offset = ?");
+    values.push(updates.cursorOffset);
+  }
+  if (updates.lastAdvancedAt !== undefined) {
+    fields.push("last_advanced_at = ?");
+    values.push(updates.lastAdvancedAt);
+  }
+  if (updates.completedAt !== undefined) {
+    fields.push("completed_at = ?");
+    values.push(updates.completedAt);
+  }
+  await env.DB.prepare(`UPDATE relative_strength_materialization_runs SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...values, runId)
+    .run();
+}
+
+function relativeStrengthRunQueuePriority(source: string | null | undefined): number {
+  if (source === "manual") return 100;
+  if (source === "background-completed") return 90;
+  if (source === "scheduled") return 50;
+  if (source === "recovery") return 25;
+  return 10;
+}
+
+async function enqueueRelativeStrengthMaterializationRun(
+  env: Env,
+  runId: string,
+  source: string,
+): Promise<void> {
+  const priority = relativeStrengthRunQueuePriority(source);
+  await env.DB.prepare(
+    `INSERT INTO relative_strength_materialization_queue
+      (run_id, priority, source, enqueued_at, last_attempted_at, attempts)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP, NULL, 0)
+     ON CONFLICT(run_id) DO UPDATE SET
+       priority = MAX(relative_strength_materialization_queue.priority, excluded.priority),
+       source = excluded.source,
+       enqueued_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(runId, priority, source)
+    .run();
+}
+
+async function removeRelativeStrengthMaterializationRunFromQueue(env: Env, runId: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?").bind(runId).run();
+}
+
+async function markRelativeStrengthMaterializationRunQueueAttempt(env: Env, runId: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE relative_strength_materialization_queue
+     SET last_attempted_at = CURRENT_TIMESTAMP,
+         attempts = attempts + 1
+     WHERE run_id = ?`,
+  )
+    .bind(runId)
+    .run();
+}
+
+async function listQueuedRelativeStrengthMaterializationRuns(env: Env): Promise<RelativeStrengthRefreshQueueRow[]> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       run_id as runId,
+       priority,
+       source,
+       enqueued_at as enqueuedAt,
+       last_attempted_at as lastAttemptedAt,
+       attempts
+     FROM relative_strength_materialization_queue
+     ORDER BY priority DESC, datetime(enqueued_at) ASC`,
+  ).all<RelativeStrengthRefreshQueueRow>();
+  return rows.results ?? [];
+}
+
+async function loadRelativeStrengthRunCandidateCount(env: Env, runId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM relative_strength_materialization_run_candidates WHERE run_id = ?",
+  )
+    .bind(runId)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
+async function loadRelativeStrengthRunCandidateTickers(
+  env: Env,
+  runId: string,
+  cursorOffset: number,
+  limit: number,
+): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ticker
+     FROM relative_strength_materialization_run_candidates
+     WHERE run_id = ?
+     ORDER BY cursor_offset ASC
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(runId, limit, cursorOffset)
+    .all<{ ticker: string }>();
+  return (rows.results ?? []).map((row) => row.ticker.toUpperCase());
+}
+
+async function loadRelativeStrengthRunCandidateTickerSet(
+  env: Env,
+  runId: string,
+  tickers: string[],
+): Promise<Set<string>> {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const present = new Set<string>();
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT ticker
+       FROM relative_strength_materialization_run_candidates
+       WHERE run_id = ?
+         AND ticker IN (${placeholders})`,
+    )
+      .bind(runId, ...chunk)
+      .all<{ ticker: string }>();
+    for (const row of rows.results ?? []) present.add(row.ticker.toUpperCase());
+  }
+  return present;
+}
+
+async function appendRelativeStrengthRunCandidateTickers(
+  env: Env,
+  runId: string,
+  tickers: string[],
+): Promise<number> {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  if (uniqueTickers.length === 0) return 0;
+  const existing = await loadRelativeStrengthRunCandidateTickerSet(env, runId, uniqueTickers);
+  const missing = uniqueTickers.filter((ticker) => !existing.has(ticker));
+  if (missing.length === 0) return 0;
+  const maxRow = await env.DB.prepare(
+    "SELECT MAX(cursor_offset) as maxCursorOffset FROM relative_strength_materialization_run_candidates WHERE run_id = ?",
+  )
+    .bind(runId)
+    .first<{ maxCursorOffset: number | null }>();
+  let nextCursorOffset = (maxRow?.maxCursorOffset ?? -1) + 1;
+  for (let index = 0; index < missing.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = missing.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    await env.DB.batch(chunk.map((ticker) =>
+      env.DB.prepare(
+        `INSERT INTO relative_strength_materialization_run_candidates (run_id, cursor_offset, ticker)
+         VALUES (?, ?, ?)`,
+      ).bind(runId, nextCursorOffset++, ticker),
+    ));
+  }
+  return missing.length;
 }
 
 async function enqueueRelativeStrengthRefreshJob(
@@ -2454,6 +2809,14 @@ async function removeRelativeStrengthRefreshJobArtifacts(env: Env, jobId: string
     env.DB.prepare("DELETE FROM scan_refresh_job_top_rows WHERE job_id = ?").bind(jobId),
     env.DB.prepare("DELETE FROM scan_refresh_job_candidates WHERE job_id = ?").bind(jobId),
     env.DB.prepare("DELETE FROM scan_refresh_jobs WHERE id = ?").bind(jobId),
+  ]);
+}
+
+async function removeRelativeStrengthMaterializationRunArtifacts(env: Env, runId: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?").bind(runId),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_run_candidates WHERE run_id = ?").bind(runId),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_runs WHERE id = ?").bind(runId),
   ]);
 }
 
@@ -2501,8 +2864,11 @@ async function loadRelativeStrengthJobCandidateCounts(
   };
 }
 
-function lastJobAdvanceTimestamp(job: Pick<ScanRefreshJobRecord, "lastAdvancedAt" | "updatedAt" | "startedAt">): number | null {
-  return toTimestampMs(job.lastAdvancedAt ?? job.updatedAt ?? job.startedAt);
+function lastRefreshAdvanceTimestamp(
+  record: Pick<ScanRefreshJobRecord, "lastAdvancedAt" | "updatedAt" | "startedAt">
+    | Pick<RelativeStrengthMaterializationRunRecord, "lastAdvancedAt" | "updatedAt" | "startedAt">,
+): number | null {
+  return toTimestampMs(record.lastAdvancedAt ?? record.updatedAt ?? record.startedAt);
 }
 
 function jobNeedsRelativeStrengthContinuation(
@@ -2510,7 +2876,17 @@ function jobNeedsRelativeStrengthContinuation(
   staleMs = RS_JOB_CONTINUATION_STALE_MS,
 ): boolean {
   if (job.status !== "queued" && job.status !== "running") return false;
-  const lastAdvancedMs = lastJobAdvanceTimestamp(job);
+  const lastAdvancedMs = lastRefreshAdvanceTimestamp(job);
+  if (lastAdvancedMs == null) return true;
+  return Date.now() - lastAdvancedMs >= staleMs;
+}
+
+function runNeedsRelativeStrengthContinuation(
+  run: Pick<RelativeStrengthMaterializationRunRecord, "status" | "lastAdvancedAt" | "updatedAt" | "startedAt">,
+  staleMs = RS_JOB_CONTINUATION_STALE_MS,
+): boolean {
+  if (run.status !== "queued" && run.status !== "running") return false;
+  const lastAdvancedMs = lastRefreshAdvanceTimestamp(run);
   if (lastAdvancedMs == null) return true;
   return Date.now() - lastAdvancedMs >= staleMs;
 }
@@ -2749,6 +3125,7 @@ async function updateScanRefreshJobRecord(
       | "latestSnapshotId"
       | "benchmarkBarsJson"
       | "requiredBarCount"
+      | "sharedRunId"
       | "fullCandidateCount"
       | "materializationCandidateCount"
       | "alreadyCurrentCandidateCount"
@@ -2789,6 +3166,10 @@ async function updateScanRefreshJobRecord(
   if (updates.requiredBarCount != null) {
     fields.push("required_bar_count = ?");
     values.push(updates.requiredBarCount);
+  }
+  if (updates.sharedRunId !== undefined) {
+    fields.push("shared_run_id = ?");
+    values.push(updates.sharedRunId);
   }
   if (updates.fullCandidateCount != null) {
     fields.push("full_candidate_count = ?");
@@ -2968,6 +3349,7 @@ async function createRelativeStrengthRefreshJob(
   requestedBy?: string | null,
   preparedCandidates?: ScanSnapshotRow[],
   currentTickerSet?: Set<string>,
+  options?: { sharedRunId?: string | null; enqueue?: boolean },
 ): Promise<ScanRefreshJobRecord> {
   const identity = buildRelativeStrengthConfigIdentity(preset);
   const existing = await loadLatestScanRefreshJobRecordForPreset(env, preset.id, {
@@ -2986,8 +3368,8 @@ async function createRelativeStrengthRefreshJob(
   try {
     await env.DB.prepare(
       `INSERT INTO scan_refresh_jobs
-        (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count, config_key, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, full_candidate_count, materialization_candidate_count, already_current_candidate_count, last_advanced_at)
-       VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, ?, 0, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count, config_key, shared_run_id, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, full_candidate_count, materialization_candidate_count, already_current_candidate_count, last_advanced_at)
+       VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, ?, 0, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     )
       .bind(
         jobId,
@@ -2997,6 +3379,7 @@ async function createRelativeStrengthRefreshJob(
         requestedBy ?? null,
         identity.requiredBarCount,
         identity.configKey,
+        options?.sharedRunId ?? null,
         identity.expectedTradingDate,
         identity.benchmarkTicker,
         identity.rsMaType,
@@ -3020,7 +3403,9 @@ async function createRelativeStrengthRefreshJob(
         `Relative strength refresh job candidate rows were incomplete (${candidateCounts.candidateCount}/${fullCandidateCount} candidates, ${candidateCounts.materializationCount}/${materializationCandidateCount} stale).`,
       );
     }
-    await enqueueRelativeStrengthRefreshJob(env, jobId, requestedBy ?? "created");
+    if (options?.enqueue ?? false) {
+      await enqueueRelativeStrengthRefreshJob(env, jobId, requestedBy ?? "created");
+    }
   } catch (error) {
     await removeRelativeStrengthRefreshJobArtifacts(env, jobId);
     throw error;
@@ -3028,6 +3413,120 @@ async function createRelativeStrengthRefreshJob(
   const created = await loadScanRefreshJobRecord(env, jobId);
   if (!created) throw new Error("Failed to create scan refresh job.");
   return created;
+}
+
+async function listScanRefreshJobRecordsForSharedRun(
+  env: Env,
+  sharedRunId: string,
+  options?: { activeOnly?: boolean },
+): Promise<ScanRefreshJobRecord[]> {
+  const clauses = ["shared_run_id = ?"];
+  if (options?.activeOnly) clauses.push("status IN ('queued', 'running')");
+  const rows = await env.DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       job_type as jobType,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       total_candidates as totalCandidates,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       requested_by as requestedBy,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       config_key as configKey,
+       shared_run_id as sharedRunId,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       full_candidate_count as fullCandidateCount,
+       materialization_candidate_count as materializationCandidateCount,
+       already_current_candidate_count as alreadyCurrentCandidateCount,
+       last_advanced_at as lastAdvancedAt
+     FROM scan_refresh_jobs
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY datetime(started_at) ASC`,
+  )
+    .bind(sharedRunId)
+    .all<ScanRefreshJobRecord>();
+  return rows.results ?? [];
+}
+
+async function createRelativeStrengthMaterializationRun(
+  env: Env,
+  identity: RelativeStrengthConfigIdentity,
+  source: string,
+  initialStaleTickers: string[],
+): Promise<RelativeStrengthMaterializationRunRecord> {
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO relative_strength_materialization_runs
+      (id, config_key, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, status, started_at, updated_at, error, benchmark_bars_json, required_bar_count, full_candidate_count, materialization_candidate_count, already_current_candidate_count, processed_candidates, matched_candidates, cursor_offset, last_advanced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, 0, 0, 0, 0, NULL)`,
+  )
+    .bind(
+      runId,
+      identity.configKey,
+      identity.expectedTradingDate,
+      identity.benchmarkTicker,
+      identity.rsMaType,
+      identity.rsMaLength,
+      identity.newHighLookback,
+      identity.requiredBarCount,
+    )
+    .run();
+  if (initialStaleTickers.length > 0) {
+    await appendRelativeStrengthRunCandidateTickers(env, runId, initialStaleTickers);
+  }
+  const candidateCount = await loadRelativeStrengthRunCandidateCount(env, runId);
+  await updateRelativeStrengthMaterializationRun(env, runId, {
+    materializationCandidateCount: candidateCount,
+    fullCandidateCount: candidateCount,
+    alreadyCurrentCandidateCount: 0,
+  });
+  await enqueueRelativeStrengthMaterializationRun(env, runId, source);
+  const created = await loadRelativeStrengthMaterializationRun(env, runId);
+  if (!created) throw new Error("Failed to create relative strength materialization run.");
+  return created;
+}
+
+async function attachRelativeStrengthJobToSharedRun(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+  job: ScanRefreshJobRecord,
+  source: string,
+): Promise<RelativeStrengthMaterializationRunRecord> {
+  const staleCandidates = (await loadAllRelativeStrengthJobCandidates(env, job.id))
+    .filter((candidate) => candidate.materializationRequired);
+  const addedCount = await appendRelativeStrengthRunCandidateTickers(
+    env,
+    run.id,
+    staleCandidates.map((candidate) => candidate.ticker),
+  );
+  if (job.sharedRunId !== run.id) {
+    await updateScanRefreshJobRecord(env, job.id, { sharedRunId: run.id });
+  }
+  if (addedCount > 0 || run.status === "queued") {
+    const candidateCount = await loadRelativeStrengthRunCandidateCount(env, run.id);
+    await updateRelativeStrengthMaterializationRun(env, run.id, {
+      fullCandidateCount: candidateCount,
+      materializationCandidateCount: candidateCount,
+      alreadyCurrentCandidateCount: 0,
+    });
+    await enqueueRelativeStrengthMaterializationRun(env, run.id, source);
+  }
+  const updated = await loadRelativeStrengthMaterializationRun(env, run.id);
+  if (!updated) throw new Error("Failed to load updated relative strength materialization run.");
+  await synchronizeAttachedRelativeStrengthJobsForRun(env, updated);
+  return updated;
 }
 
 async function ensureRelativeStrengthJobBenchmarkBars(
@@ -3094,6 +3593,70 @@ async function ensureRelativeStrengthJobBenchmarkBars(
   return benchmarkBars;
 }
 
+async function ensureRelativeStrengthRunBenchmarkBars(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+): Promise<RelativeStrengthDailyBar[]> {
+  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(run);
+  const cached = deserializeBenchmarkBars(run.benchmarkBarsJson);
+  if (cached.length > 0 && latestBarDate(cached) === identity.expectedTradingDate) return cached;
+
+  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(identity.requiredBarCount));
+  await refreshDailyBarsIncremental(env, {
+    tickers: [identity.benchmarkDataTicker],
+    startDate,
+    endDate: identity.expectedTradingDate,
+    maxTickers: 1,
+    provider: getProvider(env),
+  });
+
+  let benchmarkBars = await loadStoredDailyBarsByCount(
+    env,
+    [identity.benchmarkDataTicker],
+    identity.expectedTradingDate,
+    identity.requiredBarCount,
+  );
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length < identity.requiredBarCount) {
+    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+    await refreshDailyBarsIncremental(env, {
+      tickers: [identity.benchmarkDataTicker],
+      startDate,
+      endDate: identity.expectedTradingDate,
+      maxTickers: 1,
+      provider: fallbackProvider,
+    });
+    benchmarkBars = await loadStoredDailyBarsByCount(
+      env,
+      [identity.benchmarkDataTicker],
+      identity.expectedTradingDate,
+      identity.requiredBarCount,
+    );
+  }
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
+    const fallbackBars = await fetchBenchmarkBarsWithFallback(
+      env,
+      identity.benchmarkDataTicker,
+      startDate,
+      identity.expectedTradingDate,
+    );
+    if (fallbackBars.length > 0) {
+      await storeDailyBars(env, fallbackBars);
+      benchmarkBars = chooseFresherBars(benchmarkBars, fallbackBars);
+    }
+  }
+
+  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
+    throw new Error(`No benchmark bars were available for ${identity.benchmarkTicker}.`);
+  }
+  await updateRelativeStrengthMaterializationRun(env, run.id, {
+    benchmarkBarsJson: JSON.stringify(benchmarkBars),
+    requiredBarCount: identity.requiredBarCount,
+  });
+  return benchmarkBars;
+}
+
 async function materializeRelativeStrengthBatch(
   env: Env,
   job: ScanRefreshJobRecord,
@@ -3101,6 +3664,103 @@ async function materializeRelativeStrengthBatch(
   benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
   const identity = buildRelativeStrengthConfigIdentityFromJobRecord(job);
+  const config = rawRelativeStrengthConfig(identity);
+  const benchmarkTicker = identity.benchmarkDataTicker;
+  const candidateTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
+  ));
+  if (candidateTickers.length === 0) return 0;
+  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
+  await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
+  const currentStatesByTicker = await loadRelativeStrengthConfigStateRows(env, identity.configKey, candidateTickers);
+  const recentRatioRows = await loadRelativeStrengthRatioRowsByCount(
+    env,
+    identity.benchmarkTicker,
+    candidateTickers,
+    identity.expectedTradingDate,
+    2,
+  );
+  const recentRatioRowsByTicker = groupRatioRowsByTicker(recentRatioRows);
+  const nextStateRows: RelativeStrengthConfigState[] = [];
+  const nextLatestCacheRows: RelativeStrengthLatestCacheRecord[] = [];
+  const bootstrapTickers: string[] = [];
+  const updatedAt = new Date().toISOString();
+
+  for (const ticker of candidateTickers) {
+    const currentState = currentStatesByTicker.get(ticker);
+    if (currentState && currentState.stateVersion === RS_STATE_VERSION && currentState.latestTradingDate === identity.expectedTradingDate) {
+      nextStateRows.push(currentState);
+      nextLatestCacheRows.push(stateRowToLatestCacheRecord(currentState));
+      continue;
+    }
+
+    const recentRows = recentRatioRowsByTicker.get(ticker) ?? [];
+    const latestRow = recentRows[recentRows.length - 1];
+    const priorRow = recentRows.length > 1 ? recentRows[recentRows.length - 2] : null;
+    const canAdvanceIncrementally = currentState
+      && currentState.stateVersion === RS_STATE_VERSION
+      && latestRow
+      && latestRow.tradingDate === identity.expectedTradingDate
+      && priorRow
+      && priorRow.tradingDate === currentState.latestTradingDate;
+
+    if (canAdvanceIncrementally && latestRow) {
+      const advanced = advanceRelativeStrengthState(currentState, latestRow, config, { updatedAt });
+      nextStateRows.push({
+        ...advanced.state,
+        configKey: identity.configKey,
+      });
+      nextLatestCacheRows.push({
+        ...stateRowToLatestCacheRecord(advanced.state),
+        ticker,
+      });
+      continue;
+    }
+
+    bootstrapTickers.push(ticker);
+  }
+
+  if (bootstrapTickers.length > 0) {
+    const bootstrapRatioRows = await loadRelativeStrengthRatioRowsByCount(
+      env,
+      identity.benchmarkTicker,
+      bootstrapTickers,
+      identity.expectedTradingDate,
+      identity.requiredBarCount,
+    );
+    const bootstrapRatioRowsByTicker = groupRatioRowsByTicker(bootstrapRatioRows);
+    for (const ticker of bootstrapTickers) {
+      const bootstrapped = bootstrapRelativeStrengthStateFromRatioRows(
+        bootstrapRatioRowsByTicker.get(ticker) ?? [],
+        config,
+        { configKey: identity.configKey, updatedAt },
+      );
+      if (!bootstrapped || bootstrapped.latestCacheRow.tradingDate !== identity.expectedTradingDate) continue;
+      nextStateRows.push({
+        ...bootstrapped.state,
+        configKey: identity.configKey,
+      });
+      nextLatestCacheRows.push({
+        ...stateRowToLatestCacheRecord(bootstrapped.state),
+        ticker,
+      });
+    }
+  }
+
+  await upsertRelativeStrengthConfigStates(env, nextStateRows);
+  await upsertRelativeStrengthLatestCacheRows(env, identity.configKey, nextLatestCacheRows);
+  return nextLatestCacheRows.length;
+}
+
+async function materializeRelativeStrengthRunBatch(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+  tickers: string[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+): Promise<number> {
+  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(run);
   const config = rawRelativeStrengthConfig(identity);
   const benchmarkTicker = identity.benchmarkDataTicker;
   const candidateTickers = Array.from(new Set(
@@ -3246,6 +3906,145 @@ async function ensureRelativeStrengthSnapshotCurrent(
   return snapshot;
 }
 
+async function synchronizeAttachedRelativeStrengthJobsForRun(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+): Promise<void> {
+  const attachedJobs = await listScanRefreshJobRecordsForSharedRun(env, run.id, {
+    activeOnly: run.status !== "completed" && run.status !== "failed",
+  });
+  const nowIso = new Date().toISOString();
+  for (const job of attachedJobs) {
+    if (run.status === "failed") {
+      await updateScanRefreshJobRecord(env, job.id, {
+        status: "failed",
+        error: run.error ?? "Relative strength refresh failed.",
+        completedAt: nowIso,
+        lastAdvancedAt: run.lastAdvancedAt ?? nowIso,
+      });
+      continue;
+    }
+    if (run.status === "completed") {
+      await updateScanRefreshJobRecord(env, job.id, {
+        status: "completed",
+        processedCandidates: job.materializationCandidateCount,
+        matchedCandidates: Math.max(job.fullCandidateCount, job.matchedCandidates),
+        cursorOffset: job.materializationCandidateCount,
+        completedAt: nowIso,
+        lastAdvancedAt: run.lastAdvancedAt ?? nowIso,
+      });
+      const completedJob = await loadScanRefreshJobRecord(env, job.id);
+      const preset = await loadScanPreset(env, job.presetId);
+      if (!completedJob || !preset) continue;
+      const snapshot = await ensureRelativeStrengthSnapshotCurrent(env, preset, completedJob);
+      await updateScanRefreshJobRecord(env, job.id, { latestSnapshotId: snapshot.id });
+      continue;
+    }
+    const processedCandidates = Math.min(job.materializationCandidateCount, run.processedCandidates);
+    await updateScanRefreshJobRecord(env, job.id, {
+      status: run.status,
+      processedCandidates,
+      matchedCandidates: Math.max(job.matchedCandidates, job.alreadyCurrentCandidateCount + processedCandidates),
+      cursorOffset: processedCandidates,
+      lastAdvancedAt: run.lastAdvancedAt,
+    });
+  }
+}
+
+async function processRelativeStrengthMaterializationRun(
+  env: Env,
+  runId: string,
+  options?: { timeBudgetMs?: number; maxBatches?: number; batchSize?: number },
+): Promise<RelativeStrengthMaterializationRunRecord | null> {
+  const run = await loadRelativeStrengthMaterializationRun(env, runId);
+  if (!run) return null;
+  if (run.status === "completed" || run.status === "failed") return run;
+
+  try {
+    const effectiveMaterializationTotal = await loadRelativeStrengthRunCandidateCount(env, run.id);
+    if (effectiveMaterializationTotal === 0 || run.cursorOffset >= effectiveMaterializationTotal) {
+      await updateRelativeStrengthMaterializationRun(env, run.id, {
+        status: "completed",
+        processedCandidates: effectiveMaterializationTotal,
+        matchedCandidates: effectiveMaterializationTotal,
+        cursorOffset: effectiveMaterializationTotal,
+        materializationCandidateCount: effectiveMaterializationTotal,
+        fullCandidateCount: Math.max(run.fullCandidateCount, effectiveMaterializationTotal),
+        completedAt: new Date().toISOString(),
+        lastAdvancedAt: new Date().toISOString(),
+      });
+      await removeRelativeStrengthMaterializationRunFromQueue(env, run.id);
+      const completed = await loadRelativeStrengthMaterializationRun(env, run.id);
+      if (completed) await synchronizeAttachedRelativeStrengthJobsForRun(env, completed);
+      return completed;
+    }
+
+    await updateRelativeStrengthMaterializationRun(env, run.id, {
+      status: "running",
+      materializationCandidateCount: effectiveMaterializationTotal,
+      fullCandidateCount: Math.max(run.fullCandidateCount, effectiveMaterializationTotal),
+    });
+    const currentRun = (await loadRelativeStrengthMaterializationRun(env, run.id)) ?? run;
+    const benchmarkBars = await ensureRelativeStrengthRunBenchmarkBars(env, currentRun);
+    let cursorOffset = currentRun.cursorOffset;
+    let matchedCandidates = currentRun.matchedCandidates;
+    const startedAt = Date.now();
+    const timeBudgetMs = options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS;
+    const maxBatches = Math.max(1, options?.maxBatches ?? Number.POSITIVE_INFINITY);
+    const batchSize = Math.max(1, options?.batchSize ?? 20);
+    let processedBatchCount = 0;
+
+    while (cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
+      const batchTickers = await loadRelativeStrengthRunCandidateTickers(env, currentRun.id, cursorOffset, batchSize);
+      if (batchTickers.length === 0) {
+        throw new Error("Relative strength materialization run has no remaining candidate rows to process.");
+      }
+      const materializedCount = await materializeRelativeStrengthRunBatch(env, currentRun, batchTickers, benchmarkBars);
+      matchedCandidates += materializedCount;
+      cursorOffset += batchTickers.length;
+      processedBatchCount += 1;
+      const lastAdvancedAt = new Date().toISOString();
+      await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
+        status: "running",
+        processedCandidates: cursorOffset,
+        matchedCandidates,
+        cursorOffset,
+        materializationCandidateCount: effectiveMaterializationTotal,
+        fullCandidateCount: Math.max(currentRun.fullCandidateCount, effectiveMaterializationTotal),
+        lastAdvancedAt,
+      });
+    }
+
+    if (cursorOffset >= effectiveMaterializationTotal) {
+      await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
+        status: "completed",
+        processedCandidates: cursorOffset,
+        matchedCandidates,
+        cursorOffset,
+        materializationCandidateCount: effectiveMaterializationTotal,
+        fullCandidateCount: Math.max(currentRun.fullCandidateCount, effectiveMaterializationTotal),
+        completedAt: new Date().toISOString(),
+        lastAdvancedAt: new Date().toISOString(),
+      });
+      await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
+    } else if (effectiveMaterializationTotal > 0) {
+      await enqueueRelativeStrengthMaterializationRun(env, currentRun.id, "continuation");
+    }
+  } catch (error) {
+    await updateRelativeStrengthMaterializationRun(env, run.id, {
+      status: "failed",
+      error: error instanceof Error ? error.message : "Relative strength refresh failed.",
+      completedAt: new Date().toISOString(),
+      lastAdvancedAt: new Date().toISOString(),
+    });
+    await removeRelativeStrengthMaterializationRunFromQueue(env, run.id);
+  }
+
+  const updated = await loadRelativeStrengthMaterializationRun(env, run.id);
+  if (updated) await synchronizeAttachedRelativeStrengthJobsForRun(env, updated);
+  return updated;
+}
+
 export async function processRelativeStrengthRefreshJob(
   env: Env,
   jobId: string,
@@ -3257,6 +4056,14 @@ export async function processRelativeStrengthRefreshJob(
   if (!preset || preset.scanType !== "relative-strength") return null;
   if (job.status === "completed" || job.status === "failed") {
     return mapJobRecordToJob(job, preset);
+  }
+  if (job.sharedRunId) {
+    const processedRun = await processRelativeStrengthMaterializationRun(env, job.sharedRunId, options);
+    if (!processedRun) {
+      await invalidateRelativeStrengthRefreshJob(env, job.id, "Relative strength shared materialization run could not be loaded.");
+    }
+    const updatedJob = await loadScanRefreshJobRecord(env, jobId);
+    return updatedJob ? mapJobRecordToJob(updatedJob, preset) : null;
   }
 
   try {
@@ -3427,7 +4234,55 @@ export async function requestScansRefresh(
       job: null,
     };
   }
-  const jobRecord = await createRelativeStrengthRefreshJob(env, preset, requestedBy, candidates, currentTickerSet);
+  const staleTickers = candidates
+    .map((row) => row.ticker.toUpperCase())
+    .filter((ticker) => !currentTickerSet.has(ticker));
+  const activeRun = await loadActiveRelativeStrengthMaterializationRunForConfig(
+    env,
+    identity.configKey,
+    identity.expectedTradingDate,
+  );
+
+  let jobRecord: ScanRefreshJobRecord;
+  if (activeRun) {
+    jobRecord = await createRelativeStrengthRefreshJob(
+      env,
+      preset,
+      requestedBy,
+      candidates,
+      currentTickerSet,
+      { sharedRunId: activeRun.id, enqueue: false },
+    );
+    await attachRelativeStrengthJobToSharedRun(env, activeRun, jobRecord, requestedBy ?? "manual");
+  } else {
+    jobRecord = await createRelativeStrengthRefreshJob(
+      env,
+      preset,
+      requestedBy,
+      candidates,
+      currentTickerSet,
+      { enqueue: false },
+    );
+    let createdRunId: string | null = null;
+    try {
+      const run = await createRelativeStrengthMaterializationRun(
+        env,
+        identity,
+        requestedBy ?? "manual",
+        staleTickers,
+      );
+      createdRunId = run.id;
+      await updateScanRefreshJobRecord(env, jobRecord.id, { sharedRunId: run.id });
+      const updatedJob = await loadScanRefreshJobRecord(env, jobRecord.id);
+      if (updatedJob) jobRecord = updatedJob;
+    } catch (error) {
+      if (createdRunId) {
+        await removeRelativeStrengthMaterializationRunArtifacts(env, createdRunId);
+      }
+      await removeRelativeStrengthRefreshJobArtifacts(env, jobRecord.id);
+      throw error;
+    }
+  }
   return {
     async: true,
     snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
@@ -3476,60 +4331,56 @@ export async function processQueuedRelativeStrengthRefreshJobs(
     ? Number.POSITIVE_INFINITY
     : Math.max(1, options.maxBatches);
   const processedByJobId = new Map<string, ScanRefreshJob>();
+  const runBatchBurst = Math.max(1, Math.min(remainingBatches === Number.POSITIVE_INFINITY ? 3 : remainingBatches, 3));
 
   while (remainingBatches > 0 && Date.now() - startedAt < totalTimeBudgetMs) {
-    const activeJobs = await listActiveScanRefreshJobRecords(env);
-    if (activeJobs.length === 0) break;
-    const activeJobsById = new Map(activeJobs.map((job) => [job.id, job] as const));
-    const queuedRows = await listQueuedRelativeStrengthRefreshJobs(env);
-    const queuedJobIds = new Set(queuedRows.map((row) => row.jobId));
-    for (const activeJob of activeJobs) {
-      const staleThreshold = activeJob.status === "running" ? RS_JOB_RECOVERY_STALE_MS : RS_JOB_CONTINUATION_STALE_MS;
-      if (!queuedJobIds.has(activeJob.id) && jobNeedsRelativeStrengthContinuation(activeJob, staleThreshold)) {
-        await enqueueRelativeStrengthRefreshJob(env, activeJob.id, "recovery");
+    const activeRuns = await listActiveRelativeStrengthMaterializationRuns(env);
+    if (activeRuns.length === 0) break;
+    const activeRunsById = new Map(activeRuns.map((run) => [run.id, run] as const));
+    const queuedRows = await listQueuedRelativeStrengthMaterializationRuns(env);
+    const queuedRunIds = new Set(queuedRows.map((row) => row.runId));
+    for (const activeRun of activeRuns) {
+      const staleThreshold = activeRun.status === "running" ? RS_JOB_RECOVERY_STALE_MS : RS_JOB_CONTINUATION_STALE_MS;
+      if (!queuedRunIds.has(activeRun.id) && runNeedsRelativeStrengthContinuation(activeRun, staleThreshold)) {
+        await enqueueRelativeStrengthMaterializationRun(env, activeRun.id, "recovery");
       }
     }
-    const refreshedQueue = await listQueuedRelativeStrengthRefreshJobs(env);
-    const jobsToProcess = refreshedQueue
-      .map((row) => activeJobsById.get(row.jobId))
-      .filter((job): job is ScanRefreshJobRecord => Boolean(job));
-    if (jobsToProcess.length === 0) break;
+    const refreshedQueue = await listQueuedRelativeStrengthMaterializationRuns(env);
+    const runsToProcess = refreshedQueue
+      .map((row) => activeRunsById.get(row.runId))
+      .filter((run): run is RelativeStrengthMaterializationRunRecord => Boolean(run));
+    if (runsToProcess.length === 0) break;
 
     let advancedAny = false;
-    for (const activeJob of jobsToProcess) {
+    for (const activeRun of runsToProcess) {
       if (remainingBatches <= 0 || Date.now() - startedAt >= totalTimeBudgetMs) break;
       const remainingTimeBudgetMs = Math.max(1_000, totalTimeBudgetMs - (Date.now() - startedAt));
-      await markRelativeStrengthRefreshJobQueueAttempt(env, activeJob.id);
-      const processed = await processRelativeStrengthRefreshJob(env, activeJob.id, {
-        maxBatches: 1,
+      await markRelativeStrengthMaterializationRunQueueAttempt(env, activeRun.id);
+      const batchBurst = remainingBatches === Number.POSITIVE_INFINITY
+        ? runBatchBurst
+        : Math.max(1, Math.min(runBatchBurst, remainingBatches));
+      const processedRun = await processRelativeStrengthMaterializationRun(env, activeRun.id, {
+        maxBatches: batchBurst,
         timeBudgetMs: remainingTimeBudgetMs,
         batchSize: options?.batchSize,
       });
-      if (!processed) continue;
-      processedByJobId.set(processed.id, processed);
+      if (!processedRun) continue;
 
-      const advanced = processed.status === "completed"
-        || processed.status === "failed"
-        || processed.processedCandidates > activeJob.processedCandidates
-        || processed.cursorOffset > activeJob.cursorOffset;
+      const advanced = processedRun.status === "completed"
+        || processedRun.status === "failed"
+        || processedRun.processedCandidates > activeRun.processedCandidates
+        || processedRun.cursorOffset > activeRun.cursorOffset;
       if (advanced) {
-        remainingBatches -= 1;
+        remainingBatches -= batchBurst;
         advancedAny = true;
       }
-
-      if (processed.status === "completed") {
-        try {
-          await requestScansRefresh(env, processed.presetId, "background-completed");
-        } catch (error) {
-          console.error("background RS snapshot rebuild failed", {
-            jobId: processed.id,
-            presetId: processed.presetId,
-            error,
-          });
-        }
-      }
-      if (processed.status === "failed") {
-        await removeRelativeStrengthRefreshJobFromQueue(env, processed.id);
+      const attachedJobs = await listScanRefreshJobRecordsForSharedRun(env, processedRun.id);
+      for (const job of attachedJobs) {
+        const preset = await loadScanPreset(env, job.presetId);
+        if (!preset) continue;
+        const refreshedJob = await loadScanRefreshJobRecord(env, job.id);
+        if (!refreshedJob) continue;
+        processedByJobId.set(job.id, mapJobRecordToJob(refreshedJob, preset));
       }
     }
 
@@ -3556,7 +4407,7 @@ export async function refreshActiveRelativeStrengthPresets(
     }
     const active = await loadLatestScanRefreshJobRecordForPreset(env, preset.id, { activeOnly: true });
     if (!active) {
-      await createRelativeStrengthRefreshJob(env, preset, "scheduled");
+      await requestScansRefresh(env, preset.id, "scheduled");
     }
   }
   const jobs = await processQueuedRelativeStrengthRefreshJobs(env, options);
@@ -3827,6 +4678,13 @@ export async function refreshScanCompilePreset(env: Env, compilePresetId: string
 export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<void> {
   const window = `-${Math.max(1, retentionDays)} day`;
   await env.DB.batch([
+    env.DB.prepare(
+      "DELETE FROM relative_strength_materialization_queue WHERE run_id IN (SELECT id FROM relative_strength_materialization_runs WHERE datetime(updated_at) < datetime('now', ?))",
+    ).bind(window),
+    env.DB.prepare(
+      "DELETE FROM relative_strength_materialization_run_candidates WHERE run_id IN (SELECT id FROM relative_strength_materialization_runs WHERE datetime(updated_at) < datetime('now', ?))",
+    ).bind(window),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_runs WHERE datetime(updated_at) < datetime('now', ?)").bind(window),
     env.DB.prepare(
       "DELETE FROM relative_strength_refresh_queue WHERE job_id IN (SELECT id FROM scan_refresh_jobs WHERE datetime(updated_at) < datetime('now', ?))",
     ).bind(window),

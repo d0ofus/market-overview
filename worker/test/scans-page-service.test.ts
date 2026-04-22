@@ -93,6 +93,7 @@ type MutableScanRefreshJob = {
   benchmarkBarsJson: string | null;
   requiredBarCount: number;
   configKey: string | null;
+  sharedRunId: string | null;
   expectedTradingDate: string | null;
   benchmarkTicker: string | null;
   rsMaType: "SMA" | "EMA";
@@ -102,6 +103,45 @@ type MutableScanRefreshJob = {
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
   lastAdvancedAt: string | null;
+};
+
+type MutableRelativeStrengthMaterializationRun = {
+  id: string;
+  configKey: string;
+  expectedTradingDate: string;
+  benchmarkTicker: string;
+  rsMaType: "SMA" | "EMA";
+  rsMaLength: number;
+  newHighLookback: number;
+  status: "queued" | "running" | "completed" | "failed";
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  benchmarkBarsJson: string | null;
+  requiredBarCount: number;
+  fullCandidateCount: number;
+  materializationCandidateCount: number;
+  alreadyCurrentCandidateCount: number;
+  processedCandidates: number;
+  matchedCandidates: number;
+  cursorOffset: number;
+  lastAdvancedAt: string | null;
+};
+
+type MutableRelativeStrengthMaterializationRunCandidate = {
+  runId: string;
+  cursorOffset: number;
+  ticker: string;
+};
+
+type MutableRelativeStrengthMaterializationQueueRow = {
+  runId: string;
+  priority: number;
+  source: string | null;
+  enqueuedAt: string;
+  lastAttemptedAt: string | null;
+  attempts: number;
 };
 
 type MutableRelativeStrengthLatestCacheRow = {
@@ -261,6 +301,9 @@ function createMutableScansEnv(input: {
   const relativeStrengthRatioCache = new Map<string, MutableRelativeStrengthRatioCacheRow>();
   const relativeStrengthConfigState = new Map<string, MutableRelativeStrengthConfigState>();
   const relativeStrengthRefreshQueue = new Map<string, MutableRelativeStrengthRefreshQueueRow>();
+  const relativeStrengthMaterializationRuns = new Map<string, MutableRelativeStrengthMaterializationRun>();
+  const relativeStrengthMaterializationRunCandidates = new Map<string, MutableRelativeStrengthMaterializationRunCandidate>();
+  const relativeStrengthMaterializationQueue = new Map<string, MutableRelativeStrengthMaterializationQueueRow>();
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -377,11 +420,41 @@ function createMutableScansEnv(input: {
       else if (column === "latest_snapshot_id") job.latestSnapshotId = value == null ? null : String(value);
       else if (column === "benchmark_bars_json") job.benchmarkBarsJson = value == null ? null : String(value);
       else if (column === "required_bar_count") job.requiredBarCount = Number(value ?? job.requiredBarCount);
+      else if (column === "shared_run_id") job.sharedRunId = value == null ? null : String(value);
       else if (column === "full_candidate_count") job.fullCandidateCount = Number(value ?? job.fullCandidateCount);
       else if (column === "materialization_candidate_count") job.materializationCandidateCount = Number(value ?? job.materializationCandidateCount);
       else if (column === "already_current_candidate_count") job.alreadyCurrentCandidateCount = Number(value ?? job.alreadyCurrentCandidateCount);
       else if (column === "last_advanced_at") job.lastAdvancedAt = value == null ? null : String(value);
       else if (column === "completed_at") job.completedAt = value == null ? null : String(value);
+    }
+  };
+
+  const updateMaterializationRun = (sql: string, args: unknown[]) => {
+    const runId = String(args[args.length - 1] ?? "");
+    const run = relativeStrengthMaterializationRuns.get(runId);
+    if (!run) return;
+    const setClause = sql.match(/SET\s+(.+)\s+WHERE/i)?.[1] ?? "";
+    const assignments = setClause.split(",").map((part) => part.trim()).filter(Boolean);
+    let argIndex = 0;
+    for (const assignment of assignments) {
+      if (assignment === "updated_at = CURRENT_TIMESTAMP") {
+        run.updatedAt = nextTimestamp();
+        continue;
+      }
+      const [column] = assignment.split("=").map((part) => part.trim());
+      const value = args[argIndex++];
+      if (column === "status") run.status = String(value ?? "queued") as MutableRelativeStrengthMaterializationRun["status"];
+      else if (column === "error") run.error = value == null ? null : String(value);
+      else if (column === "benchmark_bars_json") run.benchmarkBarsJson = value == null ? null : String(value);
+      else if (column === "required_bar_count") run.requiredBarCount = Number(value ?? run.requiredBarCount);
+      else if (column === "full_candidate_count") run.fullCandidateCount = Number(value ?? run.fullCandidateCount);
+      else if (column === "materialization_candidate_count") run.materializationCandidateCount = Number(value ?? run.materializationCandidateCount);
+      else if (column === "already_current_candidate_count") run.alreadyCurrentCandidateCount = Number(value ?? run.alreadyCurrentCandidateCount);
+      else if (column === "processed_candidates") run.processedCandidates = Number(value ?? run.processedCandidates);
+      else if (column === "matched_candidates") run.matchedCandidates = Number(value ?? run.matchedCandidates);
+      else if (column === "cursor_offset") run.cursorOffset = Number(value ?? run.cursorOffset);
+      else if (column === "last_advanced_at") run.lastAdvancedAt = value == null ? null : String(value);
+      else if (column === "completed_at") run.completedAt = value == null ? null : String(value);
     }
   };
 
@@ -393,6 +466,9 @@ function createMutableScansEnv(input: {
       relativeStrengthRatioCache,
       relativeStrengthConfigState,
       relativeStrengthRefreshQueue,
+      relativeStrengthMaterializationRuns,
+      relativeStrengthMaterializationRunCandidates,
+      relativeStrengthMaterializationQueue,
       dailyBarsByTicker,
     },
     DB: {
@@ -403,6 +479,32 @@ function createMutableScansEnv(input: {
           async first<T>() {
             if (sql.includes("FROM scan_presets WHERE id = ?")) {
               return presets.find((row) => row.id === args[0]) ?? null as T;
+            }
+            if (sql.includes("FROM relative_strength_materialization_runs") && sql.includes("WHERE id = ?")) {
+              return (relativeStrengthMaterializationRuns.get(String(args[0] ?? "")) ?? null) as T;
+            }
+            if (sql.includes("FROM relative_strength_materialization_runs") && sql.includes("WHERE config_key = ?")) {
+              const configKey = String(args[0] ?? "");
+              const expectedTradingDate = String(args[1] ?? "");
+              const candidates = Array.from(relativeStrengthMaterializationRuns.values())
+                .filter((row) => row.configKey === configKey && row.expectedTradingDate === expectedTradingDate)
+                .filter((row) => row.status === "queued" || row.status === "running")
+                .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+              return (candidates[0] ?? null) as T;
+            }
+            if (sql.includes("COUNT(*) as count FROM relative_strength_materialization_run_candidates")) {
+              const runId = String(args[0] ?? "");
+              const count = Array.from(relativeStrengthMaterializationRunCandidates.values())
+                .filter((row) => row.runId === runId)
+                .length;
+              return { count } as T;
+            }
+            if (sql.includes("MAX(cursor_offset) as maxCursorOffset FROM relative_strength_materialization_run_candidates")) {
+              const runId = String(args[0] ?? "");
+              const rows = Array.from(relativeStrengthMaterializationRunCandidates.values())
+                .filter((row) => row.runId === runId);
+              const maxCursorOffset = rows.length > 0 ? Math.max(...rows.map((row) => row.cursorOffset)) : null;
+              return { maxCursorOffset } as T;
             }
             if (sql.includes("FROM scan_refresh_job_candidates") && sql.includes("COUNT(*) as candidateCount")) {
               const jobId = String(args[0] ?? "");
@@ -495,6 +597,33 @@ function createMutableScansEnv(input: {
                 .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt));
               return { results: results as T[] };
             }
+            if (sql.includes("FROM relative_strength_materialization_queue")) {
+              const results = Array.from(relativeStrengthMaterializationQueue.values())
+                .sort((left, right) => (
+                  right.priority - left.priority
+                  || left.enqueuedAt.localeCompare(right.enqueuedAt)
+                ));
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM relative_strength_materialization_runs")) {
+              const results = Array.from(relativeStrengthMaterializationRuns.values())
+                .filter((row) => row.status === "queued" || row.status === "running")
+                .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM relative_strength_materialization_run_candidates")) {
+              const runId = String(args[0] ?? "");
+              const rows = Array.from(relativeStrengthMaterializationRunCandidates.values())
+                .filter((row) => row.runId === runId)
+                .sort((left, right) => left.cursorOffset - right.cursorOffset);
+              if (sql.includes("AND ticker IN")) {
+                const requested = args.slice(1).map((value) => String(value).toUpperCase());
+                return { results: rows.filter((row) => requested.includes(row.ticker)) as T[] };
+              }
+              const limit = Number(args[1] ?? rows.length);
+              const offset = Number(args[2] ?? 0);
+              return { results: rows.slice(offset, offset + limit) as T[] };
+            }
             if (sql.includes("FROM scan_refresh_job_candidates")) {
               const jobId = String(args[0] ?? "");
               const results = scanRefreshJobCandidates
@@ -559,6 +688,15 @@ function createMutableScansEnv(input: {
               const results = getBarsInRange(requestedTickers, startDate, endDate);
               return { results: results as T[] };
             }
+            if (sql.includes("FROM scan_refresh_jobs") && sql.includes("shared_run_id = ?")) {
+              const sharedRunId = String(args[0] ?? "");
+              const activeOnly = sql.includes("status IN ('queued', 'running')");
+              const results = scanRefreshJobs
+                .filter((row) => row.sharedRunId === sharedRunId)
+                .filter((row) => !activeOnly || row.status === "queued" || row.status === "running")
+                .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+              return { results: results as T[] };
+            }
             if (sql.includes("FROM scan_compile_presets cp")) {
               const compilePresetId = sql.includes("WHERE cp.id = ?") ? String(args[0] ?? "") : undefined;
               return { results: buildCompilePresetRows(compilePresetId) as T[] };
@@ -601,6 +739,7 @@ function createMutableScansEnv(input: {
                 requestedBy,
                 requiredBarCount,
                 configKey,
+                sharedRunId,
                 expectedTradingDate,
                 benchmarkTicker,
                 rsMaType,
@@ -628,6 +767,7 @@ function createMutableScansEnv(input: {
                 benchmarkBarsJson: null,
                 requiredBarCount: Number(requiredBarCount ?? 0),
                 configKey: configKey == null ? null : String(configKey),
+                sharedRunId: sharedRunId == null ? null : String(sharedRunId),
                 expectedTradingDate: expectedTradingDate == null ? null : String(expectedTradingDate),
                 benchmarkTicker: benchmarkTicker == null ? null : String(benchmarkTicker),
                 rsMaType: String(rsMaType ?? "EMA") as "SMA" | "EMA",
@@ -642,6 +782,44 @@ function createMutableScansEnv(input: {
             if (sql.includes("UPDATE scan_refresh_jobs SET")) {
               updateJob(sql, args);
             }
+            if (sql.includes("INSERT INTO relative_strength_materialization_runs")) {
+              const [
+                id,
+                configKey,
+                expectedTradingDate,
+                benchmarkTicker,
+                rsMaType,
+                rsMaLength,
+                newHighLookback,
+                requiredBarCount,
+              ] = args;
+              relativeStrengthMaterializationRuns.set(String(id), {
+                id: String(id),
+                configKey: String(configKey),
+                expectedTradingDate: String(expectedTradingDate),
+                benchmarkTicker: String(benchmarkTicker),
+                rsMaType: String(rsMaType ?? "EMA") as "SMA" | "EMA",
+                rsMaLength: Number(rsMaLength ?? 21),
+                newHighLookback: Number(newHighLookback ?? 252),
+                status: "queued",
+                startedAt: nextTimestamp(),
+                updatedAt: nextTimestamp(),
+                completedAt: null,
+                error: null,
+                benchmarkBarsJson: null,
+                requiredBarCount: Number(requiredBarCount ?? 0),
+                fullCandidateCount: 0,
+                materializationCandidateCount: 0,
+                alreadyCurrentCandidateCount: 0,
+                processedCandidates: 0,
+                matchedCandidates: 0,
+                cursorOffset: 0,
+                lastAdvancedAt: null,
+              });
+            }
+            if (sql.includes("UPDATE relative_strength_materialization_runs SET")) {
+              updateMaterializationRun(sql, args);
+            }
             if (sql.includes("INSERT INTO relative_strength_refresh_queue")) {
               const [jobId, source] = args;
               relativeStrengthRefreshQueue.set(String(jobId), {
@@ -652,6 +830,18 @@ function createMutableScansEnv(input: {
                 attempts: 0,
               });
             }
+            if (sql.includes("INSERT INTO relative_strength_materialization_queue")) {
+              const [runId, priority, source] = args;
+              const existing = relativeStrengthMaterializationQueue.get(String(runId));
+              relativeStrengthMaterializationQueue.set(String(runId), {
+                runId: String(runId),
+                priority: Math.max(Number(priority ?? 0), existing?.priority ?? 0),
+                source: source == null ? null : String(source),
+                enqueuedAt: nextTimestamp(),
+                lastAttemptedAt: null,
+                attempts: existing?.attempts ?? 0,
+              });
+            }
             if (sql.includes("UPDATE relative_strength_refresh_queue")) {
               const [jobId] = args;
               const row = relativeStrengthRefreshQueue.get(String(jobId));
@@ -660,8 +850,28 @@ function createMutableScansEnv(input: {
                 row.attempts += 1;
               }
             }
+            if (sql.includes("UPDATE relative_strength_materialization_queue")) {
+              const [runId] = args;
+              const row = relativeStrengthMaterializationQueue.get(String(runId));
+              if (row) {
+                row.lastAttemptedAt = nextTimestamp();
+                row.attempts += 1;
+              }
+            }
             if (sql.includes("DELETE FROM relative_strength_refresh_queue WHERE job_id = ?")) {
               relativeStrengthRefreshQueue.delete(String(args[0] ?? ""));
+            }
+            if (sql.includes("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?")) {
+              relativeStrengthMaterializationQueue.delete(String(args[0] ?? ""));
+            }
+            if (sql.includes("DELETE FROM relative_strength_materialization_run_candidates WHERE run_id = ?")) {
+              const runId = String(args[0] ?? "");
+              for (const [key, row] of relativeStrengthMaterializationRunCandidates.entries()) {
+                if (row.runId === runId) relativeStrengthMaterializationRunCandidates.delete(key);
+              }
+            }
+            if (sql.includes("DELETE FROM relative_strength_materialization_runs WHERE id = ?")) {
+              relativeStrengthMaterializationRuns.delete(String(args[0] ?? ""));
             }
             if (sql.includes("DELETE FROM rs_ratio_cache")) {
               const benchmarkTicker = String(args[0] ?? "").toUpperCase();
@@ -810,6 +1020,15 @@ function createMutableScansEnv(input: {
               avgVolume: avgVolume == null ? null : Number(avgVolume),
               priceAvgVolume: priceAvgVolume == null ? null : Number(priceAvgVolume),
               materializationRequired: Number(materializationRequired ?? 1),
+            });
+            continue;
+          }
+          if (statement.__sql.includes("INSERT INTO relative_strength_materialization_run_candidates")) {
+            const [runId, cursorOffset, ticker] = statement.__args ?? [];
+            relativeStrengthMaterializationRunCandidates.set(`${String(runId)}|${String(ticker).toUpperCase()}`, {
+              runId: String(runId),
+              cursorOffset: Number(cursorOffset ?? 0),
+              ticker: String(ticker).toUpperCase(),
             });
             continue;
           }
@@ -976,6 +1195,7 @@ function seedCompletedRelativeStrengthCache(
     benchmarkBarsJson: null,
     requiredBarCount: Math.max(preset.newHighLookback, 504),
     configKey,
+    sharedRunId: null,
     expectedTradingDate,
     benchmarkTicker,
     rsMaType: preset.rsMaType,
@@ -1683,6 +1903,7 @@ describe("scans page service", () => {
       benchmarkBarsJson: null,
       requiredBarCount: 504,
       configKey: "SPY|EMA|21|252",
+      sharedRunId: null,
       expectedTradingDate: CURRENT_RS_SESSION,
       benchmarkTicker: "SPY",
       rsMaType: "EMA",
@@ -1766,6 +1987,7 @@ describe("scans page service", () => {
       benchmarkBarsJson: null,
       requiredBarCount: 504,
       configKey: "SPY|EMA|21|252",
+      sharedRunId: null,
       expectedTradingDate: CURRENT_RS_SESSION,
       benchmarkTicker: "SPY",
       rsMaType: "EMA",
@@ -1938,6 +2160,74 @@ describe("scans page service", () => {
     expect(warmedA.snapshot?.rows[0]?.rawJson).toContain(`"tradingDate":"${seeded.expectedTradingDate}"`);
     expect(warmedB.job).toBeNull();
     expect(warmedB.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("shares one RS materialization run across same-config presets with different output modes", async () => {
+    const presetA: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-shared-run-a",
+      name: "Relative Strength - New Highs",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      outputMode: "rs_new_high_only",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const presetB: ScanPreset = {
+      ...presetA,
+      id: "preset-rs-shared-run-b",
+      name: "Relative Strength - Signal",
+      outputMode: "both",
+    };
+    const benchmarkBars = makeBarsEndingOn("SPY", 520, 100, 0.15);
+    const tickerBars = makeBarsEndingOn("NVDA", 520, 40, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [presetA, presetB],
+      symbols: ["NVDA"],
+      dailyBarsByTicker: {
+        SPY: benchmarkBars,
+        NVDA: tickerBars,
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await requestScansRefresh(env, presetA.id, "test");
+    const second = await requestScansRefresh(env, presetB.id, "test");
+
+    expect(first.async).toBe(true);
+    expect(second.async).toBe(true);
+    expect(first.job?.sharedRunId).toBeTruthy();
+    expect(second.job?.sharedRunId).toBe(first.job?.sharedRunId);
+    expect(env.__testState.relativeStrengthMaterializationRuns.size).toBe(1);
+
+    let job = second.job;
+    while (job && (job.status === "queued" || job.status === "running")) {
+      job = await processRelativeStrengthRefreshJob(env, job.id, { maxBatches: 20, timeBudgetMs: 60_000 });
+    }
+
+    const firstCompleted = env.__testState.scanRefreshJobs.find((row: MutableScanRefreshJob) => row.id === first.job?.id);
+    const secondCompleted = env.__testState.scanRefreshJobs.find((row: MutableScanRefreshJob) => row.id === second.job?.id);
+    expect(firstCompleted?.status).toBe("completed");
+    expect(secondCompleted?.status).toBe("completed");
 
     vi.unstubAllGlobals();
   });
