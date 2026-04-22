@@ -47,6 +47,8 @@ const OVERVIEW_RS_ENABLED_GROUPS = new Set([
   "g-sector-etf-eqwt",
 ]);
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
+const OVERVIEW_SNAPSHOT_RETENTION_DAYS = 14;
+const SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE = 25;
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
 const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
@@ -81,6 +83,75 @@ async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[]
     if (chunk.length === 0) continue;
     await env.DB.batch(chunk);
   }
+}
+
+function buildPlaceholders(count: number): string {
+  return Array.from({ length: count }, () => "?").join(", ");
+}
+
+export async function cleanupOldOverviewSnapshots(
+  env: Env,
+  retentionDays = OVERVIEW_SNAPSHOT_RETENTION_DAYS,
+): Promise<{ cutoffDate: string; deletedSnapshots: number; deletedRows: number; deletedOrphanRows: number }> {
+  const cutoffDate = toISODate(new Date(Date.now() - retentionDays * 86400_000));
+  const orphanRowCount = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM snapshot_rows WHERE snapshot_id NOT IN (SELECT id FROM snapshots_meta)",
+  ).first<{ count: number | null }>();
+  const deletedOrphanRows = orphanRowCount?.count ?? 0;
+  if (deletedOrphanRows > 0) {
+    await env.DB.prepare(
+      "DELETE FROM snapshot_rows WHERE snapshot_id NOT IN (SELECT id FROM snapshots_meta)",
+    ).run();
+  }
+  const staleSnapshots = await env.DB.prepare(
+    `SELECT sm.id as id
+       FROM snapshots_meta sm
+       LEFT JOIN (
+         SELECT config_id, MAX(as_of_date) as latest_as_of_date
+         FROM snapshots_meta
+         GROUP BY config_id
+       ) latest
+         ON latest.config_id = sm.config_id
+        AND latest.latest_as_of_date = sm.as_of_date
+      WHERE sm.as_of_date < ?
+        AND latest.latest_as_of_date IS NULL
+      ORDER BY sm.generated_at ASC`,
+  )
+    .bind(cutoffDate)
+    .all<{ id: string }>();
+  const staleSnapshotIds = (staleSnapshots.results ?? []).map((row) => row.id).filter(Boolean);
+  if (staleSnapshotIds.length === 0) {
+    return {
+      cutoffDate,
+      deletedSnapshots: 0,
+      deletedRows: deletedOrphanRows,
+      deletedOrphanRows,
+    };
+  }
+
+  let deletedRows = deletedOrphanRows;
+  for (let i = 0; i < staleSnapshotIds.length; i += SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE) {
+    const chunk = staleSnapshotIds.slice(i, i + SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = buildPlaceholders(chunk.length);
+    const rowCount = await env.DB.prepare(
+      `SELECT COUNT(*) as count FROM snapshot_rows WHERE snapshot_id IN (${placeholders})`,
+    )
+      .bind(...chunk)
+      .first<{ count: number | null }>();
+    deletedRows += rowCount?.count ?? 0;
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM snapshot_rows WHERE snapshot_id IN (${placeholders})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM snapshots_meta WHERE id IN (${placeholders})`).bind(...chunk),
+    ]);
+  }
+
+  return {
+    cutoffDate,
+    deletedSnapshots: staleSnapshotIds.length,
+    deletedRows,
+    deletedOrphanRows,
+  };
 }
 
 async function ensureSymbolsExist(env: Env, tickers: string[]): Promise<void> {
@@ -555,12 +626,16 @@ export async function computeAndStoreSnapshot(
     barsByTicker.set(row.ticker, existing);
   }
 
+  const preCleanup = await cleanupOldOverviewSnapshots(env);
+  if (preCleanup.deletedSnapshots > 0 || preCleanup.deletedRows > 0) {
+    console.log("overview snapshot cleanup removed old rows before refresh", preCleanup);
+  }
   const snapshotId = uid();
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO snapshots_meta (id, config_id, as_of_date, generated_at, provider_label) VALUES (?, ?, ?, ?, ?)",
+  const previousSnapshot = await env.DB.prepare(
+    "SELECT id FROM snapshots_meta WHERE config_id = ? AND as_of_date = ? LIMIT 1",
   )
-    .bind(snapshotId, configId, asOfDate, generatedAt, providerLabel)
-    .run();
+    .bind(configId, asOfDate)
+    .first<{ id: string }>();
 
   const rowInserts = [];
   for (const section of config.sections) {
@@ -606,6 +681,21 @@ export async function computeAndStoreSnapshot(
     }
   }
   if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
+  await env.DB.prepare(
+    `INSERT INTO snapshots_meta (id, config_id, as_of_date, generated_at, provider_label)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(config_id, as_of_date) DO UPDATE SET
+       id = excluded.id,
+       generated_at = excluded.generated_at,
+       provider_label = excluded.provider_label`,
+  )
+    .bind(snapshotId, configId, asOfDate, generatedAt, providerLabel)
+    .run();
+  if (previousSnapshot?.id && previousSnapshot.id !== snapshotId) {
+    await env.DB.prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ?")
+      .bind(previousSnapshot.id)
+      .run();
+  }
   if (includeBreadth) {
     const breadthUniverseIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
     for (const universeId of breadthUniverseIds) {
@@ -617,6 +707,10 @@ export async function computeAndStoreSnapshot(
         generatedAt,
       );
     }
+  }
+  const postCleanup = await cleanupOldOverviewSnapshots(env);
+  if (postCleanup.deletedSnapshots > 0 || postCleanup.deletedRows > 0) {
+    console.log("overview snapshot cleanup removed old rows after refresh", postCleanup);
   }
   return { snapshotId, asOfDate };
 }
