@@ -41,6 +41,15 @@ export type RelativeStrengthCacheRow = {
   approxRsRating: number | null;
 };
 
+export type RelativeStrengthRatioRow = {
+  ticker: string;
+  benchmarkTicker: string;
+  tradingDate: string;
+  priceClose: number;
+  benchmarkClose: number;
+  rsRatioClose: number;
+};
+
 type AlignedSeries = {
   tradingDate: string;
   priceClose: number;
@@ -161,14 +170,43 @@ function relPerformance(closeSeries: number[], benchmarkSeries: number[], index:
   return closeNow / closeThen / (benchmarkNow / benchmarkThen) - 1;
 }
 
-export function buildRelativeStrengthCacheRows(
+export function buildRelativeStrengthRatioRows(
   tickerBars: RelativeStrengthDailyBar[],
   benchmarkBars: RelativeStrengthDailyBar[],
+  benchmarkTicker: string,
+): RelativeStrengthRatioRow[] {
+  const benchmarkByDate = new Map<string, RelativeStrengthDailyBar>();
+  for (const bar of benchmarkBars) {
+    benchmarkByDate.set(bar.date, bar);
+  }
+  const out: RelativeStrengthRatioRow[] = [];
+  const normalizedTicker = tickerBars[0]?.ticker?.toUpperCase() ?? "";
+  const normalizedBenchmark = benchmarkTicker.toUpperCase();
+  for (const bar of [...tickerBars].sort((left, right) => left.date.localeCompare(right.date))) {
+    const benchmark = benchmarkByDate.get(bar.date);
+    if (!benchmark || !Number.isFinite(benchmark.c) || benchmark.c === 0 || !Number.isFinite(bar.c)) continue;
+    out.push({
+      ticker: normalizedTicker,
+      benchmarkTicker: normalizedBenchmark,
+      tradingDate: bar.date,
+      priceClose: bar.c,
+      benchmarkClose: benchmark.c,
+      rsRatioClose: bar.c / benchmark.c,
+    });
+  }
+  return out.filter((row) => row.ticker);
+}
+
+export function buildRelativeStrengthCacheRowsFromRatioRows(
+  ratioRows: RelativeStrengthRatioRow[],
   config: RelativeStrengthConfig,
 ): RelativeStrengthCacheRow[] {
-  const aligned = alignBars(tickerBars, benchmarkBars, config);
+  const aligned = [...ratioRows]
+    .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate))
+    .filter((row) => Number.isFinite(row.priceClose) && Number.isFinite(row.benchmarkClose) && row.benchmarkClose !== 0 && Number.isFinite(row.rsRatioClose));
   if (aligned.length === 0) return [];
-  const rsCloseSeries = aligned.map((row) => row.rsClose);
+  const scaleFactor = config.verticalOffset * 100;
+  const rsCloseSeries = aligned.map((row) => row.rsRatioClose * scaleFactor);
   const priceCloseSeries = aligned.map((row) => row.priceClose);
   const benchmarkCloseSeries = aligned.map((row) => row.benchmarkClose);
   const movingAverageSeries = calculateMovingAverage(rsCloseSeries, config.rsMaLength, config.rsMaType);
@@ -184,7 +222,7 @@ export function buildRelativeStrengthCacheRows(
   }
 
   return aligned.map((row, index) => {
-    const rsClose = toFinite(row.rsClose);
+    const rsClose = toFinite(rsCloseSeries[index]);
     const rsMa = toFinite(movingAverageSeries[index]);
     const previousRsClose = index > 0 ? toFinite(rsCloseSeries[index - 1]) : null;
     const previousRsMa = index > 0 ? toFinite(movingAverageSeries[index - 1]) : null;
@@ -201,14 +239,14 @@ export function buildRelativeStrengthCacheRows(
       : 50;
 
     return {
-      ticker: tickerBars[0]?.ticker?.toUpperCase() ?? "",
+      ticker: row.ticker.toUpperCase(),
       benchmarkTicker: config.benchmarkTicker.toUpperCase(),
       tradingDate: row.tradingDate,
       priceClose: row.priceClose,
       change1d: index > 0 ? pctChange(row.priceClose, previousPrice) : null,
-      rsOpen: row.rsOpen,
-      rsHigh: row.rsHigh,
-      rsLow: row.rsLow,
+      rsOpen: null,
+      rsHigh: null,
+      rsLow: null,
       rsClose,
       rsMa,
       rsAboveMa: rsClose != null && rsMa != null ? rsClose >= rsMa : false,
@@ -220,4 +258,27 @@ export function buildRelativeStrengthCacheRows(
       approxRsRating,
     };
   }).filter((row) => row.ticker);
+}
+
+export function buildRelativeStrengthCacheRows(
+  tickerBars: RelativeStrengthDailyBar[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+  config: RelativeStrengthConfig,
+): RelativeStrengthCacheRow[] {
+  const baseRows = buildRelativeStrengthCacheRowsFromRatioRows(
+    buildRelativeStrengthRatioRows(tickerBars, benchmarkBars, config.benchmarkTicker),
+    config,
+  );
+  if (baseRows.length === 0) return [];
+  const aligned = alignBars(tickerBars, benchmarkBars, config);
+  const byDate = new Map(aligned.map((row) => [row.tradingDate, row]));
+  return baseRows.map((row) => {
+    const alignedRow = byDate.get(row.tradingDate);
+    return {
+      ...row,
+      rsOpen: alignedRow?.rsOpen ?? null,
+      rsHigh: alignedRow?.rsHigh ?? null,
+      rsLow: alignedRow?.rsLow ?? null,
+    };
+  });
 }

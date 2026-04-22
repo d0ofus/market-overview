@@ -119,6 +119,30 @@ type MutableRelativeStrengthLatestCacheRow = {
   approxRsRating: number | null;
 };
 
+type MutableRelativeStrengthRatioCacheRow = {
+  benchmarkTicker: string;
+  ticker: string;
+  tradingDate: string;
+  priceClose: number | null;
+  benchmarkClose: number | null;
+  rsRatioClose: number | null;
+};
+
+type MutableScanRefreshJobCandidate = {
+  jobId: string;
+  cursorOffset: number;
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
+  relativeVolume: number | null;
+  avgVolume: number | null;
+  priceAvgVolume: number | null;
+};
+
+const CURRENT_RS_SESSION = "2026-04-21";
+
 function makeBars(ticker: string, count: number, closeBase: number, closeStep: number) {
   const rows: Array<{ ticker: string; date: string; o: number; h: number; l: number; c: number; volume: number }> = [];
   const start = new Date("2025-01-02T00:00:00Z");
@@ -147,7 +171,7 @@ function makeBarsEndingOn(
   count: number,
   closeBase: number,
   closeStep: number,
-  endIsoDate = "2026-04-20",
+  endIsoDate = CURRENT_RS_SESSION,
 ) {
   const tradingDates: string[] = [];
   const current = new Date(`${endIsoDate}T00:00:00Z`);
@@ -188,7 +212,9 @@ function createMutableScansEnv(input: {
     Object.entries(input.dailyBarsByTicker ?? {}).map(([ticker, bars]) => [ticker.toUpperCase(), [...bars]]),
   );
   const scanRefreshJobs: MutableScanRefreshJob[] = [];
+  const scanRefreshJobCandidates: MutableScanRefreshJobCandidate[] = [];
   const relativeStrengthLatestCache = new Map<string, MutableRelativeStrengthLatestCacheRow>();
+  const relativeStrengthRatioCache = new Map<string, MutableRelativeStrengthRatioCacheRow>();
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -308,7 +334,9 @@ function createMutableScansEnv(input: {
   const env = {
     __testState: {
       scanRefreshJobs,
+      scanRefreshJobCandidates,
       relativeStrengthLatestCache,
+      relativeStrengthRatioCache,
       dailyBarsByTicker,
     },
     DB: {
@@ -330,6 +358,19 @@ function createMutableScansEnv(input: {
               const completedOnly = sql.includes("status = 'completed'");
               const candidates = scanRefreshJobs
                 .filter((row) => row.configKey === configKey)
+                .filter((row) => !expectedTradingDate || row.expectedTradingDate === expectedTradingDate)
+                .filter((row) => !activeOnly || row.status === "queued" || row.status === "running")
+                .filter((row) => !completedOnly || row.status === "completed")
+                .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+              return (candidates[0] ?? null) as T;
+            }
+            if (sql.includes("FROM scan_refresh_jobs") && sql.includes("WHERE preset_id = ?")) {
+              const presetId = String(args[0] ?? "");
+              const expectedTradingDate = sql.includes("expected_trading_date = ?") ? String(args[1] ?? "") : null;
+              const activeOnly = sql.includes("status IN ('queued', 'running')");
+              const completedOnly = sql.includes("status = 'completed'");
+              const candidates = scanRefreshJobs
+                .filter((row) => row.presetId === presetId)
                 .filter((row) => !expectedTradingDate || row.expectedTradingDate === expectedTradingDate)
                 .filter((row) => !activeOnly || row.status === "queued" || row.status === "running")
                 .filter((row) => !completedOnly || row.status === "completed")
@@ -376,6 +417,48 @@ function createMutableScansEnv(input: {
               const tickers = args.slice(2).map((value) => String(value).toUpperCase());
               const results = Array.from(relativeStrengthLatestCache.values())
                 .filter((row) => row.configKey === configKey && row.tradingDate === tradingDate && tickers.includes(row.ticker));
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM scan_refresh_job_candidates")) {
+              const jobId = String(args[0] ?? "");
+              const results = scanRefreshJobCandidates
+                .filter((row) => row.jobId === jobId)
+                .sort((left, right) => left.cursorOffset - right.cursorOffset);
+              if (sql.includes("cursor_offset >= ?")) {
+                const cursorOffset = Number(args[1] ?? 0);
+                const limit = Number(args[2] ?? results.length);
+                return {
+                  results: results
+                    .filter((row) => row.cursorOffset >= cursorOffset)
+                    .slice(0, limit) as T[],
+                };
+              }
+              return { results: results as T[] };
+            }
+            if (sql.includes("MAX(trading_date) as lastDate, COUNT(*) as rowCount")) {
+              const benchmarkTicker = String(args[0] ?? "").toUpperCase();
+              const endDate = String(args[args.length - 1] ?? "");
+              const requestedTickers = args.slice(1, -1).map((value) => String(value).toUpperCase());
+              const results = requestedTickers.flatMap((ticker) => {
+                const rows = Array.from(relativeStrengthRatioCache.values())
+                  .filter((row) => row.benchmarkTicker === benchmarkTicker && row.ticker === ticker && row.tradingDate <= endDate);
+                if (rows.length === 0) return [];
+                const lastDate = [...rows].sort((left, right) => right.tradingDate.localeCompare(left.tradingDate))[0]?.tradingDate ?? null;
+                return [{ ticker, lastDate, rowCount: rows.length }];
+              });
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM rs_ratio_cache") && sql.includes("ROW_NUMBER() OVER")) {
+              const benchmarkTicker = String(args[0] ?? "").toUpperCase();
+              const barLimit = Number(args[args.length - 1] ?? 0);
+              const endDate = String(args[args.length - 2] ?? "");
+              const requestedTickers = args.slice(1, -2).map((value) => String(value).toUpperCase());
+              const results = requestedTickers.flatMap((ticker) =>
+                Array.from(relativeStrengthRatioCache.values())
+                  .filter((row) => row.benchmarkTicker === benchmarkTicker && row.ticker === ticker && row.tradingDate <= endDate)
+                  .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate))
+                  .slice(-barLimit),
+              );
               return { results: results as T[] };
             }
             if (sql.includes("ROW_NUMBER() OVER")) {
@@ -474,6 +557,23 @@ function createMutableScansEnv(input: {
             }
             if (sql.includes("UPDATE scan_refresh_jobs SET")) {
               updateJob(sql, args);
+            }
+            if (sql.includes("DELETE FROM rs_ratio_cache")) {
+              const benchmarkTicker = String(args[0] ?? "").toUpperCase();
+              const keepBars = Number(args[args.length - 1] ?? 0);
+              const requestedTickers = args.slice(1, -1).map((value) => String(value).toUpperCase());
+              for (const ticker of requestedTickers) {
+                const rows = Array.from(relativeStrengthRatioCache.values())
+                  .filter((row) => row.benchmarkTicker === benchmarkTicker && row.ticker === ticker)
+                  .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate));
+                const keep = rows.slice(-keepBars);
+                for (const row of rows) {
+                  relativeStrengthRatioCache.delete(`${row.benchmarkTicker}|${row.ticker}|${row.tradingDate}`);
+                }
+                for (const row of keep) {
+                  relativeStrengthRatioCache.set(`${row.benchmarkTicker}|${row.ticker}|${row.tradingDate}`, row);
+                }
+              }
             }
             if (sql.includes("INSERT OR IGNORE INTO symbols")) {
               const [ticker] = args;
@@ -591,6 +691,34 @@ function createMutableScansEnv(input: {
             });
             continue;
           }
+          if (statement.__sql.includes("INSERT INTO scan_refresh_job_candidates")) {
+            const [jobId, cursorOffset, ticker, name, sector, industry, marketCap, relativeVolume, avgVolume, priceAvgVolume] = statement.__args ?? [];
+            scanRefreshJobCandidates.push({
+              jobId: String(jobId),
+              cursorOffset: Number(cursorOffset ?? 0),
+              ticker: String(ticker).toUpperCase(),
+              name: name == null ? null : String(name),
+              sector: sector == null ? null : String(sector),
+              industry: industry == null ? null : String(industry),
+              marketCap: marketCap == null ? null : Number(marketCap),
+              relativeVolume: relativeVolume == null ? null : Number(relativeVolume),
+              avgVolume: avgVolume == null ? null : Number(avgVolume),
+              priceAvgVolume: priceAvgVolume == null ? null : Number(priceAvgVolume),
+            });
+            continue;
+          }
+          if (statement.__sql.includes("INSERT INTO rs_ratio_cache")) {
+            const [benchmarkTicker, ticker, tradingDate, priceClose, benchmarkClose, rsRatioClose] = statement.__args ?? [];
+            relativeStrengthRatioCache.set(`${String(benchmarkTicker).toUpperCase()}|${String(ticker).toUpperCase()}|${String(tradingDate)}`, {
+              benchmarkTicker: String(benchmarkTicker).toUpperCase(),
+              ticker: String(ticker).toUpperCase(),
+              tradingDate: String(tradingDate),
+              priceClose: priceClose == null ? null : Number(priceClose),
+              benchmarkClose: benchmarkClose == null ? null : Number(benchmarkClose),
+              rsRatioClose: rsRatioClose == null ? null : Number(rsRatioClose),
+            });
+            continue;
+          }
           if (statement.__sql.includes("INSERT OR REPLACE INTO daily_bars")) {
             const [ticker, date, o, h, l, c, volume] = statement.__args ?? [];
             const normalizedTicker = String(ticker).toUpperCase();
@@ -661,7 +789,7 @@ function seedCompletedRelativeStrengthCache(
 ) {
   const benchmarkTicker = preset.benchmarkTicker ?? "SPY";
   const configKey = `${benchmarkTicker}|${preset.rsMaType}|${preset.rsMaLength}|${preset.newHighLookback}`;
-  const expectedTradingDate = rows[0]?.tradingDate ?? "2026-04-20";
+  const expectedTradingDate = rows[0]?.tradingDate ?? CURRENT_RS_SESSION;
   env.__testState.scanRefreshJobs.push({
     id: `job-${preset.id}`,
     presetId: preset.id,
@@ -685,6 +813,20 @@ function seedCompletedRelativeStrengthCache(
     rsMaType: preset.rsMaType,
     rsMaLength: preset.rsMaLength,
     newHighLookback: preset.newHighLookback,
+  });
+  rows.forEach((row, index) => {
+    env.__testState.scanRefreshJobCandidates.push({
+      jobId: `job-${preset.id}`,
+      cursorOffset: index,
+      ticker: row.ticker.toUpperCase(),
+      name: row.ticker,
+      sector: "Technology",
+      industry: "Semiconductors",
+      marketCap: 1,
+      relativeVolume: 1,
+      avgVolume: 1,
+      priceAvgVolume: 1,
+    });
   });
   for (const row of rows) {
     env.__testState.relativeStrengthLatestCache.set(`${configKey}|${row.ticker.toUpperCase()}`, {
@@ -1269,7 +1411,7 @@ describe("scans page service", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const latestTradingDate = "2026-04-20";
+    const latestTradingDate = CURRENT_RS_SESSION;
     const latestPriceClose = 199;
     seedCompletedRelativeStrengthCache(env, relativeStrengthPreset, [
       {
@@ -1362,7 +1504,7 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reuses one materialization job across presets that share the same RS config family", async () => {
+  it("treats RS materialization jobs as preset-specific even when configs match", async () => {
     const sharedBasePreset: ScanPreset = {
       ...topGainersPreset,
       scanType: "relative-strength",
@@ -1409,7 +1551,7 @@ describe("scans page service", () => {
     const seeded = seedCompletedRelativeStrengthCache(env, presetA, [
       {
         ticker: "NVDA",
-        tradingDate: "2026-04-20",
+        tradingDate: CURRENT_RS_SESSION,
         priceClose: 170.81,
         change1d: 2.55,
         rsRatioClose: 1.42,
@@ -1425,11 +1567,10 @@ describe("scans page service", () => {
     const warmedB = await requestScansRefresh(env, presetB.id, "test");
 
     expect(warmedA.async).toBe(false);
-    expect(warmedB.async).toBe(false);
+    expect(warmedB.async).toBe(true);
     expect(warmedA.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
-    expect(warmedB.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
     expect(warmedA.snapshot?.rows[0]?.rawJson).toContain(`"tradingDate":"${seeded.expectedTradingDate}"`);
-    expect((warmedB.snapshot?.rows[0]?.rsClose ?? 0)).toBeGreaterThan(warmedA.snapshot?.rows[0]?.rsClose ?? 0);
+    expect(warmedB.job?.presetId).toBe(presetB.id);
 
     vi.unstubAllGlobals();
   });

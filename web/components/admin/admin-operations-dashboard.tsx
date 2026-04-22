@@ -144,6 +144,7 @@ export function AdminOperationsDashboard() {
       const response = await updateAdminWorkerSchedule({
         id: workerSchedule.id,
         rsBackgroundEnabled: workerSchedule.rsBackgroundEnabled,
+        rsBackgroundBatchSize: workerSchedule.rsBackgroundBatchSize,
         rsBackgroundMaxBatchesPerTick: workerSchedule.rsBackgroundMaxBatchesPerTick,
         rsBackgroundTimeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
         postCloseBarsEnabled: workerSchedule.postCloseBarsEnabled,
@@ -324,7 +325,7 @@ export function AdminOperationsDashboard() {
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Relative Strength Background</p>
-                          <p className="mt-2 text-sm text-slate-300">Queued or running RS jobs keep advancing after the page closes, using the fixed worker cron and same-request background kicks.</p>
+                          <p className="mt-2 text-sm text-slate-300">Queued or running RS jobs keep advancing after the page closes, using the fixed worker cron and same-request background kicks. Batch size controls tickers per RS chunk, while max batches per tick controls how many chunks one worker pass can consume.</p>
                         </div>
                         <button
                           className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
@@ -334,7 +335,21 @@ export function AdminOperationsDashboard() {
                           {workerSchedule.rsBackgroundEnabled ? "Enabled" : "Disabled"}
                         </button>
                       </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <div className="mt-4 grid gap-4 md:grid-cols-3">
+                        <label className="text-xs text-slate-300">
+                          Tickers per RS batch
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                            value={workerSchedule.rsBackgroundBatchSize}
+                            onChange={(event) => setWorkerSchedule((current) => current ? {
+                              ...current,
+                              rsBackgroundBatchSize: Number(event.target.value || current.rsBackgroundBatchSize),
+                            } : current)}
+                          />
+                        </label>
                         <label className="text-xs text-slate-300">
                           Max batches per tick
                           <input

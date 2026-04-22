@@ -3,6 +3,7 @@ import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 
 const DEFAULT_WORKER_SCHEDULE_ID = "default";
+const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 20;
 const DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK = 20;
 const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
 const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 60;
@@ -14,6 +15,7 @@ export const FIXED_WORKER_CRON_EXPRESSION = "*/15 * * * *";
 type WorkerScheduleSettingsRow = {
   id: string;
   rsBackgroundEnabled: number | null;
+  rsBackgroundBatchSize: number | null;
   rsBackgroundMaxBatchesPerTick: number | null;
   rsBackgroundTimeBudgetMs: number | null;
   postCloseBarsEnabled: number | null;
@@ -51,6 +53,7 @@ function mapWorkerScheduleSettingsRow(row: WorkerScheduleSettingsRow | null): Wo
     id: row?.id ?? DEFAULT_WORKER_SCHEDULE_ID,
     cronExpression: FIXED_WORKER_CRON_EXPRESSION,
     rsBackgroundEnabled: asBooleanFlag(row?.rsBackgroundEnabled, true),
+    rsBackgroundBatchSize: Math.max(1, coerceInt(row?.rsBackgroundBatchSize, DEFAULT_RS_BACKGROUND_BATCH_SIZE)),
     rsBackgroundMaxBatchesPerTick: Math.max(1, coerceInt(row?.rsBackgroundMaxBatchesPerTick, DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK)),
     rsBackgroundTimeBudgetMs: Math.max(1_000, coerceInt(row?.rsBackgroundTimeBudgetMs, DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS)),
     postCloseBarsEnabled: asBooleanFlag(row?.postCloseBarsEnabled, true),
@@ -63,11 +66,12 @@ function mapWorkerScheduleSettingsRow(row: WorkerScheduleSettingsRow | null): Wo
 async function ensureWorkerScheduleSettingsRow(env: Env): Promise<void> {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO worker_schedule_settings
-      (id, rs_background_enabled, rs_background_max_batches_per_tick, rs_background_time_budget_ms, post_close_bars_enabled, post_close_bars_offset_minutes, post_close_bars_batch_size, post_close_bars_max_batches_per_tick, updated_at)
-     VALUES (?, 1, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      (id, rs_background_enabled, rs_background_batch_size, rs_background_max_batches_per_tick, rs_background_time_budget_ms, post_close_bars_enabled, post_close_bars_offset_minutes, post_close_bars_batch_size, post_close_bars_max_batches_per_tick, updated_at)
+     VALUES (?, 1, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
   )
     .bind(
       DEFAULT_WORKER_SCHEDULE_ID,
+      DEFAULT_RS_BACKGROUND_BATCH_SIZE,
       DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK,
       DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS,
       DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES,
@@ -83,6 +87,7 @@ export async function loadWorkerScheduleSettings(env: Env): Promise<WorkerSchedu
     `SELECT
        id,
        rs_background_enabled as rsBackgroundEnabled,
+       rs_background_batch_size as rsBackgroundBatchSize,
        rs_background_max_batches_per_tick as rsBackgroundMaxBatchesPerTick,
        rs_background_time_budget_ms as rsBackgroundTimeBudgetMs,
        post_close_bars_enabled as postCloseBarsEnabled,
@@ -105,10 +110,11 @@ export async function updateWorkerScheduleSettings(
   await ensureWorkerScheduleSettingsRow(env);
   await env.DB.prepare(
     `INSERT INTO worker_schedule_settings
-      (id, rs_background_enabled, rs_background_max_batches_per_tick, rs_background_time_budget_ms, post_close_bars_enabled, post_close_bars_offset_minutes, post_close_bars_batch_size, post_close_bars_max_batches_per_tick, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      (id, rs_background_enabled, rs_background_batch_size, rs_background_max_batches_per_tick, rs_background_time_budget_ms, post_close_bars_enabled, post_close_bars_offset_minutes, post_close_bars_batch_size, post_close_bars_max_batches_per_tick, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(id) DO UPDATE SET
        rs_background_enabled = excluded.rs_background_enabled,
+       rs_background_batch_size = excluded.rs_background_batch_size,
        rs_background_max_batches_per_tick = excluded.rs_background_max_batches_per_tick,
        rs_background_time_budget_ms = excluded.rs_background_time_budget_ms,
        post_close_bars_enabled = excluded.post_close_bars_enabled,
@@ -120,6 +126,7 @@ export async function updateWorkerScheduleSettings(
     .bind(
       payload.id || DEFAULT_WORKER_SCHEDULE_ID,
       payload.rsBackgroundEnabled ? 1 : 0,
+      payload.rsBackgroundBatchSize,
       payload.rsBackgroundMaxBatchesPerTick,
       payload.rsBackgroundTimeBudgetMs,
       payload.postCloseBarsEnabled ? 1 : 0,

@@ -898,6 +898,7 @@ export type WorkerScheduleSettings = {
   id: string;
   cronExpression: string;
   rsBackgroundEnabled: boolean;
+  rsBackgroundBatchSize: number;
   rsBackgroundMaxBatchesPerTick: number;
   rsBackgroundTimeBudgetMs: number;
   postCloseBarsEnabled: boolean;

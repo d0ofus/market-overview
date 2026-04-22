@@ -30,6 +30,7 @@ export const configPatchSchema = z.object({
 export const adminWorkerSchedulePatchSchema = z.object({
   id: z.string().min(1).default("default"),
   rsBackgroundEnabled: z.boolean(),
+  rsBackgroundBatchSize: z.number().int().min(1).max(500),
   rsBackgroundMaxBatchesPerTick: z.number().int().min(1).max(100),
   rsBackgroundTimeBudgetMs: z.number().int().min(1_000).max(30_000),
   postCloseBarsEnabled: z.boolean(),

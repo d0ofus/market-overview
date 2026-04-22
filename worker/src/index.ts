@@ -2259,6 +2259,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
       if (settings.rsBackgroundEnabled) {
         c.executionCtx.waitUntil((async () => {
           const processed = await processRelativeStrengthRefreshJob(c.env, result.job!.id, {
+            batchSize: settings.rsBackgroundBatchSize,
             maxBatches: settings.rsBackgroundMaxBatchesPerTick,
             timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
           });
@@ -2280,24 +2281,14 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
-  const job = await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 });
-  const snapshot = job?.status === "completed"
-    ? await requestScansRefresh(c.env, presetId, "poll-completed").then((result) => result.snapshot)
-    : await loadLatestUsableScansSnapshot(c.env, presetId);
-  return c.json({ ok: true, job, snapshot });
+  return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
 
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
-  const job = payload.job.status === "queued" || payload.job.status === "running"
-    ? await processRelativeStrengthRefreshJob(c.env, payload.job.id, { maxBatches: 1, timeBudgetMs: 10000 })
-    : payload.job;
-  const snapshot = job?.status === "completed"
-    ? await requestScansRefresh(c.env, payload.job.presetId, "poll-completed").then((result) => result.snapshot)
-    : await loadLatestUsableScansSnapshot(c.env, payload.job.presetId);
-  return c.json({ ok: true, job, snapshot });
+  return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {
@@ -3803,6 +3794,7 @@ export default {
     if (workerSchedule.rsBackgroundEnabled) {
       try {
         await processQueuedRelativeStrengthRefreshJobs(env, {
+          batchSize: workerSchedule.rsBackgroundBatchSize,
           maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
           timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
         });
@@ -3831,6 +3823,7 @@ export default {
     if (shouldRunScheduledRelativeStrength) {
       try {
         await refreshActiveRelativeStrengthPresets(env, {
+          batchSize: workerSchedule.rsBackgroundBatchSize,
           maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
           timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
         });

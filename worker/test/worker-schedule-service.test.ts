@@ -5,6 +5,7 @@ import type { Env } from "../src/types";
 type WorkerScheduleRowState = {
   id: string;
   rsBackgroundEnabled: number;
+  rsBackgroundBatchSize: number;
   rsBackgroundMaxBatchesPerTick: number;
   rsBackgroundTimeBudgetMs: number;
   postCloseBarsEnabled: number;
@@ -18,6 +19,7 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
     ? {
       id: initial.id ?? "default",
       rsBackgroundEnabled: initial.rsBackgroundEnabled ?? 1,
+      rsBackgroundBatchSize: initial.rsBackgroundBatchSize ?? 20,
       rsBackgroundMaxBatchesPerTick: initial.rsBackgroundMaxBatchesPerTick ?? 20,
       rsBackgroundTimeBudgetMs: initial.rsBackgroundTimeBudgetMs ?? 15_000,
       postCloseBarsEnabled: initial.postCloseBarsEnabled ?? 1,
@@ -43,6 +45,7 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                 return {
                   id: row.id,
                   rsBackgroundEnabled: row.rsBackgroundEnabled,
+                  rsBackgroundBatchSize: row.rsBackgroundBatchSize,
                   rsBackgroundMaxBatchesPerTick: row.rsBackgroundMaxBatchesPerTick,
                   rsBackgroundTimeBudgetMs: row.rsBackgroundTimeBudgetMs,
                   postCloseBarsEnabled: row.postCloseBarsEnabled,
@@ -56,24 +59,26 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                   row = {
                     id: String(args[0] ?? "default"),
                     rsBackgroundEnabled: 1,
-                    rsBackgroundMaxBatchesPerTick: Number(args[1] ?? 20),
-                    rsBackgroundTimeBudgetMs: Number(args[2] ?? 15_000),
+                    rsBackgroundBatchSize: Number(args[1] ?? 20),
+                    rsBackgroundMaxBatchesPerTick: Number(args[2] ?? 20),
+                    rsBackgroundTimeBudgetMs: Number(args[3] ?? 15_000),
                     postCloseBarsEnabled: 1,
-                    postCloseBarsOffsetMinutes: Number(args[3] ?? 60),
-                    postCloseBarsBatchSize: Number(args[4] ?? 400),
-                    postCloseBarsMaxBatchesPerTick: Number(args[5] ?? 4),
+                    postCloseBarsOffsetMinutes: Number(args[4] ?? 60),
+                    postCloseBarsBatchSize: Number(args[5] ?? 400),
+                    postCloseBarsMaxBatchesPerTick: Number(args[6] ?? 4),
                   };
                 }
                 if (sql.includes("INSERT INTO worker_schedule_settings")) {
                   row = {
                     id: String(args[0] ?? "default"),
                     rsBackgroundEnabled: Number(args[1] ?? 1),
-                    rsBackgroundMaxBatchesPerTick: Number(args[2] ?? 20),
-                    rsBackgroundTimeBudgetMs: Number(args[3] ?? 15_000),
-                    postCloseBarsEnabled: Number(args[4] ?? 1),
-                    postCloseBarsOffsetMinutes: Number(args[5] ?? 60),
-                    postCloseBarsBatchSize: Number(args[6] ?? 400),
-                    postCloseBarsMaxBatchesPerTick: Number(args[7] ?? 4),
+                    rsBackgroundBatchSize: Number(args[2] ?? 20),
+                    rsBackgroundMaxBatchesPerTick: Number(args[3] ?? 20),
+                    rsBackgroundTimeBudgetMs: Number(args[4] ?? 15_000),
+                    postCloseBarsEnabled: Number(args[5] ?? 1),
+                    postCloseBarsOffsetMinutes: Number(args[6] ?? 60),
+                    postCloseBarsBatchSize: Number(args[7] ?? 400),
+                    postCloseBarsMaxBatchesPerTick: Number(args[8] ?? 4),
                   };
                 }
                 return {};
@@ -103,6 +108,7 @@ describe("worker schedule service", () => {
     expect(settings.id).toBe("default");
     expect(settings.cronExpression).toBe("*/15 * * * *");
     expect(settings.rsBackgroundEnabled).toBe(true);
+    expect(settings.rsBackgroundBatchSize).toBe(20);
     expect(settings.postCloseBarsOffsetMinutes).toBe(60);
   });
 
@@ -111,6 +117,7 @@ describe("worker schedule service", () => {
     const updated = await updateWorkerScheduleSettings(env, {
       id: "default",
       rsBackgroundEnabled: false,
+      rsBackgroundBatchSize: 40,
       rsBackgroundMaxBatchesPerTick: 8,
       rsBackgroundTimeBudgetMs: 12_000,
       postCloseBarsEnabled: true,
@@ -120,6 +127,7 @@ describe("worker schedule service", () => {
     });
 
     expect(updated.rsBackgroundEnabled).toBe(false);
+    expect(updated.rsBackgroundBatchSize).toBe(40);
     expect(updated.rsBackgroundMaxBatchesPerTick).toBe(8);
     expect(updated.postCloseBarsBatchSize).toBe(600);
     expect(updated.postCloseBarsOffsetMinutes).toBe(75);
