@@ -746,7 +746,9 @@ export function ScansPageDashboard() {
         isActive: draftPreset.isActive,
         rules: draftPreset.scanType === "relative-strength" ? [] : activeRules,
         prefilterRules: draftPreset.scanType === "relative-strength" ? activeRules : draftPreset.prefilterRules,
-        benchmarkTicker: draftPreset.benchmarkTicker,
+        benchmarkTicker: draftPreset.scanType === "relative-strength"
+          ? (draftPreset.benchmarkTicker?.trim() || "SPY")
+          : undefined,
         verticalOffset: draftPreset.verticalOffset,
         rsMaLength: draftPreset.rsMaLength,
         rsMaType: draftPreset.rsMaType,

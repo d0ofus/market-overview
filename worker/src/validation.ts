@@ -204,6 +204,10 @@ export const scanPresetRuleSchema = z.object({
 const scanTypeSchema = z.enum(["tradingview", "relative-strength"]);
 const rsMaTypeSchema = z.enum(["SMA", "EMA"]);
 const rsOutputModeSchema = z.enum(["all", "rs_new_high_only", "rs_new_high_before_price_only", "both"]);
+const benchmarkTickerSchema = z.preprocess(
+  (value) => value === null ? undefined : value,
+  z.string().trim().min(1).max(20).optional().transform((value) => value?.toUpperCase()),
+);
 
 const scanPresetBaseFieldsSchema = z.object({
   name: z.string().min(1),
@@ -212,7 +216,7 @@ const scanPresetBaseFieldsSchema = z.object({
   isActive: z.boolean().optional().default(true),
   rules: z.array(scanPresetRuleSchema).optional().default([]),
   prefilterRules: z.array(scanPresetRuleSchema).optional().default([]),
-  benchmarkTicker: z.string().trim().min(1).max(20).optional().default("SPY").transform((value) => value.toUpperCase()),
+  benchmarkTicker: benchmarkTickerSchema,
   verticalOffset: z.number().finite().min(0.25).max(500).optional().default(30),
   rsMaLength: z.number().int().min(1).max(250).optional().default(21),
   rsMaType: rsMaTypeSchema.optional().default("EMA"),

@@ -5,6 +5,7 @@ import {
   correlationPairQuerySchema,
   groupPatchSchema,
   itemCreateSchema,
+  scanPresetPatchSchema,
   scanPresetRuleSchema,
 } from "../src/validation";
 
@@ -65,6 +66,15 @@ describe("validation", () => {
       field: "close",
       multiplier: 0.97,
     });
+  });
+
+  it("accepts null benchmark tickers in scan preset patches", () => {
+    const parsed = scanPresetPatchSchema.parse({
+      name: "Top Gainers Copy",
+      benchmarkTicker: null,
+    });
+
+    expect(parsed.benchmarkTicker).toBeUndefined();
   });
 
   it("parses and normalizes correlation matrix queries", () => {
