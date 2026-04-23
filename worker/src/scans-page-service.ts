@@ -400,7 +400,7 @@ const DEFAULT_RS_BENCHMARK = "SPY";
 const RETENTION_DAYS = 7;
 const RS_REQUIRED_BAR_FLOOR = 504;
 const RS_DEFAULT_COMPUTE_BATCH_SIZE = 50;
-const RS_PREPARED_SLICE_SIZE = 250;
+const RS_PREPARED_SLICE_SIZE = 50;
 const RS_RUN_LEASE_DURATION_MS = 60_000;
 const RS_DEFERRED_TICKER_MAX_ATTEMPTS = 3;
 const RS_JOB_PROVIDER_CHUNK_SIZE = 10;
@@ -2331,6 +2331,45 @@ async function ensureStoredDailyBarsCurrent(
   }
 }
 
+async function ensureRelativeStrengthBenchmarkBarsCurrent(
+  env: Env,
+  benchmarkTicker: string,
+  expectedTradingDate: string,
+  requiredBarCount: number,
+): Promise<void> {
+  const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(requiredBarCount));
+  const loadCoverage = async () => {
+    const coverageByTicker = await loadDailyBarCoverage(env, [benchmarkTicker], expectedTradingDate);
+    return coverageByTicker.get(benchmarkTicker);
+  };
+
+  await ensureStoredDailyBarsCurrent(env, [benchmarkTicker], expectedTradingDate, requiredBarCount);
+  let coverage = await loadCoverage();
+  if ((!coverage || coverage.lastDate !== expectedTradingDate) || (coverage.barCount ?? 0) < requiredBarCount) {
+    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
+    if (!coverage || coverage.lastDate !== expectedTradingDate) {
+      await refreshDailyBarsIncremental(env, {
+        tickers: [benchmarkTicker],
+        startDate,
+        endDate: expectedTradingDate,
+        maxTickers: 1,
+        provider: fallbackProvider,
+      });
+      coverage = await loadCoverage();
+    }
+    if (coverage && coverage.lastDate === expectedTradingDate && (coverage.barCount ?? 0) < requiredBarCount) {
+      await refreshDailyBarsIncremental(env, {
+        tickers: [benchmarkTicker],
+        startDate,
+        endDate: expectedTradingDate,
+        maxTickers: 1,
+        provider: fallbackProvider,
+        replaceExisting: true,
+      });
+    }
+  }
+}
+
 async function ensureRelativeStrengthRatioCacheCurrent(
   env: Env,
   tickers: string[],
@@ -3900,13 +3939,12 @@ async function ensureRelativeStrengthJobBenchmarkBars(
   if (cached.length > 0 && latestBarDate(cached) === identity.expectedTradingDate) return cached;
 
   const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(identity.requiredBarCount));
-  await refreshDailyBarsIncremental(env, {
-    tickers: [identity.benchmarkDataTicker],
-    startDate,
-    endDate: identity.expectedTradingDate,
-    maxTickers: 1,
-    provider: getProvider(env),
-  });
+  await ensureRelativeStrengthBenchmarkBarsCurrent(
+    env,
+    identity.benchmarkDataTicker,
+    identity.expectedTradingDate,
+    identity.requiredBarCount,
+  );
 
   let benchmarkBars = await loadStoredDailyBarsByCount(
     env,
@@ -3964,13 +4002,12 @@ async function ensureRelativeStrengthRunBenchmarkBars(
   if (cached.length > 0 && latestBarDate(cached) === identity.expectedTradingDate) return cached;
 
   const startDate = isoDateDaysAgo(calendarLookbackDaysForBars(identity.requiredBarCount));
-  await refreshDailyBarsIncremental(env, {
-    tickers: [identity.benchmarkDataTicker],
-    startDate,
-    endDate: identity.expectedTradingDate,
-    maxTickers: 1,
-    provider: getProvider(env),
-  });
+  await ensureRelativeStrengthBenchmarkBarsCurrent(
+    env,
+    identity.benchmarkDataTicker,
+    identity.expectedTradingDate,
+    identity.requiredBarCount,
+  );
 
   let benchmarkBars = await loadStoredDailyBarsByCount(
     env,
