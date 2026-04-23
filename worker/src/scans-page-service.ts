@@ -179,6 +179,9 @@ export type ScanRefreshJob = {
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
 };
 
 export type ScanRefreshResponse = {
@@ -215,6 +218,9 @@ type ScanRefreshJobRecord = {
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
 };
 
 type RelativeStrengthMaterializationRunRecord = {
@@ -239,6 +245,20 @@ type RelativeStrengthMaterializationRunRecord = {
   matchedCandidates: number;
   cursorOffset: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  heartbeatAt: string | null;
+};
+
+type RelativeStrengthDeferredTickerRow = {
+  runId: string;
+  ticker: string;
+  attemptCount: number;
+  lastError: string | null;
+  deferredAt: string | null;
 };
 
 type RelativeStrengthLatestCacheRecord = {
@@ -379,6 +399,10 @@ const DEFAULT_LIMIT = 100;
 const DEFAULT_RS_BENCHMARK = "SPY";
 const RETENTION_DAYS = 7;
 const RS_REQUIRED_BAR_FLOOR = 504;
+const RS_DEFAULT_COMPUTE_BATCH_SIZE = 50;
+const RS_PREPARED_SLICE_SIZE = 250;
+const RS_RUN_LEASE_DURATION_MS = 60_000;
+const RS_DEFERRED_TICKER_MAX_ATTEMPTS = 3;
 const RS_JOB_PROVIDER_CHUNK_SIZE = 10;
 const RS_STORED_BAR_QUERY_CHUNK_SIZE = 80;
 const RS_JOB_INSERT_CHUNK_SIZE = 250;
@@ -724,6 +748,9 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     materializationCandidateCount: record.materializationCandidateCount,
     alreadyCurrentCandidateCount: record.alreadyCurrentCandidateCount,
     lastAdvancedAt: record.lastAdvancedAt,
+    deferredTickerCount: record.deferredTickerCount,
+    warning: record.warning,
+    phase: record.phase,
   };
 }
 
@@ -2449,7 +2476,10 @@ async function loadScanRefreshJobRecord(env: Env, jobId: string): Promise<ScanRe
        full_candidate_count as fullCandidateCount,
        materialization_candidate_count as materializationCandidateCount,
        already_current_candidate_count as alreadyCurrentCandidateCount,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase
      FROM scan_refresh_jobs
      WHERE id = ?
      LIMIT 1`,
@@ -2493,7 +2523,10 @@ async function loadLatestScanRefreshJobRecordForPreset(
        full_candidate_count as fullCandidateCount,
        materialization_candidate_count as materializationCandidateCount,
        already_current_candidate_count as alreadyCurrentCandidateCount,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase
      FROM scan_refresh_jobs
      WHERE ${clauses.join(" AND ")}
      ORDER BY datetime(started_at) DESC
@@ -2536,7 +2569,10 @@ async function loadLatestCompletedScanRefreshJobRecordForPreset(
        full_candidate_count as fullCandidateCount,
        materialization_candidate_count as materializationCandidateCount,
        already_current_candidate_count as alreadyCurrentCandidateCount,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase
      FROM scan_refresh_jobs
      WHERE preset_id = ?
        AND expected_trading_date = ?
@@ -2577,7 +2613,10 @@ async function listActiveScanRefreshJobRecords(env: Env): Promise<ScanRefreshJob
        full_candidate_count as fullCandidateCount,
        materialization_candidate_count as materializationCandidateCount,
        already_current_candidate_count as alreadyCurrentCandidateCount,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase
      FROM scan_refresh_jobs
      WHERE status IN ('queued', 'running')
      ORDER BY datetime(updated_at) ASC, datetime(started_at) ASC`,
@@ -2612,7 +2651,13 @@ async function loadRelativeStrengthMaterializationRun(
        processed_candidates as processedCandidates,
        matched_candidates as matchedCandidates,
        cursor_offset as cursorOffset,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       heartbeat_at as heartbeatAt
      FROM relative_strength_materialization_runs
      WHERE id = ?
      LIMIT 1`,
@@ -2648,7 +2693,13 @@ async function loadActiveRelativeStrengthMaterializationRunForConfig(
        processed_candidates as processedCandidates,
        matched_candidates as matchedCandidates,
        cursor_offset as cursorOffset,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       heartbeat_at as heartbeatAt
      FROM relative_strength_materialization_runs
      WHERE config_key = ?
        AND expected_trading_date = ?
@@ -2685,7 +2736,13 @@ async function listActiveRelativeStrengthMaterializationRuns(
        processed_candidates as processedCandidates,
        matched_candidates as matchedCandidates,
        cursor_offset as cursorOffset,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       heartbeat_at as heartbeatAt
      FROM relative_strength_materialization_runs
      WHERE status IN ('queued', 'running')
      ORDER BY datetime(updated_at) ASC, datetime(started_at) ASC`,
@@ -2744,12 +2801,100 @@ async function updateRelativeStrengthMaterializationRun(
     fields.push("last_advanced_at = ?");
     values.push(updates.lastAdvancedAt);
   }
+  if (updates.deferredTickerCount != null) {
+    fields.push("deferred_ticker_count = ?");
+    values.push(updates.deferredTickerCount);
+  }
+  if (updates.warning !== undefined) {
+    fields.push("warning = ?");
+    values.push(updates.warning);
+  }
+  if (updates.phase !== undefined) {
+    fields.push("phase = ?");
+    values.push(updates.phase);
+  }
   if (updates.completedAt !== undefined) {
     fields.push("completed_at = ?");
     values.push(updates.completedAt);
   }
   await env.DB.prepare(`UPDATE relative_strength_materialization_runs SET ${fields.join(", ")} WHERE id = ?`)
     .bind(...values, runId)
+    .run();
+}
+
+function isoDateAfterMs(ms: number): string {
+  return new Date(Date.now() + ms).toISOString();
+}
+
+function isRelativeStrengthRunLeaseActive(run: Pick<RelativeStrengthMaterializationRunRecord, "leaseOwner" | "leaseExpiresAt">): boolean {
+  if (!run.leaseOwner || !run.leaseExpiresAt) return false;
+  const leaseExpiresAtMs = toTimestampMs(run.leaseExpiresAt);
+  if (leaseExpiresAtMs == null) return false;
+  return leaseExpiresAtMs > Date.now();
+}
+
+async function tryAcquireRelativeStrengthMaterializationRunLease(
+  env: Env,
+  runId: string,
+  leaseOwner: string,
+  phase: string | null,
+): Promise<RelativeStrengthMaterializationRunRecord | null> {
+  const leaseExpiresAt = isoDateAfterMs(RS_RUN_LEASE_DURATION_MS);
+  const heartbeatAt = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE relative_strength_materialization_runs
+     SET lease_owner = ?,
+         lease_expires_at = ?,
+         heartbeat_at = ?,
+         phase = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND (
+         lease_owner IS NULL
+         OR lease_expires_at IS NULL
+         OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP
+         OR lease_owner = ?
+       )`,
+  )
+    .bind(leaseOwner, leaseExpiresAt, heartbeatAt, phase, runId, leaseOwner)
+    .run();
+  const run = await loadRelativeStrengthMaterializationRun(env, runId);
+  return run?.leaseOwner === leaseOwner ? run : null;
+}
+
+async function heartbeatRelativeStrengthMaterializationRunLease(
+  env: Env,
+  runId: string,
+  leaseOwner: string,
+  phase: string | null,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE relative_strength_materialization_runs
+     SET lease_expires_at = ?,
+         heartbeat_at = ?,
+         phase = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND lease_owner = ?`,
+  )
+    .bind(isoDateAfterMs(RS_RUN_LEASE_DURATION_MS), new Date().toISOString(), phase, runId, leaseOwner)
+    .run();
+}
+
+async function releaseRelativeStrengthMaterializationRunLease(
+  env: Env,
+  runId: string,
+  leaseOwner: string,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE relative_strength_materialization_runs
+     SET lease_owner = NULL,
+         lease_expires_at = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND lease_owner = ?`,
+  )
+    .bind(runId, leaseOwner)
     .run();
 }
 
@@ -2924,6 +3069,7 @@ async function removeRelativeStrengthRefreshJobArtifacts(env: Env, jobId: string
 async function removeRelativeStrengthMaterializationRunArtifacts(env: Env, runId: string): Promise<void> {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?").bind(runId),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_run_deferred_tickers WHERE run_id = ?").bind(runId),
     env.DB.prepare("DELETE FROM relative_strength_materialization_run_candidates WHERE run_id = ?").bind(runId),
     env.DB.prepare("DELETE FROM relative_strength_materialization_runs WHERE id = ?").bind(runId),
   ]);
@@ -2991,6 +3137,72 @@ function runNeedsRelativeStrengthContinuation(
   const lastAdvancedMs = lastRefreshAdvanceTimestamp(run);
   if (lastAdvancedMs == null) return true;
   return Date.now() - lastAdvancedMs >= staleMs;
+}
+
+function formatRelativeStrengthDeferredWarning(deferredTickerCount: number): string | null {
+  if (deferredTickerCount <= 0) return null;
+  return deferredTickerCount === 1
+    ? "Deferred 1 ticker after repeated RS materialization failures."
+    : `Deferred ${deferredTickerCount} tickers after repeated RS materialization failures.`;
+}
+
+async function loadRelativeStrengthDeferredTickerRow(
+  env: Env,
+  runId: string,
+  ticker: string,
+): Promise<RelativeStrengthDeferredTickerRow | null> {
+  return env.DB.prepare(
+    `SELECT
+       run_id as runId,
+       ticker,
+       attempt_count as attemptCount,
+       last_error as lastError,
+       deferred_at as deferredAt
+     FROM relative_strength_materialization_run_deferred_tickers
+     WHERE run_id = ?
+       AND ticker = ?
+     LIMIT 1`,
+  )
+    .bind(runId, ticker.toUpperCase())
+    .first<RelativeStrengthDeferredTickerRow>();
+}
+
+async function upsertRelativeStrengthDeferredTickerRow(
+  env: Env,
+  row: RelativeStrengthDeferredTickerRow,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO relative_strength_materialization_run_deferred_tickers
+      (run_id, ticker, attempt_count, last_error, deferred_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, ticker) DO UPDATE SET
+       attempt_count = excluded.attempt_count,
+       last_error = excluded.last_error,
+       deferred_at = excluded.deferred_at`,
+  )
+    .bind(row.runId, row.ticker.toUpperCase(), row.attemptCount, row.lastError, row.deferredAt)
+    .run();
+}
+
+async function countRelativeStrengthDeferredTickers(env: Env, runId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count
+     FROM relative_strength_materialization_run_deferred_tickers
+     WHERE run_id = ?
+       AND deferred_at IS NOT NULL`,
+  )
+    .bind(runId)
+    .first<{ count: number }>();
+  return Math.max(0, Number(row?.count ?? 0));
+}
+
+async function refreshRelativeStrengthRunDeferredSummary(env: Env, runId: string): Promise<number> {
+  const deferredTickerCount = await countRelativeStrengthDeferredTickers(env, runId);
+  await updateRelativeStrengthMaterializationRun(env, runId, {
+    deferredTickerCount,
+    warning: formatRelativeStrengthDeferredWarning(deferredTickerCount),
+  });
+  return deferredTickerCount;
 }
 
 async function invalidateRelativeStrengthRefreshJob(
@@ -3232,6 +3444,9 @@ async function updateScanRefreshJobRecord(
       | "materializationCandidateCount"
       | "alreadyCurrentCandidateCount"
       | "lastAdvancedAt"
+      | "deferredTickerCount"
+      | "warning"
+      | "phase"
     >
   > & { completedAt?: string | null },
 ): Promise<void> {
@@ -3289,6 +3504,30 @@ async function updateScanRefreshJobRecord(
     fields.push("last_advanced_at = ?");
     values.push(updates.lastAdvancedAt);
   }
+  if (updates.deferredTickerCount != null) {
+    fields.push("deferred_ticker_count = ?");
+    values.push(updates.deferredTickerCount);
+  }
+  if (updates.warning !== undefined) {
+    fields.push("warning = ?");
+    values.push(updates.warning);
+  }
+  if (updates.phase !== undefined) {
+    fields.push("phase = ?");
+    values.push(updates.phase);
+  }
+  if (updates.leaseOwner !== undefined) {
+    fields.push("lease_owner = ?");
+    values.push(updates.leaseOwner);
+  }
+  if (updates.leaseExpiresAt !== undefined) {
+    fields.push("lease_expires_at = ?");
+    values.push(updates.leaseExpiresAt);
+  }
+  if (updates.heartbeatAt !== undefined) {
+    fields.push("heartbeat_at = ?");
+    values.push(updates.heartbeatAt);
+  }
   if (updates.completedAt !== undefined) {
     fields.push("completed_at = ?");
     values.push(updates.completedAt);
@@ -3312,7 +3551,7 @@ function snapshotIsFreshForCompletedJob(
 async function refreshRelativeStrengthSnapshot(
   env: Env,
   preset: ScanPreset,
-  completedJob: Pick<ScanRefreshJobRecord, "id" | "configKey" | "expectedTradingDate">,
+  completedJob: Pick<ScanRefreshJobRecord, "id" | "configKey" | "expectedTradingDate" | "warning">,
 ): Promise<{
   providerLabel: string;
   matchedRowCount: number;
@@ -3322,13 +3561,21 @@ async function refreshRelativeStrengthSnapshot(
 }> {
   const identity = buildRelativeStrengthConfigIdentity(preset);
   const candidates = await loadAllRelativeStrengthJobCandidates(env, completedJob.id);
-  return buildRelativeStrengthSnapshotResult(
+  const result = await buildRelativeStrengthSnapshotResult(
     env,
     preset,
     candidates,
     completedJob.configKey ?? identity.configKey,
     completedJob.expectedTradingDate ?? identity.expectedTradingDate,
   );
+  if (completedJob.warning && result.status !== "error") {
+    return {
+      ...result,
+      status: result.rows.length > 0 ? "warning" : result.status,
+      error: completedJob.warning,
+    };
+  }
+  return result;
 }
 
 async function buildRelativeStrengthSnapshotResult(
@@ -3416,7 +3663,28 @@ async function buildRelativeStrengthSnapshotResult(
   };
 }
 
-async function loadCurrentRelativeStrengthTickerSet(
+async function loadOutputCurrentRelativeStrengthTickerSet(
+  env: Env,
+  identity: RelativeStrengthConfigIdentity,
+  tickers: string[],
+): Promise<Set<string>> {
+  const latestCacheByTicker = await loadRelativeStrengthEffectiveLatestCacheRows(
+    env,
+    identity.configKey,
+    tickers,
+    identity.expectedTradingDate,
+  );
+  const current = new Set<string>();
+  for (const ticker of Array.from(new Set(tickers.map((value) => value.toUpperCase())))) {
+    const latest = latestCacheByTicker.get(ticker);
+    if (latest && latest.tradingDate === identity.expectedTradingDate) {
+      current.add(ticker);
+    }
+  }
+  return current;
+}
+
+async function loadStateCurrentRelativeStrengthTickerSet(
   env: Env,
   identity: RelativeStrengthConfigIdentity,
   tickers: string[],
@@ -3457,8 +3725,8 @@ async function createRelativeStrengthRefreshJob(
   try {
     await env.DB.prepare(
       `INSERT INTO scan_refresh_jobs
-        (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count, config_key, shared_run_id, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, full_candidate_count, materialization_candidate_count, already_current_candidate_count, last_advanced_at)
-       VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, ?, 0, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        (id, preset_id, job_type, status, started_at, updated_at, error, total_candidates, processed_candidates, matched_candidates, cursor_offset, latest_snapshot_id, requested_by, benchmark_bars_json, required_bar_count, config_key, shared_run_id, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, full_candidate_count, materialization_candidate_count, already_current_candidate_count, last_advanced_at, deferred_ticker_count, warning, phase)
+       VALUES (?, ?, 'relative-strength', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, ?, 0, ?, 0, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, 'queued')`,
     )
       .bind(
         jobId,
@@ -3533,7 +3801,10 @@ async function listScanRefreshJobRecordsForSharedRun(
        full_candidate_count as fullCandidateCount,
        materialization_candidate_count as materializationCandidateCount,
        already_current_candidate_count as alreadyCurrentCandidateCount,
-       last_advanced_at as lastAdvancedAt
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase
      FROM scan_refresh_jobs
      WHERE ${clauses.join(" AND ")}
      ORDER BY datetime(started_at) ASC`,
@@ -3552,8 +3823,8 @@ async function createRelativeStrengthMaterializationRun(
   const runId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO relative_strength_materialization_runs
-      (id, config_key, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, status, started_at, updated_at, error, benchmark_bars_json, required_bar_count, full_candidate_count, materialization_candidate_count, already_current_candidate_count, processed_candidates, matched_candidates, cursor_offset, last_advanced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, 0, 0, 0, 0, NULL)`,
+      (id, config_key, expected_trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, status, started_at, updated_at, error, benchmark_bars_json, required_bar_count, full_candidate_count, materialization_candidate_count, already_current_candidate_count, processed_candidates, matched_candidates, cursor_offset, last_advanced_at, deferred_ticker_count, warning, phase, lease_owner, lease_expires_at, heartbeat_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, 'queued', NULL, NULL, NULL)`,
   )
     .bind(
       runId,
@@ -3754,11 +4025,12 @@ async function materializeRelativeStrengthBatch(
   tickers: string[],
   benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
+  const identity = buildRelativeStrengthConfigIdentityFromJobRecord(job);
+  await prepareRelativeStrengthTickersForMaterialization(env, identity, tickers, benchmarkBars);
   return materializeRelativeStrengthTickers(
     env,
-    buildRelativeStrengthConfigIdentityFromJobRecord(job),
+    identity,
     tickers,
-    benchmarkBars,
   );
 }
 
@@ -3766,21 +4038,35 @@ async function materializeRelativeStrengthRunBatch(
   env: Env,
   run: RelativeStrengthMaterializationRunRecord,
   tickers: string[],
-  benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
   return materializeRelativeStrengthTickers(
     env,
     buildRelativeStrengthConfigIdentityFromRunRecord(run),
     tickers,
-    benchmarkBars,
   );
+}
+
+async function prepareRelativeStrengthTickersForMaterialization(
+  env: Env,
+  identity: RelativeStrengthConfigIdentity,
+  tickers: string[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+): Promise<void> {
+  const benchmarkTicker = identity.benchmarkDataTicker;
+  const candidateTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
+  ));
+  if (candidateTickers.length === 0) return;
+  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
+  await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
 }
 
 async function materializeRelativeStrengthTickers(
   env: Env,
   identity: RelativeStrengthConfigIdentity,
   tickers: string[],
-  benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
   const config = rawRelativeStrengthConfig(identity);
   const benchmarkTicker = identity.benchmarkDataTicker;
@@ -3790,8 +4076,6 @@ async function materializeRelativeStrengthTickers(
       .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
   ));
   if (candidateTickers.length === 0) return 0;
-  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
-  await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
   const currentStatesByTicker = await loadRelativeStrengthConfigStateRows(env, identity.configKey, candidateTickers);
   const nextStateRows: RelativeStrengthConfigState[] = [];
   const nextLatestCacheRows: RelativeStrengthLatestCacheRecord[] = [];
@@ -3895,6 +4179,157 @@ async function materializeRelativeStrengthTickers(
   return nextLatestCacheRows.length;
 }
 
+async function materializeSingleRelativeStrengthTickerWithDeferral(
+  env: Env,
+  runId: string,
+  identity: RelativeStrengthConfigIdentity,
+  ticker: string,
+  initialError: unknown,
+): Promise<number> {
+  const current = await loadRelativeStrengthDeferredTickerRow(env, runId, ticker);
+  if (current?.deferredAt) return 0;
+  let attemptCount = current?.attemptCount ?? 0;
+  let lastErrorMessage = initialError instanceof Error ? initialError.message : "Relative strength materialization failed.";
+
+  while (attemptCount < RS_DEFERRED_TICKER_MAX_ATTEMPTS) {
+    attemptCount += 1;
+    try {
+      const materialized = await materializeRelativeStrengthTickers(env, identity, [ticker]);
+      await upsertRelativeStrengthDeferredTickerRow(env, {
+        runId,
+        ticker,
+        attemptCount,
+        lastError: null,
+        deferredAt: null,
+      });
+      return materialized;
+    } catch (error) {
+      lastErrorMessage = error instanceof Error ? error.message : lastErrorMessage;
+    }
+  }
+
+  await upsertRelativeStrengthDeferredTickerRow(env, {
+    runId,
+    ticker,
+    attemptCount,
+    lastError: lastErrorMessage,
+    deferredAt: new Date().toISOString(),
+  });
+  await refreshRelativeStrengthRunDeferredSummary(env, runId);
+  return 0;
+}
+
+async function prepareSingleRelativeStrengthTickerWithDeferral(
+  env: Env,
+  runId: string,
+  identity: RelativeStrengthConfigIdentity,
+  ticker: string,
+  benchmarkBars: RelativeStrengthDailyBar[],
+  initialError: unknown,
+): Promise<boolean> {
+  const current = await loadRelativeStrengthDeferredTickerRow(env, runId, ticker);
+  if (current?.deferredAt) return false;
+  let attemptCount = current?.attemptCount ?? 0;
+  let lastErrorMessage = initialError instanceof Error ? initialError.message : "Relative strength preparation failed.";
+
+  while (attemptCount < RS_DEFERRED_TICKER_MAX_ATTEMPTS) {
+    attemptCount += 1;
+    try {
+      await prepareRelativeStrengthTickersForMaterialization(env, identity, [ticker], benchmarkBars);
+      await upsertRelativeStrengthDeferredTickerRow(env, {
+        runId,
+        ticker,
+        attemptCount,
+        lastError: null,
+        deferredAt: null,
+      });
+      return true;
+    } catch (error) {
+      lastErrorMessage = error instanceof Error ? error.message : lastErrorMessage;
+    }
+  }
+
+  await upsertRelativeStrengthDeferredTickerRow(env, {
+    runId,
+    ticker,
+    attemptCount,
+    lastError: lastErrorMessage,
+    deferredAt: new Date().toISOString(),
+  });
+  await refreshRelativeStrengthRunDeferredSummary(env, runId);
+  return false;
+}
+
+async function prepareRelativeStrengthRunTickersWithDeferral(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+  tickers: string[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+): Promise<{ preparedTickers: string[]; deferredTickers: string[] }> {
+  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(run);
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  if (uniqueTickers.length === 0) return { preparedTickers: [], deferredTickers: [] };
+  try {
+    await prepareRelativeStrengthTickersForMaterialization(env, identity, uniqueTickers, benchmarkBars);
+    return { preparedTickers: uniqueTickers, deferredTickers: [] };
+  } catch (error) {
+    if (uniqueTickers.length === 1) {
+      const prepared = await prepareSingleRelativeStrengthTickerWithDeferral(
+        env,
+        run.id,
+        identity,
+        uniqueTickers[0],
+        benchmarkBars,
+        error,
+      );
+      return {
+        preparedTickers: prepared ? uniqueTickers : [],
+        deferredTickers: prepared ? [] : uniqueTickers,
+      };
+    }
+    const midpoint = Math.max(1, Math.floor(uniqueTickers.length / 2));
+    const left = await prepareRelativeStrengthRunTickersWithDeferral(
+      env,
+      run,
+      uniqueTickers.slice(0, midpoint),
+      benchmarkBars,
+    );
+    const right = await prepareRelativeStrengthRunTickersWithDeferral(
+      env,
+      run,
+      uniqueTickers.slice(midpoint),
+      benchmarkBars,
+    );
+    return {
+      preparedTickers: [...left.preparedTickers, ...right.preparedTickers],
+      deferredTickers: [...left.deferredTickers, ...right.deferredTickers],
+    };
+  }
+}
+
+async function materializeRelativeStrengthRunTickersWithDeferral(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+  tickers: string[],
+): Promise<number> {
+  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(run);
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  if (uniqueTickers.length === 0) return 0;
+  try {
+    return await materializeRelativeStrengthRunBatch(env, run, uniqueTickers);
+  } catch (error) {
+    if (uniqueTickers.length === 1) {
+      return materializeSingleRelativeStrengthTickerWithDeferral(env, run.id, identity, uniqueTickers[0], error);
+    }
+    const midpoint = Math.max(1, Math.floor(uniqueTickers.length / 2));
+    const left = uniqueTickers.slice(0, midpoint);
+    const right = uniqueTickers.slice(midpoint);
+    const leftCount = await materializeRelativeStrengthRunTickersWithDeferral(env, run, left);
+    const rightCount = await materializeRelativeStrengthRunTickersWithDeferral(env, run, right);
+    return leftCount + rightCount;
+  }
+}
+
 async function storeScanSnapshotResult(
   env: Env,
   preset: ScanPreset,
@@ -3965,6 +4400,9 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
         error: run.error ?? "Relative strength refresh failed.",
         completedAt: nowIso,
         lastAdvancedAt: run.lastAdvancedAt ?? nowIso,
+        deferredTickerCount: run.deferredTickerCount,
+        warning: run.warning,
+        phase: run.phase,
       });
       continue;
     }
@@ -3972,16 +4410,22 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
       await updateScanRefreshJobRecord(env, job.id, {
         status: "completed",
         processedCandidates: job.materializationCandidateCount,
-        matchedCandidates: Math.max(job.fullCandidateCount, job.matchedCandidates),
+        matchedCandidates: Math.max(job.matchedCandidates, job.alreadyCurrentCandidateCount + Math.min(job.materializationCandidateCount, run.matchedCandidates)),
         cursorOffset: job.materializationCandidateCount,
         completedAt: nowIso,
         lastAdvancedAt: run.lastAdvancedAt ?? nowIso,
+        deferredTickerCount: run.deferredTickerCount,
+        warning: run.warning,
+        phase: run.phase,
       });
       const completedJob = await loadScanRefreshJobRecord(env, job.id);
       const preset = await loadScanPreset(env, job.presetId);
       if (!completedJob || !preset) continue;
       const snapshot = await ensureRelativeStrengthSnapshotCurrent(env, preset, completedJob);
-      await updateScanRefreshJobRecord(env, job.id, { latestSnapshotId: snapshot.id });
+      await updateScanRefreshJobRecord(env, job.id, {
+        latestSnapshotId: snapshot.id,
+        matchedCandidates: snapshot.matchedRowCount,
+      });
       continue;
     }
     const processedCandidates = Math.min(job.materializationCandidateCount, run.processedCandidates);
@@ -3991,6 +4435,9 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
       matchedCandidates: Math.max(job.matchedCandidates, job.alreadyCurrentCandidateCount + processedCandidates),
       cursorOffset: processedCandidates,
       lastAdvancedAt: run.lastAdvancedAt,
+      deferredTickerCount: run.deferredTickerCount,
+      warning: run.warning,
+      phase: run.phase,
     });
   }
 }
@@ -3998,73 +4445,113 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
 async function processRelativeStrengthMaterializationRun(
   env: Env,
   runId: string,
-  options?: { timeBudgetMs?: number; maxBatches?: number; batchSize?: number },
+  options?: { timeBudgetMs?: number; maxBatches?: number; batchSize?: number; leaseOwner?: string },
 ): Promise<RelativeStrengthMaterializationRunRecord | null> {
   const run = await loadRelativeStrengthMaterializationRun(env, runId);
   if (!run) return null;
   if (run.status === "completed" || run.status === "failed") return run;
+  const leaseOwner = options?.leaseOwner ?? crypto.randomUUID();
+  const leasedRun = await tryAcquireRelativeStrengthMaterializationRunLease(env, run.id, leaseOwner, "queued");
+  if (!leasedRun) {
+    return loadRelativeStrengthMaterializationRun(env, run.id);
+  }
+  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(leasedRun);
 
   try {
     const effectiveMaterializationTotal = Math.max(
-      run.materializationCandidateCount,
-      run.fullCandidateCount,
-      run.processedCandidates,
-      run.cursorOffset,
+      leasedRun.materializationCandidateCount,
+      leasedRun.fullCandidateCount,
+      leasedRun.processedCandidates,
+      leasedRun.cursorOffset,
     );
-    if (effectiveMaterializationTotal > 0 && !(await hasRelativeStrengthRunCandidates(env, run.id))) {
+    if (effectiveMaterializationTotal > 0 && !(await hasRelativeStrengthRunCandidates(env, leasedRun.id))) {
       throw new Error("Relative strength materialization run is missing candidate rows.");
     }
-    if (effectiveMaterializationTotal === 0 || run.cursorOffset >= effectiveMaterializationTotal) {
-      await updateRelativeStrengthMaterializationRun(env, run.id, {
+    if (effectiveMaterializationTotal === 0 || leasedRun.cursorOffset >= effectiveMaterializationTotal) {
+      await updateRelativeStrengthMaterializationRun(env, leasedRun.id, {
         status: "completed",
         processedCandidates: effectiveMaterializationTotal,
         matchedCandidates: effectiveMaterializationTotal,
         cursorOffset: effectiveMaterializationTotal,
         materializationCandidateCount: effectiveMaterializationTotal,
-        fullCandidateCount: Math.max(run.fullCandidateCount, effectiveMaterializationTotal),
+        fullCandidateCount: Math.max(leasedRun.fullCandidateCount, effectiveMaterializationTotal),
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
+        phase: "completed",
       });
-      await removeRelativeStrengthMaterializationRunFromQueue(env, run.id);
-      const completed = await loadRelativeStrengthMaterializationRun(env, run.id);
+      await removeRelativeStrengthMaterializationRunFromQueue(env, leasedRun.id);
+      const completed = await loadRelativeStrengthMaterializationRun(env, leasedRun.id);
       if (completed) await synchronizeAttachedRelativeStrengthJobsForRun(env, completed);
       return completed;
     }
 
-    await updateRelativeStrengthMaterializationRun(env, run.id, {
+    await updateRelativeStrengthMaterializationRun(env, leasedRun.id, {
       status: "running",
       materializationCandidateCount: effectiveMaterializationTotal,
-      fullCandidateCount: Math.max(run.fullCandidateCount, effectiveMaterializationTotal),
+      fullCandidateCount: Math.max(leasedRun.fullCandidateCount, effectiveMaterializationTotal),
+      phase: "running",
     });
-    const currentRun = (await loadRelativeStrengthMaterializationRun(env, run.id)) ?? run;
+    const currentRun = (await loadRelativeStrengthMaterializationRun(env, leasedRun.id)) ?? leasedRun;
     const benchmarkBars = await ensureRelativeStrengthRunBenchmarkBars(env, currentRun);
     let cursorOffset = currentRun.cursorOffset;
     let matchedCandidates = currentRun.matchedCandidates;
     const startedAt = Date.now();
     const timeBudgetMs = options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS;
     const maxBatches = Math.max(1, options?.maxBatches ?? Number.POSITIVE_INFINITY);
-    const batchSize = Math.max(1, options?.batchSize ?? 20);
+    const batchSize = Math.max(1, options?.batchSize ?? RS_DEFAULT_COMPUTE_BATCH_SIZE);
+    const preparedSliceSize = Math.max(batchSize, RS_PREPARED_SLICE_SIZE);
     let processedBatchCount = 0;
 
     while (cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
-      const batchTickers = await loadRelativeStrengthRunCandidateTickers(env, currentRun.id, cursorOffset, batchSize);
-      if (batchTickers.length === 0) {
+      const preparedSliceTickers = await loadRelativeStrengthRunCandidateTickers(env, currentRun.id, cursorOffset, preparedSliceSize);
+      if (preparedSliceTickers.length === 0) {
         throw new Error("Relative strength materialization run has no remaining candidate rows to process.");
       }
-      const materializedCount = await materializeRelativeStrengthRunBatch(env, currentRun, batchTickers, benchmarkBars);
-      matchedCandidates += materializedCount;
-      cursorOffset += batchTickers.length;
-      processedBatchCount += 1;
-      const lastAdvancedAt = new Date().toISOString();
-      await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
-        status: "running",
-        processedCandidates: cursorOffset,
-        matchedCandidates,
-        cursorOffset,
-        materializationCandidateCount: effectiveMaterializationTotal,
-        fullCandidateCount: Math.max(currentRun.fullCandidateCount, effectiveMaterializationTotal),
-        lastAdvancedAt,
-      });
+      await heartbeatRelativeStrengthMaterializationRunLease(env, currentRun.id, leaseOwner, "preparing");
+      const { preparedTickers, deferredTickers } = await prepareRelativeStrengthRunTickersWithDeferral(
+        env,
+        currentRun,
+        preparedSliceTickers,
+        benchmarkBars,
+      );
+      const preparedTickerSet = new Set(preparedTickers);
+      const deferredTickerSet = new Set(deferredTickers);
+
+      for (
+        let preparedSliceOffset = 0;
+        preparedSliceOffset < preparedSliceTickers.length && cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches;
+        preparedSliceOffset += batchSize
+      ) {
+        const batchTickers = preparedSliceTickers.slice(preparedSliceOffset, preparedSliceOffset + batchSize);
+        const materializableBatchTickers = batchTickers.filter((ticker) => preparedTickerSet.has(ticker));
+        const deferredInBatch = batchTickers.filter((ticker) => deferredTickerSet.has(ticker)).length;
+        await heartbeatRelativeStrengthMaterializationRunLease(
+          env,
+          currentRun.id,
+          leaseOwner,
+          materializableBatchTickers.length > 0 ? "materializing" : "deferring",
+        );
+        const materializedCount = materializableBatchTickers.length > 0
+          ? await materializeRelativeStrengthRunTickersWithDeferral(env, currentRun, materializableBatchTickers)
+          : 0;
+        matchedCandidates += materializedCount;
+        cursorOffset += batchTickers.length;
+        processedBatchCount += 1;
+        const refreshedRun = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
+        const lastAdvancedAt = new Date().toISOString();
+        await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
+          status: "running",
+          processedCandidates: cursorOffset,
+          matchedCandidates,
+          cursorOffset,
+          materializationCandidateCount: effectiveMaterializationTotal,
+          fullCandidateCount: Math.max(currentRun.fullCandidateCount, effectiveMaterializationTotal),
+          lastAdvancedAt,
+          deferredTickerCount: refreshedRun?.deferredTickerCount ?? currentRun.deferredTickerCount,
+          warning: refreshedRun?.warning ?? currentRun.warning,
+          phase: materializableBatchTickers.length > 0 ? "materializing" : (deferredInBatch > 0 ? "deferring" : "materializing"),
+        });
+      }
     }
 
     const latestRun = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
@@ -4085,6 +4572,7 @@ async function processRelativeStrengthMaterializationRun(
         fullCandidateCount: Math.max(currentRun.fullCandidateCount, finalMaterializationTotal),
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
+        phase: "completed",
       });
       await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
     } else if (finalMaterializationTotal > 0) {
@@ -4092,20 +4580,24 @@ async function processRelativeStrengthMaterializationRun(
         status: "running",
         materializationCandidateCount: finalMaterializationTotal,
         fullCandidateCount: Math.max(currentRun.fullCandidateCount, finalMaterializationTotal),
+        phase: "queued",
       });
       await enqueueRelativeStrengthMaterializationRun(env, currentRun.id, "continuation");
     }
   } catch (error) {
-    await updateRelativeStrengthMaterializationRun(env, run.id, {
+    await updateRelativeStrengthMaterializationRun(env, leasedRun.id, {
       status: "failed",
       error: error instanceof Error ? error.message : "Relative strength refresh failed.",
       completedAt: new Date().toISOString(),
       lastAdvancedAt: new Date().toISOString(),
+      phase: "failed",
     });
-    await removeRelativeStrengthMaterializationRunFromQueue(env, run.id);
+    await removeRelativeStrengthMaterializationRunFromQueue(env, leasedRun.id);
+  } finally {
+    await releaseRelativeStrengthMaterializationRunLease(env, leasedRun.id, leaseOwner);
   }
 
-  const updated = await loadRelativeStrengthMaterializationRun(env, run.id);
+  const updated = await loadRelativeStrengthMaterializationRun(env, leasedRun.id);
   if (updated) await synchronizeAttachedRelativeStrengthJobsForRun(env, updated);
   return updated;
 }
@@ -4164,7 +4656,7 @@ export async function processRelativeStrengthRefreshJob(
     const startedAt = Date.now();
     const timeBudgetMs = options?.timeBudgetMs ?? RS_JOB_TIME_BUDGET_MS;
     const maxBatches = Math.max(1, options?.maxBatches ?? Number.POSITIVE_INFINITY);
-    const batchSize = Math.max(1, options?.batchSize ?? 20);
+    const batchSize = Math.max(1, options?.batchSize ?? RS_DEFAULT_COMPUTE_BATCH_SIZE);
     let processedBatchCount = 0;
 
     while (cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
@@ -4288,7 +4780,7 @@ export async function requestScansRefresh(
     };
   }
   const candidates = await fetchRelativeStrengthPrefilterRows(preset);
-  const currentTickerSet = await loadCurrentRelativeStrengthTickerSet(
+  const currentTickerSet = await loadOutputCurrentRelativeStrengthTickerSet(
     env,
     identity,
     candidates.map((row) => row.ticker),
@@ -4416,14 +4908,14 @@ export async function processQueuedRelativeStrengthRefreshJobs(
     const queuedRunIds = new Set(queuedRows.map((row) => row.runId));
     for (const activeRun of activeRuns) {
       const staleThreshold = activeRun.status === "running" ? RS_JOB_RECOVERY_STALE_MS : RS_JOB_CONTINUATION_STALE_MS;
-      if (!queuedRunIds.has(activeRun.id) && runNeedsRelativeStrengthContinuation(activeRun, staleThreshold)) {
+      if (!queuedRunIds.has(activeRun.id) && !isRelativeStrengthRunLeaseActive(activeRun) && runNeedsRelativeStrengthContinuation(activeRun, staleThreshold)) {
         await enqueueRelativeStrengthMaterializationRun(env, activeRun.id, "recovery");
       }
     }
     const refreshedQueue = await listQueuedRelativeStrengthMaterializationRuns(env);
     const runsToProcess = refreshedQueue
       .map((row) => activeRunsById.get(row.runId))
-      .filter((run): run is RelativeStrengthMaterializationRunRecord => Boolean(run));
+      .filter((run): run is RelativeStrengthMaterializationRunRecord => Boolean(run) && !isRelativeStrengthRunLeaseActive(run));
     if (runsToProcess.length === 0) break;
 
     let advancedAny = false;

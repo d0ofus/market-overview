@@ -19,7 +19,7 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
     ? {
       id: initial.id ?? "default",
       rsBackgroundEnabled: initial.rsBackgroundEnabled ?? 1,
-      rsBackgroundBatchSize: initial.rsBackgroundBatchSize ?? 20,
+      rsBackgroundBatchSize: initial.rsBackgroundBatchSize ?? 50,
       rsBackgroundMaxBatchesPerTick: initial.rsBackgroundMaxBatchesPerTick ?? 20,
       rsBackgroundTimeBudgetMs: initial.rsBackgroundTimeBudgetMs ?? 15_000,
       postCloseBarsEnabled: initial.postCloseBarsEnabled ?? 1,
@@ -59,7 +59,7 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                   row = {
                     id: String(args[0] ?? "default"),
                     rsBackgroundEnabled: 1,
-                    rsBackgroundBatchSize: Number(args[1] ?? 20),
+                    rsBackgroundBatchSize: Number(args[1] ?? 50),
                     rsBackgroundMaxBatchesPerTick: Number(args[2] ?? 20),
                     rsBackgroundTimeBudgetMs: Number(args[3] ?? 15_000),
                     postCloseBarsEnabled: 1,
@@ -72,7 +72,7 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                   row = {
                     id: String(args[0] ?? "default"),
                     rsBackgroundEnabled: Number(args[1] ?? 1),
-                    rsBackgroundBatchSize: Number(args[2] ?? 20),
+                    rsBackgroundBatchSize: Number(args[2] ?? 50),
                     rsBackgroundMaxBatchesPerTick: Number(args[3] ?? 20),
                     rsBackgroundTimeBudgetMs: Number(args[4] ?? 15_000),
                     postCloseBarsEnabled: Number(args[5] ?? 1),
@@ -108,7 +108,7 @@ describe("worker schedule service", () => {
     expect(settings.id).toBe("default");
     expect(settings.cronExpression).toBe("*/15 * * * *");
     expect(settings.rsBackgroundEnabled).toBe(true);
-    expect(settings.rsBackgroundBatchSize).toBe(20);
+    expect(settings.rsBackgroundBatchSize).toBe(50);
     expect(settings.postCloseBarsOffsetMinutes).toBe(60);
   });
 

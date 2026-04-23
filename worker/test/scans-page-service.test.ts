@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as dailyBarsModule from "../src/daily-bars";
 import * as providerModule from "../src/provider";
+import * as relativeStrengthModule from "../src/relative-strength";
 import {
   bootstrapRelativeStrengthStateFromRatioRows,
   buildRelativeStrengthRatioRows,
@@ -107,6 +109,9 @@ type MutableScanRefreshJob = {
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
 };
 
 type MutableRelativeStrengthMaterializationRun = {
@@ -131,6 +136,12 @@ type MutableRelativeStrengthMaterializationRun = {
   matchedCandidates: number;
   cursorOffset: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  heartbeatAt: string | null;
 };
 
 type MutableRelativeStrengthMaterializationRunCandidate = {
@@ -146,6 +157,14 @@ type MutableRelativeStrengthMaterializationQueueRow = {
   enqueuedAt: string;
   lastAttemptedAt: string | null;
   attempts: number;
+};
+
+type MutableRelativeStrengthDeferredTickerRow = {
+  runId: string;
+  ticker: string;
+  attemptCount: number;
+  lastError: string | null;
+  deferredAt: string | null;
 };
 
 type MutableRelativeStrengthLatestCacheRow = {
@@ -308,6 +327,7 @@ function createMutableScansEnv(input: {
   const relativeStrengthMaterializationRuns = new Map<string, MutableRelativeStrengthMaterializationRun>();
   const relativeStrengthMaterializationRunCandidates = new Map<string, MutableRelativeStrengthMaterializationRunCandidate>();
   const relativeStrengthMaterializationQueue = new Map<string, MutableRelativeStrengthMaterializationQueueRow>();
+  const relativeStrengthDeferredTickers = new Map<string, MutableRelativeStrengthDeferredTickerRow>();
   const rsRatioRowsByCountCalls: Array<{ benchmarkTicker: string; tickers: string[]; endDate: string; barLimit: number }> = [];
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
@@ -407,7 +427,7 @@ function createMutableScansEnv(input: {
     const jobId = String(args[args.length - 1] ?? "");
     const job = scanRefreshJobs.find((row) => row.id === jobId);
     if (!job) return;
-    const setClause = sql.match(/SET\s+(.+)\s+WHERE/i)?.[1] ?? "";
+    const setClause = sql.match(/SET\s+([\s\S]+?)\s+WHERE/i)?.[1] ?? "";
     const assignments = setClause.split(",").map((part) => part.trim()).filter(Boolean);
     let argIndex = 0;
     for (const assignment of assignments) {
@@ -430,15 +450,30 @@ function createMutableScansEnv(input: {
       else if (column === "materialization_candidate_count") job.materializationCandidateCount = Number(value ?? job.materializationCandidateCount);
       else if (column === "already_current_candidate_count") job.alreadyCurrentCandidateCount = Number(value ?? job.alreadyCurrentCandidateCount);
       else if (column === "last_advanced_at") job.lastAdvancedAt = value == null ? null : String(value);
+      else if (column === "deferred_ticker_count") job.deferredTickerCount = Number(value ?? job.deferredTickerCount);
+      else if (column === "warning") job.warning = value == null ? null : String(value);
+      else if (column === "phase") job.phase = value == null ? null : String(value);
       else if (column === "completed_at") job.completedAt = value == null ? null : String(value);
     }
   };
 
   const updateMaterializationRun = (sql: string, args: unknown[]) => {
-    const runId = String(args[args.length - 1] ?? "");
+    const requiresLeaseOwnerMatch = sql.includes("WHERE id = ?") && sql.includes("AND lease_owner = ?");
+    const attemptsLeaseAcquire = sql.includes("lease_owner IS NULL") || sql.includes("lease_expires_at IS NULL");
+    const runId = String(args[requiresLeaseOwnerMatch || attemptsLeaseAcquire ? args.length - 2 : args.length - 1] ?? "");
     const run = relativeStrengthMaterializationRuns.get(runId);
     if (!run) return;
-    const setClause = sql.match(/SET\s+(.+)\s+WHERE/i)?.[1] ?? "";
+    if (requiresLeaseOwnerMatch) {
+      const requiredLeaseOwner = args[args.length - 1] == null ? null : String(args[args.length - 1]);
+      if (run.leaseOwner !== requiredLeaseOwner) return;
+    }
+    if (attemptsLeaseAcquire) {
+      const requestedLeaseOwner = args[args.length - 1] == null ? null : String(args[args.length - 1]);
+      const leaseExpiresAtMs = run.leaseExpiresAt ? Date.parse(run.leaseExpiresAt) : Number.NaN;
+      const leaseIsActive = Boolean(run.leaseOwner && Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs > Date.now());
+      if (leaseIsActive && run.leaseOwner !== requestedLeaseOwner) return;
+    }
+    const setClause = sql.match(/SET\s+([\s\S]+?)\s+WHERE/i)?.[1] ?? "";
     const assignments = setClause.split(",").map((part) => part.trim()).filter(Boolean);
     let argIndex = 0;
     for (const assignment of assignments) {
@@ -459,6 +494,12 @@ function createMutableScansEnv(input: {
       else if (column === "matched_candidates") run.matchedCandidates = Number(value ?? run.matchedCandidates);
       else if (column === "cursor_offset") run.cursorOffset = Number(value ?? run.cursorOffset);
       else if (column === "last_advanced_at") run.lastAdvancedAt = value == null ? null : String(value);
+      else if (column === "deferred_ticker_count") run.deferredTickerCount = Number(value ?? run.deferredTickerCount);
+      else if (column === "warning") run.warning = value == null ? null : String(value);
+      else if (column === "phase") run.phase = value == null ? null : String(value);
+      else if (column === "lease_owner") run.leaseOwner = value == null ? null : String(value);
+      else if (column === "lease_expires_at") run.leaseExpiresAt = value == null ? null : String(value);
+      else if (column === "heartbeat_at") run.heartbeatAt = value == null ? null : String(value);
       else if (column === "completed_at") run.completedAt = value == null ? null : String(value);
     }
   };
@@ -474,6 +515,7 @@ function createMutableScansEnv(input: {
       relativeStrengthMaterializationRuns,
       relativeStrengthMaterializationRunCandidates,
       relativeStrengthMaterializationQueue,
+      relativeStrengthDeferredTickers,
       rsRatioRowsByCountCalls,
       dailyBarsByTicker,
     },
@@ -503,6 +545,18 @@ function createMutableScansEnv(input: {
               const present = Array.from(relativeStrengthMaterializationRunCandidates.values())
                 .some((row) => row.runId === runId);
               return (present ? { present: 1 } : null) as T;
+            }
+            if (sql.includes("FROM relative_strength_materialization_run_deferred_tickers") && sql.includes("WHERE run_id = ?") && sql.includes("AND ticker = ?")) {
+              const runId = String(args[0] ?? "");
+              const ticker = String(args[1] ?? "").toUpperCase();
+              return (relativeStrengthDeferredTickers.get(`${runId}|${ticker}`) ?? null) as T;
+            }
+            if (sql.includes("COUNT(*) as count") && sql.includes("FROM relative_strength_materialization_run_deferred_tickers")) {
+              const runId = String(args[0] ?? "");
+              const count = Array.from(relativeStrengthDeferredTickers.values())
+                .filter((row) => row.runId === runId && row.deferredAt != null)
+                .length;
+              return { count } as T;
             }
             if (sql.includes("COUNT(*) as count FROM relative_strength_materialization_run_candidates")) {
               const runId = String(args[0] ?? "");
@@ -816,9 +870,12 @@ function createMutableScansEnv(input: {
                 materializationCandidateCount: Number(materializationCandidateCount ?? totalCandidates ?? 0),
                 alreadyCurrentCandidateCount: Number(alreadyCurrentCandidateCount ?? 0),
                 lastAdvancedAt: null,
+                deferredTickerCount: 0,
+                warning: null,
+                phase: "queued",
               });
             }
-            if (sql.includes("UPDATE scan_refresh_jobs SET")) {
+            if (sql.includes("UPDATE scan_refresh_jobs") && sql.includes("SET")) {
               updateJob(sql, args);
             }
             if (sql.includes("INSERT INTO relative_strength_materialization_runs")) {
@@ -854,9 +911,15 @@ function createMutableScansEnv(input: {
                 matchedCandidates: 0,
                 cursorOffset: 0,
                 lastAdvancedAt: null,
+                deferredTickerCount: 0,
+                warning: null,
+                phase: "queued",
+                leaseOwner: null,
+                leaseExpiresAt: null,
+                heartbeatAt: null,
               });
             }
-            if (sql.includes("UPDATE relative_strength_materialization_runs SET")) {
+            if (sql.includes("UPDATE relative_strength_materialization_runs") && sql.includes("SET")) {
               updateMaterializationRun(sql, args);
             }
             if (sql.includes("INSERT INTO relative_strength_refresh_queue")) {
@@ -879,6 +942,16 @@ function createMutableScansEnv(input: {
                 enqueuedAt: nextTimestamp(),
                 lastAttemptedAt: null,
                 attempts: existing?.attempts ?? 0,
+              });
+            }
+            if (sql.includes("INSERT INTO relative_strength_materialization_run_deferred_tickers")) {
+              const [runId, ticker, attemptCount, lastError, deferredAt] = args;
+              relativeStrengthDeferredTickers.set(`${String(runId)}|${String(ticker).toUpperCase()}`, {
+                runId: String(runId),
+                ticker: String(ticker).toUpperCase(),
+                attemptCount: Number(attemptCount ?? 0),
+                lastError: lastError == null ? null : String(lastError),
+                deferredAt: deferredAt == null ? null : String(deferredAt),
               });
             }
             if (sql.includes("UPDATE relative_strength_refresh_queue")) {
@@ -907,6 +980,12 @@ function createMutableScansEnv(input: {
               const runId = String(args[0] ?? "");
               for (const [key, row] of relativeStrengthMaterializationRunCandidates.entries()) {
                 if (row.runId === runId) relativeStrengthMaterializationRunCandidates.delete(key);
+              }
+            }
+            if (sql.includes("DELETE FROM relative_strength_materialization_run_deferred_tickers WHERE run_id = ?")) {
+              const runId = String(args[0] ?? "");
+              for (const [key, row] of relativeStrengthDeferredTickers.entries()) {
+                if (row.runId === runId) relativeStrengthDeferredTickers.delete(key);
               }
             }
             if (sql.includes("DELETE FROM relative_strength_materialization_runs WHERE id = ?")) {
@@ -1182,8 +1261,22 @@ async function completeRelativeStrengthMaterializationJob(env: any, presetId: st
   expect(queued.async).toBe(true);
   expect(queued.job).not.toBeNull();
   let job = queued.job;
-  while (job && (job.status === "queued" || job.status === "running")) {
+  let attempts = 0;
+  while (job && (job.status === "queued" || job.status === "running") && attempts < 50) {
     job = await processRelativeStrengthRefreshJob(env, job.id, { maxBatches: 20, timeBudgetMs: 60_000 });
+    attempts += 1;
+  }
+  if (attempts >= 50) {
+    const latestRun = job?.sharedRunId
+      ? env.__testState.relativeStrengthMaterializationRuns.get(job.sharedRunId) ?? null
+      : null;
+    throw new Error(
+      `Relative strength materialization did not complete after ${attempts} attempts. `
+      + `jobStatus=${job?.status ?? "missing"} processed=${job?.processedCandidates ?? "missing"} `
+      + `cursor=${job?.cursorOffset ?? "missing"} runStatus=${latestRun?.status ?? "missing"} `
+      + `runProcessed=${latestRun?.processedCandidates ?? "missing"} runCursor=${latestRun?.cursorOffset ?? "missing"} `
+      + `runPhase=${latestRun?.phase ?? "missing"} runWarning=${latestRun?.warning ?? "none"}`,
+    );
   }
   if (job?.status !== "completed") {
     throw new Error(`Relative strength materialization failed: ${job?.status ?? "missing"}${job?.error ? ` (${job.error})` : ""}`);
@@ -1244,6 +1337,9 @@ function seedCompletedRelativeStrengthCache(
     materializationCandidateCount: 0,
     alreadyCurrentCandidateCount: rows.length,
     lastAdvancedAt: "2026-04-21T00:05:00.000Z",
+    deferredTickerCount: 0,
+    warning: null,
+    phase: "completed",
   });
   rows.forEach((row, index) => {
     env.__testState.scanRefreshJobCandidates.push({
@@ -2382,14 +2478,300 @@ describe("scans page service", () => {
     expect(env.__testState.relativeStrengthMaterializationRuns.size).toBe(1);
 
     let job = second.job;
-    while (job && (job.status === "queued" || job.status === "running")) {
+    let attempts = 0;
+    while (job && (job.status === "queued" || job.status === "running") && attempts < 50) {
       job = await processRelativeStrengthRefreshJob(env, job.id, { maxBatches: 20, timeBudgetMs: 60_000 });
+      attempts += 1;
     }
+    expect(attempts).toBeLessThan(50);
 
     const firstCompleted = env.__testState.scanRefreshJobs.find((row: MutableScanRefreshJob) => row.id === first.job?.id);
     const secondCompleted = env.__testState.scanRefreshJobs.find((row: MutableScanRefreshJob) => row.id === second.job?.id);
     expect(firstCompleted?.status).toBe("completed");
     expect(secondCompleted?.status).toBe("completed");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("treats current latest-cache rows as output-current even when config state is missing", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-output-current",
+      name: "Relative Strength Output Current",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      outputMode: "rs_new_high_only",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const configKey = `${preset.benchmarkTicker}|${preset.rsMaType}|${preset.rsMaLength}|${preset.newHighLookback}`;
+    const { env } = createMutableScansEnv({
+      presets: [preset],
+      symbols: ["NVDA"],
+    });
+    env.__testState.relativeStrengthLatestCache.set(`${configKey}|NVDA`, {
+      configKey,
+      ticker: "NVDA",
+      benchmarkTicker: "SPY",
+      rsMaType: preset.rsMaType,
+      rsMaLength: preset.rsMaLength,
+      newHighLookback: preset.newHighLookback,
+      tradingDate: CURRENT_RS_SESSION,
+      priceClose: 170.81,
+      change1d: 2.55,
+      rsRatioClose: 1.42,
+      rsRatioMa: 1.31,
+      rsAboveMa: 1,
+      rsNewHigh: 1,
+      rsNewHighBeforePrice: 0,
+      bullCross: 0,
+      approxRsRating: 85,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await requestScansRefresh(env, preset.id, "test");
+
+    expect(response.async).toBe(false);
+    expect(response.job).toBeNull();
+    expect(response.snapshot?.rows.map((row) => row.ticker)).toEqual(["NVDA"]);
+    expect(env.__testState.scanRefreshJobs).toHaveLength(0);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("skips processing a shared run that is already leased by another processor", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-lease-skip",
+      name: "Relative Strength Lease Skip",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      outputMode: "rs_new_high_only",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const benchmarkBars = makeBarsEndingOn("SPY", 520, 100, 0.15);
+    const tickerBars = makeBarsEndingOn("NVDA", 520, 40, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [preset],
+      symbols: ["NVDA"],
+      dailyBarsByTicker: {
+        SPY: benchmarkBars,
+        NVDA: tickerBars,
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await requestScansRefresh(env, preset.id, "test");
+    expect(response.async).toBe(true);
+    const runId = response.job?.sharedRunId;
+    expect(runId).toBeTruthy();
+    const run = runId ? env.__testState.relativeStrengthMaterializationRuns.get(runId) : null;
+    expect(run).toBeTruthy();
+    if (!run || !response.job) throw new Error("Expected shared run to exist.");
+
+    run.leaseOwner = "other-processor";
+    run.leaseExpiresAt = "2099-01-01T00:00:00.000Z";
+    run.phase = "materializing";
+
+    const processed = await processRelativeStrengthRefreshJob(env, response.job.id, {
+      maxBatches: 5,
+      timeBudgetMs: 60_000,
+    });
+
+    expect(processed?.processedCandidates).toBe(0);
+    expect(env.__testState.relativeStrengthMaterializationRuns.get(runId)?.processedCandidates).toBe(0);
+    expect(env.__testState.relativeStrengthMaterializationRuns.get(runId)?.leaseOwner).toBe("other-processor");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("defers a repeatedly failing ticker instead of blocking the shared run", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-defer-outlier",
+      name: "Relative Strength Defer Outlier",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      outputMode: "all",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const benchmarkBars = makeBarsEndingOn("SPY", 520, 100, 0.15);
+    const goodBars = makeBarsEndingOn("GOOD", 520, 40, 0.5);
+    const badBars = makeBarsEndingOn("BAD", 520, 220, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [preset],
+      symbols: ["GOOD", "BAD"],
+      dailyBarsByTicker: {
+        SPY: benchmarkBars,
+        GOOD: goodBars,
+        BAD: badBars,
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:GOOD",
+            d: ["Good Corp", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+          {
+            s: "NASDAQ:BAD",
+            d: ["Bad Corp", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const originalBootstrap = relativeStrengthModule.bootstrapRelativeStrengthStateFromRatioRows;
+    const bootstrapSpy = vi.spyOn(relativeStrengthModule, "bootstrapRelativeStrengthStateFromRatioRows");
+    bootstrapSpy.mockImplementation((rows, config, options) => {
+      if ((rows[0]?.priceClose ?? 0) >= 220) {
+        throw new Error("BAD ticker bootstrap failure");
+      }
+      return originalBootstrap(rows, config, options);
+    });
+
+    const response = await requestScansRefresh(env, preset.id, "test");
+    expect(response.async).toBe(true);
+    let job = response.job;
+    let attempts = 0;
+    while (job && (job.status === "queued" || job.status === "running") && attempts < 50) {
+      job = await processRelativeStrengthRefreshJob(env, job.id, { maxBatches: 20, timeBudgetMs: 60_000 });
+      attempts += 1;
+    }
+    expect(attempts).toBeLessThan(50);
+
+    expect(job?.status).toBe("completed");
+    expect(job?.deferredTickerCount).toBe(1);
+    expect(job?.warning).toContain("Deferred 1 ticker");
+
+    const refreshed = await refreshScansSnapshot(env, preset.id);
+    expect(refreshed.status).toBe("warning");
+    expect(refreshed.rows.map((row) => row.ticker)).toEqual(["GOOD"]);
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(1);
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.ticker).toBe("BAD");
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.deferredAt).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("defers a repeatedly failing prep ticker instead of stalling the shared run cursor", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-defer-prep-outlier",
+      name: "Relative Strength Defer Prep Outlier",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      outputMode: "all",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const benchmarkBars = makeBarsEndingOn("SPY", 520, 100, 0.15);
+    const goodBars = makeBarsEndingOn("GOOD", 520, 40, 0.5);
+    const badBars = makeBarsEndingOn("BAD", 10, 220, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [preset],
+      symbols: ["GOOD", "BAD"],
+      dailyBarsByTicker: {
+        SPY: benchmarkBars,
+        GOOD: goodBars,
+        BAD: badBars,
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:GOOD",
+            d: ["Good Corp", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+          {
+            s: "NASDAQ:BAD",
+            d: ["Bad Corp", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const refreshSpy = vi.spyOn(dailyBarsModule, "refreshDailyBarsIncremental");
+    refreshSpy.mockImplementation(async (_env, options) => {
+      if (options.tickers.includes("BAD")) {
+        throw new Error("BAD ticker prep failure");
+      }
+    });
+
+    const response = await requestScansRefresh(env, preset.id, "test");
+    expect(response.async).toBe(true);
+    let job = response.job;
+    let attempts = 0;
+    while (job && (job.status === "queued" || job.status === "running") && attempts < 50) {
+      job = await processRelativeStrengthRefreshJob(env, job.id, { maxBatches: 20, timeBudgetMs: 60_000 });
+      attempts += 1;
+    }
+    expect(attempts).toBeLessThan(50);
+
+    expect(job?.status).toBe("completed");
+    expect(job?.processedCandidates).toBe(2);
+    expect(job?.deferredTickerCount).toBe(1);
+    expect(job?.warning).toContain("Deferred 1 ticker");
+
+    const refreshed = await refreshScansSnapshot(env, preset.id);
+    expect(refreshed.status).toBe("warning");
+    expect(refreshed.rows.map((row) => row.ticker)).toEqual(["GOOD"]);
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(1);
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.ticker).toBe("BAD");
 
     vi.unstubAllGlobals();
   });

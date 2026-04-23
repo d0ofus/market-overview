@@ -3,7 +3,7 @@ import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 
 const DEFAULT_WORKER_SCHEDULE_ID = "default";
-const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 20;
+const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 50;
 const DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK = 20;
 const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
 const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 60;

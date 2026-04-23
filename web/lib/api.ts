@@ -313,6 +313,9 @@ export type ScanRefreshJob = {
   materializationCandidateCount: number;
   alreadyCurrentCandidateCount: number;
   lastAdvancedAt: string | null;
+  deferredTickerCount: number;
+  warning: string | null;
+  phase: string | null;
 };
 
 export type ScanRefreshResponse = {
