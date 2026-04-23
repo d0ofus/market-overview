@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as providerModule from "../src/provider";
+import {
+  bootstrapRelativeStrengthStateFromRatioRows,
+  buildRelativeStrengthRatioRows,
+} from "../src/relative-strength";
 import {
   buildTradingViewScanPayload,
   deleteScanPreset,
@@ -304,6 +308,7 @@ function createMutableScansEnv(input: {
   const relativeStrengthMaterializationRuns = new Map<string, MutableRelativeStrengthMaterializationRun>();
   const relativeStrengthMaterializationRunCandidates = new Map<string, MutableRelativeStrengthMaterializationRunCandidate>();
   const relativeStrengthMaterializationQueue = new Map<string, MutableRelativeStrengthMaterializationQueueRow>();
+  const rsRatioRowsByCountCalls: Array<{ benchmarkTicker: string; tickers: string[]; endDate: string; barLimit: number }> = [];
   const rowsBySnapshotId = new Map<string, ScanSnapshotRow[]>(
     Object.entries(input.rowsBySnapshotId ?? {}).map(([snapshotId, rows]) => [snapshotId, rows.map((row) => ({
       name: null,
@@ -469,6 +474,7 @@ function createMutableScansEnv(input: {
       relativeStrengthMaterializationRuns,
       relativeStrengthMaterializationRunCandidates,
       relativeStrengthMaterializationQueue,
+      rsRatioRowsByCountCalls,
       dailyBarsByTicker,
     },
     DB: {
@@ -492,6 +498,12 @@ function createMutableScansEnv(input: {
                 .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
               return (candidates[0] ?? null) as T;
             }
+            if (sql.includes("SELECT 1 as present") && sql.includes("FROM relative_strength_materialization_run_candidates")) {
+              const runId = String(args[0] ?? "");
+              const present = Array.from(relativeStrengthMaterializationRunCandidates.values())
+                .some((row) => row.runId === runId);
+              return (present ? { present: 1 } : null) as T;
+            }
             if (sql.includes("COUNT(*) as count FROM relative_strength_materialization_run_candidates")) {
               const runId = String(args[0] ?? "");
               const count = Array.from(relativeStrengthMaterializationRunCandidates.values())
@@ -513,6 +525,11 @@ function createMutableScansEnv(input: {
                 candidateCount: rows.length,
                 materializationCount: rows.filter((row) => row.materializationRequired === 1).length,
               } as T;
+            }
+            if (sql.includes("SELECT 1 as present") && sql.includes("FROM scan_refresh_job_candidates")) {
+              const jobId = String(args[0] ?? "");
+              const present = scanRefreshJobCandidates.some((row) => row.jobId === jobId);
+              return (present ? { present: 1 } : null) as T;
             }
             if (sql.includes("FROM scan_refresh_jobs") && sql.includes("WHERE id = ?")) {
               return scanRefreshJobs.find((row) => row.id === args[0]) ?? null as T;
@@ -658,11 +675,33 @@ function createMutableScansEnv(input: {
               const barLimit = Number(args[args.length - 1] ?? 0);
               const endDate = String(args[args.length - 2] ?? "");
               const requestedTickers = args.slice(1, -2).map((value) => String(value).toUpperCase());
+              rsRatioRowsByCountCalls.push({
+                benchmarkTicker,
+                tickers: requestedTickers,
+                endDate,
+                barLimit,
+              });
               const results = requestedTickers.flatMap((ticker) =>
                 Array.from(relativeStrengthRatioCache.values())
                   .filter((row) => row.benchmarkTicker === benchmarkTicker && row.ticker === ticker && row.tradingDate <= endDate)
                   .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate))
                   .slice(-barLimit),
+              );
+              return { results: results as T[] };
+            }
+            if (sql.includes("FROM rs_ratio_cache") && sql.includes("trading_date > ?")) {
+              const benchmarkTicker = String(args[0] ?? "").toUpperCase();
+              const startDateExclusive = String(args[args.length - 2] ?? "");
+              const endDate = String(args[args.length - 1] ?? "");
+              const requestedTickers = args.slice(1, -2).map((value) => String(value).toUpperCase());
+              const results = requestedTickers.flatMap((ticker) =>
+                Array.from(relativeStrengthRatioCache.values())
+                  .filter((row) =>
+                    row.benchmarkTicker === benchmarkTicker
+                    && row.ticker === ticker
+                    && row.tradingDate > startDateExclusive
+                    && row.tradingDate <= endDate)
+                  .sort((left, right) => left.tradingDate.localeCompare(right.tradingDate)),
               );
               return { results: results as T[] };
             }
@@ -1275,6 +1314,17 @@ function seedCompletedRelativeStrengthCache(
 }
 
 describe("scans page service", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-22T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("normalizes rows, computes price * avg volume fallback, and sorts by 1D change descending", () => {
     const rows = normalizeScanRows([
       {
@@ -1861,6 +1911,118 @@ describe("scans page service", () => {
     expect(result?.rows[0]?.price).toBe(latestPriceClose);
     expect(result?.rows[0]?.rsNewHigh).toBe(true);
     expect(result?.rows[0]?.rawJson).toContain(`"tradingDate":"${latestTradingDate}"`);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("advances slightly stale RS state without reloading full ratio history", async () => {
+    const relativeStrengthPreset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-multi-step-incremental",
+      name: "Relative Strength",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const benchmarkBars = makeBarsEndingOn("SPY", 520, 100, 0.15);
+    const tickerBars = makeBarsEndingOn("NVDA", 520, 40, 0.5);
+    const { env } = createMutableScansEnv({
+      presets: [relativeStrengthPreset],
+      symbols: ["NVDA"],
+      dailyBarsByTicker: {
+        SPY: benchmarkBars,
+        NVDA: tickerBars,
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const configKey = `SPY|${relativeStrengthPreset.rsMaType}|${relativeStrengthPreset.rsMaLength}|${relativeStrengthPreset.newHighLookback}`;
+    const seeded = bootstrapRelativeStrengthStateFromRatioRows(
+      buildRelativeStrengthRatioRows(tickerBars.slice(0, -3), benchmarkBars.slice(0, -3), "SPY"),
+      {
+        benchmarkTicker: "SPY",
+        verticalOffset: relativeStrengthPreset.verticalOffset,
+        rsMaLength: relativeStrengthPreset.rsMaLength,
+        rsMaType: relativeStrengthPreset.rsMaType,
+        newHighLookback: relativeStrengthPreset.newHighLookback,
+      },
+      { configKey, updatedAt: "2026-04-20T00:00:00.000Z" },
+    );
+
+    expect(seeded).not.toBeNull();
+    env.__testState.relativeStrengthConfigState.set(`${configKey}|NVDA`, {
+      configKey,
+      ticker: "NVDA",
+      benchmarkTicker: "SPY",
+      rsMaType: relativeStrengthPreset.rsMaType,
+      rsMaLength: relativeStrengthPreset.rsMaLength,
+      newHighLookback: relativeStrengthPreset.newHighLookback,
+      stateVersion: seeded!.state.stateVersion,
+      latestTradingDate: seeded!.state.latestTradingDate,
+      updatedAt: "2026-04-20T00:00:00.000Z",
+      priceClose: seeded!.state.priceClose,
+      change1d: seeded!.state.change1d,
+      rsRatioClose: seeded!.state.rsRatioClose,
+      rsRatioMa: seeded!.state.rsRatioMa,
+      rsAboveMa: seeded!.state.rsAboveMa ? 1 : 0,
+      rsNewHigh: seeded!.state.rsNewHigh ? 1 : 0,
+      rsNewHighBeforePrice: seeded!.state.rsNewHighBeforePrice ? 1 : 0,
+      bullCross: seeded!.state.bullCross ? 1 : 0,
+      approxRsRating: seeded!.state.approxRsRating,
+      priceCloseHistoryJson: JSON.stringify(seeded!.state.priceCloseHistory),
+      benchmarkCloseHistoryJson: JSON.stringify(seeded!.state.benchmarkCloseHistory),
+      weightedScoreHistoryJson: JSON.stringify(seeded!.state.weightedScoreHistory),
+      rsNewHighWindowJson: JSON.stringify(seeded!.state.rsNewHighWindow),
+      priceNewHighWindowJson: JSON.stringify(seeded!.state.priceNewHighWindow),
+      smaWindowJson: JSON.stringify(seeded!.state.smaWindow),
+      smaSum: seeded!.state.smaSum,
+      emaValue: seeded!.state.emaValue,
+      previousRsClose: seeded!.state.previousRsClose,
+      previousRsMa: seeded!.state.previousRsMa,
+    });
+    env.__testState.relativeStrengthLatestCache.set(`${configKey}|NVDA`, {
+      configKey,
+      ticker: "NVDA",
+      benchmarkTicker: "SPY",
+      rsMaType: relativeStrengthPreset.rsMaType,
+      rsMaLength: relativeStrengthPreset.rsMaLength,
+      newHighLookback: relativeStrengthPreset.newHighLookback,
+      tradingDate: seeded!.state.latestTradingDate,
+      priceClose: seeded!.state.priceClose,
+      change1d: seeded!.state.change1d,
+      rsRatioClose: seeded!.state.rsRatioClose,
+      rsRatioMa: seeded!.state.rsRatioMa,
+      rsAboveMa: seeded!.state.rsAboveMa ? 1 : 0,
+      rsNewHigh: seeded!.state.rsNewHigh ? 1 : 0,
+      rsNewHighBeforePrice: seeded!.state.rsNewHighBeforePrice ? 1 : 0,
+      bullCross: seeded!.state.bullCross ? 1 : 0,
+      approxRsRating: seeded!.state.approxRsRating,
+    });
+
+    const response = await materializeRelativeStrengthPreset(env, relativeStrengthPreset.id);
+
+    expect(response.async).toBe(false);
+    expect(response.snapshot?.status).toBe("ok");
+    expect(env.__testState.relativeStrengthConfigState.get(`${configKey}|NVDA`)?.latestTradingDate).toBe(CURRENT_RS_SESSION);
+    expect(env.__testState.rsRatioRowsByCountCalls.some((call: { barLimit: number }) => call.barLimit > 2)).toBe(false);
 
     vi.unstubAllGlobals();
   });

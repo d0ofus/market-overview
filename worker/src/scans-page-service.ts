@@ -314,6 +314,12 @@ type RelativeStrengthConfigStateRecord = {
   previousRsMa: number | null;
 };
 
+type RelativeStrengthConfigStateSummaryRow = {
+  ticker: string;
+  stateVersion: number;
+  latestTradingDate: string;
+};
+
 type RelativeStrengthRefreshQueueRow = {
   jobId?: string;
   runId?: string;
@@ -322,11 +328,6 @@ type RelativeStrengthRefreshQueueRow = {
   enqueuedAt: string;
   lastAttemptedAt: string | null;
   attempts: number;
-};
-
-type RelativeStrengthJobCandidateCounts = {
-  candidateCount: number;
-  materializationCount: number;
 };
 
 type DailyBarCoverageRow = {
@@ -388,6 +389,7 @@ const RS_DEEP_HISTORY_TOP_UP_LIMIT = 40;
 const RS_STALE_TOP_UP_LOOKBACK_DAYS = 30;
 const RS_JOB_CONTINUATION_STALE_MS = 8000;
 const RS_JOB_RECOVERY_STALE_MS = 30000;
+const RS_INCREMENTAL_ADVANCE_MAX_BARS = 20;
 const RS_STALE_TOP_UP_LIMIT = 120;
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
@@ -1646,6 +1648,28 @@ async function loadRelativeStrengthLatestCacheRows(
   return rowsByTicker;
 }
 
+async function loadRelativeStrengthEffectiveLatestCacheRows(
+  env: Env,
+  configKey: string,
+  tickers: string[],
+  tradingDate: string,
+): Promise<Map<string, RelativeStrengthLatestCacheRecord>> {
+  const rowsByTicker = await loadRelativeStrengthLatestCacheRows(env, configKey, tickers, tradingDate);
+  const missingTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && !rowsByTicker.has(ticker)),
+  ));
+  if (missingTickers.length === 0) return rowsByTicker;
+
+  const stateRowsByTicker = await loadRelativeStrengthConfigStateRows(env, configKey, missingTickers);
+  for (const [ticker, state] of stateRowsByTicker.entries()) {
+    if (state.stateVersion !== RS_STATE_VERSION || state.latestTradingDate !== tradingDate) continue;
+    rowsByTicker.set(ticker, stateRowToLatestCacheRecord(state));
+  }
+  return rowsByTicker;
+}
+
 async function loadRelativeStrengthConfigStateRows(
   env: Env,
   configKey: string,
@@ -1699,6 +1723,43 @@ async function loadRelativeStrengthConfigStateRows(
       .all<RelativeStrengthConfigStateRecord>();
     for (const row of rows.results ?? []) {
       rowsByTicker.set(row.ticker.toUpperCase(), parseRelativeStrengthConfigStateRecord(row));
+    }
+  }
+  return rowsByTicker;
+}
+
+async function loadRelativeStrengthConfigStateSummaries(
+  env: Env,
+  configKey: string,
+  tickers: string[],
+): Promise<Map<string, RelativeStrengthConfigStateSummaryRow>> {
+  const uniqueTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  const rowsByTicker = new Map<string, RelativeStrengthConfigStateSummaryRow>();
+  if (uniqueTickers.length === 0) return rowsByTicker;
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT
+         ticker,
+         state_version as stateVersion,
+         latest_trading_date as latestTradingDate
+       FROM relative_strength_config_state
+       WHERE config_key = ?
+         AND ticker IN (${placeholders})`,
+    )
+      .bind(configKey, ...chunk)
+      .all<RelativeStrengthConfigStateSummaryRow>();
+    for (const row of rows.results ?? []) {
+      rowsByTicker.set(row.ticker.toUpperCase(), {
+        ticker: row.ticker.toUpperCase(),
+        stateVersion: Math.max(0, Math.trunc(row.stateVersion || 0)),
+        latestTradingDate: row.latestTradingDate,
+      });
     }
   }
   return rowsByTicker;
@@ -1900,6 +1961,51 @@ async function loadRelativeStrengthRatioRowsByCount(
        ORDER BY ticker ASC, trading_date ASC`,
     )
       .bind(benchmarkTicker, ...chunk, endDate, barLimit)
+      .all<RelativeStrengthRatioRow>();
+    out.push(
+      ...(rows.results ?? []).map((row) => ({
+        ...row,
+        ticker: row.ticker.toUpperCase(),
+        benchmarkTicker: row.benchmarkTicker.toUpperCase(),
+      })),
+    );
+  }
+  return out;
+}
+
+async function loadRelativeStrengthRatioRowsInRange(
+  env: Env,
+  benchmarkTicker: string,
+  tickers: string[],
+  startDateExclusive: string,
+  endDate: string,
+): Promise<RelativeStrengthRatioRow[]> {
+  const uniqueTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (uniqueTickers.length === 0) return [];
+  const out: RelativeStrengthRatioRow[] = [];
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT
+         benchmark_ticker as benchmarkTicker,
+         ticker,
+         trading_date as tradingDate,
+         price_close as priceClose,
+         benchmark_close as benchmarkClose,
+         rs_ratio_close as rsRatioClose
+       FROM rs_ratio_cache
+       WHERE benchmark_ticker = ?
+         AND ticker IN (${placeholders})
+         AND trading_date > ?
+         AND trading_date <= ?
+       ORDER BY ticker ASC, trading_date ASC`,
+    )
+      .bind(benchmarkTicker, ...chunk, startDateExclusive, endDate)
       .all<RelativeStrengthRatioRow>();
     out.push(
       ...(rows.results ?? []).map((row) => ({
@@ -2704,13 +2810,16 @@ async function listQueuedRelativeStrengthMaterializationRuns(env: Env): Promise<
   return rows.results ?? [];
 }
 
-async function loadRelativeStrengthRunCandidateCount(env: Env, runId: string): Promise<number> {
+async function hasRelativeStrengthRunCandidates(env: Env, runId: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    "SELECT COUNT(*) as count FROM relative_strength_materialization_run_candidates WHERE run_id = ?",
+    `SELECT 1 as present
+     FROM relative_strength_materialization_run_candidates
+     WHERE run_id = ?
+     LIMIT 1`,
   )
     .bind(runId)
-    .first<{ count: number }>();
-  return row?.count ?? 0;
+    .first<{ present: number }>();
+  return Boolean(row);
 }
 
 async function loadRelativeStrengthRunCandidateTickers(
@@ -2845,23 +2954,16 @@ async function listQueuedRelativeStrengthRefreshJobs(env: Env): Promise<Relative
   return rows.results ?? [];
 }
 
-async function loadRelativeStrengthJobCandidateCounts(
-  env: Env,
-  jobId: string,
-): Promise<RelativeStrengthJobCandidateCounts> {
-  const counts = await env.DB.prepare(
-    `SELECT
-       COUNT(*) as candidateCount,
-       COALESCE(SUM(CASE WHEN materialization_required = 1 THEN 1 ELSE 0 END), 0) as materializationCount
+async function hasRelativeStrengthJobCandidates(env: Env, jobId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 as present
      FROM scan_refresh_job_candidates
-     WHERE job_id = ?`,
+     WHERE job_id = ?
+     LIMIT 1`,
   )
     .bind(jobId)
-    .first<RelativeStrengthJobCandidateCounts>();
-  return {
-    candidateCount: counts?.candidateCount ?? 0,
-    materializationCount: counts?.materializationCount ?? 0,
-  };
+    .first<{ present: number }>();
+  return Boolean(row);
 }
 
 function lastRefreshAdvanceTimestamp(
@@ -3256,7 +3358,7 @@ async function buildRelativeStrengthSnapshotResult(
   const metadataByTicker = new Map(
     candidates.map((row) => [row.ticker.toUpperCase(), row] as const),
   );
-  const cacheRowsByTicker = await loadRelativeStrengthLatestCacheRows(
+  const cacheRowsByTicker = await loadRelativeStrengthEffectiveLatestCacheRows(
     env,
     configKey,
     Array.from(metadataByTicker.keys()),
@@ -3319,24 +3421,11 @@ async function loadCurrentRelativeStrengthTickerSet(
   identity: RelativeStrengthConfigIdentity,
   tickers: string[],
 ): Promise<Set<string>> {
-  const statesByTicker = await loadRelativeStrengthConfigStateRows(env, identity.configKey, tickers);
-  const latestCacheByTicker = await loadRelativeStrengthLatestCacheRows(
-    env,
-    identity.configKey,
-    tickers,
-    identity.expectedTradingDate,
-  );
+  const statesByTicker = await loadRelativeStrengthConfigStateSummaries(env, identity.configKey, tickers);
   const current = new Set<string>();
   for (const ticker of Array.from(new Set(tickers.map((value) => value.toUpperCase())))) {
     const state = statesByTicker.get(ticker);
-    const latest = latestCacheByTicker.get(ticker);
-    if (
-      state
-      && state.stateVersion === RS_STATE_VERSION
-      && state.latestTradingDate === identity.expectedTradingDate
-      && latest
-      && latest.tradingDate === identity.expectedTradingDate
-    ) {
+    if (state && state.stateVersion === RS_STATE_VERSION && state.latestTradingDate === identity.expectedTradingDate) {
       current.add(ticker);
     }
   }
@@ -3395,12 +3484,6 @@ async function createRelativeStrengthRefreshJob(
         env,
         jobId,
         candidates.map((row, index) => snapshotRowToJobCandidate(row, index, !currentTickers.has(row.ticker.toUpperCase()))),
-      );
-    }
-    const candidateCounts = await loadRelativeStrengthJobCandidateCounts(env, jobId);
-    if (candidateCounts.candidateCount !== fullCandidateCount || candidateCounts.materializationCount !== materializationCandidateCount) {
-      throw new Error(
-        `Relative strength refresh job candidate rows were incomplete (${candidateCounts.candidateCount}/${fullCandidateCount} candidates, ${candidateCounts.materializationCount}/${materializationCandidateCount} stale).`,
       );
     }
     if (options?.enqueue ?? false) {
@@ -3483,10 +3566,9 @@ async function createRelativeStrengthMaterializationRun(
       identity.requiredBarCount,
     )
     .run();
-  if (initialStaleTickers.length > 0) {
-    await appendRelativeStrengthRunCandidateTickers(env, runId, initialStaleTickers);
-  }
-  const candidateCount = await loadRelativeStrengthRunCandidateCount(env, runId);
+  const candidateCount = initialStaleTickers.length > 0
+    ? await appendRelativeStrengthRunCandidateTickers(env, runId, initialStaleTickers)
+    : 0;
   await updateRelativeStrengthMaterializationRun(env, runId, {
     materializationCandidateCount: candidateCount,
     fullCandidateCount: candidateCount,
@@ -3503,19 +3585,28 @@ async function attachRelativeStrengthJobToSharedRun(
   run: RelativeStrengthMaterializationRunRecord,
   job: ScanRefreshJobRecord,
   source: string,
+  staleTickers?: string[],
 ): Promise<RelativeStrengthMaterializationRunRecord> {
-  const staleCandidates = (await loadAllRelativeStrengthJobCandidates(env, job.id))
-    .filter((candidate) => candidate.materializationRequired);
+  const staleCandidates = staleTickers
+    ? Array.from(new Set(staleTickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)))
+    : (await loadAllRelativeStrengthJobCandidates(env, job.id))
+      .filter((candidate) => candidate.materializationRequired)
+      .map((candidate) => candidate.ticker);
   const addedCount = await appendRelativeStrengthRunCandidateTickers(
     env,
     run.id,
-    staleCandidates.map((candidate) => candidate.ticker),
+    staleCandidates,
   );
   if (job.sharedRunId !== run.id) {
     await updateScanRefreshJobRecord(env, job.id, { sharedRunId: run.id });
   }
   if (addedCount > 0 || run.status === "queued") {
-    const candidateCount = await loadRelativeStrengthRunCandidateCount(env, run.id);
+    const candidateCount = Math.max(
+      run.materializationCandidateCount,
+      run.fullCandidateCount,
+      run.processedCandidates,
+      run.cursorOffset,
+    ) + addedCount;
     await updateRelativeStrengthMaterializationRun(env, run.id, {
       fullCandidateCount: candidateCount,
       materializationCandidateCount: candidateCount,
@@ -3663,95 +3754,12 @@ async function materializeRelativeStrengthBatch(
   tickers: string[],
   benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
-  const identity = buildRelativeStrengthConfigIdentityFromJobRecord(job);
-  const config = rawRelativeStrengthConfig(identity);
-  const benchmarkTicker = identity.benchmarkDataTicker;
-  const candidateTickers = Array.from(new Set(
-    tickers
-      .map((ticker) => ticker.trim().toUpperCase())
-      .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
-  ));
-  if (candidateTickers.length === 0) return 0;
-  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
-  await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
-  const currentStatesByTicker = await loadRelativeStrengthConfigStateRows(env, identity.configKey, candidateTickers);
-  const recentRatioRows = await loadRelativeStrengthRatioRowsByCount(
+  return materializeRelativeStrengthTickers(
     env,
-    identity.benchmarkTicker,
-    candidateTickers,
-    identity.expectedTradingDate,
-    2,
+    buildRelativeStrengthConfigIdentityFromJobRecord(job),
+    tickers,
+    benchmarkBars,
   );
-  const recentRatioRowsByTicker = groupRatioRowsByTicker(recentRatioRows);
-  const nextStateRows: RelativeStrengthConfigState[] = [];
-  const nextLatestCacheRows: RelativeStrengthLatestCacheRecord[] = [];
-  const bootstrapTickers: string[] = [];
-  const updatedAt = new Date().toISOString();
-
-  for (const ticker of candidateTickers) {
-    const currentState = currentStatesByTicker.get(ticker);
-    if (currentState && currentState.stateVersion === RS_STATE_VERSION && currentState.latestTradingDate === identity.expectedTradingDate) {
-      nextStateRows.push(currentState);
-      nextLatestCacheRows.push(stateRowToLatestCacheRecord(currentState));
-      continue;
-    }
-
-    const recentRows = recentRatioRowsByTicker.get(ticker) ?? [];
-    const latestRow = recentRows[recentRows.length - 1];
-    const priorRow = recentRows.length > 1 ? recentRows[recentRows.length - 2] : null;
-    const canAdvanceIncrementally = currentState
-      && currentState.stateVersion === RS_STATE_VERSION
-      && latestRow
-      && latestRow.tradingDate === identity.expectedTradingDate
-      && priorRow
-      && priorRow.tradingDate === currentState.latestTradingDate;
-
-    if (canAdvanceIncrementally && latestRow) {
-      const advanced = advanceRelativeStrengthState(currentState, latestRow, config, { updatedAt });
-      nextStateRows.push({
-        ...advanced.state,
-        configKey: identity.configKey,
-      });
-      nextLatestCacheRows.push({
-        ...stateRowToLatestCacheRecord(advanced.state),
-        ticker,
-      });
-      continue;
-    }
-
-    bootstrapTickers.push(ticker);
-  }
-
-  if (bootstrapTickers.length > 0) {
-    const bootstrapRatioRows = await loadRelativeStrengthRatioRowsByCount(
-      env,
-      identity.benchmarkTicker,
-      bootstrapTickers,
-      identity.expectedTradingDate,
-      identity.requiredBarCount,
-    );
-    const bootstrapRatioRowsByTicker = groupRatioRowsByTicker(bootstrapRatioRows);
-    for (const ticker of bootstrapTickers) {
-      const bootstrapped = bootstrapRelativeStrengthStateFromRatioRows(
-        bootstrapRatioRowsByTicker.get(ticker) ?? [],
-        config,
-        { configKey: identity.configKey, updatedAt },
-      );
-      if (!bootstrapped || bootstrapped.latestCacheRow.tradingDate !== identity.expectedTradingDate) continue;
-      nextStateRows.push({
-        ...bootstrapped.state,
-        configKey: identity.configKey,
-      });
-      nextLatestCacheRows.push({
-        ...stateRowToLatestCacheRecord(bootstrapped.state),
-        ticker,
-      });
-    }
-  }
-
-  await upsertRelativeStrengthConfigStates(env, nextStateRows);
-  await upsertRelativeStrengthLatestCacheRows(env, identity.configKey, nextLatestCacheRows);
-  return nextLatestCacheRows.length;
 }
 
 async function materializeRelativeStrengthRunBatch(
@@ -3760,7 +3768,20 @@ async function materializeRelativeStrengthRunBatch(
   tickers: string[],
   benchmarkBars: RelativeStrengthDailyBar[],
 ): Promise<number> {
-  const identity = buildRelativeStrengthConfigIdentityFromRunRecord(run);
+  return materializeRelativeStrengthTickers(
+    env,
+    buildRelativeStrengthConfigIdentityFromRunRecord(run),
+    tickers,
+    benchmarkBars,
+  );
+}
+
+async function materializeRelativeStrengthTickers(
+  env: Env,
+  identity: RelativeStrengthConfigIdentity,
+  tickers: string[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+): Promise<number> {
   const config = rawRelativeStrengthConfig(identity);
   const benchmarkTicker = identity.benchmarkDataTicker;
   const candidateTickers = Array.from(new Set(
@@ -3772,18 +3793,12 @@ async function materializeRelativeStrengthRunBatch(
   await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
   await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
   const currentStatesByTicker = await loadRelativeStrengthConfigStateRows(env, identity.configKey, candidateTickers);
-  const recentRatioRows = await loadRelativeStrengthRatioRowsByCount(
-    env,
-    identity.benchmarkTicker,
-    candidateTickers,
-    identity.expectedTradingDate,
-    2,
-  );
-  const recentRatioRowsByTicker = groupRatioRowsByTicker(recentRatioRows);
   const nextStateRows: RelativeStrengthConfigState[] = [];
   const nextLatestCacheRows: RelativeStrengthLatestCacheRecord[] = [];
   const bootstrapTickers: string[] = [];
+  const incrementalTickers: string[] = [];
   const updatedAt = new Date().toISOString();
+  let earliestIncrementalDate: string | null = null;
 
   for (const ticker of candidateTickers) {
     const currentState = currentStatesByTicker.get(ticker);
@@ -3793,30 +3808,59 @@ async function materializeRelativeStrengthRunBatch(
       continue;
     }
 
-    const recentRows = recentRatioRowsByTicker.get(ticker) ?? [];
-    const latestRow = recentRows[recentRows.length - 1];
-    const priorRow = recentRows.length > 1 ? recentRows[recentRows.length - 2] : null;
-    const canAdvanceIncrementally = currentState
-      && currentState.stateVersion === RS_STATE_VERSION
-      && latestRow
-      && latestRow.tradingDate === identity.expectedTradingDate
-      && priorRow
-      && priorRow.tradingDate === currentState.latestTradingDate;
-
-    if (canAdvanceIncrementally && latestRow) {
-      const advanced = advanceRelativeStrengthState(currentState, latestRow, config, { updatedAt });
-      nextStateRows.push({
-        ...advanced.state,
-        configKey: identity.configKey,
-      });
-      nextLatestCacheRows.push({
-        ...stateRowToLatestCacheRecord(advanced.state),
-        ticker,
-      });
+    if (currentState && currentState.stateVersion === RS_STATE_VERSION && currentState.latestTradingDate < identity.expectedTradingDate) {
+      incrementalTickers.push(ticker);
+      if (!earliestIncrementalDate || currentState.latestTradingDate < earliestIncrementalDate) {
+        earliestIncrementalDate = currentState.latestTradingDate;
+      }
       continue;
     }
 
     bootstrapTickers.push(ticker);
+  }
+
+  const incrementalRatioRowsByTicker = earliestIncrementalDate
+    ? groupRatioRowsByTicker(await loadRelativeStrengthRatioRowsInRange(
+      env,
+      identity.benchmarkTicker,
+      incrementalTickers,
+      earliestIncrementalDate,
+      identity.expectedTradingDate,
+    ))
+    : new Map<string, RelativeStrengthRatioRow[]>();
+
+  for (const ticker of incrementalTickers) {
+    const currentState = currentStatesByTicker.get(ticker);
+    if (!currentState || currentState.stateVersion !== RS_STATE_VERSION) {
+      bootstrapTickers.push(ticker);
+      continue;
+    }
+
+    const nextRows = (incrementalRatioRowsByTicker.get(ticker) ?? [])
+      .filter((row) => row.tradingDate > currentState.latestTradingDate);
+    const latestRow = nextRows[nextRows.length - 1];
+    if (!latestRow || latestRow.tradingDate !== identity.expectedTradingDate || nextRows.length > RS_INCREMENTAL_ADVANCE_MAX_BARS) {
+      bootstrapTickers.push(ticker);
+      continue;
+    }
+
+    let advancedState = currentState;
+    for (const row of nextRows) {
+      advancedState = advanceRelativeStrengthState(advancedState, row, config, { updatedAt }).state;
+    }
+    if (advancedState.latestTradingDate !== identity.expectedTradingDate) {
+      bootstrapTickers.push(ticker);
+      continue;
+    }
+
+    nextStateRows.push({
+      ...advancedState,
+      configKey: identity.configKey,
+    });
+    nextLatestCacheRows.push({
+      ...stateRowToLatestCacheRecord(advancedState),
+      ticker,
+    });
   }
 
   if (bootstrapTickers.length > 0) {
@@ -3961,7 +4005,15 @@ async function processRelativeStrengthMaterializationRun(
   if (run.status === "completed" || run.status === "failed") return run;
 
   try {
-    const effectiveMaterializationTotal = await loadRelativeStrengthRunCandidateCount(env, run.id);
+    const effectiveMaterializationTotal = Math.max(
+      run.materializationCandidateCount,
+      run.fullCandidateCount,
+      run.processedCandidates,
+      run.cursorOffset,
+    );
+    if (effectiveMaterializationTotal > 0 && !(await hasRelativeStrengthRunCandidates(env, run.id))) {
+      throw new Error("Relative strength materialization run is missing candidate rows.");
+    }
     if (effectiveMaterializationTotal === 0 || run.cursorOffset >= effectiveMaterializationTotal) {
       await updateRelativeStrengthMaterializationRun(env, run.id, {
         status: "completed",
@@ -4015,19 +4067,32 @@ async function processRelativeStrengthMaterializationRun(
       });
     }
 
-    if (cursorOffset >= effectiveMaterializationTotal) {
+    const latestRun = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
+    const finalMaterializationTotal = Math.max(
+      latestRun?.materializationCandidateCount ?? effectiveMaterializationTotal,
+      latestRun?.fullCandidateCount ?? effectiveMaterializationTotal,
+      latestRun?.processedCandidates ?? cursorOffset,
+      latestRun?.cursorOffset ?? cursorOffset,
+    );
+
+    if (cursorOffset >= finalMaterializationTotal) {
       await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
         status: "completed",
         processedCandidates: cursorOffset,
         matchedCandidates,
         cursorOffset,
-        materializationCandidateCount: effectiveMaterializationTotal,
-        fullCandidateCount: Math.max(currentRun.fullCandidateCount, effectiveMaterializationTotal),
+        materializationCandidateCount: finalMaterializationTotal,
+        fullCandidateCount: Math.max(currentRun.fullCandidateCount, finalMaterializationTotal),
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
       });
       await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
-    } else if (effectiveMaterializationTotal > 0) {
+    } else if (finalMaterializationTotal > 0) {
+      await updateRelativeStrengthMaterializationRun(env, currentRun.id, {
+        status: "running",
+        materializationCandidateCount: finalMaterializationTotal,
+        fullCandidateCount: Math.max(currentRun.fullCandidateCount, finalMaterializationTotal),
+      });
       await enqueueRelativeStrengthMaterializationRun(env, currentRun.id, "continuation");
     }
   } catch (error) {
@@ -4067,9 +4132,13 @@ export async function processRelativeStrengthRefreshJob(
   }
 
   try {
-    const candidateCounts = await loadRelativeStrengthJobCandidateCounts(env, job.id);
-    const effectiveMaterializationTotal = candidateCounts.materializationCount;
-    const hasStoredCandidates = candidateCounts.candidateCount > 0;
+    const effectiveMaterializationTotal = Math.max(0, job.materializationCandidateCount);
+    const effectiveFullCandidateTotal = Math.max(
+      job.fullCandidateCount,
+      job.alreadyCurrentCandidateCount + effectiveMaterializationTotal,
+      job.totalCandidates,
+    );
+    const hasStoredCandidates = effectiveFullCandidateTotal === 0 || await hasRelativeStrengthJobCandidates(env, job.id);
     if (!hasStoredCandidates && (job.totalCandidates > 0 || job.fullCandidateCount > 0 || job.materializationCandidateCount > 0)) {
       throw new Error("Relative strength refresh job is missing candidate rows.");
     }
@@ -4079,7 +4148,7 @@ export async function processRelativeStrengthRefreshJob(
         processedCandidates: effectiveMaterializationTotal,
         matchedCandidates: Math.max(job.matchedCandidates, job.alreadyCurrentCandidateCount),
         cursorOffset: effectiveMaterializationTotal,
-        fullCandidateCount: Math.max(job.fullCandidateCount, candidateCounts.candidateCount),
+        fullCandidateCount: effectiveFullCandidateTotal,
         materializationCandidateCount: effectiveMaterializationTotal,
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
@@ -4128,7 +4197,7 @@ export async function processRelativeStrengthRefreshJob(
         processedCandidates: cursorOffset,
         matchedCandidates,
         cursorOffset,
-        fullCandidateCount: Math.max(job.fullCandidateCount, candidateCounts.candidateCount),
+        fullCandidateCount: effectiveFullCandidateTotal,
         materializationCandidateCount: effectiveMaterializationTotal,
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
@@ -4166,21 +4235,27 @@ export async function requestScansRefresh(
   const identity = buildRelativeStrengthConfigIdentity(preset);
   let activeJob = await loadLatestScanRefreshJobRecordForPreset(env, preset.id, { activeOnly: true });
   if (activeJob) {
-    const candidateCounts = await loadRelativeStrengthJobCandidateCounts(env, activeJob.id);
-    if (candidateCounts.candidateCount === 0 && (activeJob.totalCandidates > 0 || activeJob.fullCandidateCount > 0 || activeJob.materializationCandidateCount > 0)) {
+    const effectiveMaterializationTotal = Math.max(0, activeJob.materializationCandidateCount);
+    const effectiveFullCandidateTotal = Math.max(
+      activeJob.fullCandidateCount,
+      activeJob.alreadyCurrentCandidateCount + effectiveMaterializationTotal,
+      activeJob.totalCandidates,
+    );
+    const hasStoredCandidates = effectiveFullCandidateTotal === 0 || await hasRelativeStrengthJobCandidates(env, activeJob.id);
+    if (!hasStoredCandidates && (activeJob.totalCandidates > 0 || activeJob.fullCandidateCount > 0 || activeJob.materializationCandidateCount > 0)) {
       await invalidateRelativeStrengthRefreshJob(
         env,
         activeJob.id,
         "Relative strength refresh job is missing candidate rows and was reset.",
       );
       activeJob = null;
-    } else if (candidateCounts.materializationCount === 0) {
+    } else if (effectiveMaterializationTotal === 0) {
       await updateScanRefreshJobRecord(env, activeJob.id, {
         status: "completed",
         processedCandidates: 0,
         matchedCandidates: Math.max(activeJob.matchedCandidates, activeJob.alreadyCurrentCandidateCount),
         cursorOffset: 0,
-        fullCandidateCount: Math.max(activeJob.fullCandidateCount, candidateCounts.candidateCount),
+        fullCandidateCount: effectiveFullCandidateTotal,
         materializationCandidateCount: 0,
         completedAt: new Date().toISOString(),
         lastAdvancedAt: new Date().toISOString(),
@@ -4253,7 +4328,7 @@ export async function requestScansRefresh(
       currentTickerSet,
       { sharedRunId: activeRun.id, enqueue: false },
     );
-    await attachRelativeStrengthJobToSharedRun(env, activeRun, jobRecord, requestedBy ?? "manual");
+    await attachRelativeStrengthJobToSharedRun(env, activeRun, jobRecord, requestedBy ?? "manual", staleTickers);
   } else {
     jobRecord = await createRelativeStrengthRefreshJob(
       env,
