@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { ZodError } from "zod";
 import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
-import type { Env, PostCloseDailyBarRefreshJob } from "./types";
+import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 import {
   configPatchSchema,
   correlationMatrixQuerySchema,
@@ -95,6 +95,7 @@ import {
   requestScansRefresh,
   upsertScanCompilePreset,
   upsertScanPreset,
+  type ScanRefreshJob,
 } from "./scans-page-service";
 import { isOverviewSnapshotStale } from "./overview-snapshot";
 import {
@@ -209,6 +210,9 @@ const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
+const RS_POLL_ADVANCE_STALE_MS = 4_000;
+const RS_POLL_ADVANCE_MAX_BATCHES = 5;
+const RS_POLL_ADVANCE_TIME_BUDGET_MS = 5_000;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
@@ -229,6 +233,31 @@ const isAuthed = (req: Request, env: Env): boolean => {
 function isOverviewSectionTitle(title: string | null | undefined): boolean {
   if (!title) return false;
   return title.includes("Macro") || title.includes("Equities");
+}
+
+function toTimestampMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldAdvanceRelativeStrengthJobFromPoll(job: ScanRefreshJob): boolean {
+  if (job.status !== "queued" && job.status !== "running") return false;
+  const lastTouchedMs = toTimestampMs(job.lastAdvancedAt ?? job.updatedAt ?? job.startedAt);
+  if (lastTouchedMs == null) return true;
+  return Date.now() - lastTouchedMs >= RS_POLL_ADVANCE_STALE_MS;
+}
+
+function interactiveRelativeStrengthPollOptions(settings: WorkerScheduleSettings): {
+  batchSize: number;
+  maxBatches: number;
+  timeBudgetMs: number;
+} {
+  return {
+    batchSize: settings.rsBackgroundBatchSize,
+    maxBatches: Math.max(1, Math.min(settings.rsBackgroundMaxBatchesPerTick, RS_POLL_ADVANCE_MAX_BATCHES)),
+    timeBudgetMs: Math.max(1_000, Math.min(settings.rsBackgroundTimeBudgetMs, RS_POLL_ADVANCE_TIME_BUDGET_MS)),
+  };
 }
 
 function readGappersLlmOverride(req: Request): {
@@ -2277,14 +2306,14 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const presetId = (c.req.query("presetId") ?? "").trim();
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
-  if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
+  if (payload?.job && shouldAdvanceRelativeStrengthJobFromPoll(payload.job)) {
     const settings = await loadWorkerScheduleSettings(c.env);
     if (settings.rsBackgroundEnabled) {
-      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id, {
-        batchSize: settings.rsBackgroundBatchSize,
-        maxBatches: 1,
-        timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
-      }));
+      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(
+        c.env,
+        payload.job.id,
+        interactiveRelativeStrengthPollOptions(settings),
+      ));
     }
   }
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
@@ -2294,14 +2323,14 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
-  if (payload?.job && (payload.job.status === "queued" || payload.job.status === "running")) {
+  if (payload?.job && shouldAdvanceRelativeStrengthJobFromPoll(payload.job)) {
     const settings = await loadWorkerScheduleSettings(c.env);
     if (settings.rsBackgroundEnabled) {
-      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(c.env, payload.job.id, {
-        batchSize: settings.rsBackgroundBatchSize,
-        maxBatches: 1,
-        timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
-      }));
+      c.executionCtx.waitUntil(processRelativeStrengthRefreshJob(
+        c.env,
+        payload.job.id,
+        interactiveRelativeStrengthPollOptions(settings),
+      ));
     }
   }
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
