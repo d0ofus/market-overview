@@ -534,9 +534,10 @@ function createMutableScansEnv(input: {
             if (sql.includes("FROM relative_strength_materialization_runs") && sql.includes("WHERE config_key = ?")) {
               const configKey = String(args[0] ?? "");
               const expectedTradingDate = String(args[1] ?? "");
+              const activeOnly = sql.includes("status IN ('queued', 'running')");
               const candidates = Array.from(relativeStrengthMaterializationRuns.values())
                 .filter((row) => row.configKey === configKey && row.expectedTradingDate === expectedTradingDate)
-                .filter((row) => row.status === "queued" || row.status === "running")
+                .filter((row) => !activeOnly || row.status === "queued" || row.status === "running")
                 .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
               return (candidates[0] ?? null) as T;
             }
@@ -1044,6 +1045,24 @@ function createMutableScansEnv(input: {
       async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
         for (const statement of statements) {
           if (!statement.__sql) continue;
+          if (statement.__sql.includes("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?")) {
+            relativeStrengthMaterializationQueue.delete(String(statement.__args?.[0] ?? ""));
+            continue;
+          }
+          if (statement.__sql.includes("DELETE FROM relative_strength_materialization_run_candidates WHERE run_id = ?")) {
+            const runId = String(statement.__args?.[0] ?? "");
+            for (const [key, row] of relativeStrengthMaterializationRunCandidates.entries()) {
+              if (row.runId === runId) relativeStrengthMaterializationRunCandidates.delete(key);
+            }
+            continue;
+          }
+          if (statement.__sql.includes("DELETE FROM relative_strength_materialization_run_deferred_tickers WHERE run_id = ?")) {
+            const runId = String(statement.__args?.[0] ?? "");
+            for (const [key, row] of relativeStrengthDeferredTickers.entries()) {
+              if (row.runId === runId) relativeStrengthDeferredTickers.delete(key);
+            }
+            continue;
+          }
           if (statement.__sql.includes("INSERT INTO scan_snapshots")) {
             const [id, presetId, providerLabel, rowCount, matchedRowCount, status, error] = statement.__args ?? [];
             snapshots.push({
@@ -2489,6 +2508,104 @@ describe("scans page service", () => {
     const secondCompleted = env.__testState.scanRefreshJobs.find((row: MutableScanRefreshJob) => row.id === second.job?.id);
     expect(firstCompleted?.status).toBe("completed");
     expect(secondCompleted?.status).toBe("completed");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reuses an inactive same-config materialization run instead of inserting a duplicate", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "preset-rs-reuse-inactive-run",
+      name: "Relative Strength Reuse Inactive Run",
+      scanType: "relative-strength",
+      rules: [],
+      prefilterRules: [
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ"] },
+      ],
+      benchmarkTicker: "SPY",
+      rsMaLength: 21,
+      rsMaType: "EMA",
+      newHighLookback: 252,
+      outputMode: "rs_new_high_only",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 50,
+    };
+    const { env } = createMutableScansEnv({
+      presets: [preset],
+      symbols: ["NVDA"],
+    });
+    const identityConfigKey = `${preset.benchmarkTicker}|${preset.rsMaType}|${preset.rsMaLength}|${preset.newHighLookback}`;
+    env.__testState.relativeStrengthMaterializationRuns.set("existing-run", {
+      id: "existing-run",
+      configKey: identityConfigKey,
+      expectedTradingDate: CURRENT_RS_SESSION,
+      benchmarkTicker: "SPY",
+      rsMaType: preset.rsMaType,
+      rsMaLength: preset.rsMaLength,
+      newHighLookback: preset.newHighLookback,
+      status: "failed",
+      startedAt: "2026-04-23T10:00:00.000Z",
+      updatedAt: "2026-04-23T10:10:00.000Z",
+      completedAt: "2026-04-23T10:10:00.000Z",
+      error: "Old failed run",
+      benchmarkBarsJson: JSON.stringify([{ ticker: "SPY", date: CURRENT_RS_SESSION, o: 1, h: 1, l: 1, c: 1, volume: 0 }]),
+      requiredBarCount: 520,
+      fullCandidateCount: 100,
+      materializationCandidateCount: 100,
+      alreadyCurrentCandidateCount: 0,
+      processedCandidates: 75,
+      matchedCandidates: 75,
+      cursorOffset: 75,
+      lastAdvancedAt: "2026-04-23T10:09:00.000Z",
+      deferredTickerCount: 2,
+      warning: "Deferred 2 tickers",
+      phase: "failed",
+      leaseOwner: "stale-owner",
+      leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      heartbeatAt: "2026-04-23T10:08:00.000Z",
+    });
+    env.__testState.relativeStrengthMaterializationRunCandidates.set("existing-run|0|OLD", {
+      runId: "existing-run",
+      cursorOffset: 0,
+      ticker: "OLD",
+    });
+    env.__testState.relativeStrengthDeferredTickers.set("existing-run|OLD", {
+      runId: "existing-run",
+      ticker: "OLD",
+      attemptCount: 3,
+      lastError: "old error",
+      deferredAt: "2026-04-23T10:08:00.000Z",
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NASDAQ:NVDA",
+            d: ["NVIDIA", "Technology", "Semiconductors", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await requestScansRefresh(env, preset.id, "test");
+
+    expect(response.async).toBe(true);
+    expect(response.job?.sharedRunId).toBe("existing-run");
+    expect(env.__testState.relativeStrengthMaterializationRuns.size).toBe(1);
+    const reusedRun = env.__testState.relativeStrengthMaterializationRuns.get("existing-run");
+    expect(reusedRun?.status).toBe("queued");
+    expect(reusedRun?.error).toBeNull();
+    expect(reusedRun?.processedCandidates).toBe(0);
+    expect(reusedRun?.cursorOffset).toBe(0);
+    expect(reusedRun?.warning).toBeNull();
+    expect(reusedRun?.deferredTickerCount).toBe(0);
+    expect(reusedRun?.leaseOwner).toBeNull();
+    expect(Array.from(env.__testState.relativeStrengthMaterializationRunCandidates.values()).map((row: MutableRelativeStrengthMaterializationRunCandidate) => row.ticker)).toEqual(["NVDA"]);
+    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(0);
 
     vi.unstubAllGlobals();
   });

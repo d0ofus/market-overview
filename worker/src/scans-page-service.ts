@@ -2750,6 +2750,50 @@ async function loadActiveRelativeStrengthMaterializationRunForConfig(
     .first<RelativeStrengthMaterializationRunRecord>();
 }
 
+async function loadLatestRelativeStrengthMaterializationRunForConfig(
+  env: Env,
+  configKey: string,
+  expectedTradingDate: string,
+): Promise<RelativeStrengthMaterializationRunRecord | null> {
+  return env.DB.prepare(
+    `SELECT
+       id,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       status,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       benchmark_bars_json as benchmarkBarsJson,
+       required_bar_count as requiredBarCount,
+       full_candidate_count as fullCandidateCount,
+       materialization_candidate_count as materializationCandidateCount,
+       already_current_candidate_count as alreadyCurrentCandidateCount,
+       processed_candidates as processedCandidates,
+       matched_candidates as matchedCandidates,
+       cursor_offset as cursorOffset,
+       last_advanced_at as lastAdvancedAt,
+       deferred_ticker_count as deferredTickerCount,
+       warning,
+       phase,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       heartbeat_at as heartbeatAt
+     FROM relative_strength_materialization_runs
+     WHERE config_key = ?
+       AND expected_trading_date = ?
+     ORDER BY datetime(started_at) DESC
+     LIMIT 1`,
+  )
+    .bind(configKey, expectedTradingDate)
+    .first<RelativeStrengthMaterializationRunRecord>();
+}
+
 async function listActiveRelativeStrengthMaterializationRuns(
   env: Env,
 ): Promise<RelativeStrengthMaterializationRunRecord[]> {
@@ -2851,6 +2895,18 @@ async function updateRelativeStrengthMaterializationRun(
   if (updates.phase !== undefined) {
     fields.push("phase = ?");
     values.push(updates.phase);
+  }
+  if (updates.leaseOwner !== undefined) {
+    fields.push("lease_owner = ?");
+    values.push(updates.leaseOwner);
+  }
+  if (updates.leaseExpiresAt !== undefined) {
+    fields.push("lease_expires_at = ?");
+    values.push(updates.leaseExpiresAt);
+  }
+  if (updates.heartbeatAt !== undefined) {
+    fields.push("heartbeat_at = ?");
+    values.push(updates.heartbeatAt);
   }
   if (updates.completedAt !== undefined) {
     fields.push("completed_at = ?");
@@ -3890,6 +3946,47 @@ async function createRelativeStrengthMaterializationRun(
   return created;
 }
 
+async function resetRelativeStrengthMaterializationRunForReuse(
+  env: Env,
+  run: RelativeStrengthMaterializationRunRecord,
+  source: string,
+  staleTickers: string[],
+): Promise<RelativeStrengthMaterializationRunRecord> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM relative_strength_materialization_run_candidates WHERE run_id = ?").bind(run.id),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_run_deferred_tickers WHERE run_id = ?").bind(run.id),
+    env.DB.prepare("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?").bind(run.id),
+  ]);
+  await updateRelativeStrengthMaterializationRun(env, run.id, {
+    status: "queued",
+    completedAt: null,
+    error: null,
+    benchmarkBarsJson: null,
+    processedCandidates: 0,
+    matchedCandidates: 0,
+    cursorOffset: 0,
+    lastAdvancedAt: null,
+    deferredTickerCount: 0,
+    warning: null,
+    phase: "queued",
+    leaseOwner: null,
+    leaseExpiresAt: null,
+    heartbeatAt: null,
+  });
+  const candidateCount = staleTickers.length > 0
+    ? await appendRelativeStrengthRunCandidateTickers(env, run.id, staleTickers)
+    : 0;
+  await updateRelativeStrengthMaterializationRun(env, run.id, {
+    fullCandidateCount: candidateCount,
+    materializationCandidateCount: candidateCount,
+    alreadyCurrentCandidateCount: 0,
+  });
+  await enqueueRelativeStrengthMaterializationRun(env, run.id, source);
+  const reset = await loadRelativeStrengthMaterializationRun(env, run.id);
+  if (!reset) throw new Error("Failed to reset relative strength materialization run.");
+  return reset;
+}
+
 async function attachRelativeStrengthJobToSharedRun(
   env: Env,
   run: RelativeStrengthMaterializationRunRecord,
@@ -4846,6 +4943,11 @@ export async function requestScansRefresh(
     identity.configKey,
     identity.expectedTradingDate,
   );
+  const existingRun = activeRun ?? await loadLatestRelativeStrengthMaterializationRunForConfig(
+    env,
+    identity.configKey,
+    identity.expectedTradingDate,
+  );
 
   let jobRecord: ScanRefreshJobRecord;
   if (activeRun) {
@@ -4869,12 +4971,19 @@ export async function requestScansRefresh(
     );
     let createdRunId: string | null = null;
     try {
-      const run = await createRelativeStrengthMaterializationRun(
-        env,
-        identity,
-        requestedBy ?? "manual",
-        staleTickers,
-      );
+      const run = existingRun
+        ? await resetRelativeStrengthMaterializationRunForReuse(
+          env,
+          existingRun,
+          requestedBy ?? "manual",
+          staleTickers,
+        )
+        : await createRelativeStrengthMaterializationRun(
+          env,
+          identity,
+          requestedBy ?? "manual",
+          staleTickers,
+        );
       createdRunId = run.id;
       await updateScanRefreshJobRecord(env, jobRecord.id, { sharedRunId: run.id });
       const updatedJob = await loadScanRefreshJobRecord(env, jobRecord.id);
