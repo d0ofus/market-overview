@@ -727,7 +727,9 @@ export function GappersDashboard() {
                     <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="text-lg font-semibold text-accent">{row.ticker}</div>
-                        <p className="mt-1 line-clamp-1 text-sm text-slate-400">{row.name ?? row.ticker}</p>
+                        {row.name && row.name !== row.ticker ? (
+                          <p className="mt-1 line-clamp-1 text-sm text-slate-400">{row.name}</p>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
