@@ -724,24 +724,24 @@ export function GappersDashboard() {
                     key={row.ticker}
                     className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4"
                   >
-                    <div className="mb-3 flex items-start justify-between gap-3">
-                      <div className="min-w-0">
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
                         <div className="text-lg font-semibold text-accent">{row.ticker}</div>
                         <p className="mt-1 line-clamp-1 text-sm text-slate-400">{row.name ?? row.ticker}</p>
                       </div>
-                    </div>
-                    <div className="mb-4 grid gap-3 sm:grid-cols-3">
-                      <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
-                        <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Mkt Cap</div>
-                        <div className="mt-1 text-sm font-semibold text-slate-100">{fmtCompact(row.marketCap)}</div>
-                      </div>
-                      <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
-                        <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Gap %</div>
-                        <div className={`mt-1 text-sm font-semibold ${cellClass(row.gapPct)}`}>{fmtPct(row.gapPct)}</div>
-                      </div>
-                      <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-2.5">
-                        <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Pre Vol</div>
-                        <div className="mt-1 text-sm font-semibold text-slate-100">{fmtCompact(row.premarketVolume)}</div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                          <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Mkt Cap</span>
+                          <span className="font-semibold text-slate-100">{fmtCompact(row.marketCap)}</span>
+                        </span>
+                        <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                          <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Gap %</span>
+                          <span className={`font-semibold ${cellClass(row.gapPct)}`}>{fmtPct(row.gapPct)}</span>
+                        </span>
+                        <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                          <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Pre Vol</span>
+                          <span className="font-semibold text-slate-100">{fmtCompact(row.premarketVolume)}</span>
+                        </span>
                       </div>
                     </div>
                     <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
