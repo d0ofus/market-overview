@@ -49,6 +49,7 @@ export function TradingViewWidget({
   size = "default",
   chartOnly = false,
   showStatusLine = false,
+  showCorporateEvents = false,
   fillContainer = false,
   initialRange = "1M",
   surface = "card",
@@ -60,6 +61,7 @@ export function TradingViewWidget({
   size?: "small" | "default";
   chartOnly?: boolean;
   showStatusLine?: boolean;
+  showCorporateEvents?: boolean;
   fillContainer?: boolean;
   initialRange?: "1M" | "3M" | "6M" | "12M";
   surface?: "card" | "plain";
@@ -145,6 +147,7 @@ export function TradingViewWidget({
           }
         : undefined,
       withdateranges: chartOnly ? false : true,
+      calendar: showCorporateEvents,
       save_image: false,
       compareSymbols: compareSymbol
         ? [
@@ -157,7 +160,7 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, initialRange, theme, shouldLoad]);
+  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad]);
 
   const shellClassName = surface === "plain"
     ? className

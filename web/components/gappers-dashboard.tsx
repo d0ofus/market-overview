@@ -605,7 +605,7 @@ export function GappersDashboard() {
                             </div>
                             <div className={DETAIL_PANEL_CLASS}>
                               <h4 className="mb-2 text-sm font-semibold text-slate-100">Chart</h4>
-                              <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine initialRange="3M" />
+                              <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine showCorporateEvents initialRange="3M" />
                             </div>
                           </div>
                         </td>
