@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Copy, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Columns3, Copy, Loader2, Plus, RefreshCw, Save, Settings2, Table2, Trash2 } from "lucide-react";
 import {
   createScanPreset,
   createScanCompilePreset,
@@ -73,6 +73,8 @@ type TradingViewFieldOption = {
   type: string;
 };
 
+type WorkspaceTab = "scan" | "compile";
+
 const RULE_OPERATORS: Array<{ value: ScanRuleOperator; label: string }> = [
   { value: "gt", label: ">" },
   { value: "gte", label: ">=" },
@@ -138,12 +140,36 @@ const DEFAULT_VISIBLE_COLUMNS: ResultColumnKey[] = [
   "price",
   "priceAvgVolume",
 ];
+const RIGHT_ALIGNED_RESULT_COLUMNS = new Set<ResultColumnKey>([
+  "change1d",
+  "marketCap",
+  "relativeVolume",
+  "price",
+  "priceAvgVolume",
+  "rsClose",
+  "rsMa",
+  "approxRsRating",
+]);
 const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 const DEFAULT_FIELD_SEARCH_LIMIT = 50;
 
 const CUSTOM_FIELD_OPTION = "__custom__";
 const FIELD_VALUE_MODE = "field";
 const LITERAL_VALUE_MODE = "literal";
+const FORM_INPUT_CLASS =
+  "mt-1 w-full rounded-lg border border-borderSoft/80 bg-panelSoft/80 px-2.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
+const FORM_SELECT_CLASS =
+  "mt-1 w-full rounded-lg border border-borderSoft/80 bg-panelSoft/80 px-2.5 py-2 text-sm text-slate-100 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
+const SECONDARY_BUTTON_CLASS =
+  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-borderSoft/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-50";
+const PRIMARY_BUTTON_CLASS =
+  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent/15 px-2.5 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60";
+const DANGER_BUTTON_CLASS =
+  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 px-2.5 py-1.5 text-xs font-medium text-red-300 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50";
+const TABLE_HEAD_CLASS =
+  "px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300";
+const NUMERIC_CELL_CLASS = "px-3 py-3 text-right tabular-nums text-slate-300";
+const TEXT_CELL_CLASS = "px-3 py-3 text-slate-300";
 
 const FIELD_LABELS: Record<string, string> = {
   marketCap: "Market Capitalization",
@@ -441,6 +467,7 @@ export function ScansPageDashboard() {
   const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [compiledRefreshing, setCompiledRefreshing] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("scan");
   const [saving, setSaving] = useState(false);
   const [compiledListCollapsed, setCompiledListCollapsed] = useState(true);
   const [resultsTableCollapsed, setResultsTableCollapsed] = useState(false);
@@ -1004,10 +1031,10 @@ export function ScansPageDashboard() {
   const renderCell = (row: ScanRow, key: ResultColumnKey) => {
     if (key === "ticker") {
       return (
-        <td className="px-3 py-2 font-semibold text-accent">
+        <td className="px-3 py-3 font-semibold text-accent">
           <div className="flex flex-wrap items-center gap-2">
             <button
-              className="hover:underline"
+              className="rounded text-left hover:underline focus:outline-none focus:ring-2 focus:ring-accent/30"
               onClick={(event) => {
                 event.stopPropagation();
                 setPeerTicker(row.ticker);
@@ -1029,19 +1056,19 @@ export function ScansPageDashboard() {
         </td>
       );
     }
-    if (key === "name") return <td className="max-w-48 truncate px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>;
-    if (key === "sector") return <td className="px-3 py-2 text-slate-300">{row.sector ?? "-"}</td>;
-    if (key === "industry") return <td className="px-3 py-2 text-slate-300">{row.industry ?? "-"}</td>;
+    if (key === "name") return <td className="max-w-56 truncate px-3 py-3 text-slate-300">{row.name ?? row.ticker}</td>;
+    if (key === "sector") return <td className={TEXT_CELL_CLASS}>{row.sector ?? "-"}</td>;
+    if (key === "industry") return <td className={TEXT_CELL_CLASS}>{row.industry ?? "-"}</td>;
     if (key === "change1d") {
-      return <td className={`px-3 py-2 ${(row.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.change1d)}</td>;
+      return <td className={`px-3 py-3 text-right tabular-nums ${(row.change1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.change1d)}</td>;
     }
-    if (key === "marketCap") return <td className="px-3 py-2 text-slate-300">{formatCompact(row.marketCap)}</td>;
-    if (key === "relativeVolume") return <td className="px-3 py-2 text-slate-300">{formatRatio(row.relativeVolume)}</td>;
-    if (key === "price") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.price)}</td>;
-    if (key === "rsClose") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.rsClose)}</td>;
-    if (key === "rsMa") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.rsMa)}</td>;
-    if (key === "approxRsRating") return <td className="px-3 py-2 text-slate-300">{formatNumber(row.approxRsRating, 0)}</td>;
-    return <td className="px-3 py-2 text-slate-300">{formatCompact(row.priceAvgVolume)}</td>;
+    if (key === "marketCap") return <td className={NUMERIC_CELL_CLASS}>{formatCompact(row.marketCap)}</td>;
+    if (key === "relativeVolume") return <td className={NUMERIC_CELL_CLASS}>{formatRatio(row.relativeVolume)}</td>;
+    if (key === "price") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.price)}</td>;
+    if (key === "rsClose") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.rsClose)}</td>;
+    if (key === "rsMa") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.rsMa)}</td>;
+    if (key === "approxRsRating") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.approxRsRating, 0)}</td>;
+    return <td className={NUMERIC_CELL_CLASS}>{formatCompact(row.priceAvgVolume)}</td>;
   };
 
   if (loading) {
@@ -1054,644 +1081,122 @@ export function ScansPageDashboard() {
   }
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[24rem,minmax(0,1fr)]">
-      <aside className="space-y-4">
-        <section className="card p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Scan Presets</h3>
-            <button
-              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
-              onClick={() => {
-                setSelectedPresetId(null);
-                setDraftPreset(emptyDraftPreset());
-              }}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              New
-            </button>
-          </div>
-          <div className="space-y-2">
-            {presets.map((preset) => (
-              <button
-                key={preset.id}
-                className={`w-full rounded border px-3 py-2 text-left ${preset.id === selectedPresetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
-                onClick={() => setSelectedPresetId(preset.id)}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="text-sm font-semibold text-accent">{preset.name}</div>
-                  <button
-                    className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-900/40"
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void onDuplicatePreset(preset.id);
-                    }}
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    Duplicate
-                  </button>
-                </div>
-                <div className="text-[11px] text-slate-400">
-                  {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} - {preset.rowLimit} rows - {preset.sortField} {preset.sortDirection}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {preset.scanType === "relative-strength" ? "Relative Strength" : "TradingView"} {preset.isDefault ? "- Default" : "- Preset"} {preset.isActive ? "- Active" : "- Inactive"}
-                </div>
-              </button>
-            ))}
-            {presets.length === 0 && <p className="text-xs text-slate-400">No scan presets saved yet.</p>}
-          </div>
-        </section>
-
-        <section className="card p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Compile Presets</h3>
-            <button
-              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60"
-              onClick={() => {
-                setSelectedCompilePresetId(null);
-                setDraftCompilePreset(emptyDraftCompilePreset());
-              }}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              New
-            </button>
-          </div>
-          <div className="space-y-2">
-            {compilePresets.map((preset) => (
-              <button
-                key={preset.id}
-                className={`w-full rounded border px-3 py-2 text-left ${preset.id === selectedCompilePresetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
-                onClick={() => setSelectedCompilePresetId(preset.id)}
-              >
-                <div className="text-sm font-semibold text-accent">{preset.name}</div>
-                <div className="text-[11px] text-slate-400">
-                  {preset.memberCount} scan preset{preset.memberCount === 1 ? "" : "s"}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {preset.presetNames.join(", ") || "No member presets"}
-                </div>
-              </button>
-            ))}
-            {compilePresets.length === 0 && <p className="text-xs text-slate-400">No compile presets saved yet.</p>}
-          </div>
-        </section>
-
-        <section className="card p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">{draftPreset.id ? "Edit Preset" : "Create Preset"}</h3>
-            <div className="flex items-center gap-2">
-              <button
-                className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-2 py-1 text-xs font-medium text-accent disabled:opacity-60"
-                disabled={saving}
-                onClick={() => void onSavePreset()}
-              >
-                <Save className="h-3.5 w-3.5" />
-                {saving ? "Saving..." : "Save"}
-              </button>
-              <button
-                className="inline-flex items-center gap-1 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 disabled:opacity-50"
-                disabled={!draftPreset.id || draftPreset.isDefault}
-                onClick={() => void onDeletePreset()}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Delete
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-3 text-xs text-slate-300">
-            <label className="block">
-              Name
-              <input
-                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                value={draftPreset.name}
-                onChange={(event) => setDraftPreset((current) => ({ ...current, name: event.target.value }))}
-              />
-            </label>
-
-            <label className="block">
-              Preset Type
-              <select
-                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                value={draftPreset.scanType}
-                onChange={(event) => setDraftPreset((current) => ({
-                  ...current,
-                  scanType: event.target.value as ScanPresetType,
-                  sortField: event.target.value === "relative-strength" && current.sortField === "change"
-                    ? "rs_close"
-                    : current.sortField,
-                }))}
-              >
-                {SCAN_TYPE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <label className="block">
-                Sort Field
-                <select
-                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                  value={draftPreset.sortField}
-                  onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value }))}
-                >
-                  {SORT_FIELD_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="block">
-                Sort Direction
-                <select
-                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                  value={draftPreset.sortDirection}
-                  onChange={(event) => setDraftPreset((current) => ({ ...current, sortDirection: event.target.value === "asc" ? "asc" : "desc" }))}
-                >
-                  <option value="desc">Descending</option>
-                  <option value="asc">Ascending</option>
-                </select>
-              </label>
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <label className="block">
-                Row Limit
-                <input
-                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                  type="number"
-                  min={1}
-                  max={250}
-                  value={draftPreset.rowLimit}
-                  onChange={(event) => setDraftPreset((current) => ({ ...current, rowLimit: Math.max(1, Math.min(250, Number(event.target.value) || 100)) }))}
-                />
-              </label>
-              <label className="block">
-                Benchmark
-                <input
-                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm disabled:opacity-60"
-                  value={draftPreset.benchmarkTicker ?? "SPY"}
-                  disabled={draftPreset.scanType !== "relative-strength"}
-                  onChange={(event) => setDraftPreset((current) => ({ ...current, benchmarkTicker: event.target.value.toUpperCase() }))}
-                />
-              </label>
-            </div>
-
-            {draftPreset.scanType === "relative-strength" ? (
-              <div className="grid gap-2 md:grid-cols-2">
-                <label className="block">
-                  RS MA Length
-                  <input
-                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                    type="number"
-                    min={1}
-                    max={250}
-                    value={draftPreset.rsMaLength}
-                    onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaLength: Math.max(1, Math.min(250, Number(event.target.value) || 21)) }))}
-                  />
-                </label>
-                <label className="block">
-                  RS MA Type
-                  <select
-                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                    value={draftPreset.rsMaType}
-                    onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaType: event.target.value as RelativeStrengthMaType }))}
-                  >
-                    {RS_MA_TYPE_OPTIONS.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  New High Lookback
-                  <input
-                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                    type="number"
-                    min={1}
-                    max={520}
-                    value={draftPreset.newHighLookback}
-                    onChange={(event) => setDraftPreset((current) => ({ ...current, newHighLookback: Math.max(1, Math.min(520, Number(event.target.value) || 252)) }))}
-                  />
-                </label>
-                <label className="block">
-                  Vertical Offset
-                  <input
-                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                    type="number"
-                    min={0.25}
-                    step={0.25}
-                    max={500}
-                    value={draftPreset.verticalOffset}
-                    onChange={(event) => setDraftPreset((current) => ({ ...current, verticalOffset: Math.max(0.25, Math.min(500, Number(event.target.value) || 30)) }))}
-                  />
-                </label>
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),26rem]">
+      <section className="min-w-0 space-y-4">
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="card p-4">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Active Scan</div>
+                <h3 className="mt-1 truncate text-lg font-semibold text-slate-100">
+                  {snapshot?.presetName ?? selectedPreset?.name ?? "Scans"}
+                </h3>
               </div>
-            ) : null}
-
-            {draftPreset.scanType === "relative-strength" ? (
-              <label className="block">
-                Output Filter
-                <select
-                  className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                  value={draftPreset.outputMode}
-                  onChange={(event) => setDraftPreset((current) => ({ ...current, outputMode: event.target.value as RelativeStrengthOutputMode }))}
-                >
-                  {RS_OUTPUT_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={draftPreset.isDefault}
-                onChange={(event) => setDraftPreset((current) => ({ ...current, isDefault: event.target.checked }))}
-              />
-              Default preset
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={draftPreset.isActive}
-                onChange={(event) => setDraftPreset((current) => ({ ...current, isActive: event.target.checked }))}
-              />
-              Active
-            </label>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
-                  {draftPreset.scanType === "relative-strength" ? "Prefilter Rules" : "Rules"}
-                </h4>
-                <button
-                  className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                  onClick={() => updateDraftRules((rules) => [...rules, emptyDraftRule()])}
-                >
-                  Add Rule
-                </button>
-              </div>
-              {draftRules.map((rule) => {
-                const fieldQuery = rule.field.trim().toLowerCase();
-                const fieldOptions = fieldOptionsByQuery[fieldQuery] ?? fieldOptionsByQuery[""] ?? [];
-                const selectedFieldLabel = fieldLabelMap[rule.field.trim()] ?? getFieldLabel(rule.field);
-                const compareField = compareFieldToInput(rule);
-                const compareFieldQuery = compareField.trim().toLowerCase();
-                const compareFieldOptions = fieldOptionsByQuery[compareFieldQuery] ?? fieldOptionsByQuery[""] ?? [];
-                const selectedCompareFieldLabel = fieldLabelMap[compareField.trim()] ?? getFieldLabel(compareField);
-                const valueMode = getRuleValueMode(rule);
-                const operatorOptions = valueMode === FIELD_VALUE_MODE
-                  ? RULE_OPERATORS.filter((option) => option.value !== "in" && option.value !== "not_in")
-                  : RULE_OPERATORS;
-                const compareMultiplierInput = compareMultiplierInputByRule[rule.id] ?? compareMultiplierToInput(rule);
-                const rawRuleValueInput = ruleValueInputByRule[rule.id] ?? valueToInput(rule);
-                return (
-                <div key={rule.id} className="rounded border border-borderSoft/70 bg-panelSoft/30 p-2">
-                  <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),8rem]">
-                    <label className="block">
-                      Field
-                      <select
-                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                        value={isSuggestedField(rule.field, fieldOptions) ? rule.field : CUSTOM_FIELD_OPTION}
-                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
-                            if (row.id !== rule.id) return row;
-                            return {
-                              ...row,
-                              field: event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value,
-                            };
-                          }))}
-                      >
-                        {fieldOptions.map((field) => (
-                          <option key={field.value} value={field.value}>{field.label}</option>
-                        ))}
-                        {!isSuggestedField(rule.field, fieldOptions) && rule.field.trim() ? (
-                          <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedFieldLabel})</option>
-                        ) : null}
-                        <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
-                      </select>
-                    </label>
-                    <label className="block">
-                      <span className="sr-only">Field ID</span>
-                      <input
-                        className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
-                        value={rule.field}
-                        onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row))}
-                        placeholder="Field ID"
-                      />
-                    </label>
-                    <label className="block">
-                      Operator
-                      <select
-                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                        value={rule.operator}
-                        onChange={(event) => {
-                          const nextOperator = event.target.value as ScanRuleOperator;
-                          setRuleValueInputByRule((current) => {
-                            const next = { ...current };
-                            if (nextOperator !== "in" && nextOperator !== "not_in") {
-                              delete next[rule.id];
-                            }
-                            return next;
-                          });
-                          updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, operator: nextOperator } : row));
-                        }}
-                      >
-                        {operatorOptions.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                  <div className="grid gap-2">
-                    <label className="block">
-                      Comparison Target
-                      <select
-                        className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm md:max-w-48"
-                        value={valueMode}
-                        onChange={(event) => {
-                          const nextMode = event.target.value === FIELD_VALUE_MODE ? "field" : "literal";
-                          if (nextMode === "field") {
-                            setRuleValueInputByRule((current) => {
-                              const next = { ...current };
-                              delete next[rule.id];
-                              return next;
-                            });
-                          }
-                          updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleValueMode(row, nextMode) : row));
-                        }}
-                      >
-                        <option value={LITERAL_VALUE_MODE}>Fixed value</option>
-                        <option value={FIELD_VALUE_MODE}>Another field</option>
-                      </select>
-                    </label>
-                    {valueMode === FIELD_VALUE_MODE ? (
-                      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),8rem]">
-                        <div className="grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr)]">
-                          <label className="block">
-                            Reference Field
-                            <select
-                              className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                              value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
-                              onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
-                                  if (row.id !== rule.id) return row;
-                                  return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
-                                }))}
-                            >
-                              {compareFieldOptions.map((field) => (
-                                <option key={field.value} value={field.value}>{field.label}</option>
-                              ))}
-                              {!isSuggestedField(compareField, compareFieldOptions) && compareField.trim() ? (
-                                <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedCompareFieldLabel})</option>
-                              ) : null}
-                              <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
-                            </select>
-                          </label>
-                          <label className="block">
-                            <span className="sr-only">Reference field ID</span>
-                            <input
-                              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft/50 px-2 py-1.5 text-sm text-slate-300"
-                              value={compareField}
-                              onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row))}
-                              placeholder="Reference field ID"
-                            />
-                          </label>
-                        </div>
-                        <label className="block">
-                          Multiplier
-                          <input
-                            className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                            value={compareMultiplierInput}
-                            onChange={(event) => {
-                              const rawValue = event.target.value;
-                              setCompareMultiplierInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
-                              const trimmed = rawValue.trim();
-                              if (!trimmed || trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) return;
-                              updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, rawValue) : row));
-                            }}
-                            onBlur={() => {
-                              updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, compareMultiplierInput) : row));
-                              setCompareMultiplierInputByRule((current) => {
-                                const next = { ...current };
-                                delete next[rule.id];
-                                return next;
-                              });
-                            }}
-                            placeholder="1"
-                          />
-                        </label>
-                      </div>
-                    ) : (
-                      <label className="block">
-                        Value
-                        <input
-                          className="mt-1 w-full rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm"
-                          value={rawRuleValueInput}
-                          onChange={(event) => {
-                            const rawValue = event.target.value;
-                            if (rule.operator === "in" || rule.operator === "not_in") {
-                              setRuleValueInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
-                            }
-                            updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromInput(row, rawValue) : row));
-                          }}
-                          onBlur={() => {
-                            if (rule.operator !== "in" && rule.operator !== "not_in") return;
-                            setRuleValueInputByRule((current) => {
-                              const next = { ...current };
-                              delete next[rule.id];
-                              return next;
-                            });
-                          }}
-                          placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
-                        />
-                      </label>
-                    )}
-                  </div>
-                  <div className="mt-2 flex justify-end">
-                    <button
-                      className="rounded border border-red-500/40 px-2 py-1 text-[11px] text-red-300 disabled:opacity-40"
-                      disabled={draftRules.length === 1}
-                      onClick={() => {
-                        setRuleValueInputByRule((current) => {
-                          const next = { ...current };
-                          delete next[rule.id];
-                          return next;
-                        });
-                        updateDraftRules((rules) => rules.filter((row) => row.id !== rule.id));
-                      }}
-                    >
-                      Remove Rule
-                    </button>
-                  </div>
-                </div>
-              )})}
-            </div>
-          </div>
-        </section>
-
-        <section className="card p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">{draftCompilePreset.id ? "Edit Compile Preset" : "Create Compile Preset"}</h3>
-            <div className="flex items-center gap-2">
-              <button
-                className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-2 py-1 text-xs font-medium text-accent disabled:opacity-60"
-                disabled={saving}
-                onClick={() => void onSaveCompilePreset()}
-              >
-                <Save className="h-3.5 w-3.5" />
-                {saving ? "Saving..." : "Save"}
-              </button>
-              <button
-                className="inline-flex items-center gap-1 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 disabled:opacity-50"
-                disabled={!draftCompilePreset.id}
-                onClick={() => void onDeleteCompilePreset()}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Delete
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-3 text-xs text-slate-300">
-            <label className="block">
-              Name
-              <input
-                className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
-                value={draftCompilePreset.name}
-                onChange={(event) => setDraftCompilePreset((current) => ({ ...current, name: event.target.value }))}
-              />
-            </label>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Member Scan Presets</h4>
-                <span className="text-[11px] text-slate-500">{draftCompilePreset.members.length} selected</span>
-              </div>
-              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-                {presets.map((preset) => {
-                  const checked = draftCompilePreset.members.some((member) => member.scanPresetId === preset.id);
-                  return (
-                    <label
-                      key={preset.id}
-                      className={`flex items-start gap-2 rounded border px-2 py-2 text-sm ${checked ? "border-accent/40 bg-accent/10 text-slate-100" : "border-borderSoft/70 bg-panelSoft/20 text-slate-300"}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleCompilePresetMember(preset.id)}
-                      />
-                      <span className="min-w-0">
-                        <span className="block font-medium">{preset.name}</span>
-                        <span className="block text-[11px] text-slate-400">
-                          {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} - {preset.rowLimit} rows
-                        </span>
-                      </span>
-                    </label>
-                  );
-                })}
-                {presets.length === 0 && <p className="text-xs text-slate-400">Create a scan preset first, then add it to a compile preset.</p>}
-              </div>
-            </div>
-
-            {draftCompilePreset.members.length > 0 ? (
-              <div className="rounded border border-borderSoft/70 bg-panelSoft/20 p-2">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Compile Order</div>
-                <div className="mt-2 space-y-1 text-sm text-slate-300">
-                  {draftCompilePreset.members.map((member, index) => (
-                    <div key={member.scanPresetId} className="flex items-center gap-2">
-                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-800/70 text-[11px] text-slate-300">{index + 1}</span>
-                      <span>{member.scanPresetName}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </section>
-      </aside>
-
-      <section className="space-y-4">
-        <div className="card p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-200">{snapshot?.presetName ?? selectedPreset?.name ?? "Scans"}</h3>
-              <p className="text-xs text-slate-400">
-                Last updated: {formatDateTime(snapshot?.generatedAt)} - Source: {snapshot?.providerLabel ?? "TradingView Screener (Python)"}
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                {snapshot
-                  ? `Showing ${snapshot.rowCount} row${snapshot.rowCount === 1 ? "" : "s"}${snapshot.matchedRowCount > snapshot.rowCount ? ` of ${snapshot.matchedRowCount} matched` : ""}.`
-                  : "No scan snapshot loaded yet."}
-              </p>
-              {refreshJob ? (
-                <p className="mt-1 text-xs text-slate-400">
-                  {formatRsRefreshSummary(refreshJob, snapshot)}
-                </p>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`rounded px-2 py-1 text-xs ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : snapshot?.status === "warning" ? "bg-yellow-500/15 text-yellow-200" : "bg-slate-800/60 text-slate-300"}`}>
-                Status: {snapshot?.status ?? "empty"}
-              </span>
-              {refreshJob ? (
-                <span className={`rounded px-2 py-1 text-xs ${refreshJob.status === "failed" ? "bg-red-500/15 text-red-300" : refreshJob.status === "completed" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent/15 text-accent"}`}>
-                  Refresh: {refreshJob.status}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${snapshot?.status === "error" ? "bg-red-500/15 text-red-300" : snapshot?.status === "warning" ? "bg-yellow-500/15 text-yellow-200" : "bg-slate-800/60 text-slate-300"}`}>
+                  {snapshot?.status ?? "empty"}
                 </span>
-              ) : null}
+                {refreshJob ? (
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${refreshJob.status === "failed" ? "bg-red-500/15 text-red-300" : refreshJob.status === "completed" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent/15 text-accent"}`}>
+                    {refreshJob.status}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-3">
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Rows</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">
+                  {snapshot ? `${snapshot.rowCount}${snapshot.matchedRowCount > snapshot.rowCount ? ` / ${snapshot.matchedRowCount}` : ""}` : "-"}
+                </div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Updated</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">{formatDateTime(snapshot?.generatedAt)}</div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Source</div>
+                <div className="mt-1 truncate text-sm font-semibold text-slate-200">{snapshot?.providerLabel ?? "TradingView Screener (Python)"}</div>
+              </div>
+            </div>
+
+            {refreshJob ? <p className="mt-3 text-xs leading-5 text-slate-400">{formatRsRefreshSummary(refreshJob, snapshot)}</p> : null}
+            {message && <p className="mt-3 rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{message}</p>}
+            {error && <p className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               {scanExportUrl && (
-                <a
-                  className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
-                  href={scanExportUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+                <a className={SECONDARY_BUTTON_CLASS} href={scanExportUrl} target="_blank" rel="noreferrer">
                   Export TXT
                 </a>
               )}
-              <button
-                className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
-                disabled={!selectedPresetId || refreshing}
-                onClick={() => void onRefresh()}
-              >
+              <button className={PRIMARY_BUTTON_CLASS} disabled={!selectedPresetId || refreshing} onClick={() => void onRefresh()}>
                 <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
                 {refreshing ? "Refreshing..." : "Refresh Scan"}
               </button>
             </div>
           </div>
-          {message && <p className="mt-2 text-xs text-slate-300">{message}</p>}
-          {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
-        </div>
 
-        <div className="card p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-200">{selectedCompilePreset?.name ?? "Compiled Unique Tickers"}</h3>
-              <p className="text-xs text-slate-400">
-                Saved compile presets combine the latest member scan snapshots into a TradingView-ready watchlist file.
-              </p>
+          <div className="card p-4">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Compiled Watchlist</div>
+                <h3 className="mt-1 truncate text-lg font-semibold text-slate-100">
+                  {selectedCompilePreset?.name ?? "Compiled Unique Tickers"}
+                </h3>
+              </div>
+              <div className="rounded-full bg-slate-800/60 px-2.5 py-1 text-xs font-medium text-slate-300">
+                {compiledSnapshot?.rows.length ?? 0} unique
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-3">
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Members</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">{selectedCompilePreset?.memberCount ?? draftCompilePreset.members.length}</div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Updated</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">{formatDateTime(compiledSnapshot?.generatedAt)}</div>
+              </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Rows</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">{compiledSnapshot?.rows.length ?? "-"}</div>
+              </div>
+            </div>
+
+            <p className="mt-3 text-xs leading-5 text-slate-400">
+              {selectedCompilePreset
+                ? `${selectedCompilePreset.memberCount} scan preset${selectedCompilePreset.memberCount === 1 ? "" : "s"} in ${selectedCompilePreset.name}`
+                : "Select a saved compile preset to load a combined watchlist."}
+            </p>
+            {compiledMessage && <p className="mt-3 rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{compiledMessage}</p>}
+            {compiledWarnings.length > 0 && (
+              <div className="mt-3 space-y-1 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200">
+                {compiledWarnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
+            )}
+            {compiledError && <p className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{compiledError}</p>}
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
-                className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50"
+                className={PRIMARY_BUTTON_CLASS}
                 disabled={!selectedCompilePresetId || draftCompilePreset.members.length === 0 || compiledRefreshing}
                 onClick={() => void onRefreshCompiledPreset()}
               >
                 <RefreshCw className={`h-4 w-4 ${compiledRefreshing ? "animate-spin" : ""}`} />
-                {compiledRefreshing ? "Refreshing..." : "Refresh Compiled Preset"}
+                {compiledRefreshing ? "Refreshing..." : "Refresh Compiled"}
               </button>
               {compiledExportUrl && (
-                <a
-                  className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60"
-                  href={compiledExportUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+                <a className={SECONDARY_BUTTON_CLASS} href={compiledExportUrl} target="_blank" rel="noreferrer">
                   Export TXT
                 </a>
               )}
               <button
-                className="inline-flex items-center gap-2 rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 disabled:opacity-50 hover:bg-slate-800/60"
+                className={SECONDARY_BUTTON_CLASS}
                 disabled={(compiledSnapshot?.rows.length ?? 0) === 0}
                 onClick={async () => {
                   await navigator.clipboard.writeText((compiledSnapshot?.rows ?? []).map((row) => row.ticker).join("\n"));
@@ -1703,63 +1208,149 @@ export function ScansPageDashboard() {
               </button>
             </div>
           </div>
-          <p className="mt-2 text-xs text-slate-400">
-            {selectedCompilePreset
-              ? `${selectedCompilePreset.memberCount} scan preset${selectedCompilePreset.memberCount === 1 ? "" : "s"} in ${selectedCompilePreset.name}`
-              : "Select a saved compile preset to load a combined watchlist."}
-            {compiledSnapshot ? ` - ${compiledSnapshot.rows.length} unique ticker${compiledSnapshot.rows.length === 1 ? "" : "s"}` : ""}
-            {compiledSnapshot?.generatedAt ? ` - latest snapshot ${formatDateTime(compiledSnapshot.generatedAt)}` : ""}
-          </p>
-          {compiledMessage && <p className="mt-2 text-xs text-slate-300">{compiledMessage}</p>}
-          {compiledWarnings.length > 0 && (
-            <div className="mt-2 space-y-1 text-xs text-yellow-200">
-              {compiledWarnings.map((warning) => (
-                <p key={warning}>{warning}</p>
-              ))}
-            </div>
-          )}
-          {compiledError && <p className="mt-2 text-xs text-red-300">{compiledError}</p>}
-        </div>
-
-        <div className="card p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-200">Visible Columns</h3>
-              <p className="text-xs text-slate-400">Choose which columns to show in the scan results table.</p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {RESULT_COLUMNS.map((column) => (
-                <label key={column.key} className="inline-flex items-center gap-2 rounded border border-borderSoft/70 px-2 py-1 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={visibleColumns.includes(column.key)}
-                    onChange={() => toggleColumn(column.key)}
-                    disabled={visibleColumns.length === 1 && visibleColumns.includes(column.key)}
-                  />
-                  {column.label}
-                </label>
-              ))}
-            </div>
-          </div>
         </div>
 
         <div className="card overflow-hidden">
-          <div className="flex items-center justify-between border-b border-borderSoft/70 px-3 py-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-              Compiled Unique List
+          <div className="border-b border-borderSoft/70 px-4 py-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Table2 className="h-4 w-4 text-accent" />
+                  <h3 className="text-sm font-semibold text-slate-100">Scan Results</h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  {snapshot
+                    ? `${snapshot.rowCount} row${snapshot.rowCount === 1 ? "" : "s"}${snapshot.matchedRowCount > snapshot.rowCount ? ` of ${snapshot.matchedRowCount} matched` : ""}`
+                    : "No scan snapshot loaded yet."}
+                </p>
+              </div>
+              <button className={SECONDARY_BUTTON_CLASS} onClick={() => setResultsTableCollapsed((current) => !current)}>
+                {resultsTableCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                {resultsTableCollapsed ? "Expand" : "Collapse"}
+              </button>
             </div>
-            <button
-              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-              onClick={() => setCompiledListCollapsed((current) => !current)}
-            >
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+                <Columns3 className="h-3.5 w-3.5" />
+                Columns
+              </span>
+              {RESULT_COLUMNS.map((column) => {
+                const checked = visibleColumns.includes(column.key);
+                return (
+                  <label
+                    key={column.key}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${checked ? "border-accent/40 bg-accent/10 text-accent" : "border-borderSoft/70 text-slate-400 hover:bg-slate-800/40"}`}
+                  >
+                    <input
+                      className="h-3 w-3 accent-sky-400"
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleColumn(column.key)}
+                      disabled={visibleColumns.length === 1 && checked}
+                    />
+                    {column.label}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          {resultsTableCollapsed ? (
+            <div className="px-4 py-8 text-center text-sm text-slate-400">Scan result rows are hidden.</div>
+          ) : (
+            <div className="max-h-[70vh] overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead className="sticky top-0 z-10 bg-slate-900/90 backdrop-blur">
+                  <tr>
+                    {orderedVisibleColumns.map((column) => {
+                      const rightAligned = RIGHT_ALIGNED_RESULT_COLUMNS.has(column.key);
+                      const active = sortKey === column.key;
+                      return (
+                        <th key={column.key} className={`${TABLE_HEAD_CLASS} ${rightAligned ? "text-right" : "text-left"}`}>
+                          <button
+                            className={`inline-flex w-full items-center gap-1 ${rightAligned ? "justify-end text-right" : "justify-start text-left"} hover:text-slate-100`}
+                            onClick={() => onSort(column.key as SortKey)}
+                          >
+                            {column.label}
+                            {active ? (
+                              sortDir === "asc" ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+                            ) : (
+                              <span className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedRows.map((row) => {
+                    const isOpen = expandedTicker === row.ticker;
+                    const news = newsByTicker[row.ticker] ?? [];
+                    return (
+                      <Fragment key={row.ticker}>
+                        <tr
+                          className={`cursor-pointer border-t border-borderSoft/80 transition-colors ${isOpen ? "bg-panelSoft/25" : "hover:bg-slate-900/30"}`}
+                          onClick={() => onToggleRow(row.ticker)}
+                        >
+                          {orderedVisibleColumns.map((column) => (
+                            <Fragment key={column.key}>{renderCell(row, column.key)}</Fragment>
+                          ))}
+                        </tr>
+                        {isOpen && (
+                          <tr className="border-t border-borderSoft/60 bg-panel/50">
+                            <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-3">
+                              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
+                                <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/70 p-3">
+                                  <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
+                                  {newsLoadingTicker === row.ticker ? (
+                                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                      Loading news...
+                                    </div>
+                                  ) : (
+                                    <NewsList items={news} />
+                                  )}
+                                </div>
+                                <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/70 p-3">
+                                  <h4 className="mb-2 text-sm font-semibold text-slate-100">Chart</h4>
+                                  <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine initialRange="3M" />
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                  {sortedRows.length === 0 && (
+                    <tr>
+                      <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-12 text-center text-sm text-slate-400">
+                        <div className="mx-auto flex max-w-sm flex-col items-center gap-2">
+                          <Table2 className="h-5 w-5 text-slate-500" />
+                          <span>No scan rows are available yet. Save a preset and run a refresh to populate this table.</span>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-100">Compiled Unique List</h3>
+              <p className="mt-1 text-xs text-slate-400">{compiledSnapshot?.rows.length ?? 0} unique ticker{(compiledSnapshot?.rows.length ?? 0) === 1 ? "" : "s"}</p>
+            </div>
+            <button className={SECONDARY_BUTTON_CLASS} onClick={() => setCompiledListCollapsed((current) => !current)}>
               {compiledListCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
               {compiledListCollapsed ? "Expand" : "Collapse"}
             </button>
           </div>
           {compiledListCollapsed ? (
-            <div className="px-3 py-4 text-sm text-slate-400">
-              Compiled unique ticker rows are hidden.
-            </div>
+            <div className="px-4 py-8 text-center text-sm text-slate-400">Compiled unique ticker rows are hidden.</div>
           ) : compiledLoading ? (
             <div className="flex items-center gap-2 p-4 text-sm text-slate-300">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -1768,10 +1359,10 @@ export function ScansPageDashboard() {
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
-                <thead className="bg-slate-900/60">
+                <thead className="bg-slate-900/80">
                   <tr>
-                    {["Ticker", "Company", "Hits", "1D Change %", "Price", "Preset Matches"].map((label) => (
-                      <th key={label} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                    {["Ticker", "Company", "Hits", "1D Change %", "Price", "Preset Matches"].map((label, index) => (
+                      <th key={label} className={`${TABLE_HEAD_CLASS} ${index >= 2 && index <= 4 ? "text-right" : "text-left"}`}>
                         {label}
                       </th>
                     ))}
@@ -1779,18 +1370,18 @@ export function ScansPageDashboard() {
                 </thead>
                 <tbody>
                   {(compiledSnapshot?.rows ?? []).map((row) => (
-                    <tr key={row.ticker} className="border-t border-borderSoft/80 hover:bg-slate-900/30">
-                      <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
-                      <td className="px-3 py-2 text-slate-300">{row.name ?? row.ticker}</td>
-                      <td className="px-3 py-2 text-slate-300">{row.occurrences}</td>
-                      <td className={`px-3 py-2 ${(row.latestChange1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.latestChange1d)}</td>
-                      <td className="px-3 py-2 text-slate-300">{formatNumber(row.latestPrice)}</td>
-                      <td className="px-3 py-2 text-slate-300">{row.presetNames.join(", ") || "-"}</td>
+                    <tr key={row.ticker} className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30">
+                      <td className="px-3 py-3 font-semibold text-accent">{row.ticker}</td>
+                      <td className="max-w-56 truncate px-3 py-3 text-slate-300">{row.name ?? row.ticker}</td>
+                      <td className={NUMERIC_CELL_CLASS}>{row.occurrences}</td>
+                      <td className={`px-3 py-3 text-right tabular-nums ${(row.latestChange1d ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{formatPct(row.latestChange1d)}</td>
+                      <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.latestPrice)}</td>
+                      <td className="px-3 py-3 text-slate-300">{row.presetNames.join(", ") || "-"}</td>
                     </tr>
                   ))}
                   {(compiledSnapshot?.rows.length ?? 0) === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-400">
+                      <td colSpan={6} className="px-3 py-10 text-center text-sm text-slate-400">
                         {selectedCompilePresetId
                           ? "No compiled tickers are available yet for the selected compile preset."
                           : "Choose a saved compile preset to build a combined watchlist."}
@@ -1802,88 +1393,511 @@ export function ScansPageDashboard() {
             </div>
           )}
         </div>
+      </section>
 
+      <aside className="min-w-0 xl:sticky xl:top-4 xl:self-start">
         <div className="card overflow-hidden">
-          <div className="flex items-center justify-between border-b border-borderSoft/70 px-3 py-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-              Scan Results Table
+          <div className="border-b border-borderSoft/70 p-2">
+            <div className="grid grid-cols-2 gap-1 rounded-xl border border-borderSoft/70 bg-panelSoft/35 p-1">
+              <button
+                type="button"
+                className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${workspaceTab === "scan" ? "bg-accent/20 text-accent" : "text-slate-300 hover:bg-panelSoft/60"}`}
+                onClick={() => setWorkspaceTab("scan")}
+              >
+                <Settings2 className="h-4 w-4" />
+                Scan Presets
+              </button>
+              <button
+                type="button"
+                className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${workspaceTab === "compile" ? "bg-accent/20 text-accent" : "text-slate-300 hover:bg-panelSoft/60"}`}
+                onClick={() => setWorkspaceTab("compile")}
+              >
+                <Columns3 className="h-4 w-4" />
+                Compile
+              </button>
             </div>
-            <button
-              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-              onClick={() => setResultsTableCollapsed((current) => !current)}
-            >
-              {resultsTableCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
-              {resultsTableCollapsed ? "Expand" : "Collapse"}
-            </button>
           </div>
-          {resultsTableCollapsed ? (
-            <div className="px-3 py-4 text-sm text-slate-400">
-              Scan result rows are hidden.
-            </div>
-          ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-900/60">
-                <tr>
-                  {orderedVisibleColumns.map((column) => (
-                    <th key={column.key} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                      <button className="inline-flex items-center gap-1 text-left hover:text-slate-100" onClick={() => onSort(column.key as SortKey)}>
-                        {column.label}
-                      </button>
-                    </th>
+
+          {workspaceTab === "scan" ? (
+            <>
+              <div className="border-b border-borderSoft/70 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-100">Scan Presets</h3>
+                    <p className="text-xs text-slate-500">{presets.length} saved</p>
+                  </div>
+                  <button
+                    className={SECONDARY_BUTTON_CLASS}
+                    type="button"
+                    onClick={() => {
+                      setSelectedPresetId(null);
+                      setDraftPreset(emptyDraftPreset());
+                    }}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New
+                  </button>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                  {presets.map((preset) => (
+                    <div
+                      key={preset.id}
+                      className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${preset.id === selectedPresetId ? "border-accent/60 bg-accent/10 shadow-[0_0_0_1px_rgba(56,189,248,0.12)]" : "border-borderSoft/60 bg-panelSoft/20 hover:bg-slate-900/30"}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        setSelectedPresetId(preset.id);
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-accent">{preset.name}</div>
+                          <div className="mt-1 text-[11px] text-slate-400">
+                            {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {preset.scanType === "relative-strength" ? "Relative Strength" : "TradingView"} / {preset.isDefault ? "Default" : "Preset"} / {preset.isActive ? "Active" : "Inactive"}
+                          </div>
+                        </div>
+                        <button
+                          className={SECONDARY_BUTTON_CLASS}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onDuplicatePreset(preset.id);
+                          }}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          Duplicate
+                        </button>
+                      </div>
+                    </div>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedRows.map((row) => {
-                  const isOpen = expandedTicker === row.ticker;
-                  const news = newsByTicker[row.ticker] ?? [];
-                  return (
-                    <Fragment key={row.ticker}>
-                      <tr className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30" onClick={() => onToggleRow(row.ticker)}>
-                        {orderedVisibleColumns.map((column) => (
-                          <Fragment key={column.key}>{renderCell(row, column.key)}</Fragment>
+                  {presets.length === 0 && <p className="rounded-xl border border-borderSoft/70 bg-panelSoft/25 px-3 py-4 text-center text-xs text-slate-400">No scan presets saved yet.</p>}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-100">{draftPreset.id ? "Edit Preset" : "Create Preset"}</h3>
+                    <p className="text-xs text-slate-500">{draftPreset.scanType === "relative-strength" ? "Relative Strength" : "TradingView Screener"}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button className={PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void onSavePreset()}>
+                      <Save className="h-3.5 w-3.5" />
+                      {saving ? "Saving..." : "Save"}
+                    </button>
+                    <button className={DANGER_BUTTON_CLASS} disabled={!draftPreset.id || draftPreset.isDefault} onClick={() => void onDeletePreset()}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4 text-xs text-slate-300">
+                  <label className="block">
+                    Name
+                    <input className={FORM_INPUT_CLASS} value={draftPreset.name} onChange={(event) => setDraftPreset((current) => ({ ...current, name: event.target.value }))} />
+                  </label>
+
+                  <label className="block">
+                    Preset Type
+                    <select
+                      className={FORM_SELECT_CLASS}
+                      value={draftPreset.scanType}
+                      onChange={(event) => setDraftPreset((current) => ({
+                        ...current,
+                        scanType: event.target.value as ScanPresetType,
+                        sortField: event.target.value === "relative-strength" && current.sortField === "change" ? "rs_close" : current.sortField,
+                      }))}
+                    >
+                      {SCAN_TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <label className="block">
+                      Sort Field
+                      <select className={FORM_SELECT_CLASS} value={draftPreset.sortField} onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value }))}>
+                        {SORT_FIELD_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
                         ))}
-                      </tr>
-                      {isOpen && (
-                        <tr className="border-t border-borderSoft/60 bg-panel/50">
-                          <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-3">
-                            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr),minmax(24rem,1fr)]">
-                              <div className="rounded border border-borderSoft/70 bg-panelSoft/70 p-3">
-                                <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
-                                {newsLoadingTicker === row.ticker ? (
-                                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    Loading news...
-                                  </div>
-                                ) : (
-                                  <NewsList items={news} />
-                                )}
+                      </select>
+                    </label>
+                    <label className="block">
+                      Sort Direction
+                      <select className={FORM_SELECT_CLASS} value={draftPreset.sortDirection} onChange={(event) => setDraftPreset((current) => ({ ...current, sortDirection: event.target.value === "asc" ? "asc" : "desc" }))}>
+                        <option value="desc">Descending</option>
+                        <option value="asc">Ascending</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <label className="block">
+                      Row Limit
+                      <input className={FORM_INPUT_CLASS} type="number" min={1} max={250} value={draftPreset.rowLimit} onChange={(event) => setDraftPreset((current) => ({ ...current, rowLimit: Math.max(1, Math.min(250, Number(event.target.value) || 100)) }))} />
+                    </label>
+                    <label className="block">
+                      Benchmark
+                      <input className={FORM_INPUT_CLASS} value={draftPreset.benchmarkTicker ?? "SPY"} disabled={draftPreset.scanType !== "relative-strength"} onChange={(event) => setDraftPreset((current) => ({ ...current, benchmarkTicker: event.target.value.toUpperCase() }))} />
+                    </label>
+                  </div>
+
+                  {draftPreset.scanType === "relative-strength" ? (
+                    <>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        <label className="block">
+                          RS MA Length
+                          <input className={FORM_INPUT_CLASS} type="number" min={1} max={250} value={draftPreset.rsMaLength} onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaLength: Math.max(1, Math.min(250, Number(event.target.value) || 21)) }))} />
+                        </label>
+                        <label className="block">
+                          RS MA Type
+                          <select className={FORM_SELECT_CLASS} value={draftPreset.rsMaType} onChange={(event) => setDraftPreset((current) => ({ ...current, rsMaType: event.target.value as RelativeStrengthMaType }))}>
+                            {RS_MA_TYPE_OPTIONS.map((option) => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="block">
+                          New High Lookback
+                          <input className={FORM_INPUT_CLASS} type="number" min={1} max={520} value={draftPreset.newHighLookback} onChange={(event) => setDraftPreset((current) => ({ ...current, newHighLookback: Math.max(1, Math.min(520, Number(event.target.value) || 252)) }))} />
+                        </label>
+                        <label className="block">
+                          Vertical Offset
+                          <input className={FORM_INPUT_CLASS} type="number" min={0.25} step={0.25} max={500} value={draftPreset.verticalOffset} onChange={(event) => setDraftPreset((current) => ({ ...current, verticalOffset: Math.max(0.25, Math.min(500, Number(event.target.value) || 30)) }))} />
+                        </label>
+                      </div>
+                      <label className="block">
+                        Output Filter
+                        <select className={FORM_SELECT_CLASS} value={draftPreset.outputMode} onChange={(event) => setDraftPreset((current) => ({ ...current, outputMode: event.target.value as RelativeStrengthOutputMode }))}>
+                          {RS_OUTPUT_MODE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  ) : null}
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="flex items-center gap-2 rounded-lg border border-borderSoft/70 bg-panelSoft/25 px-3 py-2 text-sm">
+                      <input type="checkbox" checked={draftPreset.isDefault} onChange={(event) => setDraftPreset((current) => ({ ...current, isDefault: event.target.checked }))} />
+                      Default preset
+                    </label>
+                    <label className="flex items-center gap-2 rounded-lg border border-borderSoft/70 bg-panelSoft/25 px-3 py-2 text-sm">
+                      <input type="checkbox" checked={draftPreset.isActive} onChange={(event) => setDraftPreset((current) => ({ ...current, isActive: event.target.checked }))} />
+                      Active
+                    </label>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                        {draftPreset.scanType === "relative-strength" ? "Prefilter Rules" : "Rules"}
+                      </h4>
+                      <button className={SECONDARY_BUTTON_CLASS} type="button" onClick={() => updateDraftRules((rules) => [...rules, emptyDraftRule()])}>
+                        <Plus className="h-3.5 w-3.5" />
+                        Add Rule
+                      </button>
+                    </div>
+                    {draftRules.map((rule) => {
+                      const fieldQuery = rule.field.trim().toLowerCase();
+                      const fieldOptions = fieldOptionsByQuery[fieldQuery] ?? fieldOptionsByQuery[""] ?? [];
+                      const selectedFieldLabel = fieldLabelMap[rule.field.trim()] ?? getFieldLabel(rule.field);
+                      const compareField = compareFieldToInput(rule);
+                      const compareFieldQuery = compareField.trim().toLowerCase();
+                      const compareFieldOptions = fieldOptionsByQuery[compareFieldQuery] ?? fieldOptionsByQuery[""] ?? [];
+                      const selectedCompareFieldLabel = fieldLabelMap[compareField.trim()] ?? getFieldLabel(compareField);
+                      const valueMode = getRuleValueMode(rule);
+                      const operatorOptions = valueMode === FIELD_VALUE_MODE
+                        ? RULE_OPERATORS.filter((option) => option.value !== "in" && option.value !== "not_in")
+                        : RULE_OPERATORS;
+                      const compareMultiplierInput = compareMultiplierInputByRule[rule.id] ?? compareMultiplierToInput(rule);
+                      const rawRuleValueInput = ruleValueInputByRule[rule.id] ?? valueToInput(rule);
+                      return (
+                        <div key={rule.id} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-3">
+                          <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),7rem]">
+                            <label className="block">
+                              Field
+                              <select
+                                className={FORM_SELECT_CLASS}
+                                value={isSuggestedField(rule.field, fieldOptions) ? rule.field : CUSTOM_FIELD_OPTION}
+                                onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
+                                  if (row.id !== rule.id) return row;
+                                  return { ...row, field: event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value };
+                                }))}
+                              >
+                                {fieldOptions.map((field) => (
+                                  <option key={field.value} value={field.value}>{field.label}</option>
+                                ))}
+                                {!isSuggestedField(rule.field, fieldOptions) && rule.field.trim() ? (
+                                  <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedFieldLabel})</option>
+                                ) : null}
+                                <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
+                              </select>
+                            </label>
+                            <label className="block">
+                              <span className="sr-only">Field ID</span>
+                              <input className={FORM_INPUT_CLASS} value={rule.field} onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, field: event.target.value } : row))} placeholder="Field ID" />
+                            </label>
+                            <label className="block">
+                              Operator
+                              <select
+                                className={FORM_SELECT_CLASS}
+                                value={rule.operator}
+                                onChange={(event) => {
+                                  const nextOperator = event.target.value as ScanRuleOperator;
+                                  setRuleValueInputByRule((current) => {
+                                    const next = { ...current };
+                                    if (nextOperator !== "in" && nextOperator !== "not_in") delete next[rule.id];
+                                    return next;
+                                  });
+                                  updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? { ...row, operator: nextOperator } : row));
+                                }}
+                              >
+                                {operatorOptions.map((option) => (
+                                  <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <div className="grid gap-2">
+                            <label className="block">
+                              Comparison Target
+                              <select
+                                className={`${FORM_SELECT_CLASS} md:max-w-48`}
+                                value={valueMode}
+                                onChange={(event) => {
+                                  const nextMode = event.target.value === FIELD_VALUE_MODE ? "field" : "literal";
+                                  if (nextMode === "field") {
+                                    setRuleValueInputByRule((current) => {
+                                      const next = { ...current };
+                                      delete next[rule.id];
+                                      return next;
+                                    });
+                                  }
+                                  updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleValueMode(row, nextMode) : row));
+                                }}
+                              >
+                                <option value={LITERAL_VALUE_MODE}>Fixed value</option>
+                                <option value={FIELD_VALUE_MODE}>Another field</option>
+                              </select>
+                            </label>
+                            {valueMode === FIELD_VALUE_MODE ? (
+                              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr),7rem]">
+                                <div className="grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr)]">
+                                  <label className="block">
+                                    Reference Field
+                                    <select
+                                      className={FORM_SELECT_CLASS}
+                                      value={isSuggestedField(compareField, compareFieldOptions) ? compareField : CUSTOM_FIELD_OPTION}
+                                      onChange={(event) => updateDraftRules((rules) => rules.map((row) => {
+                                        if (row.id !== rule.id) return row;
+                                        return setRuleCompareField(row, event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value);
+                                      }))}
+                                    >
+                                      {compareFieldOptions.map((field) => (
+                                        <option key={field.value} value={field.value}>{field.label}</option>
+                                      ))}
+                                      {!isSuggestedField(compareField, compareFieldOptions) && compareField.trim() ? (
+                                        <option value={CUSTOM_FIELD_OPTION}>Custom field ({selectedCompareFieldLabel})</option>
+                                      ) : null}
+                                      <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
+                                    </select>
+                                  </label>
+                                  <label className="block">
+                                    <span className="sr-only">Reference field ID</span>
+                                    <input className={FORM_INPUT_CLASS} value={compareField} onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareField(row, event.target.value) : row))} placeholder="Reference field ID" />
+                                  </label>
+                                </div>
+                                <label className="block">
+                                  Multiplier
+                                  <input
+                                    className={FORM_INPUT_CLASS}
+                                    value={compareMultiplierInput}
+                                    onChange={(event) => {
+                                      const rawValue = event.target.value;
+                                      setCompareMultiplierInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
+                                      const trimmed = rawValue.trim();
+                                      if (!trimmed || trimmed === "-" || trimmed === "." || trimmed === "-." || trimmed.endsWith(".")) return;
+                                      updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, rawValue) : row));
+                                    }}
+                                    onBlur={() => {
+                                      updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? setRuleCompareMultiplier(row, compareMultiplierInput) : row));
+                                      setCompareMultiplierInputByRule((current) => {
+                                        const next = { ...current };
+                                        delete next[rule.id];
+                                        return next;
+                                      });
+                                    }}
+                                    placeholder="1"
+                                  />
+                                </label>
                               </div>
-                              <div className="rounded border border-borderSoft/70 bg-panelSoft/70 p-3">
-                                <h4 className="mb-2 text-sm font-semibold text-slate-100">Chart</h4>
-                                <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine initialRange="3M" />
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-                {sortedRows.length === 0 && (
-                  <tr>
-                    <td colSpan={Math.max(orderedVisibleColumns.length, 1)} className="px-3 py-6 text-center text-sm text-slate-400">
-                      No scan rows are available yet. Save a preset and run a refresh to populate this table.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                            ) : (
+                              <label className="block">
+                                Value
+                                <input
+                                  className={FORM_INPUT_CLASS}
+                                  value={rawRuleValueInput}
+                                  onChange={(event) => {
+                                    const rawValue = event.target.value;
+                                    if (rule.operator === "in" || rule.operator === "not_in") {
+                                      setRuleValueInputByRule((current) => ({ ...current, [rule.id]: rawValue }));
+                                    }
+                                    updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromInput(row, rawValue) : row));
+                                  }}
+                                  onBlur={() => {
+                                    if (rule.operator !== "in" && rule.operator !== "not_in") return;
+                                    setRuleValueInputByRule((current) => {
+                                      const next = { ...current };
+                                      delete next[rule.id];
+                                      return next;
+                                    });
+                                  }}
+                                  placeholder={rule.operator === "in" || rule.operator === "not_in" ? "Comma-separated values" : "Enter value"}
+                                />
+                              </label>
+                            )}
+                          </div>
+                          <div className="mt-3 flex justify-end">
+                            <button
+                              className={DANGER_BUTTON_CLASS}
+                              disabled={draftRules.length === 1}
+                              onClick={() => {
+                                setRuleValueInputByRule((current) => {
+                                  const next = { ...current };
+                                  delete next[rule.id];
+                                  return next;
+                                });
+                                updateDraftRules((rules) => rules.filter((row) => row.id !== rule.id));
+                              }}
+                            >
+                              Remove Rule
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="border-b border-borderSoft/70 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-100">Compile Presets</h3>
+                    <p className="text-xs text-slate-500">{compilePresets.length} saved</p>
+                  </div>
+                  <button
+                    className={SECONDARY_BUTTON_CLASS}
+                    type="button"
+                    onClick={() => {
+                      setSelectedCompilePresetId(null);
+                      setDraftCompilePreset(emptyDraftCompilePreset());
+                    }}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New
+                  </button>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                  {compilePresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${preset.id === selectedCompilePresetId ? "border-accent/60 bg-accent/10 shadow-[0_0_0_1px_rgba(56,189,248,0.12)]" : "border-borderSoft/60 bg-panelSoft/20 hover:bg-slate-900/30"}`}
+                      type="button"
+                      onClick={() => setSelectedCompilePresetId(preset.id)}
+                    >
+                      <div className="truncate text-sm font-semibold text-accent">{preset.name}</div>
+                      <div className="mt-1 text-[11px] text-slate-400">
+                        {preset.memberCount} scan preset{preset.memberCount === 1 ? "" : "s"}
+                      </div>
+                      <div className="truncate text-[11px] text-slate-500">{preset.presetNames.join(", ") || "No member presets"}</div>
+                    </button>
+                  ))}
+                  {compilePresets.length === 0 && <p className="rounded-xl border border-borderSoft/70 bg-panelSoft/25 px-3 py-4 text-center text-xs text-slate-400">No compile presets saved yet.</p>}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-100">{draftCompilePreset.id ? "Edit Compile Preset" : "Create Compile Preset"}</h3>
+                    <p className="text-xs text-slate-500">{draftCompilePreset.members.length} selected</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button className={PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void onSaveCompilePreset()}>
+                      <Save className="h-3.5 w-3.5" />
+                      {saving ? "Saving..." : "Save"}
+                    </button>
+                    <button className={DANGER_BUTTON_CLASS} disabled={!draftCompilePreset.id} onClick={() => void onDeleteCompilePreset()}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4 text-xs text-slate-300">
+                  <label className="block">
+                    Name
+                    <input className={FORM_INPUT_CLASS} value={draftCompilePreset.name} onChange={(event) => setDraftCompilePreset((current) => ({ ...current, name: event.target.value }))} />
+                  </label>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Member Scan Presets</h4>
+                      <span className="text-[11px] text-slate-500">{draftCompilePreset.members.length} selected</span>
+                    </div>
+                    <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                      {presets.map((preset) => {
+                        const checked = draftCompilePreset.members.some((member) => member.scanPresetId === preset.id);
+                        return (
+                          <label
+                            key={preset.id}
+                            className={`flex items-start gap-2 rounded-xl border px-3 py-2.5 text-sm transition ${checked ? "border-accent/40 bg-accent/10 text-slate-100" : "border-borderSoft/70 bg-panelSoft/20 text-slate-300 hover:bg-slate-900/25"}`}
+                          >
+                            <input className="mt-1 accent-sky-400" type="checkbox" checked={checked} onChange={() => toggleCompilePresetMember(preset.id)} />
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">{preset.name}</span>
+                              <span className="block text-[11px] text-slate-400">
+                                {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                      {presets.length === 0 && <p className="rounded-xl border border-borderSoft/70 bg-panelSoft/25 px-3 py-4 text-center text-xs text-slate-400">Create a scan preset first, then add it to a compile preset.</p>}
+                    </div>
+                  </div>
+
+                  {draftCompilePreset.members.length > 0 ? (
+                    <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/25 p-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Compile Order</div>
+                      <div className="mt-2 space-y-1.5 text-sm text-slate-300">
+                        {draftCompilePreset.members.map((member, index) => (
+                          <div key={member.scanPresetId} className="flex items-center gap-2">
+                            <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-800/70 text-[11px] text-slate-300">{index + 1}</span>
+                            <span className="truncate">{member.scanPresetName}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </>
           )}
         </div>
-      </section>
+      </aside>
 
       {peerTicker && <PeerGroupModal ticker={peerTicker} onClose={() => setPeerTicker(null)} />}
     </div>
