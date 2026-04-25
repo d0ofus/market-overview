@@ -6075,6 +6075,7 @@ export async function loadLatestActiveScanRefreshJob(
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
     };
   }
+  if (hasManualRelativeStrengthStorage(env)) return null;
   const record = await loadLatestScanRefreshJobRecordForPreset(env, presetId, { activeOnly: true });
   if (!record) return null;
   return {
