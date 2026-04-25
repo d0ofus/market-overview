@@ -937,7 +937,15 @@ export function SectorTracker() {
                       </thead>
                       <tbody>
                         {entries.map((e) => (
-                          <tr key={e.id} className="border-t border-borderSoft/60 align-top transition hover:bg-panelSoft/25">
+                          <tr
+                            key={e.id}
+                            className="cursor-pointer border-t border-borderSoft/60 align-top transition hover:bg-panelSoft/25 focus:bg-panelSoft/25 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openNarrativeEntry(e)}
+                            onKeyDown={(event) => handleNarrativeEntryKeyDown(event, e)}
+                            aria-label={`Open chart grid for ${e.sectorName} on ${e.eventDate}`}
+                          >
                             <td className="whitespace-nowrap px-4 py-3 text-slate-300">{e.eventDate}</td>
                             <td className="px-4 py-3 font-medium text-slate-100">{e.sectorName}</td>
                             <td className="px-4 py-3">
@@ -947,7 +955,10 @@ export function SectorTracker() {
                                   <button
                                     key={`${e.id}-${s.ticker}`}
                                     className={TICKER_CHIP_CLASS}
-                                    onClick={() => openExpandedChart(s.ticker)}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openExpandedChart(s.ticker);
+                                    }}
                                     onMouseEnter={(event) => handleTickerChipMouseEnter(s.ticker, event)}
                                     onMouseLeave={() => handleTickerChipMouseLeave(s.ticker)}
                                     title={s.name ?? s.ticker}
@@ -960,13 +971,22 @@ export function SectorTracker() {
                             <td className="max-w-xl px-4 py-3 text-slate-300">{e.notes ?? "-"}</td>
                             <td className="px-4 py-3">
                               <div className="flex flex-wrap gap-2">
-                                <button className={SECONDARY_BUTTON_CLASS} onClick={() => openEditEntry(e)}>
+                                <button
+                                  className={SECONDARY_BUTTON_CLASS}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openEditEntry(e);
+                                  }}
+                                >
                                   <Pencil className="h-3.5 w-3.5" />
                                   Edit
                                 </button>
                                 <button
                                   className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/35 bg-red-500/8 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/14"
-                                  onClick={() => void removeEntry(e.id)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void removeEntry(e.id);
+                                  }}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                   Delete
