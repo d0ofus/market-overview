@@ -96,7 +96,7 @@ export function TickerCollectionModal({
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {items.map((item) => (
                 <div key={item.key} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
-                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <div className={`mb-3 flex items-start justify-between ${item.stats ? "gap-2" : "flex-wrap gap-3"}`}>
                     <div className="min-w-0 flex-1">
                       <div className="text-lg font-semibold text-accent">{item.ticker}</div>
                       {item.name && item.name !== item.ticker ? (
@@ -104,7 +104,7 @@ export function TickerCollectionModal({
                       ) : null}
                     </div>
                     {item.stats ? (
-                      <div className="flex flex-wrap items-center justify-end gap-2">{item.stats}</div>
+                      <div className="grid min-w-0 flex-[3] grid-cols-4 gap-1">{item.stats}</div>
                     ) : item.metricLabel || item.metricValue ? (
                       <div className="text-right text-xs">
                         {item.metricLabel ? <div className="text-slate-500">{item.metricLabel}</div> : null}
