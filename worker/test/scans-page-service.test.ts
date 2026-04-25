@@ -14,6 +14,7 @@ import {
   loadCompiledScansSnapshot,
   loadCompiledScansSnapshotForCompilePreset,
   normalizeScanRows,
+  processManualRelativeStrengthScanRun,
   processRelativeStrengthRefreshJob,
   refreshScansSnapshot,
   refreshScanCompilePreset,
@@ -3418,6 +3419,13 @@ describe("scans page service", () => {
                   latestSnapshotId: null,
                   leaseOwner: null,
                   leaseExpiresAt: null,
+                  cacheHitTickers: 0,
+                  computedTickers: 0,
+                  missingBarsTickers: 0,
+                  insufficientHistoryTickers: 0,
+                  errorTickers: 0,
+                  staleBenchmarkTickers: 0,
+                  durationMs: null,
                 };
               }
               return {};
@@ -3458,5 +3466,303 @@ describe("scans page service", () => {
     expect(insertRunCalls).toBe(1);
     expect(runCandidates).toHaveLength(2);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reuses fresh manual relative strength feature cache rows during processing", async () => {
+    const expectedTradingDate = "2026-04-21";
+    const presetRow: ScanPreset = {
+      id: "rs-cache-preset",
+      name: "Relative Strength Cache",
+      scanType: "relative-strength",
+      isDefault: false,
+      isActive: true,
+      rules: [],
+      prefilterRules: [
+        { id: "close", field: "close", operator: "gt", value: 1 },
+        { id: "type", field: "type", operator: "in", value: ["stock"] },
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ", "NYSE"] },
+      ],
+      benchmarkTicker: "SPY",
+      verticalOffset: 30,
+      rsMaLength: 21,
+      rsMaType: "EMA",
+      newHighLookback: 252,
+      outputMode: "all",
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 100,
+      createdAt: "2026-04-21T00:00:00.000Z",
+      updatedAt: "2026-04-21T00:00:00.000Z",
+    };
+    const candidates = [
+      { cursorOffset: 0, ticker: "AAA", name: "AAA Inc", sector: "Technology", industry: "Software", exchange: "NASDAQ", assetClass: "equity", marketCap: null, relativeVolume: null, avgVolume: null, priceAvgVolume: null, price: null, change1d: null, status: "queued", reason: null, latestTradingDate: null, source: "computed" },
+      { cursorOffset: 1, ticker: "BBB", name: "BBB Inc", sector: "Industrials", industry: "Machinery", exchange: "NYSE", assetClass: "equity", marketCap: null, relativeVolume: null, avgVolume: null, priceAvgVolume: null, price: null, change1d: null, status: "queued", reason: null, latestTradingDate: null, source: "computed" },
+    ];
+    const featureRows = candidates.map((candidate, index) => ({
+      configKey: "SPY|EMA|21|252",
+      ticker: candidate.ticker,
+      expectedTradingDate,
+      tradingDate: expectedTradingDate,
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      priceClose: 10 + index,
+      change1d: 1 + index,
+      rsRatioClose: 2 - index * 0.1,
+      rsRatioMa: 1.8 - index * 0.1,
+      rsAboveMa: 1,
+      rsNewHigh: 1,
+      rsNewHighBeforePrice: 0,
+      bullCross: 0,
+      approxRsRating: 90 - index,
+      status: "computed",
+      reason: null,
+      computedAt: "2026-04-21T22:00:00.000Z",
+    }));
+    const benchmarkBars = Array.from({ length: 520 }, (_, index) => ({
+      ticker: "SPY",
+      date: index === 519 ? expectedTradingDate : `2025-01-${String((index % 28) + 1).padStart(2, "0")}`,
+      o: 100,
+      h: 101,
+      l: 99,
+      c: 100 + index / 1000,
+      volume: 1_000_000,
+    }));
+    const run = {
+      id: "manual-run-cache",
+      presetId: presetRow.id,
+      presetName: presetRow.name,
+      configKey: "SPY|EMA|21|252",
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      expectedTradingDate,
+      status: "queued",
+      requestedBy: "manual",
+      createdAt: "2026-04-21T22:05:00.000Z",
+      startedAt: null,
+      updatedAt: "2026-04-21T22:05:00.000Z",
+      heartbeatAt: null,
+      completedAt: null,
+      error: null,
+      warning: null,
+      totalTickers: candidates.length,
+      processedTickers: 0,
+      matchedTickers: 0,
+      cursorOffset: 0,
+      latestSnapshotId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      cacheHitTickers: 0,
+      computedTickers: 0,
+      missingBarsTickers: 0,
+      insufficientHistoryTickers: 0,
+      errorTickers: 0,
+      staleBenchmarkTickers: 0,
+      durationMs: null,
+    } as any;
+    const tickerDailyBarLoads: string[][] = [];
+    let snapshotHeader: any = null;
+    const snapshotRows: any[] = [];
+
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM scan_presets WHERE id = ?")) return presetRow;
+              if (sql.includes("FROM worker_schedule_settings")) {
+                return {
+                  id: "default",
+                  rsBackgroundEnabled: 0,
+                  rsBackgroundBatchSize: 50,
+                  rsBackgroundMaxBatchesPerTick: 20,
+                  rsBackgroundTimeBudgetMs: 15_000,
+                  rsManualCacheReuseEnabled: 1,
+                  rsSharedConfigSnapshotFanoutEnabled: 1,
+                  postCloseBarsEnabled: 1,
+                  postCloseBarsOffsetMinutes: 60,
+                  postCloseBarsBatchSize: 400,
+                  postCloseBarsMaxBatchesPerTick: 4,
+                };
+              }
+              if (sql.includes("FROM post_close_daily_bar_refresh_jobs")) return null;
+              if (sql.includes("FROM scan_snapshots")) return snapshotHeader;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM scan_presets ORDER BY")) return { results: [presetRow] };
+              if (sql.includes("FROM daily_bars")) {
+                const tickers = args.filter((arg): arg is string => typeof arg === "string" && /^[A-Z]+$/.test(arg));
+                if (tickers.includes("SPY")) return { results: benchmarkBars };
+                tickerDailyBarLoads.push(tickers);
+                return { results: [] };
+              }
+              if (sql.includes("FROM scan_rows")) return { results: snapshotRows };
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("INSERT INTO scan_snapshots")) {
+              const args = statement.__args ?? [];
+              snapshotHeader = {
+                id: String(args[0]),
+                presetId: String(args[1]),
+                providerLabel: String(args[2]),
+                generatedAt: "2026-04-21T22:06:00.000Z",
+                rowCount: Number(args[3]),
+                matchedRowCount: Number(args[4]),
+                status: String(args[5]),
+                error: args[6] == null ? null : String(args[6]),
+              };
+            }
+            if (statement.__sql?.includes("INSERT INTO scan_rows")) {
+              const args = statement.__args ?? [];
+              const raw = args[11] == null ? null : String(args[11]);
+              const parsed = raw ? JSON.parse(raw) : {};
+              snapshotRows.push({
+                ticker: String(args[2]),
+                name: args[3] == null ? null : String(args[3]),
+                sector: args[4] == null ? null : String(args[4]),
+                industry: args[5] == null ? null : String(args[5]),
+                change1d: Number(args[6]),
+                marketCap: args[7] == null ? null : Number(args[7]),
+                price: Number(args[8]),
+                avgVolume: args[9] == null ? null : Number(args[9]),
+                priceAvgVolume: args[10] == null ? null : Number(args[10]),
+                rawJson: raw,
+                relativeVolume: parsed.relative_volume_10d_calc ?? null,
+                rsClose: parsed.rsClose ?? null,
+                rsMa: parsed.rsMa ?? null,
+                rsAboveMa: Boolean(parsed.rsAboveMa),
+                rsNewHigh: Boolean(parsed.rsNewHigh),
+                rsNewHighBeforePrice: Boolean(parsed.rsNewHighBeforePrice),
+                bullCross: Boolean(parsed.bullCross),
+                approxRsRating: parsed.approxRsRating ?? null,
+              });
+            }
+          }
+          return [];
+        },
+      },
+      RS_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) return run;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM rs_scan_run_tickers") && sql.includes("JOIN rs_features_latest")) {
+                return {
+                  results: candidates.map((candidate, index) => ({
+                    ...candidate,
+                    source: "cache",
+                    ...featureRows[index],
+                    featureChange1d: featureRows[index].change1d,
+                  })),
+                };
+              }
+              if (sql.includes("FROM rs_scan_run_tickers")) return { results: candidates };
+              if (sql.includes("FROM rs_features_latest")) return { results: featureRows };
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("SET status = 'running'")) {
+                run.status = "running";
+                run.startedAt = "2026-04-21T22:05:01.000Z";
+                run.updatedAt = "2026-04-21T22:05:01.000Z";
+                run.heartbeatAt = "2026-04-21T22:05:01.000Z";
+                run.leaseOwner = String(args[0]);
+                run.leaseExpiresAt = String(args[1]);
+              } else if (sql.startsWith("UPDATE rs_scan_runs SET")) {
+                let index = 0;
+                if (sql.includes("status = ?")) run.status = String(args[index++]);
+                if (sql.includes("processed_tickers = ?")) run.processedTickers = Number(args[index++]);
+                if (sql.includes("matched_tickers = ?")) run.matchedTickers = Number(args[index++]);
+                if (sql.includes("cursor_offset = ?")) run.cursorOffset = Number(args[index++]);
+                if (sql.includes("cache_hit_tickers = ?")) run.cacheHitTickers = Number(args[index++]);
+                if (sql.includes("computed_tickers = ?")) run.computedTickers = Number(args[index++]);
+                if (sql.includes("missing_bars_tickers = ?")) run.missingBarsTickers = Number(args[index++]);
+                if (sql.includes("insufficient_history_tickers = ?")) run.insufficientHistoryTickers = Number(args[index++]);
+                if (sql.includes("error_tickers = ?")) run.errorTickers = Number(args[index++]);
+                if (sql.includes("stale_benchmark_tickers = ?")) run.staleBenchmarkTickers = Number(args[index++]);
+                if (sql.includes("duration_ms = ?")) run.durationMs = Number(args[index++]);
+                if (sql.includes("warning = ?")) {
+                  run.warning = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (sql.includes("latest_snapshot_id = ?")) {
+                  run.latestSnapshotId = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (sql.includes("completed_at = ?")) {
+                  run.completedAt = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (sql.includes("lease_owner = NULL")) {
+                  run.leaseOwner = null;
+                  run.leaseExpiresAt = null;
+                }
+                run.updatedAt = "2026-04-21T22:06:00.000Z";
+                run.heartbeatAt = "2026-04-21T22:06:00.000Z";
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+    } as any;
+
+    const job = await processManualRelativeStrengthScanRun(env, run.id, { timeBudgetMs: 10_000, batchSize: 10 });
+
+    expect(job?.status).toBe("completed");
+    expect(job?.cacheHitCount).toBe(2);
+    expect(job?.computedCount).toBe(0);
+    expect(job?.matchedCandidates).toBe(2);
+    expect(tickerDailyBarLoads).toHaveLength(0);
+    expect(snapshotRows.map((row) => row.ticker)).toEqual(["AAA", "BBB"]);
   });
 });

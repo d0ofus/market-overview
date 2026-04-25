@@ -1,6 +1,7 @@
 import { getProvider } from "./provider";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
+import { loadWorkerScheduleSettings } from "./worker-schedule-service";
 import {
   advanceRelativeStrengthState,
   bootstrapRelativeStrengthStateFromRatioRows,
@@ -183,6 +184,15 @@ export type ScanRefreshJob = {
   deferredTickerCount: number;
   warning: string | null;
   phase: string | null;
+  elapsedMs?: number | null;
+  durationMs?: number | null;
+  cacheHitCount?: number;
+  computedCount?: number;
+  missingBarsCount?: number;
+  insufficientHistoryCount?: number;
+  errorCount?: number;
+  staleBenchmarkCount?: number;
+  appliesToPreset?: boolean;
 };
 
 export type ScanRefreshResponse = {
@@ -389,6 +399,13 @@ type ManualRelativeStrengthRunRecord = {
   latestSnapshotId: string | null;
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
+  cacheHitTickers: number;
+  computedTickers: number;
+  missingBarsTickers: number;
+  insufficientHistoryTickers: number;
+  errorTickers: number;
+  staleBenchmarkTickers: number;
+  durationMs: number | null;
 };
 
 type ManualRelativeStrengthCandidateRow = {
@@ -408,14 +425,18 @@ type ManualRelativeStrengthCandidateRow = {
   status: string;
   reason: string | null;
   latestTradingDate: string | null;
+  source: string | null;
 };
 
 type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
   configKey: string;
+  expectedTradingDate: string | null;
   status: string;
   reason: string | null;
   computedAt: string;
 };
+
+type ManualRelativeStrengthTickerStatus = "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
 
 type TradingViewFilter = {
   left: string;
@@ -475,6 +496,7 @@ const MANUAL_RS_SCAN_TIME_BUDGET_MS = 20_000;
 const MANUAL_RS_SCAN_LEASE_DURATION_MS = 60_000;
 const MANUAL_RS_SCAN_STALE_RUN_MS = 30 * 60_000;
 const MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE = 10_000;
+const POST_CLOSE_DAILY_BARS_SCOPE = "active-us-common-stocks";
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -811,10 +833,31 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     deferredTickerCount: record.deferredTickerCount,
     warning: record.warning,
     phase: record.phase,
+    elapsedMs: elapsedMs(record.startedAt, record.completedAt),
+    durationMs: elapsedMs(record.startedAt, record.completedAt),
+    cacheHitCount: record.alreadyCurrentCandidateCount,
+    computedCount: record.matchedCandidates,
+    missingBarsCount: 0,
+    insufficientHistoryCount: 0,
+    errorCount: record.status === "failed" ? 1 : 0,
+    staleBenchmarkCount: 0,
+    appliesToPreset: true,
   };
 }
 
-function mapManualRunRecordToJob(record: ManualRelativeStrengthRunRecord): ScanRefreshJob {
+function elapsedMs(startedAt: string | null | undefined, completedAt?: string | null): number | null {
+  const start = toTimestampMs(startedAt);
+  if (start == null) return null;
+  const end = completedAt ? toTimestampMs(completedAt) : Date.now();
+  if (end == null || end < start) return null;
+  return Math.max(0, Math.trunc(end - start));
+}
+
+function mapManualRunRecordToJob(
+  record: ManualRelativeStrengthRunRecord,
+  options?: { appliesToPreset?: boolean },
+): ScanRefreshJob {
+  const computedElapsedMs = elapsedMs(record.startedAt ?? record.createdAt, record.completedAt);
   return {
     id: record.id,
     presetId: record.presetId,
@@ -841,6 +884,15 @@ function mapManualRunRecordToJob(record: ManualRelativeStrengthRunRecord): ScanR
     deferredTickerCount: 0,
     warning: record.warning,
     phase: record.status === "completed" || record.status === "failed" ? record.status : "manual",
+    elapsedMs: record.status === "completed" || record.status === "failed" ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
+    durationMs: record.durationMs ?? (record.status === "completed" || record.status === "failed" ? computedElapsedMs : null),
+    cacheHitCount: record.cacheHitTickers,
+    computedCount: record.computedTickers,
+    missingBarsCount: record.missingBarsTickers,
+    insufficientHistoryCount: record.insufficientHistoryTickers,
+    errorCount: record.errorTickers,
+    staleBenchmarkCount: record.staleBenchmarkTickers,
+    appliesToPreset: options?.appliesToPreset ?? true,
   };
 }
 
@@ -2400,6 +2452,13 @@ function normalizeManualRunRecord(row: ManualRelativeStrengthRunRecord): ManualR
     processedTickers: Math.max(0, Math.trunc(Number(row.processedTickers ?? 0))),
     matchedTickers: Math.max(0, Math.trunc(Number(row.matchedTickers ?? 0))),
     cursorOffset: Math.max(0, Math.trunc(Number(row.cursorOffset ?? 0))),
+    cacheHitTickers: Math.max(0, Math.trunc(Number(row.cacheHitTickers ?? 0))),
+    computedTickers: Math.max(0, Math.trunc(Number(row.computedTickers ?? 0))),
+    missingBarsTickers: Math.max(0, Math.trunc(Number(row.missingBarsTickers ?? 0))),
+    insufficientHistoryTickers: Math.max(0, Math.trunc(Number(row.insufficientHistoryTickers ?? 0))),
+    errorTickers: Math.max(0, Math.trunc(Number(row.errorTickers ?? 0))),
+    staleBenchmarkTickers: Math.max(0, Math.trunc(Number(row.staleBenchmarkTickers ?? 0))),
+    durationMs: row.durationMs == null ? null : Math.max(0, Math.trunc(Number(row.durationMs) || 0)),
   };
 }
 
@@ -2431,7 +2490,14 @@ async function loadManualRelativeStrengthRun(env: Env, runId: string): Promise<M
        cursor_offset as cursorOffset,
        latest_snapshot_id as latestSnapshotId,
        lease_owner as leaseOwner,
-       lease_expires_at as leaseExpiresAt
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       stale_benchmark_tickers as staleBenchmarkTickers,
+       duration_ms as durationMs
      FROM rs_scan_runs
      WHERE id = ?
      LIMIT 1`,
@@ -2469,12 +2535,69 @@ async function loadActiveManualRelativeStrengthRun(env: Env): Promise<ManualRela
        cursor_offset as cursorOffset,
        latest_snapshot_id as latestSnapshotId,
        lease_owner as leaseOwner,
-       lease_expires_at as leaseExpiresAt
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       stale_benchmark_tickers as staleBenchmarkTickers,
+       duration_ms as durationMs
      FROM rs_scan_runs
      WHERE status IN ('queued', 'running')
      ORDER BY datetime(created_at) ASC
      LIMIT 1`,
   ).first<ManualRelativeStrengthRunRecord>();
+  return row ? normalizeManualRunRecord(row) : null;
+}
+
+async function loadLatestCompletedManualRelativeStrengthRunForConfig(
+  env: Env,
+  configKey: string,
+): Promise<ManualRelativeStrengthRunRecord | null> {
+  if (!hasManualRelativeStrengthStorage(env)) return null;
+  const row = await env.RS_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       stale_benchmark_tickers as staleBenchmarkTickers,
+       duration_ms as durationMs
+     FROM rs_scan_runs
+     WHERE config_key = ?
+       AND status = 'completed'
+     ORDER BY datetime(completed_at) DESC, datetime(created_at) DESC
+     LIMIT 1`,
+  )
+    .bind(configKey)
+    .first<ManualRelativeStrengthRunRecord>();
   return row ? normalizeManualRunRecord(row) : null;
 }
 
@@ -2487,6 +2610,7 @@ async function failManualRelativeStrengthRun(env: Env, runId: string, error: str
          completed_at = CURRENT_TIMESTAMP,
          updated_at = CURRENT_TIMESTAMP,
          heartbeat_at = CURRENT_TIMESTAMP,
+         duration_ms = CAST((julianday('now') - julianday(COALESCE(started_at, created_at))) * 86400000 AS INTEGER),
          lease_owner = NULL,
          lease_expires_at = NULL
      WHERE id = ?`,
@@ -2548,6 +2672,7 @@ async function loadManualRelativeStrengthUniverseCandidates(
       status: "queued",
       reason: null,
       latestTradingDate: null,
+      source: "computed",
     }))
     .filter((row) => normalizeTicker(row.ticker) != null);
 }
@@ -2562,8 +2687,8 @@ async function insertManualRelativeStrengthRunCandidates(
     await env.RS_DB.batch(chunk.map((row) =>
       env.RS_DB.prepare(
         `INSERT INTO rs_scan_run_tickers
-          (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL)`,
+          (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, 'computed')`,
       ).bind(
         runId,
         row.cursorOffset,
@@ -2653,7 +2778,8 @@ async function loadManualRelativeStrengthRunCandidateSlice(
        change_1d as change1d,
        status,
        reason,
-       latest_trading_date as latestTradingDate
+       latest_trading_date as latestTradingDate,
+       source
      FROM rs_scan_run_tickers
      WHERE run_id = ?
      ORDER BY cursor_offset ASC
@@ -2778,6 +2904,7 @@ async function upsertManualRelativeStrengthBatchResults(
     relativeVolume: number | null;
     priceAvgVolume: number | null;
     feature: RelativeStrengthLatestCacheRecord | null;
+    source: "cache" | "computed";
   }>,
 ): Promise<number> {
   let computedCount = 0;
@@ -2797,7 +2924,8 @@ async function upsertManualRelativeStrengthBatchResults(
                avg_volume = ?,
                relative_volume = ?,
                price_avg_volume = ?,
-               computed_at = CURRENT_TIMESTAMP
+               computed_at = CURRENT_TIMESTAMP,
+               source = ?
            WHERE run_id = ?
              AND ticker = ?`,
         ).bind(
@@ -2809,14 +2937,19 @@ async function upsertManualRelativeStrengthBatchResults(
           result.avgVolume,
           result.relativeVolume,
           result.priceAvgVolume,
+          result.source,
           run.id,
           result.candidate.ticker,
         ),
+      ];
+      if (result.source === "cache") return statements;
+      statements.push(
         env.RS_DB.prepare(
           `INSERT INTO rs_features_latest
-            (config_key, ticker, trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, status, reason, computed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (config_key, ticker, expected_trading_date, trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, status, reason, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(config_key, ticker) DO UPDATE SET
+             expected_trading_date = excluded.expected_trading_date,
              trading_date = excluded.trading_date,
              benchmark_ticker = excluded.benchmark_ticker,
              rs_ma_type = excluded.rs_ma_type,
@@ -2837,6 +2970,7 @@ async function upsertManualRelativeStrengthBatchResults(
         ).bind(
           run.configKey,
           result.candidate.ticker,
+          run.expectedTradingDate,
           feature?.tradingDate ?? result.latestTradingDate,
           run.benchmarkTicker,
           run.rsMaType,
@@ -2854,7 +2988,8 @@ async function upsertManualRelativeStrengthBatchResults(
           result.status,
           result.reason,
         ),
-      ];
+      );
+      return statements;
     });
     await env.RS_DB.batch(statements);
   }
@@ -2864,7 +2999,7 @@ async function upsertManualRelativeStrengthBatchResults(
 async function heartbeatManualRelativeStrengthRun(
   env: Env & { RS_DB: D1Database },
   runId: string,
-  updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
+  updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId" | "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "staleBenchmarkTickers" | "durationMs">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
 ): Promise<void> {
   const fields = ["updated_at = CURRENT_TIMESTAMP", "heartbeat_at = CURRENT_TIMESTAMP"];
   const values: unknown[] = [];
@@ -2883,6 +3018,34 @@ async function heartbeatManualRelativeStrengthRun(
   if (updates.cursorOffset != null) {
     fields.push("cursor_offset = ?");
     values.push(updates.cursorOffset);
+  }
+  if (updates.cacheHitTickers != null) {
+    fields.push("cache_hit_tickers = ?");
+    values.push(updates.cacheHitTickers);
+  }
+  if (updates.computedTickers != null) {
+    fields.push("computed_tickers = ?");
+    values.push(updates.computedTickers);
+  }
+  if (updates.missingBarsTickers != null) {
+    fields.push("missing_bars_tickers = ?");
+    values.push(updates.missingBarsTickers);
+  }
+  if (updates.insufficientHistoryTickers != null) {
+    fields.push("insufficient_history_tickers = ?");
+    values.push(updates.insufficientHistoryTickers);
+  }
+  if (updates.errorTickers != null) {
+    fields.push("error_tickers = ?");
+    values.push(updates.errorTickers);
+  }
+  if (updates.staleBenchmarkTickers != null) {
+    fields.push("stale_benchmark_tickers = ?");
+    values.push(updates.staleBenchmarkTickers);
+  }
+  if (updates.durationMs != null) {
+    fields.push("duration_ms = ?");
+    values.push(updates.durationMs);
   }
   if (updates.warning !== undefined) {
     fields.push("warning = ?");
@@ -2932,6 +3095,137 @@ async function acquireManualRelativeStrengthRunLease(
   return leased?.leaseOwner === leaseOwner ? leased : null;
 }
 
+async function loadLatestCompletedPostCloseDailyBarRefreshAt(
+  env: Env,
+  tradingDate: string,
+): Promise<number | null> {
+  const row = await env.DB.prepare(
+    `SELECT completed_at as completedAt
+     FROM post_close_daily_bar_refresh_jobs
+     WHERE scope = ?
+       AND trading_date = ?
+       AND status = 'completed'
+       AND completed_at IS NOT NULL
+     ORDER BY datetime(completed_at) DESC
+     LIMIT 1`,
+  )
+    .bind(POST_CLOSE_DAILY_BARS_SCOPE, tradingDate)
+    .first<{ completedAt: string | null }>();
+  return toTimestampMs(row?.completedAt);
+}
+
+async function loadManualRelativeStrengthFeatureCacheRows(
+  env: Env & { RS_DB: D1Database },
+  configKey: string,
+  tickers: string[],
+): Promise<Map<string, ManualRelativeStrengthFeatureRow>> {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const rowsByTicker = new Map<string, ManualRelativeStrengthFeatureRow>();
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.RS_DB.prepare(
+      `SELECT
+         config_key as configKey,
+         ticker,
+         expected_trading_date as expectedTradingDate,
+         trading_date as tradingDate,
+         benchmark_ticker as benchmarkTicker,
+         rs_ma_type as rsMaType,
+         rs_ma_length as rsMaLength,
+         new_high_lookback as newHighLookback,
+         price_close as priceClose,
+         change_1d as change1d,
+         rs_ratio_close as rsRatioClose,
+         rs_ratio_ma as rsRatioMa,
+         rs_above_ma as rsAboveMa,
+         rs_new_high as rsNewHigh,
+         rs_new_high_before_price as rsNewHighBeforePrice,
+         bull_cross as bullCross,
+         approx_rs_rating as approxRsRating,
+         status,
+         reason,
+         computed_at as computedAt
+       FROM rs_features_latest
+       WHERE config_key = ?
+         AND ticker IN (${placeholders})`,
+    )
+      .bind(configKey, ...chunk)
+      .all<ManualRelativeStrengthFeatureRow>();
+    for (const row of rows.results ?? []) {
+      rowsByTicker.set(row.ticker.toUpperCase(), {
+        ...row,
+        ticker: row.ticker.toUpperCase(),
+        benchmarkTicker: row.benchmarkTicker.toUpperCase(),
+        rsMaType: normalizeRsMaType(row.rsMaType),
+        rsMaLength: Math.max(1, Math.trunc(Number(row.rsMaLength || 21))),
+        newHighLookback: Math.max(1, Math.trunc(Number(row.newHighLookback || 252))),
+      });
+    }
+  }
+  return rowsByTicker;
+}
+
+function isReusableManualRelativeStrengthFeature(
+  row: ManualRelativeStrengthFeatureRow | undefined,
+  identity: RelativeStrengthConfigIdentity,
+  invalidatedAfterMs: number | null,
+): row is ManualRelativeStrengthFeatureRow {
+  if (!row) return false;
+  const expectedTradingDate = row.expectedTradingDate ?? row.tradingDate;
+  if (expectedTradingDate !== identity.expectedTradingDate) return false;
+  const computedAtMs = toTimestampMs(row.computedAt);
+  if (invalidatedAfterMs != null && computedAtMs != null && computedAtMs < invalidatedAfterMs) return false;
+  if (row.status === "computed") return row.tradingDate === identity.expectedTradingDate;
+  return row.status === "missing_bars" || row.status === "insufficient_history" || row.status === "stale_benchmark";
+}
+
+function cachedManualRelativeStrengthResult(
+  candidate: ManualRelativeStrengthCandidateRow,
+  feature: ManualRelativeStrengthFeatureRow,
+): {
+  candidate: ManualRelativeStrengthCandidateRow;
+  status: ManualRelativeStrengthTickerStatus;
+  reason: string | null;
+  latestTradingDate: string | null;
+  price: number | null;
+  change1d: number | null;
+  avgVolume: number | null;
+  relativeVolume: number | null;
+  priceAvgVolume: number | null;
+  feature: RelativeStrengthLatestCacheRecord | null;
+  source: "cache";
+} {
+  const price = feature.priceClose ?? candidate.price ?? null;
+  const avgVolume = candidate.avgVolume ?? null;
+  return {
+    candidate,
+    status: feature.status as ManualRelativeStrengthTickerStatus,
+    reason: feature.reason ?? null,
+    latestTradingDate: feature.tradingDate ?? candidate.latestTradingDate ?? null,
+    price,
+    change1d: feature.change1d ?? candidate.change1d ?? null,
+    avgVolume,
+    relativeVolume: candidate.relativeVolume ?? null,
+    priceAvgVolume: price != null && avgVolume != null ? price * avgVolume : candidate.priceAvgVolume ?? null,
+    feature,
+    source: "cache",
+  };
+}
+
+function countManualRelativeStrengthBatchStatus(
+  results: Array<{ status: ManualRelativeStrengthTickerStatus; source: "cache" | "computed" }>,
+): Pick<ManualRelativeStrengthRunRecord, "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "staleBenchmarkTickers"> {
+  return {
+    cacheHitTickers: results.filter((result) => result.source === "cache").length,
+    computedTickers: results.filter((result) => result.source === "computed" && result.status === "computed").length,
+    missingBarsTickers: results.filter((result) => result.status === "missing_bars").length,
+    insufficientHistoryTickers: results.filter((result) => result.status === "insufficient_history").length,
+    errorTickers: results.filter((result) => result.status === "error").length,
+    staleBenchmarkTickers: results.filter((result) => result.status === "stale_benchmark").length,
+  };
+}
+
 async function buildManualRelativeStrengthSnapshotResult(
   env: Env & { RS_DB: D1Database },
   preset: ScanPreset,
@@ -2961,10 +3255,12 @@ async function buildManualRelativeStrengthSnapshotResult(
        t.status,
        t.reason,
        t.latest_trading_date as latestTradingDate,
+       t.source,
        f.benchmark_ticker as benchmarkTicker,
        f.rs_ma_type as rsMaType,
        f.rs_ma_length as rsMaLength,
        f.new_high_lookback as newHighLookback,
+       f.expected_trading_date as expectedTradingDate,
        f.trading_date as tradingDate,
        f.price_close as priceClose,
        f.change_1d as featureChange1d,
@@ -3095,26 +3391,55 @@ async function buildManualRelativeStrengthSnapshotResult(
   };
 }
 
+async function listActiveRelativeStrengthPresetsForManualRunConfig(
+  env: Env,
+  run: ManualRelativeStrengthRunRecord,
+  requestedPreset: ScanPreset,
+): Promise<ScanPreset[]> {
+  const presets = (await listScanPresets(env))
+    .filter((preset) => preset.isActive && preset.scanType === "relative-strength")
+    .filter((preset) => buildRelativeStrengthConfigIdentity(preset, run.expectedTradingDate).configKey === run.configKey);
+  const byId = new Map<string, ScanPreset>();
+  byId.set(requestedPreset.id, requestedPreset);
+  for (const preset of presets) byId.set(preset.id, preset);
+  return Array.from(byId.values());
+}
+
 async function completeManualRelativeStrengthRun(
   env: Env & { RS_DB: D1Database },
   preset: ScanPreset,
   run: ManualRelativeStrengthRunRecord,
   matchedTickers: number,
 ): Promise<ScanSnapshot | null> {
-  const result = await buildManualRelativeStrengthSnapshotResult(env, preset, run);
-  await upsertSymbolsFromRows(env, result.rows);
-  const snapshotId = await storeScanSnapshotResult(env, preset, result);
+  const settings = await loadWorkerScheduleSettings(env);
+  const targetPresets = settings.rsSharedConfigSnapshotFanoutEnabled
+    ? await listActiveRelativeStrengthPresetsForManualRunConfig(env, run, preset)
+    : [preset];
+  let selectedSnapshot: ScanSnapshot | null = null;
+  let selectedSnapshotId: string | null = null;
+  let selectedWarning: string | null = null;
+  for (const targetPreset of targetPresets) {
+    const result = await buildManualRelativeStrengthSnapshotResult(env, targetPreset, run);
+    await upsertSymbolsFromRows(env, result.rows);
+    const snapshotId = await storeScanSnapshotResult(env, targetPreset, result);
+    if (targetPreset.id === preset.id) {
+      selectedSnapshotId = snapshotId;
+      selectedWarning = result.error;
+      selectedSnapshot = await loadLatestScansSnapshot(env, targetPreset.id);
+    }
+  }
   await heartbeatManualRelativeStrengthRun(env, run.id, {
     status: "completed",
     processedTickers: run.totalTickers,
     matchedTickers,
     cursorOffset: run.totalTickers,
-    warning: result.error,
-    latestSnapshotId: snapshotId,
+    warning: selectedWarning,
+    latestSnapshotId: selectedSnapshotId,
+    durationMs: elapsedMs(run.startedAt ?? run.createdAt) ?? undefined,
     completedAt: new Date().toISOString(),
     releaseLease: true,
   });
-  return loadLatestScansSnapshot(env, preset.id);
+  return selectedSnapshot ?? loadLatestScansSnapshot(env, preset.id);
 }
 
 export async function processManualRelativeStrengthScanRun(
@@ -3143,6 +3468,10 @@ export async function processManualRelativeStrengthScanRun(
   const benchmarkLatestDate = latestBarDate(benchmarkBars);
   if (benchmarkLatestDate !== identity.expectedTradingDate) {
     const message = `Benchmark ${identity.benchmarkTicker} is missing bars for ${identity.expectedTradingDate}. Latest stored bar is ${benchmarkLatestDate ?? "none"}.`;
+    await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
+      staleBenchmarkTickers: leasedRun.totalTickers,
+      durationMs: elapsedMs(leasedRun.startedAt ?? leasedRun.createdAt) ?? undefined,
+    });
     await failManualRelativeStrengthRun(env, leasedRun.id, message);
     const failed = await loadManualRelativeStrengthRun(env, leasedRun.id);
     return failed ? mapManualRunRecordToJob(failed) : null;
@@ -3151,14 +3480,43 @@ export async function processManualRelativeStrengthScanRun(
   let cursorOffset = leasedRun.cursorOffset;
   let processedTickers = leasedRun.processedTickers;
   let matchedTickers = leasedRun.matchedTickers;
+  let cacheHitTickers = leasedRun.cacheHitTickers;
+  let computedTickers = leasedRun.computedTickers;
+  let missingBarsTickers = leasedRun.missingBarsTickers;
+  let insufficientHistoryTickers = leasedRun.insufficientHistoryTickers;
+  let errorTickers = leasedRun.errorTickers;
+  let staleBenchmarkTickers = leasedRun.staleBenchmarkTickers;
   const config = rawRelativeStrengthConfig(identity);
+  const settings = await loadWorkerScheduleSettings(env);
+  const cacheReuseEnabled = settings.rsManualCacheReuseEnabled;
+  const cacheInvalidatedAfterMs = cacheReuseEnabled
+    ? await loadLatestCompletedPostCloseDailyBarRefreshAt(env, identity.expectedTradingDate)
+    : null;
 
   while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
     const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
     const tickers = candidates.map((candidate) => candidate.ticker);
-    const barsByTicker = groupBarsByTicker(await loadStoredDailyBarsByCount(env, tickers, identity.expectedTradingDate, identity.requiredBarCount));
-    const batchResults = candidates.map((candidate) => {
+    const cachedResults: Array<ReturnType<typeof cachedManualRelativeStrengthResult>> = [];
+    let computeCandidates = candidates;
+    if (cacheReuseEnabled) {
+      const cacheRowsByTicker = await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, tickers);
+      computeCandidates = [];
+      for (const candidate of candidates) {
+        const cached = cacheRowsByTicker.get(candidate.ticker);
+        if (isReusableManualRelativeStrengthFeature(cached, identity, cacheInvalidatedAfterMs)) {
+          cachedResults.push(cachedManualRelativeStrengthResult(candidate, cached));
+        } else {
+          computeCandidates.push(candidate);
+        }
+      }
+    }
+    const barsByTicker = groupBarsByTicker(
+      computeCandidates.length > 0
+        ? await loadStoredDailyBarsByCount(env, computeCandidates.map((candidate) => candidate.ticker), identity.expectedTradingDate, identity.requiredBarCount)
+        : [],
+    );
+    const computedResults = computeCandidates.map((candidate) => {
       try {
         const tickerBars = barsByTicker.get(candidate.ticker) ?? [];
         const latestTickerDate = latestBarDate(tickerBars);
@@ -3181,6 +3539,7 @@ export async function processManualRelativeStrengthScanRun(
             relativeVolume,
             priceAvgVolume,
             feature: null,
+            source: "computed" as const,
           };
         }
         if (latestTickerDate !== identity.expectedTradingDate) {
@@ -3195,6 +3554,7 @@ export async function processManualRelativeStrengthScanRun(
             relativeVolume,
             priceAvgVolume,
             feature: null,
+            source: "computed" as const,
           };
         }
         if (tickerBars.length < Math.max(identity.rsMaLength, Math.min(identity.newHighLookback, identity.requiredBarCount))) {
@@ -3209,6 +3569,7 @@ export async function processManualRelativeStrengthScanRun(
             relativeVolume,
             priceAvgVolume,
             feature: null,
+            source: "computed" as const,
           };
         }
         const computedRows = buildRelativeStrengthCacheRows(tickerBars, benchmarkBars, config);
@@ -3225,6 +3586,7 @@ export async function processManualRelativeStrengthScanRun(
             relativeVolume,
             priceAvgVolume,
             feature: null,
+            source: "computed" as const,
           };
         }
         return {
@@ -3254,6 +3616,7 @@ export async function processManualRelativeStrengthScanRun(
             bullCross: computed.bullCross,
             approxRsRating: computed.approxRsRating,
           },
+          source: "computed" as const,
         };
       } catch (error) {
         return {
@@ -3267,10 +3630,19 @@ export async function processManualRelativeStrengthScanRun(
           relativeVolume: null,
           priceAvgVolume: null,
           feature: null,
+          source: "computed" as const,
         };
       }
     });
+    const batchResults = [...cachedResults, ...computedResults];
     matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
+    const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
+    cacheHitTickers += batchCounts.cacheHitTickers;
+    computedTickers += batchCounts.computedTickers;
+    missingBarsTickers += batchCounts.missingBarsTickers;
+    insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
+    errorTickers += batchCounts.errorTickers;
+    staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
     cursorOffset += candidates.length;
     processedTickers = cursorOffset;
     await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
@@ -3278,6 +3650,12 @@ export async function processManualRelativeStrengthScanRun(
       processedTickers,
       matchedTickers,
       cursorOffset,
+      cacheHitTickers,
+      computedTickers,
+      missingBarsTickers,
+      insufficientHistoryTickers,
+      errorTickers,
+      staleBenchmarkTickers,
     });
   }
 
@@ -5884,11 +6262,12 @@ export async function requestScansRefresh(
         job: null,
       };
     }
+    const identity = buildRelativeStrengthConfigIdentity(preset);
     const run = await createManualRelativeStrengthRun(env, preset, requestedBy);
     return {
       async: isActiveScanStatus(run.status),
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
-      job: mapManualRunRecordToJob(run),
+      job: mapManualRunRecordToJob(run, { appliesToPreset: run.configKey === identity.configKey }),
     };
   }
   const identity = buildRelativeStrengthConfigIdentity(preset);
@@ -6068,14 +6447,23 @@ export async function loadLatestActiveScanRefreshJob(
 ): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
   const preset = await loadScanPreset(env, presetId);
   if (!preset || preset.scanType !== "relative-strength") return null;
+  const identity = buildRelativeStrengthConfigIdentity(preset);
   const manualRun = await loadActiveManualRelativeStrengthRun(env);
-  if (manualRun?.presetId === presetId) {
+  if (manualRun) {
+    const appliesToPreset = manualRun.configKey === identity.configKey;
     return {
-      job: mapManualRunRecordToJob(manualRun),
+      job: mapManualRunRecordToJob(manualRun, { appliesToPreset }),
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
     };
   }
-  if (hasManualRelativeStrengthStorage(env)) return null;
+  if (hasManualRelativeStrengthStorage(env)) {
+    const completed = await loadLatestCompletedManualRelativeStrengthRunForConfig(env, identity.configKey);
+    if (!completed) return null;
+    return {
+      job: mapManualRunRecordToJob(completed, { appliesToPreset: true }),
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+    };
+  }
   const record = await loadLatestScanRefreshJobRecordForPreset(env, presetId, { activeOnly: true });
   if (!record) return null;
   return {

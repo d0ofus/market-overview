@@ -147,6 +147,8 @@ export function AdminOperationsDashboard() {
         rsBackgroundBatchSize: workerSchedule.rsBackgroundBatchSize,
         rsBackgroundMaxBatchesPerTick: workerSchedule.rsBackgroundMaxBatchesPerTick,
         rsBackgroundTimeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+        rsManualCacheReuseEnabled: workerSchedule.rsManualCacheReuseEnabled,
+        rsSharedConfigSnapshotFanoutEnabled: workerSchedule.rsSharedConfigSnapshotFanoutEnabled,
         postCloseBarsEnabled: workerSchedule.postCloseBarsEnabled,
         postCloseBarsOffsetMinutes: workerSchedule.postCloseBarsOffsetMinutes,
         postCloseBarsBatchSize: workerSchedule.postCloseBarsBatchSize,
@@ -336,6 +338,20 @@ export function AdminOperationsDashboard() {
                         </button>
                       </div>
                       <div className="mt-4 grid gap-4 md:grid-cols-3">
+                        <button
+                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
+                          onClick={() => setWorkerSchedule((current) => current ? { ...current, rsManualCacheReuseEnabled: !current.rsManualCacheReuseEnabled } : current)}
+                          type="button"
+                        >
+                          Manual cache reuse: {workerSchedule.rsManualCacheReuseEnabled ? "Enabled" : "Disabled"}
+                        </button>
+                        <button
+                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
+                          onClick={() => setWorkerSchedule((current) => current ? { ...current, rsSharedConfigSnapshotFanoutEnabled: !current.rsSharedConfigSnapshotFanoutEnabled } : current)}
+                          type="button"
+                        >
+                          Shared config fanout: {workerSchedule.rsSharedConfigSnapshotFanoutEnabled ? "Enabled" : "Disabled"}
+                        </button>
                         <label className="text-xs text-slate-300">
                           Tickers per RS batch
                           <input

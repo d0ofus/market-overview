@@ -8,6 +8,8 @@ type WorkerScheduleRowState = {
   rsBackgroundBatchSize: number;
   rsBackgroundMaxBatchesPerTick: number;
   rsBackgroundTimeBudgetMs: number;
+  rsManualCacheReuseEnabled: number;
+  rsSharedConfigSnapshotFanoutEnabled: number;
   postCloseBarsEnabled: number;
   postCloseBarsOffsetMinutes: number;
   postCloseBarsBatchSize: number;
@@ -22,6 +24,8 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
       rsBackgroundBatchSize: initial.rsBackgroundBatchSize ?? 50,
       rsBackgroundMaxBatchesPerTick: initial.rsBackgroundMaxBatchesPerTick ?? 20,
       rsBackgroundTimeBudgetMs: initial.rsBackgroundTimeBudgetMs ?? 15_000,
+      rsManualCacheReuseEnabled: initial.rsManualCacheReuseEnabled ?? 1,
+      rsSharedConfigSnapshotFanoutEnabled: initial.rsSharedConfigSnapshotFanoutEnabled ?? 1,
       postCloseBarsEnabled: initial.postCloseBarsEnabled ?? 1,
       postCloseBarsOffsetMinutes: initial.postCloseBarsOffsetMinutes ?? 60,
       postCloseBarsBatchSize: initial.postCloseBarsBatchSize ?? 400,
@@ -48,6 +52,8 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                   rsBackgroundBatchSize: row.rsBackgroundBatchSize,
                   rsBackgroundMaxBatchesPerTick: row.rsBackgroundMaxBatchesPerTick,
                   rsBackgroundTimeBudgetMs: row.rsBackgroundTimeBudgetMs,
+                  rsManualCacheReuseEnabled: row.rsManualCacheReuseEnabled,
+                  rsSharedConfigSnapshotFanoutEnabled: row.rsSharedConfigSnapshotFanoutEnabled,
                   postCloseBarsEnabled: row.postCloseBarsEnabled,
                   postCloseBarsOffsetMinutes: row.postCloseBarsOffsetMinutes,
                   postCloseBarsBatchSize: row.postCloseBarsBatchSize,
@@ -62,6 +68,8 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                     rsBackgroundBatchSize: Number(args[1] ?? 50),
                     rsBackgroundMaxBatchesPerTick: Number(args[2] ?? 20),
                     rsBackgroundTimeBudgetMs: Number(args[3] ?? 15_000),
+                    rsManualCacheReuseEnabled: 1,
+                    rsSharedConfigSnapshotFanoutEnabled: 1,
                     postCloseBarsEnabled: 1,
                     postCloseBarsOffsetMinutes: Number(args[4] ?? 60),
                     postCloseBarsBatchSize: Number(args[5] ?? 400),
@@ -75,10 +83,12 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
                     rsBackgroundBatchSize: Number(args[2] ?? 50),
                     rsBackgroundMaxBatchesPerTick: Number(args[3] ?? 20),
                     rsBackgroundTimeBudgetMs: Number(args[4] ?? 15_000),
-                    postCloseBarsEnabled: Number(args[5] ?? 1),
-                    postCloseBarsOffsetMinutes: Number(args[6] ?? 60),
-                    postCloseBarsBatchSize: Number(args[7] ?? 400),
-                    postCloseBarsMaxBatchesPerTick: Number(args[8] ?? 4),
+                    rsManualCacheReuseEnabled: Number(args[5] ?? 1),
+                    rsSharedConfigSnapshotFanoutEnabled: Number(args[6] ?? 1),
+                    postCloseBarsEnabled: Number(args[7] ?? 1),
+                    postCloseBarsOffsetMinutes: Number(args[8] ?? 60),
+                    postCloseBarsBatchSize: Number(args[9] ?? 400),
+                    postCloseBarsMaxBatchesPerTick: Number(args[10] ?? 4),
                   };
                 }
                 return {};
@@ -120,6 +130,8 @@ describe("worker schedule service", () => {
       rsBackgroundBatchSize: 40,
       rsBackgroundMaxBatchesPerTick: 8,
       rsBackgroundTimeBudgetMs: 12_000,
+      rsManualCacheReuseEnabled: false,
+      rsSharedConfigSnapshotFanoutEnabled: false,
       postCloseBarsEnabled: true,
       postCloseBarsOffsetMinutes: 75,
       postCloseBarsBatchSize: 600,
@@ -129,6 +141,8 @@ describe("worker schedule service", () => {
     expect(updated.rsBackgroundEnabled).toBe(false);
     expect(updated.rsBackgroundBatchSize).toBe(40);
     expect(updated.rsBackgroundMaxBatchesPerTick).toBe(8);
+    expect(updated.rsManualCacheReuseEnabled).toBe(false);
+    expect(updated.rsSharedConfigSnapshotFanoutEnabled).toBe(false);
     expect(updated.postCloseBarsBatchSize).toBe(600);
     expect(updated.postCloseBarsOffsetMinutes).toBe(75);
   });

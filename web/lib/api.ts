@@ -316,6 +316,15 @@ export type ScanRefreshJob = {
   deferredTickerCount: number;
   warning: string | null;
   phase: string | null;
+  elapsedMs?: number | null;
+  durationMs?: number | null;
+  cacheHitCount?: number;
+  computedCount?: number;
+  missingBarsCount?: number;
+  insufficientHistoryCount?: number;
+  errorCount?: number;
+  staleBenchmarkCount?: number;
+  appliesToPreset?: boolean;
 };
 
 export type ScanRefreshResponse = {
@@ -908,6 +917,8 @@ export type WorkerScheduleSettings = {
   rsBackgroundBatchSize: number;
   rsBackgroundMaxBatchesPerTick: number;
   rsBackgroundTimeBudgetMs: number;
+  rsManualCacheReuseEnabled: boolean;
+  rsSharedConfigSnapshotFanoutEnabled: boolean;
   postCloseBarsEnabled: boolean;
   postCloseBarsOffsetMinutes: number;
   postCloseBarsBatchSize: number;

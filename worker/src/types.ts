@@ -95,6 +95,8 @@ export type WorkerScheduleSettings = {
   rsBackgroundBatchSize: number;
   rsBackgroundMaxBatchesPerTick: number;
   rsBackgroundTimeBudgetMs: number;
+  rsManualCacheReuseEnabled: boolean;
+  rsSharedConfigSnapshotFanoutEnabled: boolean;
   postCloseBarsEnabled: boolean;
   postCloseBarsOffsetMinutes: number;
   postCloseBarsBatchSize: number;

@@ -205,6 +205,37 @@ function formatDateTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function formatDurationMs(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (value < 1000) return `${Math.max(0, Math.round(value))}ms`;
+  const seconds = Math.round(value / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
+function formatRsRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | null): string {
+  if (job.appliesToPreset === false) {
+    return `Another RS refresh is ${job.status} for ${job.presetName}; ${job.processedCandidates}/${job.fullCandidateCount} checked for ${job.expectedTradingDate ?? "the latest session"}.`;
+  }
+  const runtime = job.status === "running" || job.status === "queued"
+    ? `elapsed ${formatDurationMs(job.elapsedMs)}`
+    : `completed in ${formatDurationMs(job.durationMs ?? job.elapsedMs)}`;
+  const verified = job.status === "completed" && snapshot && snapshot.status !== "error"
+    ? " Latest-session output verified."
+    : "";
+  const counts = [
+    `${job.processedCandidates}/${job.fullCandidateCount} checked`,
+    `${job.cacheHitCount ?? job.alreadyCurrentCandidateCount ?? 0} cache reused`,
+    `${job.computedCount ?? job.matchedCandidates ?? 0} newly computed`,
+    `${job.missingBarsCount ?? 0} missing bars`,
+    `${job.insufficientHistoryCount ?? 0} insufficient history`,
+    `${job.errorCount ?? 0} errors`,
+  ];
+  return `RS refresh ${job.status} for ${job.expectedTradingDate ?? "the latest session"} (${runtime}): ${counts.join(", ")}.${verified}${snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}`;
+}
+
 function formatNumber(value: number | null | undefined, digits = 2): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   return value.toFixed(digits);
@@ -862,7 +893,7 @@ export function ScansPageDashboard() {
       setNewsByTicker({});
       if (response.async && response.job) {
         setMessage(
-          `Started RS cache materialization for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.materializationCandidateCount} stale tickers processed so far, ${response.job.alreadyCurrentCandidateCount} already current out of ${response.job.fullCandidateCount}.`,
+          `Started RS refresh for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.fullCandidateCount} checked, ${response.job.cacheHitCount ?? 0} cache reused, ${response.job.computedCount ?? 0} newly computed.`,
         );
       } else if (response.snapshot) {
         setMessage(
@@ -1595,8 +1626,7 @@ export function ScansPageDashboard() {
               </p>
               {refreshJob ? (
                 <p className="mt-1 text-xs text-slate-400">
-                  Refresh job: {refreshJob.status} - {refreshJob.processedCandidates}/{refreshJob.materializationCandidateCount} stale tickers materialized, {refreshJob.alreadyCurrentCandidateCount} already current out of {refreshJob.fullCandidateCount} total, {refreshJob.matchedCandidates} cached for {refreshJob.expectedTradingDate ?? "the latest session"}{refreshJob.lastAdvancedAt ? `, last advanced ${formatDateTime(refreshJob.lastAdvancedAt)}.` : "."}
-                  {snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}
+                  {formatRsRefreshSummary(refreshJob, snapshot)}
                 </p>
               ) : null}
             </div>
