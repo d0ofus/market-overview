@@ -4,6 +4,7 @@ import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import {
   advanceRelativeStrengthState,
   bootstrapRelativeStrengthStateFromRatioRows,
+  buildRelativeStrengthCacheRows,
   buildRelativeStrengthCacheRowsFromRatioRows,
   buildRelativeStrengthRatioRows,
   RS_STATE_VERSION,
@@ -362,6 +363,60 @@ type RelativeStrengthRatioCoverageRow = {
   rowCount: number | null;
 };
 
+type ManualRelativeStrengthRunRecord = {
+  id: string;
+  presetId: string;
+  presetName: string;
+  configKey: string;
+  benchmarkTicker: string;
+  rsMaType: RelativeStrengthMaType;
+  rsMaLength: number;
+  newHighLookback: number;
+  expectedTradingDate: string;
+  status: ScanRefreshJobStatus;
+  requestedBy: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  updatedAt: string;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  warning: string | null;
+  totalTickers: number;
+  processedTickers: number;
+  matchedTickers: number;
+  cursorOffset: number;
+  latestSnapshotId: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+};
+
+type ManualRelativeStrengthCandidateRow = {
+  cursorOffset: number;
+  ticker: string;
+  name: string | null;
+  sector: string | null;
+  industry: string | null;
+  exchange: string | null;
+  assetClass: string | null;
+  marketCap: number | null;
+  relativeVolume: number | null;
+  avgVolume: number | null;
+  priceAvgVolume: number | null;
+  price: number | null;
+  change1d: number | null;
+  status: string;
+  reason: string | null;
+  latestTradingDate: string | null;
+};
+
+type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
+  configKey: string;
+  status: string;
+  reason: string | null;
+  computedAt: string;
+};
+
 type TradingViewFilter = {
   left: string;
   operation: string;
@@ -415,6 +470,11 @@ const RS_JOB_CONTINUATION_STALE_MS = 8000;
 const RS_JOB_RECOVERY_STALE_MS = 30000;
 const RS_INCREMENTAL_ADVANCE_MAX_BARS = 20;
 const RS_STALE_TOP_UP_LIMIT = 120;
+const MANUAL_RS_SCAN_BATCH_SIZE = 40;
+const MANUAL_RS_SCAN_TIME_BUDGET_MS = 20_000;
+const MANUAL_RS_SCAN_LEASE_DURATION_MS = 60_000;
+const MANUAL_RS_SCAN_STALE_RUN_MS = 30 * 60_000;
+const MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE = 10_000;
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -751,6 +811,36 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     deferredTickerCount: record.deferredTickerCount,
     warning: record.warning,
     phase: record.phase,
+  };
+}
+
+function mapManualRunRecordToJob(record: ManualRelativeStrengthRunRecord): ScanRefreshJob {
+  return {
+    id: record.id,
+    presetId: record.presetId,
+    presetName: record.presetName,
+    jobType: "relative-strength",
+    status: record.status,
+    startedAt: record.startedAt ?? record.createdAt,
+    updatedAt: record.updatedAt,
+    completedAt: record.completedAt,
+    error: record.error,
+    totalCandidates: record.totalTickers,
+    processedCandidates: record.processedTickers,
+    matchedCandidates: record.matchedTickers,
+    cursorOffset: record.cursorOffset,
+    latestSnapshotId: record.latestSnapshotId,
+    requestedBy: record.requestedBy,
+    configKey: record.configKey,
+    sharedRunId: record.id,
+    expectedTradingDate: record.expectedTradingDate,
+    fullCandidateCount: record.totalTickers,
+    materializationCandidateCount: record.totalTickers,
+    alreadyCurrentCandidateCount: 0,
+    lastAdvancedAt: record.heartbeatAt ?? record.updatedAt,
+    deferredTickerCount: 0,
+    warning: record.warning,
+    phase: record.status === "completed" || record.status === "failed" ? record.status : "manual",
   };
 }
 
@@ -2274,6 +2364,934 @@ async function loadStoredDailyBarsByCount(
     );
   }
   return out;
+}
+
+function hasManualRelativeStrengthStorage(env: Env): env is Env & { RS_DB: D1Database } {
+  return Boolean(env.RS_DB);
+}
+
+function isActiveScanStatus(status: string | null | undefined): boolean {
+  return status === "queued" || status === "running";
+}
+
+function isManualRelativeStrengthRunLeaseActive(run: Pick<ManualRelativeStrengthRunRecord, "leaseOwner" | "leaseExpiresAt">): boolean {
+  if (!run.leaseOwner || !run.leaseExpiresAt) return false;
+  const expiresAt = toTimestampMs(run.leaseExpiresAt);
+  return expiresAt != null && expiresAt > Date.now();
+}
+
+function isManualRelativeStrengthRunAbandoned(run: ManualRelativeStrengthRunRecord): boolean {
+  if (!isActiveScanStatus(run.status)) return false;
+  if (isManualRelativeStrengthRunLeaseActive(run)) return false;
+  const updatedAt = toTimestampMs(run.heartbeatAt ?? run.updatedAt);
+  return updatedAt != null && Date.now() - updatedAt > MANUAL_RS_SCAN_STALE_RUN_MS;
+}
+
+function normalizeManualRunRecord(row: ManualRelativeStrengthRunRecord): ManualRelativeStrengthRunRecord {
+  return {
+    ...row,
+    presetId: row.presetId,
+    presetName: row.presetName,
+    benchmarkTicker: row.benchmarkTicker.toUpperCase(),
+    rsMaType: normalizeRsMaType(row.rsMaType),
+    rsMaLength: Math.max(1, Math.trunc(row.rsMaLength || 21)),
+    newHighLookback: Math.max(1, Math.trunc(row.newHighLookback || 252)),
+    totalTickers: Math.max(0, Math.trunc(Number(row.totalTickers ?? 0))),
+    processedTickers: Math.max(0, Math.trunc(Number(row.processedTickers ?? 0))),
+    matchedTickers: Math.max(0, Math.trunc(Number(row.matchedTickers ?? 0))),
+    cursorOffset: Math.max(0, Math.trunc(Number(row.cursorOffset ?? 0))),
+  };
+}
+
+async function loadManualRelativeStrengthRun(env: Env, runId: string): Promise<ManualRelativeStrengthRunRecord | null> {
+  if (!hasManualRelativeStrengthStorage(env)) return null;
+  const row = await env.RS_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt
+     FROM rs_scan_runs
+     WHERE id = ?
+     LIMIT 1`,
+  )
+    .bind(runId)
+    .first<ManualRelativeStrengthRunRecord>();
+  return row ? normalizeManualRunRecord(row) : null;
+}
+
+async function loadActiveManualRelativeStrengthRun(env: Env): Promise<ManualRelativeStrengthRunRecord | null> {
+  if (!hasManualRelativeStrengthStorage(env)) return null;
+  const row = await env.RS_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt
+     FROM rs_scan_runs
+     WHERE status IN ('queued', 'running')
+     ORDER BY datetime(created_at) ASC
+     LIMIT 1`,
+  ).first<ManualRelativeStrengthRunRecord>();
+  return row ? normalizeManualRunRecord(row) : null;
+}
+
+async function failManualRelativeStrengthRun(env: Env, runId: string, error: string): Promise<void> {
+  if (!hasManualRelativeStrengthStorage(env)) return;
+  await env.RS_DB.prepare(
+    `UPDATE rs_scan_runs
+     SET status = 'failed',
+         error = ?,
+         completed_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP,
+         heartbeat_at = CURRENT_TIMESTAMP,
+         lease_owner = NULL,
+         lease_expires_at = NULL
+     WHERE id = ?`,
+  )
+    .bind(error, runId)
+    .run();
+}
+
+async function loadManualRelativeStrengthUniverseCandidates(
+  env: Env,
+  expectedTradingDate: string,
+): Promise<ManualRelativeStrengthCandidateRow[]> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       s.ticker,
+       s.name,
+       s.sector,
+       s.industry,
+       s.exchange,
+       s.asset_class as assetClass
+     FROM symbols s
+     WHERE COALESCE(s.is_active, 1) = 1
+       AND LOWER(COALESCE(s.asset_class, 'equity')) IN ('equity', 'stock', 'stocks', 'common_stock', 'common stock')
+       AND EXISTS (
+         SELECT 1
+         FROM daily_bars d
+         WHERE d.ticker = s.ticker
+           AND d.date <= ?
+         LIMIT 1
+       )
+     ORDER BY s.ticker ASC
+     LIMIT ?`,
+  )
+    .bind(expectedTradingDate, MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE)
+    .all<{
+      ticker: string;
+      name: string | null;
+      sector: string | null;
+      industry: string | null;
+      exchange: string | null;
+      assetClass: string | null;
+    }>();
+
+  return (rows.results ?? [])
+    .map((row, index) => ({
+      cursorOffset: index,
+      ticker: row.ticker.toUpperCase(),
+      name: row.name ?? row.ticker.toUpperCase(),
+      sector: row.sector ?? null,
+      industry: row.industry ?? null,
+      exchange: row.exchange ?? null,
+      assetClass: row.assetClass ?? null,
+      marketCap: null,
+      relativeVolume: null,
+      avgVolume: null,
+      priceAvgVolume: null,
+      price: null,
+      change1d: null,
+      status: "queued",
+      reason: null,
+      latestTradingDate: null,
+    }))
+    .filter((row) => normalizeTicker(row.ticker) != null);
+}
+
+async function insertManualRelativeStrengthRunCandidates(
+  env: Env & { RS_DB: D1Database },
+  runId: string,
+  candidates: ManualRelativeStrengthCandidateRow[],
+): Promise<void> {
+  for (let index = 0; index < candidates.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = candidates.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    await env.RS_DB.batch(chunk.map((row) =>
+      env.RS_DB.prepare(
+        `INSERT INTO rs_scan_run_tickers
+          (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL)`,
+      ).bind(
+        runId,
+        row.cursorOffset,
+        row.ticker,
+        row.name,
+        row.sector,
+        row.industry,
+        row.exchange,
+        row.assetClass,
+        row.marketCap,
+        row.relativeVolume,
+        row.avgVolume,
+        row.priceAvgVolume,
+        row.price,
+        row.change1d,
+      )));
+  }
+}
+
+async function createManualRelativeStrengthRun(
+  env: Env & { RS_DB: D1Database },
+  preset: ScanPreset,
+  requestedBy?: string | null,
+): Promise<ManualRelativeStrengthRunRecord> {
+  const active = await loadActiveManualRelativeStrengthRun(env);
+  if (active && !isManualRelativeStrengthRunAbandoned(active)) return active;
+  if (active) {
+    await failManualRelativeStrengthRun(env, active.id, "Manual relative strength run was abandoned and replaced by a new request.");
+  }
+
+  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const candidates = await loadManualRelativeStrengthUniverseCandidates(env, identity.expectedTradingDate);
+  const runId = crypto.randomUUID();
+  try {
+    await env.RS_DB.prepare(
+      `INSERT INTO rs_scan_runs
+        (id, preset_id, preset_name, config_key, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, expected_trading_date, status, requested_by, total_tickers, processed_tickers, matched_tickers, cursor_offset, created_at, updated_at, warning)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+    )
+      .bind(
+        runId,
+        preset.id,
+        preset.name,
+        identity.configKey,
+        identity.benchmarkTicker,
+        identity.rsMaType,
+        identity.rsMaLength,
+        identity.newHighLookback,
+        identity.expectedTradingDate,
+        requestedBy ?? null,
+        candidates.length,
+      )
+      .run();
+    await insertManualRelativeStrengthRunCandidates(env, runId, candidates);
+  } catch (error) {
+    const existing = await loadActiveManualRelativeStrengthRun(env);
+    if (existing) return existing;
+    await env.RS_DB.prepare("DELETE FROM rs_scan_runs WHERE id = ?").bind(runId).run();
+    throw error;
+  }
+
+  const created = await loadManualRelativeStrengthRun(env, runId);
+  if (!created) throw new Error("Failed to create manual relative strength scan run.");
+  return created;
+}
+
+async function loadManualRelativeStrengthRunCandidateSlice(
+  env: Env & { RS_DB: D1Database },
+  runId: string,
+  cursorOffset: number,
+  limit: number,
+): Promise<ManualRelativeStrengthCandidateRow[]> {
+  const rows = await env.RS_DB.prepare(
+    `SELECT
+       cursor_offset as cursorOffset,
+       ticker,
+       name,
+       sector,
+       industry,
+       exchange,
+       asset_class as assetClass,
+       market_cap as marketCap,
+       relative_volume as relativeVolume,
+       avg_volume as avgVolume,
+       price_avg_volume as priceAvgVolume,
+       price,
+       change_1d as change1d,
+       status,
+       reason,
+       latest_trading_date as latestTradingDate
+     FROM rs_scan_run_tickers
+     WHERE run_id = ?
+     ORDER BY cursor_offset ASC
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(runId, limit, cursorOffset)
+    .all<ManualRelativeStrengthCandidateRow>();
+  return (rows.results ?? []).map((row) => ({
+    ...row,
+    ticker: row.ticker.toUpperCase(),
+    marketCap: row.marketCap == null ? null : Number(row.marketCap),
+    relativeVolume: row.relativeVolume == null ? null : Number(row.relativeVolume),
+    avgVolume: row.avgVolume == null ? null : Number(row.avgVolume),
+    priceAvgVolume: row.priceAvgVolume == null ? null : Number(row.priceAvgVolume),
+    price: row.price == null ? null : Number(row.price),
+    change1d: row.change1d == null ? null : Number(row.change1d),
+  }));
+}
+
+function percentChange(now: number | null | undefined, previous: number | null | undefined): number | null {
+  if (now == null || previous == null || !Number.isFinite(now) || !Number.isFinite(previous) || previous === 0) return null;
+  return ((now - previous) / previous) * 100;
+}
+
+function averageVolume(bars: RelativeStrengthDailyBar[], length: number): number | null {
+  const values = bars
+    .slice(-length)
+    .map((bar) => Number((bar as { volume?: number }).volume ?? 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function manualCandidateType(assetClass: string | null): string | null {
+  const normalized = String(assetClass ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "equity" || normalized === "stock" || normalized === "stocks") return "stock";
+  return normalized;
+}
+
+function manualRuleFieldSupported(rule: ScanPresetRule): boolean {
+  const supported = new Set([
+    "ticker",
+    "name",
+    "sector",
+    "industry",
+    "change",
+    "relative_volume_10d_calc",
+    "close",
+    "average_volume_30d_calc",
+    "Value.Traded",
+    "volume",
+    "exchange",
+    "type",
+    "rs_close",
+    "rs_ma",
+    "approx_rs_rating",
+  ]);
+  const field = normalizeFieldName(rule.field);
+  if (!supported.has(field)) return false;
+  if (isFieldReferenceValue(rule.value)) return supported.has(normalizeFieldName(rule.value.field));
+  return true;
+}
+
+function manualRulesWarning(preset: ScanPreset): string | null {
+  const unsupported = preset.rules
+    .filter((rule) => !manualRuleFieldSupported(rule))
+    .map((rule) => rule.field);
+  if (unsupported.length === 0) return null;
+  return `Skipped unsupported local RS rule fields: ${Array.from(new Set(unsupported)).join(", ")}.`;
+}
+
+function manualRowToTradingViewRow(
+  row: ScanSnapshotRow,
+  candidate: ManualRelativeStrengthCandidateRow,
+  latestVolume: number | null,
+): TradingViewScanRow {
+  return {
+    ticker: row.ticker,
+    name: row.name,
+    sector: row.sector,
+    industry: row.industry,
+    change1d: row.change1d,
+    marketCap: row.marketCap,
+    relativeVolume: row.relativeVolume,
+    price: row.price,
+    avgVolume: row.avgVolume,
+    priceAvgVolume: row.priceAvgVolume,
+    volume: latestVolume,
+    exchange: candidate.exchange,
+    type: manualCandidateType(candidate.assetClass),
+    raw: {
+      rsClose: row.rsClose,
+      rs_close: row.rsClose,
+      rsMa: row.rsMa,
+      rs_ma: row.rsMa,
+      rsAboveMa: row.rsAboveMa,
+      rs_above_ma: row.rsAboveMa,
+      rsNewHigh: row.rsNewHigh,
+      rs_new_high: row.rsNewHigh,
+      rsNewHighBeforePrice: row.rsNewHighBeforePrice,
+      rs_new_high_before_price: row.rsNewHighBeforePrice,
+      bullCross: row.bullCross,
+      bull_cross: row.bullCross,
+      approxRsRating: row.approxRsRating,
+      approx_rs_rating: row.approxRsRating,
+    },
+  };
+}
+
+async function upsertManualRelativeStrengthBatchResults(
+  env: Env & { RS_DB: D1Database },
+  run: ManualRelativeStrengthRunRecord,
+  results: Array<{
+    candidate: ManualRelativeStrengthCandidateRow;
+    status: "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
+    reason: string | null;
+    latestTradingDate: string | null;
+    price: number | null;
+    change1d: number | null;
+    avgVolume: number | null;
+    relativeVolume: number | null;
+    priceAvgVolume: number | null;
+    feature: RelativeStrengthLatestCacheRecord | null;
+  }>,
+): Promise<number> {
+  let computedCount = 0;
+  for (let index = 0; index < results.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = results.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    const statements = chunk.flatMap((result) => {
+      if (result.status === "computed") computedCount += 1;
+      const feature = result.feature;
+      return [
+        env.RS_DB.prepare(
+          `UPDATE rs_scan_run_tickers
+           SET status = ?,
+               reason = ?,
+               latest_trading_date = ?,
+               price = ?,
+               change_1d = ?,
+               avg_volume = ?,
+               relative_volume = ?,
+               price_avg_volume = ?,
+               computed_at = CURRENT_TIMESTAMP
+           WHERE run_id = ?
+             AND ticker = ?`,
+        ).bind(
+          result.status,
+          result.reason,
+          result.latestTradingDate,
+          result.price,
+          result.change1d,
+          result.avgVolume,
+          result.relativeVolume,
+          result.priceAvgVolume,
+          run.id,
+          result.candidate.ticker,
+        ),
+        env.RS_DB.prepare(
+          `INSERT INTO rs_features_latest
+            (config_key, ticker, trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, status, reason, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(config_key, ticker) DO UPDATE SET
+             trading_date = excluded.trading_date,
+             benchmark_ticker = excluded.benchmark_ticker,
+             rs_ma_type = excluded.rs_ma_type,
+             rs_ma_length = excluded.rs_ma_length,
+             new_high_lookback = excluded.new_high_lookback,
+             price_close = excluded.price_close,
+             change_1d = excluded.change_1d,
+             rs_ratio_close = excluded.rs_ratio_close,
+             rs_ratio_ma = excluded.rs_ratio_ma,
+             rs_above_ma = excluded.rs_above_ma,
+             rs_new_high = excluded.rs_new_high,
+             rs_new_high_before_price = excluded.rs_new_high_before_price,
+             bull_cross = excluded.bull_cross,
+             approx_rs_rating = excluded.approx_rs_rating,
+             status = excluded.status,
+             reason = excluded.reason,
+             computed_at = CURRENT_TIMESTAMP`,
+        ).bind(
+          run.configKey,
+          result.candidate.ticker,
+          feature?.tradingDate ?? result.latestTradingDate,
+          run.benchmarkTicker,
+          run.rsMaType,
+          run.rsMaLength,
+          run.newHighLookback,
+          feature?.priceClose ?? result.price,
+          feature?.change1d ?? result.change1d,
+          feature?.rsRatioClose ?? null,
+          feature?.rsRatioMa ?? null,
+          feature ? (asBooleanFlag(feature.rsAboveMa) ? 1 : 0) : 0,
+          feature ? (asBooleanFlag(feature.rsNewHigh) ? 1 : 0) : 0,
+          feature ? (asBooleanFlag(feature.rsNewHighBeforePrice) ? 1 : 0) : 0,
+          feature ? (asBooleanFlag(feature.bullCross) ? 1 : 0) : 0,
+          feature?.approxRsRating ?? null,
+          result.status,
+          result.reason,
+        ),
+      ];
+    });
+    await env.RS_DB.batch(statements);
+  }
+  return computedCount;
+}
+
+async function heartbeatManualRelativeStrengthRun(
+  env: Env & { RS_DB: D1Database },
+  runId: string,
+  updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
+): Promise<void> {
+  const fields = ["updated_at = CURRENT_TIMESTAMP", "heartbeat_at = CURRENT_TIMESTAMP"];
+  const values: unknown[] = [];
+  if (updates.status != null) {
+    fields.push("status = ?");
+    values.push(updates.status);
+  }
+  if (updates.processedTickers != null) {
+    fields.push("processed_tickers = ?");
+    values.push(updates.processedTickers);
+  }
+  if (updates.matchedTickers != null) {
+    fields.push("matched_tickers = ?");
+    values.push(updates.matchedTickers);
+  }
+  if (updates.cursorOffset != null) {
+    fields.push("cursor_offset = ?");
+    values.push(updates.cursorOffset);
+  }
+  if (updates.warning !== undefined) {
+    fields.push("warning = ?");
+    values.push(updates.warning);
+  }
+  if (updates.error !== undefined) {
+    fields.push("error = ?");
+    values.push(updates.error);
+  }
+  if (updates.latestSnapshotId !== undefined) {
+    fields.push("latest_snapshot_id = ?");
+    values.push(updates.latestSnapshotId);
+  }
+  if (updates.completedAt !== undefined) {
+    fields.push("completed_at = ?");
+    values.push(updates.completedAt);
+  }
+  if (updates.releaseLease) {
+    fields.push("lease_owner = NULL", "lease_expires_at = NULL");
+  }
+  await env.RS_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...values, runId)
+    .run();
+}
+
+async function acquireManualRelativeStrengthRunLease(
+  env: Env & { RS_DB: D1Database },
+  run: ManualRelativeStrengthRunRecord,
+): Promise<ManualRelativeStrengthRunRecord | null> {
+  if (isManualRelativeStrengthRunLeaseActive(run)) return null;
+  const leaseOwner = crypto.randomUUID();
+  const leaseExpiresAt = new Date(Date.now() + MANUAL_RS_SCAN_LEASE_DURATION_MS).toISOString();
+  await env.RS_DB.prepare(
+    `UPDATE rs_scan_runs
+     SET status = 'running',
+         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+         updated_at = CURRENT_TIMESTAMP,
+         heartbeat_at = CURRENT_TIMESTAMP,
+         lease_owner = ?,
+         lease_expires_at = ?
+     WHERE id = ?
+       AND status IN ('queued', 'running')`,
+  )
+    .bind(leaseOwner, leaseExpiresAt, run.id)
+    .run();
+  const leased = await loadManualRelativeStrengthRun(env, run.id);
+  return leased?.leaseOwner === leaseOwner ? leased : null;
+}
+
+async function buildManualRelativeStrengthSnapshotResult(
+  env: Env & { RS_DB: D1Database },
+  preset: ScanPreset,
+  run: ManualRelativeStrengthRunRecord,
+): Promise<{
+  providerLabel: string;
+  matchedRowCount: number;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+  rows: ScanSnapshotRow[];
+}> {
+  const rows = await env.RS_DB.prepare(
+    `SELECT
+       t.cursor_offset as cursorOffset,
+       t.ticker,
+       t.name,
+       t.sector,
+       t.industry,
+       t.exchange,
+       t.asset_class as assetClass,
+       t.market_cap as marketCap,
+       t.relative_volume as relativeVolume,
+       t.avg_volume as avgVolume,
+       t.price_avg_volume as priceAvgVolume,
+       t.price,
+       t.change_1d as change1d,
+       t.status,
+       t.reason,
+       t.latest_trading_date as latestTradingDate,
+       f.benchmark_ticker as benchmarkTicker,
+       f.rs_ma_type as rsMaType,
+       f.rs_ma_length as rsMaLength,
+       f.new_high_lookback as newHighLookback,
+       f.trading_date as tradingDate,
+       f.price_close as priceClose,
+       f.change_1d as featureChange1d,
+       f.rs_ratio_close as rsRatioClose,
+       f.rs_ratio_ma as rsRatioMa,
+       f.rs_above_ma as rsAboveMa,
+       f.rs_new_high as rsNewHigh,
+       f.rs_new_high_before_price as rsNewHighBeforePrice,
+       f.bull_cross as bullCross,
+       f.approx_rs_rating as approxRsRating,
+       f.computed_at as computedAt
+     FROM rs_scan_run_tickers t
+     JOIN rs_features_latest f
+       ON f.config_key = ?
+      AND f.ticker = t.ticker
+     WHERE t.run_id = ?
+       AND f.status = 'computed'
+     ORDER BY t.cursor_offset ASC`,
+  )
+    .bind(run.configKey, run.id)
+    .all<ManualRelativeStrengthCandidateRow & ManualRelativeStrengthFeatureRow & { featureChange1d: number | null }>();
+
+  const scaleFactor = preset.verticalOffset * 100;
+  const supportedRules = preset.rules.filter(manualRuleFieldSupported);
+  const skippedRuleWarning = manualRulesWarning(preset);
+  const identity = buildRelativeStrengthConfigIdentity(preset, run.expectedTradingDate);
+  const mergedRows = (rows.results ?? [])
+    .map((row) => {
+      const cacheRow: RelativeStrengthLatestCacheRecord = {
+        ticker: row.ticker.toUpperCase(),
+        benchmarkTicker: row.benchmarkTicker.toUpperCase(),
+        rsMaType: normalizeRsMaType(row.rsMaType),
+        rsMaLength: Math.max(1, Math.trunc(row.rsMaLength || 21)),
+        newHighLookback: Math.max(1, Math.trunc(row.newHighLookback || 252)),
+        tradingDate: row.tradingDate,
+        priceClose: row.priceClose,
+        change1d: row.featureChange1d ?? row.change1d,
+        rsRatioClose: row.rsRatioClose,
+        rsRatioMa: row.rsRatioMa,
+        rsAboveMa: row.rsAboveMa,
+        rsNewHigh: row.rsNewHigh,
+        rsNewHighBeforePrice: row.rsNewHighBeforePrice,
+        bullCross: row.bullCross,
+        approxRsRating: row.approxRsRating,
+      };
+      if (!cachedRowMatchesOutputMode(cacheRow, preset.outputMode)) return null;
+      const rsClose = cacheRow.rsRatioClose == null ? null : cacheRow.rsRatioClose * scaleFactor;
+      const rsMa = cacheRow.rsRatioMa == null ? null : cacheRow.rsRatioMa * scaleFactor;
+      const latestVolume = row.avgVolume != null && row.relativeVolume != null ? row.avgVolume * row.relativeVolume : null;
+      const snapshotRow: ScanSnapshotRow = {
+        ticker: row.ticker.toUpperCase(),
+        name: row.name ?? row.ticker.toUpperCase(),
+        sector: row.sector ?? null,
+        industry: row.industry ?? null,
+        change1d: cacheRow.change1d,
+        marketCap: row.marketCap ?? null,
+        relativeVolume: row.relativeVolume ?? null,
+        price: cacheRow.priceClose,
+        avgVolume: row.avgVolume ?? null,
+        priceAvgVolume: row.priceAvgVolume ?? null,
+        rsClose,
+        rsMa,
+        rsAboveMa: asBooleanFlag(cacheRow.rsAboveMa),
+        rsNewHigh: asBooleanFlag(cacheRow.rsNewHigh),
+        rsNewHighBeforePrice: asBooleanFlag(cacheRow.rsNewHighBeforePrice),
+        bullCross: asBooleanFlag(cacheRow.bullCross),
+        approxRsRating: cacheRow.approxRsRating,
+        rawJson: JSON.stringify({
+          benchmarkTicker: identity.benchmarkTicker,
+          tradingDate: cacheRow.tradingDate,
+          rsClose,
+          rsMa,
+          rsAboveMa: asBooleanFlag(cacheRow.rsAboveMa),
+          rsNewHigh: asBooleanFlag(cacheRow.rsNewHigh),
+          rsNewHighBeforePrice: asBooleanFlag(cacheRow.rsNewHighBeforePrice),
+          bullCross: asBooleanFlag(cacheRow.bullCross),
+          approxRsRating: cacheRow.approxRsRating,
+          relative_volume_10d_calc: row.relativeVolume ?? null,
+          latest_volume: latestVolume,
+          exchange: row.exchange ?? null,
+          type: manualCandidateType(row.assetClass),
+        }),
+      };
+      const filterRow = manualRowToTradingViewRow(snapshotRow, row, latestVolume);
+      return rowMatchesRules(filterRow, supportedRules) ? snapshotRow : null;
+    })
+    .filter((row): row is ScanSnapshotRow => Boolean(row));
+
+  const sortedRows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
+  await env.RS_DB.prepare("DELETE FROM rs_scan_rows_latest WHERE preset_id = ?").bind(preset.id).run();
+  if (sortedRows.length > 0) {
+    await env.RS_DB.batch(sortedRows.map((row, index) =>
+      env.RS_DB.prepare(
+        `INSERT INTO rs_scan_rows_latest
+          (preset_id, config_key, ticker, rank, name, sector, industry, change_1d, market_cap, relative_volume, price, avg_volume, price_avg_volume, rs_close, rs_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, raw_json, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      ).bind(
+        preset.id,
+        run.configKey,
+        row.ticker,
+        index + 1,
+        row.name,
+        row.sector,
+        row.industry,
+        row.change1d,
+        row.marketCap,
+        row.relativeVolume,
+        row.price,
+        row.avgVolume,
+        row.priceAvgVolume,
+        row.rsClose,
+        row.rsMa,
+        row.rsAboveMa ? 1 : 0,
+        row.rsNewHigh ? 1 : 0,
+        row.rsNewHighBeforePrice ? 1 : 0,
+        row.bullCross ? 1 : 0,
+        row.approxRsRating,
+        row.rawJson,
+      )));
+  }
+
+  return {
+    providerLabel: RS_PROVIDER_LABEL,
+    matchedRowCount: mergedRows.length,
+    status: sortedRows.length > 0 ? (skippedRuleWarning ? "warning" : "ok") : "empty",
+    error: skippedRuleWarning,
+    rows: sortedRows,
+  };
+}
+
+async function completeManualRelativeStrengthRun(
+  env: Env & { RS_DB: D1Database },
+  preset: ScanPreset,
+  run: ManualRelativeStrengthRunRecord,
+  matchedTickers: number,
+): Promise<ScanSnapshot | null> {
+  const result = await buildManualRelativeStrengthSnapshotResult(env, preset, run);
+  await upsertSymbolsFromRows(env, result.rows);
+  const snapshotId = await storeScanSnapshotResult(env, preset, result);
+  await heartbeatManualRelativeStrengthRun(env, run.id, {
+    status: "completed",
+    processedTickers: run.totalTickers,
+    matchedTickers,
+    cursorOffset: run.totalTickers,
+    warning: result.error,
+    latestSnapshotId: snapshotId,
+    completedAt: new Date().toISOString(),
+    releaseLease: true,
+  });
+  return loadLatestScansSnapshot(env, preset.id);
+}
+
+export async function processManualRelativeStrengthScanRun(
+  env: Env,
+  runId?: string | null,
+  options?: { timeBudgetMs?: number; batchSize?: number },
+): Promise<ScanRefreshJob | null> {
+  if (!hasManualRelativeStrengthStorage(env)) return null;
+  const initialRun = runId ? await loadManualRelativeStrengthRun(env, runId) : await loadActiveManualRelativeStrengthRun(env);
+  if (!initialRun || !isActiveScanStatus(initialRun.status)) return initialRun ? mapManualRunRecordToJob(initialRun) : null;
+  const leasedRun = await acquireManualRelativeStrengthRunLease(env, initialRun);
+  if (!leasedRun) return mapManualRunRecordToJob(initialRun);
+
+  const preset = await loadScanPreset(env, leasedRun.presetId);
+  if (!preset) {
+    await failManualRelativeStrengthRun(env, leasedRun.id, "Scan preset no longer exists.");
+    const failed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    return failed ? mapManualRunRecordToJob(failed) : null;
+  }
+
+  const startedAt = Date.now();
+  const timeBudgetMs = Math.max(1_000, options?.timeBudgetMs ?? MANUAL_RS_SCAN_TIME_BUDGET_MS);
+  const batchSize = Math.max(1, Math.trunc(options?.batchSize ?? MANUAL_RS_SCAN_BATCH_SIZE));
+  const identity = buildRelativeStrengthConfigIdentity(preset, leasedRun.expectedTradingDate);
+  const benchmarkBars = await loadStoredDailyBarsByCount(env, [identity.benchmarkDataTicker], identity.expectedTradingDate, identity.requiredBarCount);
+  const benchmarkLatestDate = latestBarDate(benchmarkBars);
+  if (benchmarkLatestDate !== identity.expectedTradingDate) {
+    const message = `Benchmark ${identity.benchmarkTicker} is missing bars for ${identity.expectedTradingDate}. Latest stored bar is ${benchmarkLatestDate ?? "none"}.`;
+    await failManualRelativeStrengthRun(env, leasedRun.id, message);
+    const failed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    return failed ? mapManualRunRecordToJob(failed) : null;
+  }
+
+  let cursorOffset = leasedRun.cursorOffset;
+  let processedTickers = leasedRun.processedTickers;
+  let matchedTickers = leasedRun.matchedTickers;
+  const config = rawRelativeStrengthConfig(identity);
+
+  while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
+    const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
+    if (candidates.length === 0) break;
+    const tickers = candidates.map((candidate) => candidate.ticker);
+    const barsByTicker = groupBarsByTicker(await loadStoredDailyBarsByCount(env, tickers, identity.expectedTradingDate, identity.requiredBarCount));
+    const batchResults = candidates.map((candidate) => {
+      try {
+        const tickerBars = barsByTicker.get(candidate.ticker) ?? [];
+        const latestTickerDate = latestBarDate(tickerBars);
+        const latest = tickerBars[tickerBars.length - 1] ?? null;
+        const previous = tickerBars.length > 1 ? tickerBars[tickerBars.length - 2] : null;
+        const avgVolume = averageVolume(tickerBars, 30);
+        const latestVolume = latest == null ? null : Number((latest as { volume?: number }).volume ?? 0);
+        const relativeVolume = avgVolume != null && latestVolume != null && avgVolume > 0 ? latestVolume / avgVolume : null;
+        const priceAvgVolume = latest?.c != null && avgVolume != null ? latest.c * avgVolume : null;
+        const change1d = latest && previous ? percentChange(latest.c, previous.c) : null;
+        if (tickerBars.length === 0) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: "No stored daily bars are available for this ticker.",
+            latestTradingDate: null,
+            price: null,
+            change1d: null,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+          };
+        }
+        if (latestTickerDate !== identity.expectedTradingDate) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: `Latest stored bar is ${latestTickerDate ?? "none"}; expected ${identity.expectedTradingDate}.`,
+            latestTradingDate: latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+          };
+        }
+        if (tickerBars.length < Math.max(identity.rsMaLength, Math.min(identity.newHighLookback, identity.requiredBarCount))) {
+          return {
+            candidate,
+            status: "insufficient_history" as const,
+            reason: `Only ${tickerBars.length} stored bars are available; ${identity.requiredBarCount} are preferred for this RS config.`,
+            latestTradingDate: latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+          };
+        }
+        const computedRows = buildRelativeStrengthCacheRows(tickerBars, benchmarkBars, config);
+        const computed = computedRows[computedRows.length - 1] ?? null;
+        if (!computed || computed.tradingDate !== identity.expectedTradingDate) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: "Ticker and benchmark bars could not be aligned through the expected session.",
+            latestTradingDate: computed?.tradingDate ?? latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+          };
+        }
+        return {
+          candidate,
+          status: "computed" as const,
+          reason: null,
+          latestTradingDate: computed.tradingDate,
+          price: computed.priceClose,
+          change1d: computed.change1d,
+          avgVolume,
+          relativeVolume,
+          priceAvgVolume,
+          feature: {
+            ticker: computed.ticker,
+            benchmarkTicker: computed.benchmarkTicker,
+            rsMaType: identity.rsMaType,
+            rsMaLength: identity.rsMaLength,
+            newHighLookback: identity.newHighLookback,
+            tradingDate: computed.tradingDate,
+            priceClose: computed.priceClose,
+            change1d: computed.change1d,
+            rsRatioClose: computed.rsClose,
+            rsRatioMa: computed.rsMa,
+            rsAboveMa: computed.rsAboveMa,
+            rsNewHigh: computed.rsNewHigh,
+            rsNewHighBeforePrice: computed.rsNewHighBeforePrice,
+            bullCross: computed.bullCross,
+            approxRsRating: computed.approxRsRating,
+          },
+        };
+      } catch (error) {
+        return {
+          candidate,
+          status: "error" as const,
+          reason: error instanceof Error ? error.message : "Failed to compute relative strength for this ticker.",
+          latestTradingDate: null,
+          price: null,
+          change1d: null,
+          avgVolume: null,
+          relativeVolume: null,
+          priceAvgVolume: null,
+          feature: null,
+        };
+      }
+    });
+    matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
+    cursorOffset += candidates.length;
+    processedTickers = cursorOffset;
+    await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
+      status: "running",
+      processedTickers,
+      matchedTickers,
+      cursorOffset,
+    });
+  }
+
+  const refreshedRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+  if (!refreshedRun) return null;
+  if (refreshedRun.cursorOffset >= refreshedRun.totalTickers) {
+    const snapshot = await completeManualRelativeStrengthRun(env, preset, refreshedRun, matchedTickers);
+    const completed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    return completed ? mapManualRunRecordToJob(completed) : (snapshot ? null : mapManualRunRecordToJob(refreshedRun));
+  }
+
+  await heartbeatManualRelativeStrengthRun(env, leasedRun.id, { releaseLease: true });
+  const latest = await loadManualRelativeStrengthRun(env, leasedRun.id);
+  return latest ? mapManualRunRecordToJob(latest) : null;
 }
 
 async function storeDailyBars(env: Env, bars: RelativeStrengthDailyBar[]): Promise<void> {
@@ -4858,6 +5876,21 @@ export async function requestScansRefresh(
       job: null,
     };
   }
+  if (hasManualRelativeStrengthStorage(env)) {
+    if (requestedBy !== "manual") {
+      return {
+        async: false,
+        snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+        job: null,
+      };
+    }
+    const run = await createManualRelativeStrengthRun(env, preset, requestedBy);
+    return {
+      async: isActiveScanStatus(run.status),
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+      job: mapManualRunRecordToJob(run),
+    };
+  }
   const identity = buildRelativeStrengthConfigIdentity(preset);
   let activeJob = await loadLatestScanRefreshJobRecordForPreset(env, preset.id, { activeOnly: true });
   if (activeJob) {
@@ -5007,6 +6040,15 @@ export async function loadScanRefreshJob(
   env: Env,
   jobId: string,
 ): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
+  const manualRun = await loadManualRelativeStrengthRun(env, jobId);
+  if (manualRun) {
+    return {
+      job: mapManualRunRecordToJob(manualRun),
+      snapshot: manualRun.status === "completed"
+        ? await loadLatestScansSnapshot(env, manualRun.presetId)
+        : await loadLatestUsableScansSnapshot(env, manualRun.presetId),
+    };
+  }
   const record = await loadScanRefreshJobRecord(env, jobId);
   if (!record) return null;
   const preset = await loadScanPreset(env, record.presetId);
@@ -5026,6 +6068,13 @@ export async function loadLatestActiveScanRefreshJob(
 ): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
   const preset = await loadScanPreset(env, presetId);
   if (!preset || preset.scanType !== "relative-strength") return null;
+  const manualRun = await loadActiveManualRelativeStrengthRun(env);
+  if (manualRun?.presetId === presetId) {
+    return {
+      job: mapManualRunRecordToJob(manualRun),
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+    };
+  }
   const record = await loadLatestScanRefreshJobRecordForPreset(env, presetId, { activeOnly: true });
   if (!record) return null;
   return {

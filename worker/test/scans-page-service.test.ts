@@ -3302,4 +3302,161 @@ describe("scans page service", () => {
     expect(batchQueries[2]).toContain("DELETE FROM scan_snapshots");
     expect(batchQueries[3]).toContain("DELETE FROM scan_presets");
   });
+
+  it("creates a manual-only RS_DB run without calling TradingView and reuses the active run", async () => {
+    const presetRow = {
+      id: "preset-rs-manual",
+      name: "Manual RS",
+      scanType: "relative-strength",
+      isDefault: 0,
+      isActive: 1,
+      rulesJson: "[]",
+      prefilterRulesJson: "[]",
+      benchmarkTicker: "SPY",
+      verticalOffset: 30,
+      rsMaLength: 21,
+      rsMaType: "EMA",
+      newHighLookback: 252,
+      outputMode: "all",
+      sortField: "approxRsRating",
+      sortDirection: "desc",
+      rowLimit: 100,
+      createdAt: "2026-04-24T00:00:00.000Z",
+      updatedAt: "2026-04-24T00:00:00.000Z",
+    };
+    const universeRows = [
+      { ticker: "AAA", name: "AAA Inc", sector: "Technology", industry: "Software", exchange: "NASDAQ", assetClass: "equity" },
+      { ticker: "BBB", name: "BBB Inc", sector: "Industrials", industry: "Machinery", exchange: "NYSE", assetClass: "equity" },
+    ];
+    let activeRun: any = null;
+    let insertRunCalls = 0;
+    const runCandidates: any[] = [];
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM scan_presets WHERE id = ?")) return presetRow;
+              if (sql.includes("FROM scan_snapshots")) return null;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM symbols s")) return { results: universeRows };
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+      RS_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE status IN")) {
+                return activeRun;
+              }
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) {
+                return activeRun?.id === args[0] ? activeRun : null;
+              }
+              return null;
+            },
+            async all() {
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("INSERT INTO rs_scan_runs")) {
+                insertRunCalls += 1;
+                activeRun = {
+                  id: String(args[0]),
+                  presetId: String(args[1]),
+                  presetName: String(args[2]),
+                  configKey: String(args[3]),
+                  benchmarkTicker: String(args[4]),
+                  rsMaType: String(args[5]),
+                  rsMaLength: Number(args[6]),
+                  newHighLookback: Number(args[7]),
+                  expectedTradingDate: String(args[8]),
+                  status: "queued",
+                  requestedBy: args[9] == null ? null : String(args[9]),
+                  createdAt: "2026-04-24T01:00:00.000Z",
+                  startedAt: null,
+                  updatedAt: "2026-04-24T01:00:00.000Z",
+                  heartbeatAt: null,
+                  completedAt: null,
+                  error: null,
+                  warning: null,
+                  totalTickers: Number(args[10]),
+                  processedTickers: 0,
+                  matchedTickers: 0,
+                  cursorOffset: 0,
+                  latestSnapshotId: null,
+                  leaseOwner: null,
+                  leaseExpiresAt: null,
+                };
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("INSERT INTO rs_scan_run_tickers")) {
+              runCandidates.push(statement.__args);
+            }
+          }
+          return [];
+        },
+      },
+    } as any;
+
+    const first = await requestScansRefresh(env, presetRow.id, "manual");
+    const second = await requestScansRefresh(env, presetRow.id, "manual");
+
+    expect(first.async).toBe(true);
+    expect(second.async).toBe(true);
+    expect(second.job?.id).toBe(first.job?.id);
+    expect(insertRunCalls).toBe(1);
+    expect(runCandidates).toHaveLength(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

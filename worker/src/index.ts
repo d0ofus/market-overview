@@ -87,9 +87,8 @@ import {
   loadLatestActiveScanRefreshJob,
   loadScanRefreshJob,
   loadScanPreset,
-  processQueuedRelativeStrengthRefreshJobs,
+  processManualRelativeStrengthScanRun,
   refreshScanCompilePreset,
-  refreshActiveRelativeStrengthPresets,
   refreshScansSnapshot,
   requestScansRefresh,
   upsertScanCompilePreset,
@@ -2274,16 +2273,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
   try {
     const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
     if (result.async && result.job) {
-      const settings = await loadWorkerScheduleSettings(c.env);
-      if (settings.rsBackgroundEnabled) {
-        c.executionCtx.waitUntil((async () => {
-          await processQueuedRelativeStrengthRefreshJobs(c.env, {
-            batchSize: settings.rsBackgroundBatchSize,
-            maxBatches: settings.rsBackgroundMaxBatchesPerTick,
-            timeBudgetMs: settings.rsBackgroundTimeBudgetMs,
-          });
-        })());
-      }
+      c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, result.job.id));
     }
     return c.json({ ok: true, ...result });
   } catch (error) {
@@ -2297,6 +2287,9 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
+  if (payload.job.status === "queued" || payload.job.status === "running") {
+    c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, payload.job.id));
+  }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
 
@@ -2304,6 +2297,9 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
+  if (payload.job.status === "queued" || payload.job.status === "running") {
+    c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, payload.job.id));
+  }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
 
@@ -3807,17 +3803,6 @@ export default {
       console.error("scheduled symbol catalog sync failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
-    if (workerSchedule.rsBackgroundEnabled) {
-      try {
-        await processQueuedRelativeStrengthRefreshJobs(env, {
-          batchSize: workerSchedule.rsBackgroundBatchSize,
-          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
-          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        });
-      } catch (error) {
-        console.error("scheduled RS background processing failed", error);
-      }
-    }
     let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
     try {
       postCloseJob = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
@@ -3830,22 +3815,6 @@ export default {
     const expectedAsOf = latestUsSessionAsOfDate(now);
     if (!postCloseJob && workerSchedule.postCloseBarsEnabled) {
       postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, expectedAsOf);
-    }
-    const shouldRunScheduledRelativeStrength = workerSchedule.rsBackgroundEnabled && (
-      workerSchedule.postCloseBarsEnabled
-        ? postCloseJob?.status === "completed"
-        : shouldRunScheduledEod(now, timezone, refreshTime)
-    );
-    if (shouldRunScheduledRelativeStrength) {
-      try {
-        await refreshActiveRelativeStrengthPresets(env, {
-          batchSize: workerSchedule.rsBackgroundBatchSize,
-          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
-          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        });
-      } catch (error) {
-        console.error("scheduled relative strength refresh failed", error);
-      }
     }
     if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 

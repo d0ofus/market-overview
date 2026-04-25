@@ -52,7 +52,7 @@ function mapWorkerScheduleSettingsRow(row: WorkerScheduleSettingsRow | null): Wo
   return {
     id: row?.id ?? DEFAULT_WORKER_SCHEDULE_ID,
     cronExpression: FIXED_WORKER_CRON_EXPRESSION,
-    rsBackgroundEnabled: asBooleanFlag(row?.rsBackgroundEnabled, true),
+    rsBackgroundEnabled: asBooleanFlag(row?.rsBackgroundEnabled, false),
     rsBackgroundBatchSize: Math.max(1, coerceInt(row?.rsBackgroundBatchSize, DEFAULT_RS_BACKGROUND_BATCH_SIZE)),
     rsBackgroundMaxBatchesPerTick: Math.max(1, coerceInt(row?.rsBackgroundMaxBatchesPerTick, DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK)),
     rsBackgroundTimeBudgetMs: Math.max(1_000, coerceInt(row?.rsBackgroundTimeBudgetMs, DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS)),
@@ -67,7 +67,7 @@ async function ensureWorkerScheduleSettingsRow(env: Env): Promise<void> {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO worker_schedule_settings
       (id, rs_background_enabled, rs_background_batch_size, rs_background_max_batches_per_tick, rs_background_time_budget_ms, post_close_bars_enabled, post_close_bars_offset_minutes, post_close_bars_batch_size, post_close_bars_max_batches_per_tick, updated_at)
-     VALUES (?, 1, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
+     VALUES (?, 0, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
   )
     .bind(
       DEFAULT_WORKER_SCHEDULE_ID,
