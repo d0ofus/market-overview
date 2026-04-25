@@ -15,6 +15,7 @@ export type TickerCollectionModalItem = {
   metricLabel?: string;
   metricValue?: string | null;
   badges?: ReactNode;
+  stats?: ReactNode;
 };
 
 export function TickerCollectionModal({
@@ -95,12 +96,16 @@ export function TickerCollectionModal({
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {items.map((item) => (
                 <div key={item.key} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
-                  <div className="mb-3 flex items-start justify-between gap-3">
-                    <div>
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
                       <div className="text-lg font-semibold text-accent">{item.ticker}</div>
-                      <p className="mt-1 text-sm text-slate-400">{item.name ?? item.ticker}</p>
+                      {item.name && item.name !== item.ticker ? (
+                        <p className="mt-1 line-clamp-1 text-sm text-slate-400">{item.name}</p>
+                      ) : null}
                     </div>
-                    {item.metricLabel || item.metricValue ? (
+                    {item.stats ? (
+                      <div className="flex flex-wrap items-center justify-end gap-2">{item.stats}</div>
+                    ) : item.metricLabel || item.metricValue ? (
                       <div className="text-right text-xs">
                         {item.metricLabel ? <div className="text-slate-500">{item.metricLabel}</div> : null}
                         <div className="mt-1 text-sm font-semibold text-slate-100">{item.metricValue ?? "-"}</div>

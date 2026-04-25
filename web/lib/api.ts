@@ -1151,6 +1151,13 @@ export function getSectorSymbolOptions(sector?: string) {
   return getJson<{ rows: any[] }>(`/api/sectors/symbol-options${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`);
 }
 
+export function getSectorTickerMetrics(tickers: string[]) {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  return getJson<{ rows: PeerMetricRow[]; error: string | null }>(
+    appendQuery("/api/sectors/metrics", { tickers: uniqueTickers.join(",") }),
+  );
+}
+
 export function getAlerts(params: {
   startDate?: string;
   endDate?: string;

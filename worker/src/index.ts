@@ -1437,6 +1437,26 @@ app.get("/api/sectors/symbol-options", async (c) => {
   return c.json({ rows: rows.results ?? [] });
 });
 
+app.get("/api/sectors/metrics", async (c) => {
+  const rawTickers = String(c.req.query("tickers") ?? "");
+  const tickers = Array.from(new Set(
+    rawTickers
+      .split(",")
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => /^[A-Z0-9.\-^]{1,20}$/.test(ticker)),
+  )).slice(0, 100);
+  if (tickers.length === 0) return c.json({ rows: [], error: null });
+
+  const metrics = await loadPeerMetrics(
+    c.env,
+    tickers.map((ticker) => ({ ticker, exchange: null })),
+  );
+  return c.json({
+    rows: metrics.rows,
+    error: metrics.error,
+  });
+});
+
 app.get("/api/sectors/entries", async (c) => {
   const rows = await c.env.DB.prepare(
     "SELECT e.id, e.sector_name as sectorName, e.event_date as eventDate, e.trend_score as trendScore, e.notes, e.narrative_id as narrativeId, n.title as narrativeTitle FROM sector_tracker_entries e LEFT JOIN sector_narratives n ON n.id = e.narrative_id ORDER BY e.event_date DESC",

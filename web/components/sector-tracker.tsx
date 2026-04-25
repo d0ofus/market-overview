@@ -12,7 +12,9 @@ import {
   getSectorEntries,
   getSectorEtfs,
   getSectorSymbolOptions,
+  getSectorTickerMetrics,
   updateSectorEntry,
+  type PeerMetricRow,
 } from "@/lib/api";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { TickerCollectionModal, type TickerCollectionModalItem } from "./ticker-collection-modal";
@@ -193,6 +195,21 @@ function formatFundPrice(value: number) {
   return Number.isFinite(value) ? value.toFixed(2) : "-";
 }
 
+function formatCompact(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+}
+
+function formatMetricPct(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function metricChangeClass(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "text-slate-100";
+  return value < 0 ? "text-neg" : "text-pos";
+}
+
 function computeHoverPreviewStyle(anchorRect: DOMRect): CSSProperties {
   if (typeof window === "undefined") {
     return { top: 16, left: 16, width: 960 };
@@ -348,6 +365,8 @@ export function SectorTracker() {
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [activeNarrativeEntry, setActiveNarrativeEntry] = useState<SectorEntry | null>(null);
   const [narrativePage, setNarrativePage] = useState(1);
+  const [narrativeMetrics, setNarrativeMetrics] = useState<Record<string, PeerMetricRow>>({});
+  const [narrativeMetricsWarning, setNarrativeMetricsWarning] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const [hoverChartTarget, setHoverChartTarget] = useState<HoverChartTarget | null>(null);
   const [hoverChartPreview, setHoverChartPreview] = useState<HoverChartPreview | null>(null);
@@ -677,9 +696,35 @@ export function SectorTracker() {
       pagedNarrativeSymbols.map((symbol) => ({
         key: `${activeNarrativeEntry?.id ?? "entry"}-${symbol.ticker}`,
         ticker: symbol.ticker,
-        name: symbol.name ?? symbol.ticker,
+        name: symbol.name ?? null,
+        stats: (() => {
+          const metric = narrativeMetrics[symbol.ticker.toUpperCase()];
+          const avgDollar = typeof metric?.price === "number" && typeof metric.avgVolume === "number"
+            ? metric.price * metric.avgVolume
+            : null;
+          return (
+            <>
+              <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Mkt Cap</span>
+                <span className="font-semibold text-slate-100">{formatCompact(metric?.marketCap)}</span>
+              </span>
+              <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Avg Vol</span>
+                <span className="font-semibold text-slate-100">{formatCompact(metric?.avgVolume)}</span>
+              </span>
+              <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Avg $</span>
+                <span className="font-semibold text-slate-100">{formatCompact(avgDollar)}</span>
+              </span>
+              <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">1D %</span>
+                <span className={`font-semibold ${metricChangeClass(metric?.change1d)}`}>{formatMetricPct(metric?.change1d)}</span>
+              </span>
+            </>
+          );
+        })(),
       })),
-    [activeNarrativeEntry?.id, pagedNarrativeSymbols],
+    [activeNarrativeEntry?.id, narrativeMetrics, pagedNarrativeSymbols],
   );
 
   const sectorNarrativeOptions = useMemo(() => {
@@ -744,6 +789,40 @@ export function SectorTracker() {
   useEffect(() => {
     setNarrativePage(1);
   }, [activeNarrativeEntry?.id, activeNarrativeEntry?.symbols.length]);
+
+  useEffect(() => {
+    if (!activeNarrativeEntry) {
+      setNarrativeMetrics({});
+      setNarrativeMetricsWarning(null);
+      return;
+    }
+
+    const tickers = (activeNarrativeEntry.symbols ?? []).map((symbol) => symbol.ticker);
+    if (tickers.length === 0) {
+      setNarrativeMetrics({});
+      setNarrativeMetricsWarning(null);
+      return;
+    }
+
+    let cancelled = false;
+    setNarrativeMetrics({});
+    setNarrativeMetricsWarning(null);
+    void getSectorTickerMetrics(tickers)
+      .then((response) => {
+        if (cancelled) return;
+        setNarrativeMetrics(Object.fromEntries((response.rows ?? []).map((row) => [row.ticker.toUpperCase(), row])));
+        setNarrativeMetricsWarning(response.error ?? null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setNarrativeMetrics({});
+        setNarrativeMetricsWarning(error instanceof Error ? error.message : "Failed to load snapshot metrics.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeNarrativeEntry]);
 
   return (
     <div className="space-y-5">
@@ -1340,6 +1419,7 @@ export function SectorTracker() {
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
+          warning={narrativeMetricsWarning ? `Snapshot metrics warning: ${narrativeMetricsWarning}` : null}
           emptyMessage="No tickers are attached to this narrative entry yet."
           onPageChange={setNarrativePage}
           onClose={() => setActiveNarrativeEntry(null)}
