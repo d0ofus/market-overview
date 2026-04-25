@@ -25,9 +25,6 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-> Add clickable multi-chart view of key movers tracker in list view as well
-> Change format of key movers tracker multi-chart view to include values and remove duplicate ticker value like /gappers
-> Add finviz themes map (https://finviz.com/map.ashx?t=themes)
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
