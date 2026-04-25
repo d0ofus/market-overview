@@ -704,20 +704,20 @@ export function SectorTracker() {
             : null;
           return (
             <>
-              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-1.5 py-1 text-center text-[9px] leading-none text-slate-200">
-                <span className="mr-0.5 uppercase text-slate-500">Mkt Cap</span>
+              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">Mkt Cap</span>
                 <span className="font-semibold text-slate-100">{formatCompact(metric?.marketCap)}</span>
               </span>
-              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-1.5 py-1 text-center text-[9px] leading-none text-slate-200">
-                <span className="mr-0.5 uppercase text-slate-500">Avg Vol</span>
+              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">Avg Vol</span>
                 <span className="font-semibold text-slate-100">{formatCompact(metric?.avgVolume)}</span>
               </span>
-              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-1.5 py-1 text-center text-[9px] leading-none text-slate-200">
-                <span className="mr-0.5 uppercase text-slate-500">Avg $</span>
+              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">Avg $</span>
                 <span className="font-semibold text-slate-100">{formatCompact(avgDollar)}</span>
               </span>
-              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-1.5 py-1 text-center text-[9px] leading-none text-slate-200">
-                <span className="mr-0.5 uppercase text-slate-500">1D %</span>
+              <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+                <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">1D %</span>
                 <span className={`font-semibold ${metricChangeClass(metric?.change1d)}`}>{formatMetricPct(metric?.change1d)}</span>
               </span>
             </>
