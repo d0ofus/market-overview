@@ -43,7 +43,6 @@
 
 ## Scans
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
-> Do a big overhaul to improve the UI to be more user friendly
 - Add strongest FA scan
 - Add Strong earnings scanner
 - Colour by industry
@@ -53,7 +52,7 @@
 
 ## Gappers
 - Add avg traded volume column in table
-- Add highest pre-market volume scan, and change title to pre-market scan
+- Change title to pre-market scan
 - Remove ETFs, closed ended funds, and OTC tickers
 - Find out what the current filters are and add more scanning filters or use a preset 
 - Add $ on gap = Pre Vol * Price
@@ -61,7 +60,6 @@
 
 ## Admin
 > Remove bootstrap seed batch function in peer groups
-> Add bulk add ticker function
 - Find out what slug means for peer-groups
 - Add function to specific exchange before ticker. For e.g., OSX chart shows the ASX listing and not the NASDAQ one
 - Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 

@@ -49,6 +49,7 @@ export type SymbolCatalogSyncResult = {
 export const SYMBOL_CATALOG_SOURCE_KEY = "nasdaqtrader-us-common-stocks";
 const DAILY_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const BATCH_SIZE = 200;
+const SQL_VARIABLE_BATCH_SIZE = 90;
 
 function normalizeTicker(value: string): string {
   return String(value ?? "").trim().toUpperCase();
@@ -84,8 +85,8 @@ async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[]
 async function loadExistingSymbolStateMap(env: Env, tickers: string[]): Promise<Map<string, ExistingSymbolRow>> {
   const map = new Map<string, ExistingSymbolRow>();
   const unique = Array.from(new Set(tickers.map(normalizeTicker).filter(Boolean)));
-  for (let index = 0; index < unique.length; index += 400) {
-    const chunk = unique.slice(index, index + 400);
+  for (let index = 0; index < unique.length; index += SQL_VARIABLE_BATCH_SIZE) {
+    const chunk = unique.slice(index, index + SQL_VARIABLE_BATCH_SIZE);
     if (chunk.length === 0) continue;
     const rows = await env.DB.prepare(
       `SELECT
