@@ -43,6 +43,13 @@ const EMPTY_FORM = {
 
 const GROUPS_PAGE_SIZE = 12;
 const GROUP_INDEX_LABELS = ["All", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""), "#"];
+const GROUP_MEMBER_BATCH_PAGE_SIZE = 100;
+
+type AdminTickerSearchRow = {
+  ticker: string;
+  name: string | null;
+  exchange: string | null;
+};
 
 function parseBootstrapTickers(input: string): string[] {
   return Array.from(
@@ -69,9 +76,11 @@ export function PeerGroupsAdminPanel() {
   const [groupIndexFilter, setGroupIndexFilter] = useState("All");
   const [groupPage, setGroupPage] = useState(0);
   const [tickerQuery, setTickerQuery] = useState("");
-  const [tickerResults, setTickerResults] = useState<Array<{ ticker: string; name: string | null; exchange: string | null }>>([]);
+  const [tickerResults, setTickerResults] = useState<AdminTickerSearchRow[]>([]);
   const [selectedTicker, setSelectedTicker] = useState<string>("");
   const [selectedTickerDetail, setSelectedTickerDetail] = useState<PeerTickerDetail | null>(null);
+  const [batchSelectedTickers, setBatchSelectedTickers] = useState<string[]>([]);
+  const [batchAdding, setBatchAdding] = useState(false);
   const [groupMembers, setGroupMembers] = useState<PeerDirectoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -198,6 +207,93 @@ export function PeerGroupsAdminPanel() {
     }
   };
 
+  const loadGroupMemberTickerSet = async (groupId: string) => {
+    const tickers = new Set<string>();
+    let offset = 0;
+    let total = 0;
+    do {
+      const res = await getPeerDirectory({ groupId, limit: GROUP_MEMBER_BATCH_PAGE_SIZE, offset });
+      const rows = res.rows ?? [];
+      for (const row of rows) {
+        tickers.add(row.ticker.toUpperCase());
+      }
+      total = Number(res.total ?? 0);
+      offset += Number(res.limit ?? GROUP_MEMBER_BATCH_PAGE_SIZE);
+      if (rows.length === 0) break;
+    } while (offset < total);
+    return tickers;
+  };
+
+  const toggleBatchTickerSelection = (ticker: string) => {
+    const nextTicker = ticker.trim().toUpperCase();
+    if (!nextTicker) return;
+    setBatchSelectedTickers((current) => (
+      current.includes(nextTicker)
+        ? current.filter((value) => value !== nextTicker)
+        : [...current, nextTicker]
+    ));
+  };
+
+  const selectVisibleTickerResults = () => {
+    setBatchSelectedTickers((current) => Array.from(
+      new Set([
+        ...current,
+        ...tickerResults.map((row) => row.ticker.trim().toUpperCase()).filter(Boolean),
+      ]),
+    ));
+  };
+
+  const clearBatchTickerSelection = () => {
+    setBatchSelectedTickers([]);
+  };
+
+  const removeBatchTickerSelection = (ticker: string) => {
+    setBatchSelectedTickers((current) => current.filter((value) => value !== ticker));
+  };
+
+  const handleAddSelectedTickersToGroup = async () => {
+    if (!targetGroupId || batchSelectedTickers.length === 0 || batchAdding) return;
+    const targetGroup = groups.find((group) => group.id === targetGroupId) ?? null;
+    const uniqueTickers = Array.from(new Set(batchSelectedTickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+    if (uniqueTickers.length === 0) return;
+
+    setBatchAdding(true);
+    setMessage(null);
+    try {
+      const existingTickers = await loadGroupMemberTickerSet(targetGroupId).catch(() => new Set<string>());
+      const alreadyExisting = uniqueTickers.filter((ticker) => existingTickers.has(ticker));
+      const tickersToAdd = uniqueTickers.filter((ticker) => !existingTickers.has(ticker));
+      const addedTickers: string[] = [];
+      const failedTickers: string[] = [];
+
+      for (const ticker of tickersToAdd) {
+        try {
+          await addAdminPeerGroupMember(targetGroupId, { ticker, source: "manual", confidence: 1 });
+          addedTickers.push(ticker);
+        } catch {
+          failedTickers.push(ticker);
+        }
+      }
+
+      await load(targetGroupId);
+      if (selectedTicker && uniqueTickers.includes(selectedTicker.toUpperCase())) {
+        await onSelectTicker(selectedTicker);
+      }
+
+      setBatchSelectedTickers(failedTickers);
+      const summary = [
+        `Added ${addedTickers.length} ticker${addedTickers.length === 1 ? "" : "s"} to ${targetGroup?.name ?? "the selected peer group"}`,
+        alreadyExisting.length ? `${alreadyExisting.length} already existed` : null,
+        failedTickers.length ? `${failedTickers.length} failed` : null,
+      ].filter(Boolean).join(". ");
+      flashMessage(`${summary}.`, failedTickers.length ? 8000 : 5000);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to add selected tickers to peer group.");
+    } finally {
+      setBatchAdding(false);
+    }
+  };
+
   const onSaveGroup = async () => {
     setSaving(true);
     setMessage(null);
@@ -267,6 +363,9 @@ export function PeerGroupsAdminPanel() {
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId],
   );
+  const batchSelectedTickerSet = useMemo(() => new Set(batchSelectedTickers), [batchSelectedTickers]);
+  const allVisibleTickerResultsSelected = tickerResults.length > 0
+    && tickerResults.every((row) => batchSelectedTickerSet.has(row.ticker.toUpperCase()));
   const selectedSymbol = selectedTickerDetail?.symbol ?? null;
   const canAddSelectedTickerToDirectory = Boolean(selectedSymbol?.ticker) && (!selectedSymbol?.persisted || !selectedSymbol?.isActive);
   const selectedSymbolActionLabel = !selectedSymbol?.persisted
@@ -732,18 +831,114 @@ export function PeerGroupsAdminPanel() {
                 Search
               </button>
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              {tickerResults.map((row) => (
+            <div className="mt-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="block min-w-[14rem] flex-1 text-xs text-slate-300">
+                  Batch target
+                  <select
+                    className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-3 py-2 text-xs"
+                    value={targetGroupId}
+                    onChange={(event) => setTargetGroupId(event.target.value)}
+                  >
+                    <option value="" disabled>Select target group</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name} ({group.groupType})
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button
-                  key={row.ticker}
-                  className={`rounded border px-3 py-2 text-left ${selectedTicker === row.ticker ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
-                  onClick={() => void onSelectTicker(row.ticker)}
+                  className="rounded border border-borderSoft px-3 py-2 text-xs text-slate-300 disabled:opacity-50"
+                  disabled={tickerResults.length === 0 || allVisibleTickerResultsSelected || batchAdding}
+                  onClick={selectVisibleTickerResults}
                   type="button"
                 >
-                  <div className="text-sm font-semibold text-accent">{row.ticker}</div>
-                  <div className="text-[11px] text-slate-400">{row.name ?? "-"} {row.exchange ? `| ${row.exchange}` : ""}</div>
+                  Select Visible
                 </button>
-              ))}
+                <button
+                  className="rounded border border-borderSoft px-3 py-2 text-xs text-slate-300 disabled:opacity-50"
+                  disabled={batchSelectedTickers.length === 0 || batchAdding}
+                  onClick={clearBatchTickerSelection}
+                  type="button"
+                >
+                  Clear
+                </button>
+                <button
+                  className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-xs text-accent disabled:opacity-50"
+                  disabled={!targetGroupId || batchSelectedTickers.length === 0 || batchAdding}
+                  onClick={() => void handleAddSelectedTickersToGroup()}
+                  type="button"
+                >
+                  {batchAdding ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Adding...
+                    </span>
+                  ) : "Add Selected To Group"}
+                </button>
+              </div>
+              <div className="mt-2 text-[11px] text-slate-400">
+                {batchSelectedTickers.length} selected
+              </div>
+              {batchSelectedTickers.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {batchSelectedTickers.slice(0, 12).map((ticker) => (
+                    <button
+                      key={ticker}
+                      className="inline-flex items-center gap-1 rounded border border-borderSoft/70 bg-panelSoft px-2 py-1 text-[11px] text-slate-300"
+                      disabled={batchAdding}
+                      onClick={() => removeBatchTickerSelection(ticker)}
+                      type="button"
+                    >
+                      {ticker}
+                      <span className="text-slate-500">x</span>
+                    </button>
+                  ))}
+                  {batchSelectedTickers.length > 12 ? (
+                    <span className="rounded border border-borderSoft/60 px-2 py-1 text-[11px] text-slate-400">
+                      +{batchSelectedTickers.length - 12} more
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-3 overflow-hidden rounded border border-borderSoft/60">
+              {tickerResults.map((row) => {
+                const ticker = row.ticker.toUpperCase();
+                const checked = batchSelectedTickerSet.has(ticker);
+                return (
+                  <div
+                    key={ticker}
+                    className={`grid items-center gap-3 border-t border-borderSoft/60 px-3 py-2 first:border-t-0 md:grid-cols-[auto,minmax(0,1fr),auto] ${selectedTicker === ticker ? "bg-accent/10" : "hover:bg-slate-900/30"}`}
+                  >
+                    <input
+                      aria-label={`Select ${ticker} for batch add`}
+                      className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+                      checked={checked}
+                      disabled={batchAdding}
+                      onChange={() => toggleBatchTickerSelection(ticker)}
+                      type="checkbox"
+                    />
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-accent">{ticker}</div>
+                      <div className="truncate text-[11px] text-slate-400">
+                        {row.name ?? "-"} {row.exchange ? `| ${row.exchange}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800/60"
+                      onClick={() => void onSelectTicker(ticker)}
+                      type="button"
+                    >
+                      Inspect
+                    </button>
+                  </div>
+                );
+              })}
+              {tickerResults.length === 0 ? (
+                <div className="px-3 py-3 text-sm text-slate-400">Search results will appear here.</div>
+              ) : null}
             </div>
           </div>
 
