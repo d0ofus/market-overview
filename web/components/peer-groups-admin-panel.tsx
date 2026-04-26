@@ -910,14 +910,27 @@ export function PeerGroupsAdminPanel() {
                 return (
                   <div
                     key={ticker}
-                    className={`grid items-center gap-3 border-t border-borderSoft/60 px-3 py-2 first:border-t-0 md:grid-cols-[auto,minmax(0,1fr),auto] ${selectedTicker === ticker ? "bg-accent/10" : "hover:bg-slate-900/30"}`}
+                    aria-label={`Inspect ${ticker}`}
+                    className={`grid cursor-pointer items-center gap-3 border-t border-borderSoft/60 px-3 py-2 outline-none first:border-t-0 focus-visible:bg-slate-900/50 focus-visible:ring-1 focus-visible:ring-accent/50 md:grid-cols-[auto,minmax(0,1fr)] ${selectedTicker === ticker ? "bg-accent/10" : "hover:bg-slate-900/30"}`}
+                    onClick={() => void onSelectTicker(ticker)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      void onSelectTicker(ticker);
+                    }}
+                    role="button"
+                    tabIndex={0}
                   >
                     <input
                       aria-label={`Select ${ticker} for batch add`}
                       className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
                       checked={checked}
                       disabled={batchAdding}
-                      onChange={() => toggleBatchTickerSelection(ticker)}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => {
+                        event.stopPropagation();
+                        toggleBatchTickerSelection(ticker);
+                      }}
                       type="checkbox"
                     />
                     <div className="min-w-0">
@@ -926,13 +939,6 @@ export function PeerGroupsAdminPanel() {
                         {row.name ?? "-"} {row.exchange ? `| ${row.exchange}` : ""}
                       </div>
                     </div>
-                    <button
-                      className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800/60"
-                      onClick={() => void onSelectTicker(ticker)}
-                      type="button"
-                    >
-                      Inspect
-                    </button>
                   </div>
                 );
               })}
