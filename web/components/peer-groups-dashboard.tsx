@@ -17,6 +17,10 @@ import { TickerMultiGrid } from "./ticker-multi-grid";
 
 type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
 type MultiChartSortKey = "change1d" | "marketCap";
+const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
+  { key: "change1d", label: "1D % Change" },
+  { key: "marketCap", label: "Market Capitalization" },
+];
 const CORRELATION_DEFAULT_LOOKBACK = "252D";
 const CORRELATION_DEFAULT_ROLLING_WINDOW = "60D";
 const CORRELATION_LAUNCH_MAX_TICKERS = 10;
@@ -34,6 +38,12 @@ function fmtPrice(value: number | null | undefined): string {
 function fmtPct(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function segmentedButtonClass(active: boolean): string {
+  return active
+    ? "bg-accent/20 text-accent shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
+    : "text-slate-300 hover:bg-panelSoft/70 hover:text-slate-100";
 }
 
 function MultiChartPager({
@@ -562,17 +572,22 @@ export function PeerGroupsDashboard() {
           <div className="card p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
-                <label className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span>Sort multi-chart by</span>
-                  <select
-                    className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
-                    value={chartSortKey}
-                    onChange={(event) => setChartSortKey(event.target.value as MultiChartSortKey)}
-                  >
-                    <option value="change1d">1D % Change</option>
-                    <option value="marketCap">Market Capitalization</option>
-                  </select>
-                </label>
+                  <div className="inline-flex rounded border border-borderSoft bg-panelSoft p-0.5" role="group" aria-label="Sort multi-chart by">
+                    {MULTI_CHART_SORT_OPTIONS.map((option) => (
+                      <button
+                        key={option.key}
+                        aria-pressed={chartSortKey === option.key}
+                        className={`rounded px-2.5 py-1 text-sm transition ${segmentedButtonClass(chartSortKey === option.key)}`}
+                        onClick={() => setChartSortKey(option.key)}
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <label className="flex items-center gap-2">
                   <span>Charts per page</span>
                   <input
