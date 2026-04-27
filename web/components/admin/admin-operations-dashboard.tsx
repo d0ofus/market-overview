@@ -32,6 +32,7 @@ const pageTargetOptions = [
   { value: "sectors", label: "Sector Tracker" },
   { value: "thirteenf", label: "13F Tracker" },
   { value: "scans", label: "Scans" },
+  { value: "pattern-scanner", label: "Pattern Scanner" },
   { value: "watchlist-compiler", label: "Watchlist Compiler" },
   { value: "gappers", label: "Gappers" },
   { value: "admin", label: "Admin" },
@@ -153,6 +154,10 @@ export function AdminOperationsDashboard() {
         postCloseBarsOffsetMinutes: workerSchedule.postCloseBarsOffsetMinutes,
         postCloseBarsBatchSize: workerSchedule.postCloseBarsBatchSize,
         postCloseBarsMaxBatchesPerTick: workerSchedule.postCloseBarsMaxBatchesPerTick,
+        patternScanEnabled: workerSchedule.patternScanEnabled,
+        patternScanOffsetMinutes: workerSchedule.patternScanOffsetMinutes,
+        patternScanBatchSize: workerSchedule.patternScanBatchSize,
+        patternScanMaxBatchesPerTick: workerSchedule.patternScanMaxBatchesPerTick,
       });
       setWorkerSchedule(response.settings);
       setMessage({ tone: "success", text: "Saved worker schedule settings." });
@@ -392,6 +397,66 @@ export function AdminOperationsDashboard() {
                             onChange={(event) => setWorkerSchedule((current) => current ? {
                               ...current,
                               rsBackgroundTimeBudgetMs: Number(event.target.value || current.rsBackgroundTimeBudgetMs),
+                            } : current)}
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Pattern Scanner</p>
+                          <p className="mt-2 text-sm text-slate-300">Run the learned pattern scanner after post-close bars are available, writing scores into the separate pattern D1 database.</p>
+                        </div>
+                        <button
+                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
+                          onClick={() => setWorkerSchedule((current) => current ? { ...current, patternScanEnabled: !current.patternScanEnabled } : current)}
+                          type="button"
+                        >
+                          {workerSchedule.patternScanEnabled ? "Enabled" : "Disabled"}
+                        </button>
+                      </div>
+                      <div className="mt-4 grid gap-4 md:grid-cols-3">
+                        <label className="text-xs text-slate-300">
+                          Start offset after US close (min)
+                          <input
+                            type="number"
+                            min={0}
+                            max={360}
+                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                            value={workerSchedule.patternScanOffsetMinutes}
+                            onChange={(event) => setWorkerSchedule((current) => current ? {
+                              ...current,
+                              patternScanOffsetMinutes: Number(event.target.value || current.patternScanOffsetMinutes),
+                            } : current)}
+                          />
+                        </label>
+                        <label className="text-xs text-slate-300">
+                          Tickers per batch
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                            value={workerSchedule.patternScanBatchSize}
+                            onChange={(event) => setWorkerSchedule((current) => current ? {
+                              ...current,
+                              patternScanBatchSize: Number(event.target.value || current.patternScanBatchSize),
+                            } : current)}
+                          />
+                        </label>
+                        <label className="text-xs text-slate-300">
+                          Max pattern batches per tick
+                          <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
+                            value={workerSchedule.patternScanMaxBatchesPerTick}
+                            onChange={(event) => setWorkerSchedule((current) => current ? {
+                              ...current,
+                              patternScanMaxBatchesPerTick: Number(event.target.value || current.patternScanMaxBatchesPerTick),
                             } : current)}
                           />
                         </label>

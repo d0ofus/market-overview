@@ -339,6 +339,178 @@ export type ScanRefreshResponse = {
   job: ScanRefreshJob | null;
 };
 
+export type PatternLabelValue = "approved" | "rejected" | "skipped";
+export type PatternLabelStatus = "active" | "archived" | "deleted";
+
+export type PatternFeatureJson = Record<string, number | null>;
+export type PatternShapeJson = Record<string, Array<number | null>>;
+
+export type PatternScoreContribution = {
+  featureKey: string;
+  label: string;
+  value: number | null;
+  contribution: number;
+};
+
+export type PatternExampleReference = {
+  labelId: string;
+  ticker: string;
+  setupDate: string;
+  label: "approved" | "rejected";
+  distance: number;
+  similarity: number;
+  tags: string[];
+};
+
+export type PatternScoreReasons = {
+  score: number;
+  mode: "heuristic" | "model";
+  approvedSimilarity: number | null;
+  rejectedSimilarity: number | null;
+  scalarSimilarity: number | null;
+  shapeSimilarity: number | null;
+  activeLearningPriority: number;
+  heuristicScore: number;
+  positiveContributions: PatternScoreContribution[];
+  negativeContributions: PatternScoreContribution[];
+  summary: string[];
+};
+
+export type PatternCandidate = {
+  id: string;
+  runId: string;
+  profileId: string;
+  ticker: string;
+  rank: number;
+  score: number;
+  reasons: PatternScoreReasons;
+  nearestApproved: PatternExampleReference[];
+  nearestRejected: PatternExampleReference[];
+  featureJson: PatternFeatureJson;
+  shapeJson: PatternShapeJson;
+  sourceMetadata: Record<string, unknown>;
+  createdAt?: string;
+  tradingDate?: string;
+  updatedAt?: string;
+};
+
+export type PatternLabel = {
+  id: string;
+  profileId: string;
+  ticker: string;
+  setupDate: string;
+  label: PatternLabelValue;
+  status: PatternLabelStatus;
+  source: string;
+  contextWindowBars: number;
+  patternWindowBars: number;
+  tags: string[];
+  notes: string | null;
+  featureVersion: string;
+  featureJson: PatternFeatureJson;
+  shapeJson: PatternShapeJson;
+  windowHash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PatternRun = {
+  id: string;
+  profileId: string;
+  tradingDate: string;
+  status: "queued" | "running" | "completed" | "failed";
+  phase: string;
+  totalCount: number;
+  processedCount: number;
+  matchedCount: number;
+  cursorOffset: number;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  warning: string | null;
+};
+
+export type PatternFeatureRegistryRow = {
+  featureKey: string;
+  displayName: string;
+  family: "scalar" | "shape";
+  valueType: string;
+  enabled: boolean;
+  version: string;
+  description: string | null;
+};
+
+export type PatternModelVersion = {
+  id: string;
+  profileId: string;
+  modelType: string;
+  featureVersion: string;
+  model: Record<string, unknown>;
+  metrics: PatternValidationMetrics;
+  featureSummary: PatternFeatureSummary;
+  approvedCount: number;
+  rejectedCount: number;
+  active: boolean;
+  createdAt: string;
+};
+
+export type PatternValidationMetrics = {
+  enoughLabels: boolean;
+  approvedCount: number;
+  rejectedCount: number;
+  totalActiveLabels: number;
+  chronologicalAccuracy: number | null;
+  precisionAt25: number | null;
+  precisionAt50: number | null;
+  validationWindowSize: number;
+};
+
+export type PatternFeatureSummary = {
+  scalarStats: Record<string, {
+    approvedAvg: number | null;
+    rejectedAvg: number | null;
+    approvedMedian: number | null;
+    rejectedMedian: number | null;
+    delta: number | null;
+  }>;
+  topWeightedFeatures: Array<{ featureKey: string; weight: number; direction: "approved" | "rejected" | "neutral" }>;
+};
+
+export type PatternProfile = {
+  id: string;
+  name: string;
+  description: string | null;
+  benchmarkTickers: string[];
+  prefilterConfig: { minPrice: number; minDollarVolume20d: number; minBars: number };
+  activeModelId: string | null;
+  settings: { contextWindowBars: number; patternWindowBars: number; candidateLimit: number };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PatternAnalysisResponse = {
+  profile: PatternProfile;
+  activeModel: PatternModelVersion | null;
+  featureRegistry: PatternFeatureRegistryRow[];
+  approvalCount: number;
+  rejectionCount: number;
+  featureSummary: PatternFeatureSummary;
+  validationMetrics: PatternValidationMetrics;
+  modelHistory: PatternModelVersion[];
+  mlReadiness: {
+    balancedLabels: number;
+    logisticReady: boolean;
+    neuralReady: boolean;
+    guidance: string[];
+  };
+};
+
+export type PatternFeatureIdeasResponse = {
+  rows: Array<{ title: string; description: string; status: string }>;
+  mlReadiness: Record<string, string>;
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
 export type WatchlistCompilerSetRow = {
@@ -928,6 +1100,10 @@ export type WorkerScheduleSettings = {
   postCloseBarsOffsetMinutes: number;
   postCloseBarsBatchSize: number;
   postCloseBarsMaxBatchesPerTick: number;
+  patternScanEnabled: boolean;
+  patternScanOffsetMinutes: number;
+  patternScanBatchSize: number;
+  patternScanMaxBatchesPerTick: number;
 };
 
 export type PeerMetricRow = {
@@ -1290,6 +1466,134 @@ export function refreshScanCompilePreset(id: string) {
   return adminFetch<{ ok: boolean } & ScanCompilePresetRefreshResult>(
     `/api/admin/scans/compile-presets/${encodeURIComponent(id)}/refresh`,
     { method: "POST" },
+  );
+}
+
+export function getPatternLatest(profileId = "default", limit = 100) {
+  return getJson<{ profileId: string; rows: PatternCandidate[] }>(
+    appendQuery("/api/pattern-scanner/latest", { profileId, limit }),
+  );
+}
+
+export function getPatternRuns(profileId = "default", limit = 25) {
+  return getJson<{ profileId: string; rows: PatternRun[] }>(
+    appendQuery("/api/pattern-scanner/runs", { profileId, limit }),
+  );
+}
+
+export function getPatternRun(runId: string) {
+  return getJson<{ run: PatternRun; candidates: PatternCandidate[] }>(
+    `/api/pattern-scanner/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+export function getPatternLabels(profileId = "default") {
+  return getJson<{ profileId: string; rows: PatternLabel[] }>(
+    appendQuery("/api/pattern-scanner/labels", { profileId }),
+  );
+}
+
+export function getPatternFeatures() {
+  return getJson<{ rows: PatternFeatureRegistryRow[] }>("/api/pattern-scanner/features");
+}
+
+export function getPatternFeatureIdeas() {
+  return getJson<PatternFeatureIdeasResponse>("/api/pattern-scanner/feature-ideas");
+}
+
+export function getPatternModel(profileId = "default") {
+  return getJson<{ profileId: string; model: PatternModelVersion | null; features: PatternFeatureRegistryRow[] }>(
+    appendQuery("/api/pattern-scanner/model", { profileId }),
+  );
+}
+
+export function getPatternAnalysis(profileId = "default") {
+  return getJson<PatternAnalysisResponse>(appendQuery("/api/pattern-scanner/analysis", { profileId }));
+}
+
+export function getPatternExportUrl(profileId = "default") {
+  return apiUrl(appendQuery("/api/pattern-scanner/export.txt", { profileId }));
+}
+
+export function createPatternLabel(payload: {
+  profileId?: string;
+  ticker: string;
+  setupDate: string;
+  label: PatternLabelValue;
+  status?: PatternLabelStatus;
+  source?: string;
+  contextWindowBars?: number;
+  patternWindowBars?: number;
+  tags?: string[];
+  notes?: string | null;
+  runId?: string | null;
+  candidateId?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; label: PatternLabel | null }>("/api/admin/pattern-scanner/labels", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createPatternLabelsBulk(payload: {
+  profileId?: string;
+  csvText?: string;
+  labels?: Array<{
+    ticker: string;
+    setupDate: string;
+    label: PatternLabelValue;
+    tags?: string[];
+    notes?: string | null;
+  }>;
+  contextWindowBars?: number;
+  patternWindowBars?: number;
+}) {
+  return adminFetch<{ ok: boolean; created: PatternLabel[]; errors: Array<{ row: number; error: string }> }>(
+    "/api/admin/pattern-scanner/labels/bulk",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function updatePatternLabel(id: string, payload: {
+  ticker?: string;
+  setupDate?: string;
+  label?: PatternLabelValue;
+  status?: PatternLabelStatus;
+  contextWindowBars?: number;
+  patternWindowBars?: number;
+  tags?: string[];
+  notes?: string | null;
+}) {
+  return adminFetch<{ ok: boolean; label: PatternLabel }>(`/api/admin/pattern-scanner/labels/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deletePatternLabel(id: string, hard = false) {
+  return adminFetch<{ ok: boolean; deleted: boolean; hard: boolean; profileId: string | null }>(
+    appendQuery(`/api/admin/pattern-scanner/labels/${encodeURIComponent(id)}`, { hard: hard ? 1 : undefined }),
+    { method: "DELETE" },
+  );
+}
+
+export function createPatternRun(payload?: { profileId?: string; tradingDate?: string; force?: boolean }) {
+  return adminFetch<{ ok: boolean; run: PatternRun }>("/api/admin/pattern-scanner/runs", {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export function updatePatternFeature(featureKey: string, payload: { displayName?: string; enabled?: boolean; description?: string | null }) {
+  return adminFetch<{ ok: boolean; feature: PatternFeatureRegistryRow }>(
+    `/api/admin/pattern-scanner/features/${encodeURIComponent(featureKey)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
   );
 }
 
@@ -1888,6 +2192,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "scans") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support scans refresh endpoint." };
+    }
+    if (page === "pattern-scanner") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support pattern scanner refresh endpoint." };
     }
     if (page === "watchlist-compiler") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support watchlist compiler refresh endpoint." };

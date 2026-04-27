@@ -39,6 +39,63 @@ export const adminWorkerSchedulePatchSchema = z.object({
   postCloseBarsOffsetMinutes: z.number().int().min(0).max(240),
   postCloseBarsBatchSize: z.number().int().min(20).max(2_000),
   postCloseBarsMaxBatchesPerTick: z.number().int().min(1).max(20),
+  patternScanEnabled: z.boolean().default(false),
+  patternScanOffsetMinutes: z.number().int().min(0).max(360).default(75),
+  patternScanBatchSize: z.number().int().min(1).max(500).default(40),
+  patternScanMaxBatchesPerTick: z.number().int().min(1).max(20).default(4),
+});
+
+const patternLabelValueSchema = z.enum(["approved", "rejected", "skipped"]);
+const patternLabelStatusSchema = z.enum(["active", "archived", "deleted"]);
+
+const patternTagsSchema = z.array(z.string().trim().min(1).max(40)).max(20).optional().default([]);
+
+export const patternLabelCreateSchema = z.object({
+  profileId: z.string().trim().min(1).optional().default("default"),
+  ticker: z.string().trim().min(1).max(20).transform((value) => value.toUpperCase()),
+  setupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  label: patternLabelValueSchema,
+  status: patternLabelStatusSchema.optional(),
+  source: z.string().trim().min(1).max(80).optional().default("manual"),
+  contextWindowBars: z.number().int().min(60).max(520).optional().default(260),
+  patternWindowBars: z.number().int().min(20).max(120).optional().default(40),
+  tags: patternTagsSchema,
+  notes: z.string().trim().max(2000).nullable().optional(),
+  runId: z.string().trim().min(1).nullable().optional(),
+  candidateId: z.string().trim().min(1).nullable().optional(),
+});
+
+export const patternLabelBulkSchema = z.object({
+  profileId: z.string().trim().min(1).optional().default("default"),
+  csvText: z.string().trim().max(200_000).optional(),
+  labels: z.array(patternLabelCreateSchema.omit({ profileId: true })).max(500).optional(),
+  contextWindowBars: z.number().int().min(60).max(520).optional().default(260),
+  patternWindowBars: z.number().int().min(20).max(120).optional().default(40),
+}).refine((value) => Boolean(value.csvText || value.labels?.length), {
+  message: "Provide csvText or labels.",
+});
+
+export const patternLabelPatchSchema = z.object({
+  ticker: z.string().trim().min(1).max(20).transform((value) => value.toUpperCase()).optional(),
+  setupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  label: patternLabelValueSchema.optional(),
+  status: patternLabelStatusSchema.optional(),
+  contextWindowBars: z.number().int().min(60).max(520).optional(),
+  patternWindowBars: z.number().int().min(20).max(120).optional(),
+  tags: patternTagsSchema,
+  notes: z.string().trim().max(2000).nullable().optional(),
+});
+
+export const patternRunCreateSchema = z.object({
+  profileId: z.string().trim().min(1).optional().default("default"),
+  tradingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  force: z.boolean().optional().default(false),
+});
+
+export const patternFeaturePatchSchema = z.object({
+  displayName: z.string().trim().min(1).max(120).optional(),
+  enabled: z.boolean().optional(),
+  description: z.string().trim().max(500).nullable().optional(),
 });
 
 export const groupPatchSchema = z.object({

@@ -1,6 +1,7 @@
 export type Env = {
   DB: D1Database;
   SCANNER_CACHE_DB?: D1Database;
+  PATTERN_DB?: D1Database;
   ADMIN_SECRET?: string;
   DATA_PROVIDER?: string;
   ALPACA_API_KEY?: string;
@@ -101,6 +102,10 @@ export type WorkerScheduleSettings = {
   postCloseBarsOffsetMinutes: number;
   postCloseBarsBatchSize: number;
   postCloseBarsMaxBatchesPerTick: number;
+  patternScanEnabled: boolean;
+  patternScanOffsetMinutes: number;
+  patternScanBatchSize: number;
+  patternScanMaxBatchesPerTick: number;
 };
 
 export type PostCloseDailyBarRefreshJob = {

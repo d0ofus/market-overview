@@ -37,6 +37,11 @@ import {
   adminSymbolCatalogSyncSchema,
   adminSymbolCatalogScheduleSchema,
   adminWorkerSchedulePatchSchema,
+  patternFeaturePatchSchema,
+  patternLabelBulkSchema,
+  patternLabelCreateSchema,
+  patternLabelPatchSchema,
+  patternRunCreateSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -199,6 +204,25 @@ import {
   listResearchLabRuns as listResearchLabRunRows,
   startResearchLabRun,
 } from "./research-lab/orchestrator";
+import {
+  createPatternLabel,
+  createPatternLabelsBulk,
+  createPatternRun,
+  deletePatternLabel,
+  listLatestPatternCandidates,
+  listPatternFeatureRegistry,
+  listPatternLabels,
+  listPatternRuns,
+  loadPatternAnalysis,
+  loadPatternModel,
+  loadPatternRunDetail,
+  maybeRunScheduledPatternScan,
+  patternExportText,
+  PatternDbUnavailableError,
+  processPatternScanRun,
+  updatePatternFeatureRegistry,
+  updatePatternLabel,
+} from "./pattern-scanner-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -226,6 +250,17 @@ const isAuthed = (req: Request, env: Env): boolean => {
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
 };
+
+function patternErrorResponse(c: any, error: unknown) {
+  if (error instanceof PatternDbUnavailableError) {
+    return c.json({ error: error.message, setupRequired: true }, 503);
+  }
+  if (error instanceof ZodError) {
+    return c.json({ error: error.issues[0]?.message ?? "Invalid pattern scanner payload." }, 400);
+  }
+  const message = error instanceof Error ? error.message : "Pattern scanner request failed.";
+  return c.json({ error: message }, 500);
+}
 
 function isOverviewSectionTitle(title: string | null | undefined): boolean {
   if (!title) return false;
@@ -676,6 +711,7 @@ type RefreshPage =
   | "ticker"
   | "alerts"
   | "scans"
+  | "pattern-scanner"
   | "watchlist-compiler"
   | "gappers";
 
@@ -763,6 +799,15 @@ async function refreshPageScopedData(
       page,
       refreshedTickers: snapshot.rowCount,
       notes: `Refreshed ${snapshot.presetName} scan snapshot with ${snapshot.rowCount} ranked rows.`,
+    };
+  }
+  if (page === "pattern-scanner") {
+    const run = await createPatternRun(env, { profileId: "default", force: false });
+    const processed = await processPatternScanRun(env, run.id, { batchSize: 40, maxBatches: 1 });
+    return {
+      page,
+      refreshedTickers: processed?.processedCount ?? run.processedCount,
+      notes: `Pattern scanner run ${processed?.status ?? run.status} for ${run.tradingDate}.`,
     };
   }
   if (page === "watchlist-compiler") {
@@ -2135,6 +2180,190 @@ app.get("/api/ticker/:ticker/news", async (c) => {
   }
 });
 
+app.get("/api/pattern-scanner/latest", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 100)));
+    const rows = await listLatestPatternCandidates(c.env, profileId, limit);
+    return c.json({ profileId, rows });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/runs", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+    const rows = await listPatternRuns(c.env, profileId, limit);
+    return c.json({ profileId, rows });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/runs/:runId", async (c) => {
+  try {
+    const detail = await loadPatternRunDetail(c.env, c.req.param("runId"));
+    if (!detail) return c.json({ error: "Pattern scan run not found." }, 404);
+    if (detail.run.status === "queued" || detail.run.status === "running") {
+      c.executionCtx.waitUntil(processPatternScanRun(c.env, detail.run.id));
+    }
+    return c.json(detail);
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/labels", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const rows = await listPatternLabels(c.env, profileId);
+    return c.json({ profileId, rows });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/features", async (c) => {
+  try {
+    const rows = await listPatternFeatureRegistry(c.env);
+    return c.json({ rows });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/feature-ideas", async (c) => {
+  return c.json({
+    rows: [
+      {
+        title: "Context-aware liquidity buckets",
+        description: "Compare examples only within similar dollar-volume and price buckets once the label set is large enough.",
+        status: "future",
+      },
+      {
+        title: "Sector-conditioned examples",
+        description: "Track whether preferred bases differ by sector, industry, and volatility regime.",
+        status: "future",
+      },
+      {
+        title: "External ML backends",
+        description: "Export V1 features for logistic_v2, xgboost_v2, embedding_v3, and neural_v4 training outside Workers.",
+        status: "future",
+      },
+    ],
+    mlReadiness: {
+      logistic: "Test logistic and boosted models around 300 balanced labels.",
+      neural: "Consider neural or image models around 1,500 labels.",
+      promotion: "Promote only if chronological validation improves Precision@25/50 by at least 15%.",
+    },
+  });
+});
+
+app.get("/api/pattern-scanner/model", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const model = await loadPatternModel(c.env, profileId);
+    const features = await listPatternFeatureRegistry(c.env);
+    return c.json({ profileId, model, features });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/analysis", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    return c.json(await loadPatternAnalysis(c.env, profileId));
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/export.txt", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const body = await patternExportText(c.env, profileId);
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Content-Disposition", `attachment; filename="pattern-scanner-${profileId}.txt"`);
+    return c.body(body);
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/labels", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternLabelCreateSchema.parse(await c.req.json());
+    const label = await createPatternLabel(c.env, payload);
+    return c.json({ ok: true, label });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/labels/bulk", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternLabelBulkSchema.parse(await c.req.json());
+    const result = await createPatternLabelsBulk(c.env, payload);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/admin/pattern-scanner/labels/:labelId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternLabelPatchSchema.parse(await c.req.json());
+    const label = await updatePatternLabel(c.env, c.req.param("labelId"), payload);
+    if (!label) return c.json({ error: "Pattern label not found." }, 404);
+    return c.json({ ok: true, label });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.delete("/api/admin/pattern-scanner/labels/:labelId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const result = await deletePatternLabel(c.env, c.req.param("labelId"), { hard: c.req.query("hard") === "1" });
+    if (!result.deleted) return c.json({ error: "Pattern label not found." }, 404);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternRunCreateSchema.parse(await c.req.json().catch(() => ({})));
+    const run = await createPatternRun(c.env, payload);
+    if (run.status === "queued" || run.status === "running") {
+      c.executionCtx.waitUntil(processPatternScanRun(c.env, run.id));
+    }
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/admin/pattern-scanner/features/:featureKey", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternFeaturePatchSchema.parse(await c.req.json());
+    const feature = await updatePatternFeatureRegistry(c.env, c.req.param("featureKey"), payload);
+    if (!feature) return c.json({ error: "Pattern feature not found." }, 404);
+    return c.json({ ok: true, feature });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
 app.get("/api/scans", async (c) => {
   await maybeRunScansPageHousekeeping(c.env);
   const presetId = c.req.query("presetId") ?? null;
@@ -3458,7 +3687,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "watchlist-compiler", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -3840,6 +4069,11 @@ export default {
       postCloseJob = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
     } catch (error) {
       console.error("scheduled post-close daily bar refresh failed", error);
+    }
+    try {
+      await maybeRunScheduledPatternScan(env, now, workerSchedule);
+    } catch (error) {
+      console.error("scheduled pattern scan failed", error);
     }
     const defaultConfig = await loadDefaultConfigRow(env);
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
