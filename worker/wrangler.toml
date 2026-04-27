@@ -22,5 +22,10 @@ binding = "SCANNER_CACHE_DB"
 database_name = "market_rs"
 database_id = "6837481f-3dd3-4f7c-933d-7927b5c755cd"
 
+[[d1_databases]]
+binding = "PATTERN_DB"
+database_name = "market_patterns"
+database_id = "979ab7bb-8c24-4978-b07a-66914d92ac04"
+
 [triggers]
 crons = ["*/15 * * * *"]
