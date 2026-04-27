@@ -87,7 +87,7 @@ import {
   loadLatestActiveScanRefreshJob,
   loadScanRefreshJob,
   loadScanPreset,
-  processManualRelativeStrengthScanRun,
+  processScannerCacheScanRun,
   refreshScanCompilePreset,
   refreshScansSnapshot,
   requestScansRefresh,
@@ -2273,7 +2273,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
   try {
     const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
     if (result.async && result.job) {
-      c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, result.job.id));
+      c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, result.job.id));
     }
     return c.json({ ok: true, ...result });
   } catch (error) {
@@ -2288,7 +2288,7 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, payload.job.id));
+    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
@@ -2298,7 +2298,7 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processManualRelativeStrengthScanRun(c.env, payload.job.id));
+    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
@@ -2360,6 +2360,11 @@ app.patch("/api/admin/scans/presets/:presetId", async (c) => {
       rsMaType: payload.rsMaType ?? existing.rsMaType,
       newHighLookback: payload.newHighLookback ?? existing.newHighLookback,
       outputMode: payload.outputMode ?? existing.outputMode,
+      vcpDailyPivotLookback: payload.vcpDailyPivotLookback ?? existing.vcpDailyPivotLookback,
+      vcpWeeklyHighLookback: payload.vcpWeeklyHighLookback ?? existing.vcpWeeklyHighLookback,
+      vcpPivotAgeBars: payload.vcpPivotAgeBars ?? existing.vcpPivotAgeBars,
+      vcpDailyNearPct: payload.vcpDailyNearPct ?? existing.vcpDailyNearPct,
+      vcpWeeklyNearPct: payload.vcpWeeklyNearPct ?? existing.vcpWeeklyNearPct,
       sortField: payload.sortField ?? existing.sortField,
       sortDirection: payload.sortDirection ?? existing.sortDirection,
       rowLimit: payload.rowLimit ?? existing.rowLimit,

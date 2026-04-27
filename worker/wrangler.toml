@@ -18,7 +18,7 @@ database_name = "market_command"
 database_id = "30528f34-b249-4d93-9b18-1d60a36df85d"
 
 [[d1_databases]]
-binding = "RS_DB"
+binding = "SCANNER_CACHE_DB"
 database_name = "market_rs"
 database_id = "6837481f-3dd3-4f7c-933d-7927b5c755cd"
 

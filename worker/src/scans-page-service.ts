@@ -16,6 +16,14 @@ import {
   type RelativeStrengthOutputMode,
   type RelativeStrengthRatioRow,
 } from "./relative-strength";
+import {
+  buildVcpFeatureRow,
+  normalizeVcpConfig,
+  requiredVcpBarCount,
+  vcpConfigKey,
+  type VcpConfig,
+  type VcpFeatureRow,
+} from "./vcp";
 import type { Env } from "./types";
 
 export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
@@ -40,7 +48,7 @@ export type ScanPresetRule = {
 export type ScanPreset = {
   id: string;
   name: string;
-  scanType: "tradingview" | "relative-strength";
+  scanType: "tradingview" | "relative-strength" | "vcp";
   isDefault: boolean;
   isActive: boolean;
   rules: ScanPresetRule[];
@@ -51,6 +59,11 @@ export type ScanPreset = {
   rsMaType: RelativeStrengthMaType;
   newHighLookback: number;
   outputMode: RelativeStrengthOutputMode;
+  vcpDailyPivotLookback: number;
+  vcpWeeklyHighLookback: number;
+  vcpPivotAgeBars: number;
+  vcpDailyNearPct: number;
+  vcpWeeklyNearPct: number;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -162,7 +175,7 @@ export type ScanRefreshJob = {
   id: string;
   presetId: string;
   presetName: string;
-  jobType: "relative-strength";
+  jobType: "relative-strength" | "vcp";
   status: ScanRefreshJobStatus;
   startedAt: string;
   updatedAt: string;
@@ -438,6 +451,55 @@ type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
 
 type ManualRelativeStrengthTickerStatus = "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
 
+type VcpRunRecord = {
+  id: string;
+  presetId: string;
+  presetName: string;
+  configKey: string;
+  expectedTradingDate: string;
+  status: ScanRefreshJobStatus;
+  requestedBy: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  updatedAt: string;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  warning: string | null;
+  totalTickers: number;
+  processedTickers: number;
+  matchedTickers: number;
+  cursorOffset: number;
+  latestSnapshotId: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  cacheHitTickers: number;
+  computedTickers: number;
+  missingBarsTickers: number;
+  insufficientHistoryTickers: number;
+  errorTickers: number;
+  durationMs: number | null;
+};
+
+type VcpCandidateRow = ManualRelativeStrengthCandidateRow;
+
+type VcpFeatureCacheRow = VcpFeatureRow & {
+  configKey: string;
+  expectedTradingDate: string | null;
+  status: string;
+  reason: string | null;
+  computedAt: string;
+};
+
+type VcpTickerStatus = "computed" | "missing_bars" | "insufficient_history" | "error";
+
+type VcpConfigIdentity = {
+  config: VcpConfig;
+  configKey: string;
+  requiredBarCount: number;
+  expectedTradingDate: string;
+};
+
 type TradingViewFilter = {
   left: string;
   operation: string;
@@ -496,12 +558,18 @@ const MANUAL_RS_SCAN_TIME_BUDGET_MS = 20_000;
 const MANUAL_RS_SCAN_LEASE_DURATION_MS = 60_000;
 const MANUAL_RS_SCAN_STALE_RUN_MS = 30 * 60_000;
 const MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE = 10_000;
+const VCP_SCAN_BATCH_SIZE = 40;
+const VCP_SCAN_TIME_BUDGET_MS = 20_000;
+const VCP_SCAN_LEASE_DURATION_MS = 60_000;
+const VCP_SCAN_STALE_RUN_MS = 30 * 60_000;
+const VCP_SCAN_MAX_UNIVERSE_SIZE = 10_000;
 const POST_CLOSE_DAILY_BARS_SCOPE = "active-us-common-stocks";
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 const RS_PROVIDER_LABEL = "Relative Strength Scan (Alpaca/Provider)";
+const VCP_PROVIDER_LABEL = "VCP Scan (shared daily bars)";
 const RS_RAW_RATIO_VERTICAL_OFFSET = 0.01;
 
 const FIELD_ALIASES: Record<string, string> = {
@@ -534,6 +602,12 @@ const FIELD_ALIASES: Record<string, string> = {
   relativeStrengthMa: "rs_ma",
   rsMa: "rs_ma",
   approxRsRating: "approx_rs_rating",
+  vcpSignal: "vcp_signal",
+  trendScore: "trend_score",
+  dailyPivot: "daily_pivot",
+  dailyPivotGapPct: "daily_pivot_gap_pct",
+  weeklyHigh: "weekly_high",
+  weeklyHighGapPct: "weekly_high_gap_pct",
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -550,8 +624,9 @@ function parseRules(raw: unknown): ScanPresetRule[] {
   }
 }
 
-function normalizeScanType(value: string | null | undefined): "tradingview" | "relative-strength" {
-  return value === "relative-strength" ? "relative-strength" : "tradingview";
+function normalizeScanType(value: string | null | undefined): "tradingview" | "relative-strength" | "vcp" {
+  if (value === "relative-strength" || value === "vcp") return value;
+  return "tradingview";
 }
 
 function normalizeOutputMode(value: string | null | undefined): RelativeStrengthOutputMode {
@@ -620,6 +695,35 @@ function rawRelativeStrengthConfig(identity: RelativeStrengthConfigIdentity): Re
     rsMaLength: identity.rsMaLength,
     rsMaType: identity.rsMaType,
     newHighLookback: identity.newHighLookback,
+  };
+}
+
+function vcpConfigForPreset(preset: Pick<
+  ScanPreset,
+  "vcpDailyPivotLookback" | "vcpWeeklyHighLookback" | "vcpPivotAgeBars" | "vcpDailyNearPct" | "vcpWeeklyNearPct"
+>): VcpConfig {
+  return normalizeVcpConfig({
+    dailyPivotLookback: preset.vcpDailyPivotLookback,
+    weeklyHighLookback: preset.vcpWeeklyHighLookback,
+    pivotAgeBars: preset.vcpPivotAgeBars,
+    dailyNearPct: preset.vcpDailyNearPct,
+    weeklyNearPct: preset.vcpWeeklyNearPct,
+  });
+}
+
+function buildVcpConfigIdentity(
+  preset: Pick<
+    ScanPreset,
+    "vcpDailyPivotLookback" | "vcpWeeklyHighLookback" | "vcpPivotAgeBars" | "vcpDailyNearPct" | "vcpWeeklyNearPct"
+  >,
+  expectedTradingDate = latestUsSessionAsOfDate(new Date()),
+): VcpConfigIdentity {
+  const config = vcpConfigForPreset(preset);
+  return {
+    config,
+    configKey: vcpConfigKey(config),
+    requiredBarCount: requiredVcpBarCount(config),
+    expectedTradingDate,
   };
 }
 
@@ -1077,6 +1181,15 @@ function sortSnapshotRows(rows: ScanSnapshotRow[], sortField: string, sortDirect
     if (normalized === "rs_close") return row.rsClose ?? Number.NEGATIVE_INFINITY;
     if (normalized === "rs_ma") return row.rsMa ?? Number.NEGATIVE_INFINITY;
     if (normalized === "approx_rs_rating") return row.approxRsRating ?? Number.NEGATIVE_INFINITY;
+    if (normalized === "trend_score" || normalized === "daily_pivot" || normalized === "daily_pivot_gap_pct" || normalized === "weekly_high" || normalized === "weekly_high_gap_pct") {
+      try {
+        const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+        const camelField = normalized.replace(/_([a-z])/g, (_match: string, char: string) => char.toUpperCase());
+        return asFiniteNumber(raw?.[normalized]) ?? asFiniteNumber(raw?.[camelField]) ?? Number.NEGATIVE_INFINITY;
+      } catch {
+        return Number.NEGATIVE_INFINITY;
+      }
+    }
     return row.change1d ?? Number.NEGATIVE_INFINITY;
   };
   return [...rows].sort((a, b) => {
@@ -1107,12 +1220,24 @@ function mapPresetRow(row: {
   rsMaType?: string | null;
   newHighLookback?: number | null;
   outputMode?: string | null;
+  vcpDailyPivotLookback?: number | null;
+  vcpWeeklyHighLookback?: number | null;
+  vcpPivotAgeBars?: number | null;
+  vcpDailyNearPct?: number | null;
+  vcpWeeklyNearPct?: number | null;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
   createdAt: string;
   updatedAt: string;
 }): ScanPreset {
+  const vcpConfig = normalizeVcpConfig({
+    dailyPivotLookback: row.vcpDailyPivotLookback ?? undefined,
+    weeklyHighLookback: row.vcpWeeklyHighLookback ?? undefined,
+    pivotAgeBars: row.vcpPivotAgeBars ?? undefined,
+    dailyNearPct: row.vcpDailyNearPct ?? undefined,
+    weeklyNearPct: row.vcpWeeklyNearPct ?? undefined,
+  });
   return {
     id: row.id,
     name: row.name,
@@ -1127,6 +1252,11 @@ function mapPresetRow(row: {
     rsMaType: normalizeRsMaType(row.rsMaType),
     newHighLookback: clamp(Number(row.newHighLookback ?? 252), 1, 520),
     outputMode: normalizeOutputMode(row.outputMode),
+    vcpDailyPivotLookback: vcpConfig.dailyPivotLookback,
+    vcpWeeklyHighLookback: vcpConfig.weeklyHighLookback,
+    vcpPivotAgeBars: vcpConfig.pivotAgeBars,
+    vcpDailyNearPct: vcpConfig.dailyNearPct,
+    vcpWeeklyNearPct: vcpConfig.weeklyNearPct,
     sortField: row.sortField,
     sortDirection: row.sortDirection === "asc" ? "asc" : "desc",
     rowLimit: clamp(Number(row.rowLimit ?? DEFAULT_LIMIT), 1, 250),
@@ -1288,7 +1418,7 @@ function nextDuplicatePresetName(sourceName: string, existingNames: string[]): s
 
 export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets ORDER BY is_default DESC, updated_at DESC, created_at DESC",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, vcp_daily_pivot_lookback as vcpDailyPivotLookback, vcp_weekly_high_lookback as vcpWeeklyHighLookback, vcp_pivot_age_bars as vcpPivotAgeBars, vcp_daily_near_pct as vcpDailyNearPct, vcp_weekly_near_pct as vcpWeeklyNearPct, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets ORDER BY is_default DESC, updated_at DESC, created_at DESC",
   ).all<{
     id: string;
     name: string;
@@ -1314,7 +1444,7 @@ export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
 
 export async function loadScanPreset(env: Env, presetId: string): Promise<ScanPreset | null> {
   const row = await env.DB.prepare(
-    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE id = ? LIMIT 1",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, vcp_daily_pivot_lookback as vcpDailyPivotLookback, vcp_weekly_high_lookback as vcpWeeklyHighLookback, vcp_pivot_age_bars as vcpPivotAgeBars, vcp_daily_near_pct as vcpDailyNearPct, vcp_weekly_near_pct as vcpWeeklyNearPct, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE id = ? LIMIT 1",
   )
     .bind(presetId)
     .first<{
@@ -1342,7 +1472,7 @@ export async function loadScanPreset(env: Env, presetId: string): Promise<ScanPr
 
 export async function loadDefaultScanPreset(env: Env): Promise<ScanPreset | null> {
   const row = await env.DB.prepare(
-    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE is_default = 1 LIMIT 1",
+    "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, vcp_daily_pivot_lookback as vcpDailyPivotLookback, vcp_weekly_high_lookback as vcpWeeklyHighLookback, vcp_pivot_age_bars as vcpPivotAgeBars, vcp_daily_near_pct as vcpDailyNearPct, vcp_weekly_near_pct as vcpWeeklyNearPct, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE is_default = 1 LIMIT 1",
   ).first<{
     id: string;
     name: string;
@@ -1371,7 +1501,7 @@ export async function loadDefaultScanPreset(env: Env): Promise<ScanPreset | null
 export async function upsertScanPreset(env: Env, input: {
   id?: string | null;
   name: string;
-  scanType?: "tradingview" | "relative-strength";
+  scanType?: "tradingview" | "relative-strength" | "vcp";
   isDefault?: boolean;
   isActive?: boolean;
   rules?: ScanPresetRule[];
@@ -1382,6 +1512,11 @@ export async function upsertScanPreset(env: Env, input: {
   rsMaType?: RelativeStrengthMaType;
   newHighLookback?: number;
   outputMode?: RelativeStrengthOutputMode;
+  vcpDailyPivotLookback?: number;
+  vcpWeeklyHighLookback?: number;
+  vcpPivotAgeBars?: number;
+  vcpDailyNearPct?: number;
+  vcpWeeklyNearPct?: number;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;
@@ -1391,12 +1526,19 @@ export async function upsertScanPreset(env: Env, input: {
   const isDefault = input.isDefault === true;
   const rules = input.rules ?? [];
   const prefilterRules = input.prefilterRules ?? rules;
+  const vcpConfig = normalizeVcpConfig({
+    dailyPivotLookback: input.vcpDailyPivotLookback,
+    weeklyHighLookback: input.vcpWeeklyHighLookback,
+    pivotAgeBars: input.vcpPivotAgeBars,
+    dailyNearPct: input.vcpDailyNearPct,
+    weeklyNearPct: input.vcpWeeklyNearPct,
+  });
   if (isDefault) {
     await env.DB.prepare("UPDATE scan_presets SET is_default = 0 WHERE is_default = 1").run();
   }
   await env.DB.prepare(
-    `INSERT INTO scan_presets (id, name, scan_type, is_default, is_active, rules_json, prefilter_rules_json, benchmark_ticker, vertical_offset, rs_ma_length, rs_ma_type, new_high_lookback, output_mode, sort_field, sort_direction, row_limit, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `INSERT INTO scan_presets (id, name, scan_type, is_default, is_active, rules_json, prefilter_rules_json, benchmark_ticker, vertical_offset, rs_ma_length, rs_ma_type, new_high_lookback, output_mode, vcp_daily_pivot_lookback, vcp_weekly_high_lookback, vcp_pivot_age_bars, vcp_daily_near_pct, vcp_weekly_near_pct, sort_field, sort_direction, row_limit, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        scan_type = excluded.scan_type,
@@ -1410,6 +1552,11 @@ export async function upsertScanPreset(env: Env, input: {
        rs_ma_type = excluded.rs_ma_type,
        new_high_lookback = excluded.new_high_lookback,
        output_mode = excluded.output_mode,
+       vcp_daily_pivot_lookback = excluded.vcp_daily_pivot_lookback,
+       vcp_weekly_high_lookback = excluded.vcp_weekly_high_lookback,
+       vcp_pivot_age_bars = excluded.vcp_pivot_age_bars,
+       vcp_daily_near_pct = excluded.vcp_daily_near_pct,
+       vcp_weekly_near_pct = excluded.vcp_weekly_near_pct,
        sort_field = excluded.sort_field,
        sort_direction = excluded.sort_direction,
        row_limit = excluded.row_limit,
@@ -1429,6 +1576,11 @@ export async function upsertScanPreset(env: Env, input: {
       normalizeRsMaType(input.rsMaType),
       clamp(Number(input.newHighLookback ?? 252), 1, 520),
       normalizeOutputMode(input.outputMode),
+      vcpConfig.dailyPivotLookback,
+      vcpConfig.weeklyHighLookback,
+      vcpConfig.pivotAgeBars,
+      vcpConfig.dailyNearPct,
+      vcpConfig.weeklyNearPct,
       input.sortField?.trim() || "change",
       input.sortDirection === "asc" ? "asc" : "desc",
       clamp(Number(input.rowLimit ?? DEFAULT_LIMIT), 1, 250),
@@ -1457,6 +1609,11 @@ export async function duplicateScanPreset(env: Env, presetId: string): Promise<S
     rsMaType: existing.rsMaType,
     newHighLookback: existing.newHighLookback,
     outputMode: existing.outputMode,
+    vcpDailyPivotLookback: existing.vcpDailyPivotLookback,
+    vcpWeeklyHighLookback: existing.vcpWeeklyHighLookback,
+    vcpPivotAgeBars: existing.vcpPivotAgeBars,
+    vcpDailyNearPct: existing.vcpDailyNearPct,
+    vcpWeeklyNearPct: existing.vcpWeeklyNearPct,
     sortField: existing.sortField,
     sortDirection: existing.sortDirection,
     rowLimit: existing.rowLimit,
@@ -2418,8 +2575,8 @@ async function loadStoredDailyBarsByCount(
   return out;
 }
 
-function hasManualRelativeStrengthStorage(env: Env): env is Env & { RS_DB: D1Database } {
-  return Boolean(env.RS_DB);
+function hasScannerCacheStorage(env: Env): env is Env & { SCANNER_CACHE_DB: D1Database } {
+  return Boolean(env.SCANNER_CACHE_DB);
 }
 
 function isActiveScanStatus(status: string | null | undefined): boolean {
@@ -2463,8 +2620,8 @@ function normalizeManualRunRecord(row: ManualRelativeStrengthRunRecord): ManualR
 }
 
 async function loadManualRelativeStrengthRun(env: Env, runId: string): Promise<ManualRelativeStrengthRunRecord | null> {
-  if (!hasManualRelativeStrengthStorage(env)) return null;
-  const row = await env.RS_DB.prepare(
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
     `SELECT
        id,
        preset_id as presetId,
@@ -2508,8 +2665,8 @@ async function loadManualRelativeStrengthRun(env: Env, runId: string): Promise<M
 }
 
 async function loadActiveManualRelativeStrengthRun(env: Env): Promise<ManualRelativeStrengthRunRecord | null> {
-  if (!hasManualRelativeStrengthStorage(env)) return null;
-  const row = await env.RS_DB.prepare(
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
     `SELECT
        id,
        preset_id as presetId,
@@ -2555,8 +2712,8 @@ async function loadLatestCompletedManualRelativeStrengthRunForConfig(
   env: Env,
   configKey: string,
 ): Promise<ManualRelativeStrengthRunRecord | null> {
-  if (!hasManualRelativeStrengthStorage(env)) return null;
-  const row = await env.RS_DB.prepare(
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
     `SELECT
        id,
        preset_id as presetId,
@@ -2602,8 +2759,8 @@ async function loadLatestCompletedManualRelativeStrengthRunForConfig(
 }
 
 async function failManualRelativeStrengthRun(env: Env, runId: string, error: string): Promise<void> {
-  if (!hasManualRelativeStrengthStorage(env)) return;
-  await env.RS_DB.prepare(
+  if (!hasScannerCacheStorage(env)) return;
+  await env.SCANNER_CACHE_DB.prepare(
     `UPDATE rs_scan_runs
      SET status = 'failed',
          error = ?,
@@ -2678,14 +2835,14 @@ async function loadManualRelativeStrengthUniverseCandidates(
 }
 
 async function insertManualRelativeStrengthRunCandidates(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   runId: string,
   candidates: ManualRelativeStrengthCandidateRow[],
 ): Promise<void> {
   for (let index = 0; index < candidates.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
     const chunk = candidates.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.RS_DB.batch(chunk.map((row) =>
-      env.RS_DB.prepare(
+    await env.SCANNER_CACHE_DB.batch(chunk.map((row) =>
+      env.SCANNER_CACHE_DB.prepare(
         `INSERT INTO rs_scan_run_tickers
           (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at, source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, 'computed')`,
@@ -2709,7 +2866,7 @@ async function insertManualRelativeStrengthRunCandidates(
 }
 
 async function createManualRelativeStrengthRun(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   preset: ScanPreset,
   requestedBy?: string | null,
 ): Promise<ManualRelativeStrengthRunRecord> {
@@ -2723,7 +2880,7 @@ async function createManualRelativeStrengthRun(
   const candidates = await loadManualRelativeStrengthUniverseCandidates(env, identity.expectedTradingDate);
   const runId = crypto.randomUUID();
   try {
-    await env.RS_DB.prepare(
+    await env.SCANNER_CACHE_DB.prepare(
       `INSERT INTO rs_scan_runs
         (id, preset_id, preset_name, config_key, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, expected_trading_date, status, requested_by, total_tickers, processed_tickers, matched_tickers, cursor_offset, created_at, updated_at, warning)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
@@ -2746,7 +2903,7 @@ async function createManualRelativeStrengthRun(
   } catch (error) {
     const existing = await loadActiveManualRelativeStrengthRun(env);
     if (existing) return existing;
-    await env.RS_DB.prepare("DELETE FROM rs_scan_runs WHERE id = ?").bind(runId).run();
+    await env.SCANNER_CACHE_DB.prepare("DELETE FROM rs_scan_runs WHERE id = ?").bind(runId).run();
     throw error;
   }
 
@@ -2756,12 +2913,12 @@ async function createManualRelativeStrengthRun(
 }
 
 async function loadManualRelativeStrengthRunCandidateSlice(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   runId: string,
   cursorOffset: number,
   limit: number,
 ): Promise<ManualRelativeStrengthCandidateRow[]> {
-  const rows = await env.RS_DB.prepare(
+  const rows = await env.SCANNER_CACHE_DB.prepare(
     `SELECT
        cursor_offset as cursorOffset,
        ticker,
@@ -2837,6 +2994,12 @@ function manualRuleFieldSupported(rule: ScanPresetRule): boolean {
     "rs_close",
     "rs_ma",
     "approx_rs_rating",
+    "trend_score",
+    "daily_pivot",
+    "daily_pivot_gap_pct",
+    "weekly_high",
+    "weekly_high_gap_pct",
+    "vcp_signal",
   ]);
   const field = normalizeFieldName(rule.field);
   if (!supported.has(field)) return false;
@@ -2849,7 +3012,7 @@ function manualRulesWarning(preset: ScanPreset): string | null {
     .filter((rule) => !manualRuleFieldSupported(rule))
     .map((rule) => rule.field);
   if (unsupported.length === 0) return null;
-  return `Skipped unsupported local RS rule fields: ${Array.from(new Set(unsupported)).join(", ")}.`;
+  return `Skipped unsupported local scanner rule fields: ${Array.from(new Set(unsupported)).join(", ")}.`;
 }
 
 function manualRowToTradingViewRow(
@@ -2891,7 +3054,7 @@ function manualRowToTradingViewRow(
 }
 
 async function upsertManualRelativeStrengthBatchResults(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   run: ManualRelativeStrengthRunRecord,
   results: Array<{
     candidate: ManualRelativeStrengthCandidateRow;
@@ -2910,11 +3073,11 @@ async function upsertManualRelativeStrengthBatchResults(
   let computedCount = 0;
   for (let index = 0; index < results.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
     const chunk = results.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    const statements = chunk.flatMap((result) => {
+    const batchStatements = chunk.flatMap((result) => {
       if (result.status === "computed") computedCount += 1;
       const feature = result.feature;
-      return [
-        env.RS_DB.prepare(
+      const rowStatements = [
+        env.SCANNER_CACHE_DB.prepare(
           `UPDATE rs_scan_run_tickers
            SET status = ?,
                reason = ?,
@@ -2942,9 +3105,9 @@ async function upsertManualRelativeStrengthBatchResults(
           result.candidate.ticker,
         ),
       ];
-      if (result.source === "cache") return statements;
-      statements.push(
-        env.RS_DB.prepare(
+      if (result.source === "cache") return rowStatements;
+      rowStatements.push(
+        env.SCANNER_CACHE_DB.prepare(
           `INSERT INTO rs_features_latest
             (config_key, ticker, expected_trading_date, trading_date, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, status, reason, computed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -2989,15 +3152,15 @@ async function upsertManualRelativeStrengthBatchResults(
           result.reason,
         ),
       );
-      return statements;
+      return rowStatements;
     });
-    await env.RS_DB.batch(statements);
+    await env.SCANNER_CACHE_DB.batch(batchStatements);
   }
   return computedCount;
 }
 
 async function heartbeatManualRelativeStrengthRun(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   runId: string,
   updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId" | "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "staleBenchmarkTickers" | "durationMs">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
 ): Promise<void> {
@@ -3066,19 +3229,19 @@ async function heartbeatManualRelativeStrengthRun(
   if (updates.releaseLease) {
     fields.push("lease_owner = NULL", "lease_expires_at = NULL");
   }
-  await env.RS_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
+  await env.SCANNER_CACHE_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
     .bind(...values, runId)
     .run();
 }
 
 async function acquireManualRelativeStrengthRunLease(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   run: ManualRelativeStrengthRunRecord,
 ): Promise<ManualRelativeStrengthRunRecord | null> {
   if (isManualRelativeStrengthRunLeaseActive(run)) return null;
   const leaseOwner = crypto.randomUUID();
   const leaseExpiresAt = new Date(Date.now() + MANUAL_RS_SCAN_LEASE_DURATION_MS).toISOString();
-  await env.RS_DB.prepare(
+  await env.SCANNER_CACHE_DB.prepare(
     `UPDATE rs_scan_runs
      SET status = 'running',
          started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
@@ -3115,7 +3278,7 @@ async function loadLatestCompletedPostCloseDailyBarRefreshAt(
 }
 
 async function loadManualRelativeStrengthFeatureCacheRows(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   configKey: string,
   tickers: string[],
 ): Promise<Map<string, ManualRelativeStrengthFeatureRow>> {
@@ -3124,7 +3287,7 @@ async function loadManualRelativeStrengthFeatureCacheRows(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.RS_DB.prepare(
+    const rows = await env.SCANNER_CACHE_DB.prepare(
       `SELECT
          config_key as configKey,
          ticker,
@@ -3227,7 +3390,7 @@ function countManualRelativeStrengthBatchStatus(
 }
 
 async function buildManualRelativeStrengthSnapshotResult(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   preset: ScanPreset,
   run: ManualRelativeStrengthRunRecord,
 ): Promise<{
@@ -3237,7 +3400,7 @@ async function buildManualRelativeStrengthSnapshotResult(
   error: string | null;
   rows: ScanSnapshotRow[];
 }> {
-  const rows = await env.RS_DB.prepare(
+  const rows = await env.SCANNER_CACHE_DB.prepare(
     `SELECT
        t.cursor_offset as cursorOffset,
        t.ticker,
@@ -3350,10 +3513,10 @@ async function buildManualRelativeStrengthSnapshotResult(
     .filter((row): row is ScanSnapshotRow => Boolean(row));
 
   const sortedRows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
-  await env.RS_DB.prepare("DELETE FROM rs_scan_rows_latest WHERE preset_id = ?").bind(preset.id).run();
+  await env.SCANNER_CACHE_DB.prepare("DELETE FROM rs_scan_rows_latest WHERE preset_id = ?").bind(preset.id).run();
   if (sortedRows.length > 0) {
-    await env.RS_DB.batch(sortedRows.map((row, index) =>
-      env.RS_DB.prepare(
+    await env.SCANNER_CACHE_DB.batch(sortedRows.map((row, index) =>
+      env.SCANNER_CACHE_DB.prepare(
         `INSERT INTO rs_scan_rows_latest
           (preset_id, config_key, ticker, rank, name, sector, industry, change_1d, market_cap, relative_volume, price, avg_volume, price_avg_volume, rs_close, rs_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, raw_json, computed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
@@ -3406,7 +3569,7 @@ async function listActiveRelativeStrengthPresetsForManualRunConfig(
 }
 
 async function completeManualRelativeStrengthRun(
-  env: Env & { RS_DB: D1Database },
+  env: Env & { SCANNER_CACHE_DB: D1Database },
   preset: ScanPreset,
   run: ManualRelativeStrengthRunRecord,
   matchedTickers: number,
@@ -3442,12 +3605,1113 @@ async function completeManualRelativeStrengthRun(
   return selectedSnapshot ?? loadLatestScansSnapshot(env, preset.id);
 }
 
+function normalizeVcpRunRecord(row: VcpRunRecord): VcpRunRecord {
+  return {
+    ...row,
+    totalTickers: Math.max(0, Math.trunc(Number(row.totalTickers ?? 0))),
+    processedTickers: Math.max(0, Math.trunc(Number(row.processedTickers ?? 0))),
+    matchedTickers: Math.max(0, Math.trunc(Number(row.matchedTickers ?? 0))),
+    cursorOffset: Math.max(0, Math.trunc(Number(row.cursorOffset ?? 0))),
+    cacheHitTickers: Math.max(0, Math.trunc(Number(row.cacheHitTickers ?? 0))),
+    computedTickers: Math.max(0, Math.trunc(Number(row.computedTickers ?? 0))),
+    missingBarsTickers: Math.max(0, Math.trunc(Number(row.missingBarsTickers ?? 0))),
+    insufficientHistoryTickers: Math.max(0, Math.trunc(Number(row.insufficientHistoryTickers ?? 0))),
+    errorTickers: Math.max(0, Math.trunc(Number(row.errorTickers ?? 0))),
+    durationMs: row.durationMs == null ? null : Math.max(0, Math.trunc(Number(row.durationMs))),
+  };
+}
+
+function mapVcpRunRecordToJob(record: VcpRunRecord): ScanRefreshJob {
+  const computedElapsedMs = elapsedMs(record.startedAt ?? record.createdAt);
+  return {
+    id: record.id,
+    presetId: record.presetId,
+    presetName: record.presetName,
+    jobType: "vcp",
+    status: record.status,
+    startedAt: record.startedAt ?? record.createdAt,
+    updatedAt: record.heartbeatAt ?? record.updatedAt,
+    completedAt: record.completedAt,
+    error: record.error,
+    totalCandidates: record.totalTickers,
+    processedCandidates: record.processedTickers,
+    matchedCandidates: record.matchedTickers,
+    cursorOffset: record.cursorOffset,
+    latestSnapshotId: record.latestSnapshotId,
+    requestedBy: record.requestedBy,
+    configKey: record.configKey,
+    sharedRunId: null,
+    expectedTradingDate: record.expectedTradingDate,
+    fullCandidateCount: record.totalTickers,
+    materializationCandidateCount: record.totalTickers,
+    alreadyCurrentCandidateCount: 0,
+    lastAdvancedAt: record.heartbeatAt ?? record.updatedAt,
+    deferredTickerCount: 0,
+    warning: record.warning,
+    phase: record.status === "completed" || record.status === "failed" ? record.status : "vcp",
+    elapsedMs: record.status === "completed" || record.status === "failed" ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
+    durationMs: record.durationMs ?? (record.status === "completed" || record.status === "failed" ? computedElapsedMs : null),
+    cacheHitCount: record.cacheHitTickers,
+    computedCount: record.computedTickers,
+    missingBarsCount: record.missingBarsTickers,
+    insufficientHistoryCount: record.insufficientHistoryTickers,
+    errorCount: record.errorTickers,
+    staleBenchmarkCount: 0,
+    appliesToPreset: true,
+  };
+}
+
+async function loadVcpRun(env: Env, runId: string): Promise<VcpRunRecord | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       duration_ms as durationMs
+     FROM vcp_scan_runs
+     WHERE id = ?
+     LIMIT 1`,
+  )
+    .bind(runId)
+    .first<VcpRunRecord>();
+  return row ? normalizeVcpRunRecord(row) : null;
+}
+
+async function loadActiveVcpRun(env: Env): Promise<VcpRunRecord | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       duration_ms as durationMs
+     FROM vcp_scan_runs
+     WHERE status IN ('queued', 'running')
+     ORDER BY datetime(updated_at) DESC
+     LIMIT 1`,
+  ).first<VcpRunRecord>();
+  return row ? normalizeVcpRunRecord(row) : null;
+}
+
+async function loadLatestCompletedVcpRunForPreset(
+  env: Env,
+  presetId: string,
+  configKey: string,
+  expectedTradingDate: string,
+): Promise<VcpRunRecord | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  const row = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT
+       id,
+       preset_id as presetId,
+       preset_name as presetName,
+       config_key as configKey,
+       expected_trading_date as expectedTradingDate,
+       status,
+       requested_by as requestedBy,
+       created_at as createdAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       heartbeat_at as heartbeatAt,
+       completed_at as completedAt,
+       error,
+       warning,
+       total_tickers as totalTickers,
+       processed_tickers as processedTickers,
+       matched_tickers as matchedTickers,
+       cursor_offset as cursorOffset,
+       latest_snapshot_id as latestSnapshotId,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       cache_hit_tickers as cacheHitTickers,
+       computed_tickers as computedTickers,
+       missing_bars_tickers as missingBarsTickers,
+       insufficient_history_tickers as insufficientHistoryTickers,
+       error_tickers as errorTickers,
+       duration_ms as durationMs
+     FROM vcp_scan_runs
+     WHERE preset_id = ?
+       AND config_key = ?
+       AND expected_trading_date = ?
+       AND status = 'completed'
+     ORDER BY datetime(completed_at) DESC, datetime(updated_at) DESC
+     LIMIT 1`,
+  )
+    .bind(presetId, configKey, expectedTradingDate)
+    .first<VcpRunRecord>();
+  return row ? normalizeVcpRunRecord(row) : null;
+}
+
+function isVcpRunLeaseActive(run: Pick<VcpRunRecord, "leaseOwner" | "leaseExpiresAt">): boolean {
+  if (!run.leaseOwner || !run.leaseExpiresAt) return false;
+  const expiresAt = toTimestampMs(run.leaseExpiresAt);
+  return expiresAt != null && expiresAt > Date.now();
+}
+
+function isVcpRunAbandoned(run: VcpRunRecord): boolean {
+  if (!isActiveScanStatus(run.status)) return false;
+  if (isVcpRunLeaseActive(run)) return false;
+  const updatedAt = toTimestampMs(run.heartbeatAt ?? run.updatedAt);
+  return updatedAt != null && Date.now() - updatedAt > VCP_SCAN_STALE_RUN_MS;
+}
+
+async function insertVcpRunCandidates(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  runId: string,
+  candidates: VcpCandidateRow[],
+): Promise<void> {
+  for (let index = 0; index < candidates.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = candidates.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    await env.SCANNER_CACHE_DB.batch(chunk.map((row) =>
+      env.SCANNER_CACHE_DB.prepare(
+        `INSERT INTO vcp_scan_run_tickers
+          (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, 'computed')`,
+      ).bind(
+        runId,
+        row.cursorOffset,
+        row.ticker,
+        row.name,
+        row.sector,
+        row.industry,
+        row.exchange,
+        row.assetClass,
+        row.marketCap,
+        row.relativeVolume,
+        row.avgVolume,
+        row.priceAvgVolume,
+        row.price,
+        row.change1d,
+      )));
+  }
+}
+
+function snapshotRowToVcpCandidate(row: ScanSnapshotRow, index: number): VcpCandidateRow {
+  let exchange: string | null = null;
+  let assetClass: string | null = null;
+  try {
+    const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+    exchange = typeof raw?.exchange === "string" ? raw.exchange : null;
+    assetClass = typeof raw?.type === "string" ? raw.type : null;
+  } catch {
+    exchange = null;
+  }
+  return {
+    cursorOffset: index,
+    ticker: row.ticker.toUpperCase(),
+    name: row.name ?? row.ticker.toUpperCase(),
+    sector: row.sector ?? null,
+    industry: row.industry ?? null,
+    exchange,
+    assetClass,
+    marketCap: row.marketCap ?? null,
+    relativeVolume: row.relativeVolume ?? null,
+    avgVolume: row.avgVolume ?? null,
+    priceAvgVolume: row.priceAvgVolume ?? null,
+    price: row.price ?? null,
+    change1d: row.change1d ?? null,
+    status: "queued",
+    reason: null,
+    latestTradingDate: null,
+    source: "computed",
+  };
+}
+
+async function createVcpScanRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  requestedBy?: string | null,
+): Promise<VcpRunRecord> {
+  const active = await loadActiveVcpRun(env);
+  if (active && !isVcpRunAbandoned(active)) return active;
+  if (active) {
+    await failVcpRun(env, active.id, "VCP scan run was abandoned and replaced by a new request.");
+  }
+
+  const identity = buildVcpConfigIdentity(preset);
+  const prefilterRows = await fetchRelativeStrengthPrefilterRows(preset);
+  const candidates = prefilterRows
+    .slice(0, VCP_SCAN_MAX_UNIVERSE_SIZE)
+    .map(snapshotRowToVcpCandidate);
+  const runId = crypto.randomUUID();
+  try {
+    await env.SCANNER_CACHE_DB.prepare(
+      `INSERT INTO vcp_scan_runs
+        (id, preset_id, preset_name, config_key, expected_trading_date, status, requested_by, total_tickers, processed_tickers, matched_tickers, cursor_offset, created_at, updated_at, warning)
+       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+    )
+      .bind(
+        runId,
+        preset.id,
+        preset.name,
+        identity.configKey,
+        identity.expectedTradingDate,
+        requestedBy ?? null,
+        candidates.length,
+      )
+      .run();
+    await insertVcpRunCandidates(env, runId, candidates);
+  } catch (error) {
+    const existing = await loadActiveVcpRun(env);
+    if (existing) return existing;
+    await env.SCANNER_CACHE_DB.prepare("DELETE FROM vcp_scan_runs WHERE id = ?").bind(runId).run();
+    throw error;
+  }
+
+  const created = await loadVcpRun(env, runId);
+  if (!created) throw new Error("Failed to create VCP scan run.");
+  return created;
+}
+
+async function loadVcpRunCandidateSlice(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  runId: string,
+  cursorOffset: number,
+  limit: number,
+): Promise<VcpCandidateRow[]> {
+  const rows = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT
+       cursor_offset as cursorOffset,
+       ticker,
+       name,
+       sector,
+       industry,
+       exchange,
+       asset_class as assetClass,
+       market_cap as marketCap,
+       relative_volume as relativeVolume,
+       avg_volume as avgVolume,
+       price_avg_volume as priceAvgVolume,
+       price,
+       change_1d as change1d,
+       status,
+       reason,
+       latest_trading_date as latestTradingDate,
+       source
+     FROM vcp_scan_run_tickers
+     WHERE run_id = ?
+     ORDER BY cursor_offset ASC
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(runId, limit, cursorOffset)
+    .all<VcpCandidateRow>();
+  return (rows.results ?? []).map((row) => ({
+    ...row,
+    ticker: row.ticker.toUpperCase(),
+    marketCap: row.marketCap == null ? null : Number(row.marketCap),
+    relativeVolume: row.relativeVolume == null ? null : Number(row.relativeVolume),
+    avgVolume: row.avgVolume == null ? null : Number(row.avgVolume),
+    priceAvgVolume: row.priceAvgVolume == null ? null : Number(row.priceAvgVolume),
+    price: row.price == null ? null : Number(row.price),
+    change1d: row.change1d == null ? null : Number(row.change1d),
+  }));
+}
+
+async function loadVcpFeatureCacheRows(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  configKey: string,
+  tickers: string[],
+): Promise<Map<string, VcpFeatureCacheRow>> {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const rowsByTicker = new Map<string, VcpFeatureCacheRow>();
+  for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
+    const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.SCANNER_CACHE_DB.prepare(
+      `SELECT
+         config_key as configKey,
+         ticker,
+         expected_trading_date as expectedTradingDate,
+         trading_date as tradingDate,
+         price_close as priceClose,
+         change_1d as change1d,
+         sma50,
+         sma150,
+         sma200,
+         daily_pivot as dailyPivot,
+         daily_pivot_gap_pct as dailyPivotGapPct,
+         weekly_high as weeklyHigh,
+         weekly_high_gap_pct as weeklyHighGapPct,
+         vol_sma20 as volSma20,
+         trend_score as trendScore,
+         trend_template as trendTemplate,
+         pivot_stable as pivotStable,
+         daily_near as dailyNear,
+         weekly_near as weeklyNear,
+         higher_lows as higherLows,
+         volume_contracting as volumeContracting,
+         vcp_signal as vcpSignal,
+         status,
+         reason,
+         computed_at as computedAt
+       FROM vcp_features_latest
+       WHERE config_key = ?
+         AND ticker IN (${placeholders})`,
+    )
+      .bind(configKey, ...chunk)
+      .all<VcpFeatureCacheRow>();
+    for (const row of rows.results ?? []) {
+      rowsByTicker.set(row.ticker.toUpperCase(), {
+        ...row,
+        ticker: row.ticker.toUpperCase(),
+        trendScore: Math.max(0, Math.trunc(Number(row.trendScore ?? 0))),
+        trendTemplate: asBooleanFlag(row.trendTemplate),
+        pivotStable: asBooleanFlag(row.pivotStable),
+        dailyNear: asBooleanFlag(row.dailyNear),
+        weeklyNear: asBooleanFlag(row.weeklyNear),
+        higherLows: asBooleanFlag(row.higherLows),
+        volumeContracting: asBooleanFlag(row.volumeContracting),
+        vcpSignal: asBooleanFlag(row.vcpSignal),
+      });
+    }
+  }
+  return rowsByTicker;
+}
+
+function isReusableVcpFeature(
+  row: VcpFeatureCacheRow | undefined,
+  identity: VcpConfigIdentity,
+  invalidatedAfterMs: number | null,
+): row is VcpFeatureCacheRow {
+  if (!row) return false;
+  const expectedTradingDate = row.expectedTradingDate ?? row.tradingDate;
+  if (expectedTradingDate !== identity.expectedTradingDate) return false;
+  const computedAtMs = toTimestampMs(row.computedAt);
+  if (invalidatedAfterMs != null && computedAtMs != null && computedAtMs < invalidatedAfterMs) return false;
+  if (row.status === "computed") return row.tradingDate === identity.expectedTradingDate;
+  return row.status === "missing_bars" || row.status === "insufficient_history";
+}
+
+function cachedVcpResult(
+  candidate: VcpCandidateRow,
+  feature: VcpFeatureCacheRow,
+): {
+  candidate: VcpCandidateRow;
+  status: VcpTickerStatus;
+  reason: string | null;
+  latestTradingDate: string | null;
+  price: number | null;
+  change1d: number | null;
+  avgVolume: number | null;
+  relativeVolume: number | null;
+  priceAvgVolume: number | null;
+  feature: VcpFeatureRow | null;
+  source: "cache";
+} {
+  const price = feature.priceClose ?? candidate.price ?? null;
+  const avgVolume = candidate.avgVolume ?? null;
+  return {
+    candidate,
+    status: feature.status as VcpTickerStatus,
+    reason: feature.reason ?? null,
+    latestTradingDate: feature.tradingDate ?? candidate.latestTradingDate ?? null,
+    price,
+    change1d: feature.change1d ?? candidate.change1d ?? null,
+    avgVolume,
+    relativeVolume: candidate.relativeVolume ?? null,
+    priceAvgVolume: price != null && avgVolume != null ? price * avgVolume : candidate.priceAvgVolume ?? null,
+    feature,
+    source: "cache",
+  };
+}
+
+function countVcpBatchStatus(
+  results: Array<{ status: VcpTickerStatus; source: "cache" | "computed" }>,
+): Pick<VcpRunRecord, "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers"> {
+  return {
+    cacheHitTickers: results.filter((result) => result.source === "cache").length,
+    computedTickers: results.filter((result) => result.source === "computed" && result.status === "computed").length,
+    missingBarsTickers: results.filter((result) => result.status === "missing_bars").length,
+    insufficientHistoryTickers: results.filter((result) => result.status === "insufficient_history").length,
+    errorTickers: results.filter((result) => result.status === "error").length,
+  };
+}
+
+async function upsertVcpBatchResults(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  run: VcpRunRecord,
+  results: Array<{
+    candidate: VcpCandidateRow;
+    status: VcpTickerStatus;
+    reason: string | null;
+    latestTradingDate: string | null;
+    price: number | null;
+    change1d: number | null;
+    avgVolume: number | null;
+    relativeVolume: number | null;
+    priceAvgVolume: number | null;
+    feature: VcpFeatureRow | null;
+    source: "cache" | "computed";
+  }>,
+): Promise<number> {
+  let matchedSignalCount = 0;
+  for (let index = 0; index < results.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+    const chunk = results.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+    const batchStatements = chunk.flatMap((result) => {
+      if (result.status === "computed" && result.feature?.vcpSignal) matchedSignalCount += 1;
+      const feature = result.feature;
+      const rowStatements = [
+        env.SCANNER_CACHE_DB.prepare(
+          `UPDATE vcp_scan_run_tickers
+           SET status = ?,
+               reason = ?,
+               latest_trading_date = ?,
+               price = ?,
+               change_1d = ?,
+               avg_volume = ?,
+               relative_volume = ?,
+               price_avg_volume = ?,
+               computed_at = CURRENT_TIMESTAMP,
+               source = ?
+           WHERE run_id = ?
+             AND ticker = ?`,
+        ).bind(
+          result.status,
+          result.reason,
+          result.latestTradingDate,
+          result.price,
+          result.change1d,
+          result.avgVolume,
+          result.relativeVolume,
+          result.priceAvgVolume,
+          result.source,
+          run.id,
+          result.candidate.ticker,
+        ),
+      ];
+      if (result.source === "cache") return rowStatements;
+      rowStatements.push(
+        env.SCANNER_CACHE_DB.prepare(
+          `INSERT INTO vcp_features_latest
+            (config_key, ticker, expected_trading_date, trading_date, price_close, change_1d, sma50, sma150, sma200, daily_pivot, daily_pivot_gap_pct, weekly_high, weekly_high_gap_pct, vol_sma20, trend_score, trend_template, pivot_stable, daily_near, weekly_near, higher_lows, volume_contracting, vcp_signal, status, reason, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(config_key, ticker) DO UPDATE SET
+             expected_trading_date = excluded.expected_trading_date,
+             trading_date = excluded.trading_date,
+             price_close = excluded.price_close,
+             change_1d = excluded.change_1d,
+             sma50 = excluded.sma50,
+             sma150 = excluded.sma150,
+             sma200 = excluded.sma200,
+             daily_pivot = excluded.daily_pivot,
+             daily_pivot_gap_pct = excluded.daily_pivot_gap_pct,
+             weekly_high = excluded.weekly_high,
+             weekly_high_gap_pct = excluded.weekly_high_gap_pct,
+             vol_sma20 = excluded.vol_sma20,
+             trend_score = excluded.trend_score,
+             trend_template = excluded.trend_template,
+             pivot_stable = excluded.pivot_stable,
+             daily_near = excluded.daily_near,
+             weekly_near = excluded.weekly_near,
+             higher_lows = excluded.higher_lows,
+             volume_contracting = excluded.volume_contracting,
+             vcp_signal = excluded.vcp_signal,
+             status = excluded.status,
+             reason = excluded.reason,
+             computed_at = CURRENT_TIMESTAMP`,
+        ).bind(
+          run.configKey,
+          result.candidate.ticker,
+          run.expectedTradingDate,
+          feature?.tradingDate ?? result.latestTradingDate,
+          feature?.priceClose ?? result.price,
+          feature?.change1d ?? result.change1d,
+          feature?.sma50 ?? null,
+          feature?.sma150 ?? null,
+          feature?.sma200 ?? null,
+          feature?.dailyPivot ?? null,
+          feature?.dailyPivotGapPct ?? null,
+          feature?.weeklyHigh ?? null,
+          feature?.weeklyHighGapPct ?? null,
+          feature?.volSma20 ?? null,
+          feature?.trendScore ?? 0,
+          feature?.trendTemplate ? 1 : 0,
+          feature?.pivotStable ? 1 : 0,
+          feature?.dailyNear ? 1 : 0,
+          feature?.weeklyNear ? 1 : 0,
+          feature?.higherLows ? 1 : 0,
+          feature?.volumeContracting ? 1 : 0,
+          feature?.vcpSignal ? 1 : 0,
+          result.status,
+          result.reason,
+        ),
+      );
+      return rowStatements;
+    });
+    await env.SCANNER_CACHE_DB.batch(batchStatements);
+  }
+  return matchedSignalCount;
+}
+
+async function heartbeatVcpRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  runId: string,
+  updates: Partial<Pick<VcpRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId" | "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "durationMs">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
+): Promise<void> {
+  const fields = ["updated_at = CURRENT_TIMESTAMP", "heartbeat_at = CURRENT_TIMESTAMP"];
+  const values: unknown[] = [];
+  if (updates.status != null) {
+    fields.push("status = ?");
+    values.push(updates.status);
+  }
+  if (updates.processedTickers != null) {
+    fields.push("processed_tickers = ?");
+    values.push(updates.processedTickers);
+  }
+  if (updates.matchedTickers != null) {
+    fields.push("matched_tickers = ?");
+    values.push(updates.matchedTickers);
+  }
+  if (updates.cursorOffset != null) {
+    fields.push("cursor_offset = ?");
+    values.push(updates.cursorOffset);
+  }
+  if (updates.cacheHitTickers != null) {
+    fields.push("cache_hit_tickers = ?");
+    values.push(updates.cacheHitTickers);
+  }
+  if (updates.computedTickers != null) {
+    fields.push("computed_tickers = ?");
+    values.push(updates.computedTickers);
+  }
+  if (updates.missingBarsTickers != null) {
+    fields.push("missing_bars_tickers = ?");
+    values.push(updates.missingBarsTickers);
+  }
+  if (updates.insufficientHistoryTickers != null) {
+    fields.push("insufficient_history_tickers = ?");
+    values.push(updates.insufficientHistoryTickers);
+  }
+  if (updates.errorTickers != null) {
+    fields.push("error_tickers = ?");
+    values.push(updates.errorTickers);
+  }
+  if (updates.durationMs != null) {
+    fields.push("duration_ms = ?");
+    values.push(updates.durationMs);
+  }
+  if (updates.warning !== undefined) {
+    fields.push("warning = ?");
+    values.push(updates.warning);
+  }
+  if (updates.error !== undefined) {
+    fields.push("error = ?");
+    values.push(updates.error);
+  }
+  if (updates.latestSnapshotId !== undefined) {
+    fields.push("latest_snapshot_id = ?");
+    values.push(updates.latestSnapshotId);
+  }
+  if (updates.completedAt !== undefined) {
+    fields.push("completed_at = ?");
+    values.push(updates.completedAt);
+  }
+  if (updates.releaseLease) {
+    fields.push("lease_owner = NULL", "lease_expires_at = NULL");
+  }
+  await env.SCANNER_CACHE_DB.prepare(`UPDATE vcp_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...values, runId)
+    .run();
+}
+
+async function failVcpRun(env: Env & { SCANNER_CACHE_DB: D1Database }, runId: string, message: string): Promise<void> {
+  await heartbeatVcpRun(env, runId, {
+    status: "failed",
+    error: message,
+    completedAt: new Date().toISOString(),
+    releaseLease: true,
+  });
+}
+
+async function acquireVcpRunLease(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  run: VcpRunRecord,
+): Promise<VcpRunRecord | null> {
+  if (isVcpRunLeaseActive(run)) return null;
+  const leaseOwner = crypto.randomUUID();
+  const leaseExpiresAt = new Date(Date.now() + VCP_SCAN_LEASE_DURATION_MS).toISOString();
+  await env.SCANNER_CACHE_DB.prepare(
+    `UPDATE vcp_scan_runs
+     SET status = 'running',
+         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+         updated_at = CURRENT_TIMESTAMP,
+         heartbeat_at = CURRENT_TIMESTAMP,
+         lease_owner = ?,
+         lease_expires_at = ?
+     WHERE id = ?
+       AND status IN ('queued', 'running')`,
+  )
+    .bind(leaseOwner, leaseExpiresAt, run.id)
+    .run();
+  const leased = await loadVcpRun(env, run.id);
+  return leased?.leaseOwner === leaseOwner ? leased : null;
+}
+
+function vcpRowToTradingViewRow(
+  row: ScanSnapshotRow,
+  candidate: VcpCandidateRow,
+  latestVolume: number | null,
+): TradingViewScanRow {
+  const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : {};
+  return {
+    ticker: row.ticker,
+    name: row.name,
+    sector: row.sector,
+    industry: row.industry,
+    change1d: row.change1d,
+    marketCap: row.marketCap,
+    relativeVolume: row.relativeVolume,
+    price: row.price,
+    avgVolume: row.avgVolume,
+    priceAvgVolume: row.priceAvgVolume,
+    volume: latestVolume,
+    exchange: candidate.exchange,
+    type: manualCandidateType(candidate.assetClass),
+    raw,
+  };
+}
+
+async function buildVcpSnapshotResult(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  run: VcpRunRecord,
+): Promise<{
+  providerLabel: string;
+  matchedRowCount: number;
+  status: "ok" | "warning" | "error" | "empty";
+  error: string | null;
+  rows: ScanSnapshotRow[];
+}> {
+  const rows = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT
+       t.cursor_offset as cursorOffset,
+       t.ticker,
+       t.name,
+       t.sector,
+       t.industry,
+       t.exchange,
+       t.asset_class as assetClass,
+       t.market_cap as marketCap,
+       t.relative_volume as relativeVolume,
+       t.avg_volume as avgVolume,
+       t.price_avg_volume as priceAvgVolume,
+       t.price,
+       t.change_1d as change1d,
+       t.status,
+       t.reason,
+       t.latest_trading_date as latestTradingDate,
+       t.source,
+       f.expected_trading_date as expectedTradingDate,
+       f.trading_date as tradingDate,
+       f.price_close as priceClose,
+       f.change_1d as featureChange1d,
+       f.sma50,
+       f.sma150,
+       f.sma200,
+       f.daily_pivot as dailyPivot,
+       f.daily_pivot_gap_pct as dailyPivotGapPct,
+       f.weekly_high as weeklyHigh,
+       f.weekly_high_gap_pct as weeklyHighGapPct,
+       f.vol_sma20 as volSma20,
+       f.trend_score as trendScore,
+       f.trend_template as trendTemplate,
+       f.pivot_stable as pivotStable,
+       f.daily_near as dailyNear,
+       f.weekly_near as weeklyNear,
+       f.higher_lows as higherLows,
+       f.volume_contracting as volumeContracting,
+       f.vcp_signal as vcpSignal,
+       f.computed_at as computedAt
+     FROM vcp_scan_run_tickers t
+     JOIN vcp_features_latest f
+       ON f.config_key = ?
+      AND f.ticker = t.ticker
+     WHERE t.run_id = ?
+       AND f.status = 'computed'
+     ORDER BY t.cursor_offset ASC`,
+  )
+    .bind(run.configKey, run.id)
+    .all<VcpCandidateRow & VcpFeatureCacheRow & { featureChange1d: number | null }>();
+
+  const supportedRules = preset.rules.filter(manualRuleFieldSupported);
+  const skippedRuleWarning = manualRulesWarning(preset);
+  const mergedRows = (rows.results ?? [])
+    .map((row) => {
+      const vcpSignal = asBooleanFlag(row.vcpSignal);
+      if (!vcpSignal) return null;
+      const latestVolume = row.avgVolume != null && row.relativeVolume != null ? row.avgVolume * row.relativeVolume : null;
+      const snapshotRow: ScanSnapshotRow = {
+        ticker: row.ticker.toUpperCase(),
+        name: row.name ?? row.ticker.toUpperCase(),
+        sector: row.sector ?? null,
+        industry: row.industry ?? null,
+        change1d: row.featureChange1d ?? row.change1d,
+        marketCap: row.marketCap ?? null,
+        relativeVolume: row.relativeVolume ?? null,
+        price: row.priceClose ?? row.price,
+        avgVolume: row.avgVolume ?? null,
+        priceAvgVolume: row.priceAvgVolume ?? null,
+        rsClose: null,
+        rsMa: null,
+        rsAboveMa: false,
+        rsNewHigh: false,
+        rsNewHighBeforePrice: false,
+        bullCross: false,
+        approxRsRating: null,
+        rawJson: JSON.stringify({
+          scannerType: "vcp",
+          tradingDate: row.tradingDate,
+          trading_date: row.tradingDate,
+          vcpSignal,
+          vcp_signal: vcpSignal,
+          trendScore: row.trendScore,
+          trend_score: row.trendScore,
+          trendTemplate: asBooleanFlag(row.trendTemplate),
+          trend_template: asBooleanFlag(row.trendTemplate),
+          pivotStable: asBooleanFlag(row.pivotStable),
+          pivot_stable: asBooleanFlag(row.pivotStable),
+          dailyNear: asBooleanFlag(row.dailyNear),
+          daily_near: asBooleanFlag(row.dailyNear),
+          weeklyNear: asBooleanFlag(row.weeklyNear),
+          weekly_near: asBooleanFlag(row.weeklyNear),
+          higherLows: asBooleanFlag(row.higherLows),
+          higher_lows: asBooleanFlag(row.higherLows),
+          volumeContracting: asBooleanFlag(row.volumeContracting),
+          volume_contracting: asBooleanFlag(row.volumeContracting),
+          sma50: row.sma50,
+          sma150: row.sma150,
+          sma200: row.sma200,
+          dailyPivot: row.dailyPivot,
+          daily_pivot: row.dailyPivot,
+          dailyPivotGapPct: row.dailyPivotGapPct,
+          daily_pivot_gap_pct: row.dailyPivotGapPct,
+          weeklyHigh: row.weeklyHigh,
+          weekly_high: row.weeklyHigh,
+          weeklyHighGapPct: row.weeklyHighGapPct,
+          weekly_high_gap_pct: row.weeklyHighGapPct,
+          volSma20: row.volSma20,
+          vol_sma20: row.volSma20,
+          relative_volume_10d_calc: row.relativeVolume ?? null,
+          latest_volume: latestVolume,
+          exchange: row.exchange ?? null,
+          type: manualCandidateType(row.assetClass),
+        }),
+      };
+      const filterRow = vcpRowToTradingViewRow(snapshotRow, row, latestVolume);
+      return rowMatchesRules(filterRow, supportedRules) ? snapshotRow : null;
+    })
+    .filter((row): row is ScanSnapshotRow => Boolean(row));
+
+  const sortedRows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
+  return {
+    providerLabel: VCP_PROVIDER_LABEL,
+    matchedRowCount: mergedRows.length,
+    status: sortedRows.length > 0 ? (skippedRuleWarning ? "warning" : "ok") : "empty",
+    error: skippedRuleWarning,
+    rows: sortedRows,
+  };
+}
+
+async function completeVcpRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  run: VcpRunRecord,
+  matchedTickers: number,
+): Promise<ScanSnapshot | null> {
+  const result = await buildVcpSnapshotResult(env, preset, run);
+  await upsertSymbolsFromRows(env, result.rows);
+  const snapshotId = await storeScanSnapshotResult(env, preset, result);
+  const snapshot = await loadLatestScansSnapshot(env, preset.id);
+  await heartbeatVcpRun(env, run.id, {
+    status: "completed",
+    processedTickers: run.totalTickers,
+    matchedTickers,
+    cursorOffset: run.totalTickers,
+    warning: result.error,
+    latestSnapshotId: snapshotId,
+    durationMs: elapsedMs(run.startedAt ?? run.createdAt) ?? undefined,
+    completedAt: new Date().toISOString(),
+    releaseLease: true,
+  });
+  return snapshot;
+}
+
+export async function processVcpScanRun(
+  env: Env,
+  runId?: string | null,
+  options?: { timeBudgetMs?: number; batchSize?: number },
+): Promise<ScanRefreshJob | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  const initialRun = runId ? await loadVcpRun(env, runId) : await loadActiveVcpRun(env);
+  if (!initialRun || !isActiveScanStatus(initialRun.status)) return initialRun ? mapVcpRunRecordToJob(initialRun) : null;
+  const leasedRun = await acquireVcpRunLease(env, initialRun);
+  if (!leasedRun) return mapVcpRunRecordToJob(initialRun);
+
+  const preset = await loadScanPreset(env, leasedRun.presetId);
+  if (!preset || preset.scanType !== "vcp") {
+    await failVcpRun(env, leasedRun.id, "VCP scan preset no longer exists.");
+    const failed = await loadVcpRun(env, leasedRun.id);
+    return failed ? mapVcpRunRecordToJob(failed) : null;
+  }
+
+  const startedAt = Date.now();
+  const timeBudgetMs = Math.max(1_000, options?.timeBudgetMs ?? VCP_SCAN_TIME_BUDGET_MS);
+  const batchSize = Math.max(1, Math.trunc(options?.batchSize ?? VCP_SCAN_BATCH_SIZE));
+  const identity = buildVcpConfigIdentity(preset, leasedRun.expectedTradingDate);
+  const cacheInvalidatedAfterMs = await loadLatestCompletedPostCloseDailyBarRefreshAt(env, identity.expectedTradingDate);
+
+  let cursorOffset = leasedRun.cursorOffset;
+  let processedTickers = leasedRun.processedTickers;
+  let matchedTickers = leasedRun.matchedTickers;
+  let cacheHitTickers = leasedRun.cacheHitTickers;
+  let computedTickers = leasedRun.computedTickers;
+  let missingBarsTickers = leasedRun.missingBarsTickers;
+  let insufficientHistoryTickers = leasedRun.insufficientHistoryTickers;
+  let errorTickers = leasedRun.errorTickers;
+
+  while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
+    const candidates = await loadVcpRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
+    if (candidates.length === 0) break;
+    const tickers = candidates.map((candidate) => candidate.ticker);
+    const cachedResults: Array<ReturnType<typeof cachedVcpResult>> = [];
+    const cacheRowsByTicker = await loadVcpFeatureCacheRows(env, identity.configKey, tickers);
+    const computeCandidates: VcpCandidateRow[] = [];
+    for (const candidate of candidates) {
+      const cached = cacheRowsByTicker.get(candidate.ticker);
+      if (isReusableVcpFeature(cached, identity, cacheInvalidatedAfterMs)) {
+        cachedResults.push(cachedVcpResult(candidate, cached));
+      } else {
+        computeCandidates.push(candidate);
+      }
+    }
+
+    if (computeCandidates.length > 0) {
+      await ensureStoredDailyBarsCurrent(
+        env,
+        computeCandidates.map((candidate) => candidate.ticker),
+        identity.expectedTradingDate,
+        identity.requiredBarCount,
+      );
+    }
+
+    const barsByTicker = groupBarsByTicker(
+      computeCandidates.length > 0
+        ? await loadStoredDailyBarsByCount(
+          env,
+          computeCandidates.map((candidate) => candidate.ticker),
+          identity.expectedTradingDate,
+          identity.requiredBarCount,
+        )
+        : [],
+    );
+
+    const computedResults = computeCandidates.map((candidate) => {
+      try {
+        const tickerBars = barsByTicker.get(candidate.ticker) ?? [];
+        const latestTickerDate = latestBarDate(tickerBars);
+        const latest = tickerBars[tickerBars.length - 1] ?? null;
+        const previous = tickerBars.length > 1 ? tickerBars[tickerBars.length - 2] : null;
+        const avgVolume = averageVolume(tickerBars, 30);
+        const latestVolume = latest == null ? null : Number((latest as { volume?: number }).volume ?? 0);
+        const relativeVolume = avgVolume != null && latestVolume != null && avgVolume > 0 ? latestVolume / avgVolume : null;
+        const priceAvgVolume = latest?.c != null && avgVolume != null ? latest.c * avgVolume : null;
+        const change1d = latest && previous ? percentChange(latest.c, previous.c) : null;
+        if (tickerBars.length === 0) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: "No stored daily bars are available for this ticker.",
+            latestTradingDate: null,
+            price: null,
+            change1d: null,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+            source: "computed" as const,
+          };
+        }
+        if (latestTickerDate !== identity.expectedTradingDate) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: `Latest stored bar is ${latestTickerDate ?? "none"}; expected ${identity.expectedTradingDate}.`,
+            latestTradingDate: latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+            source: "computed" as const,
+          };
+        }
+        if (tickerBars.length < identity.requiredBarCount) {
+          return {
+            candidate,
+            status: "insufficient_history" as const,
+            reason: `Only ${tickerBars.length} stored bars are available; ${identity.requiredBarCount} are required for this VCP config.`,
+            latestTradingDate: latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+            source: "computed" as const,
+          };
+        }
+        const computed = buildVcpFeatureRow(tickerBars, identity.config);
+        if (!computed || computed.tradingDate !== identity.expectedTradingDate) {
+          return {
+            candidate,
+            status: "missing_bars" as const,
+            reason: "VCP features could not be computed through the expected session.",
+            latestTradingDate: computed?.tradingDate ?? latestTickerDate,
+            price: latest?.c ?? null,
+            change1d,
+            avgVolume,
+            relativeVolume,
+            priceAvgVolume,
+            feature: null,
+            source: "computed" as const,
+          };
+        }
+        return {
+          candidate,
+          status: "computed" as const,
+          reason: null,
+          latestTradingDate: computed.tradingDate,
+          price: computed.priceClose,
+          change1d: computed.change1d,
+          avgVolume,
+          relativeVolume,
+          priceAvgVolume,
+          feature: computed,
+          source: "computed" as const,
+        };
+      } catch (error) {
+        return {
+          candidate,
+          status: "error" as const,
+          reason: error instanceof Error ? error.message : "Failed to compute VCP features for this ticker.",
+          latestTradingDate: null,
+          price: null,
+          change1d: null,
+          avgVolume: null,
+          relativeVolume: null,
+          priceAvgVolume: null,
+          feature: null,
+          source: "computed" as const,
+        };
+      }
+    });
+
+    const batchResults = [...cachedResults, ...computedResults];
+    matchedTickers += await upsertVcpBatchResults(env, leasedRun, batchResults);
+    const batchCounts = countVcpBatchStatus(batchResults);
+    cacheHitTickers += batchCounts.cacheHitTickers;
+    computedTickers += batchCounts.computedTickers;
+    missingBarsTickers += batchCounts.missingBarsTickers;
+    insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
+    errorTickers += batchCounts.errorTickers;
+    cursorOffset += candidates.length;
+    processedTickers = cursorOffset;
+    await heartbeatVcpRun(env, leasedRun.id, {
+      status: "running",
+      processedTickers,
+      matchedTickers,
+      cursorOffset,
+      cacheHitTickers,
+      computedTickers,
+      missingBarsTickers,
+      insufficientHistoryTickers,
+      errorTickers,
+    });
+  }
+
+  const refreshedRun = await loadVcpRun(env, leasedRun.id);
+  if (!refreshedRun) return null;
+  if (refreshedRun.cursorOffset >= refreshedRun.totalTickers) {
+    const snapshot = await completeVcpRun(env, preset, refreshedRun, matchedTickers);
+    const completed = await loadVcpRun(env, leasedRun.id);
+    return completed ? mapVcpRunRecordToJob(completed) : (snapshot ? null : mapVcpRunRecordToJob(refreshedRun));
+  }
+
+  await heartbeatVcpRun(env, leasedRun.id, { releaseLease: true });
+  const latest = await loadVcpRun(env, leasedRun.id);
+  return latest ? mapVcpRunRecordToJob(latest) : null;
+}
+
+export async function processScannerCacheScanRun(
+  env: Env,
+  runId?: string | null,
+  options?: { timeBudgetMs?: number; batchSize?: number },
+): Promise<ScanRefreshJob | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  if (runId) {
+    const vcpRun = await loadVcpRun(env, runId);
+    if (vcpRun) return processVcpScanRun(env, runId, options);
+    return processManualRelativeStrengthScanRun(env, runId, options);
+  }
+  const vcpRun = await loadActiveVcpRun(env);
+  if (vcpRun) return processVcpScanRun(env, vcpRun.id, options);
+  return processManualRelativeStrengthScanRun(env, null, options);
+}
+
 export async function processManualRelativeStrengthScanRun(
   env: Env,
   runId?: string | null,
   options?: { timeBudgetMs?: number; batchSize?: number },
 ): Promise<ScanRefreshJob | null> {
-  if (!hasManualRelativeStrengthStorage(env)) return null;
+  if (!hasScannerCacheStorage(env)) return null;
   const initialRun = runId ? await loadManualRelativeStrengthRun(env, runId) : await loadActiveManualRelativeStrengthRun(env);
   if (!initialRun || !isActiveScanStatus(initialRun.status)) return initialRun ? mapManualRunRecordToJob(initialRun) : null;
   const leasedRun = await acquireManualRelativeStrengthRunLease(env, initialRun);
@@ -6247,6 +7511,33 @@ export async function requestScansRefresh(
 ): Promise<ScanRefreshResponse> {
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) throw new Error("No scan preset is configured.");
+  if (preset.scanType === "vcp") {
+    if (!hasScannerCacheStorage(env)) {
+      throw new Error("VCP scans require the SCANNER_CACHE_DB binding.");
+    }
+    if (requestedBy !== "manual") {
+      return {
+        async: false,
+        snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+        job: null,
+      };
+    }
+    const identity = buildVcpConfigIdentity(preset);
+    const completed = await loadLatestCompletedVcpRunForPreset(env, preset.id, identity.configKey, identity.expectedTradingDate);
+    if (completed) {
+      return {
+        async: false,
+        snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+        job: null,
+      };
+    }
+    const run = await createVcpScanRun(env, preset, requestedBy);
+    return {
+      async: isActiveScanStatus(run.status),
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+      job: mapVcpRunRecordToJob(run),
+    };
+  }
   if (preset.scanType !== "relative-strength") {
     return {
       async: false,
@@ -6254,7 +7545,7 @@ export async function requestScansRefresh(
       job: null,
     };
   }
-  if (hasManualRelativeStrengthStorage(env)) {
+  if (hasScannerCacheStorage(env)) {
     if (requestedBy !== "manual") {
       return {
         async: false,
@@ -6428,6 +7719,15 @@ export async function loadScanRefreshJob(
         : await loadLatestUsableScansSnapshot(env, manualRun.presetId),
     };
   }
+  const vcpRun = await loadVcpRun(env, jobId);
+  if (vcpRun) {
+    return {
+      job: mapVcpRunRecordToJob(vcpRun),
+      snapshot: vcpRun.status === "completed"
+        ? await loadLatestScansSnapshot(env, vcpRun.presetId)
+        : await loadLatestUsableScansSnapshot(env, vcpRun.presetId),
+    };
+  }
   const record = await loadScanRefreshJobRecord(env, jobId);
   if (!record) return null;
   const preset = await loadScanPreset(env, record.presetId);
@@ -6446,7 +7746,24 @@ export async function loadLatestActiveScanRefreshJob(
   presetId: string,
 ): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
   const preset = await loadScanPreset(env, presetId);
-  if (!preset || preset.scanType !== "relative-strength") return null;
+  if (!preset) return null;
+  if (preset.scanType === "vcp") {
+    const identity = buildVcpConfigIdentity(preset);
+    const activeRun = await loadActiveVcpRun(env);
+    if (activeRun) {
+      return {
+        job: mapVcpRunRecordToJob(activeRun),
+        snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+      };
+    }
+    const completed = await loadLatestCompletedVcpRunForPreset(env, preset.id, identity.configKey, identity.expectedTradingDate);
+    if (!completed) return null;
+    return {
+      job: mapVcpRunRecordToJob(completed),
+      snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+    };
+  }
+  if (preset.scanType !== "relative-strength") return null;
   const identity = buildRelativeStrengthConfigIdentity(preset);
   const manualRun = await loadActiveManualRelativeStrengthRun(env);
   if (manualRun) {
@@ -6456,7 +7773,7 @@ export async function loadLatestActiveScanRefreshJob(
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
     };
   }
-  if (hasManualRelativeStrengthStorage(env)) {
+  if (hasScannerCacheStorage(env)) {
     const completed = await loadLatestCompletedManualRelativeStrengthRunForConfig(env, identity.configKey);
     if (!completed) return null;
     return {
@@ -6665,6 +7982,15 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
       throw new Error(`Relative strength cache materialization is ${response.job.status} for ${response.job.expectedTradingDate ?? "the latest session"}.`);
     }
     throw new Error("Relative strength refresh could not load a snapshot.");
+  }
+
+  if (preset.scanType === "vcp") {
+    const response = await requestScansRefresh(env, preset.id, "sync-refresh");
+    if (response.snapshot) return response.snapshot;
+    if (response.job) {
+      throw new Error(`VCP scan is ${response.job.status} for ${response.job.expectedTradingDate ?? "the latest session"}.`);
+    }
+    throw new Error("VCP refresh could not load a snapshot.");
   }
 
   try {

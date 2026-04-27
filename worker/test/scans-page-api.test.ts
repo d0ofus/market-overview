@@ -16,7 +16,7 @@ type MutableSnapshot = {
 type MutablePreset = {
   id: string;
   name: string;
-  scanType?: "tradingview" | "relative-strength";
+  scanType?: "tradingview" | "relative-strength" | "vcp";
   isDefault: boolean;
   isActive: boolean;
   rules: Array<{ id: string; field: string; operator: string; value: unknown }>;
@@ -27,6 +27,11 @@ type MutablePreset = {
   rsMaType?: "SMA" | "EMA";
   newHighLookback?: number;
   outputMode?: "all" | "rs_new_high_only" | "rs_new_high_before_price_only" | "both";
+  vcpDailyPivotLookback?: number;
+  vcpWeeklyHighLookback?: number;
+  vcpPivotAgeBars?: number;
+  vcpDailyNearPct?: number;
+  vcpWeeklyNearPct?: number;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;

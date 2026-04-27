@@ -203,7 +203,7 @@ export const scanPresetRuleSchema = z.object({
   }
 });
 
-const scanTypeSchema = z.enum(["tradingview", "relative-strength"]);
+const scanTypeSchema = z.enum(["tradingview", "relative-strength", "vcp"]);
 const rsMaTypeSchema = z.enum(["SMA", "EMA"]);
 const rsOutputModeSchema = z.enum(["all", "rs_new_high_only", "rs_new_high_before_price_only", "both"]);
 const benchmarkTickerSchema = z.preprocess(
@@ -224,18 +224,23 @@ const scanPresetBaseFieldsSchema = z.object({
   rsMaType: rsMaTypeSchema.optional().default("EMA"),
   newHighLookback: z.number().int().min(1).max(520).optional().default(252),
   outputMode: rsOutputModeSchema.optional().default("all"),
+  vcpDailyPivotLookback: z.number().int().min(5).max(520).optional().default(100),
+  vcpWeeklyHighLookback: z.number().int().min(5).max(260).optional().default(100),
+  vcpPivotAgeBars: z.number().int().min(1).max(120).optional().default(10),
+  vcpDailyNearPct: z.number().finite().min(0.1).max(50).optional().default(7),
+  vcpWeeklyNearPct: z.number().finite().min(0.1).max(80).optional().default(20),
   sortField: z.string().min(1).optional().default("change"),
   sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
   rowLimit: z.number().int().min(1).max(250).optional().default(100),
 });
 
 const scanPresetCreateValidatedSchema = scanPresetBaseFieldsSchema.superRefine((value, ctx) => {
-  if (value.scanType === "relative-strength") {
+  if (value.scanType === "relative-strength" || value.scanType === "vcp") {
     if (value.prefilterRules.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["prefilterRules"],
-        message: "Add at least one prefilter rule before saving a relative strength preset.",
+        message: "Add at least one prefilter rule before saving this scan preset.",
       });
     }
     return;
@@ -252,11 +257,11 @@ const scanPresetCreateValidatedSchema = scanPresetBaseFieldsSchema.superRefine((
 export const scanPresetCreateSchema = scanPresetCreateValidatedSchema;
 
 export const scanPresetPatchSchema = scanPresetBaseFieldsSchema.partial().superRefine((value, ctx) => {
-  if (value.scanType === "relative-strength" && value.prefilterRules && value.prefilterRules.length === 0) {
+  if ((value.scanType === "relative-strength" || value.scanType === "vcp") && value.prefilterRules && value.prefilterRules.length === 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["prefilterRules"],
-      message: "Add at least one prefilter rule before saving a relative strength preset.",
+      message: "Add at least one prefilter rule before saving this scan preset.",
     });
   }
   if ((value.scanType === undefined || value.scanType === "tradingview") && value.rules && value.rules.length === 0) {

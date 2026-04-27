@@ -166,7 +166,7 @@ export type ScanRule = {
   value: ScanRuleScalar | Array<ScanRuleScalar> | ScanRuleFieldReference;
 };
 
-export type ScanPresetType = "tradingview" | "relative-strength";
+export type ScanPresetType = "tradingview" | "relative-strength" | "vcp";
 export type RelativeStrengthMaType = "SMA" | "EMA";
 export type RelativeStrengthOutputMode = "all" | "rs_new_high_only" | "rs_new_high_before_price_only" | "both";
 
@@ -184,6 +184,11 @@ export type ScanPreset = {
   rsMaType: RelativeStrengthMaType;
   newHighLookback: number;
   outputMode: RelativeStrengthOutputMode;
+  vcpDailyPivotLookback: number;
+  vcpWeeklyHighLookback: number;
+  vcpPivotAgeBars: number;
+  vcpDailyNearPct: number;
+  vcpWeeklyNearPct: number;
   sortField: string;
   sortDirection: "asc" | "desc";
   rowLimit: number;
@@ -295,7 +300,7 @@ export type ScanRefreshJob = {
   id: string;
   presetId: string;
   presetName: string;
-  jobType: "relative-strength";
+  jobType: "relative-strength" | "vcp";
   status: ScanRefreshJobStatus;
   startedAt: string;
   updatedAt: string;
@@ -1301,6 +1306,11 @@ export function createScanPreset(payload: {
   rsMaType?: RelativeStrengthMaType;
   newHighLookback?: number;
   outputMode?: RelativeStrengthOutputMode;
+  vcpDailyPivotLookback?: number;
+  vcpWeeklyHighLookback?: number;
+  vcpPivotAgeBars?: number;
+  vcpDailyNearPct?: number;
+  vcpWeeklyNearPct?: number;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;
@@ -1324,6 +1334,11 @@ export function updateScanPreset(id: string, payload: {
   rsMaType?: RelativeStrengthMaType;
   newHighLookback?: number;
   outputMode?: RelativeStrengthOutputMode;
+  vcpDailyPivotLookback?: number;
+  vcpWeeklyHighLookback?: number;
+  vcpPivotAgeBars?: number;
+  vcpDailyNearPct?: number;
+  vcpWeeklyNearPct?: number;
   sortField?: string;
   sortDirection?: "asc" | "desc";
   rowLimit?: number;

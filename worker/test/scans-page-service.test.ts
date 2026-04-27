@@ -56,6 +56,11 @@ const topGainersPreset: ScanPreset = {
   rsMaType: "EMA",
   newHighLookback: 252,
   outputMode: "all",
+  vcpDailyPivotLookback: 100,
+  vcpWeeklyHighLookback: 100,
+  vcpPivotAgeBars: 10,
+  vcpDailyNearPct: 7,
+  vcpWeeklyNearPct: 20,
   sortField: "change",
   sortDirection: "desc",
   rowLimit: 100,
@@ -2914,6 +2919,11 @@ describe("scans page service", () => {
         rsMaType: "EMA",
         newHighLookback: 252,
         outputMode: "rs_new_high_only",
+        vcpDailyPivotLookback: 100,
+        vcpWeeklyHighLookback: 100,
+        vcpPivotAgeBars: 10,
+        vcpDailyNearPct: 7,
+        vcpWeeklyNearPct: 20,
         sortField: "change",
         sortDirection: "desc",
         rowLimit: 100,
@@ -2962,9 +2972,14 @@ describe("scans page service", () => {
                       rsMaType: args[10],
                       newHighLookback: args[11],
                       outputMode: args[12],
-                      sortField: args[13],
-                      sortDirection: args[14],
-                      rowLimit: args[15],
+                      vcpDailyPivotLookback: args[13],
+                      vcpWeeklyHighLookback: args[14],
+                      vcpPivotAgeBars: args[15],
+                      vcpDailyNearPct: args[16],
+                      vcpWeeklyNearPct: args[17],
+                      sortField: args[18],
+                      sortDirection: args[19],
+                      rowLimit: args[20],
                       createdAt: "",
                       updatedAt: "",
                     };
@@ -3304,7 +3319,7 @@ describe("scans page service", () => {
     expect(batchQueries[3]).toContain("DELETE FROM scan_presets");
   });
 
-  it("creates a manual-only RS_DB run without calling TradingView and reuses the active run", async () => {
+  it("creates a manual-only SCANNER_CACHE_DB run without calling TradingView and reuses the active run", async () => {
     const presetRow = {
       id: "preset-rs-manual",
       name: "Manual RS",
@@ -3373,7 +3388,7 @@ describe("scans page service", () => {
           return [];
         },
       },
-      RS_DB: {
+      SCANNER_CACHE_DB: {
         prepare(sql: string) {
           const makeBound = (args: unknown[]) => ({
             __sql: sql,
@@ -3488,6 +3503,11 @@ describe("scans page service", () => {
       rsMaType: "EMA",
       newHighLookback: 252,
       outputMode: "all",
+      vcpDailyPivotLookback: 100,
+      vcpWeeklyHighLookback: 100,
+      vcpPivotAgeBars: 10,
+      vcpDailyNearPct: 7,
+      vcpWeeklyNearPct: 20,
       sortField: "rs_close",
       sortDirection: "desc",
       rowLimit: 100,
@@ -3668,7 +3688,7 @@ describe("scans page service", () => {
           return [];
         },
       },
-      RS_DB: {
+      SCANNER_CACHE_DB: {
         prepare(sql: string) {
           const makeBound = (args: unknown[]) => ({
             __sql: sql,

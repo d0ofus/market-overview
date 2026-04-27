@@ -51,7 +51,12 @@ type SortKey =
   | "priceAvgVolume"
   | "rsClose"
   | "rsMa"
-  | "approxRsRating";
+  | "approxRsRating"
+  | "trendScore"
+  | "dailyPivot"
+  | "dailyPivotGapPct"
+  | "weeklyHigh"
+  | "weeklyHighGapPct";
 
 type ResultColumnKey =
   | "ticker"
@@ -65,7 +70,12 @@ type ResultColumnKey =
   | "priceAvgVolume"
   | "rsClose"
   | "rsMa"
-  | "approxRsRating";
+  | "approxRsRating"
+  | "trendScore"
+  | "dailyPivot"
+  | "dailyPivotGapPct"
+  | "weeklyHigh"
+  | "weeklyHighGapPct";
 
 type TradingViewFieldOption = {
   value: string;
@@ -99,6 +109,11 @@ const RESULT_COLUMNS: Array<{ key: ResultColumnKey; label: string }> = [
   { key: "rsClose", label: "RS Line" },
   { key: "rsMa", label: "RS MA" },
   { key: "approxRsRating", label: "RS Rating" },
+  { key: "trendScore", label: "Trend Score" },
+  { key: "dailyPivot", label: "Daily Pivot" },
+  { key: "dailyPivotGapPct", label: "% To Pivot" },
+  { key: "weeklyHigh", label: "Weekly High" },
+  { key: "weeklyHighGapPct", label: "% To Weekly High" },
 ];
 
 const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
@@ -114,11 +129,17 @@ const SORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "rs_close", label: "RS Line" },
   { value: "rs_ma", label: "RS MA" },
   { value: "approx_rs_rating", label: "RS Rating" },
+  { value: "trend_score", label: "Trend Score" },
+  { value: "daily_pivot", label: "Daily Pivot" },
+  { value: "daily_pivot_gap_pct", label: "% To Pivot" },
+  { value: "weekly_high", label: "Weekly High" },
+  { value: "weekly_high_gap_pct", label: "% To Weekly High" },
 ];
 
 const SCAN_TYPE_OPTIONS: Array<{ value: ScanPresetType; label: string }> = [
   { value: "tradingview", label: "TradingView Screener" },
   { value: "relative-strength", label: "Relative Strength" },
+  { value: "vcp", label: "VCP Scanner" },
 ];
 
 const RS_MA_TYPE_OPTIONS: RelativeStrengthMaType[] = ["EMA", "SMA"];
@@ -149,6 +170,11 @@ const RIGHT_ALIGNED_RESULT_COLUMNS = new Set<ResultColumnKey>([
   "rsClose",
   "rsMa",
   "approxRsRating",
+  "trendScore",
+  "dailyPivot",
+  "dailyPivotGapPct",
+  "weeklyHigh",
+  "weeklyHighGapPct",
 ]);
 const RESULTS_COLUMNS_STORAGE_KEY = "scans-results-columns";
 const DEFAULT_FIELD_SEARCH_LIMIT = 50;
@@ -178,7 +204,22 @@ const FIELD_LABELS: Record<string, string> = {
   average_day_range_14: "Average Day Range (14)",
   averageDayRange14: "Average Day Range (14)",
   relative_volume_10d_calc: "Relative Volume",
+  trend_score: "Trend Score",
+  daily_pivot: "Daily Pivot",
+  daily_pivot_gap_pct: "% To Daily Pivot",
+  weekly_high: "Weekly High",
+  weekly_high_gap_pct: "% To Weekly High",
 };
+
+function isComputedScanType(scanType: ScanPresetType): boolean {
+  return scanType === "relative-strength" || scanType === "vcp";
+}
+
+function scanTypeLabel(scanType: ScanPresetType): string {
+  if (scanType === "relative-strength") return "Relative Strength";
+  if (scanType === "vcp") return "VCP Scanner";
+  return "TradingView Screener";
+}
 
 const emptyDraftRule = (): ScanRule => ({
   id: crypto.randomUUID(),
@@ -201,6 +242,11 @@ const emptyDraftPreset = (): ScanPreset => ({
   rsMaType: "EMA",
   newHighLookback: 252,
   outputMode: "all",
+  vcpDailyPivotLookback: 100,
+  vcpWeeklyHighLookback: 100,
+  vcpPivotAgeBars: 10,
+  vcpDailyNearPct: 7,
+  vcpWeeklyNearPct: 20,
   sortField: "change",
   sortDirection: "desc",
   rowLimit: 100,
@@ -241,9 +287,10 @@ function formatDurationMs(value: number | null | undefined): string {
   return `${minutes}m ${remainder}s`;
 }
 
-function formatRsRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | null): string {
+function formatScanRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | null): string {
+  const label = job.jobType === "vcp" ? "VCP" : "RS";
   if (job.appliesToPreset === false) {
-    return `Another RS refresh is ${job.status} for ${job.presetName}; ${job.processedCandidates}/${job.fullCandidateCount} checked for ${job.expectedTradingDate ?? "the latest session"}.`;
+    return `Another ${label} refresh is ${job.status} for ${job.presetName}; ${job.processedCandidates}/${job.fullCandidateCount} checked for ${job.expectedTradingDate ?? "the latest session"}.`;
   }
   const runtime = job.status === "running" || job.status === "queued"
     ? `elapsed ${formatDurationMs(job.elapsedMs)}`
@@ -259,7 +306,7 @@ function formatRsRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | nu
     `${job.insufficientHistoryCount ?? 0} insufficient history`,
     `${job.errorCount ?? 0} errors`,
   ];
-  return `RS refresh ${job.status} for ${job.expectedTradingDate ?? "the latest session"} (${runtime}): ${counts.join(", ")}.${verified}${snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}`;
+  return `${label} refresh ${job.status} for ${job.expectedTradingDate ?? "the latest session"} (${runtime}): ${counts.join(", ")}.${verified}${snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}`;
 }
 
 function formatNumber(value: number | null | undefined, digits = 2): string {
@@ -389,6 +436,19 @@ function isSuggestedField(field: string, options: TradingViewFieldOption[]): boo
   return options.some((option) => option.value === field);
 }
 
+function rawNumber(row: ScanRow, ...keys: string[]): number | null {
+  try {
+    const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+    for (const key of keys) {
+      const value = raw?.[key];
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): ScanRow[] {
   const copy = [...rows];
   copy.sort((a, b) => {
@@ -404,6 +464,11 @@ function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): S
       if (sortKey === "rsClose") return row.rsClose ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "rsMa") return row.rsMa ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "approxRsRating") return row.approxRsRating ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "trendScore") return rawNumber(row, "trendScore", "trend_score") ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "dailyPivot") return rawNumber(row, "dailyPivot", "daily_pivot") ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "dailyPivotGapPct") return rawNumber(row, "dailyPivotGapPct", "daily_pivot_gap_pct") ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "weeklyHigh") return rawNumber(row, "weeklyHigh", "weekly_high") ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "weeklyHighGapPct") return rawNumber(row, "weeklyHighGapPct", "weekly_high_gap_pct") ?? Number.NEGATIVE_INFINITY;
       return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
     };
     const left = valueFor(a);
@@ -431,6 +496,11 @@ function sortKeyFromPresetField(field: string | null | undefined): SortKey {
   if (normalized === "rs_close") return "rsClose";
   if (normalized === "rs_ma") return "rsMa";
   if (normalized === "approx_rs_rating") return "approxRsRating";
+  if (normalized === "trend_score") return "trendScore";
+  if (normalized === "daily_pivot") return "dailyPivot";
+  if (normalized === "daily_pivot_gap_pct") return "dailyPivotGapPct";
+  if (normalized === "weekly_high") return "weeklyHigh";
+  if (normalized === "weekly_high_gap_pct") return "weeklyHighGapPct";
   return "change1d";
 }
 
@@ -489,10 +559,10 @@ export function ScansPageDashboard() {
   const [ruleValueInputByRule, setRuleValueInputByRule] = useState<Record<string, string>>({});
   const compilePresetDetailRequestId = useRef(0);
   const compiledSnapshotRequestId = useRef(0);
-  const draftRules = draftPreset.scanType === "relative-strength" ? draftPreset.prefilterRules : draftPreset.rules;
+  const draftRules = isComputedScanType(draftPreset.scanType) ? draftPreset.prefilterRules : draftPreset.rules;
   const updateDraftRules = (updater: (rules: ScanRule[]) => ScanRule[]) => {
     setDraftPreset((current) => (
-      current.scanType === "relative-strength"
+      isComputedScanType(current.scanType)
         ? { ...current, prefilterRules: updater(current.prefilterRules) }
         : { ...current, rules: updater(current.rules) }
     ));
@@ -781,7 +851,7 @@ export function ScansPageDashboard() {
       return;
     }
     if (activeRules.length === 0) {
-      setError(draftPreset.scanType === "relative-strength"
+      setError(isComputedScanType(draftPreset.scanType)
         ? "Add at least one prefilter rule before saving."
         : "Add at least one scan rule before saving.");
       setMessage(null);
@@ -802,8 +872,8 @@ export function ScansPageDashboard() {
         scanType: draftPreset.scanType,
         isDefault: draftPreset.isDefault,
         isActive: draftPreset.isActive,
-        rules: draftPreset.scanType === "relative-strength" ? [] : activeRules,
-        prefilterRules: draftPreset.scanType === "relative-strength" ? activeRules : draftPreset.prefilterRules,
+        rules: isComputedScanType(draftPreset.scanType) ? [] : activeRules,
+        prefilterRules: isComputedScanType(draftPreset.scanType) ? activeRules : draftPreset.prefilterRules,
         benchmarkTicker: draftPreset.scanType === "relative-strength"
           ? (draftPreset.benchmarkTicker?.trim() || "SPY")
           : undefined,
@@ -812,6 +882,11 @@ export function ScansPageDashboard() {
         rsMaType: draftPreset.rsMaType,
         newHighLookback: draftPreset.newHighLookback,
         outputMode: draftPreset.outputMode,
+        vcpDailyPivotLookback: draftPreset.vcpDailyPivotLookback,
+        vcpWeeklyHighLookback: draftPreset.vcpWeeklyHighLookback,
+        vcpPivotAgeBars: draftPreset.vcpPivotAgeBars,
+        vcpDailyNearPct: draftPreset.vcpDailyNearPct,
+        vcpWeeklyNearPct: draftPreset.vcpWeeklyNearPct,
         sortField: draftPreset.sortField.trim() || "change",
         sortDirection: draftPreset.sortDirection,
         rowLimit: draftPreset.rowLimit,
@@ -1068,6 +1143,11 @@ export function ScansPageDashboard() {
     if (key === "rsClose") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.rsClose)}</td>;
     if (key === "rsMa") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.rsMa)}</td>;
     if (key === "approxRsRating") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(row.approxRsRating, 0)}</td>;
+    if (key === "trendScore") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(rawNumber(row, "trendScore", "trend_score"), 0)}</td>;
+    if (key === "dailyPivot") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(rawNumber(row, "dailyPivot", "daily_pivot"))}</td>;
+    if (key === "dailyPivotGapPct") return <td className={NUMERIC_CELL_CLASS}>{formatPct(rawNumber(row, "dailyPivotGapPct", "daily_pivot_gap_pct"))}</td>;
+    if (key === "weeklyHigh") return <td className={NUMERIC_CELL_CLASS}>{formatNumber(rawNumber(row, "weeklyHigh", "weekly_high"))}</td>;
+    if (key === "weeklyHighGapPct") return <td className={NUMERIC_CELL_CLASS}>{formatPct(rawNumber(row, "weeklyHighGapPct", "weekly_high_gap_pct"))}</td>;
     return <td className={NUMERIC_CELL_CLASS}>{formatCompact(row.priceAvgVolume)}</td>;
   };
 
@@ -1121,7 +1201,7 @@ export function ScansPageDashboard() {
               </div>
             </div>
 
-            {refreshJob ? <p className="mt-3 text-xs leading-5 text-slate-400">{formatRsRefreshSummary(refreshJob, snapshot)}</p> : null}
+            {refreshJob ? <p className="mt-3 text-xs leading-5 text-slate-400">{formatScanRefreshSummary(refreshJob, snapshot)}</p> : null}
             {message && <p className="mt-3 rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{message}</p>}
             {error && <p className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
 
@@ -1456,10 +1536,10 @@ export function ScansPageDashboard() {
                         <div className="min-w-0">
                           <div className="truncate text-sm font-semibold text-accent">{preset.name}</div>
                           <div className="mt-1 text-[11px] text-slate-400">
-                            {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
+                            {(isComputedScanType(preset.scanType) ? preset.prefilterRules.length : preset.rules.length)} {isComputedScanType(preset.scanType) ? "prefilter" : "rule"}{(isComputedScanType(preset.scanType) ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            {preset.scanType === "relative-strength" ? "Relative Strength" : "TradingView"} / {preset.isDefault ? "Default" : "Preset"} / {preset.isActive ? "Active" : "Inactive"}
+                            {scanTypeLabel(preset.scanType)} / {preset.isDefault ? "Default" : "Preset"} / {preset.isActive ? "Active" : "Inactive"}
                           </div>
                         </div>
                         <button
@@ -1484,7 +1564,7 @@ export function ScansPageDashboard() {
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-semibold text-slate-100">{draftPreset.id ? "Edit Preset" : "Create Preset"}</h3>
-                    <p className="text-xs text-slate-500">{draftPreset.scanType === "relative-strength" ? "Relative Strength" : "TradingView Screener"}</p>
+                    <p className="text-xs text-slate-500">{scanTypeLabel(draftPreset.scanType)}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <button className={PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void onSavePreset()}>
@@ -1512,7 +1592,11 @@ export function ScansPageDashboard() {
                       onChange={(event) => setDraftPreset((current) => ({
                         ...current,
                         scanType: event.target.value as ScanPresetType,
-                        sortField: event.target.value === "relative-strength" && current.sortField === "change" ? "rs_close" : current.sortField,
+                        sortField: event.target.value === "relative-strength" && current.sortField === "change"
+                          ? "rs_close"
+                          : event.target.value === "vcp" && (current.sortField === "change" || current.sortField === "rs_close")
+                            ? "daily_pivot_gap_pct"
+                            : current.sortField,
                       }))}
                     >
                       {SCAN_TYPE_OPTIONS.map((option) => (
@@ -1585,6 +1669,31 @@ export function ScansPageDashboard() {
                     </>
                   ) : null}
 
+                  {draftPreset.scanType === "vcp" ? (
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <label className="block">
+                        Daily Pivot Lookback
+                        <input className={FORM_INPUT_CLASS} type="number" min={5} max={520} value={draftPreset.vcpDailyPivotLookback} onChange={(event) => setDraftPreset((current) => ({ ...current, vcpDailyPivotLookback: Math.max(5, Math.min(520, Number(event.target.value) || 100)) }))} />
+                      </label>
+                      <label className="block">
+                        Weekly High Lookback
+                        <input className={FORM_INPUT_CLASS} type="number" min={5} max={260} value={draftPreset.vcpWeeklyHighLookback} onChange={(event) => setDraftPreset((current) => ({ ...current, vcpWeeklyHighLookback: Math.max(5, Math.min(260, Number(event.target.value) || 100)) }))} />
+                      </label>
+                      <label className="block">
+                        Pivot Age Bars
+                        <input className={FORM_INPUT_CLASS} type="number" min={1} max={120} value={draftPreset.vcpPivotAgeBars} onChange={(event) => setDraftPreset((current) => ({ ...current, vcpPivotAgeBars: Math.max(1, Math.min(120, Number(event.target.value) || 10)) }))} />
+                      </label>
+                      <label className="block">
+                        Daily Max Below Pivot %
+                        <input className={FORM_INPUT_CLASS} type="number" min={0.1} max={50} step={0.1} value={draftPreset.vcpDailyNearPct} onChange={(event) => setDraftPreset((current) => ({ ...current, vcpDailyNearPct: Math.max(0.1, Math.min(50, Number(event.target.value) || 7)) }))} />
+                      </label>
+                      <label className="block">
+                        Weekly Max Below High %
+                        <input className={FORM_INPUT_CLASS} type="number" min={0.1} max={80} step={0.1} value={draftPreset.vcpWeeklyNearPct} onChange={(event) => setDraftPreset((current) => ({ ...current, vcpWeeklyNearPct: Math.max(0.1, Math.min(80, Number(event.target.value) || 20)) }))} />
+                      </label>
+                    </div>
+                  ) : null}
+
                   <div className="grid gap-2 sm:grid-cols-2">
                     <label className="flex items-center gap-2 rounded-lg border border-borderSoft/70 bg-panelSoft/25 px-3 py-2 text-sm">
                       <input type="checkbox" checked={draftPreset.isDefault} onChange={(event) => setDraftPreset((current) => ({ ...current, isDefault: event.target.checked }))} />
@@ -1599,7 +1708,7 @@ export function ScansPageDashboard() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
-                        {draftPreset.scanType === "relative-strength" ? "Prefilter Rules" : "Rules"}
+                        {isComputedScanType(draftPreset.scanType) ? "Prefilter Rules" : "Rules"}
                       </h4>
                       <button className={SECONDARY_BUTTON_CLASS} type="button" onClick={() => updateDraftRules((rules) => [...rules, emptyDraftRule()])}>
                         <Plus className="h-3.5 w-3.5" />
@@ -1869,7 +1978,7 @@ export function ScansPageDashboard() {
                             <span className="min-w-0">
                               <span className="block truncate font-medium">{preset.name}</span>
                               <span className="block text-[11px] text-slate-400">
-                                {(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length)} {preset.scanType === "relative-strength" ? "prefilter" : "rule"}{(preset.scanType === "relative-strength" ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
+                                {(isComputedScanType(preset.scanType) ? preset.prefilterRules.length : preset.rules.length)} {isComputedScanType(preset.scanType) ? "prefilter" : "rule"}{(isComputedScanType(preset.scanType) ? preset.prefilterRules.length : preset.rules.length) === 1 ? "" : "s"} / {preset.rowLimit} rows
                               </span>
                             </span>
                           </label>
