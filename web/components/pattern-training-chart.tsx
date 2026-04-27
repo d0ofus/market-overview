@@ -15,8 +15,11 @@ type DragMode = "new" | "resize-start" | "resize-end" | "move";
 type DragState = {
   mode: DragMode;
   anchorDate: string;
+  anchorIndex: number;
   initialStartDate?: string;
   initialEndDate?: string;
+  initialStartIndex?: number;
+  initialEndIndex?: number;
 };
 
 const QUICK_LENGTHS = [20, 40, 60, 80, 120];
@@ -58,6 +61,20 @@ function moveWindow(dates: string[], startDate: string, endDate: string, anchorD
   const delta = targetIndex - anchorIndex;
   const maxStart = Math.max(0, dates.length - length);
   const nextStart = Math.max(0, Math.min(maxStart, startIndex + delta));
+  return {
+    startDate: dates[nextStart],
+    endDate: dates[Math.min(dates.length - 1, nextStart + length - 1)],
+  };
+}
+
+function moveWindowByIndex(dates: string[], startIndex: number, endIndex: number, anchorIndex: number, targetIndex: number) {
+  if (dates.length === 0) return null;
+  const normalizedStart = Math.max(0, Math.min(startIndex, endIndex));
+  const normalizedEnd = Math.min(dates.length - 1, Math.max(startIndex, endIndex));
+  const length = Math.max(1, normalizedEnd - normalizedStart + 1);
+  const delta = targetIndex - anchorIndex;
+  const maxStart = Math.max(0, dates.length - length);
+  const nextStart = Math.max(0, Math.min(maxStart, normalizedStart + delta));
   return {
     startDate: dates[nextStart],
     endDate: dates[Math.min(dates.length - 1, nextStart + length - 1)],
@@ -183,12 +200,24 @@ export function PatternTrainingChart({
   }, [selection, data]);
 
   const dateFromPointer = (clientX: number) => {
+    const index = indexFromPointer(clientX);
+    if (index != null) return dates[index];
     const chart = chartRef.current;
     const overlay = overlayRef.current;
     if (!chart || !overlay) return null;
     const bounds = overlay.getBoundingClientRect();
     const time = chart.timeScale().coordinateToTime(clientX - bounds.left);
     return snapDate(dates, timeToDate(time));
+  };
+
+  const indexFromPointer = (clientX: number) => {
+    const chart = chartRef.current;
+    const overlay = overlayRef.current;
+    if (!chart || !overlay) return null;
+    const bounds = overlay.getBoundingClientRect();
+    const logical = chart.timeScale().coordinateToLogical(clientX - bounds.left);
+    if (logical == null || !Number.isFinite(logical)) return null;
+    return Math.max(0, Math.min(dates.length - 1, Math.round(Number(logical))));
   };
 
   const selectLast = (length: number) => {
@@ -226,23 +255,29 @@ export function PatternTrainingChart({
           className="absolute inset-0 cursor-crosshair"
           role="application"
           aria-label="Pattern date range selector"
+          style={{ touchAction: "none" }}
           onPointerDown={(event) => {
+            event.preventDefault();
             const date = dateFromPointer(event.clientX);
-            if (!date) return;
+            const pointerIndex = indexFromPointer(event.clientX);
+            if (!date || pointerIndex == null) return;
             const chart = chartRef.current;
             const overlay = overlayRef.current;
             const bounds = overlay?.getBoundingClientRect();
             const x = bounds ? event.clientX - bounds.left : 0;
             const startX = selection && chart ? chart.timeScale().timeToCoordinate(selection.startDate as Time) : null;
             const endX = selection && chart ? chart.timeScale().timeToCoordinate(selection.endDate as Time) : null;
-            const insideSelection = startX != null && endX != null && x >= Math.min(startX, endX) + 10 && x <= Math.max(startX, endX) - 10;
-            const mode: DragMode = startX != null && Math.abs(x - startX) <= 10
+            const edgeTolerance = 8;
+            const insideSelection = startX != null && endX != null && x >= Math.min(startX, endX) && x <= Math.max(startX, endX);
+            const mode: DragMode = startX != null && Math.abs(x - startX) <= edgeTolerance
               ? "resize-start"
-              : endX != null && Math.abs(x - endX) <= 10
+              : endX != null && Math.abs(x - endX) <= edgeTolerance
                 ? "resize-end"
                 : insideSelection
                   ? "move"
                   : "new";
+            const initialStartIndex = selection ? dates.indexOf(selection.startDate) : -1;
+            const initialEndIndex = selection ? dates.indexOf(selection.endDate) : -1;
             dragRef.current = {
               mode,
               anchorDate: mode === "resize-start"
@@ -250,8 +285,11 @@ export function PatternTrainingChart({
                 : mode === "resize-end"
                   ? (selection?.startDate ?? date)
                   : date,
+              anchorIndex: pointerIndex,
               initialStartDate: selection?.startDate,
               initialEndDate: selection?.endDate,
+              initialStartIndex: initialStartIndex >= 0 ? initialStartIndex : undefined,
+              initialEndIndex: initialEndIndex >= 0 ? initialEndIndex : undefined,
             };
             event.currentTarget.setPointerCapture(event.pointerId);
             if (mode === "new") emitSelection(date, date);
@@ -259,10 +297,16 @@ export function PatternTrainingChart({
           onPointerMove={(event) => {
             const drag = dragRef.current;
             if (!drag) return;
+            event.preventDefault();
             const date = dateFromPointer(event.clientX);
-            if (!date) return;
+            const pointerIndex = indexFromPointer(event.clientX);
+            if (!date || pointerIndex == null) return;
             if (drag.mode === "resize-start") emitSelection(date, drag.anchorDate);
             else if (drag.mode === "resize-end") emitSelection(drag.anchorDate, date);
+            else if (drag.mode === "move" && drag.initialStartIndex != null && drag.initialEndIndex != null) {
+              const next = moveWindowByIndex(dates, drag.initialStartIndex, drag.initialEndIndex, drag.anchorIndex, pointerIndex);
+              if (next) emitSelection(next.startDate, next.endDate);
+            }
             else if (drag.mode === "move" && drag.initialStartDate && drag.initialEndDate) {
               const next = moveWindow(dates, drag.initialStartDate, drag.initialEndDate, drag.anchorDate, date);
               if (next) emitSelection(next.startDate, next.endDate);

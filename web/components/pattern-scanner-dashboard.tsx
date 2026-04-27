@@ -449,6 +449,10 @@ export function PatternScannerDashboard() {
                   <input className={INPUT_CLASS} value={seed.ticker} onChange={(event) => {
                     setSeed((current) => ({ ...current, ticker: event.target.value.toUpperCase(), patternStartDate: "", patternEndDate: "", selectedBarCount: 0 }));
                     setSeedChart(null);
+                  }} onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    if (!seedChartLoading && seed.ticker.trim() && seed.setupDate) void loadSeedChart();
                   }} />
                 </label>
                 <label className="text-xs text-slate-300">
