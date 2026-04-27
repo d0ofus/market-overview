@@ -23,6 +23,7 @@ type DragState = {
 };
 
 const QUICK_LENGTHS = [20, 40, 60, 80, 120];
+const DRAG_ATTRIBUTE = "data-pattern-drag";
 
 function timeToDate(value: Time | null): string | null {
   if (value == null) return null;
@@ -215,9 +216,30 @@ export function PatternTrainingChart({
     const overlay = overlayRef.current;
     if (!chart || !overlay) return null;
     const bounds = overlay.getBoundingClientRect();
-    const logical = chart.timeScale().coordinateToLogical(clientX - bounds.left);
+    const x = clientX - bounds.left;
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < dates.length; index += 1) {
+      const coordinate = chart.timeScale().timeToCoordinate(dates[index] as Time);
+      if (coordinate == null || !Number.isFinite(coordinate)) continue;
+      const distance = Math.abs(coordinate - x);
+      if (distance < bestDistance) {
+        bestIndex = index;
+        bestDistance = distance;
+      }
+    }
+    if (bestIndex >= 0) return bestIndex;
+    const logical = chart.timeScale().coordinateToLogical(x);
     if (logical == null || !Number.isFinite(logical)) return null;
     return Math.max(0, Math.min(dates.length - 1, Math.round(Number(logical))));
+  };
+
+  const dragModeFromTarget = (target: EventTarget | null): DragMode | null => {
+    if (!(target instanceof HTMLElement)) return null;
+    const element = target.closest(`[${DRAG_ATTRIBUTE}]`);
+    const mode = element?.getAttribute(DRAG_ATTRIBUTE);
+    if (mode === "move" || mode === "resize-start" || mode === "resize-end") return mode;
+    return null;
   };
 
   const selectLast = (length: number) => {
@@ -261,21 +283,7 @@ export function PatternTrainingChart({
             const date = dateFromPointer(event.clientX);
             const pointerIndex = indexFromPointer(event.clientX);
             if (!date || pointerIndex == null) return;
-            const chart = chartRef.current;
-            const overlay = overlayRef.current;
-            const bounds = overlay?.getBoundingClientRect();
-            const x = bounds ? event.clientX - bounds.left : 0;
-            const startX = selection && chart ? chart.timeScale().timeToCoordinate(selection.startDate as Time) : null;
-            const endX = selection && chart ? chart.timeScale().timeToCoordinate(selection.endDate as Time) : null;
-            const edgeTolerance = 8;
-            const insideSelection = startX != null && endX != null && x >= Math.min(startX, endX) && x <= Math.max(startX, endX);
-            const mode: DragMode = startX != null && Math.abs(x - startX) <= edgeTolerance
-              ? "resize-start"
-              : endX != null && Math.abs(x - endX) <= edgeTolerance
-                ? "resize-end"
-                : insideSelection
-                  ? "move"
-                  : "new";
+            const mode = selection ? (dragModeFromTarget(event.target) ?? "new") : "new";
             const initialStartIndex = selection ? dates.indexOf(selection.startDate) : -1;
             const initialEndIndex = selection ? dates.indexOf(selection.endDate) : -1;
             dragRef.current = {
@@ -323,12 +331,13 @@ export function PatternTrainingChart({
         >
           {rect ? (
             <div
-              className="absolute bottom-0 top-0 border-x border-accent/80 bg-accent/15"
+              className="absolute bottom-0 top-0 cursor-grab border-x border-accent/80 bg-accent/15 active:cursor-grabbing"
+              data-pattern-drag="move"
               style={{ left: rect.left, width: rect.width }}
             >
-              <div className="absolute inset-y-0 left-2 right-2 cursor-move" />
-              <div className="absolute -left-1 top-0 h-full w-2 cursor-ew-resize bg-accent/70" />
-              <div className="absolute -right-1 top-0 h-full w-2 cursor-ew-resize bg-accent/70" />
+              <div className="absolute inset-y-0 left-3 right-3 cursor-grab active:cursor-grabbing" data-pattern-drag="move" />
+              <div className="absolute -left-2 top-0 h-full w-4 cursor-ew-resize bg-accent/70" data-pattern-drag="resize-start" />
+              <div className="absolute -right-2 top-0 h-full w-4 cursor-ew-resize bg-accent/70" data-pattern-drag="resize-end" />
             </div>
           ) : null}
         </div>
