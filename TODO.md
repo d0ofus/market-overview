@@ -1,9 +1,9 @@
 # TODO
 
 ## Overview
+> Add macro stuff like 10Y yields and yield curve chart
 > Add hover charts for tickers like Key Movers Tracker in /sectors
 - Check source of data for EQ Index Futures, they seem wrong.
-- Add macro stuff like 10Y yields
 - Add yield curve structure
 - Amend implied rate path to intervals of 0.1% on the y-axis
 - Add refresh button for macro rates table
@@ -42,7 +42,9 @@
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
 ## Scans
+> Make the UI better to segregate each input field
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
+> Put a preset for US market to have exchange, symbol type preconfigured
 - Add strongest FA scan
 - Add Strong earnings scanner
 - Colour by industry
@@ -59,6 +61,7 @@
 - Add Average $ traded filter
 
 ## Admin
+> Add password protection to access admin
 > Remove bootstrap seed batch function in peer groups
 - Find out what slug means for peer-groups
 - Add function to specific exchange before ticker. For e.g., OSX chart shows the ASX listing and not the NASDAQ one

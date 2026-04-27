@@ -25,6 +25,7 @@ import {
   scanCompilePresetPatchSchema,
   scanPresetPatchSchema,
   scanRefreshSchema,
+  scannerCacheRsCacheBackfillSchema,
   searchTemplateVersionCreateSchema,
   peerBootstrapSchema,
   peerGroupCreateSchema,
@@ -87,6 +88,8 @@ import {
   loadLatestActiveScanRefreshJob,
   loadScanRefreshJob,
   loadScanPreset,
+  backfillScannerCacheRsCache,
+  loadScannerCacheRsCacheStatus,
   processScannerCacheScanRun,
   refreshScanCompilePreset,
   refreshScansSnapshot,
@@ -2278,6 +2281,30 @@ app.post("/api/admin/scans/refresh", async (c) => {
     return c.json({ ok: true, ...result });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh scans." }, 500);
+  }
+});
+
+app.get("/api/admin/scanner-cache/rs-cache-status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const status = await loadScannerCacheRsCacheStatus(c.env);
+    return c.json({ ok: true, ...status });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load RS cache status." }, 500);
+  }
+});
+
+app.post("/api/admin/scanner-cache/rs-cache-backfill", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = scannerCacheRsCacheBackfillSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await backfillScannerCacheRsCache(c.env, payload);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid RS cache backfill payload." }, 400);
+    }
+    return c.json({ error: error instanceof Error ? error.message : "Failed to backfill RS cache." }, 500);
   }
 });
 

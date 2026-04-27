@@ -566,11 +566,50 @@ const VCP_SCAN_MAX_UNIVERSE_SIZE = 10_000;
 const POST_CLOSE_DAILY_BARS_SCOPE = "active-us-common-stocks";
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
+const RS_DERIVED_CACHE_BACKFILL_DEFAULT_LIMIT = 250;
+const RS_DERIVED_CACHE_BACKFILL_MAX_LIMIT = 1000;
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 const RS_PROVIDER_LABEL = "Relative Strength Scan (Alpaca/Provider)";
 const VCP_PROVIDER_LABEL = "VCP Scan (shared daily bars)";
 const RS_RAW_RATIO_VERTICAL_OFFSET = 0.01;
+
+export type RsDerivedCacheTable =
+  | "rs_ratio_cache"
+  | "relative_strength_latest_cache"
+  | "relative_strength_config_state";
+
+export type RsDerivedCacheBackfillTarget = RsDerivedCacheTable | "all";
+
+export type RsDerivedCacheBackfillTableResult = {
+  table: RsDerivedCacheTable;
+  copied: number;
+  done: boolean;
+  nextCursor: string | null;
+};
+
+export type RsDerivedCacheBackfillResult = {
+  table: RsDerivedCacheBackfillTarget;
+  copied: number;
+  done: boolean;
+  nextCursor: string | null;
+  tables: RsDerivedCacheBackfillTableResult[];
+};
+
+export type RsDerivedCacheStatus = {
+  scannerCacheDbAvailable: boolean;
+  tables: Array<{
+    table: RsDerivedCacheTable;
+    legacyRowCount: number;
+    scannerCacheRowCount: number | null;
+  }>;
+};
+
+const RS_DERIVED_CACHE_TABLES: RsDerivedCacheTable[] = [
+  "rs_ratio_cache",
+  "relative_strength_latest_cache",
+  "relative_strength_config_state",
+];
 
 const FIELD_ALIASES: Record<string, string> = {
   ticker: "ticker",
@@ -1924,8 +1963,8 @@ function cachedRowMatchesOutputMode(row: RelativeStrengthLatestCacheRecord, outp
   return true;
 }
 
-async function loadRelativeStrengthLatestCacheRows(
-  env: Env,
+async function loadRelativeStrengthLatestCacheRowsFromDb(
+  db: D1Database,
   configKey: string,
   tickers: string[],
   tradingDate: string,
@@ -1940,7 +1979,7 @@ async function loadRelativeStrengthLatestCacheRows(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT
          ticker,
          benchmark_ticker as benchmarkTicker,
@@ -1974,6 +2013,32 @@ async function loadRelativeStrengthLatestCacheRows(
   return rowsByTicker;
 }
 
+async function loadRelativeStrengthLatestCacheRows(
+  env: Env,
+  configKey: string,
+  tickers: string[],
+  tradingDate: string,
+): Promise<Map<string, RelativeStrengthLatestCacheRecord>> {
+  const rowsByTicker = await loadRelativeStrengthLatestCacheRowsFromDb(
+    getRsDerivedCacheDb(env),
+    configKey,
+    tickers,
+    tradingDate,
+  );
+  if (!shouldReadLegacyRsDerivedCache(env)) return rowsByTicker;
+  const missingTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && !rowsByTicker.has(ticker)),
+  ));
+  if (missingTickers.length === 0) return rowsByTicker;
+  const legacyRows = await loadRelativeStrengthLatestCacheRowsFromDb(env.DB, configKey, missingTickers, tradingDate);
+  for (const [ticker, row] of legacyRows.entries()) {
+    if (!rowsByTicker.has(ticker)) rowsByTicker.set(ticker, row);
+  }
+  return rowsByTicker;
+}
+
 async function loadRelativeStrengthEffectiveLatestCacheRows(
   env: Env,
   configKey: string,
@@ -1996,8 +2061,8 @@ async function loadRelativeStrengthEffectiveLatestCacheRows(
   return rowsByTicker;
 }
 
-async function loadRelativeStrengthConfigStateRows(
-  env: Env,
+async function loadRelativeStrengthConfigStateRowsFromDb(
+  db: D1Database,
   configKey: string,
   tickers: string[],
 ): Promise<Map<string, RelativeStrengthConfigState>> {
@@ -2011,7 +2076,7 @@ async function loadRelativeStrengthConfigStateRows(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT
          config_key as configKey,
          ticker,
@@ -2054,8 +2119,29 @@ async function loadRelativeStrengthConfigStateRows(
   return rowsByTicker;
 }
 
-async function loadRelativeStrengthConfigStateSummaries(
+async function loadRelativeStrengthConfigStateRows(
   env: Env,
+  configKey: string,
+  tickers: string[],
+): Promise<Map<string, RelativeStrengthConfigState>> {
+  const rowsByTicker = await loadRelativeStrengthConfigStateRowsFromDb(getRsDerivedCacheDb(env), configKey, tickers);
+  if (!shouldReadLegacyRsDerivedCache(env)) return rowsByTicker;
+  const fallbackTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (fallbackTickers.length === 0) return rowsByTicker;
+  const legacyRows = await loadRelativeStrengthConfigStateRowsFromDb(env.DB, configKey, fallbackTickers);
+  for (const [ticker, row] of legacyRows.entries()) {
+    const current = rowsByTicker.get(ticker);
+    if (!current || row.latestTradingDate > current.latestTradingDate) rowsByTicker.set(ticker, row);
+  }
+  return rowsByTicker;
+}
+
+async function loadRelativeStrengthConfigStateSummariesFromDb(
+  db: D1Database,
   configKey: string,
   tickers: string[],
 ): Promise<Map<string, RelativeStrengthConfigStateSummaryRow>> {
@@ -2069,7 +2155,7 @@ async function loadRelativeStrengthConfigStateSummaries(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT
          ticker,
          state_version as stateVersion,
@@ -2091,15 +2177,37 @@ async function loadRelativeStrengthConfigStateSummaries(
   return rowsByTicker;
 }
 
+async function loadRelativeStrengthConfigStateSummaries(
+  env: Env,
+  configKey: string,
+  tickers: string[],
+): Promise<Map<string, RelativeStrengthConfigStateSummaryRow>> {
+  const rowsByTicker = await loadRelativeStrengthConfigStateSummariesFromDb(getRsDerivedCacheDb(env), configKey, tickers);
+  if (!shouldReadLegacyRsDerivedCache(env)) return rowsByTicker;
+  const fallbackTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (fallbackTickers.length === 0) return rowsByTicker;
+  const legacyRows = await loadRelativeStrengthConfigStateSummariesFromDb(env.DB, configKey, fallbackTickers);
+  for (const [ticker, row] of legacyRows.entries()) {
+    const current = rowsByTicker.get(ticker);
+    if (!current || row.latestTradingDate > current.latestTradingDate) rowsByTicker.set(ticker, row);
+  }
+  return rowsByTicker;
+}
+
 async function upsertRelativeStrengthConfigStates(
   env: Env,
   rows: RelativeStrengthConfigState[],
 ): Promise<void> {
   if (rows.length === 0) return;
+  const cacheDb = getRsDerivedCacheDb(env);
   for (let index = 0; index < rows.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
     const chunk = rows.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.DB.batch(chunk.map((row) =>
-      env.DB.prepare(
+    await cacheDb.batch(chunk.map((row) =>
+      cacheDb.prepare(
         `INSERT INTO relative_strength_config_state
           (config_key, ticker, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, state_version, latest_trading_date, updated_at, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, price_close_history_json, benchmark_close_history_json, weighted_score_history_json, rs_new_high_window_json, price_new_high_window_json, sma_window_json, sma_sum, ema_value, previous_rs_close, previous_rs_ma, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -2169,10 +2277,11 @@ async function upsertRelativeStrengthLatestCacheRows(
   rows: RelativeStrengthLatestCacheRecord[],
 ): Promise<void> {
   if (rows.length === 0) return;
+  const cacheDb = getRsDerivedCacheDb(env);
   for (let index = 0; index < rows.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
     const chunk = rows.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.DB.batch(chunk.map((row) =>
-      env.DB.prepare(
+    await cacheDb.batch(chunk.map((row) =>
+      cacheDb.prepare(
         `INSERT INTO relative_strength_latest_cache
           (config_key, ticker, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, trading_date, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -2213,8 +2322,8 @@ async function upsertRelativeStrengthLatestCacheRows(
   }
 }
 
-async function loadRelativeStrengthRatioCoverage(
-  env: Env,
+async function loadRelativeStrengthRatioCoverageFromDb(
+  db: D1Database,
   benchmarkTicker: string,
   tickers: string[],
   endDate: string,
@@ -2229,7 +2338,7 @@ async function loadRelativeStrengthRatioCoverage(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, MAX(trading_date) as lastDate, COUNT(*) as rowCount
        FROM rs_ratio_cache
        WHERE benchmark_ticker = ?
@@ -2250,8 +2359,41 @@ async function loadRelativeStrengthRatioCoverage(
   return rowsByTicker;
 }
 
-async function loadRelativeStrengthRatioRowsByCount(
+async function loadRelativeStrengthRatioCoverage(
   env: Env,
+  benchmarkTicker: string,
+  tickers: string[],
+  endDate: string,
+): Promise<Map<string, RelativeStrengthRatioCoverageRow>> {
+  const rowsByTicker = await loadRelativeStrengthRatioCoverageFromDb(
+    getRsDerivedCacheDb(env),
+    benchmarkTicker,
+    tickers,
+    endDate,
+  );
+  if (!shouldReadLegacyRsDerivedCache(env)) return rowsByTicker;
+  const fallbackTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (fallbackTickers.length === 0) return rowsByTicker;
+  const legacyRows = await loadRelativeStrengthRatioCoverageFromDb(env.DB, benchmarkTicker, fallbackTickers, endDate);
+  for (const [ticker, row] of legacyRows.entries()) {
+    const current = rowsByTicker.get(ticker);
+    if (
+      !current
+      || (row.lastDate ?? "") > (current.lastDate ?? "")
+      || (row.lastDate === current.lastDate && row.rowCount > current.rowCount)
+    ) {
+      rowsByTicker.set(ticker, row);
+    }
+  }
+  return rowsByTicker;
+}
+
+async function loadRelativeStrengthRatioRowsByCountFromDb(
+  db: D1Database,
   benchmarkTicker: string,
   tickers: string[],
   endDate: string,
@@ -2267,7 +2409,7 @@ async function loadRelativeStrengthRatioRowsByCount(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT benchmark_ticker as benchmarkTicker, ticker, trading_date as tradingDate, price_close as priceClose, benchmark_close as benchmarkClose, rs_ratio_close as rsRatioClose
        FROM (
          SELECT
@@ -2299,8 +2441,40 @@ async function loadRelativeStrengthRatioRowsByCount(
   return out;
 }
 
-async function loadRelativeStrengthRatioRowsInRange(
+async function loadRelativeStrengthRatioRowsByCount(
   env: Env,
+  benchmarkTicker: string,
+  tickers: string[],
+  endDate: string,
+  barLimit: number,
+): Promise<RelativeStrengthRatioRow[]> {
+  const scannerRows = await loadRelativeStrengthRatioRowsByCountFromDb(
+    getRsDerivedCacheDb(env),
+    benchmarkTicker,
+    tickers,
+    endDate,
+    barLimit,
+  );
+  if (!shouldReadLegacyRsDerivedCache(env)) return scannerRows;
+  const scannerRowsByTicker = groupRatioRowsByTicker(scannerRows);
+  const fallbackTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && (scannerRowsByTicker.get(ticker)?.length ?? 0) < barLimit),
+  ));
+  if (fallbackTickers.length === 0) return scannerRows;
+  const legacyRows = await loadRelativeStrengthRatioRowsByCountFromDb(
+    env.DB,
+    benchmarkTicker,
+    fallbackTickers,
+    endDate,
+    barLimit,
+  );
+  return mergeRelativeStrengthRatioRows(legacyRows, scannerRows);
+}
+
+async function loadRelativeStrengthRatioRowsInRangeFromDb(
+  db: D1Database,
   benchmarkTicker: string,
   tickers: string[],
   startDateExclusive: string,
@@ -2316,7 +2490,7 @@ async function loadRelativeStrengthRatioRowsInRange(
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT
          benchmark_ticker as benchmarkTicker,
          ticker,
@@ -2344,6 +2518,44 @@ async function loadRelativeStrengthRatioRowsInRange(
   return out;
 }
 
+async function loadRelativeStrengthRatioRowsInRange(
+  env: Env,
+  benchmarkTicker: string,
+  tickers: string[],
+  startDateExclusive: string,
+  endDate: string,
+): Promise<RelativeStrengthRatioRow[]> {
+  const scannerRows = await loadRelativeStrengthRatioRowsInRangeFromDb(
+    getRsDerivedCacheDb(env),
+    benchmarkTicker,
+    tickers,
+    startDateExclusive,
+    endDate,
+  );
+  if (!shouldReadLegacyRsDerivedCache(env)) return scannerRows;
+  const fallbackTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (fallbackTickers.length === 0) return scannerRows;
+  const legacyRows = await loadRelativeStrengthRatioRowsInRangeFromDb(
+    env.DB,
+    benchmarkTicker,
+    fallbackTickers,
+    startDateExclusive,
+    endDate,
+  );
+  return mergeRelativeStrengthRatioRows(legacyRows, scannerRows);
+}
+
+function mergeRelativeStrengthRatioRows(
+  fallbackRows: RelativeStrengthRatioRow[],
+  preferredRows: RelativeStrengthRatioRow[],
+): RelativeStrengthRatioRow[] {
+  return Array.from(groupRatioRowsByTicker([...fallbackRows, ...preferredRows]).values()).flat();
+}
+
 function groupRatioRowsByTicker(rows: RelativeStrengthRatioRow[]): Map<string, RelativeStrengthRatioRow[]> {
   const map = new Map<string, Map<string, RelativeStrengthRatioRow>>();
   for (const row of rows) {
@@ -2367,10 +2579,11 @@ async function upsertRelativeStrengthRatioRows(
   rows: RelativeStrengthRatioRow[],
 ): Promise<void> {
   if (rows.length === 0) return;
+  const cacheDb = getRsDerivedCacheDb(env);
   for (let index = 0; index < rows.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
     const chunk = rows.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.DB.batch(chunk.map((row) =>
-      env.DB.prepare(
+    await cacheDb.batch(chunk.map((row) =>
+      cacheDb.prepare(
         `INSERT INTO rs_ratio_cache
           (benchmark_ticker, ticker, trading_date, price_close, benchmark_close, rs_ratio_close, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -2402,10 +2615,11 @@ async function pruneRelativeStrengthRatioCache(
       .filter(Boolean),
   ));
   if (uniqueTickers.length === 0 || keepBars <= 0) return;
+  const cacheDb = getRsDerivedCacheDb(env);
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    await env.DB.prepare(
+    await cacheDb.prepare(
       `DELETE FROM rs_ratio_cache
        WHERE (benchmark_ticker, ticker, trading_date) IN (
          SELECT benchmark_ticker, ticker, trading_date
@@ -2577,6 +2791,402 @@ async function loadStoredDailyBarsByCount(
 
 function hasScannerCacheStorage(env: Env): env is Env & { SCANNER_CACHE_DB: D1Database } {
   return Boolean(env.SCANNER_CACHE_DB);
+}
+
+function getRsDerivedCacheDb(env: Env): D1Database {
+  return env.SCANNER_CACHE_DB ?? env.DB;
+}
+
+function shouldReadLegacyRsDerivedCache(env: Env): boolean {
+  return Boolean(env.SCANNER_CACHE_DB && env.SCANNER_CACHE_DB !== env.DB);
+}
+
+type RsBackfillCursor = {
+  version: 1;
+  table: RsDerivedCacheTable;
+  key: string[];
+};
+
+type RsAllBackfillCursor = {
+  version: 1;
+  table: "all";
+  cursors: Partial<Record<RsDerivedCacheTable, string | null>>;
+};
+
+function assertRsDerivedCacheTable(value: string): asserts value is RsDerivedCacheTable {
+  if (!RS_DERIVED_CACHE_TABLES.includes(value as RsDerivedCacheTable)) {
+    throw new Error("Invalid RS derived cache table.");
+  }
+}
+
+function normalizeRsDerivedBackfillLimit(limit?: number | null): number {
+  const parsed = Math.trunc(Number(limit ?? RS_DERIVED_CACHE_BACKFILL_DEFAULT_LIMIT));
+  if (!Number.isFinite(parsed)) return RS_DERIVED_CACHE_BACKFILL_DEFAULT_LIMIT;
+  return Math.min(RS_DERIVED_CACHE_BACKFILL_MAX_LIMIT, Math.max(1, parsed));
+}
+
+function encodeRsBackfillCursor(cursor: RsBackfillCursor | RsAllBackfillCursor): string {
+  return btoa(JSON.stringify(cursor));
+}
+
+function decodeRsBackfillCursor(cursor: string | null | undefined): RsBackfillCursor | RsAllBackfillCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed = JSON.parse(atob(cursor)) as Record<string, unknown>;
+    if (parsed.version !== 1) throw new Error("Unsupported cursor version.");
+    if (parsed.table === "all") {
+      return {
+        version: 1,
+        table: "all",
+        cursors: typeof parsed.cursors === "object" && parsed.cursors
+          ? parsed.cursors as Partial<Record<RsDerivedCacheTable, string | null>>
+          : {},
+      };
+    }
+    if (typeof parsed.table !== "string" || !Array.isArray(parsed.key)) throw new Error("Malformed cursor.");
+    assertRsDerivedCacheTable(parsed.table);
+    return { version: 1, table: parsed.table, key: parsed.key.map(String) };
+  } catch {
+    throw new Error("Invalid scanner cache backfill cursor.");
+  }
+}
+
+async function countRows(db: D1Database, table: RsDerivedCacheTable): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) as count FROM ${table}`).first<{ count: number }>();
+  return Math.max(0, Math.trunc(Number(row?.count ?? 0)));
+}
+
+export async function loadScannerCacheRsCacheStatus(env: Env): Promise<RsDerivedCacheStatus> {
+  const scannerDb = env.SCANNER_CACHE_DB ?? null;
+  const tables = [];
+  for (const table of RS_DERIVED_CACHE_TABLES) {
+    tables.push({
+      table,
+      legacyRowCount: await countRows(env.DB, table),
+      scannerCacheRowCount: scannerDb ? await countRows(scannerDb, table) : null,
+    });
+  }
+  return {
+    scannerCacheDbAvailable: Boolean(scannerDb),
+    tables,
+  };
+}
+
+function rsBackfillKeyForRow(table: RsDerivedCacheTable, row: Record<string, unknown>): string[] {
+  if (table === "rs_ratio_cache") {
+    return [String(row.benchmarkTicker ?? ""), String(row.ticker ?? ""), String(row.tradingDate ?? "")];
+  }
+  return [String(row.configKey ?? ""), String(row.ticker ?? "")];
+}
+
+async function loadLegacyRsBackfillRows(
+  db: D1Database,
+  table: RsDerivedCacheTable,
+  cursor: string | null | undefined,
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const decoded = decodeRsBackfillCursor(cursor);
+  const key = decoded && decoded.table !== "all" && decoded.table === table ? decoded.key : null;
+  if (table === "rs_ratio_cache") {
+    const where = key
+      ? `WHERE benchmark_ticker > ?
+          OR (benchmark_ticker = ? AND ticker > ?)
+          OR (benchmark_ticker = ? AND ticker = ? AND trading_date > ?)`
+      : "";
+    const bindArgs = key ? [key[0], key[0], key[1], key[0], key[1], key[2], limit] : [limit];
+    const rows = await db.prepare(
+      `SELECT
+         benchmark_ticker as benchmarkTicker,
+         ticker,
+         trading_date as tradingDate,
+         price_close as priceClose,
+         benchmark_close as benchmarkClose,
+         rs_ratio_close as rsRatioClose,
+         created_at as createdAt,
+         updated_at as updatedAt
+       FROM rs_ratio_cache
+       ${where}
+       ORDER BY benchmark_ticker ASC, ticker ASC, trading_date ASC
+       LIMIT ?`,
+    )
+      .bind(...bindArgs)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  const where = key ? "WHERE config_key > ? OR (config_key = ? AND ticker > ?)" : "";
+  const bindArgs = key ? [key[0], key[0], key[1], limit] : [limit];
+  if (table === "relative_strength_latest_cache") {
+    const rows = await db.prepare(
+      `SELECT
+         config_key as configKey,
+         ticker,
+         benchmark_ticker as benchmarkTicker,
+         rs_ma_type as rsMaType,
+         rs_ma_length as rsMaLength,
+         new_high_lookback as newHighLookback,
+         trading_date as tradingDate,
+         price_close as priceClose,
+         change_1d as change1d,
+         rs_ratio_close as rsRatioClose,
+         rs_ratio_ma as rsRatioMa,
+         rs_above_ma as rsAboveMa,
+         rs_new_high as rsNewHigh,
+         rs_new_high_before_price as rsNewHighBeforePrice,
+         bull_cross as bullCross,
+         approx_rs_rating as approxRsRating,
+         created_at as createdAt,
+         updated_at as updatedAt
+       FROM relative_strength_latest_cache
+       ${where}
+       ORDER BY config_key ASC, ticker ASC
+       LIMIT ?`,
+    )
+      .bind(...bindArgs)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  const rows = await db.prepare(
+    `SELECT
+       config_key as configKey,
+       ticker,
+       benchmark_ticker as benchmarkTicker,
+       rs_ma_type as rsMaType,
+       rs_ma_length as rsMaLength,
+       new_high_lookback as newHighLookback,
+       state_version as stateVersion,
+       latest_trading_date as latestTradingDate,
+       updated_at as updatedAt,
+       price_close as priceClose,
+       change_1d as change1d,
+       rs_ratio_close as rsRatioClose,
+       rs_ratio_ma as rsRatioMa,
+       rs_above_ma as rsAboveMa,
+       rs_new_high as rsNewHigh,
+       rs_new_high_before_price as rsNewHighBeforePrice,
+       bull_cross as bullCross,
+       approx_rs_rating as approxRsRating,
+       price_close_history_json as priceCloseHistoryJson,
+       benchmark_close_history_json as benchmarkCloseHistoryJson,
+       weighted_score_history_json as weightedScoreHistoryJson,
+       rs_new_high_window_json as rsNewHighWindowJson,
+       price_new_high_window_json as priceNewHighWindowJson,
+       sma_window_json as smaWindowJson,
+       sma_sum as smaSum,
+       ema_value as emaValue,
+       previous_rs_close as previousRsClose,
+       previous_rs_ma as previousRsMa,
+       created_at as createdAt
+     FROM relative_strength_config_state
+     ${where}
+     ORDER BY config_key ASC, ticker ASC
+     LIMIT ?`,
+  )
+    .bind(...bindArgs)
+    .all<Record<string, unknown>>();
+  return rows.results ?? [];
+}
+
+function prepareRsBackfillUpsert(db: D1Database, table: RsDerivedCacheTable, row: Record<string, unknown>): D1PreparedStatement {
+  if (table === "rs_ratio_cache") {
+    return db.prepare(
+      `INSERT INTO rs_ratio_cache
+        (benchmark_ticker, ticker, trading_date, price_close, benchmark_close, rs_ratio_close, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+       ON CONFLICT(benchmark_ticker, ticker, trading_date) DO UPDATE SET
+         price_close = excluded.price_close,
+         benchmark_close = excluded.benchmark_close,
+         rs_ratio_close = excluded.rs_ratio_close,
+         updated_at = excluded.updated_at`,
+    ).bind(
+      String(row.benchmarkTicker ?? "").toUpperCase(),
+      String(row.ticker ?? "").toUpperCase(),
+      row.tradingDate,
+      row.priceClose ?? null,
+      row.benchmarkClose ?? null,
+      row.rsRatioClose ?? null,
+      row.createdAt ?? null,
+      row.updatedAt ?? null,
+    );
+  }
+  if (table === "relative_strength_latest_cache") {
+    return db.prepare(
+      `INSERT INTO relative_strength_latest_cache
+        (config_key, ticker, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, trading_date, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+       ON CONFLICT(config_key, ticker) DO UPDATE SET
+         benchmark_ticker = excluded.benchmark_ticker,
+         rs_ma_type = excluded.rs_ma_type,
+         rs_ma_length = excluded.rs_ma_length,
+         new_high_lookback = excluded.new_high_lookback,
+         trading_date = excluded.trading_date,
+         price_close = excluded.price_close,
+         change_1d = excluded.change_1d,
+         rs_ratio_close = excluded.rs_ratio_close,
+         rs_ratio_ma = excluded.rs_ratio_ma,
+         rs_above_ma = excluded.rs_above_ma,
+         rs_new_high = excluded.rs_new_high,
+         rs_new_high_before_price = excluded.rs_new_high_before_price,
+         bull_cross = excluded.bull_cross,
+         approx_rs_rating = excluded.approx_rs_rating,
+         updated_at = excluded.updated_at
+       WHERE excluded.trading_date >= relative_strength_latest_cache.trading_date`,
+    ).bind(
+      row.configKey,
+      String(row.ticker ?? "").toUpperCase(),
+      String(row.benchmarkTicker ?? "").toUpperCase(),
+      row.rsMaType,
+      row.rsMaLength,
+      row.newHighLookback,
+      row.tradingDate,
+      row.priceClose ?? null,
+      row.change1d ?? null,
+      row.rsRatioClose ?? null,
+      row.rsRatioMa ?? null,
+      row.rsAboveMa ?? 0,
+      row.rsNewHigh ?? 0,
+      row.rsNewHighBeforePrice ?? 0,
+      row.bullCross ?? 0,
+      row.approxRsRating ?? null,
+      row.createdAt ?? null,
+      row.updatedAt ?? null,
+    );
+  }
+
+  return db.prepare(
+    `INSERT INTO relative_strength_config_state
+      (config_key, ticker, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback, state_version, latest_trading_date, updated_at, price_close, change_1d, rs_ratio_close, rs_ratio_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, price_close_history_json, benchmark_close_history_json, weighted_score_history_json, rs_new_high_window_json, price_new_high_window_json, sma_window_json, sma_sum, ema_value, previous_rs_close, previous_rs_ma, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+     ON CONFLICT(config_key, ticker) DO UPDATE SET
+       benchmark_ticker = excluded.benchmark_ticker,
+       rs_ma_type = excluded.rs_ma_type,
+       rs_ma_length = excluded.rs_ma_length,
+       new_high_lookback = excluded.new_high_lookback,
+       state_version = excluded.state_version,
+       latest_trading_date = excluded.latest_trading_date,
+       updated_at = excluded.updated_at,
+       price_close = excluded.price_close,
+       change_1d = excluded.change_1d,
+       rs_ratio_close = excluded.rs_ratio_close,
+       rs_ratio_ma = excluded.rs_ratio_ma,
+       rs_above_ma = excluded.rs_above_ma,
+       rs_new_high = excluded.rs_new_high,
+       rs_new_high_before_price = excluded.rs_new_high_before_price,
+       bull_cross = excluded.bull_cross,
+       approx_rs_rating = excluded.approx_rs_rating,
+       price_close_history_json = excluded.price_close_history_json,
+       benchmark_close_history_json = excluded.benchmark_close_history_json,
+       weighted_score_history_json = excluded.weighted_score_history_json,
+       rs_new_high_window_json = excluded.rs_new_high_window_json,
+       price_new_high_window_json = excluded.price_new_high_window_json,
+       sma_window_json = excluded.sma_window_json,
+       sma_sum = excluded.sma_sum,
+       ema_value = excluded.ema_value,
+       previous_rs_close = excluded.previous_rs_close,
+       previous_rs_ma = excluded.previous_rs_ma
+     WHERE excluded.latest_trading_date >= relative_strength_config_state.latest_trading_date`,
+  ).bind(
+    row.configKey,
+    String(row.ticker ?? "").toUpperCase(),
+    String(row.benchmarkTicker ?? "").toUpperCase(),
+    row.rsMaType,
+    row.rsMaLength,
+    row.newHighLookback,
+    row.stateVersion,
+    row.latestTradingDate,
+    row.updatedAt ?? null,
+    row.priceClose ?? null,
+    row.change1d ?? null,
+    row.rsRatioClose ?? null,
+    row.rsRatioMa ?? null,
+    row.rsAboveMa ?? 0,
+    row.rsNewHigh ?? 0,
+    row.rsNewHighBeforePrice ?? 0,
+    row.bullCross ?? 0,
+    row.approxRsRating ?? null,
+    row.priceCloseHistoryJson ?? null,
+    row.benchmarkCloseHistoryJson ?? null,
+    row.weightedScoreHistoryJson ?? null,
+    row.rsNewHighWindowJson ?? null,
+    row.priceNewHighWindowJson ?? null,
+    row.smaWindowJson ?? null,
+    row.smaSum ?? null,
+    row.emaValue ?? null,
+    row.previousRsClose ?? null,
+    row.previousRsMa ?? null,
+    row.createdAt ?? null,
+  );
+}
+
+async function backfillScannerCacheRsCacheTable(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  table: RsDerivedCacheTable,
+  cursor: string | null | undefined,
+  limit: number,
+): Promise<RsDerivedCacheBackfillTableResult> {
+  const rows = await loadLegacyRsBackfillRows(env.DB, table, cursor, limit);
+  if (rows.length > 0) {
+    for (let index = 0; index < rows.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+      const chunk = rows.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+      await env.SCANNER_CACHE_DB.batch(chunk.map((row) => prepareRsBackfillUpsert(env.SCANNER_CACHE_DB, table, row)));
+    }
+  }
+  const done = rows.length < limit;
+  const lastRow = rows[rows.length - 1];
+  const nextCursor = done || !lastRow
+    ? null
+    : encodeRsBackfillCursor({ version: 1, table, key: rsBackfillKeyForRow(table, lastRow) });
+  return {
+    table,
+    copied: rows.length,
+    done,
+    nextCursor,
+  };
+}
+
+export async function backfillScannerCacheRsCache(
+  env: Env,
+  input: {
+    table?: RsDerivedCacheBackfillTarget | null;
+    cursor?: string | null;
+    limit?: number | null;
+  },
+): Promise<RsDerivedCacheBackfillResult> {
+  if (!hasScannerCacheStorage(env)) {
+    throw new Error("SCANNER_CACHE_DB binding is required for RS cache backfill.");
+  }
+  const target = input.table ?? "all";
+  const limit = normalizeRsDerivedBackfillLimit(input.limit);
+  if (target !== "all") {
+    assertRsDerivedCacheTable(target);
+    const result = await backfillScannerCacheRsCacheTable(env, target, input.cursor, limit);
+    return {
+      table: target,
+      copied: result.copied,
+      done: result.done,
+      nextCursor: result.nextCursor,
+      tables: [result],
+    };
+  }
+
+  const decoded = decodeRsBackfillCursor(input.cursor);
+  const cursorMap = decoded?.table === "all" ? decoded.cursors : {};
+  const results: RsDerivedCacheBackfillTableResult[] = [];
+  const nextCursors: Partial<Record<RsDerivedCacheTable, string | null>> = {};
+  for (const table of RS_DERIVED_CACHE_TABLES) {
+    const result = await backfillScannerCacheRsCacheTable(env, table, cursorMap[table], limit);
+    results.push(result);
+    nextCursors[table] = result.nextCursor;
+  }
+  const done = results.every((result) => result.done);
+  return {
+    table: "all",
+    copied: results.reduce((sum, result) => sum + result.copied, 0),
+    done,
+    nextCursor: done ? null : encodeRsBackfillCursor({ version: 1, table: "all", cursors: nextCursors }),
+    tables: results,
+  };
 }
 
 function isActiveScanStatus(status: string | null | undefined): boolean {

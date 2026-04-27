@@ -198,6 +198,117 @@ function createApiScansEnv(input?: {
   } as Env;
 }
 
+type MutableRsRatioCacheRow = {
+  benchmarkTicker: string;
+  ticker: string;
+  tradingDate: string;
+  priceClose: number | null;
+  benchmarkClose: number | null;
+  rsRatioClose: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function createScannerCacheAdminEnv(input: {
+  adminSecret?: string;
+  legacyRatioRows?: MutableRsRatioCacheRow[];
+  scannerRatioRows?: MutableRsRatioCacheRow[];
+}): Env & { __scannerRatioRows: MutableRsRatioCacheRow[] } {
+  const legacyRatioRows = [...(input.legacyRatioRows ?? [])];
+  const scannerRatioRows = [...(input.scannerRatioRows ?? [])];
+
+  const makeDb = (sourceRows: MutableRsRatioCacheRow[], allowWrites: boolean): D1Database => ({
+    prepare(sql: string) {
+      const makeBound = (args: unknown[]) => ({
+        __sql: sql,
+        __args: args,
+        async first<T>() {
+          if (sql.includes("COUNT(*) as count FROM rs_ratio_cache")) {
+            return { count: sourceRows.length } as T;
+          }
+          if (
+            sql.includes("COUNT(*) as count FROM relative_strength_latest_cache")
+            || sql.includes("COUNT(*) as count FROM relative_strength_config_state")
+          ) {
+            return { count: 0 } as T;
+          }
+          return null as T;
+        },
+        async all<T>() {
+          if (sql.includes("FROM rs_ratio_cache") && sql.includes("ORDER BY benchmark_ticker ASC")) {
+            const limit = Number(args[args.length - 1] ?? sourceRows.length);
+            const key = args.length > 1
+              ? [String(args[0] ?? ""), String(args[2] ?? ""), String(args[5] ?? "")]
+              : null;
+            const results = sourceRows
+              .filter((row) => !key
+                || row.benchmarkTicker > key[0]
+                || (row.benchmarkTicker === key[0] && row.ticker > key[1])
+                || (row.benchmarkTicker === key[0] && row.ticker === key[1] && row.tradingDate > key[2]))
+              .sort((left, right) => (
+                left.benchmarkTicker.localeCompare(right.benchmarkTicker)
+                || left.ticker.localeCompare(right.ticker)
+                || left.tradingDate.localeCompare(right.tradingDate)
+              ))
+              .slice(0, limit);
+            return { results: results as T[] };
+          }
+          return { results: [] as T[] };
+        },
+        async run() {
+          return {};
+        },
+      });
+      return {
+        bind(...args: unknown[]) {
+          return makeBound(args);
+        },
+        async first<T>() {
+          return makeBound([]).first<T>();
+        },
+        async all<T>() {
+          return makeBound([]).all<T>();
+        },
+        async run() {
+          return {};
+        },
+      };
+    },
+    async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+      if (!allowWrites) return [];
+      for (const statement of statements) {
+        if (!statement.__sql?.includes("INSERT INTO rs_ratio_cache")) continue;
+        const [benchmarkTicker, ticker, tradingDate, priceClose, benchmarkClose, rsRatioClose, createdAt, updatedAt] = statement.__args ?? [];
+        const row: MutableRsRatioCacheRow = {
+          benchmarkTicker: String(benchmarkTicker ?? "").toUpperCase(),
+          ticker: String(ticker ?? "").toUpperCase(),
+          tradingDate: String(tradingDate ?? ""),
+          priceClose: priceClose == null ? null : Number(priceClose),
+          benchmarkClose: benchmarkClose == null ? null : Number(benchmarkClose),
+          rsRatioClose: rsRatioClose == null ? null : Number(rsRatioClose),
+          createdAt: String(createdAt ?? ""),
+          updatedAt: String(updatedAt ?? ""),
+        };
+        const existingIndex = sourceRows.findIndex((candidate) => (
+          candidate.benchmarkTicker === row.benchmarkTicker
+          && candidate.ticker === row.ticker
+          && candidate.tradingDate === row.tradingDate
+        ));
+        if (existingIndex >= 0) sourceRows[existingIndex] = row;
+        else sourceRows.push(row);
+      }
+      return [];
+    },
+  } as unknown as D1Database);
+
+  return {
+    ADMIN_SECRET: input.adminSecret,
+    DB: makeDb(legacyRatioRows, false),
+    SCANNER_CACHE_DB: makeDb(scannerRatioRows, true),
+    __scannerRatioRows: scannerRatioRows,
+  } as Env & { __scannerRatioRows: MutableRsRatioCacheRow[] };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -521,5 +632,85 @@ describe("scans page API", () => {
       ["Breakouts", "error", true],
     ]);
     expect(body.snapshot.rows.map((row) => row.ticker)).toEqual(["NVDA", "OLDB"]);
+  });
+
+  it("reports RS derived cache status across main and scanner cache databases", async () => {
+    const env = createScannerCacheAdminEnv({
+      adminSecret: "secret",
+      legacyRatioRows: [{
+        benchmarkTicker: "SPY",
+        ticker: "AAPL",
+        tradingDate: "2026-03-18",
+        priceClose: 200,
+        benchmarkClose: 500,
+        rsRatioClose: 0.4,
+        createdAt: "2026-03-18T00:00:00.000Z",
+        updatedAt: "2026-03-18T00:00:00.000Z",
+      }],
+    });
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/admin/scanner-cache/rs-cache-status", {
+        headers: { authorization: "Bearer secret" },
+      }),
+      env as never,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      ok: boolean;
+      scannerCacheDbAvailable: boolean;
+      tables: Array<{ table: string; legacyRowCount: number; scannerCacheRowCount: number | null }>;
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.scannerCacheDbAvailable).toBe(true);
+    expect(body.tables.find((row) => row.table === "rs_ratio_cache")).toMatchObject({
+      legacyRowCount: 1,
+      scannerCacheRowCount: 0,
+    });
+  });
+
+  it("backfills RS ratio cache rows into SCANNER_CACHE_DB idempotently", async () => {
+    const env = createScannerCacheAdminEnv({
+      adminSecret: "secret",
+      legacyRatioRows: [{
+        benchmarkTicker: "SPY",
+        ticker: "AAPL",
+        tradingDate: "2026-03-18",
+        priceClose: 200,
+        benchmarkClose: 500,
+        rsRatioClose: 0.4,
+        createdAt: "2026-03-18T00:00:00.000Z",
+        updatedAt: "2026-03-18T00:00:00.000Z",
+      }],
+    });
+
+    const runBackfill = () => (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/admin/scanner-cache/rs-cache-backfill", {
+        method: "POST",
+        headers: { authorization: "Bearer secret", "content-type": "application/json" },
+        body: JSON.stringify({ table: "rs_ratio_cache", limit: 250 }),
+      }),
+      env as never,
+    );
+
+    const firstResponse = await runBackfill();
+    const firstBody = await firstResponse.json() as { ok: boolean; copied: number; done: boolean };
+    expect(firstResponse.status).toBe(200);
+    expect(firstBody).toMatchObject({ ok: true, copied: 1, done: true });
+    expect(env.__scannerRatioRows).toHaveLength(1);
+    expect(env.__scannerRatioRows[0]).toMatchObject({
+      benchmarkTicker: "SPY",
+      ticker: "AAPL",
+      tradingDate: "2026-03-18",
+      rsRatioClose: 0.4,
+    });
+
+    const secondResponse = await runBackfill();
+    const secondBody = await secondResponse.json() as { ok: boolean; copied: number; done: boolean };
+    expect(secondResponse.status).toBe(200);
+    expect(secondBody).toMatchObject({ ok: true, copied: 1, done: true });
+    expect(env.__scannerRatioRows).toHaveLength(1);
   });
 });

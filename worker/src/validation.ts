@@ -289,6 +289,17 @@ export const scanRefreshSchema = z.object({
   presetId: z.string().min(1).nullable().optional(),
 });
 
+export const scannerCacheRsCacheBackfillSchema = z.object({
+  table: z.enum([
+    "rs_ratio_cache",
+    "relative_strength_latest_cache",
+    "relative_strength_config_state",
+    "all",
+  ]).optional().default("all"),
+  cursor: z.string().nullable().optional(),
+  limit: z.number().int().min(1).max(1000).optional().default(250),
+});
+
 export const correlationLookbackSchema = z.enum(["60D", "120D", "252D", "2Y", "5Y"]);
 export const correlationRollingWindowSchema = z.enum(["20D", "60D", "120D"]);
 
