@@ -98,7 +98,10 @@ export function PatternTrainingChart({
   const chartRef = useRef<IChartApi | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [rect, setRect] = useState<{ left: number; width: number } | null>(null);
+  const [rangeEditKeyDown, setRangeEditKeyDown] = useState(false);
+  const [rangeDragActive, setRangeDragActive] = useState(false);
   const dates = useMemo(() => data.bars.map((bar) => bar.date), [data.bars]);
+  const rangeEditActive = rangeEditKeyDown || rangeDragActive;
 
   const emitSelection = (startDate: string, endDate: string) => {
     const start = startDate <= endDate ? startDate : endDate;
@@ -136,6 +139,12 @@ export function PatternTrainingChart({
       },
       crosshair: {
         mode: 0,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
       },
     });
     chartRef.current = chart;
@@ -199,6 +208,35 @@ export function PatternTrainingChart({
     chart.timeScale().subscribeVisibleLogicalRangeChange(updateRect);
     return () => chart.timeScale().unsubscribeVisibleLogicalRangeChange(updateRect);
   }, [selection, data]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setRangeEditKeyDown(true);
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setRangeEditKeyDown(false);
+    };
+    const handleBlur = () => setRangeEditKeyDown(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, []);
+
+  const setChartDragPanEnabled = (enabled: boolean) => {
+    chartRef.current?.applyOptions({
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: enabled,
+        horzTouchDrag: enabled,
+        vertTouchDrag: enabled,
+      },
+    });
+  };
 
   const dateFromPointer = (clientX: number) => {
     const index = indexFromPointer(clientX);
@@ -271,18 +309,22 @@ export function PatternTrainingChart({
         </div>
       </div>
       <div className="relative mt-3 overflow-hidden rounded border border-borderSoft/50">
-        <div ref={containerRef} className="w-full" style={{ height }} />
+        <div ref={containerRef} className="relative z-0 w-full" style={{ height }} />
         <div
           ref={overlayRef}
-          className="absolute inset-0 cursor-crosshair"
+          className={`absolute inset-0 z-50 ${rangeEditActive ? "cursor-crosshair" : "pointer-events-none"}`}
           role="application"
-          aria-label="Pattern date range selector"
-          style={{ touchAction: "none" }}
+          aria-label="Pattern date range selector. Hold Control or Command while dragging to edit the selected range."
+          style={{ touchAction: rangeEditActive ? "none" : "auto" }}
           onPointerDown={(event) => {
+            if (!event.ctrlKey && !event.metaKey) return;
             event.preventDefault();
+            event.stopPropagation();
             const date = dateFromPointer(event.clientX);
             const pointerIndex = indexFromPointer(event.clientX);
             if (!date || pointerIndex == null) return;
+            setRangeDragActive(true);
+            setChartDragPanEnabled(false);
             const mode = selection ? (dragModeFromTarget(event.target) ?? "new") : "new";
             const initialStartIndex = selection ? dates.indexOf(selection.startDate) : -1;
             const initialEndIndex = selection ? dates.indexOf(selection.endDate) : -1;
@@ -306,6 +348,7 @@ export function PatternTrainingChart({
             const drag = dragRef.current;
             if (!drag) return;
             event.preventDefault();
+            event.stopPropagation();
             const date = dateFromPointer(event.clientX);
             const pointerIndex = indexFromPointer(event.clientX);
             if (!date || pointerIndex == null) return;
@@ -323,15 +366,19 @@ export function PatternTrainingChart({
           }}
           onPointerUp={(event) => {
             dragRef.current = null;
+            setRangeDragActive(false);
+            setChartDragPanEnabled(true);
             if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
           }}
           onPointerCancel={() => {
             dragRef.current = null;
+            setRangeDragActive(false);
+            setChartDragPanEnabled(true);
           }}
         >
           {rect ? (
             <div
-              className="absolute bottom-0 top-0 cursor-grab border-x border-accent/80 bg-accent/15 active:cursor-grabbing"
+              className={`absolute bottom-0 top-0 border-x border-accent/80 bg-accent/15 ${rangeEditActive ? "cursor-grab active:cursor-grabbing" : "pointer-events-none"}`}
               data-pattern-drag="move"
               style={{ left: rect.left, width: rect.width }}
             >
