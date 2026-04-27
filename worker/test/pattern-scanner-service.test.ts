@@ -41,6 +41,10 @@ function labelFromSnapshot(
     source: "test",
     contextWindowBars: snapshot.contextWindowBars,
     patternWindowBars: snapshot.patternWindowBars,
+    patternStartDate: snapshot.patternStartDate,
+    patternEndDate: snapshot.patternEndDate,
+    selectedBarCount: snapshot.selectedBarCount,
+    selectionMode: snapshot.selectionMode,
     tags: [],
     notes: null,
     featureVersion: snapshot.featureVersion,
@@ -78,7 +82,33 @@ describe("pattern scanner service", () => {
     expect(withFuture?.featureJson).toEqual(withoutFuture?.featureJson);
     expect(withFuture?.shapeJson.price_path_40d).toHaveLength(40);
     expect(withFuture?.shapeJson.relative_strength_path_60d).toHaveLength(60);
+    expect(withFuture?.shapeJson.selected_price_path_64).toHaveLength(64);
     expect(withFuture?.sourceMetadata.latestBarDate).toBe(setupDate);
+  });
+
+  it("uses a chart-selected date range for pattern-sensitive features", () => {
+    const tickerBars = makeBars("RANGE", 140, 40);
+    const benchmarkBars = makeBars("SPY", 140, 100);
+    const setupDate = tickerBars[110].date;
+    const startDate = tickerBars[82].date;
+    const snapshot = buildPatternFeatureSnapshot({
+      ticker: "RANGE",
+      setupDate,
+      patternStartDate: startDate,
+      patternEndDate: setupDate,
+      selectionMode: "chart_range",
+      tickerBars,
+      benchmarkBars,
+      benchmarkTicker: "SPY",
+    });
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.patternStartDate).toBe(startDate);
+    expect(snapshot?.patternEndDate).toBe(setupDate);
+    expect(snapshot?.selectedBarCount).toBe(29);
+    expect(snapshot?.featureJson.base_length_bars).toBe(29);
+    expect(snapshot?.shapeJson.selected_price_path_64).toHaveLength(64);
+    expect(snapshot?.sourceMetadata.latestBarDate).toBe(setupDate);
   });
 
   it("returns null when stored bars are insufficient", () => {

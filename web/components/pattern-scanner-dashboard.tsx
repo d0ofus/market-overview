@@ -23,6 +23,7 @@ import {
   createPatternRun,
   deletePatternLabel,
   getAdminWorkerSchedule,
+  getPatternChart,
   getPatternAnalysis,
   getPatternExportUrl,
   getPatternFeatureIdeas,
@@ -33,16 +34,19 @@ import {
   updateAdminWorkerSchedule,
   updatePatternFeature,
   updatePatternLabel,
+  type PatternChartData,
   type PatternAnalysisResponse,
   type PatternCandidate,
   type PatternFeatureIdeasResponse,
   type PatternFeatureRegistryRow,
   type PatternLabel,
   type PatternLabelValue,
+  type PatternSelectionMode,
   type PatternRun,
   type WorkerScheduleSettings,
 } from "@/lib/api";
 import { Sparkline } from "./sparkline";
+import { PatternTrainingChart, type PatternChartSelection } from "./pattern-training-chart";
 
 type TabKey = "candidates" | "training" | "runs" | "analysis" | "ideas" | "settings";
 
@@ -114,7 +118,13 @@ export function PatternScannerDashboard() {
     label: "approved" as PatternLabelValue,
     tags: "",
     notes: "",
+    patternStartDate: "",
+    patternEndDate: "",
+    selectedBarCount: 0,
+    selectionMode: "fixed_window" as PatternSelectionMode,
   });
+  const [seedChart, setSeedChart] = useState<PatternChartData | null>(null);
+  const [seedChartLoading, setSeedChartLoading] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [runDate, setRunDate] = useState(defaultSetupDate());
 
@@ -165,6 +175,10 @@ export function PatternScannerDashboard() {
     notes?: string | null;
     runId?: string | null;
     candidateId?: string | null;
+    patternStartDate?: string | null;
+    patternEndDate?: string | null;
+    selectedBarCount?: number | null;
+    selectionMode?: PatternSelectionMode;
   }) => {
     setSaving(true);
     try {
@@ -178,6 +192,10 @@ export function PatternScannerDashboard() {
         source: payload.candidateId ? "candidate_review" : "manual",
         runId: payload.runId ?? null,
         candidateId: payload.candidateId ?? null,
+        patternStartDate: payload.patternStartDate ?? null,
+        patternEndDate: payload.patternEndDate ?? payload.setupDate,
+        selectedBarCount: payload.selectedBarCount ?? null,
+        selectionMode: payload.selectionMode ?? (payload.patternStartDate ? "chart_range" : "fixed_window"),
       });
       setMessage({ tone: "success", text: `${payload.ticker.toUpperCase()} ${payload.label}.` });
       await load();
@@ -189,15 +207,55 @@ export function PatternScannerDashboard() {
   };
 
   const submitSeed = async () => {
-    if (!seed.ticker.trim()) return;
+    if (!seed.ticker.trim() || !seed.patternStartDate || !seed.patternEndDate || seed.selectedBarCount <= 0) return;
     await addLabel({
       ticker: seed.ticker,
-      setupDate: seed.setupDate,
+      setupDate: seed.patternEndDate || seed.setupDate,
       label: seed.label,
       tags: tagsFromText(seed.tags),
       notes: seed.notes.trim() || null,
+      patternStartDate: seed.patternStartDate,
+      patternEndDate: seed.patternEndDate || seed.setupDate,
+      selectedBarCount: seed.selectedBarCount,
+      selectionMode: "chart_range",
     });
-    setSeed((current) => ({ ...current, ticker: "", notes: "" }));
+    setSeed((current) => ({ ...current, ticker: "", notes: "", patternStartDate: "", patternEndDate: "", selectedBarCount: 0, selectionMode: "fixed_window" }));
+    setSeedChart(null);
+  };
+
+  const loadSeedChart = async () => {
+    if (!seed.ticker.trim() || !seed.setupDate) return;
+    setSeedChartLoading(true);
+    try {
+      const chart = await getPatternChart({ profileId, ticker: seed.ticker, endDate: seed.setupDate, contextBars: 260 });
+      setSeedChart(chart);
+      const endDate = chart.availableEndDate ?? seed.setupDate;
+      const startIndex = Math.max(0, chart.bars.length - 40);
+      const startDate = chart.bars[startIndex]?.date ?? chart.availableStartDate ?? "";
+      setSeed((current) => ({
+        ...current,
+        patternStartDate: startDate,
+        patternEndDate: endDate,
+        selectedBarCount: chart.bars.filter((bar) => bar.date >= startDate && bar.date <= endDate).length,
+        selectionMode: "chart_range",
+      }));
+      setMessage(null);
+    } catch (error) {
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load pattern chart." });
+    } finally {
+      setSeedChartLoading(false);
+    }
+  };
+
+  const applyChartSelection = (selection: PatternChartSelection) => {
+    setSeed((current) => ({
+      ...current,
+      setupDate: selection.endDate,
+      patternStartDate: selection.startDate,
+      patternEndDate: selection.endDate,
+      selectedBarCount: selection.barCount,
+      selectionMode: selection.selectionMode,
+    }));
   };
 
   const submitBulk = async () => {
@@ -353,6 +411,10 @@ export function PatternScannerDashboard() {
                   label,
                   runId: candidate.runId,
                   candidateId: candidate.id,
+                  patternStartDate: metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate"),
+                  patternEndDate: metaString(candidate, "matchedPatternEndDate") ?? candidate.tradingDate ?? metaString(candidate, "patternEndDate") ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
+                  selectedBarCount: metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount"),
+                  selectionMode: "fixed_window",
                 })}
               />
             ))}
@@ -377,24 +439,83 @@ export function PatternScannerDashboard() {
       ) : null}
 
       {!loading && activeTab === "training" ? (
-        <div className="grid gap-4 xl:grid-cols-[24rem,minmax(0,1fr)]">
+        <div className="grid gap-4 xl:grid-cols-[28rem,minmax(0,1fr)]">
           <div className="space-y-4">
             <div className="card p-4">
               <h3 className="text-sm font-semibold text-slate-100">Seed Example</h3>
               <div className="mt-4 grid gap-3">
                 <label className="text-xs text-slate-300">
                   Ticker
-                  <input className={INPUT_CLASS} value={seed.ticker} onChange={(event) => setSeed((current) => ({ ...current, ticker: event.target.value.toUpperCase() }))} />
+                  <input className={INPUT_CLASS} value={seed.ticker} onChange={(event) => {
+                    setSeed((current) => ({ ...current, ticker: event.target.value.toUpperCase(), patternStartDate: "", patternEndDate: "", selectedBarCount: 0 }));
+                    setSeedChart(null);
+                  }} />
                 </label>
                 <label className="text-xs text-slate-300">
-                  Setup date
-                  <input className={INPUT_CLASS} type="date" value={seed.setupDate} onChange={(event) => setSeed((current) => ({ ...current, setupDate: event.target.value }))} />
+                  Setup/end date
+                  <input className={INPUT_CLASS} type="date" value={seed.setupDate} onChange={(event) => {
+                    setSeed((current) => ({ ...current, setupDate: event.target.value, patternStartDate: "", patternEndDate: "", selectedBarCount: 0 }));
+                    setSeedChart(null);
+                  }} />
                 </label>
+                <button className={BUTTON_CLASS} disabled={seedChartLoading || !seed.ticker.trim() || !seed.setupDate} onClick={() => void loadSeedChart()} type="button">
+                  {seedChartLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BarChart3 className="h-3.5 w-3.5" />}
+                  Load Chart
+                </button>
+                {seedChart ? (
+                  <PatternTrainingChart
+                    data={seedChart}
+                    selection={seed.patternStartDate && seed.patternEndDate ? {
+                      startDate: seed.patternStartDate,
+                      endDate: seed.patternEndDate,
+                      barCount: seed.selectedBarCount,
+                      selectionMode: "chart_range",
+                    } : null}
+                    onSelectionChange={applyChartSelection}
+                  />
+                ) : null}
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="text-xs text-slate-300">
+                    Pattern start
+                    <input className={INPUT_CLASS} type="date" value={seed.patternStartDate} onChange={(event) => {
+                      const startDate = event.target.value;
+                      setSeed((current) => ({
+                        ...current,
+                        patternStartDate: startDate,
+                        selectedBarCount: seedChart ? seedChart.bars.filter((bar) => bar.date >= startDate && bar.date <= (current.patternEndDate || current.setupDate)).length : current.selectedBarCount,
+                        selectionMode: "chart_range",
+                      }));
+                    }} />
+                  </label>
+                  <label className="text-xs text-slate-300">
+                    Pattern end
+                    <input className={INPUT_CLASS} type="date" value={seed.patternEndDate} onChange={(event) => {
+                      const endDate = event.target.value;
+                      setSeed((current) => ({
+                        ...current,
+                        setupDate: endDate,
+                        patternEndDate: endDate,
+                        selectedBarCount: seedChart ? seedChart.bars.filter((bar) => bar.date >= current.patternStartDate && bar.date <= endDate).length : current.selectedBarCount,
+                        selectionMode: "chart_range",
+                      }));
+                    }} />
+                  </label>
+                  <label className="text-xs text-slate-300">
+                    Bars
+                    <input className={INPUT_CLASS} value={seed.selectedBarCount ? String(seed.selectedBarCount) : ""} readOnly />
+                  </label>
+                </div>
+                {seed.selectedBarCount > 0 && seed.selectedBarCount < 20 ? (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                    Short window selected: {seed.selectedBarCount} bars.
+                  </div>
+                ) : null}
                 <label className="text-xs text-slate-300">
                   Label
                   <select className={SELECT_CLASS} value={seed.label} onChange={(event) => setSeed((current) => ({ ...current, label: event.target.value as PatternLabelValue }))}>
                     <option value="approved">Approve</option>
                     <option value="rejected">Reject</option>
+                    <option value="skipped">Skip</option>
                   </select>
                 </label>
                 <label className="text-xs text-slate-300">
@@ -405,7 +526,7 @@ export function PatternScannerDashboard() {
                   Notes
                   <textarea className={`${INPUT_CLASS} min-h-20`} value={seed.notes} onChange={(event) => setSeed((current) => ({ ...current, notes: event.target.value }))} />
                 </label>
-                <button className={PRIMARY_BUTTON_CLASS} disabled={saving || !seed.ticker.trim()} onClick={() => void submitSeed()} type="button">
+                <button className={PRIMARY_BUTTON_CLASS} disabled={saving || !seed.ticker.trim() || !seed.patternStartDate || !seed.patternEndDate || seed.selectedBarCount < 10} onClick={() => void submitSeed()} type="button">
                   <Save className="h-3.5 w-3.5" />
                   Save Example
                 </button>
@@ -432,7 +553,9 @@ export function PatternScannerDashboard() {
                 <thead className="bg-panelSoft/60 text-xs uppercase tracking-[0.12em] text-slate-400">
                   <tr>
                     <th className="px-3 py-2 text-left">Ticker</th>
-                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Setup</th>
+                    <th className="px-3 py-2 text-left">Pattern</th>
+                    <th className="px-3 py-2 text-right">Bars</th>
                     <th className="px-3 py-2 text-left">Label</th>
                     <th className="px-3 py-2 text-left">Status</th>
                     <th className="px-3 py-2 text-left">Tags</th>
@@ -444,6 +567,8 @@ export function PatternScannerDashboard() {
                     <tr key={label.id} className="border-t border-borderSoft/50">
                       <td className="px-3 py-2 font-semibold text-slate-100">{label.ticker}</td>
                       <td className="px-3 py-2 text-slate-300">{label.setupDate}</td>
+                      <td className="px-3 py-2 text-slate-300">{label.patternStartDate ? `${label.patternStartDate} to ${label.patternEndDate ?? label.setupDate}` : "-"}</td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-300">{label.selectedBarCount ?? label.patternWindowBars}</td>
                       <td className="px-3 py-2"><LabelPill label={label.label} /></td>
                       <td className="px-3 py-2 text-slate-300">{label.status}</td>
                       <td className="px-3 py-2 text-slate-400">{label.tags.join(", ") || "-"}</td>
@@ -666,8 +791,13 @@ function CandidateCard({ candidate, saving, onFeedback }: {
   saving: boolean;
   onFeedback: (label: PatternLabelValue) => void | Promise<void>;
 }) {
-  const pricePath = shapeValues(candidate, "price_path_40d");
-  const rsPath = shapeValues(candidate, "relative_strength_path_60d");
+  const selectedPricePath = shapeValues(candidate, "selected_price_path_64");
+  const selectedRsPath = shapeValues(candidate, "selected_rs_path_64");
+  const pricePath = selectedPricePath.length ? selectedPricePath : shapeValues(candidate, "price_path_40d");
+  const rsPath = selectedRsPath.length ? selectedRsPath : shapeValues(candidate, "relative_strength_path_60d");
+  const matchedStart = metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate");
+  const matchedEnd = metaString(candidate, "matchedPatternEndDate") ?? metaString(candidate, "patternEndDate") ?? candidate.tradingDate;
+  const matchedBars = metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount");
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -702,13 +832,19 @@ function CandidateCard({ candidate, saving, onFeedback }: {
         <Metric label="Heuristic" value={pct(candidate.reasons.heuristicScore)} />
         <Metric label="Dollar Vol" value={num(metaNumber(candidate, "avgDollarVolume20d") ?? metaNumber(candidate, "universeAvgDollarVolume20d"), 1)} />
       </div>
+      {matchedStart || matchedEnd || matchedBars ? (
+        <div className="mt-3 rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-400">
+          Matched window <span className="font-mono text-slate-200">{matchedStart ?? "-"} to {matchedEnd ?? "-"}</span>
+          <span className="ml-2 font-mono text-slate-200">{matchedBars ? `${matchedBars} bars` : ""}</span>
+        </div>
+      ) : null}
       <div className="mt-4 grid gap-4 lg:grid-cols-[12rem,12rem,minmax(0,1fr)]">
         <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/45 p-3">
-          <div className="text-xs text-slate-500">Price path</div>
+          <div className="text-xs text-slate-500">Selected price</div>
           <div className="mt-2 h-10"><Sparkline values={pricePath} width={150} height={36} /></div>
         </div>
         <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/45 p-3">
-          <div className="text-xs text-slate-500">RS path</div>
+          <div className="text-xs text-slate-500">Selected RS</div>
           <div className="mt-2 h-10"><Sparkline values={rsPath} width={150} height={36} /></div>
         </div>
         <div className="grid gap-2">

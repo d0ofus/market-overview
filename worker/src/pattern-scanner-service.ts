@@ -1,14 +1,18 @@
 import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, WorkerScheduleSettings } from "./types";
 
-export const PATTERN_FEATURE_VERSION = "v1";
+export const PATTERN_FEATURE_VERSION = "v2";
 export const PATTERN_MODEL_TYPE = "similarity_v1";
 export const DEFAULT_PATTERN_PROFILE_ID = "default";
 
 const DEFAULT_CONTEXT_WINDOW_BARS = 260;
 const DEFAULT_PATTERN_WINDOW_BARS = 40;
+const DEFAULT_SELECTED_RESAMPLE_POINTS = 64;
+const DEFAULT_CANDIDATE_PATTERN_LENGTHS = [20, 40, 60, 80, 120];
 const DEFAULT_BENCHMARK_TICKER = "SPY";
 const MIN_EXTRACT_BARS = 60;
+const MIN_SELECTED_PATTERN_BARS = 10;
+const MAX_SELECTED_PATTERN_BARS = 160;
 const MIN_MODEL_CLASS_COUNT = 3;
 const MATCH_SCORE_THRESHOLD = 0.6;
 const PATTERN_UNIVERSE_QUERY_CHUNK_SIZE = 50;
@@ -36,6 +40,10 @@ export type PatternFeatureSnapshot = {
   featureVersion: string;
   ticker: string;
   setupDate: string;
+  patternStartDate: string | null;
+  patternEndDate: string;
+  selectedBarCount: number;
+  selectionMode: PatternSelectionMode;
   benchmarkTicker: string;
   contextWindowBars: number;
   patternWindowBars: number;
@@ -45,6 +53,10 @@ export type PatternFeatureSnapshot = {
   sourceMetadata: {
     ticker: string;
     setupDate: string;
+    patternStartDate: string | null;
+    patternEndDate: string;
+    selectedBarCount: number;
+    selectionMode: PatternSelectionMode;
     latestBarDate: string | null;
     firstBarDate: string | null;
     benchmarkTicker: string;
@@ -73,6 +85,8 @@ export type PatternProfileSettings = {
   contextWindowBars: number;
   patternWindowBars: number;
   candidateLimit: number;
+  selectedResamplePoints: number;
+  candidatePatternLengths: number[];
 };
 
 export type PatternPrefilterConfig = {
@@ -83,6 +97,7 @@ export type PatternPrefilterConfig = {
 
 export type PatternLabelValue = "approved" | "rejected" | "skipped";
 export type PatternLabelStatus = "active" | "archived" | "deleted";
+export type PatternSelectionMode = "chart_range" | "fixed_window";
 
 export type PatternLabel = {
   id: string;
@@ -94,6 +109,10 @@ export type PatternLabel = {
   source: string;
   contextWindowBars: number;
   patternWindowBars: number;
+  patternStartDate: string | null;
+  patternEndDate: string | null;
+  selectedBarCount: number | null;
+  selectionMode: PatternSelectionMode;
   tags: string[];
   notes: string | null;
   featureVersion: string;
@@ -250,6 +269,10 @@ export type PatternLabelCreateInput = {
   source?: string;
   contextWindowBars?: number;
   patternWindowBars?: number;
+  patternStartDate?: string | null;
+  patternEndDate?: string | null;
+  selectedBarCount?: number | null;
+  selectionMode?: PatternSelectionMode;
   tags?: string[];
   notes?: string | null;
   runId?: string | null;
@@ -280,6 +303,10 @@ type PatternLabelRow = {
   source: string;
   contextWindowBars: number;
   patternWindowBars: number;
+  patternStartDate: string | null;
+  patternEndDate: string | null;
+  selectedBarCount: number | null;
+  selectionMode: PatternSelectionMode | null;
   tagsJson: string | null;
   notes: string | null;
   featureVersion: string;
@@ -339,6 +366,28 @@ type PatternCandidateRow = {
   updatedAt?: string;
 };
 
+export type PatternChartBar = {
+  ticker: string;
+  date: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  volume: number;
+  rs: number | null;
+};
+
+export type PatternChartData = {
+  ticker: string;
+  endDate: string;
+  benchmarkTicker: string;
+  contextWindowBars: number;
+  availableStartDate: string | null;
+  availableEndDate: string | null;
+  bars: PatternChartBar[];
+  warnings: string[];
+};
+
 type UniverseCandidate = {
   ticker: string;
   name: string | null;
@@ -384,6 +433,13 @@ const SHAPE_FEATURE_KEYS = [
   "relative_strength_path_60d",
   "distance_from_20sma_path_40d",
   "distance_from_50sma_path_40d",
+  "selected_price_path_64",
+  "selected_volume_path_64",
+  "selected_range_path_64",
+  "selected_atr_path_64",
+  "selected_rs_path_64",
+  "selected_distance_from_20sma_path_64",
+  "selected_distance_from_50sma_path_64",
 ] as const;
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -415,6 +471,13 @@ const FEATURE_LABELS: Record<string, string> = {
   relative_strength_path_60d: "60D RS path",
   distance_from_20sma_path_40d: "Distance from 20SMA path",
   distance_from_50sma_path_40d: "Distance from 50SMA path",
+  selected_price_path_64: "Selected price path",
+  selected_volume_path_64: "Selected volume path",
+  selected_range_path_64: "Selected range path",
+  selected_atr_path_64: "Selected ATR path",
+  selected_rs_path_64: "Selected RS path",
+  selected_distance_from_20sma_path_64: "Selected 20SMA distance",
+  selected_distance_from_50sma_path_64: "Selected 50SMA distance",
 };
 
 function requirePatternDb(env: Env): D1Database {
@@ -555,6 +618,67 @@ function padLeft(values: Array<number | null>, length: number): Array<number | n
   return [...Array.from({ length: length - trimmed.length }, () => null), ...trimmed];
 }
 
+function resampleSeries(values: Array<number | null>, length: number): Array<number | null> {
+  const fixedLength = Math.max(2, Math.trunc(length));
+  const source = values.map((value) => finiteOrNull(value));
+  if (source.length === 0) return Array.from({ length: fixedLength }, () => null);
+  if (source.length === 1) return Array.from({ length: fixedLength }, () => source[0]);
+  const out: Array<number | null> = [];
+  for (let index = 0; index < fixedLength; index += 1) {
+    const position = (index / (fixedLength - 1)) * (source.length - 1);
+    const leftIndex = Math.floor(position);
+    const rightIndex = Math.min(source.length - 1, Math.ceil(position));
+    const left = source[leftIndex];
+    const right = source[rightIndex];
+    if (left == null && right == null) {
+      out.push(null);
+      continue;
+    }
+    if (left == null) {
+      out.push(right);
+      continue;
+    }
+    if (right == null) {
+      out.push(left);
+      continue;
+    }
+    const weight = position - leftIndex;
+    out.push(left + (right - left) * weight);
+  }
+  return out;
+}
+
+function normalizeSelectionToStart(values: Array<number | null>, length: number): Array<number | null> {
+  const sampled = resampleSeries(values, length);
+  const first = sampled.find((value): value is number => typeof value === "number" && Number.isFinite(value) && value !== 0);
+  if (first == null) return sampled.map(() => null);
+  return sampled.map((value) => value == null || !Number.isFinite(value) ? null : value / first);
+}
+
+function normalizeSelectionByMedian(values: Array<number | null>, length: number): Array<number | null> {
+  const sampled = resampleSeries(values, length);
+  const divisor = median(sampled);
+  if (!divisor || !Number.isFinite(divisor) || divisor === 0) return sampled.map((value) => finiteOrNull(value));
+  return sampled.map((value) => value == null || !Number.isFinite(value) ? null : value / divisor);
+}
+
+function sanitizeCandidatePatternLengths(values: unknown): number[] {
+  const input = Array.isArray(values) ? values : DEFAULT_CANDIDATE_PATTERN_LENGTHS;
+  const unique = new Set<number>();
+  for (const value of input) {
+    const parsed = Math.trunc(Number(value));
+    if (Number.isFinite(parsed) && parsed >= MIN_SELECTED_PATTERN_BARS && parsed <= MAX_SELECTED_PATTERN_BARS) {
+      unique.add(parsed);
+    }
+  }
+  return unique.size > 0 ? Array.from(unique).sort((left, right) => left - right) : [...DEFAULT_CANDIDATE_PATTERN_LENGTHS];
+}
+
+function sanitizeSelectedResamplePoints(value: unknown): number {
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed) ? Math.max(16, Math.min(256, parsed)) : DEFAULT_SELECTED_RESAMPLE_POINTS;
+}
+
 function hashString(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -565,6 +689,7 @@ function hashString(value: string): string {
 }
 
 function mapProfileRow(row: PatternProfileRow): PatternProfile {
+  const parsedSettings = parseJson<Partial<PatternProfileSettings>>(row.settingsJson, {});
   return {
     id: row.id,
     name: row.name,
@@ -583,7 +708,9 @@ function mapProfileRow(row: PatternProfileRow): PatternProfile {
       contextWindowBars: DEFAULT_CONTEXT_WINDOW_BARS,
       patternWindowBars: DEFAULT_PATTERN_WINDOW_BARS,
       candidateLimit: 100,
-      ...parseJson<Partial<PatternProfileSettings>>(row.settingsJson, {}),
+      ...parsedSettings,
+      selectedResamplePoints: sanitizeSelectedResamplePoints(parsedSettings.selectedResamplePoints ?? DEFAULT_SELECTED_RESAMPLE_POINTS),
+      candidatePatternLengths: sanitizeCandidatePatternLengths(parsedSettings.candidatePatternLengths ?? DEFAULT_CANDIDATE_PATTERN_LENGTHS),
     },
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -601,6 +728,10 @@ function mapLabelRow(row: PatternLabelRow): PatternLabel {
     source: row.source,
     contextWindowBars: Number(row.contextWindowBars),
     patternWindowBars: Number(row.patternWindowBars),
+    patternStartDate: row.patternStartDate ?? null,
+    patternEndDate: row.patternEndDate ?? row.setupDate ?? null,
+    selectedBarCount: row.selectedBarCount == null ? null : Number(row.selectedBarCount),
+    selectionMode: row.selectionMode === "chart_range" ? "chart_range" : "fixed_window",
     tags: parseJson<string[]>(row.tagsJson, []),
     notes: row.notes,
     featureVersion: row.featureVersion,
@@ -772,17 +903,28 @@ async function loadBarsByCount(
 export function buildPatternFeatureSnapshot(input: {
   ticker: string;
   setupDate: string;
+  patternStartDate?: string | null;
+  patternEndDate?: string | null;
+  selectionMode?: PatternSelectionMode;
   tickerBars: PatternDailyBar[];
   benchmarkBars: PatternDailyBar[];
   benchmarkTicker?: string;
   contextWindowBars?: number;
   patternWindowBars?: number;
+  selectedResamplePoints?: number;
 }): PatternFeatureSnapshot | null {
   const ticker = input.ticker.trim().toUpperCase();
-  const setupDate = input.setupDate;
+  const setupDate = input.patternEndDate ?? input.setupDate;
+  const patternEndDate = setupDate;
+  const explicitPatternStartDate = input.patternStartDate ?? null;
+  const selectionMode: PatternSelectionMode = explicitPatternStartDate ? (input.selectionMode ?? "chart_range") : (input.selectionMode ?? "fixed_window");
   const benchmarkTicker = (input.benchmarkTicker ?? DEFAULT_BENCHMARK_TICKER).trim().toUpperCase();
   const contextWindowBars = Math.max(MIN_EXTRACT_BARS, Math.trunc(input.contextWindowBars ?? DEFAULT_CONTEXT_WINDOW_BARS));
   const patternWindowBars = Math.max(20, Math.trunc(input.patternWindowBars ?? DEFAULT_PATTERN_WINDOW_BARS));
+  const selectedResamplePoints = sanitizeSelectedResamplePoints(input.selectedResamplePoints ?? DEFAULT_SELECTED_RESAMPLE_POINTS);
+  if (explicitPatternStartDate && explicitPatternStartDate > patternEndDate) {
+    throw new Error("Pattern start date must be on or before the setup/end date.");
+  }
   const bars = [...input.tickerBars]
     .filter((bar) => bar.ticker.toUpperCase() === ticker && bar.date <= setupDate && Number.isFinite(bar.c))
     .sort((left, right) => left.date.localeCompare(right.date))
@@ -795,10 +937,23 @@ export function buildPatternFeatureSnapshot(input: {
 
   const latest = bars[bars.length - 1];
   const index = bars.length - 1;
+  const patternBars = explicitPatternStartDate
+    ? bars.filter((bar) => bar.date >= explicitPatternStartDate && bar.date <= patternEndDate)
+    : bars.slice(-Math.min(patternWindowBars, bars.length));
+  if (patternBars.length < MIN_SELECTED_PATTERN_BARS) return null;
+  if (patternBars.length > MAX_SELECTED_PATTERN_BARS) {
+    throw new Error(`Pattern window cannot exceed ${MAX_SELECTED_PATTERN_BARS} trading bars.`);
+  }
+  const selectedBarCount = patternBars.length;
+  const patternStartDate = patternBars[0]?.date ?? null;
   const closes = bars.map((bar) => bar.c);
   const highs = bars.map((bar) => bar.h);
   const lows = bars.map((bar) => bar.l);
   const volumes = bars.map((bar) => Number(bar.volume ?? 0));
+  const selectedCloses = patternBars.map((bar) => bar.c);
+  const selectedHighs = patternBars.map((bar) => bar.h);
+  const selectedLows = patternBars.map((bar) => bar.l);
+  const selectedVolumes = patternBars.map((bar) => Number(bar.volume ?? 0));
   const close = latest.c;
   const atr10 = atrAt(bars, 10, index);
   const atr50 = atrAt(bars, 50, index);
@@ -807,8 +962,10 @@ export function buildPatternFeatureSnapshot(input: {
   const high20 = highest(highs, 20, index);
   const low20 = lowest(lows, 20, index);
   const high252 = highest(highs, 252, index);
-  const patternHigh = highest(highs, Math.min(patternWindowBars, bars.length), index);
-  const patternLow = lowest(lows, Math.min(patternWindowBars, bars.length), index);
+  const finiteSelectedHighs = selectedHighs.filter(Number.isFinite);
+  const finiteSelectedLows = selectedLows.filter(Number.isFinite);
+  const patternHigh = finiteSelectedHighs.length > 0 ? Math.max(...finiteSelectedHighs) : null;
+  const patternLow = finiteSelectedLows.length > 0 ? Math.min(...finiteSelectedLows) : null;
   const sma20 = sma(closes, 20, index);
   const sma50 = sma(closes, 50, index);
   const sma200 = sma(closes, 200, index);
@@ -824,14 +981,14 @@ export function buildPatternFeatureSnapshot(input: {
     const previous = sliceIndex > 0 ? slice[sliceIndex - 1] : bars[bars.length - 20 - 1];
     return previous && bar.c < previous.c ? sum + Number(bar.volume ?? 0) : sum;
   }, 0);
-  const tightnessValues = bars.slice(-10).map((bar, sliceIndex, slice) => (
+  const tightnessValues = patternBars.slice(-10).map((bar, sliceIndex, slice) => (
     sliceIndex === 0 ? null : pctChange(bar.c, slice[sliceIndex - 1].c)
   )).filter((value): value is number => value != null).map((value) => Math.abs(value));
-  const segmentLength = Math.max(5, Math.floor(Math.min(patternWindowBars, bars.length) / 4));
+  const segmentLength = Math.max(2, Math.floor(patternBars.length / 4));
   const segmentLows = [4, 3, 2, 1].map((segment) => {
-    const end = bars.length - (segment - 1) * segmentLength;
+    const end = patternBars.length - (segment - 1) * segmentLength;
     const start = Math.max(0, end - segmentLength);
-    return lowest(bars.slice(start, end).map((bar) => bar.l), segmentLength, Math.min(segmentLength - 1, end - start - 1));
+    return lowest(patternBars.slice(start, end).map((bar) => bar.l), segmentLength, Math.min(segmentLength - 1, end - start - 1));
   });
   let higherLowsCount = 0;
   for (let current = 1; current < segmentLows.length; current += 1) {
@@ -857,6 +1014,25 @@ export function buildPatternFeatureSnapshot(input: {
     const ma = sma(closes, 50, rowIndex);
     return ma && ma !== 0 ? ((value / ma) - 1) * 100 : null;
   });
+  const contextIndexByDate = new Map(bars.map((bar, rowIndex) => [bar.date, rowIndex]));
+  const selectedIndexes = patternBars.map((bar) => contextIndexByDate.get(bar.date)).filter((value): value is number => typeof value === "number");
+  const selectedRsRows = selectedIndexes.map((rowIndex) => rsRows[rowIndex] ?? null);
+  const selectedAtrRows = selectedIndexes.map((rowIndex) => rollingAtrValues[rowIndex] ?? null);
+  const selectedDistance20Rows = selectedIndexes.map((rowIndex) => distance20Path[rowIndex] ?? null);
+  const selectedDistance50Rows = selectedIndexes.map((rowIndex) => distance50Path[rowIndex] ?? null);
+  const selectedRangeRows = patternBars.map((bar) => bar.c !== 0 ? ((bar.h - bar.l) / bar.c) * 100 : null);
+  const selectedUpVolume = patternBars.reduce((sum, bar, sliceIndex, slice) => {
+    const previous = sliceIndex > 0 ? slice[sliceIndex - 1] : null;
+    return previous && bar.c > previous.c ? sum + Number(bar.volume ?? 0) : sum;
+  }, 0);
+  const selectedDownVolume = patternBars.reduce((sum, bar, sliceIndex, slice) => {
+    const previous = sliceIndex > 0 ? slice[sliceIndex - 1] : null;
+    return previous && bar.c < previous.c ? sum + Number(bar.volume ?? 0) : sum;
+  }, 0);
+  const firstSelectedIndex = selectedIndexes[0] ?? 0;
+  const priorVolumeWindow = bars.slice(Math.max(0, firstSelectedIndex - 50), firstSelectedIndex).map((bar) => Number(bar.volume ?? 0));
+  const selectedAvgVolume = mean(selectedVolumes);
+  const priorAvgVolume = mean(priorVolumeWindow);
 
   const featureJson: PatternFeatureJson = {
     range_10d_pct: high10 != null && low10 != null && close !== 0 ? ((high10 - low10) / close) * 100 : null,
@@ -864,7 +1040,9 @@ export function buildPatternFeatureSnapshot(input: {
     atr_10: finiteOrNull(atr10),
     atr_50: finiteOrNull(atr50),
     atr_contraction_ratio: atr10 != null && atr50 != null && atr50 !== 0 ? atr10 / atr50 : null,
-    volume_dryup_ratio: avgVol10 != null && avgVol50 != null && avgVol50 !== 0 ? avgVol10 / avgVol50 : null,
+    volume_dryup_ratio: selectedAvgVolume != null && priorAvgVolume != null && priorAvgVolume !== 0
+      ? selectedAvgVolume / priorAvgVolume
+      : avgVol10 != null && avgVol50 != null && avgVol50 !== 0 ? avgVol10 / avgVol50 : null,
     close_vs_20sma_pct: sma20 && sma20 !== 0 ? ((close / sma20) - 1) * 100 : null,
     close_vs_50sma_pct: sma50 && sma50 !== 0 ? ((close / sma50) - 1) * 100 : null,
     close_vs_200sma_pct: sma200 && sma200 !== 0 ? ((close / sma200) - 1) * 100 : null,
@@ -873,9 +1051,11 @@ export function buildPatternFeatureSnapshot(input: {
     rs_line_near_high: rsLineNearHigh,
     prior_runup_60d_pct: bars.length > 60 ? pctChange(close, bars[bars.length - 61].c) : null,
     base_depth_pct: patternHigh != null && patternLow != null && patternHigh !== 0 ? ((patternHigh - patternLow) / patternHigh) * 100 : null,
-    base_length_bars: patternWindowBars,
+    base_length_bars: selectedBarCount,
     price_tightness_10d: mean(tightnessValues),
-    up_down_volume_ratio_20d: downVolume > 0 ? upVolume / downVolume : (upVolume > 0 ? 99 : null),
+    up_down_volume_ratio_20d: selectedDownVolume > 0 ? selectedUpVolume / selectedDownVolume : (
+      selectedUpVolume > 0 ? 99 : downVolume > 0 ? upVolume / downVolume : (upVolume > 0 ? 99 : null)
+    ),
     dollar_volume_20d: averageDollarVolume(bars, 20),
     relative_volume_20d: latestVolume != null && avgVol20 != null && avgVol20 !== 0 ? latestVolume / avgVol20 : null,
   };
@@ -890,6 +1070,13 @@ export function buildPatternFeatureSnapshot(input: {
     relative_strength_path_60d: normalizeToStart(rsRows.slice(-60), 60),
     distance_from_20sma_path_40d: padLeft(distance20Path.slice(-40), 40),
     distance_from_50sma_path_40d: padLeft(distance50Path.slice(-40), 40),
+    selected_price_path_64: normalizeSelectionToStart(selectedCloses, selectedResamplePoints),
+    selected_volume_path_64: normalizeSelectionByMedian(selectedVolumes, selectedResamplePoints),
+    selected_range_path_64: normalizeSelectionByMedian(selectedRangeRows, selectedResamplePoints),
+    selected_atr_path_64: normalizeSelectionByMedian(selectedAtrRows, selectedResamplePoints),
+    selected_rs_path_64: normalizeSelectionToStart(selectedRsRows, selectedResamplePoints),
+    selected_distance_from_20sma_path_64: resampleSeries(selectedDistance20Rows, selectedResamplePoints),
+    selected_distance_from_50sma_path_64: resampleSeries(selectedDistance50Rows, selectedResamplePoints),
   };
 
   const firstBarDate = bars[0]?.date ?? null;
@@ -904,6 +1091,11 @@ export function buildPatternFeatureSnapshot(input: {
     benchmarkLatestBarDate,
     contextWindowBars,
     patternWindowBars,
+    patternStartDate,
+    patternEndDate,
+    selectedBarCount,
+    selectionMode,
+    selectedResamplePoints,
     close,
   }));
 
@@ -911,6 +1103,10 @@ export function buildPatternFeatureSnapshot(input: {
     featureVersion: PATTERN_FEATURE_VERSION,
     ticker,
     setupDate,
+    patternStartDate,
+    patternEndDate,
+    selectedBarCount,
+    selectionMode,
     benchmarkTicker,
     contextWindowBars,
     patternWindowBars,
@@ -920,6 +1116,10 @@ export function buildPatternFeatureSnapshot(input: {
     sourceMetadata: {
       ticker,
       setupDate,
+      patternStartDate,
+      patternEndDate,
+      selectedBarCount,
+      selectionMode,
       latestBarDate,
       firstBarDate,
       benchmarkTicker,
@@ -939,6 +1139,9 @@ export async function extractPatternFeatures(
     profileId?: string;
     ticker: string;
     setupDate: string;
+    patternStartDate?: string | null;
+    patternEndDate?: string | null;
+    selectionMode?: PatternSelectionMode;
     contextWindowBars?: number;
     patternWindowBars?: number;
   },
@@ -948,16 +1151,67 @@ export async function extractPatternFeatures(
   const patternWindowBars = input.patternWindowBars ?? profile?.settings.patternWindowBars ?? DEFAULT_PATTERN_WINDOW_BARS;
   const benchmarkTicker = profile?.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
   const ticker = input.ticker.trim().toUpperCase();
-  const bars = await loadBarsByCount(env, [ticker, benchmarkTicker], input.setupDate, contextWindowBars);
+  const setupDate = input.patternEndDate ?? input.setupDate;
+  const bars = await loadBarsByCount(env, [ticker, benchmarkTicker], setupDate, contextWindowBars);
   return buildPatternFeatureSnapshot({
     ticker,
-    setupDate: input.setupDate,
+    setupDate,
+    patternStartDate: input.patternStartDate,
+    patternEndDate: input.patternEndDate,
+    selectionMode: input.selectionMode,
     benchmarkTicker,
     tickerBars: bars.get(ticker) ?? [],
     benchmarkBars: bars.get(benchmarkTicker) ?? [],
     contextWindowBars,
     patternWindowBars,
+    selectedResamplePoints: profile?.settings.selectedResamplePoints ?? DEFAULT_SELECTED_RESAMPLE_POINTS,
   });
+}
+
+export async function loadPatternChartData(
+  env: Env,
+  input: {
+    profileId?: string;
+    ticker: string;
+    endDate: string;
+    contextBars?: number;
+  },
+): Promise<PatternChartData> {
+  const profile = await loadPatternProfile(env, input.profileId ?? DEFAULT_PATTERN_PROFILE_ID);
+  const benchmarkTicker = profile?.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
+  const ticker = input.ticker.trim().toUpperCase();
+  const contextWindowBars = Math.max(MIN_EXTRACT_BARS, Math.min(520, Math.trunc(input.contextBars ?? profile?.settings.contextWindowBars ?? DEFAULT_CONTEXT_WINDOW_BARS)));
+  const barsByTicker = await loadBarsByCount(env, [ticker, benchmarkTicker], input.endDate, contextWindowBars);
+  const tickerBars = barsByTicker.get(ticker) ?? [];
+  const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];
+  const benchmarkByDate = new Map(benchmarkBars.map((bar) => [bar.date, bar]));
+  const bars: PatternChartBar[] = tickerBars.map((bar) => {
+    const benchmark = benchmarkByDate.get(bar.date);
+    return {
+      ticker,
+      date: bar.date,
+      o: Number(bar.o),
+      h: Number(bar.h),
+      l: Number(bar.l),
+      c: Number(bar.c),
+      volume: Number(bar.volume ?? 0),
+      rs: benchmark && benchmark.c !== 0 ? bar.c / benchmark.c : null,
+    };
+  });
+  const warnings: string[] = [];
+  if (bars.length < MIN_EXTRACT_BARS) warnings.push(`Only ${bars.length} stored bars were found through ${input.endDate}.`);
+  if (benchmarkBars.length < MIN_EXTRACT_BARS) warnings.push(`${benchmarkTicker} benchmark history is sparse; RS values may be partial.`);
+  if (bars.at(-1)?.date !== input.endDate) warnings.push(`Latest stored bar is ${bars.at(-1)?.date ?? "unavailable"}, not ${input.endDate}.`);
+  return {
+    ticker,
+    endDate: input.endDate,
+    benchmarkTicker,
+    contextWindowBars,
+    availableStartDate: bars[0]?.date ?? null,
+    availableEndDate: bars.at(-1)?.date ?? null,
+    bars,
+    warnings,
+  };
 }
 
 export async function loadPatternProfile(env: Env, profileId = DEFAULT_PATTERN_PROFILE_ID): Promise<PatternProfile | null> {
@@ -995,7 +1249,13 @@ async function ensurePatternProfile(env: Env, profileId = DEFAULT_PATTERN_PROFIL
     .bind(
       DEFAULT_PATTERN_PROFILE_ID,
       JSON.stringify({ minPrice: 3, minDollarVolume20d: 5_000_000, minBars: DEFAULT_CONTEXT_WINDOW_BARS }),
-      JSON.stringify({ contextWindowBars: DEFAULT_CONTEXT_WINDOW_BARS, patternWindowBars: DEFAULT_PATTERN_WINDOW_BARS, candidateLimit: 100 }),
+      JSON.stringify({
+        contextWindowBars: DEFAULT_CONTEXT_WINDOW_BARS,
+        patternWindowBars: DEFAULT_PATTERN_WINDOW_BARS,
+        candidateLimit: 100,
+        selectedResamplePoints: DEFAULT_SELECTED_RESAMPLE_POINTS,
+        candidatePatternLengths: DEFAULT_CANDIDATE_PATTERN_LENGTHS,
+      }),
     )
     .run();
   const created = await loadPatternProfile(env, profileId);
@@ -1016,6 +1276,10 @@ export async function listPatternLabels(env: Env, profileId = DEFAULT_PATTERN_PR
        source,
        context_window_bars as contextWindowBars,
        pattern_window_bars as patternWindowBars,
+       pattern_start_date as patternStartDate,
+       pattern_end_date as patternEndDate,
+       selected_bar_count as selectedBarCount,
+       selection_mode as selectionMode,
        tags_json as tagsJson,
        notes,
        feature_version as featureVersion,
@@ -1043,32 +1307,40 @@ export async function createPatternLabel(env: Env, input: PatternLabelCreateInpu
   const profile = await ensurePatternProfile(env, input.profileId ?? DEFAULT_PATTERN_PROFILE_ID);
   const labelValue = input.label;
   const status = input.status ?? (labelValue === "skipped" ? "archived" : "active");
+  const setupDate = input.patternEndDate ?? input.setupDate;
   const extraction = await extractPatternFeatures(env, {
     profileId: profile.id,
     ticker: input.ticker,
-    setupDate: input.setupDate,
+    setupDate,
+    patternStartDate: input.patternStartDate ?? null,
+    patternEndDate: input.patternEndDate ?? setupDate,
+    selectionMode: input.selectionMode ?? (input.patternStartDate ? "chart_range" : "fixed_window"),
     contextWindowBars: input.contextWindowBars ?? profile.settings.contextWindowBars,
     patternWindowBars: input.patternWindowBars ?? profile.settings.patternWindowBars,
   });
   if (!extraction) {
-    throw new Error(`Insufficient stored bars for ${input.ticker.toUpperCase()} through ${input.setupDate}.`);
+    throw new Error(`Insufficient stored bars or invalid selected window for ${input.ticker.toUpperCase()} through ${setupDate}.`);
   }
   const id = crypto.randomUUID();
   await db.prepare(
     `INSERT INTO pattern_labels
-      (id, profile_id, ticker, setup_date, label, status, source, context_window_bars, pattern_window_bars, tags_json, notes, feature_version, feature_json, shape_json, window_hash, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      (id, profile_id, ticker, setup_date, label, status, source, context_window_bars, pattern_window_bars, pattern_start_date, pattern_end_date, selected_bar_count, selection_mode, tags_json, notes, feature_version, feature_json, shape_json, window_hash, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
   )
     .bind(
       id,
       profile.id,
       extraction.ticker,
-      input.setupDate,
+      extraction.setupDate,
       labelValue,
       status,
       input.source ?? "manual",
       extraction.contextWindowBars,
       extraction.patternWindowBars,
+      extraction.patternStartDate,
+      extraction.patternEndDate,
+      extraction.selectedBarCount,
+      extraction.selectionMode,
       JSON.stringify(input.tags ?? []),
       input.notes ?? null,
       extraction.featureVersion,
@@ -1083,9 +1355,17 @@ export async function createPatternLabel(env: Env, input: PatternLabelCreateInpu
     candidateId: input.candidateId ?? null,
     labelId: id,
     ticker: extraction.ticker,
-    setupDate: input.setupDate,
+    setupDate: extraction.setupDate,
     eventType: labelValue === "skipped" ? "skip" : `label_${labelValue}`,
-    payload: { source: input.source ?? "manual", status, tags: input.tags ?? [] },
+    payload: {
+      source: input.source ?? "manual",
+      status,
+      tags: input.tags ?? [],
+      patternStartDate: extraction.patternStartDate,
+      patternEndDate: extraction.patternEndDate,
+      selectedBarCount: extraction.selectedBarCount,
+      selectionMode: extraction.selectionMode,
+    },
   });
   if (labelValue !== "skipped") await rebuildPatternModel(env, profile.id);
   return await loadPatternLabel(env, id);
@@ -1162,6 +1442,10 @@ async function loadPatternLabel(env: Env, labelId: string): Promise<PatternLabel
        source,
        context_window_bars as contextWindowBars,
        pattern_window_bars as patternWindowBars,
+       pattern_start_date as patternStartDate,
+       pattern_end_date as patternEndDate,
+       selected_bar_count as selectedBarCount,
+       selection_mode as selectionMode,
        tags_json as tagsJson,
        notes,
        feature_version as featureVersion,
@@ -1184,18 +1468,36 @@ export async function updatePatternLabel(env: Env, labelId: string, patch: Patte
   if (!existing) return null;
   const db = requirePatternDb(env);
   const ticker = patch.ticker ?? existing.ticker;
-  const setupDate = patch.setupDate ?? existing.setupDate;
+  const setupDate = patch.patternEndDate ?? patch.setupDate ?? existing.patternEndDate ?? existing.setupDate;
   const contextWindowBars = patch.contextWindowBars ?? existing.contextWindowBars;
   const patternWindowBars = patch.patternWindowBars ?? existing.patternWindowBars;
+  const patternStartDate = patch.patternStartDate !== undefined ? patch.patternStartDate : existing.patternStartDate;
+  const patternEndDate = patch.patternEndDate ?? patch.setupDate ?? existing.patternEndDate ?? setupDate;
+  const selectionMode = patch.selectionMode ?? existing.selectionMode;
+  let nextPatternStartDate = existing.patternStartDate;
+  let nextPatternEndDate = existing.patternEndDate ?? setupDate;
+  let nextSelectedBarCount = existing.selectedBarCount;
+  let nextSelectionMode = existing.selectionMode;
   let featureJson = existing.featureJson;
   let shapeJson = existing.shapeJson;
   let windowHash = existing.windowHash;
   let featureVersion = existing.featureVersion;
-  if (ticker !== existing.ticker || setupDate !== existing.setupDate || contextWindowBars !== existing.contextWindowBars || patternWindowBars !== existing.patternWindowBars) {
+  if (
+    ticker !== existing.ticker
+    || setupDate !== existing.setupDate
+    || contextWindowBars !== existing.contextWindowBars
+    || patternWindowBars !== existing.patternWindowBars
+    || patternStartDate !== existing.patternStartDate
+    || patternEndDate !== (existing.patternEndDate ?? existing.setupDate)
+    || selectionMode !== existing.selectionMode
+  ) {
     const extraction = await extractPatternFeatures(env, {
       profileId: existing.profileId,
       ticker,
       setupDate,
+      patternStartDate,
+      patternEndDate,
+      selectionMode,
       contextWindowBars,
       patternWindowBars,
     });
@@ -1204,6 +1506,10 @@ export async function updatePatternLabel(env: Env, labelId: string, patch: Patte
     shapeJson = extraction.shapeJson;
     windowHash = extraction.windowHash;
     featureVersion = extraction.featureVersion;
+    nextPatternStartDate = extraction.patternStartDate;
+    nextPatternEndDate = extraction.patternEndDate;
+    nextSelectedBarCount = extraction.selectedBarCount;
+    nextSelectionMode = extraction.selectionMode;
   }
   await db.prepare(
     `UPDATE pattern_labels
@@ -1213,6 +1519,10 @@ export async function updatePatternLabel(env: Env, labelId: string, patch: Patte
          status = ?,
          context_window_bars = ?,
          pattern_window_bars = ?,
+         pattern_start_date = ?,
+         pattern_end_date = ?,
+         selected_bar_count = ?,
+         selection_mode = ?,
          tags_json = ?,
          notes = ?,
          feature_version = ?,
@@ -1229,6 +1539,10 @@ export async function updatePatternLabel(env: Env, labelId: string, patch: Patte
       patch.status ?? existing.status,
       contextWindowBars,
       patternWindowBars,
+      nextPatternStartDate,
+      nextPatternEndDate,
+      nextSelectedBarCount,
+      nextSelectionMode,
       JSON.stringify(patch.tags ?? existing.tags),
       patch.notes !== undefined ? patch.notes : existing.notes,
       featureVersion,
@@ -2110,29 +2424,47 @@ export async function processPatternScanRun(
       const tickers = universe.map((candidate) => candidate.ticker);
       const barsByTicker = await loadBarsByCount(env, [...tickers, benchmarkTicker], run.tradingDate, profile.settings.contextWindowBars);
       const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];
+      const candidatePatternLengths = sanitizeCandidatePatternLengths(profile.settings.candidatePatternLengths);
       const statements: D1PreparedStatement[] = [];
       for (let index = 0; index < universe.length; index += 1) {
         const row = universe[index];
-        const snapshot = buildPatternFeatureSnapshot({
-          ticker: row.ticker,
-          setupDate: run.tradingDate,
-          benchmarkTicker,
-          tickerBars: barsByTicker.get(row.ticker) ?? [],
-          benchmarkBars,
-          contextWindowBars: profile.settings.contextWindowBars,
-          patternWindowBars: profile.settings.patternWindowBars,
-        });
-        if (!snapshot) {
+        const tickerBars = barsByTicker.get(row.ticker) ?? [];
+        let bestSnapshot: PatternFeatureSnapshot | null = null;
+        let bestReasons: PatternScoreReasons | null = null;
+        for (const length of candidatePatternLengths) {
+          const snapshot = buildPatternFeatureSnapshot({
+            ticker: row.ticker,
+            setupDate: run.tradingDate,
+            benchmarkTicker,
+            tickerBars,
+            benchmarkBars,
+            contextWindowBars: profile.settings.contextWindowBars,
+            patternWindowBars: length,
+            selectionMode: "fixed_window",
+            selectedResamplePoints: profile.settings.selectedResamplePoints,
+          });
+          if (!snapshot) continue;
+          const reasons = scorePatternSnapshot(snapshot, labels, model);
+          if (!bestReasons || reasons.score > bestReasons.score) {
+            bestSnapshot = snapshot;
+            bestReasons = reasons;
+          }
+        }
+        if (!bestSnapshot || !bestReasons) {
           processedCount += 1;
           continue;
         }
-        const reasons = scorePatternSnapshot(snapshot, labels, model);
+        const snapshot = bestSnapshot;
+        const reasons = bestReasons;
         const nearestApproved = model?.model ? nearestExamples(snapshot.featureJson, snapshot.shapeJson, labels, model.model, "approved") : [];
         const nearestRejected = model?.model ? nearestExamples(snapshot.featureJson, snapshot.shapeJson, labels, model.model, "rejected") : [];
         const candidateId = crypto.randomUUID();
         const rank = cursorOffset + index + 1;
         const sourceMetadata = {
           ...snapshot.sourceMetadata,
+          matchedPatternStartDate: snapshot.patternStartDate,
+          matchedPatternEndDate: snapshot.patternEndDate,
+          matchedPatternBars: snapshot.selectedBarCount,
           name: row.name,
           exchange: row.exchange,
           assetClass: row.assetClass,

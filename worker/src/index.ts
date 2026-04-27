@@ -210,6 +210,7 @@ import {
   createPatternRun,
   deletePatternLabel,
   listLatestPatternCandidates,
+  loadPatternChartData,
   listPatternFeatureRegistry,
   listPatternLabels,
   listPatternRuns,
@@ -2220,6 +2221,20 @@ app.get("/api/pattern-scanner/labels", async (c) => {
     const profileId = c.req.query("profileId") ?? "default";
     const rows = await listPatternLabels(c.env, profileId);
     return c.json({ profileId, rows });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.get("/api/pattern-scanner/chart", async (c) => {
+  try {
+    const profileId = c.req.query("profileId") ?? "default";
+    const ticker = (c.req.query("ticker") ?? "").trim().toUpperCase();
+    const endDate = (c.req.query("endDate") ?? "").trim();
+    const contextBars = Math.max(60, Math.min(520, Number(c.req.query("contextBars") ?? 260)));
+    if (!/^[A-Z0-9.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Valid ticker is required." }, 400);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return c.json({ error: "Valid endDate is required." }, 400);
+    return c.json(await loadPatternChartData(c.env, { profileId, ticker, endDate, contextBars }));
   } catch (error) {
     return patternErrorResponse(c, error);
   }

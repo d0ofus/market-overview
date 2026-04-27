@@ -47,28 +47,41 @@ export const adminWorkerSchedulePatchSchema = z.object({
 
 const patternLabelValueSchema = z.enum(["approved", "rejected", "skipped"]);
 const patternLabelStatusSchema = z.enum(["active", "archived", "deleted"]);
+const patternSelectionModeSchema = z.enum(["chart_range", "fixed_window"]);
+const patternDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const patternTagsSchema = z.array(z.string().trim().min(1).max(40)).max(20).optional().default([]);
 
-export const patternLabelCreateSchema = z.object({
+const patternLabelCreateBaseSchema = z.object({
   profileId: z.string().trim().min(1).optional().default("default"),
   ticker: z.string().trim().min(1).max(20).transform((value) => value.toUpperCase()),
-  setupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  setupDate: patternDateSchema,
   label: patternLabelValueSchema,
   status: patternLabelStatusSchema.optional(),
   source: z.string().trim().min(1).max(80).optional().default("manual"),
   contextWindowBars: z.number().int().min(60).max(520).optional().default(260),
   patternWindowBars: z.number().int().min(20).max(120).optional().default(40),
+  patternStartDate: patternDateSchema.nullable().optional(),
+  patternEndDate: patternDateSchema.nullable().optional(),
+  selectedBarCount: z.number().int().min(1).max(520).nullable().optional(),
+  selectionMode: patternSelectionModeSchema.optional().default("fixed_window"),
   tags: patternTagsSchema,
   notes: z.string().trim().max(2000).nullable().optional(),
   runId: z.string().trim().min(1).nullable().optional(),
   candidateId: z.string().trim().min(1).nullable().optional(),
 });
 
+export const patternLabelCreateSchema = patternLabelCreateBaseSchema.superRefine((value, ctx) => {
+  const endDate = value.patternEndDate ?? value.setupDate;
+  if (value.patternStartDate && value.patternStartDate > endDate) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["patternStartDate"], message: "patternStartDate must be on or before patternEndDate/setupDate." });
+  }
+});
+
 export const patternLabelBulkSchema = z.object({
   profileId: z.string().trim().min(1).optional().default("default"),
   csvText: z.string().trim().max(200_000).optional(),
-  labels: z.array(patternLabelCreateSchema.omit({ profileId: true })).max(500).optional(),
+  labels: z.array(patternLabelCreateBaseSchema.omit({ profileId: true })).max(500).optional(),
   contextWindowBars: z.number().int().min(60).max(520).optional().default(260),
   patternWindowBars: z.number().int().min(20).max(120).optional().default(40),
 }).refine((value) => Boolean(value.csvText || value.labels?.length), {
@@ -77,13 +90,22 @@ export const patternLabelBulkSchema = z.object({
 
 export const patternLabelPatchSchema = z.object({
   ticker: z.string().trim().min(1).max(20).transform((value) => value.toUpperCase()).optional(),
-  setupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  setupDate: patternDateSchema.optional(),
   label: patternLabelValueSchema.optional(),
   status: patternLabelStatusSchema.optional(),
   contextWindowBars: z.number().int().min(60).max(520).optional(),
   patternWindowBars: z.number().int().min(20).max(120).optional(),
+  patternStartDate: patternDateSchema.nullable().optional(),
+  patternEndDate: patternDateSchema.nullable().optional(),
+  selectedBarCount: z.number().int().min(1).max(520).nullable().optional(),
+  selectionMode: patternSelectionModeSchema.optional(),
   tags: patternTagsSchema,
   notes: z.string().trim().max(2000).nullable().optional(),
+}).superRefine((value, ctx) => {
+  const endDate = value.patternEndDate ?? value.setupDate;
+  if (value.patternStartDate && endDate && value.patternStartDate > endDate) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["patternStartDate"], message: "patternStartDate must be on or before patternEndDate/setupDate." });
+  }
 });
 
 export const patternRunCreateSchema = z.object({

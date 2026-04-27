@@ -341,6 +341,7 @@ export type ScanRefreshResponse = {
 
 export type PatternLabelValue = "approved" | "rejected" | "skipped";
 export type PatternLabelStatus = "active" | "archived" | "deleted";
+export type PatternSelectionMode = "chart_range" | "fixed_window";
 
 export type PatternFeatureJson = Record<string, number | null>;
 export type PatternShapeJson = Record<string, Array<number | null>>;
@@ -404,6 +405,10 @@ export type PatternLabel = {
   source: string;
   contextWindowBars: number;
   patternWindowBars: number;
+  patternStartDate: string | null;
+  patternEndDate: string | null;
+  selectedBarCount: number | null;
+  selectionMode: PatternSelectionMode;
   tags: string[];
   notes: string | null;
   featureVersion: string;
@@ -484,9 +489,37 @@ export type PatternProfile = {
   benchmarkTickers: string[];
   prefilterConfig: { minPrice: number; minDollarVolume20d: number; minBars: number };
   activeModelId: string | null;
-  settings: { contextWindowBars: number; patternWindowBars: number; candidateLimit: number };
+  settings: {
+    contextWindowBars: number;
+    patternWindowBars: number;
+    candidateLimit: number;
+    selectedResamplePoints?: number;
+    candidatePatternLengths?: number[];
+  };
   createdAt: string;
   updatedAt: string;
+};
+
+export type PatternChartBar = {
+  ticker: string;
+  date: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  volume: number;
+  rs: number | null;
+};
+
+export type PatternChartData = {
+  ticker: string;
+  endDate: string;
+  benchmarkTicker: string;
+  contextWindowBars: number;
+  availableStartDate: string | null;
+  availableEndDate: string | null;
+  bars: PatternChartBar[];
+  warnings: string[];
 };
 
 export type PatternAnalysisResponse = {
@@ -1493,6 +1526,22 @@ export function getPatternLabels(profileId = "default") {
   );
 }
 
+export function getPatternChart(params: {
+  profileId?: string;
+  ticker: string;
+  endDate: string;
+  contextBars?: number;
+}) {
+  return getJson<PatternChartData>(
+    appendQuery("/api/pattern-scanner/chart", {
+      profileId: params.profileId ?? "default",
+      ticker: params.ticker,
+      endDate: params.endDate,
+      contextBars: params.contextBars,
+    }),
+  );
+}
+
 export function getPatternFeatures() {
   return getJson<{ rows: PatternFeatureRegistryRow[] }>("/api/pattern-scanner/features");
 }
@@ -1524,6 +1573,10 @@ export function createPatternLabel(payload: {
   source?: string;
   contextWindowBars?: number;
   patternWindowBars?: number;
+  patternStartDate?: string | null;
+  patternEndDate?: string | null;
+  selectedBarCount?: number | null;
+  selectionMode?: PatternSelectionMode;
   tags?: string[];
   notes?: string | null;
   runId?: string | null;
@@ -1544,6 +1597,10 @@ export function createPatternLabelsBulk(payload: {
     label: PatternLabelValue;
     tags?: string[];
     notes?: string | null;
+    patternStartDate?: string | null;
+    patternEndDate?: string | null;
+    selectedBarCount?: number | null;
+    selectionMode?: PatternSelectionMode;
   }>;
   contextWindowBars?: number;
   patternWindowBars?: number;
@@ -1564,6 +1621,10 @@ export function updatePatternLabel(id: string, payload: {
   status?: PatternLabelStatus;
   contextWindowBars?: number;
   patternWindowBars?: number;
+  patternStartDate?: string | null;
+  patternEndDate?: string | null;
+  selectedBarCount?: number | null;
+  selectionMode?: PatternSelectionMode;
   tags?: string[];
   notes?: string | null;
 }) {
