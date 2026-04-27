@@ -11,7 +11,13 @@ export type PatternChartSelection = {
   selectionMode: PatternSelectionMode;
 };
 
-type DragMode = "new" | "resize-start" | "resize-end";
+type DragMode = "new" | "resize-start" | "resize-end" | "move";
+type DragState = {
+  mode: DragMode;
+  anchorDate: string;
+  initialStartDate?: string;
+  initialEndDate?: string;
+};
 
 const QUICK_LENGTHS = [20, 40, 60, 80, 120];
 
@@ -42,19 +48,37 @@ function snapDate(dates: string[], target: string | null) {
   return best;
 }
 
+function moveWindow(dates: string[], startDate: string, endDate: string, anchorDate: string, targetDate: string) {
+  const anchorIndex = dates.indexOf(anchorDate);
+  const targetIndex = dates.indexOf(targetDate);
+  const startIndex = dates.indexOf(startDate);
+  const endIndex = dates.indexOf(endDate);
+  if (anchorIndex < 0 || targetIndex < 0 || startIndex < 0 || endIndex < 0) return null;
+  const length = Math.max(1, endIndex - startIndex + 1);
+  const delta = targetIndex - anchorIndex;
+  const maxStart = Math.max(0, dates.length - length);
+  const nextStart = Math.max(0, Math.min(maxStart, startIndex + delta));
+  return {
+    startDate: dates[nextStart],
+    endDate: dates[Math.min(dates.length - 1, nextStart + length - 1)],
+  };
+}
+
 export function PatternTrainingChart({
   data,
   selection,
   onSelectionChange,
+  height = 440,
 }: {
   data: PatternChartData;
   selection: PatternChartSelection | null;
   onSelectionChange: (selection: PatternChartSelection) => void;
+  height?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const dragRef = useRef<{ mode: DragMode; anchorDate: string } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
   const [rect, setRect] = useState<{ left: number; width: number } | null>(null);
   const dates = useMemo(() => data.bars.map((bar) => bar.date), [data.bars]);
 
@@ -76,7 +100,7 @@ export function PatternTrainingChart({
     const container = containerRef.current;
     if (!container) return;
     const chart = createChart(container, {
-      height: 360,
+      height,
       layout: {
         background: { color: "transparent" },
         textColor: "#94a3b8",
@@ -127,7 +151,7 @@ export function PatternTrainingChart({
     chart.timeScale().fitContent();
     const resizeObserver = new ResizeObserver((entries) => {
       const width = Math.floor(entries[0]?.contentRect.width ?? 0);
-      if (width > 0) chart.resize(width, 360);
+      if (width > 0) chart.resize(width, height);
     });
     resizeObserver.observe(container);
     return () => {
@@ -135,7 +159,7 @@ export function PatternTrainingChart({
       chart.remove();
       chartRef.current = null;
     };
-  }, [data]);
+  }, [data, height]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -196,10 +220,12 @@ export function PatternTrainingChart({
         </div>
       </div>
       <div className="relative mt-3 overflow-hidden rounded border border-borderSoft/50">
-        <div ref={containerRef} className="h-[360px] w-full" />
+        <div ref={containerRef} className="w-full" style={{ height }} />
         <div
           ref={overlayRef}
           className="absolute inset-0 cursor-crosshair"
+          role="application"
+          aria-label="Pattern date range selector"
           onPointerDown={(event) => {
             const date = dateFromPointer(event.clientX);
             if (!date) return;
@@ -209,11 +235,14 @@ export function PatternTrainingChart({
             const x = bounds ? event.clientX - bounds.left : 0;
             const startX = selection && chart ? chart.timeScale().timeToCoordinate(selection.startDate as Time) : null;
             const endX = selection && chart ? chart.timeScale().timeToCoordinate(selection.endDate as Time) : null;
+            const insideSelection = startX != null && endX != null && x >= Math.min(startX, endX) + 10 && x <= Math.max(startX, endX) - 10;
             const mode: DragMode = startX != null && Math.abs(x - startX) <= 10
               ? "resize-start"
               : endX != null && Math.abs(x - endX) <= 10
                 ? "resize-end"
-                : "new";
+                : insideSelection
+                  ? "move"
+                  : "new";
             dragRef.current = {
               mode,
               anchorDate: mode === "resize-start"
@@ -221,6 +250,8 @@ export function PatternTrainingChart({
                 : mode === "resize-end"
                   ? (selection?.startDate ?? date)
                   : date,
+              initialStartDate: selection?.startDate,
+              initialEndDate: selection?.endDate,
             };
             event.currentTarget.setPointerCapture(event.pointerId);
             if (mode === "new") emitSelection(date, date);
@@ -232,6 +263,10 @@ export function PatternTrainingChart({
             if (!date) return;
             if (drag.mode === "resize-start") emitSelection(date, drag.anchorDate);
             else if (drag.mode === "resize-end") emitSelection(drag.anchorDate, date);
+            else if (drag.mode === "move" && drag.initialStartDate && drag.initialEndDate) {
+              const next = moveWindow(dates, drag.initialStartDate, drag.initialEndDate, drag.anchorDate, date);
+              if (next) emitSelection(next.startDate, next.endDate);
+            }
             else emitSelection(drag.anchorDate, date);
           }}
           onPointerUp={(event) => {
@@ -247,6 +282,7 @@ export function PatternTrainingChart({
               className="absolute bottom-0 top-0 border-x border-accent/80 bg-accent/15"
               style={{ left: rect.left, width: rect.width }}
             >
+              <div className="absolute inset-y-0 left-2 right-2 cursor-move" />
               <div className="absolute -left-1 top-0 h-full w-2 cursor-ew-resize bg-accent/70" />
               <div className="absolute -right-1 top-0 h-full w-2 cursor-ew-resize bg-accent/70" />
             </div>

@@ -439,7 +439,7 @@ export function PatternScannerDashboard() {
       ) : null}
 
       {!loading && activeTab === "training" ? (
-        <div className="grid gap-4 xl:grid-cols-[28rem,minmax(0,1fr)]">
+        <div className="grid gap-4 xl:grid-cols-[24rem,minmax(0,1fr)]">
           <div className="space-y-4">
             <div className="card p-4">
               <h3 className="text-sm font-semibold text-slate-100">Seed Example</h3>
@@ -462,18 +462,6 @@ export function PatternScannerDashboard() {
                   {seedChartLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BarChart3 className="h-3.5 w-3.5" />}
                   Load Chart
                 </button>
-                {seedChart ? (
-                  <PatternTrainingChart
-                    data={seedChart}
-                    selection={seed.patternStartDate && seed.patternEndDate ? {
-                      startDate: seed.patternStartDate,
-                      endDate: seed.patternEndDate,
-                      barCount: seed.selectedBarCount,
-                      selectionMode: "chart_range",
-                    } : null}
-                    onSelectionChange={applyChartSelection}
-                  />
-                ) : null}
                 <div className="grid gap-3 md:grid-cols-3">
                   <label className="text-xs text-slate-300">
                     Pattern start
@@ -546,48 +534,69 @@ export function PatternScannerDashboard() {
               </button>
             </div>
           </div>
-          <div className="card overflow-hidden">
-            <div className="border-b border-borderSoft/70 px-4 py-3 text-sm font-semibold text-slate-100">Training Labels</div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-panelSoft/60 text-xs uppercase tracking-[0.12em] text-slate-400">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Ticker</th>
-                    <th className="px-3 py-2 text-left">Setup</th>
-                    <th className="px-3 py-2 text-left">Pattern</th>
-                    <th className="px-3 py-2 text-right">Bars</th>
-                    <th className="px-3 py-2 text-left">Label</th>
-                    <th className="px-3 py-2 text-left">Status</th>
-                    <th className="px-3 py-2 text-left">Tags</th>
-                    <th className="px-3 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {labels.map((label) => (
-                    <tr key={label.id} className="border-t border-borderSoft/50">
-                      <td className="px-3 py-2 font-semibold text-slate-100">{label.ticker}</td>
-                      <td className="px-3 py-2 text-slate-300">{label.setupDate}</td>
-                      <td className="px-3 py-2 text-slate-300">{label.patternStartDate ? `${label.patternStartDate} to ${label.patternEndDate ?? label.setupDate}` : "-"}</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-300">{label.selectedBarCount ?? label.patternWindowBars}</td>
-                      <td className="px-3 py-2"><LabelPill label={label.label} /></td>
-                      <td className="px-3 py-2 text-slate-300">{label.status}</td>
-                      <td className="px-3 py-2 text-slate-400">{label.tags.join(", ") || "-"}</td>
-                      <td className="px-3 py-2">
-                        <div className="flex justify-end gap-2">
-                          <button className={BUTTON_CLASS} disabled={saving} onClick={() => void archiveLabel(label)} type="button">
-                            <Archive className="h-3.5 w-3.5" />
-                            {label.status === "active" ? "Archive" : "Restore"}
-                          </button>
-                          <button className={DANGER_BUTTON_CLASS} disabled={saving} onClick={() => void removeLabel(label)} type="button">
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Delete
-                          </button>
-                        </div>
-                      </td>
+          <div className="space-y-4">
+            {seedChart ? (
+              <div className="card p-4">
+                <PatternTrainingChart
+                  data={seedChart}
+                  height={500}
+                  selection={seed.patternStartDate && seed.patternEndDate ? {
+                    startDate: seed.patternStartDate,
+                    endDate: seed.patternEndDate,
+                    barCount: seed.selectedBarCount,
+                    selectionMode: "chart_range",
+                  } : null}
+                  onSelectionChange={applyChartSelection}
+                />
+              </div>
+            ) : (
+              <div className="card flex min-h-[24rem] items-center justify-center p-8 text-sm text-slate-500">
+                No chart loaded.
+              </div>
+            )}
+            <div className="card overflow-hidden">
+              <div className="border-b border-borderSoft/70 px-4 py-3 text-sm font-semibold text-slate-100">Training Labels</div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-panelSoft/60 text-xs uppercase tracking-[0.12em] text-slate-400">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Ticker</th>
+                      <th className="px-3 py-2 text-left">Setup</th>
+                      <th className="px-3 py-2 text-left">Pattern</th>
+                      <th className="px-3 py-2 text-right">Bars</th>
+                      <th className="px-3 py-2 text-left">Label</th>
+                      <th className="px-3 py-2 text-left">Status</th>
+                      <th className="px-3 py-2 text-left">Tags</th>
+                      <th className="px-3 py-2 text-right">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {labels.map((label) => (
+                      <tr key={label.id} className="border-t border-borderSoft/50">
+                        <td className="px-3 py-2 font-semibold text-slate-100">{label.ticker}</td>
+                        <td className="px-3 py-2 text-slate-300">{label.setupDate}</td>
+                        <td className="px-3 py-2 text-slate-300">{label.patternStartDate ? `${label.patternStartDate} to ${label.patternEndDate ?? label.setupDate}` : "-"}</td>
+                        <td className="px-3 py-2 text-right font-mono text-slate-300">{label.selectedBarCount ?? label.patternWindowBars}</td>
+                        <td className="px-3 py-2"><LabelPill label={label.label} /></td>
+                        <td className="px-3 py-2 text-slate-300">{label.status}</td>
+                        <td className="px-3 py-2 text-slate-400">{label.tags.join(", ") || "-"}</td>
+                        <td className="px-3 py-2">
+                          <div className="flex justify-end gap-2">
+                            <button className={BUTTON_CLASS} disabled={saving} onClick={() => void archiveLabel(label)} type="button">
+                              <Archive className="h-3.5 w-3.5" />
+                              {label.status === "active" ? "Archive" : "Restore"}
+                            </button>
+                            <button className={DANGER_BUTTON_CLASS} disabled={saving} onClick={() => void removeLabel(label)} type="button">
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>
