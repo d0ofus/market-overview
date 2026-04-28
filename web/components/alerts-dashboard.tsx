@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Loader2, Maximize2, RefreshCw } from "lucide-react";
 import {
   getAlertNews,
   getAlerts,
@@ -13,7 +13,6 @@ import {
 } from "@/lib/api";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
-import { TickerMultiGrid } from "./ticker-multi-grid";
 import { PeerGroupModal } from "./peer-group-modal";
 
 const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
@@ -157,7 +156,9 @@ export function AlertsDashboard() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
+  const [expandedGridNews, setExpandedGridNews] = useState<Set<string>>(new Set());
   const [activePeerTicker, setActivePeerTicker] = useState<string | null>(null);
+  const [activeChartRow, setActiveChartRow] = useState<AlertTickerDayRow | null>(null);
   const [chartPage, setChartPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
 
@@ -264,6 +265,15 @@ export function AlertsDashboard() {
 
   const onToggleNews = (key: string) => {
     setExpandedNews((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleGridNews = (key: string) => {
+    setExpandedGridNews((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -457,35 +467,94 @@ export function AlertsDashboard() {
                   />
                 </div>
               </div>
-              <TickerMultiGrid
-                title={`Multi-Chart Grid (${tickerDayTotal} ticker-days)`}
-                selectedKey={selectedKey}
-                onSelect={setSelectedKey}
-                emptyMessage="No tickers match current filters."
-                showChartStatusLine
-                enableChartPopup
-                items={tickerDays.map((row) => ({
-                  key: keyFor(row.ticker, row.tradingDay),
-                  ticker: row.ticker,
-                  title: row.ticker,
-                  onTitleClick: () => setActivePeerTicker(row.ticker),
-                  subtitle: `${formatAlertStamp(row.latestReceivedAt, row.marketSession)} • ${alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}`,
-                  popupTitle: row.ticker,
-                  popupSubtitle: (
-                    <div className="space-y-1">
-                      <div>{formatAlertStamp(row.latestReceivedAt, row.marketSession)}</div>
-                      <div>{alertDescriptionByTickerDay.get(keyFor(row.ticker, row.tradingDay)) ?? "-"}</div>
+              <div className="card p-3">
+                <div className="text-sm text-slate-300">
+                  Multi-Chart Grid ({tickerDayTotal} ticker-day{tickerDayTotal === 1 ? "" : "s"})
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {tickerDays.map((row) => {
+                  const compoundKey = keyFor(row.ticker, row.tradingDay);
+                  const description = alertDescriptionByTickerDay.get(compoundKey) ?? "-";
+                  const gridNewsOpen = expandedGridNews.has(compoundKey);
+                  const isSelected = selectedKey === compoundKey;
+                  return (
+                    <div
+                      key={compoundKey}
+                      className={`rounded-[24px] border bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4 ${
+                        isSelected ? "border-accent/60" : "border-borderSoft/60"
+                      }`}
+                    >
+                      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <button
+                            type="button"
+                            className="block text-left text-lg font-semibold text-accent hover:underline"
+                            onClick={() => setActivePeerTicker(row.ticker)}
+                          >
+                            {row.ticker}
+                          </button>
+                          <button
+                            type="button"
+                            className="mt-1 line-clamp-2 w-full text-left text-sm text-slate-400"
+                            onClick={() => setSelectedKey(compoundKey)}
+                          >
+                            {formatAlertStamp(row.latestReceivedAt, row.marketSession)} • {description}
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                            <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Alerts</span>
+                            <span className="font-semibold text-slate-100">{row.alertCount}</span>
+                          </span>
+                          <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+                            <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Price</span>
+                            <span className="font-semibold text-slate-100">
+                              {typeof row.price === "number" && Number.isFinite(row.price) ? row.price.toFixed(2) : "-"}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                      <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
+                        <TradingViewWidget
+                          ticker={row.ticker}
+                          chartOnly
+                          showStatusLine
+                          fillContainer
+                          initialRange="3M"
+                          surface="plain"
+                        />
+                      </div>
+                      <div className="mt-4 flex flex-wrap justify-between gap-2">
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                          onClick={() => toggleGridNews(compoundKey)}
+                        >
+                          {gridNewsOpen ? "Hide latest news" : "Show latest news"}
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                          onClick={() => setActiveChartRow(row)}
+                        >
+                          <Maximize2 className="h-3.5 w-3.5" />
+                          Expand chart
+                        </button>
+                      </div>
+                      {gridNewsOpen ? (
+                        <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
+                          <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
+                          <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />
+                        </div>
+                      ) : null}
                     </div>
-                  ),
-                  popupMetrics: {
-                    price: row.price,
-                    change1d: row.change1d,
-                    marketCap: row.marketCap,
-                    avgVolume: row.avgVolume,
-                  },
-                  detail: <NewsList items={row.news} expanded={expandedNews} onToggle={onToggleNews} compact />,
-                }))}
-              />
+                  );
+                })}
+                {tickerDays.length === 0 ? (
+                  <div className="card p-4 text-sm text-slate-300">No tickers match current filters.</div>
+                ) : null}
+              </div>
               <div className="flex justify-end px-1">
                 <ChartGridPager
                   totalItems={tickerDayTotal}
@@ -561,6 +630,79 @@ export function AlertsDashboard() {
       </div>
 
       {activePeerTicker && <PeerGroupModal ticker={activePeerTicker} onClose={() => setActivePeerTicker(null)} />}
+      {activeChartRow ? (
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartRow(null)}>
+          <div
+            className="flex h-[calc(100vh-2rem)] w-full max-w-[96vw] flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] 2xl:max-w-[140rem]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
+                <h4 className="mt-1 text-base font-semibold text-slate-100">{activeChartRow.ticker}</h4>
+                <div className="mt-2 space-y-1 text-sm text-slate-400">
+                  <div>{formatAlertStamp(activeChartRow.latestReceivedAt, activeChartRow.marketSession)}</div>
+                  <div>{alertDescriptionByTickerDay.get(keyFor(activeChartRow.ticker, activeChartRow.tradingDay)) ?? "-"}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-modal-close="true"
+                className="inline-flex items-center justify-center rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                onClick={() => setActiveChartRow(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="border-b border-borderSoft/50 px-5 py-4">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Alerts</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{activeChartRow.alertCount}</div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Price</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">
+                    {typeof activeChartRow.price === "number" && Number.isFinite(activeChartRow.price) ? activeChartRow.price.toFixed(2) : "-"}
+                  </div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">1D %</div>
+                  <div className={`mt-1 text-sm font-semibold ${
+                    typeof activeChartRow.change1d === "number" && Number.isFinite(activeChartRow.change1d) && activeChartRow.change1d < 0
+                      ? "text-neg"
+                      : "text-pos"
+                  }`}>
+                    {typeof activeChartRow.change1d === "number" && Number.isFinite(activeChartRow.change1d)
+                      ? `${activeChartRow.change1d >= 0 ? "+" : ""}${activeChartRow.change1d.toFixed(2)}%`
+                      : "-"}
+                  </div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg Vol</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">
+                    {typeof activeChartRow.avgVolume === "number" && Number.isFinite(activeChartRow.avgVolume)
+                      ? Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(activeChartRow.avgVolume)
+                      : "-"}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              <div className="rounded-[24px] bg-panelSoft/25 p-3">
+                <TradingViewWidget
+                  ticker={activeChartRow.ticker}
+                  chartOnly
+                  showStatusLine
+                  fillContainer
+                  initialRange="3M"
+                  surface="plain"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
