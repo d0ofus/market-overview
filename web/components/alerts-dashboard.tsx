@@ -485,7 +485,7 @@ export function AlertsDashboard() {
                         isSelected ? "border-accent/60" : "border-borderSoft/60"
                       }`}
                     >
-                      <div className="mb-4 grid gap-3 sm:grid-cols-[auto,minmax(0,1fr)]">
+                      <div className="mb-4 grid grid-cols-[auto,minmax(0,1fr)] items-center gap-3">
                         <button
                           type="button"
                           className="text-left text-lg font-semibold text-accent hover:underline"
@@ -495,18 +495,13 @@ export function AlertsDashboard() {
                         </button>
                         <button
                           type="button"
-                          className="min-w-0 text-left sm:text-right"
+                          className="flex min-w-0 items-center justify-end gap-2 text-left"
                           onClick={() => setSelectedKey(compoundKey)}
                         >
-                          <span className="inline-flex flex-wrap items-center gap-2 sm:justify-end">
-                            <span className="rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
-                              {formatDateTime(row.latestReceivedAt)}
-                            </span>
-                            <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-slate-300">
-                              {row.marketSession}
-                            </span>
+                          <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
+                            {formatDateTime(row.latestReceivedAt)}
                           </span>
-                          <span className="mt-2 block truncate text-sm leading-snug text-slate-300">
+                          <span className="min-w-0 truncate text-sm leading-snug text-slate-300">
                             {description}
                           </span>
                         </button>
