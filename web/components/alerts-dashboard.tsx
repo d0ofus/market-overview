@@ -485,35 +485,31 @@ export function AlertsDashboard() {
                         isSelected ? "border-accent/60" : "border-borderSoft/60"
                       }`}
                     >
-                      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <button
-                            type="button"
-                            className="block text-left text-lg font-semibold text-accent hover:underline"
-                            onClick={() => setActivePeerTicker(row.ticker)}
-                          >
-                            {row.ticker}
-                          </button>
-                          <button
-                            type="button"
-                            className="mt-1 line-clamp-2 w-full text-left text-sm text-slate-400"
-                            onClick={() => setSelectedKey(compoundKey)}
-                          >
-                            {formatAlertStamp(row.latestReceivedAt, row.marketSession)} • {description}
-                          </button>
-                        </div>
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
-                            <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Alerts</span>
-                            <span className="font-semibold text-slate-100">{row.alertCount}</span>
-                          </span>
-                          <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
-                            <span className="mr-1 uppercase tracking-[0.12em] text-slate-500">Price</span>
-                            <span className="font-semibold text-slate-100">
-                              {typeof row.price === "number" && Number.isFinite(row.price) ? row.price.toFixed(2) : "-"}
+                      <div className="mb-4 grid gap-3 sm:grid-cols-[auto,minmax(0,1fr)]">
+                        <button
+                          type="button"
+                          className="text-left text-lg font-semibold text-accent hover:underline"
+                          onClick={() => setActivePeerTicker(row.ticker)}
+                        >
+                          {row.ticker}
+                        </button>
+                        <button
+                          type="button"
+                          className="min-w-0 text-left sm:text-right"
+                          onClick={() => setSelectedKey(compoundKey)}
+                        >
+                          <span className="inline-flex flex-wrap items-center gap-2 sm:justify-end">
+                            <span className="rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
+                              {formatDateTime(row.latestReceivedAt)}
+                            </span>
+                            <span className="rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-slate-300">
+                              {row.marketSession}
                             </span>
                           </span>
-                        </div>
+                          <span className="mt-2 block truncate text-sm leading-snug text-slate-300">
+                            {description}
+                          </span>
+                        </button>
                       </div>
                       <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
                         <TradingViewWidget
