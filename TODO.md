@@ -25,6 +25,7 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
+> Add auto suggestion of all tickers previously entered for existing narrative when chosen
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -32,7 +33,8 @@
 > Make keyboard shortcut to expand chart (Alt + Enter) (?)
 > See if there can be tradingview financials widgets shown in the expanded chart
 
-## Peer Groups
+## PEER GROUPS
+> Add Avg vol * Price for multi-chart
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
@@ -49,6 +51,9 @@
 - Add Strong earnings scanner
 - Colour by industry
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
+
+## PATTERN SCANNER
+- Change browser tab initials to PS
 
 ## Watchlist Compiler
 
@@ -77,6 +82,7 @@
 >> Remove NWX
 
 ## General
+> See what cron jobs are active in entire application and manage. Can add in /admin for easy management
 - See what other features in google sheets dashboard that are good
 - Remove top left Market command centre box
 
