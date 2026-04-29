@@ -1,20 +1,25 @@
 "use client";
 
-import { AlertTriangle, CalendarDays, Database, ListChecks, Play, RefreshCw, type LucideIcon } from "lucide-react";
+import { AlertTriangle, CalendarDays, Database, ListChecks, Play, RefreshCw, Search, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   buildAdminFundamentalsSeedQueue,
   getAdminEarningsStatus,
   getAdminFundamentalsSeedErrors,
   getAdminFundamentalsSeedStatus,
+  getTickerFundamentals,
   processAdminEarningsRefresh,
   processAdminFundamentalsSeedQueue,
+  refreshTickerFundamentals,
   syncAdminEarningsCalendar,
   type AdminEarningsStatus,
   type AdminFundamentalsSeedErrorsResponse,
   type AdminFundamentalsSeedProcessResponse,
+  type AdminFundamentalsSeedQueueRow,
   type AdminFundamentalsSeedStatus,
+  type FundamentalsResponse,
 } from "@/lib/api";
+import { FundamentalsChartPanel, formatFundamentalDate } from "@/components/fundamentals-chart-panel";
 import { AdminCard } from "./admin-card";
 import { AdminPageHeader } from "./admin-page-header";
 import { AdminStatCard } from "./admin-stat-card";
@@ -55,6 +60,10 @@ function formatDateTime(value: string | null | undefined): string {
 
 function countFor(counts: Record<string, number> | undefined, status: string): number {
   return Number(counts?.[status] ?? 0);
+}
+
+function normalizeTickerInput(value: string): string {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9.-]/g, "");
 }
 
 function ActionButton({
@@ -116,6 +125,12 @@ export function FundamentalsAdminPanel() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<Message | null>(null);
+  const [lookupInput, setLookupInput] = useState("");
+  const [lookupTicker, setLookupTicker] = useState<string | null>(null);
+  const [lookupData, setLookupData] = useState<FundamentalsResponse | null>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupRefreshing, setLookupRefreshing] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -148,6 +163,15 @@ export function FundamentalsAdminPanel() {
     error: countFor(seedCounts, "error"),
     unsupported: countFor(seedCounts, "no_supported_rows"),
   }), [seedCounts]);
+  const lookupQueueContext = useMemo<AdminFundamentalsSeedQueueRow | null>(() => {
+    if (!lookupTicker) return null;
+    const ticker = lookupTicker.toUpperCase();
+    return (
+      seedStatus?.queue.nextTickers.find((row) => row.ticker.toUpperCase() === ticker)
+      ?? seedErrors?.rows.find((row) => row.ticker.toUpperCase() === ticker)
+      ?? null
+    );
+  }, [lookupTicker, seedErrors?.rows, seedStatus?.queue.nextTickers]);
 
   const runAction = async (key: string, action: () => Promise<string>, tone: Message["tone"] = "success") => {
     setBusy(key);
@@ -160,6 +184,49 @@ export function FundamentalsAdminPanel() {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Action failed." });
     } finally {
       setBusy(null);
+    }
+  };
+
+  const loadLookupTicker = async (tickerInput = lookupInput) => {
+    const ticker = normalizeTickerInput(tickerInput);
+    if (!ticker) {
+      setLookupError("Enter a ticker symbol to inspect cached fundamentals.");
+      return;
+    }
+    setLookupTicker(ticker);
+    setLookupInput(ticker);
+    setLookupLoading(true);
+    setLookupError(null);
+    try {
+      const response = await getTickerFundamentals(ticker, 16);
+      setLookupData(response);
+    } catch (error) {
+      setLookupData(null);
+      setLookupError(error instanceof Error ? error.message : "Failed to load cached fundamentals.");
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
+  const refreshLookupTicker = async () => {
+    const ticker = normalizeTickerInput(lookupInput) || lookupTicker;
+    if (!ticker) {
+      setLookupError("Enter a ticker symbol to refresh SEC fundamentals.");
+      return;
+    }
+    setLookupTicker(ticker);
+    setLookupInput(ticker);
+    setLookupRefreshing(true);
+    setLookupError(null);
+    try {
+      await refreshTickerFundamentals(ticker);
+      const response = await getTickerFundamentals(ticker, 16);
+      setLookupData(response);
+      setMessage({ tone: "success", text: `Refreshed SEC fundamentals for ${ticker}.` });
+    } catch (error) {
+      setLookupError(error instanceof Error ? error.message : "Failed to refresh SEC fundamentals.");
+    } finally {
+      setLookupRefreshing(false);
     }
   };
 
@@ -226,6 +293,108 @@ export function FundamentalsAdminPanel() {
             <AdminStatCard label="Earnings Due" value={formatCount(earningsStatus.dueCount)} helper="Events ready for SEC checks." tone={earningsStatus.dueCount > 0 ? "info" : "default"} />
             <AdminStatCard label="Storage Estimate" value={seedStatus.storageEstimate.label} helper={seedStatus.storageEstimate.note} />
           </div>
+
+          <AdminCard
+            title="Ticker Lookup"
+            description="Inspect cached SEC fundamentals from the linked D1 fundamentals database."
+          >
+            <div className="space-y-5">
+              <form
+                className="grid gap-3 lg:grid-cols-[minmax(12rem,18rem),auto,auto,minmax(0,1fr)]"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void loadLookupTicker();
+                }}
+              >
+                <label className="text-xs text-slate-300">
+                  Ticker
+                  <input
+                    className="mt-2 h-10 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 font-mono text-sm uppercase text-text"
+                    placeholder="AAPL"
+                    value={lookupInput}
+                    onChange={(event) => setLookupInput(event.target.value.toUpperCase())}
+                  />
+                </label>
+                <div className="flex items-end">
+                  <button
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-accent px-4 text-sm font-medium text-slate-950 transition hover:brightness-110 disabled:opacity-60"
+                    disabled={lookupLoading || lookupRefreshing}
+                    type="submit"
+                  >
+                    <Search className="h-4 w-4" />
+                    {lookupLoading ? "Loading..." : "Load"}
+                  </button>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-accent/40 bg-accent/15 px-4 text-sm font-medium text-accent transition hover:bg-accent/25 disabled:opacity-60"
+                    disabled={lookupLoading || lookupRefreshing || (!lookupTicker && !lookupInput.trim())}
+                    onClick={() => void refreshLookupTicker()}
+                    type="button"
+                  >
+                    <RefreshCw className={lookupRefreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    {lookupRefreshing ? "Refreshing..." : "Refresh SEC"}
+                  </button>
+                </div>
+                <div className="flex items-end text-xs text-slate-500">
+                  {lookupTicker ? `Showing D1 cache for ${lookupTicker}` : "Lookup reads fundamental_issuers and fundamental_quarters."}
+                </div>
+              </form>
+
+              {lookupQueueContext ? (
+                <div className="grid gap-3 rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4 text-sm text-slate-300 md:grid-cols-4">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Seed Status</p>
+                    <p className="mt-1 text-text">{lookupQueueContext.status}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Rank</p>
+                    <p className="mt-1 text-text">#{lookupQueueContext.priorityRank}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Attempts</p>
+                    <p className="mt-1 text-text">{formatCount(lookupQueueContext.attempts)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Last Error</p>
+                    <p className="mt-1 truncate text-rose-200" title={lookupQueueContext.lastError ?? undefined}>{lookupQueueContext.lastError ?? "-"}</p>
+                  </div>
+                </div>
+              ) : null}
+
+              {lookupData?.issuer ? (
+                <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/35 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{lookupData.issuer.ticker}</p>
+                      <h3 className="mt-1 text-base font-semibold text-text">{lookupData.issuer.companyName}</h3>
+                    </div>
+                    <div className="text-right text-xs text-slate-400">
+                      <div>Status: <span className="text-slate-200">{lookupData.issuer.status ?? "-"}</span></div>
+                      <div>Last refreshed: <span className="text-slate-200">{formatFundamentalDate(lookupData.issuer.lastRefreshedAt?.slice(0, 10))}</span></div>
+                    </div>
+                  </div>
+                  {lookupData.issuer.lastError ? <p className="mt-3 text-xs text-rose-200">{lookupData.issuer.lastError}</p> : null}
+                </div>
+              ) : null}
+
+              {lookupTicker || lookupLoading || lookupError ? (
+                <FundamentalsChartPanel
+                  data={lookupData}
+                  loading={lookupLoading}
+                  refreshing={lookupRefreshing}
+                  error={lookupError}
+                  onRefresh={refreshLookupTicker}
+                  showVerificationTable
+                />
+              ) : (
+                <EmptyState
+                  title="No ticker loaded"
+                  description="Enter a ticker to inspect the fundamentals cache populated by the SEC seed queue."
+                />
+              )}
+            </div>
+          </AdminCard>
 
           <AdminCard
             title="Earnings Calendar"
