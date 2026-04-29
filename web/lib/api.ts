@@ -2111,9 +2111,13 @@ export function deleteAdminPeerGroup(id: string) {
   });
 }
 
-export function searchAdminPeerTickers(q: string) {
+export function searchAdminPeerTickers(q: string, options?: { resolve?: boolean; limit?: number }) {
   return adminFetch<{ rows: Array<{ ticker: string; name: string | null; exchange: string | null; sector: string | null; industry: string | null }> }>(
-    appendQuery("/api/admin/peer-groups/ticker-search", { q }),
+    appendQuery("/api/admin/peer-groups/ticker-search", {
+      q,
+      resolve: options?.resolve == null ? undefined : options.resolve ? 1 : 0,
+      limit: options?.limit,
+    }),
   );
 }
 

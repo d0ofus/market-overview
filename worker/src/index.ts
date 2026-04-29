@@ -3313,6 +3313,9 @@ app.get("/api/admin/peer-groups/ticker-search", async (c) => {
   const q = String(c.req.query("q") ?? "").trim();
   if (!q) return c.json({ rows: [] });
   const qUpper = q.toUpperCase();
+  const resolveFallback = c.req.query("resolve") !== "0";
+  const requestedLimit = Number(c.req.query("limit") ?? 25);
+  const limit = Math.max(1, Math.min(50, Number.isFinite(requestedLimit) ? requestedLimit : 25));
   const rows = await c.env.DB.prepare(
     `SELECT ticker, name, exchange, sector, industry
      FROM symbols
@@ -3324,12 +3327,12 @@ app.get("/api/admin/peer-groups/ticker-search", async (c) => {
          ELSE 2
        END,
        ticker ASC
-     LIMIT 25`,
+     LIMIT ?`,
   )
-    .bind(qUpper, `${qUpper}%`, `%${q}%`, qUpper, `${qUpper}%`)
+    .bind(qUpper, `${qUpper}%`, `%${q}%`, qUpper, `${qUpper}%`, limit)
     .all<{ ticker: string; name: string | null; exchange: string | null; sector: string | null; industry: string | null }>();
   const existing = rows.results ?? [];
-  if (existing.length === 0 && /^[A-Z.\-^]{1,20}$/.test(qUpper)) {
+  if (resolveFallback && existing.length === 0 && /^[A-Z.\-^]{1,20}$/.test(qUpper)) {
     const resolved = await resolveTickerMeta(qUpper, c.env);
     if (resolved) {
       return c.json({

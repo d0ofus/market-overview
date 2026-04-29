@@ -44,12 +44,18 @@ const EMPTY_FORM = {
 const GROUPS_PAGE_SIZE = 12;
 const GROUP_INDEX_LABELS = ["All", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""), "#"];
 const GROUP_MEMBER_BATCH_PAGE_SIZE = 100;
+const TICKER_TYPEAHEAD_MIN_LENGTH = 2;
+const TICKER_TYPEAHEAD_DELAY_MS = 300;
 
 type AdminTickerSearchRow = {
   ticker: string;
   name: string | null;
   exchange: string | null;
 };
+
+function mapTickerSearchRows(rows: Array<{ ticker: string; name: string | null; exchange: string | null }>): AdminTickerSearchRow[] {
+  return rows.map((row) => ({ ticker: row.ticker, name: row.name, exchange: row.exchange }));
+}
 
 function parseBootstrapTickers(input: string): string[] {
   return Array.from(
@@ -77,6 +83,8 @@ export function PeerGroupsAdminPanel() {
   const [groupPage, setGroupPage] = useState(0);
   const [tickerQuery, setTickerQuery] = useState("");
   const [tickerResults, setTickerResults] = useState<AdminTickerSearchRow[]>([]);
+  const [tickerSearchLoading, setTickerSearchLoading] = useState(false);
+  const [tickerSearchError, setTickerSearchError] = useState<string | null>(null);
   const [selectedTicker, setSelectedTicker] = useState<string>("");
   const [selectedTickerDetail, setSelectedTickerDetail] = useState<PeerTickerDetail | null>(null);
   const [batchSelectedTickers, setBatchSelectedTickers] = useState<string[]>([]);
@@ -99,6 +107,7 @@ export function PeerGroupsAdminPanel() {
   const [memberToRemove, setMemberToRemove] = useState<PeerDirectoryRow | null>(null);
   const [memberRemovalBusy, setMemberRemovalBusy] = useState(false);
   const formCardRef = useRef<HTMLDivElement | null>(null);
+  const tickerSearchRequestRef = useRef(0);
 
   const flashMessage = (next: string, timeoutMs = 4000) => {
     setMessage(next);
@@ -187,13 +196,66 @@ export function PeerGroupsAdminPanel() {
     setGroupPage(0);
   }, [groupQuery, groupIndexFilter]);
 
+  useEffect(() => {
+    const query = tickerQuery.trim();
+    const requestId = ++tickerSearchRequestRef.current;
+    setTickerSearchError(null);
+
+    if (!query || query.length < TICKER_TYPEAHEAD_MIN_LENGTH) {
+      setTickerSearchLoading(false);
+      setTickerResults([]);
+      return;
+    }
+
+    setTickerSearchLoading(true);
+    let isActive = true;
+    const timeoutId = window.setTimeout(() => {
+      void searchAdminPeerTickers(query, { resolve: false, limit: 25 })
+        .then((res) => {
+          if (!isActive || requestId !== tickerSearchRequestRef.current) return;
+          setTickerResults(mapTickerSearchRows(res.rows ?? []));
+        })
+        .catch((error) => {
+          if (!isActive || requestId !== tickerSearchRequestRef.current) return;
+          setTickerSearchError(error instanceof Error ? error.message : "Failed to search tickers.");
+        })
+        .finally(() => {
+          if (isActive && requestId === tickerSearchRequestRef.current) {
+            setTickerSearchLoading(false);
+          }
+        });
+    }, TICKER_TYPEAHEAD_DELAY_MS);
+
+    return () => {
+      isActive = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [tickerQuery]);
+
   const onSearchTicker = async () => {
-    if (!tickerQuery.trim()) return;
+    const query = tickerQuery.trim();
+    const requestId = ++tickerSearchRequestRef.current;
+    if (!query) {
+      setTickerResults([]);
+      setTickerSearchError(null);
+      setTickerSearchLoading(false);
+      return;
+    }
     try {
-      const res = await searchAdminPeerTickers(tickerQuery);
-      setTickerResults((res.rows ?? []).map((row) => ({ ticker: row.ticker, name: row.name, exchange: row.exchange })));
+      setTickerSearchLoading(true);
+      setTickerSearchError(null);
+      const res = await searchAdminPeerTickers(query, { resolve: true, limit: 25 });
+      if (requestId !== tickerSearchRequestRef.current) return;
+      setTickerResults(mapTickerSearchRows(res.rows ?? []));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to search tickers.");
+      if (requestId !== tickerSearchRequestRef.current) return;
+      const messageText = error instanceof Error ? error.message : "Failed to search tickers.";
+      setTickerSearchError(messageText);
+      setMessage(messageText);
+    } finally {
+      if (requestId === tickerSearchRequestRef.current) {
+        setTickerSearchLoading(false);
+      }
     }
   };
 
@@ -828,9 +890,17 @@ export function PeerGroupsAdminPanel() {
                 placeholder="AAPL"
               />
               <button className="rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm text-accent" onClick={() => void onSearchTicker()} type="button">
-                Search
+                {tickerSearchLoading ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Search
+                  </span>
+                ) : "Search"}
               </button>
             </div>
+            {tickerSearchError ? (
+              <p className="mt-2 text-xs text-red-300">{tickerSearchError}</p>
+            ) : null}
             <div className="mt-3 rounded border border-borderSoft/60 bg-slate-900/30 p-3">
               <div className="flex flex-wrap items-end gap-2">
                 <label className="block min-w-[14rem] flex-1 text-xs text-slate-300">
@@ -943,7 +1013,13 @@ export function PeerGroupsAdminPanel() {
                 );
               })}
               {tickerResults.length === 0 ? (
-                <div className="px-3 py-3 text-sm text-slate-400">Search results will appear here.</div>
+                <div className="px-3 py-3 text-sm text-slate-400">
+                  {tickerSearchLoading
+                    ? "Searching..."
+                    : tickerQuery.trim().length > 0 && tickerQuery.trim().length < TICKER_TYPEAHEAD_MIN_LENGTH
+                      ? "Type at least 2 characters for live results, or press Search for an exact lookup."
+                      : "Search results will appear here."}
+                </div>
               ) : null}
             </div>
           </div>
