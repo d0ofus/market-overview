@@ -116,6 +116,7 @@ import {
 } from "./peer-groups-service";
 import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
+import { loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
 import {
   addManualSymbolToDirectory,
   setSymbolCatalogSyncEnabled,
@@ -2127,6 +2128,12 @@ app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
   });
 });
 
+app.get("/api/fundamentals/ticker/:ticker", async (c) => {
+  const quarters = c.req.query("quarters") ? Number(c.req.query("quarters")) : 8;
+  const payload = await loadTickerFundamentals(c.env, c.req.param("ticker"), quarters);
+  return c.json(payload);
+});
+
 app.get("/api/alerts", async (c) => {
   await maybeRunAlertsHousekeeping(c.env);
   const payload = await queryAlertsByFilters(c.env, {
@@ -3640,6 +3647,17 @@ app.post("/api/admin/alerts/reconcile", async (c) => {
   const reconcile = await reconcileAlertsFromMailboxAdapters(c.env, maxEmails);
   const cleanup = body.cleanup !== false ? await cleanupOldAlertsData(c.env, 30) : null;
   return c.json({ ok: true, reconcile, cleanup });
+});
+
+app.post("/api/admin/fundamentals/ticker/:ticker/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const result = await refreshTickerFundamentals(c.env, c.req.param("ticker"));
+    await upsertAudit(c.env, "default", "FUNDAMENTALS_REFRESH", result);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to refresh fundamentals." }, 500);
+  }
 });
 
 app.post("/api/admin/run-eod", async (c) => {

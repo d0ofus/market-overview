@@ -1,5 +1,6 @@
 export type Env = {
   DB: D1Database;
+  FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
   PATTERN_DB?: D1Database;
   ADMIN_SECRET?: string;

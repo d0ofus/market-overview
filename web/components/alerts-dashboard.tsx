@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Maximize2, RefreshCw } from "lucide-react";
+import { BarChart3, Loader2, Maximize2, RefreshCw } from "lucide-react";
 import {
   getAlertNews,
   getAlerts,
@@ -14,6 +14,7 @@ import {
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 import { PeerGroupModal } from "./peer-group-modal";
+import { FundamentalsModal } from "./fundamentals-modal";
 
 const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
   { value: "all", label: "All Sessions" },
@@ -158,6 +159,7 @@ export function AlertsDashboard() {
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
   const [expandedGridNews, setExpandedGridNews] = useState<Set<string>>(new Set());
   const [activePeerTicker, setActivePeerTicker] = useState<string | null>(null);
+  const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [activeChartRow, setActiveChartRow] = useState<AlertTickerDayRow | null>(null);
   const [chartPage, setChartPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
@@ -517,13 +519,23 @@ export function AlertsDashboard() {
                         />
                       </div>
                       <div className="mt-4 flex flex-wrap justify-between gap-2">
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
-                          onClick={() => toggleGridNews(compoundKey)}
-                        >
-                          {gridNewsOpen ? "Hide latest news" : "Show latest news"}
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                            onClick={() => toggleGridNews(compoundKey)}
+                          >
+                            {gridNewsOpen ? "Hide latest news" : "Show latest news"}
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                            onClick={() => setActiveFundamentalsTicker(row.ticker)}
+                          >
+                            <BarChart3 className="h-3.5 w-3.5" />
+                            Fundamentals
+                          </button>
+                        </div>
                         <button
                           type="button"
                           className="inline-flex items-center justify-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
@@ -621,6 +633,9 @@ export function AlertsDashboard() {
       </div>
 
       {activePeerTicker && <PeerGroupModal ticker={activePeerTicker} onClose={() => setActivePeerTicker(null)} />}
+      {activeFundamentalsTicker ? (
+        <FundamentalsModal ticker={activeFundamentalsTicker} onClose={() => setActiveFundamentalsTicker(null)} />
+      ) : null}
       {activeChartRow ? (
         <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartRow(null)}>
           <div

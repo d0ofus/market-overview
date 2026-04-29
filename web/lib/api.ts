@@ -86,6 +86,58 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
+export type FundamentalQuarterRow = {
+  ticker: string;
+  cik: string;
+  companyName: string | null;
+  fiscalYear: number;
+  fiscalQuarter: number;
+  periodEnd: string;
+  filedAt: string | null;
+  form: string | null;
+  accession: string | null;
+  currency: string;
+  revenue: number | null;
+  netIncome: number | null;
+  revenueYoY: number | null;
+  revenueQoQ: number | null;
+  netIncomeYoY: number | null;
+  netIncomeQoQ: number | null;
+  revenueSourceTag: string | null;
+  netIncomeSourceTag: string | null;
+  derivation: string | null;
+  warnings: string[];
+};
+
+export type FundamentalsResponse = {
+  ticker: string;
+  schemaReady: boolean;
+  issuer: {
+    ticker: string;
+    cik: string;
+    companyName: string;
+    lastRefreshedAt: string | null;
+    status: string | null;
+    lastError: string | null;
+  } | null;
+  rows: FundamentalQuarterRow[];
+  warning: string | null;
+};
+
+export type FundamentalsRefreshResponse = {
+  ok: boolean;
+  ticker: string;
+  cik: string;
+  companyName: string;
+  refreshedAt: string;
+  rowsUpserted: number;
+  selectedQuarters: number;
+  completePeriodsFound: number;
+  derivedQ4Count: number;
+  warningCount: number;
+  warnings: string[];
+};
+
 export type ScanSourceType = "tradingview-public-link" | "csv-text" | "ticker-list";
 export type ScanStatus = "ok" | "empty" | "error";
 
@@ -1415,6 +1467,19 @@ export function getAlertTickerDays(params: {
 export function getAlertNews(ticker: string, tradingDay: string) {
   return getJson<{ ticker: string; tradingDay: string; rows: AlertNewsRow[] }>(
     appendQuery("/api/alerts/news", { ticker, tradingDay }),
+  );
+}
+
+export function getTickerFundamentals(ticker: string, quarters = 8) {
+  return getJson<FundamentalsResponse>(
+    appendQuery(`/api/fundamentals/ticker/${encodeURIComponent(ticker)}`, { quarters }),
+  );
+}
+
+export function refreshTickerFundamentals(ticker: string) {
+  return adminFetch<FundamentalsRefreshResponse>(
+    `/api/admin/fundamentals/ticker/${encodeURIComponent(ticker)}/refresh`,
+    { method: "POST" },
   );
 }
 
