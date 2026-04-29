@@ -23,6 +23,11 @@ database_name = "market_rs"
 database_id = "6837481f-3dd3-4f7c-933d-7927b5c755cd"
 
 [[d1_databases]]
+binding = "FUNDAMENTALS_DB"
+database_name = "market_fundamentals"
+database_id = "3380987f-47a5-4ffe-8593-30d9f6b9ffbe"
+
+[[d1_databases]]
 binding = "PATTERN_DB"
 database_name = "market_patterns"
 database_id = "979ab7bb-8c24-4978-b07a-66914d92ac04"
