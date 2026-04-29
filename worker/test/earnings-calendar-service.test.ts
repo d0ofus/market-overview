@@ -26,6 +26,12 @@ describe("earnings calendar parsing", () => {
     expect(rows[1]?.epsEstimate).toBeNull();
   });
 
+  it("surfaces Alpha Vantage JSON error messages clearly", () => {
+    expect(() => parseAlphaVantageEarningsCalendarCsv(JSON.stringify({
+      Information: "The standard API rate limit is 25 requests per day.",
+    }))).toThrow("Alpha Vantage earnings calendar error: The standard API rate limit is 25 requests per day.");
+  });
+
   it("dedupes provider events and keeps the higher-confidence row while filling blanks", () => {
     const rows = dedupeProviderEvents([
       {

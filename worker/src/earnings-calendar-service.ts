@@ -170,9 +170,20 @@ function pick(row: Record<string, unknown>, names: string[]): unknown {
   return null;
 }
 
+function alphaVantageJsonErrorMessage(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const message = pick(parsed, ["Information", "Note", "Error Message", "message"]);
+    if (message) return String(message).trim().slice(0, 400);
+  } catch {
+    // Fall through to the generic parser message.
+  }
+  return "Alpha Vantage returned JSON instead of the expected earnings calendar CSV.";
+}
+
 export function parseAlphaVantageEarningsCalendarCsv(raw: string): EarningsProviderEvent[] {
   if (raw.trim().startsWith("{")) {
-    throw new Error("Alpha Vantage earnings calendar returned JSON instead of CSV.");
+    throw new Error(`Alpha Vantage earnings calendar error: ${alphaVantageJsonErrorMessage(raw)}`);
   }
   return parseCsvRows(raw)
     .map<EarningsProviderEvent | null>((row) => {
@@ -317,6 +328,7 @@ async function fetchProviderEvents(env: Env, provider: EarningsProviderKey, hori
     const url = `${ALPHA_VANTAGE_URL}?${new URLSearchParams({
       function: "EARNINGS_CALENDAR",
       horizon,
+      datatype: "csv",
       apikey: env.ALPHA_VANTAGE_API_KEY,
     }).toString()}`;
     return parseAlphaVantageEarningsCalendarCsv(await fetchText(url, "Alpha Vantage earnings calendar"));
