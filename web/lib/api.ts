@@ -138,6 +138,149 @@ export type FundamentalsRefreshResponse = {
   warnings: string[];
 };
 
+export type AdminEarningsStatus = {
+  schemaReady: boolean;
+  counts: Record<string, number>;
+  dueCount: number;
+  syncs: Array<{
+    provider: string;
+    status: string;
+    horizon: string | null;
+    lastStartedAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    rowsSeen: number | null;
+    rowsUpserted: number | null;
+    updatedAt: string | null;
+  }>;
+  upcoming: Array<{
+    ticker: string;
+    companyName: string | null;
+    scheduledDate: string;
+    timeHint: string | null;
+    fiscalPeriod: string;
+    provider: string;
+    status: string;
+    nextCheckAt: string | null;
+  }>;
+  warning: string | null;
+};
+
+export type AdminEarningsSyncResponse = {
+  ok: boolean;
+  horizon: string;
+  providers: Array<{
+    provider: string;
+    rowsSeen: number;
+    rowsEligible: number;
+    status: "ok" | "skipped" | "error";
+    error: string | null;
+  }>;
+  rowsUpserted: number;
+  warning: string | null;
+};
+
+export type AdminEarningsProcessResponse = {
+  ok: boolean;
+  attempted: number;
+  rows: Array<{
+    ticker: string;
+    previousStatus: string;
+    status: string;
+    rowsUpserted: number;
+    secForm: string | null;
+    error: string | null;
+  }>;
+};
+
+export type AdminFundamentalsSeedQueueRow = {
+  ticker: string;
+  companyName: string | null;
+  exchange: string | null;
+  marketCap: number | null;
+  priorityRank: number;
+  status: string;
+  attempts: number;
+  rowsUpserted?: number | null;
+  latestPeriodEnd?: string | null;
+  latestFiledAt?: string | null;
+  lastRefreshedAt?: string | null;
+  nextAttemptAt?: string | null;
+  lastError?: string | null;
+  updatedAt?: string | null;
+};
+
+export type AdminFundamentalsSeedRun = {
+  id: string;
+  runType: "build" | "process" | string;
+  trigger: "manual" | "scheduled" | string;
+  requestedLimit: number;
+  fetchedRows: number;
+  eligibleRows: number;
+  queuedRows: number;
+  processedRows: number;
+  okRows: number;
+  errorRows: number;
+  noSupportedRows: number;
+  startedAt: string;
+  completedAt: string | null;
+  error: string | null;
+};
+
+export type AdminFundamentalsSeedStatus = {
+  schemaReady: boolean;
+  warning: string | null;
+  counts: Record<string, number>;
+  cached: {
+    issuerCount: number;
+    quarterRowCount: number;
+    tickerWithQuarterCount: number;
+  };
+  queue: {
+    total: number;
+    progressPct: number;
+    nextTickers: AdminFundamentalsSeedQueueRow[];
+  };
+  storageEstimate: {
+    estimatedBytes: number;
+    label: string;
+    note: string;
+  };
+  recentRuns: AdminFundamentalsSeedRun[];
+};
+
+export type AdminFundamentalsSeedBuildResponse = {
+  ok: boolean;
+  providerLabel: string;
+  requestedLimit: number;
+  fetchedRows: number;
+  marketEligibleRows: number;
+  universeEligibleRows: number;
+  queuedRows: number;
+  skippedNoIssuer: number;
+  completedAt: string;
+};
+
+export type AdminFundamentalsSeedProcessResponse = {
+  ok: boolean;
+  attempted: number;
+  rows: Array<{
+    ticker: string;
+    previousStatus: string;
+    status: string;
+    rowsUpserted: number;
+    latestPeriodEnd: string | null;
+    latestFiledAt: string | null;
+    error: string | null;
+  }>;
+};
+
+export type AdminFundamentalsSeedErrorsResponse = {
+  schemaReady: boolean;
+  warning: string | null;
+  rows: AdminFundamentalsSeedQueueRow[];
+};
+
 export type ScanSourceType = "tradingview-public-link" | "csv-text" | "ticker-list";
 export type ScanStatus = "ok" | "empty" | "error";
 
@@ -1480,6 +1623,48 @@ export function refreshTickerFundamentals(ticker: string) {
   return adminFetch<FundamentalsRefreshResponse>(
     `/api/admin/fundamentals/ticker/${encodeURIComponent(ticker)}/refresh`,
     { method: "POST" },
+  );
+}
+
+export function getAdminEarningsStatus() {
+  return adminFetch<AdminEarningsStatus>("/api/admin/earnings/status");
+}
+
+export function syncAdminEarningsCalendar(horizon?: string) {
+  return adminFetch<AdminEarningsSyncResponse>(
+    appendQuery("/api/admin/earnings/sync", { horizon }),
+    { method: "POST" },
+  );
+}
+
+export function processAdminEarningsRefresh(limit = 5) {
+  return adminFetch<AdminEarningsProcessResponse>(
+    appendQuery("/api/admin/earnings/process", { limit }),
+    { method: "POST" },
+  );
+}
+
+export function getAdminFundamentalsSeedStatus() {
+  return adminFetch<AdminFundamentalsSeedStatus>("/api/admin/fundamentals/seed/status");
+}
+
+export function buildAdminFundamentalsSeedQueue(limit = 500) {
+  return adminFetch<AdminFundamentalsSeedBuildResponse>(
+    appendQuery("/api/admin/fundamentals/seed/build", { limit }),
+    { method: "POST" },
+  );
+}
+
+export function processAdminFundamentalsSeedQueue(limit = 10) {
+  return adminFetch<AdminFundamentalsSeedProcessResponse>(
+    appendQuery("/api/admin/fundamentals/seed/process", { limit }),
+    { method: "POST" },
+  );
+}
+
+export function getAdminFundamentalsSeedErrors(limit = 50) {
+  return adminFetch<AdminFundamentalsSeedErrorsResponse>(
+    appendQuery("/api/admin/fundamentals/seed/errors", { limit }),
   );
 }
 

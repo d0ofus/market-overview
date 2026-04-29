@@ -109,6 +109,7 @@ export type FundamentalsRefreshResult = {
 export type FundamentalsRefreshOptions = {
   maxRows?: number;
   onlyIfNewerThanPeriodEnd?: string | null;
+  issuerOverride?: FundamentalIssuer | null;
 };
 
 const METRICS: Record<"revenue" | "netIncome", MetricConfig> = {
@@ -644,7 +645,9 @@ export async function refreshTickerFundamentals(
     throw new Error("Fundamentals schema is missing. Apply worker/fundamentals-migrations/0001_fundamentals.sql.");
   }
 
-  const issuer = await resolveFundamentalIssuer(ticker, env);
+  const issuer = options.issuerOverride?.ticker === ticker
+    ? options.issuerOverride
+    : await resolveFundamentalIssuer(ticker, env);
   if (!issuer) throw new Error(`SEC issuer mapping was not found for ${ticker}.`);
 
   const refreshedAt = new Date().toISOString();

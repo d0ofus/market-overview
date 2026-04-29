@@ -21,6 +21,11 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     description: "Group maintenance, symbol directory management, and peer seeding.",
   },
   {
+    href: "/admin/fundamentals",
+    label: "Fundamentals",
+    description: "Earnings refresh controls, SEC seed queue, and fundamentals cache health.",
+  },
+  {
     href: "/admin/watchlist-compiler",
     label: "Watchlist Compiler",
     description: "Saved watchlist sets, source URLs, and compile controls.",

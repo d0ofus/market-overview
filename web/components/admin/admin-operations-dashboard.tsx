@@ -567,6 +567,9 @@ export function AdminOperationsDashboard() {
                   <Link className="rounded-2xl border border-borderSoft/80 bg-panelSoft/55 px-4 py-3 text-sm text-slate-200 transition hover:border-accent/30 hover:bg-panelSoft/70" href="/admin/peer-groups">
                     Peer Groups
                   </Link>
+                  <Link className="rounded-2xl border border-borderSoft/80 bg-panelSoft/55 px-4 py-3 text-sm text-slate-200 transition hover:border-accent/30 hover:bg-panelSoft/70" href="/admin/fundamentals">
+                    Fundamentals
+                  </Link>
                   <Link className="rounded-2xl border border-borderSoft/80 bg-panelSoft/55 px-4 py-3 text-sm text-slate-200 transition hover:border-accent/30 hover:bg-panelSoft/70" href="/admin/watchlist-compiler">
                     Watchlist Compiler
                   </Link>

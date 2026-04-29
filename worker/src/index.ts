@@ -124,6 +124,13 @@ import {
   syncEarningsCalendarFromProviders,
 } from "./earnings-calendar-service";
 import {
+  buildFundamentalSeedQueue,
+  loadFundamentalSeedErrors,
+  loadFundamentalSeedStatus,
+  maybeProcessFundamentalSeedQueue,
+  processFundamentalSeedQueue,
+} from "./fundamentals-seed-service";
+import {
   addManualSymbolToDirectory,
   setSymbolCatalogSyncEnabled,
   loadSymbolCatalogStatus,
@@ -3699,6 +3706,49 @@ app.post("/api/admin/earnings/process", async (c) => {
   }
 });
 
+app.get("/api/admin/fundamentals/seed/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadFundamentalSeedStatus(c.env));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load fundamentals seed status." }, 500);
+  }
+});
+
+app.post("/api/admin/fundamentals/seed/build", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(3000, Number(c.req.query("limit") ?? 500)));
+    const result = await buildFundamentalSeedQueue(c.env, { limit, trigger: "manual" });
+    await upsertAudit(c.env, "default", "FUNDAMENTALS_SEED_BUILD", result);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to build fundamentals seed queue." }, 500);
+  }
+});
+
+app.post("/api/admin/fundamentals/seed/process", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 10)));
+    const result = await processFundamentalSeedQueue(c.env, { limit, trigger: "manual" });
+    await upsertAudit(c.env, "default", "FUNDAMENTALS_SEED_PROCESS", result);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to process fundamentals seed queue." }, 500);
+  }
+});
+
+app.get("/api/admin/fundamentals/seed/errors", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50)));
+    return c.json(await loadFundamentalSeedErrors(c.env, { limit }));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load fundamentals seed errors." }, 500);
+  }
+});
+
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsSessionAsOfDate(new Date());
@@ -4147,6 +4197,11 @@ export default {
       await processDueEarningsFundamentalRefreshes(env, { limit: 5, now });
     } catch (error) {
       console.error("scheduled earnings fundamentals refresh failed", error);
+    }
+    try {
+      await maybeProcessFundamentalSeedQueue(env, now);
+    } catch (error) {
+      console.error("scheduled fundamentals seed queue failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
     let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
