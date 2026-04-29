@@ -20,7 +20,7 @@ function usdFact(def: {
   return def;
 }
 
-function factsFor(units: unknown[]) {
+function factsFor(units: Array<ReturnType<typeof usdFact>>) {
   return { units: { USD: units } };
 }
 
@@ -229,7 +229,9 @@ describe("fundamentals SEC parser", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.rowsUpserted).toBe(8);
     expect(result.derivedQ4Count).toBe(2);
-    expect(batchedStatements).toHaveLength(9);
+    expect(result.latestPeriodEnd).toBe("2025-12-31");
+    expect(batchedStatements).toHaveLength(10);
     expect(batchedStatements.some((statement) => statement.args.includes(205) && statement.args.includes(26))).toBe(true);
+    expect(batchedStatements.some((statement) => statement.sql.includes("DELETE FROM fundamental_quarters"))).toBe(true);
   });
 });

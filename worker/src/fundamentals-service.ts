@@ -32,6 +32,8 @@ type Issuer = {
   companyName: string;
 };
 
+export type FundamentalIssuer = Issuer;
+
 type MetricConfig = {
   label: string;
   tags: string[];
@@ -99,6 +101,14 @@ export type FundamentalsRefreshResult = {
   derivedQ4Count: number;
   warningCount: number;
   warnings: string[];
+  latestPeriodEnd: string | null;
+  latestFiledAt: string | null;
+  skipped?: boolean;
+};
+
+export type FundamentalsRefreshOptions = {
+  maxRows?: number;
+  onlyIfNewerThanPeriodEnd?: string | null;
 };
 
 const METRICS: Record<"revenue" | "netIncome", MetricConfig> = {
@@ -453,7 +463,7 @@ async function fetchJson<T>(url: string, env: Env, label: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function loadCompanyTickerMap(env: Env): Promise<Map<string, Issuer>> {
+export async function loadFundamentalIssuerMap(env: Env): Promise<Map<string, FundamentalIssuer>> {
   const now = Date.now();
   if (companyTickerCache && companyTickerCache.expiresAt > now) return companyTickerCache.byTicker;
   const json = await fetchJson<Record<string, CompanyTickerEntry>>(COMPANY_TICKERS_URL, env, "SEC company tickers");
@@ -469,8 +479,8 @@ async function loadCompanyTickerMap(env: Env): Promise<Map<string, Issuer>> {
   return byTicker;
 }
 
-async function resolveIssuer(ticker: string, env: Env): Promise<Issuer | null> {
-  const map = await loadCompanyTickerMap(env);
+export async function resolveFundamentalIssuer(ticker: string, env: Env): Promise<FundamentalIssuer | null> {
+  const map = await loadFundamentalIssuerMap(env);
   return map.get(normalizeTicker(ticker)) ?? null;
 }
 
@@ -600,7 +610,33 @@ export async function loadTickerFundamentals(env: Env, tickerInput: string, quar
   };
 }
 
-export async function refreshTickerFundamentals(env: Env, tickerInput: string): Promise<FundamentalsRefreshResult> {
+export async function loadLatestCachedFundamentalPeriod(env: Env, tickerInput: string): Promise<{ periodEnd: string | null; filedAt: string | null } | null> {
+  const ticker = normalizeTicker(tickerInput);
+  const db = fundamentalsDb(env);
+  if (!db || !(await hasFundamentalsSchema(db))) return null;
+  const row = await db.prepare(
+    `SELECT period_end as periodEnd, filed_at as filedAt
+     FROM fundamental_quarters
+     WHERE ticker = ?
+     ORDER BY period_end DESC
+     LIMIT 1`,
+  ).bind(ticker).first<{ periodEnd: string | null; filedAt: string | null }>();
+  return row ?? null;
+}
+
+function latestParsedRow(rows: FundamentalQuarterRow[]): FundamentalQuarterRow | null {
+  return rows[0] ?? null;
+}
+
+function normalizeMaxRows(value: number | null | undefined): number {
+  return Math.max(1, Math.min(40, Number(value ?? 16)));
+}
+
+export async function refreshTickerFundamentals(
+  env: Env,
+  tickerInput: string,
+  options: FundamentalsRefreshOptions = {},
+): Promise<FundamentalsRefreshResult> {
   const ticker = normalizeTicker(tickerInput);
   const db = fundamentalsDb(env);
   if (!db) throw new Error("FUNDAMENTALS_DB binding is not configured.");
@@ -608,13 +644,37 @@ export async function refreshTickerFundamentals(env: Env, tickerInput: string): 
     throw new Error("Fundamentals schema is missing. Apply worker/fundamentals-migrations/0001_fundamentals.sql.");
   }
 
-  const issuer = await resolveIssuer(ticker, env);
+  const issuer = await resolveFundamentalIssuer(ticker, env);
   if (!issuer) throw new Error(`SEC issuer mapping was not found for ${ticker}.`);
 
   const refreshedAt = new Date().toISOString();
   try {
     const companyFacts = await fetchJson<SecFactsResponse>(`${COMPANY_FACTS_URL}${issuer.cik}.json`, env, `SEC companyfacts for ${ticker}`);
     const parsed = parseSecCompanyFundamentals(ticker, issuer, companyFacts);
+    const latest = latestParsedRow(parsed.rows);
+    const latestPeriodEnd = latest?.periodEnd ?? null;
+    const latestFiledAt = latest?.filedAt ?? null;
+    const onlyIfNewerThan = options.onlyIfNewerThanPeriodEnd ?? null;
+    if (onlyIfNewerThan && latestPeriodEnd && latestPeriodEnd <= onlyIfNewerThan) {
+      return {
+        ticker,
+        cik: issuer.cik,
+        companyName: issuer.companyName,
+        refreshedAt,
+        rowsUpserted: 0,
+        selectedQuarters: 0,
+        completePeriodsFound: 0,
+        derivedQ4Count: 0,
+        warningCount: parsed.warnings.length,
+        warnings: parsed.warnings,
+        latestPeriodEnd,
+        latestFiledAt,
+        skipped: true,
+      };
+    }
+
+    const maxRows = normalizeMaxRows(options.maxRows);
+    const selectedRows = parsed.rows.slice(0, maxRows);
 
     const statements = [
       db.prepare(
@@ -628,7 +688,7 @@ export async function refreshTickerFundamentals(env: Env, tickerInput: string): 
            last_error = NULL,
            updated_at = CURRENT_TIMESTAMP`,
       ).bind(ticker, issuer.cik, issuer.companyName, refreshedAt),
-      ...parsed.rows.map((row) => db.prepare(
+      ...selectedRows.map((row) => db.prepare(
         `INSERT INTO fundamental_quarters (
           ticker, cik, fiscal_year, fiscal_quarter, period_end, filed_at, form, accession, currency,
           revenue, net_income, revenue_yoy, revenue_qoq, net_income_yoy, net_income_qoq,
@@ -673,6 +733,16 @@ export async function refreshTickerFundamentals(env: Env, tickerInput: string): 
         row.derivation,
         JSON.stringify(row.warnings),
       )),
+      db.prepare(
+        `DELETE FROM fundamental_quarters
+         WHERE ticker = ?
+           AND rowid NOT IN (
+             SELECT rowid FROM fundamental_quarters
+             WHERE ticker = ?
+             ORDER BY period_end DESC
+             LIMIT ?
+           )`,
+      ).bind(ticker, ticker, maxRows),
     ];
     await db.batch(statements);
 
@@ -681,12 +751,14 @@ export async function refreshTickerFundamentals(env: Env, tickerInput: string): 
       cik: issuer.cik,
       companyName: issuer.companyName,
       refreshedAt,
-      rowsUpserted: parsed.rows.length,
-      selectedQuarters: Math.min(8, parsed.rows.length),
-      completePeriodsFound: parsed.completePeriodsFound,
-      derivedQ4Count: parsed.derivedQ4Count,
+      rowsUpserted: selectedRows.length,
+      selectedQuarters: Math.min(8, selectedRows.length),
+      completePeriodsFound: selectedRows.filter((row) => isFiniteNumber(row.revenue) && isFiniteNumber(row.netIncome)).length,
+      derivedQ4Count: selectedRows.filter((row) => String(row.derivation ?? "").includes("derived_q4")).length,
       warningCount: parsed.warnings.length,
       warnings: parsed.warnings,
+      latestPeriodEnd,
+      latestFiledAt,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to refresh fundamentals.";

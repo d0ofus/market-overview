@@ -132,6 +132,8 @@ Web (`web/.env.local`):
 - Seed: `worker/migrations/0002_seed.sql`
 - Tracker schema + sample seed: `worker/migrations/0003_trackers.sql`
 - Alerts schema: `worker/migrations/0008_alerts_email_ingestion.sql`
+- Fundamentals schema: `worker/fundamentals-migrations/0001_fundamentals.sql`
+- Earnings-driven fundamentals refresh schema: `worker/fundamentals-migrations/0002_earnings_events.sql`
 
 Seed script:
 ```bash
@@ -150,6 +152,28 @@ curl -X POST "http://127.0.0.1:8787/api/admin/run-eod?date=2026-02-27" \
 ```
 
 Idempotent storage is handled via unique keys and upserts.
+
+## Earnings-Driven Fundamentals
+
+The Worker can sync a free upcoming earnings calendar, watch SEC filings/companyfacts after each scheduled release, and refresh the cached fundamentals only when the SEC data is ready.
+
+Admin endpoints:
+```bash
+curl "http://127.0.0.1:8787/api/admin/earnings/status" \
+  -H "Authorization: Bearer <ADMIN_SECRET>"
+
+curl -X POST "http://127.0.0.1:8787/api/admin/earnings/sync" \
+  -H "Authorization: Bearer <ADMIN_SECRET>"
+
+curl -X POST "http://127.0.0.1:8787/api/admin/earnings/process?limit=5" \
+  -H "Authorization: Bearer <ADMIN_SECRET>"
+```
+
+Apply the fundamentals migrations to the `market_fundamentals` D1 database:
+```bash
+wrangler d1 execute market_fundamentals --remote --file=worker/fundamentals-migrations/0001_fundamentals.sql
+wrangler d1 execute market_fundamentals --remote --file=worker/fundamentals-migrations/0002_earnings_events.sql
+```
 
 ## Deploy (Cloudflare)
 

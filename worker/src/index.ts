@@ -118,6 +118,12 @@ import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
 import { loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
 import {
+  loadEarningsRefreshStatus,
+  maybeRunScheduledEarningsCalendarSync,
+  processDueEarningsFundamentalRefreshes,
+  syncEarningsCalendarFromProviders,
+} from "./earnings-calendar-service";
+import {
   addManualSymbolToDirectory,
   setSymbolCatalogSyncEnabled,
   loadSymbolCatalogStatus,
@@ -3660,6 +3666,39 @@ app.post("/api/admin/fundamentals/ticker/:ticker/refresh", async (c) => {
   }
 });
 
+app.get("/api/admin/earnings/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadEarningsRefreshStatus(c.env));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load earnings refresh status." }, 500);
+  }
+});
+
+app.post("/api/admin/earnings/sync", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const horizon = c.req.query("horizon") ?? undefined;
+    const result = await syncEarningsCalendarFromProviders(c.env, { horizon });
+    await upsertAudit(c.env, "default", "EARNINGS_CALENDAR_SYNC", result);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to sync earnings calendar." }, 500);
+  }
+});
+
+app.post("/api/admin/earnings/process", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 5)));
+    const result = await processDueEarningsFundamentalRefreshes(c.env, { limit });
+    await upsertAudit(c.env, "default", "EARNINGS_FUNDAMENTALS_PROCESS", result);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to process earnings fundamentals refreshes." }, 500);
+  }
+});
+
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsSessionAsOfDate(new Date());
@@ -4098,6 +4137,16 @@ export default {
       await maybeRunScheduledSymbolCatalogSync(env, now);
     } catch (error) {
       console.error("scheduled symbol catalog sync failed", error);
+    }
+    try {
+      await maybeRunScheduledEarningsCalendarSync(env, now);
+    } catch (error) {
+      console.error("scheduled earnings calendar sync failed", error);
+    }
+    try {
+      await processDueEarningsFundamentalRefreshes(env, { limit: 5, now });
+    } catch (error) {
+      console.error("scheduled earnings fundamentals refresh failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
     let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
