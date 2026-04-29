@@ -1,5 +1,10 @@
 # TODO
 
+## General
+> See what cron jobs are active in entire application and manage. Can add in /admin for easy management
+- See what other features in google sheets dashboard that are good
+- Remove top left Market command centre box
+
 ## Overview
 > Add macro stuff like 10Y yields and yield curve chart
 > Add hover charts for tickers like Key Movers Tracker in /sectors
@@ -30,6 +35,7 @@
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
+> For earnings charts, change net income hover to show value in M instead of B. Also, put Rev growth and net income growth on different Y-axes
 > Make keyboard shortcut to expand chart (Alt + Enter) (?)
 > See if there can be tradingview financials widgets shown in the expanded chart
 
@@ -80,11 +86,6 @@
 - Create export function to get all teh Industry and sector ETFs in the list
 - Add/remove ETFs
 >> Remove NWX
-
-## General
-> See what cron jobs are active in entire application and manage. Can add in /admin for easy management
-- See what other features in google sheets dashboard that are good
-- Remove top left Market command centre box
 
 ## Research Lab
 ==>> Make token use more efficient
