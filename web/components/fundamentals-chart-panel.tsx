@@ -21,6 +21,11 @@ type ChartRow = FundamentalQuarterRow & {
   netIncomeBillions: number | null;
 };
 
+type BarChartRow = ChartRow & {
+  revenueScaled: number | null;
+  netIncomeScaled: number | null;
+};
+
 type MetricKey =
   | "revenueBillions"
   | "netIncomeBillions"
@@ -37,6 +42,12 @@ type LegendItem = {
   color: string;
   shape: "bar" | "line";
   lineStyle?: "solid" | "dotted";
+};
+
+type UsdAxisScale = {
+  divisor: number;
+  suffix: string;
+  subtitle: string;
 };
 
 const CHART_COLORS = {
@@ -109,10 +120,34 @@ function toChartRows(rows: FundamentalQuarterRow[]): ChartRow[] {
   }));
 }
 
-function domainFor(rows: ChartRow[], keys: MetricKey[]): [number, number] {
-  const values = rows
-    .flatMap((row) => keys.map((key) => row[key]))
+function barMetricUsdValue(row: ChartRow, key: MetricKey): number | null {
+  if (key === "revenueBillions") return row.revenue;
+  if (key === "netIncomeBillions") return row.netIncome;
+  return null;
+}
+
+function barMetricValues(rows: ChartRow[], keys: MetricKey[]): number[] {
+  return rows
+    .flatMap((row) => keys.map((key) => barMetricUsdValue(row, key)))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function axisScaleForUsd(values: number[]): UsdAxisScale {
+  const maxAbs = Math.max(0, ...values.map((value) => Math.abs(value)));
+  if (maxAbs >= 1_000_000_000) return { divisor: 1_000_000_000, suffix: "B", subtitle: "USD billions" };
+  if (maxAbs >= 1_000_000) return { divisor: 1_000_000, suffix: "M", subtitle: "USD millions" };
+  return { divisor: 1, suffix: "", subtitle: "USD" };
+}
+
+function scaleBarRows(rows: ChartRow[], axisScale: UsdAxisScale): BarChartRow[] {
+  return rows.map((row) => ({
+    ...row,
+    revenueScaled: typeof row.revenue === "number" && Number.isFinite(row.revenue) ? row.revenue / axisScale.divisor : null,
+    netIncomeScaled: typeof row.netIncome === "number" && Number.isFinite(row.netIncome) ? row.netIncome / axisScale.divisor : null,
+  }));
+}
+
+function domainForValues(values: number[]): [number, number] {
   if (values.length === 0) return [0, 1];
 
   const min = Math.min(...values);
@@ -124,6 +159,13 @@ function domainFor(rows: ChartRow[], keys: MetricKey[]): [number, number] {
 
   const padding = (max - min) * 0.12;
   return [min - padding, max + padding];
+}
+
+function domainFor(rows: ChartRow[], keys: MetricKey[]): [number, number] {
+  const values = rows
+    .flatMap((row) => keys.map((key) => row[key]))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return domainForValues(values);
 }
 
 function MetricLegend({
@@ -238,8 +280,11 @@ function FundamentalsTooltip({
   );
 }
 
-function yAxisBillions(value: number): string {
-  return formatBillions(value);
+function yAxisUsd(value: number, axisScale: UsdAxisScale): string {
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  const digits = axisScale.suffix === "B" ? (abs < 1 ? 1 : 0) : axisScale.suffix === "M" && abs < 10 ? 1 : 0;
+  return `${sign}$${abs.toFixed(digits)}${axisScale.suffix}`;
 }
 
 function yAxisPercent(value: number): string {
@@ -321,7 +366,10 @@ export function FundamentalsChartPanel({
   const visibleRevenueGrowthKeys = (["revenueYoY", "revenueQoQ"] as MetricKey[]).filter((key) => visibility[key]);
   const visibleNetIncomeGrowthKeys = (["netIncomeYoY", "netIncomeQoQ"] as MetricKey[]).filter((key) => visibility[key]);
   const visibleGrowthKeys = GROWTH_LEGEND_ITEMS.map((item) => item.key).filter((key) => visibility[key]);
-  const barDomain = domainFor(chartRows, visibleBarKeys);
+  const barValues = barMetricValues(chartRows, visibleBarKeys);
+  const barAxisScale = axisScaleForUsd(barValues);
+  const barChartRows = scaleBarRows(chartRows, barAxisScale);
+  const barDomain = domainForValues(barValues.map((value) => value / barAxisScale.divisor));
   const revenueGrowthDomain = domainFor(chartRows, visibleRevenueGrowthKeys);
   const netIncomeGrowthDomain = domainFor(chartRows, visibleNetIncomeGrowthKeys);
   const toggleMetric = (key: MetricKey) => {
@@ -384,7 +432,7 @@ export function FundamentalsChartPanel({
         <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
           <div>
             <h5 className="text-sm font-semibold text-slate-100">Quarterly Revenue + Net Income</h5>
-            <p className="mt-1 text-xs text-slate-400">USD billions, latest {chartRows.length} fiscal quarters</p>
+            <p className="mt-1 text-xs text-slate-400">{barAxisScale.subtitle}, latest {chartRows.length} fiscal quarters</p>
           </div>
           <div className="flex flex-wrap gap-3 text-xs">
             <MetricChip color={CHART_COLORS.revenue} label="Revenue" active={visibility.revenueBillions} />
@@ -393,13 +441,13 @@ export function FundamentalsChartPanel({
         </div>
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartRows} margin={{ top: 12, right: 14, left: 6, bottom: 8 }}>
+            <BarChart data={barChartRows} margin={{ top: 12, right: 14, left: 6, bottom: 8 }}>
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" vertical={false} />
               <XAxis dataKey="quarterLabel" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis domain={barDomain} tickFormatter={yAxisBillions} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <YAxis domain={barDomain} tickFormatter={(value) => yAxisUsd(value, barAxisScale)} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={64} />
               <Tooltip content={<FundamentalsTooltip visibleMetrics={visibleBarKeys} />} cursor={{ fill: "rgba(148, 163, 184, 0.08)" }} />
-              <Bar dataKey="revenueBillions" name="Revenue" fill={CHART_COLORS.revenue} hide={!visibility.revenueBillions} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="netIncomeBillions" name="Net income" fill={CHART_COLORS.netIncome} hide={!visibility.netIncomeBillions} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="revenueScaled" name="Revenue" fill={CHART_COLORS.revenue} hide={!visibility.revenueBillions} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="netIncomeScaled" name="Net income" fill={CHART_COLORS.netIncome} hide={!visibility.netIncomeBillions} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -411,9 +459,13 @@ export function FundamentalsChartPanel({
           <h5 className="text-sm font-semibold text-slate-100">Growth: YoY + QoQ</h5>
           <p className="mt-1 text-xs text-slate-400">Revenue and net income growth rates</p>
         </div>
-        <div className="h-72">
+        <div className="relative h-72">
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-between px-1 text-[11px] font-semibold uppercase tracking-[0.12em]">
+            <span className={visibleRevenueGrowthKeys.length > 0 ? "text-sky-300" : "text-slate-500"}>Revenue</span>
+            <span className={visibleNetIncomeGrowthKeys.length > 0 ? "text-pink-300" : "text-slate-500"}>Net Income</span>
+          </div>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartRows} margin={{ top: 12, right: 28, left: 6, bottom: 8 }}>
+            <LineChart data={chartRows} margin={{ top: 30, right: 28, left: 6, bottom: 8 }}>
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" vertical={false} />
               <XAxis dataKey="quarterLabel" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis yAxisId="revenueGrowth" domain={revenueGrowthDomain} tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
