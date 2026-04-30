@@ -35,9 +35,11 @@
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
-> For earnings charts, change net income hover to show value in M instead of B. Also, put Rev growth and net income growth on different Y-axes
+> Change either revenue or NI growth lines to dotted to differentiate
+> Add metrics like mkt cap, avg price * vol for multi chart view
+> Change dimensions of expanded chart as it is too big now
 > Make keyboard shortcut to expand chart (Alt + Enter) (?)
-> See if there can be tradingview financials widgets shown in the expanded chart
+
 
 ## PEER GROUPS
 > Add Avg vol * Price for multi-chart
@@ -103,6 +105,7 @@
 
 ## New Functions
 - Add in morning brief section using Claude API
+- Add in latest fed minutes summary in macro rates
 - Add macro dashboard (https://x.com/investingluc/status/2044560364424032433?s=20)
 - Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs

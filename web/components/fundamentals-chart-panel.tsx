@@ -1,11 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -21,6 +21,24 @@ type ChartRow = FundamentalQuarterRow & {
   netIncomeBillions: number | null;
 };
 
+type MetricKey =
+  | "revenueBillions"
+  | "netIncomeBillions"
+  | "revenueYoY"
+  | "revenueQoQ"
+  | "netIncomeYoY"
+  | "netIncomeQoQ";
+
+type MetricVisibility = Record<MetricKey, boolean>;
+
+type LegendItem = {
+  key: MetricKey;
+  label: string;
+  color: string;
+  shape: "bar" | "line";
+  lineStyle?: "solid" | "dotted";
+};
+
 const CHART_COLORS = {
   revenue: "#5eead4",
   netIncome: "#fbbf24",
@@ -29,6 +47,27 @@ const CHART_COLORS = {
   netIncomeYoY: "#f472b6",
   netIncomeQoQ: "#fb923c",
 };
+
+const INITIAL_VISIBILITY: MetricVisibility = {
+  revenueBillions: true,
+  netIncomeBillions: true,
+  revenueYoY: true,
+  revenueQoQ: true,
+  netIncomeYoY: true,
+  netIncomeQoQ: true,
+};
+
+const BAR_LEGEND_ITEMS: LegendItem[] = [
+  { key: "revenueBillions", label: "Revenue", color: CHART_COLORS.revenue, shape: "bar" },
+  { key: "netIncomeBillions", label: "Net income", color: CHART_COLORS.netIncome, shape: "bar" },
+];
+
+const GROWTH_LEGEND_ITEMS: LegendItem[] = [
+  { key: "revenueYoY", label: "Revenue YoY", color: CHART_COLORS.revenueYoY, shape: "line", lineStyle: "dotted" },
+  { key: "revenueQoQ", label: "Revenue QoQ", color: CHART_COLORS.revenueQoQ, shape: "line", lineStyle: "dotted" },
+  { key: "netIncomeYoY", label: "NI YoY", color: CHART_COLORS.netIncomeYoY, shape: "line" },
+  { key: "netIncomeQoQ", label: "NI QoQ", color: CHART_COLORS.netIncomeQoQ, shape: "line" },
+];
 
 export function formatFundamentalDate(value: string | null | undefined): string {
   if (!value) return "-";
@@ -70,10 +109,90 @@ function toChartRows(rows: FundamentalQuarterRow[]): ChartRow[] {
   }));
 }
 
-function FundamentalsTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload?: ChartRow }> }) {
+function domainFor(rows: ChartRow[], keys: MetricKey[]): [number, number] {
+  const values = rows
+    .flatMap((row) => keys.map((key) => row[key]))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length === 0) return [0, 1];
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) {
+    const padding = Math.max(Math.abs(min) * 0.15, 1);
+    return [min - padding, max + padding];
+  }
+
+  const padding = (max - min) * 0.12;
+  return [min - padding, max + padding];
+}
+
+function MetricLegend({
+  items,
+  visibility,
+  onToggle,
+}: {
+  items: LegendItem[];
+  visibility: MetricVisibility;
+  onToggle: (key: MetricKey) => void;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap justify-center gap-3 text-xs">
+      {items.map((item) => {
+        const isVisible = visibility[item.key];
+        const color = isVisible ? item.color : "#64748b";
+        return (
+          <button
+            key={item.key}
+            type="button"
+            aria-pressed={isVisible}
+            className={`inline-flex items-center gap-1.5 rounded px-1 py-0.5 transition ${
+              isVisible ? "text-slate-200 hover:text-white" : "text-slate-500 hover:text-slate-300"
+            }`}
+            onClick={() => onToggle(item.key)}
+          >
+            {item.shape === "line" && item.lineStyle === "dotted" ? (
+              <span
+                className="h-1.5 w-4"
+                style={{
+                  backgroundImage: `radial-gradient(circle, ${color} 1.5px, transparent 1.6px)`,
+                  backgroundPosition: "left center",
+                  backgroundRepeat: "repeat-x",
+                  backgroundSize: "6px 6px",
+                }}
+              />
+            ) : (
+              <span
+                className={item.shape === "line" ? "h-0.5 w-4 rounded-full" : "h-2.5 w-2.5 rounded-sm"}
+                style={{ backgroundColor: color }}
+              />
+            )}
+            <span>{item.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FundamentalsTooltip({
+  active,
+  payload,
+  visibleMetrics,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: ChartRow }>;
+  visibleMetrics: MetricKey[];
+}) {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
+  const showRevenue = visibleMetrics.includes("revenueBillions");
+  const showNetIncome = visibleMetrics.includes("netIncomeBillions");
+  const showRevenueYoY = visibleMetrics.includes("revenueYoY");
+  const showRevenueQoQ = visibleMetrics.includes("revenueQoQ");
+  const showNetIncomeYoY = visibleMetrics.includes("netIncomeYoY");
+  const showNetIncomeQoQ = visibleMetrics.includes("netIncomeQoQ");
+
   return (
     <div className="min-w-64 rounded border border-borderSoft/80 bg-slate-950/95 p-3 text-xs shadow-2xl">
       <div className="font-semibold text-slate-100">{row.quarterLabel}</div>
@@ -81,30 +200,38 @@ function FundamentalsTooltip({ active, payload }: { active?: boolean; payload?: 
         {formatFundamentalDate(row.periodEnd)} {row.derivation ? `- ${row.derivation === "direct" ? "direct" : "derived"}` : ""}
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
-        <div>
-          <div className="text-slate-500">Revenue</div>
-          <div className="font-semibold text-slate-100">{formatBillions(row.revenueBillions)}</div>
-        </div>
-        <div>
-          <div className="text-slate-500">Net income</div>
-          <div className="font-semibold text-slate-100">{formatUsdCompact(row.netIncome)}</div>
-        </div>
-        <div>
-          <div className="text-slate-500">Revenue YoY / QoQ</div>
+        {showRevenue ? (
           <div>
-            <span className={percentClass(row.revenueYoY)}>{formatPercent(row.revenueYoY)}</span>
-            <span className="text-slate-500"> / </span>
-            <span className={percentClass(row.revenueQoQ)}>{formatPercent(row.revenueQoQ)}</span>
+            <div className="text-slate-500">Revenue</div>
+            <div className="font-semibold text-slate-100">{formatBillions(row.revenueBillions)}</div>
           </div>
-        </div>
-        <div>
-          <div className="text-slate-500">NI YoY / QoQ</div>
+        ) : null}
+        {showNetIncome ? (
           <div>
-            <span className={percentClass(row.netIncomeYoY)}>{formatPercent(row.netIncomeYoY)}</span>
-            <span className="text-slate-500"> / </span>
-            <span className={percentClass(row.netIncomeQoQ)}>{formatPercent(row.netIncomeQoQ)}</span>
+            <div className="text-slate-500">Net income</div>
+            <div className="font-semibold text-slate-100">{formatUsdCompact(row.netIncome)}</div>
           </div>
-        </div>
+        ) : null}
+        {showRevenueYoY || showRevenueQoQ ? (
+          <div>
+            <div className="text-slate-500">Revenue YoY / QoQ</div>
+            <div>
+              {showRevenueYoY ? <span className={percentClass(row.revenueYoY)}>{formatPercent(row.revenueYoY)}</span> : null}
+              {showRevenueYoY && showRevenueQoQ ? <span className="text-slate-500"> / </span> : null}
+              {showRevenueQoQ ? <span className={percentClass(row.revenueQoQ)}>{formatPercent(row.revenueQoQ)}</span> : null}
+            </div>
+          </div>
+        ) : null}
+        {showNetIncomeYoY || showNetIncomeQoQ ? (
+          <div>
+            <div className="text-slate-500">NI YoY / QoQ</div>
+            <div>
+              {showNetIncomeYoY ? <span className={percentClass(row.netIncomeYoY)}>{formatPercent(row.netIncomeYoY)}</span> : null}
+              {showNetIncomeYoY && showNetIncomeQoQ ? <span className="text-slate-500"> / </span> : null}
+              {showNetIncomeQoQ ? <span className={percentClass(row.netIncomeQoQ)}>{formatPercent(row.netIncomeQoQ)}</span> : null}
+            </div>
+          </div>
+        ) : null}
       </div>
       {row.warnings.length > 0 ? <div className="mt-3 text-[11px] leading-4 text-yellow-200">{row.warnings[0]}</div> : null}
     </div>
@@ -112,11 +239,20 @@ function FundamentalsTooltip({ active, payload }: { active?: boolean; payload?: 
 }
 
 function yAxisBillions(value: number): string {
-  return `$${value.toFixed(0)}B`;
+  return formatBillions(value);
 }
 
 function yAxisPercent(value: number): string {
   return `${value.toFixed(0)}%`;
+}
+
+function MetricChip({ active, color, label }: { active: boolean; color: string; label: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 ${active ? "text-slate-300" : "text-slate-500"}`}>
+      <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: active ? color : "#64748b" }} />
+      {label}
+    </span>
+  );
 }
 
 function VerificationTable({ rows }: { rows: ChartRow[] }) {
@@ -177,9 +313,20 @@ export function FundamentalsChartPanel({
   refreshing: boolean;
   showVerificationTable?: boolean;
 }) {
+  const [visibility, setVisibility] = useState<MetricVisibility>(INITIAL_VISIBILITY);
   const chartRows = toChartRows(data?.rows ?? []);
   const latest = chartRows.at(-1) ?? null;
   const hasRows = chartRows.length > 0;
+  const visibleBarKeys = BAR_LEGEND_ITEMS.map((item) => item.key).filter((key) => visibility[key]);
+  const visibleRevenueGrowthKeys = (["revenueYoY", "revenueQoQ"] as MetricKey[]).filter((key) => visibility[key]);
+  const visibleNetIncomeGrowthKeys = (["netIncomeYoY", "netIncomeQoQ"] as MetricKey[]).filter((key) => visibility[key]);
+  const visibleGrowthKeys = GROWTH_LEGEND_ITEMS.map((item) => item.key).filter((key) => visibility[key]);
+  const barDomain = domainFor(chartRows, visibleBarKeys);
+  const revenueGrowthDomain = domainFor(chartRows, visibleRevenueGrowthKeys);
+  const netIncomeGrowthDomain = domainFor(chartRows, visibleNetIncomeGrowthKeys);
+  const toggleMetric = (key: MetricKey) => {
+    setVisibility((current) => ({ ...current, [key]: !current[key] }));
+  };
 
   if (loading) {
     return (
@@ -239,9 +386,9 @@ export function FundamentalsChartPanel({
             <h5 className="text-sm font-semibold text-slate-100">Quarterly Revenue + Net Income</h5>
             <p className="mt-1 text-xs text-slate-400">USD billions, latest {chartRows.length} fiscal quarters</p>
           </div>
-          <div className="flex flex-wrap gap-3 text-xs text-slate-300">
-            <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: CHART_COLORS.revenue }} />Revenue</span>
-            <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: CHART_COLORS.netIncome }} />Net income</span>
+          <div className="flex flex-wrap gap-3 text-xs">
+            <MetricChip color={CHART_COLORS.revenue} label="Revenue" active={visibility.revenueBillions} />
+            <MetricChip color={CHART_COLORS.netIncome} label="Net income" active={visibility.netIncomeBillions} />
           </div>
         </div>
         <div className="h-72">
@@ -249,14 +396,14 @@ export function FundamentalsChartPanel({
             <BarChart data={chartRows} margin={{ top: 12, right: 14, left: 6, bottom: 8 }}>
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" vertical={false} />
               <XAxis dataKey="quarterLabel" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tickFormatter={yAxisBillions} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
-              <Tooltip content={<FundamentalsTooltip />} cursor={{ fill: "rgba(148, 163, 184, 0.08)" }} />
-              <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: 12 }} />
-              <Bar dataKey="revenueBillions" name="Revenue" fill={CHART_COLORS.revenue} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="netIncomeBillions" name="Net income" fill={CHART_COLORS.netIncome} radius={[4, 4, 0, 0]} />
+              <YAxis domain={barDomain} tickFormatter={yAxisBillions} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <Tooltip content={<FundamentalsTooltip visibleMetrics={visibleBarKeys} />} cursor={{ fill: "rgba(148, 163, 184, 0.08)" }} />
+              <Bar dataKey="revenueBillions" name="Revenue" fill={CHART_COLORS.revenue} hide={!visibility.revenueBillions} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="netIncomeBillions" name="Net income" fill={CHART_COLORS.netIncome} hide={!visibility.netIncomeBillions} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
+        <MetricLegend items={BAR_LEGEND_ITEMS} visibility={visibility} onToggle={toggleMetric} />
       </section>
 
       <section className="rounded-[24px] border border-borderSoft/70 bg-panelSoft/25 p-4">
@@ -269,17 +416,17 @@ export function FundamentalsChartPanel({
             <LineChart data={chartRows} margin={{ top: 12, right: 28, left: 6, bottom: 8 }}>
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" vertical={false} />
               <XAxis dataKey="quarterLabel" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis yAxisId="revenueGrowth" tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
-              <YAxis yAxisId="netIncomeGrowth" orientation="right" tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
-              <Tooltip content={<FundamentalsTooltip />} cursor={{ stroke: "rgba(148, 163, 184, 0.55)", strokeDasharray: "4 4" }} />
-              <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: 12 }} />
-              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueYoY" name="Revenue YoY" stroke={CHART_COLORS.revenueYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueQoQ" name="Revenue QoQ" stroke={CHART_COLORS.revenueQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeYoY" name="NI YoY" stroke={CHART_COLORS.netIncomeYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeQoQ" name="NI QoQ" stroke={CHART_COLORS.netIncomeQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+              <YAxis yAxisId="revenueGrowth" domain={revenueGrowthDomain} tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <YAxis yAxisId="netIncomeGrowth" domain={netIncomeGrowthDomain} orientation="right" tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <Tooltip content={<FundamentalsTooltip visibleMetrics={visibleGrowthKeys} />} cursor={{ stroke: "rgba(148, 163, 184, 0.55)", strokeDasharray: "4 4" }} />
+              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueYoY" name="Revenue YoY" stroke={CHART_COLORS.revenueYoY} strokeWidth={2.2} strokeDasharray="1 7" strokeLinecap="round" dot={{ r: 3 }} activeDot={{ r: 5 }} hide={!visibility.revenueYoY} />
+              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueQoQ" name="Revenue QoQ" stroke={CHART_COLORS.revenueQoQ} strokeWidth={2.2} strokeDasharray="1 7" strokeLinecap="round" dot={{ r: 3 }} activeDot={{ r: 5 }} hide={!visibility.revenueQoQ} />
+              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeYoY" name="NI YoY" stroke={CHART_COLORS.netIncomeYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} hide={!visibility.netIncomeYoY} />
+              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeQoQ" name="NI QoQ" stroke={CHART_COLORS.netIncomeQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} hide={!visibility.netIncomeQoQ} />
             </LineChart>
           </ResponsiveContainer>
         </div>
+        <MetricLegend items={GROWTH_LEGEND_ITEMS} visibility={visibility} onToggle={toggleMetric} />
       </section>
 
       {showVerificationTable ? <VerificationTable rows={chartRows} /> : null}
