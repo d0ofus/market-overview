@@ -1,11 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPatternFeatureSnapshot,
+  extractPatternFeatures,
   scorePatternSnapshot,
   type PatternDailyBar,
   type PatternLabel,
   type PatternModelVersion,
 } from "../src/pattern-scanner-service";
+import type { Env } from "../src/types";
+
+const refreshDailyBarsIncrementalMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../src/daily-bars", () => ({
+  refreshDailyBarsIncremental: refreshDailyBarsIncrementalMock,
+}));
+
+vi.mock("../src/provider", () => ({
+  getProvider: vi.fn(() => ({
+    label: "Mock Provider",
+    getDailyBars: vi.fn(),
+  })),
+}));
 
 function makeBars(ticker: string, count: number, startClose = 50): PatternDailyBar[] {
   const start = new Date("2025-01-02T00:00:00Z");
@@ -56,7 +71,79 @@ function labelFromSnapshot(
   };
 }
 
+function makePatternHydrationEnv(bars: PatternDailyBar[]): Env {
+  const bindResult = (sql: string, args: unknown[]) => ({
+    async first<T>() {
+      return null as T;
+    },
+    async all<T>() {
+      if (sql.includes("MAX(date) as latestBarDate")) {
+        const endDate = String(args.at(-1));
+        const startDate = String(args.at(-2));
+        const tickers = args.slice(0, -2).map((value) => String(value).toUpperCase());
+        const rows = tickers.map((ticker) => {
+          const tickerBars = bars.filter((bar) => bar.ticker === ticker && bar.date >= startDate && bar.date <= endDate);
+          if (tickerBars.length === 0) return null;
+          return {
+            ticker,
+            latestBarDate: tickerBars.map((bar) => bar.date).sort().at(-1) ?? null,
+            barCount: tickerBars.length,
+          };
+        }).filter(Boolean);
+        return { results: rows as T[] };
+      }
+      if (sql.includes("ROW_NUMBER() OVER")) {
+        const endDate = String(args.at(-2));
+        const limit = Number(args.at(-1));
+        const tickers = args.slice(0, -2).map((value) => String(value).toUpperCase());
+        const rows = tickers.flatMap((ticker) => (
+          bars
+            .filter((bar) => bar.ticker === ticker && bar.date <= endDate)
+            .sort((left, right) => right.date.localeCompare(left.date))
+            .slice(0, limit)
+            .sort((left, right) => left.date.localeCompare(right.date))
+        )).sort((left, right) => left.ticker.localeCompare(right.ticker) || left.date.localeCompare(right.date));
+        return { results: rows as T[] };
+      }
+      return { results: [] as T[] };
+    },
+    async run() {
+      return {};
+    },
+  });
+  const db = {
+    prepare(sql: string) {
+      return {
+        ...bindResult(sql, []),
+        bind(...args: unknown[]) {
+          return bindResult(sql, args);
+        },
+      };
+    },
+    async batch() {
+      return [];
+    },
+  } as unknown as D1Database;
+
+  const patternDb = {
+    prepare(sql: string) {
+      return {
+        ...bindResult(sql, []),
+        bind(...args: unknown[]) {
+          return bindResult(sql, args);
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  return { DB: db, PATTERN_DB: patternDb };
+}
+
 describe("pattern scanner service", () => {
+  beforeEach(() => {
+    refreshDailyBarsIncrementalMock.mockReset();
+  });
+
   it("extracts deterministic fixed-length features without future bars", () => {
     const tickerBars = makeBars("TEST", 120, 30);
     const benchmarkBars = makeBars("SPY", 120, 100);
@@ -121,6 +208,45 @@ describe("pattern scanner service", () => {
     });
 
     expect(snapshot).toBeNull();
+  });
+
+  it("hydrates missing stored bars before extracting selected pattern features", async () => {
+    const bars: PatternDailyBar[] = [];
+    const tickerBars = makeBars("HYDR", 90, 30);
+    const benchmarkBars = makeBars("SPY", 90, 100);
+    const setupDate = tickerBars[79].date;
+    const env = makePatternHydrationEnv(bars);
+    refreshDailyBarsIncrementalMock.mockImplementation(async (_env: Env, input: { tickers: string[]; startDate: string; endDate: string }) => {
+      const fetched = [...tickerBars, ...benchmarkBars].filter((bar) => (
+        input.tickers.includes(bar.ticker) && bar.date >= input.startDate && bar.date <= input.endDate
+      ));
+      bars.push(...fetched);
+      return {
+        requestedTickers: input.tickers.length,
+        fetchedRows: fetched.length,
+        writtenRows: fetched.length,
+        skippedCurrentTickers: 0,
+      };
+    });
+
+    const snapshot = await extractPatternFeatures(env, {
+      ticker: "HYDR",
+      setupDate,
+      contextWindowBars: 80,
+      patternWindowBars: 40,
+    });
+
+    expect(refreshDailyBarsIncrementalMock).toHaveBeenCalledWith(
+      env,
+      expect.objectContaining({
+        tickers: ["HYDR", "SPY"],
+        endDate: setupDate,
+        replaceExisting: true,
+      }),
+    );
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.sourceMetadata.barCount).toBe(80);
+    expect(snapshot?.sourceMetadata.latestBarDate).toBe(setupDate);
   });
 
   it("scores with model mode when enough active labels are present", () => {

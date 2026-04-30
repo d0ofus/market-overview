@@ -1,3 +1,5 @@
+import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getProvider } from "./provider";
 import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, WorkerScheduleSettings } from "./types";
 
@@ -16,6 +18,12 @@ const MAX_SELECTED_PATTERN_BARS = 160;
 const MIN_MODEL_CLASS_COUNT = 3;
 const MATCH_SCORE_THRESHOLD = 0.6;
 const PATTERN_UNIVERSE_QUERY_CHUNK_SIZE = 50;
+
+type PatternBarCoverage = {
+  ticker: string;
+  latestBarDate: string | null;
+  barCount: number;
+};
 
 export class PatternDbUnavailableError extends Error {
   constructor() {
@@ -483,6 +491,95 @@ const FEATURE_LABELS: Record<string, string> = {
 function requirePatternDb(env: Env): D1Database {
   if (!env.PATTERN_DB) throw new PatternDbUnavailableError();
   return env.PATTERN_DB;
+}
+
+function addUtcDays(isoDate: string, days: number): string {
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function calendarLookbackDaysForBars(barCount: number): number {
+  return Math.ceil(Math.max(1, barCount) * 7 / 5) + 35;
+}
+
+async function loadPatternBarCoverage(
+  env: Env,
+  tickers: string[],
+  startDate: string,
+  endDate: string,
+): Promise<Map<string, PatternBarCoverage>> {
+  const out = new Map<string, PatternBarCoverage>();
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  if (unique.length === 0) return out;
+  for (let index = 0; index < unique.length; index += PATTERN_UNIVERSE_QUERY_CHUNK_SIZE) {
+    const chunk = unique.slice(index, index + PATTERN_UNIVERSE_QUERY_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT
+         ticker,
+         MAX(date) as latestBarDate,
+         COUNT(*) as barCount
+       FROM daily_bars
+       WHERE ticker IN (${placeholders})
+         AND date >= ?
+         AND date <= ?
+       GROUP BY ticker`,
+    )
+      .bind(...chunk, startDate, endDate)
+      .all<{ ticker: string; latestBarDate: string | null; barCount: number | string | null }>();
+    for (const row of rows.results ?? []) {
+      const ticker = row.ticker.toUpperCase();
+      out.set(ticker, {
+        ticker,
+        latestBarDate: row.latestBarDate ?? null,
+        barCount: Math.max(0, Number(row.barCount ?? 0) || 0),
+      });
+    }
+  }
+  return out;
+}
+
+async function ensurePatternBarsHydrated(
+  env: Env,
+  input: {
+    tickers: string[];
+    endDate: string;
+    contextWindowBars: number;
+  },
+): Promise<void> {
+  const uniqueTickers = Array.from(new Set(
+    input.tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (uniqueTickers.length === 0) return;
+  const requiredBars = Math.max(MIN_EXTRACT_BARS, Math.trunc(input.contextWindowBars));
+  const startDate = addUtcDays(input.endDate, -calendarLookbackDaysForBars(requiredBars));
+  const coverage = await loadPatternBarCoverage(env, uniqueTickers, startDate, input.endDate);
+  const hydrationTickers = uniqueTickers.filter((ticker) => {
+    const row = coverage.get(ticker);
+    if (!row) return true;
+    if (!row.latestBarDate) return true;
+    if (row.latestBarDate < input.endDate) return true;
+    return row.barCount < requiredBars;
+  });
+  if (hydrationTickers.length === 0) return;
+  try {
+    await refreshDailyBarsIncremental(env, {
+      tickers: hydrationTickers,
+      startDate,
+      endDate: input.endDate,
+      provider: getProvider(env, { yahooPreferredTickers: uniqueTickers }),
+      replaceExisting: true,
+    });
+  } catch (error) {
+    console.error("pattern scanner history hydration failed; stored bars will be used", {
+      tickers: hydrationTickers,
+      endDate: input.endDate,
+      error,
+    });
+  }
 }
 
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
@@ -1152,6 +1249,11 @@ export async function extractPatternFeatures(
   const benchmarkTicker = profile?.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
   const ticker = input.ticker.trim().toUpperCase();
   const setupDate = input.patternEndDate ?? input.setupDate;
+  await ensurePatternBarsHydrated(env, {
+    tickers: [ticker, benchmarkTicker],
+    endDate: setupDate,
+    contextWindowBars,
+  });
   const bars = await loadBarsByCount(env, [ticker, benchmarkTicker], setupDate, contextWindowBars);
   return buildPatternFeatureSnapshot({
     ticker,
@@ -1181,6 +1283,11 @@ export async function loadPatternChartData(
   const benchmarkTicker = profile?.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
   const ticker = input.ticker.trim().toUpperCase();
   const contextWindowBars = Math.max(MIN_EXTRACT_BARS, Math.min(520, Math.trunc(input.contextBars ?? profile?.settings.contextWindowBars ?? DEFAULT_CONTEXT_WINDOW_BARS)));
+  await ensurePatternBarsHydrated(env, {
+    tickers: [ticker, benchmarkTicker],
+    endDate: input.endDate,
+    contextWindowBars,
+  });
   const barsByTicker = await loadBarsByCount(env, [ticker, benchmarkTicker], input.endDate, contextWindowBars);
   const tickerBars = barsByTicker.get(ticker) ?? [];
   const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];

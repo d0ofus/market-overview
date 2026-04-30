@@ -35,11 +35,9 @@
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
-> Change either revenue or NI growth lines to dotted to differentiate
-> Add metrics like mkt cap, avg price * vol for multi chart view
+> Add metrics like industry (from peer group/tradingview), mkt cap, avg price * vol for multi chart view. Change format to move metrics to same line as ticker and remove deplicate ticker
 > Change dimensions of expanded chart as it is too big now
 > Make keyboard shortcut to expand chart (Alt + Enter) (?)
-
 
 ## PEER GROUPS
 > Add Avg vol * Price for multi-chart

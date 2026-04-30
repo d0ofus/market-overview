@@ -224,16 +224,18 @@ export function PatternScannerDashboard() {
   };
 
   const loadSeedChart = async () => {
-    if (!seed.ticker.trim() || !seed.setupDate) return;
+    const requestedEndDate = seed.setupDate || defaultSetupDate();
+    if (!seed.ticker.trim()) return;
     setSeedChartLoading(true);
     try {
-      const chart = await getPatternChart({ profileId, ticker: seed.ticker, endDate: seed.setupDate, contextBars: 260 });
+      const chart = await getPatternChart({ profileId, ticker: seed.ticker, endDate: requestedEndDate, contextBars: 260 });
       setSeedChart(chart);
-      const endDate = chart.availableEndDate ?? seed.setupDate;
+      const endDate = chart.availableEndDate ?? requestedEndDate;
       const startIndex = Math.max(0, chart.bars.length - 40);
       const startDate = chart.bars[startIndex]?.date ?? chart.availableStartDate ?? "";
       setSeed((current) => ({
         ...current,
+        setupDate: endDate,
         patternStartDate: startDate,
         patternEndDate: endDate,
         selectedBarCount: chart.bars.filter((bar) => bar.date >= startDate && bar.date <= endDate).length,
@@ -447,12 +449,19 @@ export function PatternScannerDashboard() {
                 <label className="text-xs text-slate-300">
                   Ticker
                   <input className={INPUT_CLASS} value={seed.ticker} onChange={(event) => {
-                    setSeed((current) => ({ ...current, ticker: event.target.value.toUpperCase(), patternStartDate: "", patternEndDate: "", selectedBarCount: 0 }));
+                    setSeed((current) => ({
+                      ...current,
+                      ticker: event.target.value.toUpperCase(),
+                      setupDate: defaultSetupDate(),
+                      patternStartDate: "",
+                      patternEndDate: "",
+                      selectedBarCount: 0,
+                    }));
                     setSeedChart(null);
                   }} onKeyDown={(event) => {
                     if (event.key !== "Enter") return;
                     event.preventDefault();
-                    if (!seedChartLoading && seed.ticker.trim() && seed.setupDate) void loadSeedChart();
+                    if (!seedChartLoading && seed.ticker.trim()) void loadSeedChart();
                   }} />
                 </label>
                 <label className="text-xs text-slate-300">
@@ -462,9 +471,9 @@ export function PatternScannerDashboard() {
                     setSeedChart(null);
                   }} />
                 </label>
-                <button className={BUTTON_CLASS} disabled={seedChartLoading || !seed.ticker.trim() || !seed.setupDate} onClick={() => void loadSeedChart()} type="button">
+                <button className={BUTTON_CLASS} disabled={seedChartLoading || !seed.ticker.trim()} onClick={() => void loadSeedChart()} type="button">
                   {seedChartLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BarChart3 className="h-3.5 w-3.5" />}
-                  Load Chart
+                  Refresh Chart
                 </button>
                 <div className="grid gap-3 md:grid-cols-3">
                   <label className="text-xs text-slate-300">
