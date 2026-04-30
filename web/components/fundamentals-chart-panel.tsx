@@ -87,7 +87,7 @@ function FundamentalsTooltip({ active, payload }: { active?: boolean; payload?: 
         </div>
         <div>
           <div className="text-slate-500">Net income</div>
-          <div className="font-semibold text-slate-100">{formatBillions(row.netIncomeBillions)}</div>
+          <div className="font-semibold text-slate-100">{formatUsdCompact(row.netIncome)}</div>
         </div>
         <div>
           <div className="text-slate-500">Revenue YoY / QoQ</div>
@@ -266,16 +266,17 @@ export function FundamentalsChartPanel({
         </div>
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartRows} margin={{ top: 12, right: 14, left: 6, bottom: 8 }}>
+            <LineChart data={chartRows} margin={{ top: 12, right: 28, left: 6, bottom: 8 }}>
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" vertical={false} />
               <XAxis dataKey="quarterLabel" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <YAxis yAxisId="revenueGrowth" tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+              <YAxis yAxisId="netIncomeGrowth" orientation="right" tickFormatter={yAxisPercent} tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
               <Tooltip content={<FundamentalsTooltip />} cursor={{ stroke: "rgba(148, 163, 184, 0.55)", strokeDasharray: "4 4" }} />
               <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: 12 }} />
-              <Line type="monotone" dataKey="revenueYoY" name="Revenue YoY" stroke={CHART_COLORS.revenueYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line type="monotone" dataKey="revenueQoQ" name="Revenue QoQ" stroke={CHART_COLORS.revenueQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line type="monotone" dataKey="netIncomeYoY" name="NI YoY" stroke={CHART_COLORS.netIncomeYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-              <Line type="monotone" dataKey="netIncomeQoQ" name="NI QoQ" stroke={CHART_COLORS.netIncomeQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueYoY" name="Revenue YoY" stroke={CHART_COLORS.revenueYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+              <Line yAxisId="revenueGrowth" type="monotone" dataKey="revenueQoQ" name="Revenue QoQ" stroke={CHART_COLORS.revenueQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeYoY" name="NI YoY" stroke={CHART_COLORS.netIncomeYoY} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+              <Line yAxisId="netIncomeGrowth" type="monotone" dataKey="netIncomeQoQ" name="NI QoQ" stroke={CHART_COLORS.netIncomeQoQ} strokeWidth={2.2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
