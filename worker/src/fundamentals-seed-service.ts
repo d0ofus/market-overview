@@ -12,6 +12,7 @@ const MAX_FETCH_RANGE = 1000;
 const MAX_DISCOVERY_ROWS = 10_000;
 const QUEUE_BATCH_SIZE = 50;
 const PROCESS_LIMIT_MAX = 10;
+const SCHEDULED_PROCESS_LIMIT = 10;
 const PROCESS_DELAY_MS = 250;
 
 type FundamentalSeedStatus = "queued" | "running" | "ok" | "no_supported_rows" | "error" | "skipped";
@@ -564,7 +565,7 @@ export async function maybeProcessFundamentalSeedQueue(env: Env, now = new Date(
        AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime(?))`,
   ).bind(now.toISOString()).first<DbCountRow>();
   if (Number(due?.count ?? 0) <= 0) return null;
-  return processFundamentalSeedQueue(env, { limit: 3, trigger: "scheduled", now });
+  return processFundamentalSeedQueue(env, { limit: SCHEDULED_PROCESS_LIMIT, trigger: "scheduled", now });
 }
 
 function storageLabel(bytes: number): string {
