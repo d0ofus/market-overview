@@ -18,6 +18,7 @@ const MAX_SELECTED_PATTERN_BARS = 160;
 const MIN_MODEL_CLASS_COUNT = 3;
 const MATCH_SCORE_THRESHOLD = 0.6;
 const PATTERN_UNIVERSE_QUERY_CHUNK_SIZE = 50;
+const PATTERN_RUN_LEASE_MS = 2 * 60_000;
 
 type PatternBarCoverage = {
   ticker: string;
@@ -200,18 +201,25 @@ export type PatternRun = {
   id: string;
   profileId: string;
   tradingDate: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "paused" | "cancelled" | "completed" | "failed";
   phase: string;
   totalCount: number;
   processedCount: number;
   matchedCount: number;
   cursorOffset: number;
+  autoContinue: boolean;
+  lastAdvancedAt: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
   error: string | null;
   warning: string | null;
 };
+
+const PROCESSABLE_PATTERN_RUN_STATUSES = new Set<PatternRun["status"]>(["queued", "running"]);
+const TERMINAL_PATTERN_RUN_STATUSES = new Set<PatternRun["status"]>(["cancelled", "completed", "failed"]);
 
 export type PatternCandidate = {
   id: string;
@@ -229,6 +237,8 @@ export type PatternCandidate = {
   createdAt?: string;
   tradingDate?: string;
   updatedAt?: string;
+  reviewStatus?: PatternLabelValue | null;
+  reviewedAt?: string | null;
 };
 
 export type PatternScoreReasons = {
@@ -266,6 +276,7 @@ export type PatternRunCreateInput = {
   profileId?: string;
   tradingDate?: string;
   force?: boolean;
+  autoContinue?: boolean;
 };
 
 export type PatternLabelCreateInput = {
@@ -349,6 +360,10 @@ type PatternRunRow = {
   processedCount: number;
   matchedCount: number;
   cursorOffset: number;
+  autoContinue?: number | null;
+  lastAdvancedAt?: string | null;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -372,6 +387,8 @@ type PatternCandidateRow = {
   createdAt?: string;
   tradingDate?: string;
   updatedAt?: string;
+  reviewEventType?: string | null;
+  reviewedAt?: string | null;
 };
 
 export type PatternChartBar = {
@@ -867,6 +884,10 @@ function mapRunRow(row: PatternRunRow): PatternRun {
     processedCount: Number(row.processedCount ?? 0),
     matchedCount: Number(row.matchedCount ?? 0),
     cursorOffset: Number(row.cursorOffset ?? 0),
+    autoContinue: Number(row.autoContinue ?? 0) === 1,
+    lastAdvancedAt: row.lastAdvancedAt ?? null,
+    leaseOwner: row.leaseOwner ?? null,
+    leaseExpiresAt: row.leaseExpiresAt ?? null,
     startedAt: row.startedAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -892,7 +913,16 @@ function mapCandidateRow(row: PatternCandidateRow): PatternCandidate {
     createdAt: row.createdAt,
     tradingDate: row.tradingDate,
     updatedAt: row.updatedAt,
+    reviewStatus: mapReviewEventType(row.reviewEventType),
+    reviewedAt: row.reviewedAt ?? null,
   };
+}
+
+function mapReviewEventType(value: string | null | undefined): PatternLabelValue | null {
+  if (value === "label_approved") return "approved";
+  if (value === "label_rejected") return "rejected";
+  if (value === "skip") return "skipped";
+  return null;
 }
 
 function emptyModelJson(): PatternModelJson {
@@ -2351,21 +2381,29 @@ export async function createPatternRun(env: Env, input: PatternRunCreateInput = 
   const profile = await ensurePatternProfile(env, input.profileId ?? DEFAULT_PATTERN_PROFILE_ID);
   const tradingDate = input.tradingDate ?? latestUsSessionAsOfDate(new Date());
   const existing = await loadPatternRunByProfileDate(env, profile.id, tradingDate);
-  if (existing && !input.force && existing.status !== "failed") return existing;
+  if (existing && !input.force && !TERMINAL_PATTERN_RUN_STATUSES.has(existing.status)) {
+    if (input.autoContinue && !existing.autoContinue) {
+      await updatePatternRun(env, existing.id, { autoContinue: true });
+      return await loadPatternRun(env, existing.id) ?? existing;
+    }
+    return existing;
+  }
+  if (existing && !input.force && existing.status === "completed") return existing;
   if (existing && input.force) {
     await db.batch([
-      db.prepare("DELETE FROM pattern_run_candidates WHERE run_id = ?").bind(existing.id),
-      db.prepare("DELETE FROM pattern_runs WHERE id = ?").bind(existing.id),
+      db.prepare("DELETE FROM pattern_run_candidates WHERE run_id IN (SELECT id FROM pattern_runs WHERE profile_id = ? AND trading_date = ?)").bind(profile.id, tradingDate),
+      db.prepare("DELETE FROM pattern_scores_latest WHERE profile_id = ? AND trading_date = ?").bind(profile.id, tradingDate),
+      db.prepare("DELETE FROM pattern_runs WHERE profile_id = ? AND trading_date = ?").bind(profile.id, tradingDate),
     ]);
   }
   const totalCount = await countEligibleUniverse(env, profile, tradingDate);
   const runId = crypto.randomUUID();
   await db.prepare(
     `INSERT INTO pattern_runs
-      (id, profile_id, trading_date, status, phase, total_count, processed_count, matched_count, cursor_offset, started_at, updated_at, completed_at, error, warning)
-     VALUES (?, ?, ?, 'queued', 'queued', ?, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, NULL)`,
+      (id, profile_id, trading_date, status, phase, total_count, processed_count, matched_count, cursor_offset, auto_continue, last_advanced_at, lease_owner, lease_expires_at, started_at, updated_at, completed_at, error, warning)
+     VALUES (?, ?, ?, 'queued', 'queued', ?, 0, 0, 0, ?, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, NULL)`,
   )
-    .bind(runId, profile.id, tradingDate, totalCount)
+    .bind(runId, profile.id, tradingDate, totalCount, input.autoContinue === false ? 0 : 1)
     .run();
   const run = await loadPatternRun(env, runId);
   if (!run) throw new Error("Failed to create pattern scan run.");
@@ -2385,6 +2423,10 @@ async function loadPatternRunByProfileDate(env: Env, profileId: string, tradingD
        processed_count as processedCount,
        matched_count as matchedCount,
        cursor_offset as cursorOffset,
+       COALESCE(auto_continue, 0) as autoContinue,
+       last_advanced_at as lastAdvancedAt,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
@@ -2393,6 +2435,7 @@ async function loadPatternRunByProfileDate(env: Env, profileId: string, tradingD
      FROM pattern_runs
      WHERE profile_id = ?
        AND trading_date = ?
+     ORDER BY datetime(started_at) DESC
      LIMIT 1`,
   )
     .bind(profileId, tradingDate)
@@ -2413,6 +2456,10 @@ export async function loadPatternRun(env: Env, runId: string): Promise<PatternRu
        processed_count as processedCount,
        matched_count as matchedCount,
        cursor_offset as cursorOffset,
+       COALESCE(auto_continue, 0) as autoContinue,
+       last_advanced_at as lastAdvancedAt,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
@@ -2440,6 +2487,10 @@ export async function listPatternRuns(env: Env, profileId = DEFAULT_PATTERN_PROF
        processed_count as processedCount,
        matched_count as matchedCount,
        cursor_offset as cursorOffset,
+       COALESCE(auto_continue, 0) as autoContinue,
+       last_advanced_at as lastAdvancedAt,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
@@ -2461,6 +2512,10 @@ async function updatePatternRun(env: Env, runId: string, patch: Partial<{
   processedCount: number;
   matchedCount: number;
   cursorOffset: number;
+  autoContinue: boolean;
+  lastAdvancedAt: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
   completedAt: string | null;
   error: string | null;
   warning: string | null;
@@ -2488,6 +2543,22 @@ async function updatePatternRun(env: Env, runId: string, patch: Partial<{
     assignments.push("cursor_offset = ?");
     values.push(patch.cursorOffset);
   }
+  if (typeof patch.autoContinue === "boolean") {
+    assignments.push("auto_continue = ?");
+    values.push(patch.autoContinue ? 1 : 0);
+  }
+  if (patch.lastAdvancedAt !== undefined) {
+    assignments.push("last_advanced_at = ?");
+    values.push(patch.lastAdvancedAt);
+  }
+  if (patch.leaseOwner !== undefined) {
+    assignments.push("lease_owner = ?");
+    values.push(patch.leaseOwner);
+  }
+  if (patch.leaseExpiresAt !== undefined) {
+    assignments.push("lease_expires_at = ?");
+    values.push(patch.leaseExpiresAt);
+  }
   if (patch.completedAt !== undefined) {
     assignments.push("completed_at = ?");
     values.push(patch.completedAt);
@@ -2503,15 +2574,69 @@ async function updatePatternRun(env: Env, runId: string, patch: Partial<{
   await db.prepare(`UPDATE pattern_runs SET ${assignments.join(", ")} WHERE id = ?`).bind(...values, runId).run();
 }
 
+async function acquirePatternRunLease(env: Env, runId: string, owner: string, leaseMs = PATTERN_RUN_LEASE_MS): Promise<boolean> {
+  const db = requirePatternDb(env);
+  const nowIso = new Date().toISOString();
+  const leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString();
+  const result = await db.prepare(
+    `UPDATE pattern_runs
+     SET
+       status = CASE WHEN status = 'queued' THEN 'running' ELSE status END,
+       phase = 'scanning',
+       lease_owner = ?,
+       lease_expires_at = ?,
+       error = NULL,
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND status IN ('queued', 'running')
+       AND (
+         lease_owner IS NULL
+         OR lease_owner = ?
+         OR lease_expires_at IS NULL
+         OR datetime(lease_expires_at) <= datetime(?)
+       )`,
+  )
+    .bind(owner, leaseExpiresAt, runId, owner, nowIso)
+    .run();
+  return Number(result.meta?.changes ?? 0) > 0;
+}
+
+async function releasePatternRunLease(env: Env, runId: string, owner: string): Promise<void> {
+  const db = requirePatternDb(env);
+  await db.prepare(
+    `UPDATE pattern_runs
+     SET lease_owner = NULL,
+         lease_expires_at = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND lease_owner = ?`,
+  )
+    .bind(runId, owner)
+    .run();
+}
+
+async function clearLatestPatternScoresForRun(env: Env, runId: string): Promise<void> {
+  const db = requirePatternDb(env);
+  await db.prepare("DELETE FROM pattern_scores_latest WHERE run_id = ?").bind(runId).run();
+}
+
 export async function processPatternScanRun(
   env: Env,
   runId: string,
-  options?: { batchSize?: number; maxBatches?: number },
+  options?: { batchSize?: number; maxBatches?: number; leaseOwner?: string },
 ): Promise<PatternRun | null> {
   const db = requirePatternDb(env);
   let run = await loadPatternRun(env, runId);
   if (!run) return null;
-  if (run.status === "completed" || run.status === "failed") return run;
+  if (!PROCESSABLE_PATTERN_RUN_STATUSES.has(run.status)) return run;
+  const leaseOwner = options?.leaseOwner ?? crypto.randomUUID();
+  const acquired = await acquirePatternRunLease(env, run.id, leaseOwner);
+  if (!acquired) return run;
+  run = await loadPatternRun(env, runId);
+  if (!run || !PROCESSABLE_PATTERN_RUN_STATUSES.has(run.status)) {
+    await releasePatternRunLease(env, runId, leaseOwner);
+    return run;
+  }
   const profile = await ensurePatternProfile(env, run.profileId);
   let model = await loadPatternModel(env, profile.id);
   if (!model) model = await rebuildPatternModel(env, profile.id);
@@ -2522,11 +2647,30 @@ export async function processPatternScanRun(
   let processedCount = run.processedCount;
   let matchedCount = run.matchedCount;
   let batchCount = 0;
+  let warning: string | null = run.warning;
   try {
-    await updatePatternRun(env, run.id, { status: "running", phase: "scanning", error: null });
     while (cursorOffset < run.totalCount && batchCount < maxBatches) {
+      const control = await loadPatternRun(env, run.id);
+      if (!control) return null;
+      if (control.status === "paused" || control.status === "cancelled") {
+        await updatePatternRun(env, run.id, {
+          phase: control.status,
+          processedCount,
+          matchedCount,
+          cursorOffset,
+          lastAdvancedAt: batchCount > 0 ? new Date().toISOString() : control.lastAdvancedAt,
+          autoContinue: false,
+        });
+        if (control.status === "cancelled") await clearLatestPatternScoresForRun(env, run.id);
+        run = await loadPatternRun(env, runId);
+        return run;
+      }
       const universe = await loadEligibleUniverseBatch(env, profile, run.tradingDate, cursorOffset, batchSize);
-      if (universe.length === 0) break;
+      if (universe.length === 0) {
+        warning = "Eligible universe ended before the stored total count.";
+        cursorOffset = run.totalCount;
+        break;
+      }
       const benchmarkTicker = profile.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
       const tickers = universe.map((candidate) => candidate.ticker);
       const barsByTicker = await loadBarsByCount(env, [...tickers, benchmarkTicker], run.tradingDate, profile.settings.contextWindowBars);
@@ -2650,12 +2794,28 @@ export async function processPatternScanRun(
       if (statements.length > 0) await db.batch(statements);
       cursorOffset += universe.length;
       batchCount += 1;
+      const progressedAt = new Date().toISOString();
+      const controlAfterBatch = await loadPatternRun(env, run.id);
+      if (controlAfterBatch?.status === "paused" || controlAfterBatch?.status === "cancelled") {
+        await updatePatternRun(env, run.id, {
+          phase: controlAfterBatch.status,
+          processedCount,
+          matchedCount,
+          cursorOffset,
+          lastAdvancedAt: progressedAt,
+          autoContinue: false,
+        });
+        if (controlAfterBatch.status === "cancelled") await clearLatestPatternScoresForRun(env, run.id);
+        run = await loadPatternRun(env, runId);
+        return run;
+      }
       await updatePatternRun(env, run.id, {
         status: "running",
         phase: "scanning",
         processedCount,
         matchedCount,
         cursorOffset,
+        lastAdvancedAt: progressedAt,
       });
     }
     if (cursorOffset >= run.totalCount) {
@@ -2666,16 +2826,35 @@ export async function processPatternScanRun(
         processedCount,
         matchedCount,
         cursorOffset,
+        autoContinue: false,
+        lastAdvancedAt: new Date().toISOString(),
+        leaseOwner: null,
+        leaseExpiresAt: null,
         completedAt: new Date().toISOString(),
+        warning,
+      });
+    } else {
+      await updatePatternRun(env, run.id, {
+        status: "running",
+        phase: "waiting_for_next_batch",
+        processedCount,
+        matchedCount,
+        cursorOffset,
+        warning,
       });
     }
   } catch (error) {
-    await updatePatternRun(env, run.id, {
+    await updatePatternRun(env, runId, {
       status: "failed",
       phase: "failed",
+      autoContinue: false,
+      leaseOwner: null,
+      leaseExpiresAt: null,
       completedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : "Pattern scan failed.",
     });
+  } finally {
+    await releasePatternRunLease(env, runId, leaseOwner);
   }
   run = await loadPatternRun(env, runId);
   return run;
@@ -2698,15 +2877,121 @@ async function rerankRunCandidates(env: Env, runId: string): Promise<void> {
   }
 }
 
+export async function continuePatternRun(env: Env, runId: string): Promise<PatternRun | null> {
+  const run = await loadPatternRun(env, runId);
+  if (!run) return null;
+  if (TERMINAL_PATTERN_RUN_STATUSES.has(run.status)) return run;
+  await updatePatternRun(env, run.id, {
+    status: "running",
+    phase: "waiting_for_next_batch",
+    autoContinue: true,
+    completedAt: null,
+    error: null,
+  });
+  return await loadPatternRun(env, run.id);
+}
+
+export async function pausePatternRun(env: Env, runId: string): Promise<PatternRun | null> {
+  const run = await loadPatternRun(env, runId);
+  if (!run) return null;
+  if (TERMINAL_PATTERN_RUN_STATUSES.has(run.status)) return run;
+  await updatePatternRun(env, run.id, {
+    status: "paused",
+    phase: "paused",
+    autoContinue: false,
+    warning: "Paused by user.",
+  });
+  return await loadPatternRun(env, run.id);
+}
+
+export async function resumePatternRun(env: Env, runId: string): Promise<PatternRun | null> {
+  const run = await loadPatternRun(env, runId);
+  if (!run) return null;
+  if (TERMINAL_PATTERN_RUN_STATUSES.has(run.status)) return run;
+  await updatePatternRun(env, run.id, {
+    status: "running",
+    phase: "waiting_for_next_batch",
+    autoContinue: true,
+    completedAt: null,
+    error: null,
+    warning: null,
+  });
+  return await loadPatternRun(env, run.id);
+}
+
+export async function cancelPatternRun(env: Env, runId: string): Promise<PatternRun | null> {
+  const run = await loadPatternRun(env, runId);
+  if (!run) return null;
+  if (TERMINAL_PATTERN_RUN_STATUSES.has(run.status)) return run;
+  await updatePatternRun(env, run.id, {
+    status: "cancelled",
+    phase: "cancelled",
+    autoContinue: false,
+    leaseOwner: null,
+    leaseExpiresAt: null,
+    completedAt: new Date().toISOString(),
+    warning: "Cancelled by user.",
+  });
+  await clearLatestPatternScoresForRun(env, run.id);
+  return await loadPatternRun(env, run.id);
+}
+
+export async function listAutoContinuablePatternRuns(env: Env, limit = 3): Promise<PatternRun[]> {
+  const db = requirePatternDb(env);
+  const nowIso = new Date().toISOString();
+  const rows = await db.prepare(
+    `SELECT
+       id,
+       profile_id as profileId,
+       trading_date as tradingDate,
+       status,
+       phase,
+       total_count as totalCount,
+       processed_count as processedCount,
+       matched_count as matchedCount,
+       cursor_offset as cursorOffset,
+       COALESCE(auto_continue, 0) as autoContinue,
+       last_advanced_at as lastAdvancedAt,
+       lease_owner as leaseOwner,
+       lease_expires_at as leaseExpiresAt,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       warning
+     FROM pattern_runs
+     WHERE auto_continue = 1
+       AND status IN ('queued', 'running')
+       AND (
+         lease_owner IS NULL
+         OR lease_expires_at IS NULL
+         OR datetime(lease_expires_at) <= datetime(?)
+       )
+     ORDER BY datetime(started_at) ASC
+     LIMIT ?`,
+  )
+    .bind(nowIso, Math.max(1, Math.min(10, limit)))
+    .all<PatternRunRow>();
+  return (rows.results ?? []).map(mapRunRow);
+}
+
 export async function maybeRunScheduledPatternScan(
   env: Env,
   now: Date,
   settings: WorkerScheduleSettings,
 ): Promise<PatternRun | null> {
-  if (!env.PATTERN_DB || !settings.patternScanEnabled) return null;
+  if (!env.PATTERN_DB) return null;
+  const continuable = await listAutoContinuablePatternRuns(env, 1);
+  if (continuable[0]) {
+    return await processPatternScanRun(env, continuable[0].id, {
+      batchSize: settings.patternScanBatchSize,
+      maxBatches: settings.patternScanMaxBatchesPerTick,
+    });
+  }
+  if (!settings.patternScanEnabled) return null;
   const tradingDate = latestUsSessionAsOfDate(now);
   if (!isPatternScanWindowOpen(now, tradingDate, settings.patternScanOffsetMinutes)) return null;
-  const run = await createPatternRun(env, { profileId: DEFAULT_PATTERN_PROFILE_ID, tradingDate, force: false });
+  const run = await createPatternRun(env, { profileId: DEFAULT_PATTERN_PROFILE_ID, tradingDate, force: false, autoContinue: true });
   if (run.status === "completed") return run;
   return await processPatternScanRun(env, run.id, {
     batchSize: settings.patternScanBatchSize,
@@ -2738,7 +3023,27 @@ export async function listLatestPatternCandidates(env: Env, profileId = DEFAULT_
        shape_json as shapeJson,
        source_metadata_json as sourceMetadataJson,
        trading_date as tradingDate,
-       updated_at as updatedAt
+       updated_at as updatedAt,
+       (
+         SELECT event_type
+         FROM pattern_review_events e
+         WHERE e.profile_id = pattern_scores_latest.profile_id
+           AND e.run_id = pattern_scores_latest.run_id
+           AND e.candidate_id = pattern_scores_latest.candidate_id
+           AND e.event_type IN ('label_approved', 'label_rejected', 'skip')
+         ORDER BY datetime(e.created_at) DESC
+         LIMIT 1
+       ) as reviewEventType,
+       (
+         SELECT created_at
+         FROM pattern_review_events e
+         WHERE e.profile_id = pattern_scores_latest.profile_id
+           AND e.run_id = pattern_scores_latest.run_id
+           AND e.candidate_id = pattern_scores_latest.candidate_id
+           AND e.event_type IN ('label_approved', 'label_rejected', 'skip')
+         ORDER BY datetime(e.created_at) DESC
+         LIMIT 1
+       ) as reviewedAt
      FROM pattern_scores_latest
      WHERE profile_id = ?
      ORDER BY score DESC, ticker ASC
@@ -2767,7 +3072,27 @@ export async function loadPatternRunDetail(env: Env, runId: string): Promise<{ r
        feature_json as featureJson,
        shape_json as shapeJson,
        source_metadata_json as sourceMetadataJson,
-       created_at as createdAt
+       created_at as createdAt,
+       (
+         SELECT event_type
+         FROM pattern_review_events e
+         WHERE e.profile_id = pattern_run_candidates.profile_id
+           AND e.run_id = pattern_run_candidates.run_id
+           AND e.candidate_id = pattern_run_candidates.id
+           AND e.event_type IN ('label_approved', 'label_rejected', 'skip')
+         ORDER BY datetime(e.created_at) DESC
+         LIMIT 1
+       ) as reviewEventType,
+       (
+         SELECT created_at
+         FROM pattern_review_events e
+         WHERE e.profile_id = pattern_run_candidates.profile_id
+           AND e.run_id = pattern_run_candidates.run_id
+           AND e.candidate_id = pattern_run_candidates.id
+           AND e.event_type IN ('label_approved', 'label_rejected', 'skip')
+         ORDER BY datetime(e.created_at) DESC
+         LIMIT 1
+       ) as reviewedAt
      FROM pattern_run_candidates
      WHERE run_id = ?
      ORDER BY score DESC, ticker ASC

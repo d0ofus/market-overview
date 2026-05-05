@@ -219,6 +219,8 @@ import {
   startResearchLabRun,
 } from "./research-lab/orchestrator";
 import {
+  cancelPatternRun,
+  continuePatternRun,
   createPatternLabel,
   createPatternLabelsBulk,
   createPatternRun,
@@ -233,8 +235,10 @@ import {
   loadPatternRunDetail,
   maybeRunScheduledPatternScan,
   patternExportText,
+  pausePatternRun,
   PatternDbUnavailableError,
   processPatternScanRun,
+  resumePatternRun,
   updatePatternFeatureRegistry,
   updatePatternLabel,
 } from "./pattern-scanner-service";
@@ -817,7 +821,7 @@ async function refreshPageScopedData(
     };
   }
   if (page === "pattern-scanner") {
-    const run = await createPatternRun(env, { profileId: "default", force: false });
+    const run = await createPatternRun(env, { profileId: "default", force: false, autoContinue: true });
     const processed = await processPatternScanRun(env, run.id, { batchSize: 40, maxBatches: 1 });
     return {
       page,
@@ -2227,9 +2231,6 @@ app.get("/api/pattern-scanner/runs/:runId", async (c) => {
   try {
     const detail = await loadPatternRunDetail(c.env, c.req.param("runId"));
     if (!detail) return c.json({ error: "Pattern scan run not found." }, 404);
-    if (detail.run.status === "queued" || detail.run.status === "running") {
-      c.executionCtx.waitUntil(processPatternScanRun(c.env, detail.run.id));
-    }
     return c.json(detail);
   } catch (error) {
     return patternErrorResponse(c, error);
@@ -2381,6 +2382,56 @@ app.post("/api/admin/pattern-scanner/runs", async (c) => {
     if (run.status === "queued" || run.status === "running") {
       c.executionCtx.waitUntil(processPatternScanRun(c.env, run.id));
     }
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/runs/:runId/continue", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const run = await continuePatternRun(c.env, c.req.param("runId"));
+    if (!run) return c.json({ error: "Pattern scan run not found." }, 404);
+    if (run.status === "queued" || run.status === "running") {
+      c.executionCtx.waitUntil(processPatternScanRun(c.env, run.id));
+    }
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/runs/:runId/pause", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const run = await pausePatternRun(c.env, c.req.param("runId"));
+    if (!run) return c.json({ error: "Pattern scan run not found." }, 404);
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/runs/:runId/resume", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const run = await resumePatternRun(c.env, c.req.param("runId"));
+    if (!run) return c.json({ error: "Pattern scan run not found." }, 404);
+    if (run.status === "queued" || run.status === "running") {
+      c.executionCtx.waitUntil(processPatternScanRun(c.env, run.id));
+    }
+    return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/pattern-scanner/runs/:runId/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const run = await cancelPatternRun(c.env, c.req.param("runId"));
+    if (!run) return c.json({ error: "Pattern scan run not found." }, 404);
     return c.json({ ok: true, run });
   } catch (error) {
     return patternErrorResponse(c, error);

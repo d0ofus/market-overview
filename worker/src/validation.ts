@@ -112,6 +112,7 @@ export const patternRunCreateSchema = z.object({
   profileId: z.string().trim().min(1).optional().default("default"),
   tradingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   force: z.boolean().optional().default(false),
+  autoContinue: z.boolean().optional().default(true),
 });
 
 export const patternFeaturePatchSchema = z.object({

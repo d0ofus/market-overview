@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPatternFeatureSnapshot,
+  cancelPatternRun,
+  continuePatternRun,
   extractPatternFeatures,
+  pausePatternRun,
+  resumePatternRun,
   scorePatternSnapshot,
   type PatternDailyBar,
   type PatternLabel,
   type PatternModelVersion,
+  type PatternRun,
 } from "../src/pattern-scanner-service";
 import type { Env } from "../src/types";
 
@@ -137,6 +142,84 @@ function makePatternHydrationEnv(bars: PatternDailyBar[]): Env {
   } as unknown as D1Database;
 
   return { DB: db, PATTERN_DB: patternDb };
+}
+
+function makeRunControlEnv(initial: PatternRun): Env & { __run: PatternRun; __latestDeletes: string[] } {
+  const run = { ...initial };
+  const latestDeletes: string[] = [];
+  const row = () => ({
+    ...run,
+    autoContinue: run.autoContinue ? 1 : 0,
+  });
+  const applyRunPatch = (sql: string, args: unknown[]) => {
+    let index = 0;
+    if (sql.includes("status = ?")) run.status = args[index++] as PatternRun["status"];
+    if (sql.includes("phase = ?")) run.phase = args[index++] as string;
+    if (sql.includes("processed_count = ?")) run.processedCount = Number(args[index++]);
+    if (sql.includes("matched_count = ?")) run.matchedCount = Number(args[index++]);
+    if (sql.includes("cursor_offset = ?")) run.cursorOffset = Number(args[index++]);
+    if (sql.includes("auto_continue = ?")) run.autoContinue = Number(args[index++]) === 1;
+    if (sql.includes("last_advanced_at = ?")) run.lastAdvancedAt = args[index++] as string | null;
+    if (sql.includes("lease_owner = ?")) run.leaseOwner = args[index++] as string | null;
+    if (sql.includes("lease_expires_at = ?")) run.leaseExpiresAt = args[index++] as string | null;
+    if (sql.includes("completed_at = ?")) run.completedAt = args[index++] as string | null;
+    if (sql.includes("error = ?")) run.error = args[index++] as string | null;
+    if (sql.includes("warning = ?")) run.warning = args[index++] as string | null;
+    run.updatedAt = "2026-05-05T10:00:00.000Z";
+  };
+  const bindResult = (sql: string, args: unknown[]) => ({
+    async first<T>() {
+      if (sql.includes("FROM pattern_runs") && sql.includes("WHERE id = ?")) return row() as T;
+      return null as T;
+    },
+    async all<T>() {
+      return { results: [] as T[] };
+    },
+    async run() {
+      if (sql.startsWith("UPDATE pattern_runs SET")) applyRunPatch(sql, args);
+      if (sql.startsWith("DELETE FROM pattern_scores_latest")) latestDeletes.push(String(args[0] ?? ""));
+      return { meta: { changes: 1 } };
+    },
+  });
+  const db = {
+    prepare(sql: string) {
+      return {
+        ...bindResult(sql, []),
+        bind(...args: unknown[]) {
+          return bindResult(sql, args);
+        },
+      };
+    },
+    async batch() {
+      return [];
+    },
+  } as unknown as D1Database;
+
+  return { DB: db, PATTERN_DB: db, __run: run, __latestDeletes: latestDeletes } as Env & { __run: PatternRun; __latestDeletes: string[] };
+}
+
+function makeRun(overrides: Partial<PatternRun> = {}): PatternRun {
+  return {
+    id: "run-1",
+    profileId: "default",
+    tradingDate: "2026-05-05",
+    status: "running",
+    phase: "waiting_for_next_batch",
+    totalCount: 957,
+    processedCount: 120,
+    matchedCount: 8,
+    cursorOffset: 120,
+    autoContinue: true,
+    lastAdvancedAt: null,
+    leaseOwner: null,
+    leaseExpiresAt: null,
+    startedAt: "2026-05-05T09:00:00.000Z",
+    updatedAt: "2026-05-05T09:10:00.000Z",
+    completedAt: null,
+    error: null,
+    warning: null,
+    ...overrides,
+  };
 }
 
 describe("pattern scanner service", () => {
@@ -322,5 +405,49 @@ describe("pattern scanner service", () => {
     expect(score.mode).toBe("model");
     expect(score.score).toBeGreaterThan(0.5);
     expect(score.positiveContributions.length).toBeGreaterThan(0);
+  });
+
+  it("pauses a running pattern scan without deleting partial progress", async () => {
+    const env = makeRunControlEnv(makeRun());
+
+    const paused = await pausePatternRun(env, "run-1");
+
+    expect(paused?.status).toBe("paused");
+    expect(paused?.phase).toBe("paused");
+    expect(paused?.autoContinue).toBe(false);
+    expect(paused?.processedCount).toBe(120);
+  });
+
+  it("resumes a paused pattern scan with auto continuation", async () => {
+    const env = makeRunControlEnv(makeRun({ status: "paused", phase: "paused", autoContinue: false, warning: "Paused by user." }));
+
+    const resumed = await resumePatternRun(env, "run-1");
+
+    expect(resumed?.status).toBe("running");
+    expect(resumed?.phase).toBe("waiting_for_next_batch");
+    expect(resumed?.autoContinue).toBe(true);
+    expect(resumed?.warning).toBeNull();
+  });
+
+  it("continues a stalled running pattern scan", async () => {
+    const env = makeRunControlEnv(makeRun({ autoContinue: false }));
+
+    const continued = await continuePatternRun(env, "run-1");
+
+    expect(continued?.status).toBe("running");
+    expect(continued?.phase).toBe("waiting_for_next_batch");
+    expect(continued?.autoContinue).toBe(true);
+  });
+
+  it("cancels a running pattern scan and removes it from latest candidates", async () => {
+    const env = makeRunControlEnv(makeRun());
+
+    const cancelled = await cancelPatternRun(env, "run-1");
+
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.phase).toBe("cancelled");
+    expect(cancelled?.autoContinue).toBe(false);
+    expect(cancelled?.completedAt).not.toBeNull();
+    expect(env.__latestDeletes).toEqual(["run-1"]);
   });
 });

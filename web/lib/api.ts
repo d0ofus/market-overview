@@ -590,6 +590,8 @@ export type PatternCandidate = {
   createdAt?: string;
   tradingDate?: string;
   updatedAt?: string;
+  reviewStatus?: PatternLabelValue | null;
+  reviewedAt?: string | null;
 };
 
 export type PatternLabel = {
@@ -620,12 +622,16 @@ export type PatternRun = {
   id: string;
   profileId: string;
   tradingDate: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "paused" | "cancelled" | "completed" | "failed";
   phase: string;
   totalCount: number;
   processedCount: number;
   matchedCount: number;
   cursorOffset: number;
+  autoContinue: boolean;
+  lastAdvancedAt: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -1893,11 +1899,39 @@ export function deletePatternLabel(id: string, hard = false) {
   );
 }
 
-export function createPatternRun(payload?: { profileId?: string; tradingDate?: string; force?: boolean }) {
+export function createPatternRun(payload?: { profileId?: string; tradingDate?: string; force?: boolean; autoContinue?: boolean }) {
   return adminFetch<{ ok: boolean; run: PatternRun }>("/api/admin/pattern-scanner/runs", {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });
+}
+
+export function continuePatternRun(runId: string) {
+  return adminFetch<{ ok: boolean; run: PatternRun }>(
+    `/api/admin/pattern-scanner/runs/${encodeURIComponent(runId)}/continue`,
+    { method: "POST" },
+  );
+}
+
+export function pausePatternRun(runId: string) {
+  return adminFetch<{ ok: boolean; run: PatternRun }>(
+    `/api/admin/pattern-scanner/runs/${encodeURIComponent(runId)}/pause`,
+    { method: "POST" },
+  );
+}
+
+export function resumePatternRun(runId: string) {
+  return adminFetch<{ ok: boolean; run: PatternRun }>(
+    `/api/admin/pattern-scanner/runs/${encodeURIComponent(runId)}/resume`,
+    { method: "POST" },
+  );
+}
+
+export function cancelPatternRun(runId: string) {
+  return adminFetch<{ ok: boolean; run: PatternRun }>(
+    `/api/admin/pattern-scanner/runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST" },
+  );
 }
 
 export function updatePatternFeature(featureKey: string, payload: { displayName?: string; enabled?: boolean; description?: string | null }) {

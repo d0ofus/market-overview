@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -9,15 +9,19 @@ import {
   CircleDashed,
   Download,
   Loader2,
+  Pause,
   Play,
   RefreshCw,
   Save,
   Settings2,
   SkipForward,
+  Square,
   Trash2,
   X,
 } from "lucide-react";
 import {
+  cancelPatternRun,
+  continuePatternRun,
   createPatternLabel,
   createPatternLabelsBulk,
   createPatternRun,
@@ -31,6 +35,8 @@ import {
   getPatternLabels,
   getPatternLatest,
   getPatternRuns,
+  pausePatternRun,
+  resumePatternRun,
   updateAdminWorkerSchedule,
   updatePatternFeature,
   updatePatternLabel,
@@ -99,6 +105,13 @@ function defaultSetupDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function runsProgressKey(runs: PatternRun[]) {
+  return runs
+    .slice(0, 5)
+    .map((run) => `${run.id}:${run.status}:${run.phase}:${run.processedCount}:${run.matchedCount}:${run.cursorOffset}:${run.updatedAt}`)
+    .join("|");
+}
+
 export function PatternScannerDashboard() {
   const profileId = "default";
   const [activeTab, setActiveTab] = useState<TabKey>("candidates");
@@ -127,11 +140,12 @@ export function PatternScannerDashboard() {
   const [seedChartLoading, setSeedChartLoading] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [runDate, setRunDate] = useState(defaultSetupDate());
+  const runProgressKeyRef = useRef("");
 
   const activeRun = useMemo(() => runs.find((run) => run.status === "queued" || run.status === "running") ?? null, [runs]);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     try {
       const [latestRes, labelsRes, runsRes, analysisRes, featuresRes, ideasRes, scheduleRes] = await Promise.all([
         getPatternLatest(profileId, 100),
@@ -149,11 +163,22 @@ export function PatternScannerDashboard() {
       setFeatures(featuresRes.rows);
       setIdeas(ideasRes);
       setWorkerSchedule(scheduleRes);
-      setMessage(null);
+      runProgressKeyRef.current = runsProgressKey(runsRes.rows);
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load pattern scanner." });
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
+    }
+  };
+
+  const refreshRuns = async () => {
+    const runsRes = await getPatternRuns(profileId, 25);
+    setRuns(runsRes.rows);
+    const nextKey = runsProgressKey(runsRes.rows);
+    if (nextKey !== runProgressKeyRef.current) {
+      runProgressKeyRef.current = nextKey;
+      const latestRes = await getPatternLatest(profileId, 100);
+      setCandidates(latestRes.rows);
     }
   };
 
@@ -163,7 +188,9 @@ export function PatternScannerDashboard() {
 
   useEffect(() => {
     if (!activeRun) return;
-    const id = window.setInterval(() => void load(), 5000);
+    const id = window.setInterval(() => void refreshRuns().catch((error) => {
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to refresh pattern run." });
+    }), 15000);
     return () => window.clearInterval(id);
   }, [activeRun?.id]);
 
@@ -281,11 +308,30 @@ export function PatternScannerDashboard() {
   const startRun = async (force = false) => {
     setSaving(true);
     try {
-      const result = await createPatternRun({ profileId, tradingDate: runDate || undefined, force });
+      const result = await createPatternRun({ profileId, tradingDate: runDate || undefined, force, autoContinue: true });
       setMessage({ tone: "success", text: `Pattern run ${result.run.status} for ${result.run.tradingDate}.` });
       await load();
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to start pattern run." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const controlRun = async (run: PatternRun, action: "continue" | "pause" | "resume" | "cancel") => {
+    setSaving(true);
+    try {
+      const result = action === "continue"
+        ? await continuePatternRun(run.id)
+        : action === "pause"
+          ? await pausePatternRun(run.id)
+          : action === "resume"
+            ? await resumePatternRun(run.id)
+            : await cancelPatternRun(run.id);
+      setMessage({ tone: "success", text: `Pattern run ${result.run.status} for ${result.run.tradingDate}.` });
+      await load({ silent: true });
+    } catch (error) {
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : `Failed to ${action} run.` });
     } finally {
       setSaving(false);
     }
@@ -642,7 +688,10 @@ export function PatternScannerDashboard() {
                     <div className="font-mono text-xs text-slate-500">{run.id}</div>
                     <div className="mt-1 text-sm font-semibold text-slate-100">{run.tradingDate}</div>
                   </div>
-                  <RunStatus run={run} />
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <RunControls run={run} saving={saving} onAction={controlRun} />
+                    <RunStatus run={run} />
+                  </div>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-4">
                   <Metric label="Total" value={run.totalCount.toString()} />
@@ -650,7 +699,13 @@ export function PatternScannerDashboard() {
                   <Metric label="Matched" value={run.matchedCount.toString()} />
                   <Metric label="Cursor" value={run.cursorOffset.toString()} />
                 </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <Metric label="Progress" value={runProgressPct(run)} />
+                  <Metric label="Last Advanced" value={formatShortDateTime(run.lastAdvancedAt)} />
+                  <Metric label="Auto Continue" value={run.autoContinue ? "on" : "off"} />
+                </div>
                 {run.error ? <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-red-200">{run.error}</div> : null}
+                {run.warning ? <div className="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-amber-100">{run.warning}</div> : null}
               </div>
             ))}
           </div>
@@ -820,29 +875,31 @@ function CandidateCard({ candidate, saving, onFeedback }: {
   const matchedStart = metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate");
   const matchedEnd = metaString(candidate, "matchedPatternEndDate") ?? metaString(candidate, "patternEndDate") ?? candidate.tradingDate;
   const matchedBars = metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount");
+  const reviewed = Boolean(candidate.reviewStatus);
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-lg font-semibold text-slate-100">{candidate.ticker}</h3>
             <span className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-xs text-accent">{pct(candidate.score)}</span>
             <span className="rounded-full border border-borderSoft/70 px-2 py-0.5 text-xs text-slate-400">{candidate.reasons.mode}</span>
+            <ReviewPill status={candidate.reviewStatus ?? null} />
           </div>
           <div className="mt-1 text-sm text-slate-400">
             {[metaString(candidate, "name"), metaString(candidate, "sector"), metaString(candidate, "industry")].filter(Boolean).join(" · ") || "Pattern candidate"}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className={PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void onFeedback("approved")} type="button">
+          <button className={PRIMARY_BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("approved")} type="button">
             <Check className="h-3.5 w-3.5" />
             Approve
           </button>
-          <button className={DANGER_BUTTON_CLASS} disabled={saving} onClick={() => void onFeedback("rejected")} type="button">
+          <button className={DANGER_BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("rejected")} type="button">
             <X className="h-3.5 w-3.5" />
             Reject
           </button>
-          <button className={BUTTON_CLASS} disabled={saving} onClick={() => void onFeedback("skipped")} type="button">
+          <button className={BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("skipped")} type="button">
             <SkipForward className="h-3.5 w-3.5" />
             Skip
           </button>
@@ -919,6 +976,11 @@ function NearestList({ title, rows }: { title: string; rows: PatternCandidate["n
   );
 }
 
+function ReviewPill({ status }: { status: PatternLabelValue | null }) {
+  if (!status) return <span className="rounded-full border border-slate-600/60 px-2 py-0.5 text-xs text-slate-400">Unreviewed</span>;
+  return <LabelPill label={status} />;
+}
+
 function LabelPill({ label }: { label: PatternLabelValue }) {
   const classes = label === "approved"
     ? "border-green-500/30 bg-green-500/10 text-green-300"
@@ -928,15 +990,82 @@ function LabelPill({ label }: { label: PatternLabelValue }) {
   return <span className={`rounded-full border px-2 py-0.5 text-xs ${classes}`}>{label}</span>;
 }
 
+function RunControls({ run, saving, onAction }: {
+  run: PatternRun;
+  saving: boolean;
+  onAction: (run: PatternRun, action: "continue" | "pause" | "resume" | "cancel") => void | Promise<void>;
+}) {
+  const canPause = run.status === "queued" || run.status === "running";
+  const canResume = run.status === "paused";
+  const canContinue = run.status === "queued" || run.status === "running";
+  const canCancel = run.status === "queued" || run.status === "running" || run.status === "paused";
+  return (
+    <div className="flex flex-wrap justify-end gap-2">
+      {canContinue ? (
+        <button className={BUTTON_CLASS} disabled={saving} onClick={() => void onAction(run, "continue")} type="button">
+          <Play className="h-3.5 w-3.5" />
+          Continue
+        </button>
+      ) : null}
+      {canPause ? (
+        <button className={BUTTON_CLASS} disabled={saving} onClick={() => void onAction(run, "pause")} type="button">
+          <Pause className="h-3.5 w-3.5" />
+          Pause
+        </button>
+      ) : null}
+      {canResume ? (
+        <button className={PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void onAction(run, "resume")} type="button">
+          <Play className="h-3.5 w-3.5" />
+          Resume
+        </button>
+      ) : null}
+      {canCancel ? (
+        <button className={DANGER_BUTTON_CLASS} disabled={saving} onClick={() => void onAction(run, "cancel")} type="button">
+          <Square className="h-3.5 w-3.5" />
+          Cancel
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function RunStatus({ run }: { run: PatternRun }) {
-  const tone = run.status === "completed" ? "text-green-300" : run.status === "failed" ? "text-red-300" : "text-accent";
-  const Icon = run.status === "failed" ? AlertTriangle : run.status === "completed" ? Check : Loader2;
+  const tone = run.status === "completed"
+    ? "text-green-300"
+    : run.status === "failed" || run.status === "cancelled"
+      ? "text-red-300"
+      : run.status === "paused"
+        ? "text-amber-300"
+        : "text-accent";
+  const Icon = run.status === "failed"
+    ? AlertTriangle
+    : run.status === "completed"
+      ? Check
+      : run.status === "paused" || run.status === "cancelled"
+        ? CircleDashed
+        : Loader2;
   return (
     <div className={`inline-flex items-center gap-1.5 rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1 text-xs ${tone}`}>
       <Icon className={`h-3.5 w-3.5 ${run.status === "queued" || run.status === "running" ? "animate-spin" : ""}`} />
-      {run.status} · {run.phase}
+      {run.status} · {formatPhase(run.phase)}
     </div>
   );
+}
+
+function formatPhase(value: string) {
+  return value.replace(/_/g, " ");
+}
+
+function runProgressPct(run: PatternRun) {
+  if (run.totalCount <= 0) return "-";
+  return pct(run.processedCount / run.totalCount);
+}
+
+function formatShortDateTime(value: string | null | undefined) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
