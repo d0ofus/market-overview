@@ -1,6 +1,7 @@
 # TODO
 
 ## General
+> Remove redundant storage in market_command D1 database
 > See what cron jobs are active in entire application and manage. Can add in /admin for easy management
 - See what other features in google sheets dashboard that are good
 - Remove top left Market command centre box
