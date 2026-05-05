@@ -11,6 +11,7 @@ const links = [
   { href: "/thirteenf", label: "13F Tracker" },
   { href: "/sectors", label: "Sector Tracker" },
   { href: "/alerts", label: "Alerts" },
+  { href: "/social-alerts", label: "Social Alerts" },
   { href: "/peer-groups", label: "Peer Groups" },
   { href: "/correlation", label: "Correlation" },
   { href: "/scans", label: "Scans" },

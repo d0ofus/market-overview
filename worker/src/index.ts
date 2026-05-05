@@ -242,6 +242,15 @@ import {
   updatePatternFeatureRegistry,
   updatePatternLabel,
 } from "./pattern-scanner-service";
+import {
+  createSocialAlertHandle,
+  deleteSocialAlertCredential,
+  getSocialAlertHealth,
+  getSocialAlertResults,
+  listSocialAlertHandles,
+  runSocialAlertScrape,
+  saveSocialAlertCredential,
+} from "./social-alerts-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -2189,6 +2198,90 @@ app.get("/api/alerts/news", async (c) => {
     .bind(ticker, tradingDay)
     .all();
   return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
+});
+
+function socialAlertsErrorResponse(c: any, error: unknown) {
+  if (error instanceof ZodError) {
+    return c.json({ error: error.issues[0]?.message ?? "Invalid social alerts payload." }, 400);
+  }
+  const message = error instanceof Error ? error.message : "Social alerts request failed.";
+  const status = message.toLowerCase().includes("not configured") ? 503 : 500;
+  return c.json({ error: message }, status);
+}
+
+app.get("/api/admin/social-alerts/handles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await listSocialAlertHandles(c.env));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/social-alerts/handles", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await createSocialAlertHandle(c.env, await c.req.json()));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/social-alerts/credentials", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await saveSocialAlertCredential(c.env, await c.req.json());
+    return c.json(payload, payload.ok ? 200 : 400);
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.delete("/api/admin/social-alerts/credentials", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await deleteSocialAlertCredential(c.env));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.get("/api/admin/social-alerts/health", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await getSocialAlertHealth(c.env, {
+      probe: c.req.query("probe") === "1",
+      probeHandle: c.req.query("probeHandle") ?? null,
+    }));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/social-alerts/scrape", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await runSocialAlertScrape(c.env, await c.req.json());
+    return c.json(payload, payload.ok ? 200 : 502);
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.get("/api/admin/social-alerts/results", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await getSocialAlertResults(c.env, {
+      runId: c.req.query("runId") ?? null,
+      ticker: c.req.query("ticker") ?? null,
+      handle: c.req.query("handle") ?? null,
+      q: c.req.query("q") ?? null,
+      limit: Number(c.req.query("limit") ?? 200),
+      offset: Number(c.req.query("offset") ?? 0),
+    }));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
 });
 
 app.get("/api/ticker/:ticker/news", async (c) => {

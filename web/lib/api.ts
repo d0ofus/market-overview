@@ -88,6 +88,88 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
+export type SocialAlertHealthStatus =
+  | "missing_token"
+  | "configured"
+  | "working"
+  | "expired"
+  | "rate_limited"
+  | "function_unreachable"
+  | "missing_config"
+  | "error";
+
+export type SocialAlertSourceRow = {
+  id: string;
+  handle: string;
+  displayName: string | null;
+  isActive: boolean;
+  lastScrapedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SocialAlertMetrics = {
+  tweets: number;
+  cashtagHits: number;
+  uniqueTickers: number;
+  failures: number;
+  runtimeMs: number;
+};
+
+export type SocialAlertResultRow = {
+  id: string;
+  handle: string;
+  tweetId: string | null;
+  tweetCreatedAt: string | null;
+  cashtags: string[];
+  text: string;
+  url: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type SocialAlertRunSummary = {
+  id: string;
+  status: string;
+  startDate: string;
+  limitPerHandle: number;
+  selectedHandles: string[];
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export type SocialAlertHealthResponse = {
+  status: SocialAlertHealthStatus;
+  tokenConfigured: boolean;
+  tokenLast4: string | null;
+  functionReachable: boolean;
+  lastValidatedAt: string | null;
+  updatedAt: string | null;
+  message: string | null;
+  scweetVersion?: string | null;
+};
+
+export type SocialAlertResultsResponse = {
+  run: SocialAlertRunSummary | null;
+  metrics: SocialAlertMetrics;
+  rows: SocialAlertResultRow[];
+  uniqueTickers: string[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SocialAlertScrapeResponse = {
+  ok: boolean;
+  run: { id: string; status: string; startDate: string; limitPerHandle: number };
+  metrics: SocialAlertMetrics;
+  results: SocialAlertResultRow[];
+  failures: Array<{ handle?: string | null; error?: string | null; status?: string | null }>;
+  authStatus: { status: SocialAlertHealthStatus; message: string | null };
+};
+
 export type FundamentalQuarterRow = {
   ticker: string;
   cik: string;
@@ -1618,6 +1700,77 @@ export function getAlertTickerDays(params: {
 export function getAlertNews(ticker: string, tradingDay: string) {
   return getJson<{ ticker: string; tradingDay: string; rows: AlertNewsRow[] }>(
     appendQuery("/api/alerts/news", { ticker, tradingDay }),
+  );
+}
+
+export function getSocialAlertHandles() {
+  return adminFetch<{ rows: SocialAlertSourceRow[] }>("/api/admin/social-alerts/handles");
+}
+
+export function createSocialAlertHandle(handle: string) {
+  return adminFetch<{ ok: boolean; row: SocialAlertSourceRow }>("/api/admin/social-alerts/handles", {
+    method: "POST",
+    body: JSON.stringify({ handle }),
+  });
+}
+
+export function getSocialAlertHealth(options?: { probe?: boolean; probeHandle?: string | null }) {
+  return adminFetch<SocialAlertHealthResponse>(
+    appendQuery("/api/admin/social-alerts/health", {
+      probe: options?.probe ? 1 : undefined,
+      probeHandle: options?.probeHandle ?? undefined,
+    }),
+  );
+}
+
+export function saveSocialAlertCredential(authToken: string, validate = true) {
+  return adminFetch<{
+    ok: boolean;
+    status: SocialAlertHealthStatus;
+    tokenLast4: string | null;
+    updatedAt: string;
+    message: string | null;
+  }>("/api/admin/social-alerts/credentials", {
+    method: "POST",
+    body: JSON.stringify({ authToken, validate }),
+  });
+}
+
+export function deleteSocialAlertCredential() {
+  return adminFetch<{ ok: boolean; status: SocialAlertHealthStatus }>("/api/admin/social-alerts/credentials", {
+    method: "DELETE",
+  });
+}
+
+export function runSocialAlertScrape(payload: {
+  allHandles?: boolean;
+  handleIds?: string[];
+  startDate: string;
+  limitPerHandle: number;
+}) {
+  return adminFetch<SocialAlertScrapeResponse>("/api/admin/social-alerts/scrape", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getSocialAlertResults(params?: {
+  runId?: string | null;
+  ticker?: string | null;
+  handle?: string | null;
+  q?: string | null;
+  limit?: number;
+  offset?: number;
+}) {
+  return adminFetch<SocialAlertResultsResponse>(
+    appendQuery("/api/admin/social-alerts/results", {
+      runId: params?.runId ?? undefined,
+      ticker: params?.ticker ?? undefined,
+      handle: params?.handle ?? undefined,
+      q: params?.q ?? undefined,
+      limit: params?.limit,
+      offset: params?.offset,
+    }),
   );
 }
 

@@ -3,5 +3,11 @@
   "framework": "nextjs",
   "installCommand": "npm install",
   "buildCommand": "npm run build -w web",
-  "outputDirectory": "web/.next"
+  "outputDirectory": "web/.next",
+  "functions": {
+    "api/**/*.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,__tests__/**,**/*.test.py,fixtures/**,__fixtures__/**,testdata/**,static/**,assets/**,node_modules/**,web/.next/**,worker/.wrangler/**}"
+    }
+  }
 }
