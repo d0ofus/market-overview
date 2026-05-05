@@ -20,11 +20,13 @@ const ALERT_TICKER_REPAIR_INTERVAL_MS = 5 * 60_000;
 const ALERT_TICKER_REPAIR_LOOKBACK_DAYS = 30;
 const ALERT_TICKER_REPAIR_SCAN_LIMIT = 150;
 const ALERTS_TICKER_DAY_NEWS_BATCH_SIZE = 100;
+const ALERTS_SYMBOL_METADATA_BATCH_SIZE = 100;
 
 const SESSION_VALUES: AlertsSessionFilter[] = ["all", "premarket", "regular", "after-hours"];
 let lastAlertTickerRepairAt = 0;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const isFiniteNumber = (value: number | null | undefined): value is number => typeof value === "number" && Number.isFinite(value);
 const normalizeOffset = (value: number | null | undefined): number => {
   const parsed = Number(value ?? 0);
   if (!Number.isFinite(parsed)) return 0;
@@ -575,7 +577,7 @@ async function loadNewsForTickerDays(env: Env, pairs: Array<{ ticker: string; tr
 async function loadMetricsForAlertTickerDays(
   env: Env,
   tickers: string[],
-): Promise<Map<string, { price: number | null; change1d: number | null; marketCap: number | null; avgVolume: number | null }>> {
+): Promise<Map<string, { price: number | null; change1d: number | null; marketCap: number | null; avgVolume: number | null; priceAvgVolume: number | null }>> {
   const normalizedTickers = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
   if (normalizedTickers.length === 0) return new Map();
 
@@ -592,9 +594,32 @@ async function loadMetricsForAlertTickerDays(
         change1d: row.change1d,
         marketCap: row.marketCap,
         avgVolume: row.avgVolume,
+        priceAvgVolume: isFiniteNumber(row.price) && isFiniteNumber(row.avgVolume) ? row.price * row.avgVolume : null,
       },
     ]),
   );
+}
+
+async function loadIndustriesForAlertTickers(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
+  const normalizedTickers = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
+  const industries = new Map<string, string | null>();
+  if (normalizedTickers.length === 0) return industries;
+
+  for (let index = 0; index < normalizedTickers.length; index += ALERTS_SYMBOL_METADATA_BATCH_SIZE) {
+    const batch = normalizedTickers.slice(index, index + ALERTS_SYMBOL_METADATA_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT ticker, industry FROM symbols WHERE ticker IN (${placeholders})`,
+    )
+      .bind(...batch)
+      .all<{ ticker: string; industry: string | null }>();
+
+    for (const row of rows.results ?? []) {
+      industries.set(String(row.ticker ?? "").trim().toUpperCase(), row.industry ?? null);
+    }
+  }
+
+  return industries;
 }
 
 export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: AlertFilterInput): Promise<{
@@ -628,26 +653,36 @@ export async function queryUniqueTickerDaysByFilters(env: Env, filterInput: Aler
     }>();
 
   const rows = grouped.results ?? [];
-  const newsMap = await loadNewsForTickerDays(env, rows.map((row) => ({ ticker: row.ticker, tradingDay: row.tradingDay })));
-  const metricMap = await loadMetricsForAlertTickerDays(env, rows.map((row) => row.ticker));
+  const tickerInputs = rows.map((row) => row.ticker);
+  const [newsMap, metricMap, industryMap] = await Promise.all([
+    loadNewsForTickerDays(env, rows.map((row) => ({ ticker: row.ticker, tradingDay: row.tradingDay }))),
+    loadMetricsForAlertTickerDays(env, tickerInputs),
+    loadIndustriesForAlertTickers(env, tickerInputs),
+  ]);
 
   return {
     filters,
     total,
     limit: filters.limit,
     offset,
-    rows: rows.map((row) => ({
-      ticker: row.ticker,
-      tradingDay: row.tradingDay,
-      latestReceivedAt: row.latestReceivedAt,
-      alertCount: row.alertCount,
-      marketSession: row.marketSession,
-      price: metricMap.get(row.ticker)?.price ?? null,
-      change1d: metricMap.get(row.ticker)?.change1d ?? null,
-      marketCap: metricMap.get(row.ticker)?.marketCap ?? null,
-      avgVolume: metricMap.get(row.ticker)?.avgVolume ?? null,
-      news: newsMap.get(`${row.ticker}|${row.tradingDay}`) ?? [],
-    })),
+    rows: rows.map((row) => {
+      const tickerKey = String(row.ticker ?? "").trim().toUpperCase();
+      const metric = metricMap.get(tickerKey);
+      return {
+        ticker: row.ticker,
+        tradingDay: row.tradingDay,
+        latestReceivedAt: row.latestReceivedAt,
+        alertCount: row.alertCount,
+        marketSession: row.marketSession,
+        price: metric?.price ?? null,
+        change1d: metric?.change1d ?? null,
+        industry: industryMap.get(tickerKey) ?? null,
+        marketCap: metric?.marketCap ?? null,
+        avgVolume: metric?.avgVolume ?? null,
+        priceAvgVolume: metric?.priceAvgVolume ?? null,
+        news: newsMap.get(`${row.ticker}|${row.tradingDay}`) ?? [],
+      };
+    }),
   };
 }
 

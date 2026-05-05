@@ -72,8 +72,10 @@ export type AlertTickerDayRow = {
   marketSession: MarketSession;
   price: number | null;
   change1d: number | null;
+  industry: string | null;
   marketCap: number | null;
   avgVolume: number | null;
+  priceAvgVolume: number | null;
   news: TickerNewsRow[];
 };
 

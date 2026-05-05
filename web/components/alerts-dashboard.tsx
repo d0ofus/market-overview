@@ -74,6 +74,30 @@ function formatAlertStamp(value: string | null | undefined, marketSession?: stri
   return `${timestamp} • ${marketSession}`;
 }
 
+function formatCompact(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+}
+
+function MetricBubble({
+  label,
+  value,
+  valueClass = "text-slate-100",
+}: {
+  label: string;
+  value: string;
+  valueClass?: string;
+}) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+      <span className="shrink-0 uppercase tracking-[0.12em] text-slate-500">{label}</span>
+      <span className={`min-w-0 max-w-[12rem] truncate font-semibold ${valueClass}`} title={value}>
+        {value}
+      </span>
+    </span>
+  );
+}
+
 function summarizeDescription(row: AlertLogRow): string {
   const fromSubject = (row.rawEmailSubject ?? "")
     .replace(/^\s*(tradingview\s+alert\s*[-:]\s*|alert\s*:\s*)/i, "")
@@ -487,23 +511,30 @@ export function AlertsDashboard() {
                         isSelected ? "border-accent/60" : "border-borderSoft/60"
                       }`}
                     >
-                      <div className="mb-4 grid grid-cols-[auto,minmax(0,1fr)] items-center gap-3">
+                      <div className="mb-4 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <button
+                            type="button"
+                            className="text-left text-lg font-semibold text-accent hover:underline"
+                            onClick={() => setActivePeerTicker(row.ticker)}
+                          >
+                            {row.ticker}
+                          </button>
+                          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+                            <MetricBubble label="Industry" value={row.industry ?? "-"} />
+                            <MetricBubble label="Mkt Cap" value={formatCompact(row.marketCap)} />
+                            <MetricBubble label="Avg $ Vol" value={formatCompact(row.priceAvgVolume)} />
+                          </div>
+                        </div>
                         <button
                           type="button"
-                          className="text-left text-lg font-semibold text-accent hover:underline"
-                          onClick={() => setActivePeerTicker(row.ticker)}
-                        >
-                          {row.ticker}
-                        </button>
-                        <button
-                          type="button"
-                          className="flex min-w-0 items-center justify-end gap-2 text-left"
+                          className="flex w-full min-w-0 flex-wrap items-center gap-2 text-left"
                           onClick={() => setSelectedKey(compoundKey)}
                         >
                           <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
                             {formatDateTime(row.latestReceivedAt)}
                           </span>
-                          <span className="min-w-0 truncate text-sm leading-snug text-slate-300">
+                          <span className="min-w-0 flex-1 truncate text-sm leading-snug text-slate-300">
                             {description}
                           </span>
                         </button>
@@ -685,12 +716,24 @@ export function AlertsDashboard() {
                   </div>
                 </div>
                 <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Industry</div>
+                  <div className="mt-1 truncate text-sm font-semibold text-slate-100" title={activeChartRow.industry ?? "-"}>
+                    {activeChartRow.industry ?? "-"}
+                  </div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Mkt Cap</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartRow.marketCap)}</div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
                   <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg Vol</div>
                   <div className="mt-1 text-sm font-semibold text-slate-100">
-                    {typeof activeChartRow.avgVolume === "number" && Number.isFinite(activeChartRow.avgVolume)
-                      ? Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(activeChartRow.avgVolume)
-                      : "-"}
+                    {formatCompact(activeChartRow.avgVolume)}
                   </div>
+                </div>
+                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg $ Vol</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartRow.priceAvgVolume)}</div>
                 </div>
               </div>
             </div>

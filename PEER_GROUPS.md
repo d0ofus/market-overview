@@ -53,16 +53,18 @@ Broad `company name contains` searches still scale with more rows read because w
   - `manual` for admin-edited memberships
 
 ## Runtime Metrics Strategy
-- Runtime metrics come from the existing Alpaca-backed provider path.
+- Runtime metrics come from the shared TradingView Screener provider path.
 - `/peer-groups` does not preload metrics on initial page load.
 - Metrics are fetched only after a ticker is searched or selected.
 - Returned fields:
   - `price`
+  - `change1d`
   - `avgVolume`
   - `marketCap`
   - `asOf`
   - `source`
-- `marketCap` is computed as `price * shares_outstanding` when seeded shares data exists. It remains `null` otherwise.
+- `marketCap` is requested as `market_cap_basic`.
+- `avgVolume` is requested as `average_volume_30d_calc`.
 - No runtime metric snapshots are stored in D1.
 
 ## /peer-groups Flow
