@@ -20,8 +20,8 @@ import { ChartGridPager } from "./chart-grid-pager";
 import { TickerMultiGrid, type TickerMultiGridItem } from "./ticker-multi-grid";
 
 const QUICK_PRESETS = [1, 3, 7, 14, 30] as const;
-const DEFAULT_LIMIT_PER_HANDLE = 25;
-const MAX_LIMIT_PER_HANDLE = 100;
+const DEFAULT_LIMIT_PER_HANDLE = 50;
+const MAX_LIMIT_PER_HANDLE = 500;
 const MAX_HANDLES_PER_RUN = 10;
 const DEFAULT_CHARTS_PER_PAGE = 12;
 

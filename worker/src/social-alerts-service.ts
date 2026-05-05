@@ -4,8 +4,8 @@ import type { Env } from "./types";
 const HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CASHTAG_RE = /(^|[^A-Za-z0-9_])\$([A-Za-z]{1,6}(?:[.\-][A-Za-z]{1,3})?)(?![A-Za-z0-9_])/g;
-const DEFAULT_LIMIT_PER_HANDLE = 25;
-const MAX_LIMIT_PER_HANDLE = 100;
+const DEFAULT_LIMIT_PER_HANDLE = 50;
+const MAX_LIMIT_PER_HANDLE = 500;
 const MAX_HANDLES_PER_RUN = 10;
 const DEFAULT_SERVICE_TIMEOUT_MS = 55_000;
 const CREDENTIAL_KEY = "scweet_auth_token";
@@ -726,7 +726,7 @@ export async function getSocialAlertResults(env: Env, query: {
      FROM social_alert_run_posts rp
      JOIN social_alert_posts p ON p.id = rp.post_id
      WHERE ${where}
-     ORDER BY datetime(COALESCE(p.tweet_created_at, p.last_seen_at)) DESC
+     ORDER BY CASE WHEN datetime(p.tweet_created_at) IS NULL THEN 1 ELSE 0 END ASC, datetime(p.tweet_created_at) DESC, datetime(p.last_seen_at) DESC
      LIMIT ? OFFSET ?`,
   )
     .bind(...args, limit, offset)

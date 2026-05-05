@@ -3,6 +3,7 @@ import {
   deleteSocialAlertCredential,
   extractCashtags,
   getSocialAlertHealth,
+  getSocialAlertResults,
   normalizeSocialHandle,
   saveSocialAlertCredential,
   summarizeSocialAlertMetrics,
@@ -49,6 +50,53 @@ function createCredentialDb() {
   };
 }
 
+function createResultsDb() {
+  const selectedPostQueries: string[] = [];
+  const statementFor = (sql: string, args: unknown[] = []): any => ({
+    bind: (...nextArgs: unknown[]) => statementFor(sql, nextArgs),
+    first: async () => {
+      if (sql.includes("FROM social_alert_runs")) {
+        return {
+          id: "run-1",
+          status: "completed",
+          startDate: "2026-05-01",
+          limitPerHandle: 500,
+          selectedHandlesJson: JSON.stringify(["sourcehandle"]),
+          error: null,
+          tweets: 3,
+          cashtagHits: 3,
+          uniqueTickers: 3,
+          failures: 0,
+          runtimeMs: 123,
+          createdAt: "2026-05-05T00:00:00Z",
+          completedAt: "2026-05-05T00:01:00Z",
+        };
+      }
+      if (sql.includes("COUNT(*)")) return { count: 3 };
+      return null;
+    },
+    all: async () => {
+      if (sql.includes("SELECT p.id, p.handle")) {
+        selectedPostQueries.push(sql);
+        return { results: [
+          { id: "p1", handle: "sourcehandle", tweetId: "1", tweetCreatedAt: "2026-05-05T13:00:00Z", cashtagsJson: JSON.stringify(["NVDA"]), text: "$NVDA", url: "https://x.com/sourcehandle/status/1", firstSeenAt: "2026-05-05T13:01:00Z", lastSeenAt: "2026-05-05T13:01:00Z" },
+        ] };
+      }
+      if (sql.includes("SELECT p.cashtags_json")) {
+        return { results: [{ cashtagsJson: JSON.stringify(["NVDA", "TSLA"]) }] };
+      }
+      return { results: [] };
+    },
+    run: async () => ({ success: true }),
+  });
+  return {
+    db: {
+      prepare: (sql: string) => statementFor(sql),
+    } as unknown as D1Database,
+    selectedPostQueries,
+  };
+}
+
 describe("social alerts helpers", () => {
   it("normalizes X/Twitter handles from common input forms", () => {
     expect(normalizeSocialHandle("@MarketWizard_1")).toBe("marketwizard_1");
@@ -82,14 +130,14 @@ describe("social alerts helpers", () => {
     expect(validateSocialAlertScrapePayload({
       allHandles: true,
       startDate: "2026-05-01",
-      limitPerHandle: 25,
-    })).toMatchObject({ allHandles: true, startDate: "2026-05-01", limitPerHandle: 25 });
+      limitPerHandle: 500,
+    })).toMatchObject({ allHandles: true, startDate: "2026-05-01", limitPerHandle: 500 });
     expect(() => validateSocialAlertScrapePayload({ allHandles: true, startDate: "05-01-2026" })).toThrow();
     expect(() => validateSocialAlertScrapePayload({
       handleIds: Array.from({ length: 11 }, (_, index) => `h-${index}`),
       startDate: "2026-05-01",
     })).toThrow();
-    expect(() => validateSocialAlertScrapePayload({ allHandles: true, startDate: "2026-05-01", limitPerHandle: 101 })).toThrow();
+    expect(() => validateSocialAlertScrapePayload({ allHandles: true, startDate: "2026-05-01", limitPerHandle: 501 })).toThrow();
   });
 
   it("saves, reads, and deletes encrypted credentials without exposing plaintext", async () => {
@@ -116,5 +164,16 @@ describe("social alerts helpers", () => {
 
     await deleteSocialAlertCredential(env);
     expect((await getSocialAlertHealth(env)).status).toBe("missing_token");
+  });
+
+  it("uses deterministic newest-first SQL ordering with undated posts last", async () => {
+    const store = createResultsDb();
+    const env = { DB: store.db } as Env;
+
+    await getSocialAlertResults(env, { limit: 10, offset: 0 });
+
+    expect(store.selectedPostQueries[0]).toContain("CASE WHEN datetime(p.tweet_created_at) IS NULL THEN 1 ELSE 0 END ASC");
+    expect(store.selectedPostQueries[0]).toContain("datetime(p.tweet_created_at) DESC");
+    expect(store.selectedPostQueries[0]).toContain("datetime(p.last_seen_at) DESC");
   });
 });
