@@ -83,13 +83,15 @@ function MetricBubble({
   label,
   value,
   valueClass = "text-slate-100",
+  className = "",
 }: {
   label: string;
   value: string;
   valueClass?: string;
+  className?: string;
 }) {
   return (
-    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200">
+    <span className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-3 py-1.5 text-xs text-slate-200 ${className}`}>
       <span className="shrink-0 uppercase tracking-[0.12em] text-slate-500">{label}</span>
       <span className={`min-w-0 max-w-[12rem] truncate font-semibold ${valueClass}`} title={value}>
         {value}
@@ -512,7 +514,7 @@ export function AlertsDashboard() {
                       }`}
                     >
                       <div className="mb-4 space-y-2">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="grid grid-cols-[auto,minmax(0,1fr)] items-center gap-3">
                           <button
                             type="button"
                             className="text-left text-lg font-semibold text-accent hover:underline"
@@ -520,24 +522,24 @@ export function AlertsDashboard() {
                           >
                             {row.ticker}
                           </button>
-                          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
-                            <MetricBubble label="Industry" value={row.industry ?? "-"} />
-                            <MetricBubble label="Mkt Cap" value={formatCompact(row.marketCap)} />
-                            <MetricBubble label="Avg $ Vol" value={formatCompact(row.priceAvgVolume)} />
-                          </div>
+                          <button
+                            type="button"
+                            className="flex min-w-0 items-center justify-end gap-2 text-left"
+                            onClick={() => setSelectedKey(compoundKey)}
+                          >
+                            <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
+                              {formatDateTime(row.latestReceivedAt)}
+                            </span>
+                            <span className="min-w-0 truncate text-sm leading-snug text-slate-300">
+                              {description}
+                            </span>
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          className="flex w-full min-w-0 flex-wrap items-center gap-2 text-left"
-                          onClick={() => setSelectedKey(compoundKey)}
-                        >
-                          <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
-                            {formatDateTime(row.latestReceivedAt)}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-sm leading-snug text-slate-300">
-                            {description}
-                          </span>
-                        </button>
+                        <div className="grid min-w-0 grid-cols-[minmax(0,1fr),auto,auto] items-center gap-2">
+                          <MetricBubble className="w-full" label="Industry" value={row.industry ?? "-"} />
+                          <MetricBubble className="shrink-0" label="Mkt Cap" value={formatCompact(row.marketCap)} />
+                          <MetricBubble className="shrink-0" label="Avg $ Vol" value={formatCompact(row.priceAvgVolume)} />
+                        </div>
                       </div>
                       <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
                         <TradingViewWidget
