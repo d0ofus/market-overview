@@ -5,6 +5,7 @@ import {
   correlationPairQuerySchema,
   groupPatchSchema,
   itemCreateSchema,
+  patternProfilePatchSchema,
   scanPresetPatchSchema,
   scanPresetRuleSchema,
 } from "../src/validation";
@@ -116,5 +117,33 @@ describe("validation", () => {
     expect(parsed.rsBackgroundBatchSize).toBe(40);
     expect(parsed.rsBackgroundMaxBatchesPerTick).toBe(12);
     expect(parsed.postCloseBarsOffsetMinutes).toBe(60);
+  });
+
+  it("validates pattern profile scanner settings", () => {
+    const parsed = patternProfilePatchSchema.parse({
+      minPrice: 3,
+      minDollarVolume20d: 5_000_000,
+      minBars: 260,
+      candidateLimit: 100,
+      matchScoreThreshold: 0.6,
+      contextWindowBars: 260,
+      candidatePatternLengths: [20, 40, 60, 80, 120],
+    });
+
+    expect(parsed.matchScoreThreshold).toBe(0.6);
+    expect(parsed.candidatePatternLengths).toEqual([20, 40, 60, 80, 120]);
+  });
+
+  it("rejects invalid pattern profile scanner settings", () => {
+    expect(() =>
+      patternProfilePatchSchema.parse({
+        matchScoreThreshold: 1.2,
+      })
+    ).toThrow();
+    expect(() =>
+      patternProfilePatchSchema.parse({
+        candidatePatternLengths: [5],
+      })
+    ).toThrow();
   });
 });

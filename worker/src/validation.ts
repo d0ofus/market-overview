@@ -115,6 +115,29 @@ export const patternRunCreateSchema = z.object({
   autoContinue: z.boolean().optional().default(true),
 });
 
+const patternCandidatePatternLengthsSchema = z.array(z.number().int().min(10).max(160)).min(1).max(12);
+
+export const patternProfilePatchSchema = z.object({
+  profileId: z.string().trim().min(1).optional().default("default"),
+  minPrice: z.number().min(0).max(10_000).optional(),
+  minDollarVolume20d: z.number().min(0).max(10_000_000_000).optional(),
+  minBars: z.number().int().min(60).max(2_000).optional(),
+  candidateLimit: z.number().int().min(1).max(500).optional(),
+  matchScoreThreshold: z.number().min(0).max(1).optional(),
+  contextWindowBars: z.number().int().min(60).max(520).optional(),
+  candidatePatternLengths: patternCandidatePatternLengthsSchema.optional(),
+}).refine((value) => Object.keys(value).some((key) => key !== "profileId"), {
+  message: "Provide at least one pattern profile setting to update.",
+});
+
+export const patternCandidatesQuerySchema = z.object({
+  profileId: z.string().trim().min(1).optional().default("default"),
+  scope: z.enum(["matched", "all"]).optional().default("matched"),
+  reviewed: z.enum(["exclude", "include"]).optional().default("exclude"),
+  limit: z.coerce.number().int().min(1).max(500).optional().default(100),
+  runId: z.string().trim().min(1).nullable().optional(),
+});
+
 export const patternFeaturePatchSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
   enabled: z.boolean().optional(),

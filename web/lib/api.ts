@@ -778,6 +778,7 @@ export type PatternProfile = {
     contextWindowBars: number;
     patternWindowBars: number;
     candidateLimit: number;
+    matchScoreThreshold: number;
     selectedResamplePoints?: number;
     candidatePatternLengths?: number[];
   };
@@ -805,6 +806,20 @@ export type PatternChartData = {
   availableEndDate: string | null;
   bars: PatternChartBar[];
   warnings: string[];
+};
+
+export type PatternCandidateScope = "matched" | "all";
+export type PatternCandidateReviewedMode = "exclude" | "include";
+
+export type PatternCandidateListResponse = {
+  profileId: string;
+  run: PatternRun | null;
+  scope: PatternCandidateScope;
+  reviewed: PatternCandidateReviewedMode;
+  matchScoreThreshold: number;
+  totalCandidateCount: number;
+  reviewedHiddenCount: number;
+  rows: PatternCandidate[];
 };
 
 export type PatternAnalysisResponse = {
@@ -1919,6 +1934,24 @@ export function getPatternLatest(profileId = "default", limit = 100) {
   );
 }
 
+export function getPatternCandidates(params?: {
+  profileId?: string;
+  scope?: PatternCandidateScope;
+  reviewed?: PatternCandidateReviewedMode;
+  limit?: number;
+  runId?: string | null;
+}) {
+  return getJson<PatternCandidateListResponse>(
+    appendQuery("/api/pattern-scanner/candidates", {
+      profileId: params?.profileId ?? "default",
+      scope: params?.scope ?? "matched",
+      reviewed: params?.reviewed ?? "exclude",
+      limit: params?.limit ?? 100,
+      runId: params?.runId ?? undefined,
+    }),
+  );
+}
+
 export function getPatternRuns(profileId = "default", limit = 25) {
   return getJson<{ profileId: string; rows: PatternRun[] }>(
     appendQuery("/api/pattern-scanner/runs", { profileId, limit }),
@@ -2085,6 +2118,22 @@ export function cancelPatternRun(runId: string) {
     `/api/admin/pattern-scanner/runs/${encodeURIComponent(runId)}/cancel`,
     { method: "POST" },
   );
+}
+
+export function updatePatternProfile(payload: {
+  profileId?: string;
+  minPrice?: number;
+  minDollarVolume20d?: number;
+  minBars?: number;
+  candidateLimit?: number;
+  matchScoreThreshold?: number;
+  contextWindowBars?: number;
+  candidatePatternLengths?: number[];
+}) {
+  return adminFetch<{ ok: boolean; profile: PatternProfile }>("/api/admin/pattern-scanner/profile", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function updatePatternFeature(featureKey: string, payload: { displayName?: string; enabled?: boolean; description?: string | null }) {

@@ -27,32 +27,37 @@ import {
   createPatternRun,
   deletePatternLabel,
   getAdminWorkerSchedule,
+  getPatternCandidates,
   getPatternChart,
   getPatternAnalysis,
   getPatternExportUrl,
   getPatternFeatureIdeas,
   getPatternFeatures,
   getPatternLabels,
-  getPatternLatest,
   getPatternRuns,
   pausePatternRun,
   resumePatternRun,
   updateAdminWorkerSchedule,
   updatePatternFeature,
   updatePatternLabel,
+  updatePatternProfile,
   type PatternChartData,
   type PatternAnalysisResponse,
   type PatternCandidate,
+  type PatternCandidateListResponse,
+  type PatternCandidateScope,
   type PatternFeatureIdeasResponse,
   type PatternFeatureRegistryRow,
   type PatternLabel,
   type PatternLabelValue,
+  type PatternProfile,
   type PatternSelectionMode,
   type PatternRun,
   type WorkerScheduleSettings,
 } from "@/lib/api";
 import { Sparkline } from "./sparkline";
 import { PatternTrainingChart, type PatternChartSelection } from "./pattern-training-chart";
+import { PatternCandidateChart } from "./pattern-candidate-chart";
 
 type TabKey = "candidates" | "training" | "runs" | "analysis" | "ideas" | "settings";
 
@@ -112,10 +117,42 @@ function runsProgressKey(runs: PatternRun[]) {
     .join("|");
 }
 
+function scannerSettingsFromProfile(profile: PatternProfile | null | undefined) {
+  return {
+    minPrice: String(profile?.prefilterConfig.minPrice ?? 3),
+    minDollarVolume20d: String(profile?.prefilterConfig.minDollarVolume20d ?? 5_000_000),
+    minBars: String(profile?.prefilterConfig.minBars ?? 260),
+    candidateLimit: String(profile?.settings.candidateLimit ?? 100),
+    matchScoreThreshold: String(profile?.settings.matchScoreThreshold ?? 0.6),
+    contextWindowBars: String(profile?.settings.contextWindowBars ?? 260),
+    candidatePatternLengths: (profile?.settings.candidatePatternLengths ?? [20, 40, 60, 80, 120]).join(", "),
+  };
+}
+
+function parseSettingNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parsePatternLengths(value: string) {
+  return Array.from(new Set(
+    value
+      .split(/[,\s;]+/)
+      .map((part) => Math.trunc(Number(part.trim())))
+      .filter((part) => Number.isFinite(part) && part >= 10 && part <= 160),
+  )).sort((left, right) => left - right);
+}
+
+function sortedCandidates(rows: PatternCandidate[]) {
+  return [...rows].sort((left, right) => right.score - left.score || left.ticker.localeCompare(right.ticker));
+}
+
 export function PatternScannerDashboard() {
   const profileId = "default";
   const [activeTab, setActiveTab] = useState<TabKey>("candidates");
+  const [candidateScope, setCandidateScope] = useState<PatternCandidateScope>("matched");
   const [candidates, setCandidates] = useState<PatternCandidate[]>([]);
+  const [candidateList, setCandidateList] = useState<PatternCandidateListResponse | null>(null);
   const [labels, setLabels] = useState<PatternLabel[]>([]);
   const [runs, setRuns] = useState<PatternRun[]>([]);
   const [features, setFeatures] = useState<PatternFeatureRegistryRow[]>([]);
@@ -141,14 +178,15 @@ export function PatternScannerDashboard() {
   const [bulkText, setBulkText] = useState("");
   const [runDate, setRunDate] = useState(defaultSetupDate());
   const runProgressKeyRef = useRef("");
+  const [scannerSettings, setScannerSettings] = useState(scannerSettingsFromProfile(null));
 
   const activeRun = useMemo(() => runs.find((run) => run.status === "queued" || run.status === "running") ?? null, [runs]);
 
-  const load = async (options?: { silent?: boolean }) => {
+  const load = async (options?: { preserveMessage?: boolean; silent?: boolean }) => {
     if (!options?.silent) setLoading(true);
     try {
-      const [latestRes, labelsRes, runsRes, analysisRes, featuresRes, ideasRes, scheduleRes] = await Promise.all([
-        getPatternLatest(profileId, 100),
+      const [candidateRes, labelsRes, runsRes, analysisRes, featuresRes, ideasRes, scheduleRes] = await Promise.all([
+        getPatternCandidates({ profileId, scope: candidateScope, reviewed: "exclude", limit: 100 }),
         getPatternLabels(profileId),
         getPatternRuns(profileId, 25),
         getPatternAnalysis(profileId),
@@ -156,14 +194,17 @@ export function PatternScannerDashboard() {
         getPatternFeatureIdeas(),
         getAdminWorkerSchedule().catch(() => null),
       ]);
-      setCandidates(latestRes.rows);
+      setCandidateList(candidateRes);
+      setCandidates(sortedCandidates(candidateRes.rows));
       setLabels(labelsRes.rows);
       setRuns(runsRes.rows);
       setAnalysis(analysisRes);
+      setScannerSettings(scannerSettingsFromProfile(analysisRes.profile));
       setFeatures(featuresRes.rows);
       setIdeas(ideasRes);
       setWorkerSchedule(scheduleRes);
       runProgressKeyRef.current = runsProgressKey(runsRes.rows);
+      if (!options?.preserveMessage) setMessage(null);
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load pattern scanner." });
     } finally {
@@ -177,14 +218,15 @@ export function PatternScannerDashboard() {
     const nextKey = runsProgressKey(runsRes.rows);
     if (nextKey !== runProgressKeyRef.current) {
       runProgressKeyRef.current = nextKey;
-      const latestRes = await getPatternLatest(profileId, 100);
-      setCandidates(latestRes.rows);
+      const candidateRes = await getPatternCandidates({ profileId, scope: candidateScope, reviewed: "exclude", limit: 100 });
+      setCandidateList(candidateRes);
+      setCandidates(sortedCandidates(candidateRes.rows));
     }
   };
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [candidateScope]);
 
   useEffect(() => {
     if (!activeRun) return;
@@ -225,7 +267,7 @@ export function PatternScannerDashboard() {
         selectionMode: payload.selectionMode ?? (payload.patternStartDate ? "chart_range" : "fixed_window"),
       });
       setMessage({ tone: "success", text: `${payload.ticker.toUpperCase()} ${payload.label}.` });
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to save feedback." });
     } finally {
@@ -297,7 +339,7 @@ export function PatternScannerDashboard() {
         text: `Created ${result.created.length} labels${result.errors.length ? ` with ${result.errors.length} errors` : ""}.`,
       });
       setBulkText("");
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Bulk seed failed." });
     } finally {
@@ -310,7 +352,7 @@ export function PatternScannerDashboard() {
     try {
       const result = await createPatternRun({ profileId, tradingDate: runDate || undefined, force, autoContinue: true });
       setMessage({ tone: "success", text: `Pattern run ${result.run.status} for ${result.run.tradingDate}.` });
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to start pattern run." });
     } finally {
@@ -341,7 +383,7 @@ export function PatternScannerDashboard() {
     setSaving(true);
     try {
       await updatePatternLabel(label.id, { status: label.status === "active" ? "archived" : "active" });
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to update label." });
     } finally {
@@ -353,7 +395,7 @@ export function PatternScannerDashboard() {
     setSaving(true);
     try {
       await deletePatternLabel(label.id);
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to delete label." });
     } finally {
@@ -365,9 +407,95 @@ export function PatternScannerDashboard() {
     setSaving(true);
     try {
       await updatePatternFeature(feature.featureKey, { enabled: !feature.enabled });
-      await load();
+      await load({ preserveMessage: true });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to update feature." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reviewCandidate = async (candidate: PatternCandidate, label: PatternLabelValue) => {
+    const previousCandidates = candidates;
+    const previousList = candidateList;
+    setCandidates((current) => current.filter((row) => row.id !== candidate.id));
+    setCandidateList((current) => current ? {
+      ...current,
+      reviewedHiddenCount: current.reviewedHiddenCount + 1,
+      rows: current.rows.filter((row) => row.id !== candidate.id),
+    } : current);
+    setSaving(true);
+    try {
+      await createPatternLabel({
+        profileId,
+        ticker: candidate.ticker,
+        setupDate: candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
+        label,
+        tags: [],
+        notes: null,
+        source: "candidate_review",
+        runId: candidate.runId,
+        candidateId: candidate.id,
+        patternStartDate: metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate"),
+        patternEndDate: metaString(candidate, "matchedPatternEndDate") ?? candidate.tradingDate ?? metaString(candidate, "patternEndDate") ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
+        selectedBarCount: metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount"),
+        selectionMode: "fixed_window",
+      });
+      const [labelsRes, analysisRes] = await Promise.all([
+        getPatternLabels(profileId),
+        getPatternAnalysis(profileId),
+      ]);
+      setLabels(labelsRes.rows);
+      setAnalysis(analysisRes);
+      setScannerSettings(scannerSettingsFromProfile(analysisRes.profile));
+      setMessage({ tone: "success", text: `${candidate.ticker} ${label}.` });
+    } catch (error) {
+      setCandidates(previousCandidates);
+      setCandidateList(previousList);
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to save feedback." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveScannerSettings = async () => {
+    const minPrice = parseSettingNumber(scannerSettings.minPrice);
+    const minDollarVolume20d = parseSettingNumber(scannerSettings.minDollarVolume20d);
+    const minBars = parseSettingNumber(scannerSettings.minBars);
+    const candidateLimit = parseSettingNumber(scannerSettings.candidateLimit);
+    const matchScoreThreshold = parseSettingNumber(scannerSettings.matchScoreThreshold);
+    const contextWindowBars = parseSettingNumber(scannerSettings.contextWindowBars);
+    const candidatePatternLengths = parsePatternLengths(scannerSettings.candidatePatternLengths);
+    if (
+      minPrice == null ||
+      minDollarVolume20d == null ||
+      minBars == null ||
+      candidateLimit == null ||
+      matchScoreThreshold == null ||
+      contextWindowBars == null ||
+      candidatePatternLengths.length === 0
+    ) {
+      setMessage({ tone: "danger", text: "Check scanner settings before saving." });
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await updatePatternProfile({
+        profileId,
+        minPrice,
+        minDollarVolume20d,
+        minBars: Math.trunc(minBars),
+        candidateLimit: Math.trunc(candidateLimit),
+        matchScoreThreshold,
+        contextWindowBars: Math.trunc(contextWindowBars),
+        candidatePatternLengths,
+      });
+      setAnalysis((current) => current ? { ...current, profile: result.profile } : current);
+      setScannerSettings(scannerSettingsFromProfile(result.profile));
+      setMessage({ tone: "success", text: "Saved pattern scanner settings." });
+      await load({ preserveMessage: true });
+    } catch (error) {
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to save scanner settings." });
     } finally {
       setSaving(false);
     }
@@ -446,24 +574,32 @@ export function PatternScannerDashboard() {
       {!loading && activeTab === "candidates" ? (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),20rem]">
           <div className="space-y-3">
+            <div className="card flex flex-wrap items-center justify-between gap-3 p-3">
+              <div className="inline-flex rounded-lg border border-borderSoft/70 bg-panelSoft/60 p-1">
+                {(["matched", "all"] as PatternCandidateScope[]).map((scope) => (
+                  <button
+                    key={scope}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${candidateScope === scope ? "bg-accent/20 text-accent" : "text-slate-400 hover:text-slate-200"}`}
+                    onClick={() => setCandidateScope(scope)}
+                    type="button"
+                  >
+                    {scope === "matched" ? "Matched" : "All top"}
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-slate-500">
+                {candidateList?.run ? `${candidateList.run.tradingDate} - ${candidateList.run.id.slice(0, 8)}` : "No completed run"}
+              </div>
+            </div>
             {candidates.length === 0 ? (
-              <div className="card p-6 text-sm text-slate-400">No candidates yet.</div>
-            ) : candidates.slice(0, 40).map((candidate) => (
+              <div className="card p-6 text-sm text-slate-400">No candidates in this view.</div>
+            ) : candidates.map((candidate) => (
               <CandidateCard
                 key={`${candidate.runId}-${candidate.ticker}`}
                 candidate={candidate}
+                profileId={profileId}
                 saving={saving}
-                onFeedback={(label) => addLabel({
-                  ticker: candidate.ticker,
-                  setupDate: candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
-                  label,
-                  runId: candidate.runId,
-                  candidateId: candidate.id,
-                  patternStartDate: metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate"),
-                  patternEndDate: metaString(candidate, "matchedPatternEndDate") ?? candidate.tradingDate ?? metaString(candidate, "patternEndDate") ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
-                  selectedBarCount: metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount"),
-                  selectionMode: "fixed_window",
-                })}
+                onFeedback={(label) => reviewCandidate(candidate, label)}
               />
             ))}
           </div>
@@ -473,7 +609,10 @@ export function PatternScannerDashboard() {
               Latest Snapshot
             </div>
             <div className="mt-4 grid gap-3">
-              <Metric label="Candidates" value={candidates.length.toString()} />
+              <Metric label="Visible" value={candidates.length.toString()} />
+              <Metric label="Run Candidates" value={String(candidateList?.totalCandidateCount ?? 0)} />
+              <Metric label="Reviewed Hidden" value={String(candidateList?.reviewedHiddenCount ?? 0)} />
+              <Metric label="Threshold" value={pct(candidateList?.matchScoreThreshold ?? analysis?.profile.settings.matchScoreThreshold)} />
               <Metric label="Top Score" value={candidates[0] ? pct(candidates[0].score) : "-"} />
               <Metric label="Active Approvals" value={String(analysis?.approvalCount ?? 0)} />
               <Metric label="Active Rejections" value={String(analysis?.rejectionCount ?? 0)} />
@@ -778,6 +917,47 @@ export function PatternScannerDashboard() {
 
       {!loading && activeTab === "settings" ? (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),24rem]">
+          <div className="space-y-4">
+          <div className="card p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+              <Settings2 className="h-4 w-4 text-accent" />
+              Scanner Filters
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <label className="text-xs text-slate-300">
+                Minimum price
+                <input className={INPUT_CLASS} min={0} type="number" value={scannerSettings.minPrice} onChange={(event) => setScannerSettings((current) => ({ ...current, minPrice: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300">
+                Minimum 20D dollar volume
+                <input className={INPUT_CLASS} min={0} type="number" value={scannerSettings.minDollarVolume20d} onChange={(event) => setScannerSettings((current) => ({ ...current, minDollarVolume20d: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300">
+                Minimum stored bars
+                <input className={INPUT_CLASS} min={60} type="number" value={scannerSettings.minBars} onChange={(event) => setScannerSettings((current) => ({ ...current, minBars: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300">
+                Context bars
+                <input className={INPUT_CLASS} max={520} min={60} type="number" value={scannerSettings.contextWindowBars} onChange={(event) => setScannerSettings((current) => ({ ...current, contextWindowBars: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300">
+                Candidate limit
+                <input className={INPUT_CLASS} max={500} min={1} type="number" value={scannerSettings.candidateLimit} onChange={(event) => setScannerSettings((current) => ({ ...current, candidateLimit: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300">
+                Match threshold
+                <input className={INPUT_CLASS} max={1} min={0} step={0.01} type="number" value={scannerSettings.matchScoreThreshold} onChange={(event) => setScannerSettings((current) => ({ ...current, matchScoreThreshold: event.target.value }))} />
+              </label>
+              <label className="text-xs text-slate-300 md:col-span-2">
+                Candidate pattern lengths
+                <input className={INPUT_CLASS} value={scannerSettings.candidatePatternLengths} onChange={(event) => setScannerSettings((current) => ({ ...current, candidatePatternLengths: event.target.value }))} />
+              </label>
+            </div>
+            <button className={`${PRIMARY_BUTTON_CLASS} mt-4`} disabled={saving} onClick={() => void saveScannerSettings()} type="button">
+              <Save className="h-3.5 w-3.5" />
+              Save Scanner Settings
+            </button>
+          </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
               <Settings2 className="h-4 w-4 text-accent" />
@@ -794,12 +974,13 @@ export function PatternScannerDashboard() {
                 >
                   <span>
                     <span className="block font-medium text-slate-200">{feature.displayName}</span>
-                    <span className="block text-xs text-slate-500">{feature.family} · {feature.featureKey}</span>
+                    <span className="block text-xs text-slate-500">{feature.family} - {feature.featureKey}</span>
                   </span>
                   <span className={feature.enabled ? "text-green-300" : "text-slate-500"}>{feature.enabled ? "Enabled" : "Disabled"}</span>
                 </button>
               ))}
             </div>
+          </div>
           </div>
           <div className="card p-4">
             <h3 className="text-sm font-semibold text-slate-100">Schedule</h3>
@@ -863,8 +1044,9 @@ export function PatternScannerDashboard() {
   );
 }
 
-function CandidateCard({ candidate, saving, onFeedback }: {
+function CandidateCard({ candidate, profileId, saving, onFeedback }: {
   candidate: PatternCandidate;
+  profileId: string;
   saving: boolean;
   onFeedback: (label: PatternLabelValue) => void | Promise<void>;
 }) {
@@ -873,9 +1055,10 @@ function CandidateCard({ candidate, saving, onFeedback }: {
   const pricePath = selectedPricePath.length ? selectedPricePath : shapeValues(candidate, "price_path_40d");
   const rsPath = selectedRsPath.length ? selectedRsPath : shapeValues(candidate, "relative_strength_path_60d");
   const matchedStart = metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate");
-  const matchedEnd = metaString(candidate, "matchedPatternEndDate") ?? metaString(candidate, "patternEndDate") ?? candidate.tradingDate;
+  const matchedEnd = metaString(candidate, "matchedPatternEndDate") ?? metaString(candidate, "patternEndDate") ?? candidate.tradingDate ?? null;
   const matchedBars = metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount");
   const reviewed = Boolean(candidate.reviewStatus);
+  const chartEndDate = matchedEnd ?? candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate();
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -887,7 +1070,7 @@ function CandidateCard({ candidate, saving, onFeedback }: {
             <ReviewPill status={candidate.reviewStatus ?? null} />
           </div>
           <div className="mt-1 text-sm text-slate-400">
-            {[metaString(candidate, "name"), metaString(candidate, "sector"), metaString(candidate, "industry")].filter(Boolean).join(" · ") || "Pattern candidate"}
+            {[metaString(candidate, "name"), metaString(candidate, "sector"), metaString(candidate, "industry")].filter(Boolean).join(" - ") || "Pattern candidate"}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -932,6 +1115,15 @@ function CandidateCard({ candidate, saving, onFeedback }: {
           ))}
         </div>
       </div>
+      <div className="mt-4">
+        <PatternCandidateChart
+          profileId={profileId}
+          ticker={candidate.ticker}
+          endDate={chartEndDate}
+          patternStartDate={matchedStart}
+          patternEndDate={matchedEnd}
+        />
+      </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <ContributionList title="Positive" rows={candidate.reasons.positiveContributions} tone="positive" />
         <ContributionList title="Negative" rows={candidate.reasons.negativeContributions} tone="negative" />
@@ -967,7 +1159,7 @@ function NearestList({ title, rows }: { title: string; rows: PatternCandidate["n
       <div className="mt-2 space-y-1">
         {rows.length === 0 ? <div className="text-xs text-slate-500">No examples yet</div> : rows.map((row) => (
           <div key={row.labelId} className="flex justify-between gap-3 text-xs">
-            <span className="text-slate-300">{row.ticker} · {row.setupDate}</span>
+            <span className="text-slate-300">{row.ticker} - {row.setupDate}</span>
             <span className="text-accent">{pct(row.similarity)}</span>
           </div>
         ))}
@@ -1047,7 +1239,7 @@ function RunStatus({ run }: { run: PatternRun }) {
   return (
     <div className={`inline-flex items-center gap-1.5 rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1 text-xs ${tone}`}>
       <Icon className={`h-3.5 w-3.5 ${run.status === "queued" || run.status === "running" ? "animate-spin" : ""}`} />
-      {run.status} · {formatPhase(run.phase)}
+      {run.status} - {formatPhase(run.phase)}
     </div>
   );
 }

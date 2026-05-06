@@ -38,9 +38,11 @@ import {
   adminSymbolCatalogScheduleSchema,
   adminWorkerSchedulePatchSchema,
   patternFeaturePatchSchema,
+  patternCandidatesQuerySchema,
   patternLabelBulkSchema,
   patternLabelCreateSchema,
   patternLabelPatchSchema,
+  patternProfilePatchSchema,
   patternRunCreateSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
@@ -226,6 +228,7 @@ import {
   createPatternRun,
   deletePatternLabel,
   listLatestPatternCandidates,
+  listPatternCandidatesForReview,
   loadPatternChartData,
   listPatternFeatureRegistry,
   listPatternLabels,
@@ -241,6 +244,7 @@ import {
   resumePatternRun,
   updatePatternFeatureRegistry,
   updatePatternLabel,
+  updatePatternProfileSettings,
 } from "./pattern-scanner-service";
 import {
   createSocialAlertHandle,
@@ -2309,6 +2313,21 @@ app.get("/api/pattern-scanner/latest", async (c) => {
   }
 });
 
+app.get("/api/pattern-scanner/candidates", async (c) => {
+  try {
+    const payload = patternCandidatesQuerySchema.parse({
+      profileId: c.req.query("profileId"),
+      scope: c.req.query("scope"),
+      reviewed: c.req.query("reviewed"),
+      limit: c.req.query("limit"),
+      runId: c.req.query("runId") ?? undefined,
+    });
+    return c.json(await listPatternCandidatesForReview(c.env, payload));
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
 app.get("/api/pattern-scanner/runs", async (c) => {
   try {
     const profileId = c.req.query("profileId") ?? "default";
@@ -2526,6 +2545,18 @@ app.post("/api/admin/pattern-scanner/runs/:runId/cancel", async (c) => {
     const run = await cancelPatternRun(c.env, c.req.param("runId"));
     if (!run) return c.json({ error: "Pattern scan run not found." }, 404);
     return c.json({ ok: true, run });
+  } catch (error) {
+    return patternErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/admin/pattern-scanner/profile", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = patternProfilePatchSchema.parse(await c.req.json().catch(() => ({})));
+    const profile = await updatePatternProfileSettings(c.env, payload);
+    await upsertAudit(c.env, "default", "PATTERN_PROFILE_UPDATE", { profileId: profile.id });
+    return c.json({ ok: true, profile });
   } catch (error) {
     return patternErrorResponse(c, error);
   }

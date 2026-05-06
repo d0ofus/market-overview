@@ -12,11 +12,11 @@ const DEFAULT_PATTERN_WINDOW_BARS = 40;
 const DEFAULT_SELECTED_RESAMPLE_POINTS = 64;
 const DEFAULT_CANDIDATE_PATTERN_LENGTHS = [20, 40, 60, 80, 120];
 const DEFAULT_BENCHMARK_TICKER = "SPY";
+const DEFAULT_MATCH_SCORE_THRESHOLD = 0.6;
 const MIN_EXTRACT_BARS = 60;
 const MIN_SELECTED_PATTERN_BARS = 10;
 const MAX_SELECTED_PATTERN_BARS = 160;
 const MIN_MODEL_CLASS_COUNT = 3;
-const MATCH_SCORE_THRESHOLD = 0.6;
 const PATTERN_UNIVERSE_QUERY_CHUNK_SIZE = 50;
 const PATTERN_RUN_LEASE_MS = 2 * 60_000;
 
@@ -94,6 +94,7 @@ export type PatternProfileSettings = {
   contextWindowBars: number;
   patternWindowBars: number;
   candidateLimit: number;
+  matchScoreThreshold: number;
   selectedResamplePoints: number;
   candidatePatternLengths: number[];
 };
@@ -277,6 +278,31 @@ export type PatternRunCreateInput = {
   tradingDate?: string;
   force?: boolean;
   autoContinue?: boolean;
+};
+
+export type PatternProfilePatchInput = {
+  profileId?: string;
+  minPrice?: number;
+  minDollarVolume20d?: number;
+  minBars?: number;
+  candidateLimit?: number;
+  matchScoreThreshold?: number;
+  contextWindowBars?: number;
+  candidatePatternLengths?: number[];
+};
+
+export type PatternCandidateListScope = "matched" | "all";
+export type PatternCandidateReviewedMode = "exclude" | "include";
+
+export type PatternCandidateListResult = {
+  profileId: string;
+  run: PatternRun | null;
+  scope: PatternCandidateListScope;
+  reviewed: PatternCandidateReviewedMode;
+  matchScoreThreshold: number;
+  totalCandidateCount: number;
+  reviewedHiddenCount: number;
+  rows: PatternCandidate[];
 };
 
 export type PatternLabelCreateInput = {
@@ -793,6 +819,11 @@ function sanitizeSelectedResamplePoints(value: unknown): number {
   return Number.isFinite(parsed) ? Math.max(16, Math.min(256, parsed)) : DEFAULT_SELECTED_RESAMPLE_POINTS;
 }
 
+function sanitizeMatchScoreThreshold(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : DEFAULT_MATCH_SCORE_THRESHOLD;
+}
+
 function hashString(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -823,6 +854,7 @@ function mapProfileRow(row: PatternProfileRow): PatternProfile {
       patternWindowBars: DEFAULT_PATTERN_WINDOW_BARS,
       candidateLimit: 100,
       ...parsedSettings,
+      matchScoreThreshold: sanitizeMatchScoreThreshold(parsedSettings.matchScoreThreshold ?? DEFAULT_MATCH_SCORE_THRESHOLD),
       selectedResamplePoints: sanitizeSelectedResamplePoints(parsedSettings.selectedResamplePoints ?? DEFAULT_SELECTED_RESAMPLE_POINTS),
       candidatePatternLengths: sanitizeCandidatePatternLengths(parsedSettings.candidatePatternLengths ?? DEFAULT_CANDIDATE_PATTERN_LENGTHS),
     },
@@ -1390,6 +1422,7 @@ async function ensurePatternProfile(env: Env, profileId = DEFAULT_PATTERN_PROFIL
         contextWindowBars: DEFAULT_CONTEXT_WINDOW_BARS,
         patternWindowBars: DEFAULT_PATTERN_WINDOW_BARS,
         candidateLimit: 100,
+        matchScoreThreshold: DEFAULT_MATCH_SCORE_THRESHOLD,
         selectedResamplePoints: DEFAULT_SELECTED_RESAMPLE_POINTS,
         candidatePatternLengths: DEFAULT_CANDIDATE_PATTERN_LENGTHS,
       }),
@@ -1398,6 +1431,40 @@ async function ensurePatternProfile(env: Env, profileId = DEFAULT_PATTERN_PROFIL
   const created = await loadPatternProfile(env, profileId);
   if (!created) throw new Error("Failed to create default pattern profile.");
   return created;
+}
+
+export async function updatePatternProfileSettings(
+  env: Env,
+  input: PatternProfilePatchInput,
+): Promise<PatternProfile> {
+  const profile = await ensurePatternProfile(env, input.profileId ?? DEFAULT_PATTERN_PROFILE_ID);
+  const nextPrefilter: PatternPrefilterConfig = {
+    minPrice: typeof input.minPrice === "number" ? input.minPrice : profile.prefilterConfig.minPrice,
+    minDollarVolume20d: typeof input.minDollarVolume20d === "number" ? input.minDollarVolume20d : profile.prefilterConfig.minDollarVolume20d,
+    minBars: typeof input.minBars === "number" ? input.minBars : profile.prefilterConfig.minBars,
+  };
+  const nextSettings: PatternProfileSettings = {
+    ...profile.settings,
+    contextWindowBars: typeof input.contextWindowBars === "number" ? input.contextWindowBars : profile.settings.contextWindowBars,
+    candidateLimit: typeof input.candidateLimit === "number" ? input.candidateLimit : profile.settings.candidateLimit,
+    matchScoreThreshold: sanitizeMatchScoreThreshold(input.matchScoreThreshold ?? profile.settings.matchScoreThreshold),
+    candidatePatternLengths: input.candidatePatternLengths
+      ? sanitizeCandidatePatternLengths(input.candidatePatternLengths)
+      : profile.settings.candidatePatternLengths,
+  };
+  const db = requirePatternDb(env);
+  await db.prepare(
+    `UPDATE pattern_profiles
+     SET prefilter_config_json = ?,
+         settings_json = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+  )
+    .bind(JSON.stringify(nextPrefilter), JSON.stringify(nextSettings), profile.id)
+    .run();
+  const updated = await loadPatternProfile(env, profile.id);
+  if (!updated) throw new Error("Failed to load updated pattern profile.");
+  return updated;
 }
 
 export async function listPatternLabels(env: Env, profileId = DEFAULT_PATTERN_PROFILE_ID): Promise<PatternLabel[]> {
@@ -2506,6 +2573,127 @@ export async function listPatternRuns(env: Env, profileId = DEFAULT_PATTERN_PROF
   return (rows.results ?? []).map(mapRunRow);
 }
 
+async function loadLatestCompletedPatternRun(env: Env, profileId = DEFAULT_PATTERN_PROFILE_ID): Promise<PatternRun | null> {
+  const db = requirePatternDb(env);
+  const row = await db.prepare(
+    `SELECT
+       id,
+       profile_id as profileId,
+       trading_date as tradingDate,
+       status,
+       phase,
+       total_count as totalCount,
+       processed_count as processedCount,
+       matched_count as matchedCount,
+       cursor_offset as cursorOffset,
+       started_at as startedAt,
+       updated_at as updatedAt,
+       completed_at as completedAt,
+       error,
+       warning
+     FROM pattern_runs
+     WHERE profile_id = ?
+       AND status = 'completed'
+     ORDER BY datetime(completed_at) DESC, datetime(started_at) DESC
+     LIMIT 1`,
+  )
+    .bind(profileId)
+    .first<PatternRunRow>();
+  return row ? mapRunRow(row) : null;
+}
+
+export async function listPatternCandidatesForReview(
+  env: Env,
+  options: {
+    profileId?: string;
+    scope?: PatternCandidateListScope;
+    reviewed?: PatternCandidateReviewedMode;
+    limit?: number;
+    runId?: string | null;
+  } = {},
+): Promise<PatternCandidateListResult> {
+  const profile = await ensurePatternProfile(env, options.profileId ?? DEFAULT_PATTERN_PROFILE_ID);
+  const run = options.runId
+    ? await loadPatternRun(env, options.runId)
+    : await loadLatestCompletedPatternRun(env, profile.id);
+  const scope = options.scope ?? "matched";
+  const reviewed = options.reviewed ?? "exclude";
+  const matchScoreThreshold = sanitizeMatchScoreThreshold(profile.settings.matchScoreThreshold);
+  if (!run) {
+    return {
+      profileId: profile.id,
+      run: null,
+      scope,
+      reviewed,
+      matchScoreThreshold,
+      totalCandidateCount: 0,
+      reviewedHiddenCount: 0,
+      rows: [],
+    };
+  }
+  if (run.profileId !== profile.id) throw new Error("Pattern run does not belong to the selected profile.");
+  const db = requirePatternDb(env);
+  const scopeSql = scope === "matched" ? " AND score >= ?" : "";
+  const scopeArgs = scope === "matched" ? [matchScoreThreshold] : [];
+  const reviewExistsSql = `EXISTS (
+    SELECT 1
+    FROM pattern_review_events e
+    WHERE e.run_id = pattern_run_candidates.run_id
+      AND e.candidate_id = pattern_run_candidates.id
+      AND e.event_type IN ('label_approved', 'label_rejected', 'skip')
+  )`;
+  const totalRow = await db.prepare(
+    `SELECT COUNT(*) as count
+     FROM pattern_run_candidates
+     WHERE run_id = ?${scopeSql}`,
+  )
+    .bind(run.id, ...scopeArgs)
+    .first<{ count: number | string | null }>();
+  const hiddenRow = await db.prepare(
+    `SELECT COUNT(*) as count
+     FROM pattern_run_candidates
+     WHERE run_id = ?${scopeSql}
+       AND ${reviewExistsSql}`,
+  )
+    .bind(run.id, ...scopeArgs)
+    .first<{ count: number | string | null }>();
+  const reviewedSql = reviewed === "exclude" ? ` AND NOT ${reviewExistsSql}` : "";
+  const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? profile.settings.candidateLimit)));
+  const rows = await db.prepare(
+    `SELECT
+       id,
+       run_id as runId,
+       profile_id as profileId,
+       ticker,
+       rank,
+       score,
+       reasons_json as reasonsJson,
+       nearest_approved_json as nearestApprovedJson,
+       nearest_rejected_json as nearestRejectedJson,
+       feature_json as featureJson,
+       shape_json as shapeJson,
+       source_metadata_json as sourceMetadataJson,
+       created_at as createdAt,
+       ? as tradingDate
+     FROM pattern_run_candidates
+     WHERE run_id = ?${scopeSql}${reviewedSql}
+     ORDER BY score DESC, ticker ASC
+     LIMIT ?`,
+  )
+    .bind(run.tradingDate, run.id, ...scopeArgs, limit)
+    .all<PatternCandidateRow>();
+  return {
+    profileId: profile.id,
+    run,
+    scope,
+    reviewed,
+    matchScoreThreshold,
+    totalCandidateCount: Math.max(0, Number(totalRow?.count ?? 0) || 0),
+    reviewedHiddenCount: Math.max(0, Number(hiddenRow?.count ?? 0) || 0),
+    rows: (rows.results ?? []).map(mapCandidateRow),
+  };
+}
+
 async function updatePatternRun(env: Env, runId: string, patch: Partial<{
   status: PatternRun["status"];
   phase: string;
@@ -2643,6 +2831,7 @@ export async function processPatternScanRun(
   const labels = await listActiveTrainingLabels(env, profile.id);
   const batchSize = Math.max(1, Math.trunc(options?.batchSize ?? 40));
   const maxBatches = Math.max(1, Math.trunc(options?.maxBatches ?? 4));
+  const matchScoreThreshold = sanitizeMatchScoreThreshold(profile.settings.matchScoreThreshold);
   let cursorOffset = run.cursorOffset;
   let processedCount = run.processedCount;
   let matchedCount = run.matchedCount;
@@ -2725,7 +2914,7 @@ export async function processPatternScanRun(
           universeAvgDollarVolume20d: row.avgDollarVolume20d,
           universeBarCount: row.barCount,
         };
-        if (reasons.score >= MATCH_SCORE_THRESHOLD) matchedCount += 1;
+        if (reasons.score >= matchScoreThreshold) matchedCount += 1;
         processedCount += 1;
         statements.push(
           db.prepare(

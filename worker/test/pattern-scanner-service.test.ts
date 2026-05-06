@@ -4,6 +4,7 @@ import {
   cancelPatternRun,
   continuePatternRun,
   extractPatternFeatures,
+  listPatternCandidatesForReview,
   pausePatternRun,
   resumePatternRun,
   scorePatternSnapshot,
@@ -220,6 +221,123 @@ function makeRun(overrides: Partial<PatternRun> = {}): PatternRun {
     warning: null,
     ...overrides,
   };
+}
+
+type CandidateFixture = {
+  id: string;
+  ticker: string;
+  score: number;
+  reviewed?: boolean;
+};
+
+function makePatternCandidateEnv(candidates: CandidateFixture[]) {
+  const profile = {
+    id: "default",
+    name: "Default",
+    description: "Default",
+    benchmarkTickersJson: "[\"SPY\"]",
+    prefilterConfigJson: JSON.stringify({ minPrice: 3, minDollarVolume20d: 5_000_000, minBars: 260 }),
+    activeModelId: null,
+    settingsJson: JSON.stringify({
+      contextWindowBars: 260,
+      patternWindowBars: 40,
+      candidateLimit: 100,
+      matchScoreThreshold: 0.6,
+      selectedResamplePoints: 64,
+      candidatePatternLengths: [20, 40, 60],
+    }),
+    createdAt: "2026-05-05T00:00:00Z",
+    updatedAt: "2026-05-05T00:00:00Z",
+  };
+  const run = {
+    id: "run-1",
+    profileId: "default",
+    tradingDate: "2026-05-05",
+    status: "completed",
+    phase: "completed",
+    totalCount: 4,
+    processedCount: 4,
+    matchedCount: 2,
+    cursorOffset: 4,
+    startedAt: "2026-05-05T21:00:00Z",
+    updatedAt: "2026-05-05T21:05:00Z",
+    completedAt: "2026-05-05T21:05:00Z",
+    error: null,
+    warning: null,
+  };
+  const filteredCandidates = (args: unknown[], sql: string) => {
+    const hasScoreFilter = /score >= \?/.test(sql);
+    const hasReviewFilter = /NOT EXISTS/.test(sql);
+    const threshold = hasScoreFilter ? Number(args[1]) : 0;
+    return candidates
+      .filter((candidate) => !hasScoreFilter || candidate.score >= threshold)
+      .filter((candidate) => !hasReviewFilter || !candidate.reviewed);
+  };
+  const db = {
+    prepare(sql: string) {
+      return {
+        __sql: sql,
+        __args: [] as unknown[],
+        bind(...args: unknown[]) {
+          return {
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM pattern_profiles")) return profile;
+              if (sql.includes("FROM pattern_runs")) return run;
+              if (sql.includes("COUNT(*)") && sql.includes("pattern_review_events")) {
+                return { count: filteredCandidates(args, sql).filter((candidate) => candidate.reviewed).length };
+              }
+              if (sql.includes("COUNT(*)") && sql.includes("FROM pattern_run_candidates")) {
+                return { count: filteredCandidates(args, sql).length };
+              }
+              throw new Error(`Unhandled first query: ${sql}`);
+            },
+            async all() {
+              if (sql.includes("FROM pattern_run_candidates")) {
+                const rows = filteredCandidates(args.slice(1), sql)
+                  .sort((left, right) => right.score - left.score || left.ticker.localeCompare(right.ticker))
+                  .map((candidate, index) => ({
+                    id: candidate.id,
+                    runId: "run-1",
+                    profileId: "default",
+                    ticker: candidate.ticker,
+                    rank: index + 1,
+                    score: candidate.score,
+                    reasonsJson: JSON.stringify({
+                      score: candidate.score,
+                      mode: "heuristic",
+                      approvedSimilarity: null,
+                      rejectedSimilarity: null,
+                      scalarSimilarity: null,
+                      shapeSimilarity: null,
+                      activeLearningPriority: 0,
+                      heuristicScore: candidate.score,
+                      positiveContributions: [],
+                      negativeContributions: [],
+                      summary: [],
+                    }),
+                    nearestApprovedJson: "[]",
+                    nearestRejectedJson: "[]",
+                    featureJson: "{}",
+                    shapeJson: "{}",
+                    sourceMetadataJson: "{}",
+                    createdAt: "2026-05-05T21:05:00Z",
+                    tradingDate: "2026-05-05",
+                  }));
+                return { results: rows };
+              }
+              throw new Error(`Unhandled all query: ${sql}`);
+            },
+            async run() {
+              return {};
+            },
+          };
+        },
+      };
+    },
+  };
+  return { PATTERN_DB: db as unknown as D1Database };
 }
 
 describe("pattern scanner service", () => {
@@ -449,5 +567,43 @@ describe("pattern scanner service", () => {
     expect(cancelled?.autoContinue).toBe(false);
     expect(cancelled?.completedAt).not.toBeNull();
     expect(env.__latestDeletes).toEqual(["run-1"]);
+  });
+
+  it("lists matched candidates in descending score order", async () => {
+    const env = makePatternCandidateEnv([
+      { id: "c-low", ticker: "LOW", score: 0.52 },
+      { id: "c-top", ticker: "TOP", score: 0.91 },
+      { id: "c-mid", ticker: "MID", score: 0.72 },
+    ]);
+
+    const result = await listPatternCandidatesForReview(env as any, {
+      profileId: "default",
+      scope: "matched",
+      reviewed: "include",
+      limit: 10,
+    });
+
+    expect(result.matchScoreThreshold).toBe(0.6);
+    expect(result.totalCandidateCount).toBe(2);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["TOP", "MID"]);
+  });
+
+  it("excludes reviewed candidates when requested", async () => {
+    const env = makePatternCandidateEnv([
+      { id: "c-top", ticker: "TOP", score: 0.91, reviewed: true },
+      { id: "c-mid", ticker: "MID", score: 0.72 },
+      { id: "c-low", ticker: "LOW", score: 0.52 },
+    ]);
+
+    const result = await listPatternCandidatesForReview(env as any, {
+      profileId: "default",
+      scope: "matched",
+      reviewed: "exclude",
+      limit: 10,
+    });
+
+    expect(result.totalCandidateCount).toBe(2);
+    expect(result.reviewedHiddenCount).toBe(1);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["MID"]);
   });
 });
