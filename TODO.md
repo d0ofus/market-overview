@@ -1,11 +1,5 @@
 # TODO
 
-## General
-> Remove redundant storage in market_command D1 database
-> See what cron jobs are active in entire application and manage. Can add in /admin for easy management
-- See what other features in google sheets dashboard that are good
-- Remove top left Market command centre box
-
 ## Overview
 > Add macro stuff like 10Y yields and yield curve chart
 > Add hover charts for tickers like Key Movers Tracker in /sectors
@@ -31,16 +25,18 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
-> Add auto suggestion of all tickers previously entered for existing narrative when chosen
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
-> Change dimensions of expanded chart as it is too big now
 > Make keyboard shortcut to expand chart (Alt + Enter) (?)
+> See if there can be tradingview financials widgets shown in the expanded chart
 
-## PEER GROUPS
-> Add Avg vol * Price for multi-chart
+## SOCIAL ALERTS
+> Retain a database of the last 30 days scraped tweets
+> Handle repeat searches with the same parameters 
+
+## Peer Groups
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
@@ -58,9 +54,6 @@
 - Colour by industry
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
-## PATTERN SCANNER
-- Change browser tab initials to PS
-
 ## Watchlist Compiler
 
 ## Gappers
@@ -72,9 +65,9 @@
 - Add Average $ traded filter
 
 ## Admin
-> Allow comma-separated search for peer groups
 > Add password protection to access admin
 > Remove bootstrap seed batch function in peer groups
+> Only can add 12 names, can't add in the rest
 - Find out what slug means for peer-groups
 - Add function to specific exchange before ticker. For e.g., OSX chart shows the ASX listing and not the NASDAQ one
 - Adding in Sector ETF XPH doesn't show up on overview, but there is another section below to add. Have the ETF watchlists portion be the source of truth 
@@ -87,6 +80,10 @@
 - Create export function to get all teh Industry and sector ETFs in the list
 - Add/remove ETFs
 >> Remove NWX
+
+## General
+- See what other features in google sheets dashboard that are good
+- Remove top left Market command centre box
 
 ## Research Lab
 ==>> Make token use more efficient
@@ -104,7 +101,6 @@
 
 ## New Functions
 - Add in morning brief section using Claude API
-- Add in latest fed minutes summary in macro rates
 - Add macro dashboard (https://x.com/investingluc/status/2044560364424032433?s=20)
 - Add unusual options analysis/insider transactions tracker
 - Add in search function for leveraged ETFs
