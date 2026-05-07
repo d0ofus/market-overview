@@ -56,8 +56,9 @@ import {
   type WorkerScheduleSettings,
 } from "@/lib/api";
 import { Sparkline } from "./sparkline";
-import { PatternTrainingChart, type PatternChartSelection } from "./pattern-training-chart";
+import { PatternTrainingChart } from "./pattern-training-chart";
 import { PatternCandidateChart } from "./pattern-candidate-chart";
+import type { PatternChartSelection } from "./pattern-chart-selection";
 
 type TabKey = "candidates" | "training" | "runs" | "analysis" | "ideas" | "settings";
 
@@ -415,9 +416,13 @@ export function PatternScannerDashboard() {
     }
   };
 
-  const reviewCandidate = async (candidate: PatternCandidate, label: PatternLabelValue) => {
+  const reviewCandidate = async (candidate: PatternCandidate, label: PatternLabelValue, adjustedSelection?: PatternChartSelection | null) => {
     const previousCandidates = candidates;
     const previousList = candidateList;
+    const reviewSetupDate = adjustedSelection?.endDate ?? candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate();
+    const reviewPatternStartDate = adjustedSelection?.startDate ?? metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate");
+    const reviewPatternEndDate = adjustedSelection?.endDate ?? metaString(candidate, "matchedPatternEndDate") ?? candidate.tradingDate ?? metaString(candidate, "patternEndDate") ?? metaString(candidate, "setupDate") ?? defaultSetupDate();
+    const reviewSelectedBarCount = adjustedSelection?.barCount ?? metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount");
     setCandidates((current) => current.filter((row) => row.id !== candidate.id));
     setCandidateList((current) => current ? {
       ...current,
@@ -429,17 +434,17 @@ export function PatternScannerDashboard() {
       await createPatternLabel({
         profileId,
         ticker: candidate.ticker,
-        setupDate: candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
+        setupDate: reviewSetupDate,
         label,
         tags: [],
         notes: null,
         source: "candidate_review",
         runId: candidate.runId,
         candidateId: candidate.id,
-        patternStartDate: metaString(candidate, "matchedPatternStartDate") ?? metaString(candidate, "patternStartDate"),
-        patternEndDate: metaString(candidate, "matchedPatternEndDate") ?? candidate.tradingDate ?? metaString(candidate, "patternEndDate") ?? metaString(candidate, "setupDate") ?? defaultSetupDate(),
-        selectedBarCount: metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount"),
-        selectionMode: "fixed_window",
+        patternStartDate: reviewPatternStartDate,
+        patternEndDate: reviewPatternEndDate,
+        selectedBarCount: reviewSelectedBarCount,
+        selectionMode: adjustedSelection ? "chart_range" : "fixed_window",
       });
       const [labelsRes, analysisRes] = await Promise.all([
         getPatternLabels(profileId),
@@ -599,7 +604,7 @@ export function PatternScannerDashboard() {
                 candidate={candidate}
                 profileId={profileId}
                 saving={saving}
-                onFeedback={(label) => reviewCandidate(candidate, label)}
+                onFeedback={(label, selection) => reviewCandidate(candidate, label, selection)}
               />
             ))}
           </div>
@@ -1048,7 +1053,7 @@ function CandidateCard({ candidate, profileId, saving, onFeedback }: {
   candidate: PatternCandidate;
   profileId: string;
   saving: boolean;
-  onFeedback: (label: PatternLabelValue) => void | Promise<void>;
+  onFeedback: (label: PatternLabelValue, selection?: PatternChartSelection | null) => void | Promise<void>;
 }) {
   const selectedPricePath = shapeValues(candidate, "selected_price_path_64");
   const selectedRsPath = shapeValues(candidate, "selected_rs_path_64");
@@ -1059,6 +1064,28 @@ function CandidateCard({ candidate, profileId, saving, onFeedback }: {
   const matchedBars = metaNumber(candidate, "matchedPatternBars") ?? metaNumber(candidate, "selectedBarCount");
   const reviewed = Boolean(candidate.reviewStatus);
   const chartEndDate = matchedEnd ?? candidate.tradingDate ?? metaString(candidate, "setupDate") ?? defaultSetupDate();
+  const engineSelection = useMemo<PatternChartSelection | null>(() => {
+    if (!matchedStart || !matchedEnd) return null;
+    return {
+      startDate: matchedStart,
+      endDate: matchedEnd,
+      barCount: matchedBars ?? 0,
+      selectionMode: "fixed_window",
+    };
+  }, [matchedBars, matchedEnd, matchedStart]);
+  const [selectedWindow, setSelectedWindow] = useState<PatternChartSelection | null>(engineSelection);
+  useEffect(() => {
+    setSelectedWindow(engineSelection);
+  }, [candidate.id, engineSelection]);
+  const windowAdjusted = Boolean(selectedWindow && (!engineSelection || (
+    selectedWindow.startDate !== engineSelection.startDate ||
+    selectedWindow.endDate !== engineSelection.endDate ||
+    selectedWindow.barCount !== engineSelection.barCount
+  )));
+  const approveSelection = windowAdjusted && selectedWindow && selectedWindow.barCount >= 10
+    ? selectedWindow
+    : null;
+  const adjustedSelectionInvalid = windowAdjusted && Boolean(selectedWindow) && (selectedWindow?.barCount ?? 0) < 10;
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1074,15 +1101,15 @@ function CandidateCard({ candidate, profileId, saving, onFeedback }: {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className={PRIMARY_BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("approved")} type="button">
+          <button className={PRIMARY_BUTTON_CLASS} disabled={saving || reviewed || adjustedSelectionInvalid} onClick={() => void onFeedback("approved", approveSelection)} type="button">
             <Check className="h-3.5 w-3.5" />
             Approve
           </button>
-          <button className={DANGER_BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("rejected")} type="button">
+          <button className={DANGER_BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("rejected", null)} type="button">
             <X className="h-3.5 w-3.5" />
             Reject
           </button>
-          <button className={BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("skipped")} type="button">
+          <button className={BUTTON_CLASS} disabled={saving || reviewed} onClick={() => void onFeedback("skipped", null)} type="button">
             <SkipForward className="h-3.5 w-3.5" />
             Skip
           </button>
@@ -1120,8 +1147,10 @@ function CandidateCard({ candidate, profileId, saving, onFeedback }: {
           profileId={profileId}
           ticker={candidate.ticker}
           endDate={chartEndDate}
-          patternStartDate={matchedStart}
-          patternEndDate={matchedEnd}
+          selection={selectedWindow}
+          engineSelection={engineSelection}
+          onSelectionChange={setSelectedWindow}
+          onResetSelection={() => setSelectedWindow(engineSelection)}
         />
       </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
