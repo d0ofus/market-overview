@@ -1941,15 +1941,38 @@ export function getPatternCandidates(params?: {
   limit?: number;
   runId?: string | null;
 }) {
-  return getJson<PatternCandidateListResponse>(
-    appendQuery("/api/pattern-scanner/candidates", {
-      profileId: params?.profileId ?? "default",
-      scope: params?.scope ?? "matched",
-      reviewed: params?.reviewed ?? "exclude",
-      limit: params?.limit ?? 100,
-      runId: params?.runId ?? undefined,
-    }),
-  );
+  const profileId = params?.profileId ?? "default";
+  const scope = params?.scope ?? "matched";
+  const reviewed = params?.reviewed ?? "exclude";
+  const limit = params?.limit ?? 100;
+  const path = appendQuery("/api/pattern-scanner/candidates", {
+    profileId,
+    scope,
+    reviewed,
+    limit,
+    runId: params?.runId ?? undefined,
+  });
+  return getJson<PatternCandidateListResponse>(path).catch(async (error) => {
+    const message = error instanceof Error ? error.message : "";
+    if (!message.includes("API /api/pattern-scanner/candidates") || !message.includes("failed: 404")) {
+      throw error;
+    }
+    const latest = await getPatternLatest(profileId, limit);
+    const threshold = 0.6;
+    const rows = scope === "matched"
+      ? latest.rows.filter((candidate) => candidate.score >= threshold)
+      : latest.rows;
+    return {
+      profileId,
+      run: null,
+      scope,
+      reviewed,
+      matchScoreThreshold: threshold,
+      totalCandidateCount: rows.length,
+      reviewedHiddenCount: 0,
+      rows,
+    };
+  });
 }
 
 export function getPatternRuns(profileId = "default", limit = 25) {
