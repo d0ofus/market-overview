@@ -110,7 +110,27 @@ function normalizeCashtagInput(value: string): string {
   return value.trim().replace(/^\$+/, "").toUpperCase();
 }
 
-function MentionList({ mentions, compact = false }: { mentions: SocialAlertMention[]; compact?: boolean }) {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function HighlightedCashtagText({ text, ticker }: { text: string; ticker: string }) {
+  const normalized = normalizeCashtagInput(ticker);
+  if (!normalized) return <>{text}</>;
+  const pattern = new RegExp(`(\\$${escapeRegExp(normalized)})(?![A-Za-z0-9._-])`, "gi");
+  return (
+    <>
+      {text.split(pattern).map((part, index) => {
+        if (part.toUpperCase() === `$${normalized}`) {
+          return <strong key={`${part}-${index}`} className="font-semibold text-slate-100">{part}</strong>;
+        }
+        return part;
+      })}
+    </>
+  );
+}
+
+function MentionList({ mentions, ticker, compact = false }: { mentions: SocialAlertMention[]; ticker: string; compact?: boolean }) {
   return (
     <div className="space-y-2">
       {mentions.map((mention) => (
@@ -119,7 +139,9 @@ function MentionList({ mentions, compact = false }: { mentions: SocialAlertMenti
             <span className="font-semibold text-slate-300">@{mention.handle}</span>
             <span>{formatDateTime(mention.tweetCreatedAt ?? mention.lastSeenAt)}</span>
           </div>
-          <p className="mt-1 text-xs leading-relaxed text-slate-300">{mention.text}</p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-300">
+            <HighlightedCashtagText text={mention.text} ticker={ticker} />
+          </p>
           {!compact ? (
             <a className="mt-1 block break-all text-[11px] text-accent hover:underline" href={mention.url} target="_blank" rel="noreferrer">
               {mention.url}
@@ -157,6 +179,7 @@ export function SocialAlertsDashboard() {
   const [chartPage, setChartPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
   const [expandedMentions, setExpandedMentions] = useState<Set<string>>(new Set());
+  const [expandedLatestDescriptions, setExpandedLatestDescriptions] = useState<Set<string>>(new Set());
   const [activeChartSummary, setActiveChartSummary] = useState<SocialAlertTickerSummary | null>(null);
   const [blacklistTicker, setBlacklistTicker] = useState("");
   const [blacklistReason, setBlacklistReason] = useState("");
@@ -375,6 +398,15 @@ export function SocialAlertsDashboard() {
 
   const toggleMentions = (ticker: string) => {
     setExpandedMentions((current) => {
+      const next = new Set(current);
+      if (next.has(ticker)) next.delete(ticker);
+      else next.add(ticker);
+      return next;
+    });
+  };
+
+  const toggleLatestDescription = (ticker: string) => {
+    setExpandedLatestDescriptions((current) => {
       const next = new Set(current);
       if (next.has(ticker)) next.delete(ticker);
       else next.add(ticker);
@@ -748,6 +780,7 @@ export function SocialAlertsDashboard() {
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {visibleSummaries.map((summary) => {
                 const isOpen = expandedMentions.has(summary.ticker);
+                const latestExpanded = expandedLatestDescriptions.has(summary.ticker);
                 return (
                   <div key={summary.ticker} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
                     <div className="mb-4 space-y-2">
@@ -758,7 +791,15 @@ export function SocialAlertsDashboard() {
                         </div>
                         <div className="min-w-0 text-right">
                           <div className="text-xs font-semibold text-slate-300">@{summary.latestMention.handle}</div>
-                          <div className="mt-1 line-clamp-2 text-xs leading-snug text-slate-400" title={summary.latestMention.text}>{summary.latestMention.text}</div>
+                          <button
+                            type="button"
+                            className={`mt-1 block w-full text-right text-xs leading-snug text-slate-400 transition hover:text-slate-200 ${latestExpanded ? "" : "line-clamp-2"}`}
+                            onClick={() => toggleLatestDescription(summary.ticker)}
+                            aria-expanded={latestExpanded}
+                            title={latestExpanded ? "Collapse post text" : "Show full post text"}
+                          >
+                            <HighlightedCashtagText text={summary.latestMention.text} ticker={summary.ticker} />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -786,7 +827,7 @@ export function SocialAlertsDashboard() {
                     {isOpen ? (
                       <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
                         <h4 className="mb-2 text-sm font-semibold text-slate-100">X Mentions</h4>
-                        <MentionList mentions={summary.mentions} />
+                        <MentionList mentions={summary.mentions} ticker={summary.ticker} />
                       </div>
                     ) : null}
                   </div>
@@ -811,7 +852,10 @@ export function SocialAlertsDashboard() {
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
                 <h4 className="mt-1 text-base font-semibold text-slate-100">{activeChartSummary.ticker}</h4>
-                <div className="mt-2 max-w-4xl text-sm text-slate-400">@{activeChartSummary.latestMention.handle}: {activeChartSummary.latestMention.text}</div>
+                <div className="mt-2 max-w-4xl text-sm text-slate-400">
+                  @{activeChartSummary.latestMention.handle}:{" "}
+                  <HighlightedCashtagText text={activeChartSummary.latestMention.text} ticker={activeChartSummary.ticker} />
+                </div>
               </div>
               <button
                 type="button"
@@ -828,7 +872,7 @@ export function SocialAlertsDashboard() {
               </div>
               <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
                 <h4 className="mb-2 text-sm font-semibold text-slate-100">X Mentions</h4>
-                <MentionList mentions={activeChartSummary.mentions} />
+                <MentionList mentions={activeChartSummary.mentions} ticker={activeChartSummary.ticker} />
               </div>
             </div>
           </div>
