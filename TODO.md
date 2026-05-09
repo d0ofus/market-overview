@@ -33,10 +33,7 @@
 > See if there can be tradingview financials widgets shown in the expanded chart
 
 ## SOCIAL ALERTS
-> Retain a database of the last 30 days scraped tweets
-> Handle repeat searches with the same parameters 
-> Add blacklisted tickers like indices etc.
-> Put actual tweet in description of multi-chart view
+> Change the date and time to be bubbles format like /alerts 
 
 ## Peer Groups
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
