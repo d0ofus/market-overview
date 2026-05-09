@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Ban, CheckCircle2, ChevronDown, ChevronUp, Clock, KeyRound, Loader2, Maximize2, Plus, RefreshCw, Search, Trash2, XCircle } from "lucide-react";
 import {
   createSocialAlertBlacklistEntry,
@@ -43,6 +43,12 @@ const PRIMARY_BUTTON_CLASS =
 const DANGER_BUTTON_CLASS =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 px-2.5 py-1.5 text-xs font-medium text-red-300 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50";
 const EMPTY_METRICS: SocialAlertMetrics = { tweets: 0, cashtagHits: 0, uniqueTickers: 0, failures: 0, runtimeMs: 0 };
+const COLLAPSED_LATEST_TEXT_STYLE: CSSProperties = {
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical",
+  overflow: "hidden",
+};
 const DEFAULT_SETTINGS: SocialAlertSettings = {
   id: "default",
   dailyScrapeEnabled: false,
@@ -793,7 +799,8 @@ export function SocialAlertsDashboard() {
                           <div className="text-xs font-semibold text-slate-300">@{summary.latestMention.handle}</div>
                           <button
                             type="button"
-                            className={`mt-1 block w-full text-right text-xs leading-snug text-slate-400 transition hover:text-slate-200 ${latestExpanded ? "" : "line-clamp-2"}`}
+                            className="mt-1 w-full text-right text-xs leading-snug text-slate-400 transition hover:text-slate-200"
+                            style={latestExpanded ? undefined : COLLAPSED_LATEST_TEXT_STYLE}
                             onClick={() => toggleLatestDescription(summary.ticker)}
                             aria-expanded={latestExpanded}
                             title={latestExpanded ? "Collapse post text" : "Show full post text"}
