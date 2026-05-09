@@ -247,13 +247,20 @@ import {
   updatePatternProfileSettings,
 } from "./pattern-scanner-service";
 import {
+  cleanupOldSocialAlertData,
+  createSocialAlertBlacklistedCashtag,
   createSocialAlertHandle,
+  deleteSocialAlertBlacklistedCashtag,
   deleteSocialAlertCredential,
   getSocialAlertHealth,
   getSocialAlertResults,
+  getSocialAlertSettings,
+  listSocialAlertBlacklistedCashtags,
   listSocialAlertHandles,
+  maybeRunScheduledSocialAlertScrape,
   runSocialAlertScrape,
   saveSocialAlertCredential,
+  updateSocialAlertSettings,
 } from "./social-alerts-service";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -263,12 +270,14 @@ const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_SPARKLINE_MIN_POINTS = 90;
 const OVERVIEW_HISTORY_LOOKBACK_DAYS = 320;
 const ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
+const SOCIAL_ALERTS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANNING_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const GAPPERS_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 const SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60_000;
 let lastOverviewCatalogEnsureAt = 0;
 let lastOverviewBarRefreshAt = 0;
 let lastAlertsHousekeepingAt = 0;
+let lastSocialAlertsHousekeepingAt = 0;
 let lastScanningHousekeepingAt = 0;
 let lastGappersHousekeepingAt = 0;
 let lastScansPageHousekeepingAt = 0;
@@ -875,6 +884,17 @@ async function maybeRunAlertsHousekeeping(env: Env): Promise<void> {
     await reconcileAlertsFromMailboxAdapters(env, 30);
   } catch (error) {
     console.error("alerts reconcile failed", error);
+  }
+}
+
+async function maybeRunSocialAlertsHousekeeping(env: Env): Promise<void> {
+  const now = Date.now();
+  if (now - lastSocialAlertsHousekeepingAt < SOCIAL_ALERTS_HOUSEKEEPING_INTERVAL_MS) return;
+  lastSocialAlertsHousekeepingAt = now;
+  try {
+    await cleanupOldSocialAlertData(env, 10);
+  } catch (error) {
+    console.error("social alerts cleanup failed", error);
   }
 }
 
@@ -2231,6 +2251,51 @@ app.post("/api/admin/social-alerts/handles", async (c) => {
   }
 });
 
+app.get("/api/admin/social-alerts/settings", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await getSocialAlertSettings(c.env));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/admin/social-alerts/settings", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await updateSocialAlertSettings(c.env, await c.req.json()));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.get("/api/admin/social-alerts/blacklist", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await listSocialAlertBlacklistedCashtags(c.env));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.post("/api/admin/social-alerts/blacklist", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await createSocialAlertBlacklistedCashtag(c.env, await c.req.json()));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
+app.delete("/api/admin/social-alerts/blacklist/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await deleteSocialAlertBlacklistedCashtag(c.env, c.req.param("ticker")));
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
 app.post("/api/admin/social-alerts/credentials", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -2280,6 +2345,9 @@ app.get("/api/admin/social-alerts/results", async (c) => {
       ticker: c.req.query("ticker") ?? null,
       handle: c.req.query("handle") ?? null,
       q: c.req.query("q") ?? null,
+      startDate: c.req.query("startDate") ?? null,
+      endDate: c.req.query("endDate") ?? null,
+      lookbackDays: Number(c.req.query("lookbackDays") ?? 10),
       limit: Number(c.req.query("limit") ?? 200),
       offset: Number(c.req.query("offset") ?? 0),
     }));
@@ -4352,6 +4420,7 @@ export default {
   },
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
     await maybeRunAlertsHousekeeping(env);
+    await maybeRunSocialAlertsHousekeeping(env);
     await maybeRunScansPageHousekeeping(env);
     await maybeRunScanningHousekeeping(env);
     await maybeRunGappersHousekeeping(env);
@@ -4377,6 +4446,11 @@ export default {
       await maybeProcessFundamentalSeedQueue(env, now);
     } catch (error) {
       console.error("scheduled fundamentals seed queue failed", error);
+    }
+    try {
+      await maybeRunScheduledSocialAlertScrape(env, now);
+    } catch (error) {
+      console.error("scheduled social alerts scrape failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
     let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
