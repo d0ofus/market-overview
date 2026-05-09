@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  cleanupOldSocialAlertData,
   deleteSocialAlertCredential,
   extractCashtags,
   getSocialAlertHealth,
   getSocialAlertResults,
+  maybeRunScheduledSocialAlertScrape,
   normalizeSocialHandle,
   saveSocialAlertCredential,
+  shouldRunScheduledSocialAlertScrape,
   summarizeSocialAlertMetrics,
   validateSocialAlertScrapePayload,
 } from "../src/social-alerts-service";
@@ -97,6 +100,105 @@ function createResultsDb() {
   };
 }
 
+function createRollingLogDb() {
+  const selectedPostQueries: string[] = [];
+  const statementFor = (sql: string, args: unknown[] = []): any => ({
+    bind: (...nextArgs: unknown[]) => statementFor(sql, nextArgs),
+    first: async () => {
+      if (sql.includes("FROM social_alert_runs")) {
+        return {
+          id: "run-2",
+          status: "completed",
+          startDate: "2026-05-08",
+          limitPerHandle: 50,
+          selectedHandlesJson: JSON.stringify(["sourcehandle"]),
+          error: null,
+          tweets: 4,
+          cashtagHits: 4,
+          uniqueTickers: 3,
+          failures: 1,
+          runtimeMs: 2500,
+          trigger: "manual",
+          scheduledLocalDate: null,
+          createdAt: "2026-05-10T00:00:00Z",
+          completedAt: "2026-05-10T00:01:00Z",
+        };
+      }
+      return null;
+    },
+    all: async () => {
+      if (sql.includes("FROM social_alert_blacklisted_cashtags")) {
+        return { results: [
+          { ticker: "SPY", reason: "index", createdAt: "2026-05-01T00:00:00Z", updatedAt: "2026-05-01T00:00:00Z" },
+        ] };
+      }
+      if (sql.includes("FROM social_alert_posts p")) {
+        selectedPostQueries.push(sql);
+        return { results: [
+          { id: "p1", handle: "sourcehandle", tweetId: "1", tweetCreatedAt: "2026-05-10T13:00:00Z", cashtagsJson: JSON.stringify(["NVDA", "SPY"]), text: "$NVDA $SPY", url: "https://x.com/sourcehandle/status/1", firstSeenAt: "2026-05-10T13:01:00Z", lastSeenAt: "2026-05-10T13:01:00Z" },
+          { id: "p2", handle: "sourcehandle", tweetId: "2", tweetCreatedAt: "2026-05-09T13:00:00Z", cashtagsJson: JSON.stringify(["QQQ"]), text: "$QQQ", url: "https://x.com/sourcehandle/status/2", firstSeenAt: "2026-05-09T13:01:00Z", lastSeenAt: "2026-05-09T13:01:00Z" },
+          { id: "p3", handle: "sourcehandle", tweetId: "3", tweetCreatedAt: "2026-05-08T13:00:00Z", cashtagsJson: JSON.stringify(["SPY"]), text: "$SPY only", url: "https://x.com/sourcehandle/status/3", firstSeenAt: "2026-05-08T13:01:00Z", lastSeenAt: "2026-05-08T13:01:00Z" },
+          { id: "p4", handle: "sourcehandle", tweetId: "4", tweetCreatedAt: "2026-05-07T13:00:00Z", cashtagsJson: JSON.stringify([]), text: "no cashtags", url: "https://x.com/sourcehandle/status/4", firstSeenAt: "2026-05-07T13:01:00Z", lastSeenAt: "2026-05-07T13:01:00Z" },
+        ] };
+      }
+      return { results: [] };
+    },
+    run: async () => ({ success: true, meta: { changes: 0 } }),
+  });
+  return {
+    db: {
+      prepare: (sql: string) => statementFor(sql),
+    } as unknown as D1Database,
+    selectedPostQueries,
+  };
+}
+
+function createCleanupDb() {
+  const statements: string[] = [];
+  return {
+    db: {
+      prepare(sql: string) {
+        statements.push(sql);
+        return {
+          bind: () => ({
+            run: async () => ({ meta: { changes: 1 } }),
+          }),
+        };
+      },
+    } as unknown as D1Database,
+    statements,
+  };
+}
+
+function createScheduledSettingsDb(existingScheduledRun: boolean) {
+  const statementFor = (sql: string, args: unknown[] = []): any => ({
+    bind: (...nextArgs: unknown[]) => statementFor(sql, nextArgs),
+    first: async () => {
+      if (sql.includes("FROM social_alert_settings")) {
+        return {
+          id: "default",
+          dailyScrapeEnabled: 1,
+          dailyScrapeTimeLocal: "10:00",
+          dailyScrapeTimezone: "Australia/Melbourne",
+          dailyScrapeLookbackDays: 1,
+          updatedAt: "2026-05-09T00:00:00Z",
+        };
+      }
+      if (sql.includes("FROM social_alert_runs")) {
+        return existingScheduledRun ? { id: "scheduled-run" } : null;
+      }
+      return null;
+    },
+    all: async () => ({ results: [] }),
+    run: async () => ({ success: true, meta: { changes: 0 } }),
+  });
+  return {
+    DB: {
+      prepare: (sql: string) => statementFor(sql),
+    } as unknown as D1Database,
+  } as Env;
+}
+
 describe("social alerts helpers", () => {
   it("normalizes X/Twitter handles from common input forms", () => {
     expect(normalizeSocialHandle("@MarketWizard_1")).toBe("marketwizard_1");
@@ -175,5 +277,114 @@ describe("social alerts helpers", () => {
     expect(store.selectedPostQueries[0]).toContain("CASE WHEN datetime(p.tweet_created_at) IS NULL THEN 1 ELSE 0 END ASC");
     expect(store.selectedPostQueries[0]).toContain("datetime(p.tweet_created_at) DESC");
     expect(store.selectedPostQueries[0]).toContain("datetime(p.last_seen_at) DESC");
+  });
+
+  it("returns a rolling deduped log with blacklist-aware metrics and ticker summaries", async () => {
+    const store = createRollingLogDb();
+    const env = { DB: store.db } as Env;
+
+    const result = await getSocialAlertResults(env, {
+      startDate: "2026-05-07",
+      endDate: "2026-05-10",
+      lookbackDays: 4,
+      limit: 10,
+      offset: 0,
+    });
+
+    expect(result.rows).toHaveLength(4);
+    expect(result.total).toBe(4);
+    expect(result.rows.map((row) => row.id)).toEqual(["p1", "p2", "p3", "p4"]);
+    expect(result.rows[0].cashtags).toEqual(["NVDA"]);
+    expect(result.rows[2].cashtags).toEqual([]);
+    expect(result.uniqueTickers).toEqual(["NVDA", "QQQ"]);
+    expect(result.tickerSummaries).toHaveLength(2);
+    expect(result.tickerSummaries[0]).toMatchObject({
+      ticker: "NVDA",
+      mentionCount: 1,
+      latestMention: { handle: "sourcehandle", text: "$NVDA $SPY" },
+    });
+    expect(result.metrics).toEqual({
+      tweets: 4,
+      cashtagHits: 2,
+      uniqueTickers: 2,
+      failures: 1,
+      runtimeMs: 2500,
+    });
+    expect(result.blacklist.map((row) => row.ticker)).toEqual(["SPY"]);
+    expect(result.window).toEqual({ startDate: "2026-05-07", endDate: "2026-05-10", lookbackDays: 4 });
+    expect(store.selectedPostQueries[0]).toContain("FROM social_alert_posts p");
+  });
+
+  it("does not expose blacklisted cashtags through ticker filters", async () => {
+    const env = { DB: createRollingLogDb().db } as Env;
+
+    const result = await getSocialAlertResults(env, {
+      ticker: "SPY",
+      startDate: "2026-05-07",
+      endDate: "2026-05-10",
+      limit: 10,
+      offset: 0,
+    });
+
+    expect(result.rows).toEqual([]);
+    expect(result.total).toBe(0);
+    expect(result.uniqueTickers).toEqual([]);
+    expect(result.metrics).toEqual({
+      tweets: 0,
+      cashtagHits: 0,
+      uniqueTickers: 0,
+      failures: 1,
+      runtimeMs: 2500,
+    });
+  });
+
+  it("cleans social alert log data older than the retention window", async () => {
+    const store = createCleanupDb();
+
+    const result = await cleanupOldSocialAlertData({ DB: store.db } as Env, 10);
+
+    expect(result).toEqual({ deletedRunPosts: 1, deletedPosts: 1, deletedRuns: 1 });
+    expect(store.statements[0]).toContain("DELETE FROM social_alert_run_posts");
+    expect(store.statements[1]).toContain("DELETE FROM social_alert_posts");
+    expect(store.statements[2]).toContain("DELETE FROM social_alert_runs");
+  });
+
+  it("decides when the Melbourne daily social alert scrape is due", () => {
+    const settings = {
+      id: "default",
+      dailyScrapeEnabled: true,
+      dailyScrapeTimeLocal: "10:00",
+      dailyScrapeTimezone: "Australia/Melbourne",
+      dailyScrapeLookbackDays: 1,
+      updatedAt: "2026-05-09T00:00:00Z",
+    };
+
+    expect(shouldRunScheduledSocialAlertScrape(new Date("2026-05-08T23:45:00Z"), settings)).toEqual({
+      shouldRun: false,
+      localDate: "2026-05-09",
+    });
+    expect(shouldRunScheduledSocialAlertScrape(new Date("2026-05-09T00:05:00Z"), settings)).toEqual({
+      shouldRun: true,
+      localDate: "2026-05-09",
+    });
+    expect(shouldRunScheduledSocialAlertScrape(new Date("2026-05-09T00:05:00Z"), {
+      ...settings,
+      dailyScrapeEnabled: false,
+    })).toEqual({
+      shouldRun: false,
+      localDate: "2026-05-09",
+    });
+  });
+
+  it("skips the scheduled scrape after it has already run for the Melbourne local date", async () => {
+    const env = createScheduledSettingsDb(true);
+
+    const result = await maybeRunScheduledSocialAlertScrape(env, new Date("2026-05-09T00:05:00Z"));
+
+    expect(result).toEqual({
+      skipped: true,
+      reason: "already_ran",
+      localDate: "2026-05-09",
+    });
   });
 });

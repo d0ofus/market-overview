@@ -129,6 +129,40 @@ export type SocialAlertResultRow = {
   lastSeenAt: string;
 };
 
+export type SocialAlertBlacklistedCashtagRow = {
+  ticker: string;
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SocialAlertSettings = {
+  id: string;
+  dailyScrapeEnabled: boolean;
+  dailyScrapeTimeLocal: string;
+  dailyScrapeTimezone: string;
+  dailyScrapeLookbackDays: number;
+  updatedAt: string;
+};
+
+export type SocialAlertMention = {
+  postId: string;
+  handle: string;
+  tweetId: string | null;
+  tweetCreatedAt: string | null;
+  text: string;
+  url: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type SocialAlertTickerSummary = {
+  ticker: string;
+  mentionCount: number;
+  latestMention: SocialAlertMention;
+  mentions: SocialAlertMention[];
+};
+
 export type SocialAlertRunSummary = {
   id: string;
   status: string;
@@ -138,6 +172,8 @@ export type SocialAlertRunSummary = {
   error: string | null;
   createdAt: string;
   completedAt: string | null;
+  trigger?: string | null;
+  scheduledLocalDate?: string | null;
 };
 
 export type SocialAlertHealthResponse = {
@@ -156,6 +192,9 @@ export type SocialAlertResultsResponse = {
   metrics: SocialAlertMetrics;
   rows: SocialAlertResultRow[];
   uniqueTickers: string[];
+  tickerSummaries: SocialAlertTickerSummary[];
+  blacklist: SocialAlertBlacklistedCashtagRow[];
+  window: { startDate: string; endDate: string; lookbackDays: number };
   total: number;
   limit: number;
   offset: number;
@@ -1729,6 +1768,34 @@ export function createSocialAlertHandle(handle: string) {
   });
 }
 
+export function getSocialAlertSettings() {
+  return adminFetch<SocialAlertSettings>("/api/admin/social-alerts/settings");
+}
+
+export function updateSocialAlertSettings(payload: Omit<SocialAlertSettings, "id" | "updatedAt">) {
+  return adminFetch<{ ok: boolean; settings: SocialAlertSettings }>("/api/admin/social-alerts/settings", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getSocialAlertBlacklist() {
+  return adminFetch<{ rows: SocialAlertBlacklistedCashtagRow[] }>("/api/admin/social-alerts/blacklist");
+}
+
+export function createSocialAlertBlacklistEntry(ticker: string, reason?: string | null) {
+  return adminFetch<{ ok: boolean; row: SocialAlertBlacklistedCashtagRow }>("/api/admin/social-alerts/blacklist", {
+    method: "POST",
+    body: JSON.stringify({ ticker, reason: reason ?? null }),
+  });
+}
+
+export function deleteSocialAlertBlacklistEntry(ticker: string) {
+  return adminFetch<{ ok: boolean; ticker: string }>(`/api/admin/social-alerts/blacklist/${encodeURIComponent(ticker)}`, {
+    method: "DELETE",
+  });
+}
+
 export function getSocialAlertHealth(options?: { probe?: boolean; probeHandle?: string | null }) {
   return adminFetch<SocialAlertHealthResponse>(
     appendQuery("/api/admin/social-alerts/health", {
@@ -1774,6 +1841,9 @@ export function getSocialAlertResults(params?: {
   ticker?: string | null;
   handle?: string | null;
   q?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  lookbackDays?: number;
   limit?: number;
   offset?: number;
 }) {
@@ -1783,6 +1853,9 @@ export function getSocialAlertResults(params?: {
       ticker: params?.ticker ?? undefined,
       handle: params?.handle ?? undefined,
       q: params?.q ?? undefined,
+      startDate: params?.startDate ?? undefined,
+      endDate: params?.endDate ?? undefined,
+      lookbackDays: params?.lookbackDays,
       limit: params?.limit,
       offset: params?.offset,
     }),

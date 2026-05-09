@@ -1,14 +1,22 @@
 import { z } from "zod";
 import type { Env } from "./types";
+import { parseLocalTime, zonedParts } from "./refresh-timing";
 
 const HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CASHTAG_TOKEN_RE = /^[A-Z]{1,6}(?:[.\-][A-Z]{1,3})?$/;
 const CASHTAG_RE = /(^|[^A-Za-z0-9_])\$([A-Za-z]{1,6}(?:[.\-][A-Za-z]{1,3})?)(?![A-Za-z0-9_])/g;
 const DEFAULT_LIMIT_PER_HANDLE = 50;
 const MAX_LIMIT_PER_HANDLE = 500;
 const MAX_HANDLES_PER_RUN = 10;
 const DEFAULT_SERVICE_TIMEOUT_MS = 55_000;
 const CREDENTIAL_KEY = "scweet_auth_token";
+const DEFAULT_LOG_RETENTION_DAYS = 10;
+const DEFAULT_SETTINGS_ID = "default";
+const DEFAULT_DAILY_SCRAPE_TIME_LOCAL = "10:00";
+const DEFAULT_DAILY_SCRAPE_TIMEZONE = "Australia/Melbourne";
+const DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS = 1;
+const MAX_LOG_QUERY_ROWS = 5_000;
 
 export type SocialAlertHealthStatus =
   | "missing_token"
@@ -49,6 +57,40 @@ export type SocialAlertResultRow = {
   url: string;
   firstSeenAt: string;
   lastSeenAt: string;
+};
+
+export type SocialAlertBlacklistedCashtagRow = {
+  ticker: string;
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SocialAlertSettings = {
+  id: string;
+  dailyScrapeEnabled: boolean;
+  dailyScrapeTimeLocal: string;
+  dailyScrapeTimezone: string;
+  dailyScrapeLookbackDays: number;
+  updatedAt: string;
+};
+
+export type SocialAlertMention = {
+  postId: string;
+  handle: string;
+  tweetId: string | null;
+  tweetCreatedAt: string | null;
+  text: string;
+  url: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type SocialAlertTickerSummary = {
+  ticker: string;
+  mentionCount: number;
+  latestMention: SocialAlertMention;
+  mentions: SocialAlertMention[];
 };
 
 type StoredCredentialRow = {
@@ -102,12 +144,42 @@ const scrapeSchema = z.object({
   limitPerHandle: z.number().int().min(1).max(MAX_LIMIT_PER_HANDLE).optional().default(DEFAULT_LIMIT_PER_HANDLE),
 });
 
+const blacklistCreateSchema = z.object({
+  ticker: z.string().trim().min(1).max(16).transform((value) => normalizeCashtagTicker(value)),
+  reason: z.string().trim().max(240).nullable().optional(),
+});
+
+const settingsPatchSchema = z.object({
+  dailyScrapeEnabled: z.boolean(),
+  dailyScrapeTimeLocal: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
+  dailyScrapeTimezone: z.string().trim().min(1).max(80),
+  dailyScrapeLookbackDays: z.number().int().min(1).max(DEFAULT_LOG_RETENTION_DAYS),
+});
+
 export function validateSocialAlertScrapePayload(body: unknown): z.infer<typeof scrapeSchema> {
   return scrapeSchema.parse(body);
 }
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function addDaysIso(isoDate: string, days: number): string {
+  const value = new Date(`${isoDate}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+function defaultLogEndDate(now = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+function normalizeCashtagTicker(raw: string): string {
+  const ticker = String(raw ?? "").trim().replace(/^\$+/, "").toUpperCase();
+  if (!CASHTAG_TOKEN_RE.test(ticker)) {
+    throw new Error("Enter a valid cashtag ticker.");
+  }
+  return ticker;
 }
 
 function normalizeStatus(value: string | null | undefined): SocialAlertHealthStatus {
@@ -241,6 +313,11 @@ function serviceTimeout(env: Env): number {
   return Number.isFinite(parsed) ? Math.max(5_000, Math.min(290_000, parsed)) : DEFAULT_SERVICE_TIMEOUT_MS;
 }
 
+function isMissingTableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.toLowerCase().includes("no such table");
+}
+
 async function callScweetService(
   env: Env,
   payload: Record<string, unknown>,
@@ -341,6 +418,133 @@ export async function createSocialAlertHandle(env: Env, body: unknown): Promise<
       isActive: Boolean(row.isActive),
     },
   };
+}
+
+function mapSettingsRow(row: {
+  id: string;
+  dailyScrapeEnabled: number | null;
+  dailyScrapeTimeLocal: string | null;
+  dailyScrapeTimezone: string | null;
+  dailyScrapeLookbackDays: number | null;
+  updatedAt: string | null;
+} | null): SocialAlertSettings {
+  return {
+    id: row?.id ?? DEFAULT_SETTINGS_ID,
+    dailyScrapeEnabled: Number(row?.dailyScrapeEnabled ?? 0) === 1,
+    dailyScrapeTimeLocal: row?.dailyScrapeTimeLocal ?? DEFAULT_DAILY_SCRAPE_TIME_LOCAL,
+    dailyScrapeTimezone: row?.dailyScrapeTimezone ?? DEFAULT_DAILY_SCRAPE_TIMEZONE,
+    dailyScrapeLookbackDays: Math.max(1, Math.min(DEFAULT_LOG_RETENTION_DAYS, Number(row?.dailyScrapeLookbackDays ?? DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS))),
+    updatedAt: row?.updatedAt ?? nowIso(),
+  };
+}
+
+async function ensureSocialAlertSettingsRow(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO social_alert_settings
+      (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
+     VALUES (?, 0, ?, ?, ?, CURRENT_TIMESTAMP)`,
+  )
+    .bind(DEFAULT_SETTINGS_ID, DEFAULT_DAILY_SCRAPE_TIME_LOCAL, DEFAULT_DAILY_SCRAPE_TIMEZONE, DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS)
+    .run();
+}
+
+export async function getSocialAlertSettings(env: Env): Promise<SocialAlertSettings> {
+  try {
+    await ensureSocialAlertSettingsRow(env);
+    const row = await env.DB.prepare(
+      `SELECT
+         id,
+         daily_scrape_enabled as dailyScrapeEnabled,
+         daily_scrape_time_local as dailyScrapeTimeLocal,
+         daily_scrape_timezone as dailyScrapeTimezone,
+         daily_scrape_lookback_days as dailyScrapeLookbackDays,
+         updated_at as updatedAt
+       FROM social_alert_settings
+       WHERE id = ?
+       LIMIT 1`,
+    )
+      .bind(DEFAULT_SETTINGS_ID)
+      .first<{
+        id: string;
+        dailyScrapeEnabled: number | null;
+        dailyScrapeTimeLocal: string | null;
+        dailyScrapeTimezone: string | null;
+        dailyScrapeLookbackDays: number | null;
+        updatedAt: string | null;
+      }>();
+    return mapSettingsRow(row ?? null);
+  } catch (error) {
+    if (isMissingTableError(error)) return mapSettingsRow(null);
+    throw error;
+  }
+}
+
+export async function updateSocialAlertSettings(env: Env, body: unknown): Promise<{ ok: true; settings: SocialAlertSettings }> {
+  const payload = settingsPatchSchema.parse(body);
+  await ensureSocialAlertSettingsRow(env);
+  await env.DB.prepare(
+    `INSERT INTO social_alert_settings
+      (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(id) DO UPDATE SET
+       daily_scrape_enabled = excluded.daily_scrape_enabled,
+       daily_scrape_time_local = excluded.daily_scrape_time_local,
+       daily_scrape_timezone = excluded.daily_scrape_timezone,
+       daily_scrape_lookback_days = excluded.daily_scrape_lookback_days,
+       updated_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(
+      DEFAULT_SETTINGS_ID,
+      payload.dailyScrapeEnabled ? 1 : 0,
+      payload.dailyScrapeTimeLocal,
+      payload.dailyScrapeTimezone,
+      payload.dailyScrapeLookbackDays,
+    )
+    .run();
+  return { ok: true, settings: await getSocialAlertSettings(env) };
+}
+
+export async function listSocialAlertBlacklistedCashtags(env: Env): Promise<{ rows: SocialAlertBlacklistedCashtagRow[] }> {
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT ticker, reason, created_at as createdAt, updated_at as updatedAt FROM social_alert_blacklisted_cashtags ORDER BY ticker ASC",
+    ).all<SocialAlertBlacklistedCashtagRow>();
+    return { rows: rows.results ?? [] };
+  } catch (error) {
+    if (isMissingTableError(error)) return { rows: [] };
+    throw error;
+  }
+}
+
+export async function createSocialAlertBlacklistedCashtag(env: Env, body: unknown): Promise<{ ok: true; row: SocialAlertBlacklistedCashtagRow }> {
+  const payload = blacklistCreateSchema.parse(body);
+  await env.DB.prepare(
+    `INSERT INTO social_alert_blacklisted_cashtags (ticker, reason, created_at, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(ticker) DO UPDATE SET reason = excluded.reason, updated_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(payload.ticker, payload.reason?.trim() || null)
+    .run();
+  const row = await env.DB.prepare(
+    "SELECT ticker, reason, created_at as createdAt, updated_at as updatedAt FROM social_alert_blacklisted_cashtags WHERE ticker = ? LIMIT 1",
+  )
+    .bind(payload.ticker)
+    .first<SocialAlertBlacklistedCashtagRow>();
+  if (!row) throw new Error("Failed to save blacklisted cashtag.");
+  return { ok: true, row };
+}
+
+export async function deleteSocialAlertBlacklistedCashtag(env: Env, ticker: string): Promise<{ ok: true; ticker: string }> {
+  const normalized = normalizeCashtagTicker(ticker);
+  await env.DB.prepare("DELETE FROM social_alert_blacklisted_cashtags WHERE ticker = ?")
+    .bind(normalized)
+    .run();
+  return { ok: true, ticker: normalized };
+}
+
+async function loadBlacklistedCashtagSet(env: Env): Promise<Set<string>> {
+  const rows = await listSocialAlertBlacklistedCashtags(env);
+  return new Set(rows.rows.map((row) => row.ticker.toUpperCase()));
 }
 
 export async function saveSocialAlertCredential(env: Env, body: unknown): Promise<{
@@ -539,14 +743,28 @@ export async function runSocialAlertScrape(env: Env, body: unknown): Promise<{
   results: SocialAlertResultRow[];
   failures: ScweetFailure[];
   authStatus: { status: SocialAlertHealthStatus; message: string | null };
+}>;
+export async function runSocialAlertScrape(
+  env: Env,
+  body: unknown,
+  options?: { trigger?: "manual" | "scheduled"; scheduledLocalDate?: string | null },
+): Promise<{
+  ok: boolean;
+  run: { id: string; status: string; startDate: string; limitPerHandle: number };
+  metrics: SocialAlertMetrics;
+  results: SocialAlertResultRow[];
+  failures: ScweetFailure[];
+  authStatus: { status: SocialAlertHealthStatus; message: string | null };
 }> {
   const payload = validateSocialAlertScrapePayload(body);
   const handles = await selectedHandlesForRun(env, payload);
   const runId = crypto.randomUUID();
+  const trigger = options?.trigger ?? "manual";
+  const scheduledLocalDate = trigger === "scheduled" ? options?.scheduledLocalDate ?? null : null;
   await env.DB.prepare(
-    "INSERT INTO social_alert_runs (id, status, start_date, limit_per_handle, selected_handles_json, started_at, created_at) VALUES (?, 'running', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    "INSERT INTO social_alert_runs (id, status, start_date, limit_per_handle, selected_handles_json, \"trigger\", scheduled_local_date, started_at, created_at) VALUES (?, 'running', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
   )
-    .bind(runId, payload.startDate, payload.limitPerHandle, JSON.stringify(handles.map((row) => row.handle)))
+    .bind(runId, payload.startDate, payload.limitPerHandle, JSON.stringify(handles.map((row) => row.handle)), trigger, scheduledLocalDate)
     .run();
 
   try {
@@ -590,7 +808,12 @@ export async function runSocialAlertScrape(env: Env, body: unknown): Promise<{
 
     const failures = response.failures ?? [];
     const runtimeMs = Number(response.runtimeMs ?? Date.now() - started);
-    const metrics = summarizeSocialAlertMetrics(rows, failures.length, runtimeMs);
+    const blacklist = await loadBlacklistedCashtagSet(env);
+    const metrics = summarizeSocialAlertMetrics(
+      rows.map((row) => ({ cashtags: row.cashtags.filter((ticker) => !blacklist.has(ticker.toUpperCase())) })),
+      failures.length,
+      runtimeMs,
+    );
     await env.DB.prepare(
       "UPDATE social_alert_runs SET status = 'completed', auth_status = ?, tweets = ?, cashtag_hits = ?, unique_tickers = ?, failures = ?, runtime_ms = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
     )
@@ -654,11 +877,107 @@ function parseJsonArray(raw: string | null | undefined): string[] {
   }
 }
 
+function normalizeLogWindow(query: {
+  startDate?: string | null;
+  endDate?: string | null;
+  lookbackDays?: number | null;
+}, now = new Date()): { startDate: string; endDate: string; lookbackDays: number } {
+  const requestedEnd = query.endDate && DATE_RE.test(query.endDate) ? query.endDate : defaultLogEndDate(now);
+  const parsedLookback = Math.max(1, Math.min(DEFAULT_LOG_RETENTION_DAYS, Math.trunc(Number(query.lookbackDays ?? DEFAULT_LOG_RETENTION_DAYS) || DEFAULT_LOG_RETENTION_DAYS)));
+  const requestedStart = query.startDate && DATE_RE.test(query.startDate)
+    ? query.startDate
+    : addDaysIso(requestedEnd, -(parsedLookback - 1));
+  const startDate = requestedStart <= requestedEnd ? requestedStart : requestedEnd;
+  const endDate = requestedStart <= requestedEnd ? requestedEnd : requestedStart;
+  const msPerDay = 86_400_000;
+  const startMs = Date.parse(`${startDate}T00:00:00Z`);
+  const endMs = Date.parse(`${endDate}T00:00:00Z`);
+  const actualLookback = Number.isFinite(startMs) && Number.isFinite(endMs)
+    ? Math.max(1, Math.min(DEFAULT_LOG_RETENTION_DAYS, Math.round((endMs - startMs) / msPerDay) + 1))
+    : parsedLookback;
+  return { startDate, endDate, lookbackDays: actualLookback };
+}
+
+function filterCashtagsForDisplay(cashtags: string[], blacklist: Set<string>): string[] {
+  const seen = new Set<string>();
+  const filtered: string[] = [];
+  for (const ticker of cashtags) {
+    const normalized = String(ticker ?? "").trim().toUpperCase();
+    if (!normalized || blacklist.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    filtered.push(normalized);
+  }
+  return filtered;
+}
+
+function mentionFromRow(row: SocialAlertResultRow): SocialAlertMention {
+  return {
+    postId: row.id,
+    handle: row.handle,
+    tweetId: row.tweetId,
+    tweetCreatedAt: row.tweetCreatedAt,
+    text: row.text,
+    url: row.url,
+    firstSeenAt: row.firstSeenAt,
+    lastSeenAt: row.lastSeenAt,
+  };
+}
+
+function buildTickerSummaries(rows: SocialAlertResultRow[]): SocialAlertTickerSummary[] {
+  const byTicker = new Map<string, SocialAlertMention[]>();
+  for (const row of rows) {
+    for (const ticker of row.cashtags) {
+      const mentions = byTicker.get(ticker) ?? [];
+      mentions.push(mentionFromRow(row));
+      byTicker.set(ticker, mentions);
+    }
+  }
+  return Array.from(byTicker.entries())
+    .map(([ticker, mentions]) => ({
+      ticker,
+      mentionCount: mentions.length,
+      latestMention: mentions[0],
+      mentions,
+    }))
+    .filter((row): row is SocialAlertTickerSummary => Boolean(row.latestMention))
+    .sort((left, right) => right.mentionCount - left.mentionCount || left.ticker.localeCompare(right.ticker));
+}
+
+type SocialAlertRunRecord = {
+  id: string;
+  status: string;
+  startDate: string;
+  limitPerHandle: number;
+  selectedHandlesJson: string | null;
+  error: string | null;
+  tweets: number | null;
+  cashtagHits: number | null;
+  uniqueTickers: number | null;
+  failures: number | null;
+  runtimeMs: number | null;
+  trigger?: string | null;
+  scheduledLocalDate?: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+async function loadSocialAlertRunRecord(env: Env, runId?: string | null): Promise<SocialAlertRunRecord | null> {
+  const selectRun =
+    "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson, error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs, \"trigger\" as trigger, scheduled_local_date as scheduledLocalDate, created_at as createdAt, completed_at as completedAt FROM social_alert_runs";
+  if (runId) {
+    return await env.DB.prepare(`${selectRun} WHERE id = ? LIMIT 1`).bind(runId).first<SocialAlertRunRecord>();
+  }
+  return await env.DB.prepare(`${selectRun} ORDER BY datetime(created_at) DESC LIMIT 1`).first<SocialAlertRunRecord>();
+}
+
 export async function getSocialAlertResults(env: Env, query: {
   runId?: string | null;
   ticker?: string | null;
   handle?: string | null;
   q?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  lookbackDays?: number | null;
   limit?: number | null;
   offset?: number | null;
 }): Promise<{
@@ -671,39 +990,34 @@ export async function getSocialAlertResults(env: Env, query: {
     error: string | null;
     createdAt: string;
     completedAt: string | null;
+    trigger?: string | null;
+    scheduledLocalDate?: string | null;
   } | null;
   metrics: SocialAlertMetrics;
   rows: SocialAlertResultRow[];
   uniqueTickers: string[];
+  tickerSummaries: SocialAlertTickerSummary[];
+  blacklist: SocialAlertBlacklistedCashtagRow[];
+  window: { startDate: string; endDate: string; lookbackDays: number };
   total: number;
   limit: number;
   offset: number;
 }> {
-  const run = query.runId
-    ? await env.DB.prepare(
-      "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson, error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs, created_at as createdAt, completed_at as completedAt FROM social_alert_runs WHERE id = ? LIMIT 1",
-    ).bind(query.runId).first<any>()
-    : await env.DB.prepare(
-      "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson, error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs, created_at as createdAt, completed_at as completedAt FROM social_alert_runs ORDER BY datetime(created_at) DESC LIMIT 1",
-    ).first<any>();
+  const run = await loadSocialAlertRunRecord(env, query.runId ?? null);
+  const blacklistRows = await listSocialAlertBlacklistedCashtags(env);
+  const blacklist = new Set(blacklistRows.rows.map((row) => row.ticker.toUpperCase()));
+  const window = normalizeLogWindow(query);
+  const requestedTicker = query.ticker?.trim() ? normalizeCashtagTicker(query.ticker) : null;
+  const tickerIsBlacklisted = requestedTicker ? blacklist.has(requestedTicker) : false;
 
-  if (!run) {
-    return {
-      run: null,
-      metrics: { tweets: 0, cashtagHits: 0, uniqueTickers: 0, failures: 0, runtimeMs: 0 },
-      rows: [],
-      uniqueTickers: [],
-      total: 0,
-      limit: Math.max(1, Math.min(500, Number(query.limit ?? 200))),
-      offset: Math.max(0, Number(query.offset ?? 0)),
-    };
-  }
-
-  const clauses = ["rp.run_id = ?"];
-  const args: unknown[] = [run.id];
-  if (query.ticker?.trim()) {
-    clauses.push("p.cashtags_json LIKE ?");
-    args.push(`%"${query.ticker.trim().toUpperCase()}"%`);
+  const clauses = [
+    "date(COALESCE(p.tweet_created_at, p.last_seen_at, p.first_seen_at)) >= date(?)",
+    "date(COALESCE(p.tweet_created_at, p.last_seen_at, p.first_seen_at)) <= date(?)",
+  ];
+  const args: unknown[] = [window.startDate, window.endDate];
+  if (query.runId?.trim()) {
+    clauses.push("EXISTS (SELECT 1 FROM social_alert_run_posts rp WHERE rp.post_id = p.id AND rp.run_id = ?)");
+    args.push(query.runId.trim());
   }
   if (query.handle?.trim()) {
     clauses.push("p.handle = ? COLLATE NOCASE");
@@ -716,34 +1030,39 @@ export async function getSocialAlertResults(env: Env, query: {
   const where = clauses.join(" AND ");
   const limit = Math.max(1, Math.min(500, Number(query.limit ?? 200)));
   const offset = Math.max(0, Number(query.offset ?? 0));
-  const countRow = await env.DB.prepare(
-    `SELECT COUNT(*) as count FROM social_alert_run_posts rp JOIN social_alert_posts p ON p.id = rp.post_id WHERE ${where}`,
-  )
-    .bind(...args)
-    .first<{ count: number }>();
   const rows = await env.DB.prepare(
     `SELECT p.id, p.handle, p.tweet_id as tweetId, p.tweet_created_at as tweetCreatedAt, p.cashtags_json as cashtagsJson, p.text, p.tweet_url as url, p.first_seen_at as firstSeenAt, p.last_seen_at as lastSeenAt
-     FROM social_alert_run_posts rp
-     JOIN social_alert_posts p ON p.id = rp.post_id
+     FROM social_alert_posts p
      WHERE ${where}
      ORDER BY CASE WHEN datetime(p.tweet_created_at) IS NULL THEN 1 ELSE 0 END ASC, datetime(p.tweet_created_at) DESC, datetime(p.last_seen_at) DESC
-     LIMIT ? OFFSET ?`,
+     LIMIT ?`,
   )
-    .bind(...args, limit, offset)
+    .bind(...args, MAX_LOG_QUERY_ROWS)
     .all<any>();
 
-  const allCashtags = await env.DB.prepare(
-    "SELECT p.cashtags_json as cashtagsJson FROM social_alert_run_posts rp JOIN social_alert_posts p ON p.id = rp.post_id WHERE rp.run_id = ?",
-  )
-    .bind(run.id)
-    .all<{ cashtagsJson: string }>();
-  const unique = new Set<string>();
-  for (const row of allCashtags.results ?? []) {
-    parseJsonArray(row.cashtagsJson).forEach((ticker) => unique.add(ticker));
-  }
+  const normalizedRows = (rows.results ?? []).map((row) => ({
+    id: row.id,
+    handle: row.handle,
+    tweetId: row.tweetId ?? null,
+    tweetCreatedAt: row.tweetCreatedAt ?? null,
+    cashtags: filterCashtagsForDisplay(parseJsonArray(row.cashtagsJson), blacklist),
+    text: row.text,
+    url: row.url,
+    firstSeenAt: row.firstSeenAt,
+    lastSeenAt: row.lastSeenAt,
+  } satisfies SocialAlertResultRow));
+  const filteredRows = tickerIsBlacklisted
+    ? []
+    : requestedTicker
+      ? normalizedRows.filter((row) => row.cashtags.includes(requestedTicker))
+      : normalizedRows;
+  const pagedRows = filteredRows.slice(offset, offset + limit);
+  const tickerSummaries = buildTickerSummaries(filteredRows);
+  const uniqueTickers = tickerSummaries.map((row) => row.ticker);
+  const metrics = summarizeSocialAlertMetrics(filteredRows.map((row) => ({ cashtags: row.cashtags })), Number(run?.failures ?? 0), Number(run?.runtimeMs ?? 0));
 
   return {
-    run: {
+    run: run ? {
       id: run.id,
       status: run.status,
       startDate: run.startDate,
@@ -752,28 +1071,102 @@ export async function getSocialAlertResults(env: Env, query: {
       error: run.error ?? null,
       createdAt: run.createdAt,
       completedAt: run.completedAt ?? null,
-    },
+      trigger: run.trigger ?? "manual",
+      scheduledLocalDate: run.scheduledLocalDate ?? null,
+    } : null,
     metrics: {
-      tweets: Number(run.tweets ?? 0),
-      cashtagHits: Number(run.cashtagHits ?? 0),
-      uniqueTickers: Number(run.uniqueTickers ?? 0),
-      failures: Number(run.failures ?? 0),
-      runtimeMs: Number(run.runtimeMs ?? 0),
+      ...metrics,
+      uniqueTickers: uniqueTickers.length,
     },
-    rows: (rows.results ?? []).map((row) => ({
-      id: row.id,
-      handle: row.handle,
-      tweetId: row.tweetId ?? null,
-      tweetCreatedAt: row.tweetCreatedAt ?? null,
-      cashtags: parseJsonArray(row.cashtagsJson),
-      text: row.text,
-      url: row.url,
-      firstSeenAt: row.firstSeenAt,
-      lastSeenAt: row.lastSeenAt,
-    })),
-    uniqueTickers: Array.from(unique).sort(),
-    total: Number(countRow?.count ?? 0),
+    rows: pagedRows,
+    uniqueTickers,
+    tickerSummaries,
+    blacklist: blacklistRows.rows,
+    window,
+    total: filteredRows.length,
     limit,
     offset,
+  };
+}
+
+export async function cleanupOldSocialAlertData(env: Env, retentionDays = DEFAULT_LOG_RETENTION_DAYS): Promise<{
+  deletedRunPosts: number;
+  deletedPosts: number;
+  deletedRuns: number;
+}> {
+  const window = `-${Math.max(1, retentionDays)} day`;
+  const deleteRunPosts = await env.DB.prepare(
+    `DELETE FROM social_alert_run_posts
+     WHERE post_id IN (
+       SELECT id FROM social_alert_posts
+       WHERE datetime(COALESCE(tweet_created_at, last_seen_at, first_seen_at)) < datetime('now', ?)
+     )`,
+  )
+    .bind(window)
+    .run();
+  const deletePosts = await env.DB.prepare(
+    "DELETE FROM social_alert_posts WHERE datetime(COALESCE(tweet_created_at, last_seen_at, first_seen_at)) < datetime('now', ?)",
+  )
+    .bind(window)
+    .run();
+  const deleteRuns = await env.DB.prepare(
+    "DELETE FROM social_alert_runs WHERE datetime(created_at) < datetime('now', ?) AND id NOT IN (SELECT DISTINCT run_id FROM social_alert_run_posts)",
+  )
+    .bind(window)
+    .run();
+  return {
+    deletedRunPosts: deleteRunPosts.meta?.changes ?? 0,
+    deletedPosts: deletePosts.meta?.changes ?? 0,
+    deletedRuns: deleteRuns.meta?.changes ?? 0,
+  };
+}
+
+export function shouldRunScheduledSocialAlertScrape(now: Date, settings: SocialAlertSettings): { shouldRun: boolean; localDate: string } {
+  if (!settings.dailyScrapeEnabled) {
+    return { shouldRun: false, localDate: zonedParts(now, settings.dailyScrapeTimezone).localDate };
+  }
+  const target = parseLocalTime(settings.dailyScrapeTimeLocal) ?? { hour: 10, minute: 0 };
+  const local = zonedParts(now, settings.dailyScrapeTimezone || DEFAULT_DAILY_SCRAPE_TIMEZONE);
+  const targetMinutes = target.hour * 60 + target.minute;
+  return {
+    shouldRun: local.minutesOfDay >= targetMinutes,
+    localDate: local.localDate,
+  };
+}
+
+async function hasScheduledSocialAlertRunForDate(env: Env, localDate: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_date = ? LIMIT 1",
+  )
+    .bind(localDate)
+    .first<{ id: string }>();
+  return Boolean(row?.id);
+}
+
+export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Date()): Promise<{
+  skipped: boolean;
+  reason?: string;
+  runId?: string;
+  localDate?: string;
+}> {
+  const settings = await getSocialAlertSettings(env);
+  const decision = shouldRunScheduledSocialAlertScrape(now, settings);
+  if (!decision.shouldRun) return { skipped: true, reason: "not_due", localDate: decision.localDate };
+  if (await hasScheduledSocialAlertRunForDate(env, decision.localDate)) {
+    return { skipped: true, reason: "already_ran", localDate: decision.localDate };
+  }
+  const startDate = addDaysIso(decision.localDate, -settings.dailyScrapeLookbackDays);
+  const result = await runSocialAlertScrape(env, {
+    allHandles: true,
+    startDate,
+    limitPerHandle: DEFAULT_LIMIT_PER_HANDLE,
+  }, {
+    trigger: "scheduled",
+    scheduledLocalDate: decision.localDate,
+  });
+  return {
+    skipped: false,
+    runId: result.run.id,
+    localDate: decision.localDate,
   };
 }

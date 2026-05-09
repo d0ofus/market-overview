@@ -13,7 +13,7 @@ export default function SocialAlertsPage() {
             </p>
           </div>
           <div className="rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1.5 text-xs font-medium text-slate-300">
-            Scweet on demand
+            Scweet on demand + scheduled
           </div>
         </div>
       </div>
