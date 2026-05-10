@@ -25,6 +25,7 @@
 - Add other funds to track like Drunkenmiller
 
 ## Sector Tracker
+> Add in finviz themes map
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -82,7 +83,6 @@
 
 ## General
 - See what other features in google sheets dashboard that are good
-- Remove top left Market command centre box
 
 ## Research Lab
 ==>> Make token use more efficient
