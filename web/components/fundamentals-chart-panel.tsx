@@ -87,11 +87,6 @@ export function formatFundamentalDate(value: string | null | undefined): string 
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "2-digit", year: "numeric", timeZone: "UTC" }).format(parsed);
 }
 
-function formatBillions(value: number | null | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  return `$${value.toFixed(1)}B`;
-}
-
 function formatUsdCompact(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   const sign = value < 0 ? "-" : "";
@@ -245,7 +240,7 @@ function FundamentalsTooltip({
         {showRevenue ? (
           <div>
             <div className="text-slate-500">Revenue</div>
-            <div className="font-semibold text-slate-100">{formatBillions(row.revenueBillions)}</div>
+            <div className="font-semibold text-slate-100">{formatUsdCompact(row.revenue)}</div>
           </div>
         ) : null}
         {showNetIncome ? (
@@ -409,18 +404,22 @@ export function FundamentalsChartPanel({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Latest Quarter</div>
           <div className="mt-1 text-sm font-semibold text-slate-100">{latest?.quarterLabel ?? "-"}</div>
         </div>
         <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Revenue</div>
-          <div className="mt-1 text-sm font-semibold text-slate-100">{formatBillions(latest?.revenueBillions)}</div>
+          <div className="mt-1 text-sm font-semibold text-slate-100">{formatUsdCompact(latest?.revenue)}</div>
         </div>
         <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Net Income</div>
-          <div className="mt-1 text-sm font-semibold text-slate-100">{formatBillions(latest?.netIncomeBillions)}</div>
+          <div className="mt-1 text-sm font-semibold text-slate-100">{formatUsdCompact(latest?.netIncome)}</div>
+        </div>
+        <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
+          <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">SEC Filed</div>
+          <div className="mt-1 text-sm font-semibold text-slate-100">{formatFundamentalDate(latest?.filedAt)}</div>
         </div>
         <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Source</div>
