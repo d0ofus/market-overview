@@ -79,6 +79,21 @@ function formatCompact(value: number | null | undefined): string {
   return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
 }
 
+function formatPrice(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return value.toFixed(2);
+}
+
+function formatPct(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function metricChangeClass(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "text-slate-100";
+  return value < 0 ? "text-neg" : "text-pos";
+}
+
 function MetricBubble({
   label,
   value,
@@ -327,6 +342,9 @@ export function AlertsDashboard() {
   const isQuickRangeActive = (days: number) => startDate === rangeStartDate(endDate, days);
 
   const singleNews = selectedTickerDay?.news?.length ? selectedTickerDay.news : selectedNews;
+  const activeChartDescription = activeChartRow
+    ? (alertDescriptionByTickerDay.get(keyFor(activeChartRow.ticker, activeChartRow.tradingDay)) ?? "-")
+    : "-";
 
   return (
     <div className="space-y-4">
@@ -509,9 +527,19 @@ export function AlertsDashboard() {
                   return (
                     <div
                       key={compoundKey}
+                      role="group"
+                      tabIndex={0}
+                      aria-label={`${row.ticker} chart card`}
+                      aria-keyshortcuts="Alt+Enter"
                       className={`rounded-[24px] border bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4 ${
                         isSelected ? "border-accent/60" : "border-borderSoft/60"
-                      }`}
+                      } focus:outline-none focus:ring-2 focus:ring-accent/45`}
+                      onKeyDown={(event) => {
+                        if (!event.altKey || event.key !== "Enter") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setActiveChartRow(row);
+                      }}
                     >
                       <div className="mb-4 space-y-2">
                         <div className="grid grid-cols-[auto,minmax(0,1fr)] items-center gap-3">
@@ -670,82 +698,52 @@ export function AlertsDashboard() {
         <FundamentalsModal ticker={activeFundamentalsTicker} onClose={() => setActiveFundamentalsTicker(null)} />
       ) : null}
       {activeChartRow ? (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartRow(null)}>
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-2 md:p-3" onClick={() => setActiveChartRow(null)}>
           <div
-            className="flex h-[calc(100vh-2rem)] w-full max-w-[96vw] flex-col overflow-hidden rounded-[30px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] 2xl:max-w-[140rem]"
+            className="flex h-[calc(100vh-1rem)] w-full max-w-[98vw] flex-col overflow-hidden rounded-[24px] border border-borderSoft/75 bg-panel/95 shadow-[0_24px_80px_rgba(2,6,23,0.55)] md:h-[calc(100vh-1.5rem)] 2xl:max-w-[140rem]"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
-                <h4 className="mt-1 text-base font-semibold text-slate-100">{activeChartRow.ticker}</h4>
-                <div className="mt-2 space-y-1 text-sm text-slate-400">
-                  <div>{formatAlertStamp(activeChartRow.latestReceivedAt, activeChartRow.marketSession)}</div>
-                  <div>{alertDescriptionByTickerDay.get(keyFor(activeChartRow.ticker, activeChartRow.tradingDay)) ?? "-"}</div>
+            <div className="flex items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-4 py-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Expanded Chart</p>
+                  <h4 className="text-base font-semibold text-slate-100">{activeChartRow.ticker}</h4>
+                  <span className="min-w-0 truncate text-sm text-slate-400">
+                    {formatAlertStamp(activeChartRow.latestReceivedAt, activeChartRow.marketSession)}
+                  </span>
+                </div>
+                <div className="mt-1 max-w-[72rem] truncate text-sm text-slate-400" title={activeChartDescription}>
+                  {activeChartDescription}
                 </div>
               </div>
               <button
                 type="button"
                 data-modal-close="true"
-                className="inline-flex items-center justify-center rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
+                className="inline-flex shrink-0 items-center justify-center rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55"
                 onClick={() => setActiveChartRow(null)}
               >
                 Close
               </button>
             </div>
-            <div className="border-b border-borderSoft/50 px-5 py-4">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Alerts</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">{activeChartRow.alertCount}</div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Price</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">
-                    {typeof activeChartRow.price === "number" && Number.isFinite(activeChartRow.price) ? activeChartRow.price.toFixed(2) : "-"}
-                  </div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">1D %</div>
-                  <div className={`mt-1 text-sm font-semibold ${
-                    typeof activeChartRow.change1d === "number" && Number.isFinite(activeChartRow.change1d) && activeChartRow.change1d < 0
-                      ? "text-neg"
-                      : "text-pos"
-                  }`}>
-                    {typeof activeChartRow.change1d === "number" && Number.isFinite(activeChartRow.change1d)
-                      ? `${activeChartRow.change1d >= 0 ? "+" : ""}${activeChartRow.change1d.toFixed(2)}%`
-                      : "-"}
-                  </div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Industry</div>
-                  <div className="mt-1 truncate text-sm font-semibold text-slate-100" title={activeChartRow.industry ?? "-"}>
-                    {activeChartRow.industry ?? "-"}
-                  </div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Mkt Cap</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartRow.marketCap)}</div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg Vol</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">
-                    {formatCompact(activeChartRow.avgVolume)}
-                  </div>
-                </div>
-                <div className="rounded-[18px] border border-borderSoft/60 bg-panelSoft/30 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Avg $ Vol</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">{formatCompact(activeChartRow.priceAvgVolume)}</div>
-                </div>
+            <div className="overflow-x-auto border-b border-borderSoft/50 px-4 py-2">
+              <div className="flex min-w-max flex-nowrap gap-2">
+                <MetricBubble className="shrink-0" label="Alerts" value={String(activeChartRow.alertCount)} />
+                <MetricBubble className="shrink-0" label="Price" value={formatPrice(activeChartRow.price)} />
+                <MetricBubble className="shrink-0" label="1D %" value={formatPct(activeChartRow.change1d)} valueClass={metricChangeClass(activeChartRow.change1d)} />
+                <MetricBubble className="min-w-[16rem] shrink-0" label="Industry" value={activeChartRow.industry ?? "-"} />
+                <MetricBubble className="shrink-0" label="Mkt Cap" value={formatCompact(activeChartRow.marketCap)} />
+                <MetricBubble className="shrink-0" label="Avg Vol" value={formatCompact(activeChartRow.avgVolume)} />
+                <MetricBubble className="shrink-0" label="Avg $ Vol" value={formatCompact(activeChartRow.priceAvgVolume)} />
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-5">
-              <div className="rounded-[24px] bg-panelSoft/25 p-3">
+            <div className="min-h-0 flex-1 overflow-hidden p-3">
+              <div className="h-full min-h-0 rounded-[20px] bg-panelSoft/25 p-2">
                 <TradingViewWidget
                   ticker={activeChartRow.ticker}
                   chartOnly
                   showStatusLine
                   fillContainer
+                  heightMode="fill"
                   initialRange="3M"
                   surface="plain"
                 />

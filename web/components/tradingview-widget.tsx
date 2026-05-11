@@ -51,6 +51,7 @@ export function TradingViewWidget({
   showStatusLine = false,
   showCorporateEvents = false,
   fillContainer = false,
+  heightMode = "aspect",
   initialRange = "1M",
   surface = "card",
   className = "",
@@ -63,6 +64,7 @@ export function TradingViewWidget({
   showStatusLine?: boolean;
   showCorporateEvents?: boolean;
   fillContainer?: boolean;
+  heightMode?: "aspect" | "fill";
   initialRange?: "1M" | "3M" | "6M" | "12M";
   surface?: "card" | "plain";
   className?: string;
@@ -80,17 +82,19 @@ export function TradingViewWidget({
       : compact
         ? 640
         : 880;
-  const frameClass = fillContainer
-    ? denseStatusLayout
-      ? "w-full aspect-[8/5]"
-      : "w-full aspect-[16/11]"
-    : size === "small"
+  const frameClass = heightMode === "fill"
+    ? "h-full min-h-0 w-full"
+    : fillContainer
       ? denseStatusLayout
-        ? "w-full max-w-[560px] aspect-[7/5]"
-        : "w-full max-w-[420px] aspect-[4/3]"
-      : compact
-        ? "w-full max-w-[640px] aspect-[4/3]"
-        : "w-full max-w-[880px] aspect-[4/3]";
+        ? "w-full aspect-[8/5]"
+        : "w-full aspect-[16/11]"
+      : size === "small"
+        ? denseStatusLayout
+          ? "w-full max-w-[560px] aspect-[7/5]"
+          : "w-full max-w-[420px] aspect-[4/3]"
+        : compact
+          ? "w-full max-w-[640px] aspect-[4/3]"
+          : "w-full max-w-[880px] aspect-[4/3]";
 
   useEffect(() => {
     return subscribeToTheme(setTheme);
@@ -118,7 +122,9 @@ export function TradingViewWidget({
     if (!ref.current || !shouldLoad) return;
     const minWidth = size === "small" ? 280 : 360;
     const width = Math.max(minWidth, Math.min(ref.current.clientWidth, maxWidth));
-    const height = Math.round(width * 0.75);
+    const height = heightMode === "fill"
+      ? ref.current.clientHeight || Math.round(width * 0.75)
+      : Math.round(width * 0.75);
     ref.current.innerHTML = "";
     const script = document.createElement("script");
     script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
@@ -160,11 +166,12 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad]);
+  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad, heightMode]);
 
+  const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"
-    ? className
-    : `card ${denseStatusLayout ? "p-1" : "p-2"} ${className}`;
+    ? `${heightClassName} ${className}`.trim()
+    : `card ${denseStatusLayout ? "p-1" : "p-2"} ${heightClassName} ${className}`.trim();
 
   return (
     <div className={shellClassName}>
