@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
@@ -91,6 +92,21 @@ export function Sidebar() {
     });
   };
 
+  const tooltipPortal =
+    collapsed && tooltip && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            id={SIDEBAR_TOOLTIP_ID}
+            role="tooltip"
+            className="pointer-events-none fixed z-[2147483647] -translate-y-1/2 whitespace-nowrap rounded-lg border border-borderSoft/80 bg-panelSoft px-2.5 py-1.5 text-xs font-medium text-text shadow-lg"
+            style={{ left: tooltip.left, top: tooltip.top }}
+          >
+            {tooltip.label}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <aside
       className={`sticky top-0 flex h-screen shrink-0 flex-col border-r border-borderSoft/70 bg-panel/90 p-4 backdrop-blur-xl transition-[width] duration-200 ease-out ${
@@ -143,16 +159,7 @@ export function Sidebar() {
       >
         <ThemeToggle />
       </div>
-      {collapsed && tooltip && (
-        <div
-          id={SIDEBAR_TOOLTIP_ID}
-          role="tooltip"
-          className="pointer-events-none fixed z-50 -translate-y-1/2 whitespace-nowrap rounded-lg border border-borderSoft/80 bg-panelSoft px-2.5 py-1.5 text-xs font-medium text-text shadow-lg"
-          style={{ left: tooltip.left, top: tooltip.top }}
-        >
-          {tooltip.label}
-        </div>
-      )}
+      {tooltipPortal}
     </aside>
   );
 }
