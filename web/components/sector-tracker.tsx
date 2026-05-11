@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { CalendarDays, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
   adminFetch,
   deleteSectorEntry,
@@ -123,6 +123,11 @@ type HoverChartTarget = {
 type HoverChartPreview = {
   ticker: string;
   style: CSSProperties;
+};
+
+type NarrativeTickerSuggestion = {
+  ticker: string;
+  name: string | null;
 };
 
 const SECTION_NAV_ITEMS: Array<{ id: string; label: string }> = [
@@ -738,6 +743,57 @@ export function SectorTracker() {
     return Array.from(options).sort((a, b) => a.localeCompare(b));
   }, [entries, calendarRows]);
 
+  const narrativeTickerSuggestionsByName = useMemo(() => {
+    const map = new Map<string, Map<string, NarrativeTickerSuggestion>>();
+    for (const row of [...entries, ...calendarRows]) {
+      const narrativeName = row.sectorName?.trim();
+      if (!narrativeName) continue;
+      const tickerMap = map.get(narrativeName) ?? new Map<string, NarrativeTickerSuggestion>();
+      for (const symbol of row.symbols ?? []) {
+        const ticker = symbol.ticker.trim().toUpperCase();
+        if (!ticker) continue;
+        const existing = tickerMap.get(ticker);
+        tickerMap.set(ticker, {
+          ticker,
+          name: existing?.name ?? symbol.name ?? null,
+        });
+      }
+      map.set(narrativeName, tickerMap);
+    }
+
+    return new Map(
+      Array.from(map.entries()).map(([narrativeName, tickerMap]) => [
+        narrativeName,
+        Array.from(tickerMap.values()).sort((a, b) => a.ticker.localeCompare(b.ticker)),
+      ]),
+    );
+  }, [entries, calendarRows]);
+
+  const selectedTickerSet = useMemo(() => new Set(selectedTickers), [selectedTickers]);
+  const suggestedNarrativeTickers = sectorNarrativeExisting
+    ? narrativeTickerSuggestionsByName.get(sectorNarrativeExisting) ?? []
+    : [];
+  const suggestedNarrativeTickerSet = useMemo(
+    () => new Set(suggestedNarrativeTickers.map((item) => item.ticker)),
+    [suggestedNarrativeTickers],
+  );
+  const selectedSuggestedTickerCount = suggestedNarrativeTickers.filter((item) => selectedTickerSet.has(item.ticker)).length;
+
+  const toggleSuggestedTicker = (ticker: string) => {
+    setSelectedTickers((prev) => {
+      if (prev.includes(ticker)) return prev.filter((value) => value !== ticker);
+      return [...prev, ticker];
+    });
+  };
+
+  const selectAllSuggestedTickers = () => {
+    setSelectedTickers((prev) => Array.from(new Set([...prev, ...suggestedNarrativeTickers.map((item) => item.ticker)])));
+  };
+
+  const clearSuggestedTickers = () => {
+    setSelectedTickers((prev) => prev.filter((ticker) => !suggestedNarrativeTickerSet.has(ticker)));
+  };
+
   const openExpandedChart = (ticker: string) => {
     if (hoverOpenTimeoutRef.current) {
       clearTimeout(hoverOpenTimeoutRef.current);
@@ -904,6 +960,71 @@ export function SectorTracker() {
                       </button>
                     </div>
                   </div>
+
+                  {sectorNarrativeExisting ? (
+                    <div className="rounded-2xl border border-borderSoft/60 bg-panel/35 p-3">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Prior tickers</p>
+                          <p className="mt-1 text-sm text-slate-400">
+                            {suggestedNarrativeTickers.length > 0
+                              ? `${selectedSuggestedTickerCount} of ${suggestedNarrativeTickers.length} selected from ${sectorNarrativeExisting}.`
+                              : `No prior tickers found for ${sectorNarrativeExisting}.`}
+                          </p>
+                        </div>
+                        {suggestedNarrativeTickers.length > 0 ? (
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className={SECONDARY_BUTTON_CLASS}
+                              onClick={selectAllSuggestedTickers}
+                              disabled={selectedSuggestedTickerCount === suggestedNarrativeTickers.length}
+                            >
+                              Select all
+                            </button>
+                            <button
+                              type="button"
+                              className={SECONDARY_BUTTON_CLASS}
+                              onClick={clearSuggestedTickers}
+                              disabled={selectedSuggestedTickerCount === 0}
+                            >
+                              Clear suggested
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {suggestedNarrativeTickers.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {suggestedNarrativeTickers.map((item) => {
+                            const selected = selectedTickerSet.has(item.ticker);
+                            return (
+                              <button
+                                key={`suggested-narrative-ticker-${sectorNarrativeExisting}-${item.ticker}`}
+                                type="button"
+                                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                                  selected
+                                    ? "border-accent/45 bg-accent/14 text-accent"
+                                    : "border-borderSoft/60 bg-panelSoft/35 text-slate-300 hover:bg-panelSoft/55"
+                                }`}
+                                onClick={() => toggleSuggestedTicker(item.ticker)}
+                                aria-pressed={selected}
+                                title={item.name ?? item.ticker}
+                              >
+                                <span
+                                  className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${
+                                    selected ? "border-accent bg-accent text-slate-950" : "border-slate-500/70"
+                                  }`}
+                                >
+                                  {selected ? <Check className="h-3 w-3" /> : null}
+                                </span>
+                                {item.ticker}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div className="flex flex-wrap gap-2">
                     {selectedTickers.map((ticker) => (
