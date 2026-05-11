@@ -43,9 +43,18 @@ const links: Array<{ href: string; label: string; Icon: LucideIcon }> = [
   { href: "/admin", label: "Admin", Icon: Settings },
 ];
 
+type SidebarTooltip = {
+  label: string;
+  left: number;
+  top: number;
+};
+
+const SIDEBAR_TOOLTIP_ID = "sidebar-page-tooltip";
+
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [tooltip, setTooltip] = useState<SidebarTooltip | null>(null);
 
   useEffect(() => {
     try {
@@ -54,6 +63,10 @@ export function Sidebar() {
       setCollapsed(false);
     }
   }, []);
+
+  useEffect(() => {
+    setTooltip(null);
+  }, [collapsed, pathname]);
 
   const toggleCollapsed = () => {
     setCollapsed((current) => {
@@ -64,6 +77,17 @@ export function Sidebar() {
         // Ignore storage failures; the in-session state is still useful.
       }
       return next;
+    });
+  };
+
+  const showTooltip = (label: string, target: HTMLElement) => {
+    if (!collapsed) return;
+
+    const rect = target.getBoundingClientRect();
+    setTooltip({
+      label,
+      left: rect.right + 12,
+      top: rect.top + rect.height / 2,
     });
   };
 
@@ -98,7 +122,11 @@ export function Sidebar() {
                 collapsed ? "justify-center px-0" : "gap-3 px-3"
               } ${active ? "bg-accent/20 text-accent" : "text-text/85 hover:bg-panelSoft/80"}`}
               aria-label={collapsed ? link.label : undefined}
-              title={collapsed ? link.label : undefined}
+              aria-describedby={collapsed && tooltip?.label === link.label ? SIDEBAR_TOOLTIP_ID : undefined}
+              onMouseEnter={(event) => showTooltip(link.label, event.currentTarget)}
+              onMouseLeave={() => setTooltip(null)}
+              onFocus={(event) => showTooltip(link.label, event.currentTarget)}
+              onBlur={() => setTooltip(null)}
             >
               <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
               {!collapsed && <span className="truncate">{link.label}</span>}
@@ -115,6 +143,16 @@ export function Sidebar() {
       >
         <ThemeToggle />
       </div>
+      {collapsed && tooltip && (
+        <div
+          id={SIDEBAR_TOOLTIP_ID}
+          role="tooltip"
+          className="pointer-events-none fixed z-50 -translate-y-1/2 whitespace-nowrap rounded-lg border border-borderSoft/80 bg-panelSoft px-2.5 py-1.5 text-xs font-medium text-text shadow-lg"
+          style={{ left: tooltip.left, top: tooltip.top }}
+        >
+          {tooltip.label}
+        </div>
+      )}
     </aside>
   );
 }
