@@ -97,6 +97,7 @@
 - Create a research repository (maybe in peer-groups or new page?)
 
 ## New Functions
+> Create a earnings gap up scanner, ranked by distance of close from highs + volume multiple of average + % gain
 - Add in morning brief section using Claude API
 - Add macro dashboard (https://x.com/investingluc/status/2044560364424032433?s=20)
 - Add unusual options analysis/insider transactions tracker
