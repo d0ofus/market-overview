@@ -1419,6 +1419,7 @@ export function SectorTracker() {
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
+          maxColumns={3}
           warning={narrativeMetricsWarning ? `Snapshot metrics warning: ${narrativeMetricsWarning}` : null}
           emptyMessage="No tickers are attached to this narrative entry yet."
           onPageChange={setNarrativePage}

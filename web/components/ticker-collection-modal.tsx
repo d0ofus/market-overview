@@ -31,6 +31,7 @@ export function TickerCollectionModal({
   warning,
   loading = false,
   loadingLabel = "Loading charts...",
+  maxColumns = 4,
   emptyMessage,
   onPageChange,
   onClose,
@@ -48,11 +49,16 @@ export function TickerCollectionModal({
   warning?: string | null;
   loading?: boolean;
   loadingLabel?: string;
+  maxColumns?: 3 | 4;
   emptyMessage: string;
   onPageChange: (page: number) => void;
   onClose: () => void;
   onExpandChart: (ticker: string) => void;
 }) {
+  const gridClass = maxColumns === 3
+    ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3"
+    : "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/70 p-4" onClick={onClose}>
       <div
@@ -93,7 +99,7 @@ export function TickerCollectionModal({
               {loadingLabel}
             </div>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <div className={gridClass}>
               {items.map((item) => (
                 <div key={item.key} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
                   <div className={`mb-3 flex items-start justify-between ${item.stats ? "gap-4" : "flex-wrap gap-3"}`}>
