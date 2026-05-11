@@ -30,11 +30,9 @@
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
 ## Alerts
-> Make keyboard shortcut to expand chart (Alt + Enter) (?)
-> See if there can be tradingview financials widgets shown in the expanded chart
+> Find out why some companies are not filing with SEC for their quarterly earnings
 
 ## SOCIAL ALERTS
-> Change the date and time to be bubbles format like /alerts 
 
 ## Peer Groups
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
