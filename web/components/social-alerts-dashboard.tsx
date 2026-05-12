@@ -185,6 +185,7 @@ export function SocialAlertsDashboard() {
   const [chartPage, setChartPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
   const [expandedMentions, setExpandedMentions] = useState<Set<string>>(new Set());
+  const [expandedLatestDescriptions, setExpandedLatestDescriptions] = useState<Set<string>>(new Set());
   const [activeChartSummary, setActiveChartSummary] = useState<SocialAlertTickerSummary | null>(null);
   const [blacklistTicker, setBlacklistTicker] = useState("");
   const [blacklistReason, setBlacklistReason] = useState("");
@@ -403,6 +404,15 @@ export function SocialAlertsDashboard() {
 
   const toggleMentions = (ticker: string) => {
     setExpandedMentions((current) => {
+      const next = new Set(current);
+      if (next.has(ticker)) next.delete(ticker);
+      else next.add(ticker);
+      return next;
+    });
+  };
+
+  const toggleLatestDescription = (ticker: string) => {
+    setExpandedLatestDescriptions((current) => {
       const next = new Set(current);
       if (next.has(ticker)) next.delete(ticker);
       else next.add(ticker);
@@ -776,6 +786,7 @@ export function SocialAlertsDashboard() {
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {visibleSummaries.map((summary) => {
                 const isOpen = expandedMentions.has(summary.ticker);
+                const latestExpanded = expandedLatestDescriptions.has(summary.ticker);
                 return (
                   <div key={summary.ticker} className="rounded-[24px] border border-borderSoft/60 bg-gradient-to-b from-panelSoft/45 to-panel/40 p-4">
                     <div className="mb-4 space-y-2">
@@ -785,14 +796,17 @@ export function SocialAlertsDashboard() {
                           <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
                             {formatDateTime(summary.latestMention.tweetCreatedAt ?? summary.latestMention.lastSeenAt)}
                           </span>
-                          <span
-                            className="min-w-0 text-xs leading-snug text-slate-400"
-                            style={LATEST_POST_TEXT_STYLE}
-                            title={`@${summary.latestMention.handle}: ${summary.latestMention.text}`}
+                          <button
+                            type="button"
+                            className="min-w-0 flex-1 text-left text-xs leading-snug text-slate-400 transition hover:text-slate-200"
+                            style={latestExpanded ? undefined : LATEST_POST_TEXT_STYLE}
+                            onClick={() => toggleLatestDescription(summary.ticker)}
+                            aria-expanded={latestExpanded}
+                            title={latestExpanded ? "Collapse post text" : "Show full post text"}
                           >
                             <span className="font-semibold text-slate-300">@{summary.latestMention.handle}: </span>
                             <HighlightedCashtagText text={summary.latestMention.text} ticker={summary.ticker} />
-                          </span>
+                          </button>
                         </div>
                       </div>
                     </div>
