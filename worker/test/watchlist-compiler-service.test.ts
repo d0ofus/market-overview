@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  duplicateWatchlistSet,
   filterWatchlistCandidatesBySections,
   parseWatchlistSourceSections,
   resolveExportFileName,
@@ -77,5 +78,128 @@ describe("watchlist compiler service helpers", () => {
     ], "###IN-PLAY: INDIVIDUAL/SECTORS");
 
     expect(rows.map((row) => row.ticker)).toEqual(["AAOI"]);
+  });
+
+  it("duplicates sets with fresh ids, unique copy naming, copied sources, and no run history", async () => {
+    type MockStatement = {
+      query: string;
+      args: unknown[];
+      bind: (...args: unknown[]) => MockStatement;
+      first: () => Promise<any>;
+      all: () => Promise<{ results: any[] }>;
+      run: () => Promise<Record<string, never>>;
+    };
+
+    const setRows = [
+      {
+        id: "set-a",
+        scanDefinitionId: "scan-a",
+        name: "Momentum",
+        slug: "momentum",
+        isActive: 1,
+        compileDaily: 1,
+        dailyCompileTimeLocal: "08:15",
+        dailyCompileTimezone: "Australia/Sydney",
+      },
+      { id: "set-b", name: "Momentum Copy", slug: "momentum-copy" },
+      { id: "set-c", name: "Momentum Copy 2", slug: "momentum-copy-2" },
+    ];
+    const sourceRows = [
+      {
+        id: "source-a",
+        setId: "set-a",
+        sourceName: "Ready",
+        sourceUrl: "https://www.tradingview.com/watchlists/111/",
+        sourceSections: "FOCUS LIST - READY",
+        sortOrder: 10,
+        isActive: 1,
+        createdAt: "",
+        updatedAt: "",
+      },
+      {
+        id: "source-b",
+        setId: "set-a",
+        sourceName: null,
+        sourceUrl: "https://www.tradingview.com/watchlists/222/",
+        sourceSections: null,
+        sortOrder: 20,
+        isActive: 0,
+        createdAt: "",
+        updatedAt: "",
+      },
+    ];
+    let batchStatements: MockStatement[] = [];
+
+    const makeStatement = (query: string, args: unknown[] = []): MockStatement => ({
+      query,
+      args,
+      bind: (...nextArgs: unknown[]) => makeStatement(query, nextArgs),
+      async first() {
+        if (query.includes("FROM tv_watchlist_sets WHERE id = ?")) return setRows[0];
+        return null;
+      },
+      async all() {
+        if (query.includes("SELECT name, slug FROM tv_watchlist_sets")) return { results: setRows };
+        if (query.includes("FROM tv_watchlist_sources WHERE set_id = ?")) return { results: sourceRows };
+        return { results: [] };
+      },
+      async run() {
+        return {};
+      },
+    });
+
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return makeStatement(query);
+        },
+        async batch(statements: MockStatement[]) {
+          batchStatements = statements;
+          return [];
+        },
+      },
+    } as any;
+
+    const duplicated = await duplicateWatchlistSet(env, "set-a");
+    const scanDefinitionInsert = batchStatements.find((statement) => statement.query.includes("INSERT INTO scan_definitions"));
+    const setInsert = batchStatements.find((statement) => statement.query.includes("INSERT INTO tv_watchlist_sets"));
+    const sourceInserts = batchStatements.filter((statement) => statement.query.includes("INSERT INTO tv_watchlist_sources"));
+
+    expect(duplicated.id).not.toBe("set-a");
+    expect(scanDefinitionInsert?.args[0]).not.toBe("scan-a");
+    expect(scanDefinitionInsert?.args[1]).toBe("Momentum Copy 3");
+    expect(scanDefinitionInsert?.args[3]).toBe("watchlist-set:momentum-copy-3");
+
+    expect(setInsert?.args).toEqual([
+      duplicated.id,
+      scanDefinitionInsert?.args[0],
+      "Momentum Copy 3",
+      "momentum-copy-3",
+      1,
+      1,
+      "08:15",
+      "Australia/Sydney",
+    ]);
+
+    expect(sourceInserts).toHaveLength(2);
+    expect(sourceInserts[0]?.args.slice(1)).toEqual([
+      duplicated.id,
+      "Ready",
+      "https://www.tradingview.com/watchlists/111/",
+      "FOCUS LIST - READY",
+      10,
+      1,
+    ]);
+    expect(sourceInserts[1]?.args.slice(1)).toEqual([
+      duplicated.id,
+      null,
+      "https://www.tradingview.com/watchlists/222/",
+      null,
+      20,
+      0,
+    ]);
+    expect(sourceInserts[0]?.args[0]).not.toBe("source-a");
+    expect(sourceInserts[1]?.args[0]).not.toBe("source-b");
+    expect(batchStatements.some((statement) => /scan_runs|scan_run_rows/.test(statement.query))).toBe(false);
   });
 });

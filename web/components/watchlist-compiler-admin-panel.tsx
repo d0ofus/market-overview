@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Copy, Loader2 } from "lucide-react";
 import {
   compileAdminWatchlistCompilerSet,
   createAdminWatchlistCompilerSet,
   createAdminWatchlistCompilerSource,
   deleteAdminWatchlistCompilerSet,
   deleteAdminWatchlistCompilerSource,
+  duplicateAdminWatchlistCompilerSet,
   getAdminWatchlistCompilerSets,
   getWatchlistCompilerSet,
   updateAdminWatchlistCompilerSet,
@@ -53,6 +54,7 @@ export function WatchlistCompilerAdminPanel() {
   const [deleteSetBusy, setDeleteSetBusy] = useState(false);
   const [sourceToDelete, setSourceToDelete] = useState<{ id: string; label: string } | null>(null);
   const [deleteSourceBusy, setDeleteSourceBusy] = useState(false);
+  const [duplicatingSetId, setDuplicatingSetId] = useState<string | null>(null);
 
   const flashMessage = (next: string, timeoutMs = 4000) => {
     setMessage(next);
@@ -164,6 +166,20 @@ export function WatchlistCompilerAdminPanel() {
     }
   };
 
+  const handleDuplicateSet = async (setId: string, setName: string) => {
+    setDuplicatingSetId(setId);
+    setMessage(null);
+    try {
+      const duplicated = await duplicateAdminWatchlistCompilerSet(setId);
+      await load(duplicated.id);
+      flashMessage(`Duplicated ${setName}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to duplicate watchlist set.");
+    } finally {
+      setDuplicatingSetId(null);
+    }
+  };
+
   return (
     <>
       <section className="space-y-6">
@@ -218,30 +234,45 @@ export function WatchlistCompilerAdminPanel() {
             ) : (
               <div className="space-y-2">
                 {sets.map((set) => (
-                  <button
+                  <div
                     key={set.id}
-                    className={`w-full rounded border px-3 py-2 text-left ${set.id === selectedSetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
-                    onClick={async () => {
-                      try {
-                        setSelectedSetId(set.id);
-                        const nextDetail = await getWatchlistCompilerSet(set.id);
-                        setDetail(nextDetail);
-                        setForm({
-                          name: nextDetail.name,
-                          slug: nextDetail.slug,
-                          isActive: nextDetail.isActive,
-                          compileDaily: nextDetail.compileDaily,
-                          dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
-                          dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
-                        });
-                      } catch (error) {
-                        setMessage(error instanceof Error ? error.message : "Failed to load selected watchlist set.");
-                      }
-                    }}
+                    className={`flex items-stretch gap-2 rounded border ${set.id === selectedSetId ? "border-accent/60 bg-accent/10" : "border-borderSoft/60 hover:bg-slate-900/30"}`}
                   >
-                    <div className="text-sm font-semibold text-accent">{set.name}</div>
-                    <div className="text-[11px] text-slate-400">{set.sourceCount} sources | {set.compileDaily ? "daily" : "manual"}</div>
-                  </button>
+                    <button
+                      className="min-w-0 flex-1 px-3 py-2 text-left"
+                      onClick={async () => {
+                        try {
+                          setSelectedSetId(set.id);
+                          const nextDetail = await getWatchlistCompilerSet(set.id);
+                          setDetail(nextDetail);
+                          setForm({
+                            name: nextDetail.name,
+                            slug: nextDetail.slug,
+                            isActive: nextDetail.isActive,
+                            compileDaily: nextDetail.compileDaily,
+                            dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
+                            dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
+                          });
+                        } catch (error) {
+                          setMessage(error instanceof Error ? error.message : "Failed to load selected watchlist set.");
+                        }
+                      }}
+                      type="button"
+                    >
+                      <div className="truncate text-sm font-semibold text-accent">{set.name}</div>
+                      <div className="text-[11px] text-slate-400">{set.sourceCount} sources | {set.compileDaily ? "daily" : "manual"}</div>
+                    </button>
+                    <button
+                      aria-label={`Duplicate ${set.name}`}
+                      className="m-1 flex w-9 shrink-0 items-center justify-center rounded border border-borderSoft/70 text-slate-300 transition hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={Boolean(duplicatingSetId)}
+                      onClick={() => void handleDuplicateSet(set.id, set.name)}
+                      title={`Duplicate ${set.name}`}
+                      type="button"
+                    >
+                      {duplicatingSetId === set.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                    </button>
+                  </div>
                 ))}
                 {sets.length === 0 && <EmptyState title="No watchlist sets yet" description="Create your first set to begin managing source URLs and compile schedules." />}
               </div>

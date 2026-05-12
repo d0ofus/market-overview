@@ -152,6 +152,7 @@ import {
   createWatchlistSource,
   deleteWatchlistSet,
   deleteWatchlistSource,
+  duplicateWatchlistSet,
   listWatchlistSetRuns,
   listWatchlistSets,
   loadWatchlistCompiledRows,
@@ -3278,6 +3279,17 @@ app.post("/api/admin/watchlist-compiler/sets", async (c) => {
   const created = await createWatchlistSet(c.env, payload);
   await upsertAudit(c.env, "default", "WATCHLIST_SET_CREATE", { id: created.id, payload });
   return c.json({ ok: true, id: created.id });
+});
+
+app.post("/api/admin/watchlist-compiler/sets/:id/duplicate", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const duplicated = await duplicateWatchlistSet(c.env, c.req.param("id"));
+    await upsertAudit(c.env, "default", "WATCHLIST_SET_DUPLICATE", { id: duplicated.id, sourceId: c.req.param("id") });
+    return c.json({ ok: true, id: duplicated.id });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to duplicate watchlist set." }, 400);
+  }
 });
 
 app.patch("/api/admin/watchlist-compiler/sets/:id", async (c) => {

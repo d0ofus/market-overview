@@ -2415,6 +2415,12 @@ export function deleteAdminWatchlistCompilerSet(id: string) {
   });
 }
 
+export function duplicateAdminWatchlistCompilerSet(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}/duplicate`, {
+    method: "POST",
+  });
+}
+
 export function createAdminWatchlistCompilerSource(setId: string, payload: { sourceName?: string | null; sourceUrl: string; sourceSections?: string | null; isActive?: boolean }) {
   return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(setId)}/sources`, {
     method: "POST",

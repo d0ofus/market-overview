@@ -114,6 +114,29 @@ function slugify(value: string): string {
     .slice(0, 80) || "watchlist-set";
 }
 
+function nextDuplicateSetName(sourceName: string, existingNames: string[]): string {
+  const trimmedSourceName = sourceName.trim() || "Watchlist Set";
+  const occupied = new Set(existingNames.map((name) => name.trim().toLowerCase()));
+  const firstCandidate = `${trimmedSourceName} Copy`;
+  if (!occupied.has(firstCandidate.toLowerCase())) return firstCandidate;
+  let counter = 2;
+  while (occupied.has(`${trimmedSourceName} Copy ${counter}`.toLowerCase())) {
+    counter += 1;
+  }
+  return `${trimmedSourceName} Copy ${counter}`;
+}
+
+function nextUniqueSlug(sourceName: string, existingSlugs: string[]): string {
+  const baseSlug = slugify(sourceName);
+  const occupied = new Set(existingSlugs.map((slug) => slug.trim().toLowerCase()));
+  if (!occupied.has(baseSlug.toLowerCase())) return baseSlug;
+  let counter = 2;
+  while (occupied.has(`${baseSlug}-${counter}`.toLowerCase())) {
+    counter += 1;
+  }
+  return `${baseSlug}-${counter}`;
+}
+
 function normalizeWatchlistSectionName(value: string | null | undefined): string | null {
   const text = String(value ?? "")
     .replace(/^#+/, "")
@@ -382,6 +405,62 @@ export async function createWatchlistSet(env: Env, input: {
       input.dailyCompileTimezone?.trim() || null,
     ),
   ]);
+  return { id };
+}
+
+export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ id: string }> {
+  const existing = await env.DB.prepare(
+    "SELECT id, scan_definition_id as scanDefinitionId, name, slug, is_active as isActive, compile_daily as compileDaily, daily_compile_time_local as dailyCompileTimeLocal, daily_compile_timezone as dailyCompileTimezone FROM tv_watchlist_sets WHERE id = ? LIMIT 1",
+  ).bind(setId).first<{
+    id: string;
+    scanDefinitionId: string;
+    name: string;
+    slug: string;
+    isActive: number;
+    compileDaily: number;
+    dailyCompileTimeLocal: string | null;
+    dailyCompileTimezone: string | null;
+  }>();
+  if (!existing) throw new Error("Watchlist set not found.");
+
+  const allSets = await env.DB.prepare("SELECT name, slug FROM tv_watchlist_sets").all<{ name: string; slug: string }>();
+  const name = nextDuplicateSetName(existing.name, (allSets.results ?? []).map((row) => row.name));
+  const slug = nextUniqueSlug(name, (allSets.results ?? []).map((row) => row.slug));
+  const sources = await listWatchlistSources(env, setId);
+  const id = crypto.randomUUID();
+  const scanDefinitionId = crypto.randomUUID();
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO scan_definitions (id, name, provider_key, source_type, source_value, fallback_source_type, fallback_source_value, is_active, notes, created_at, updated_at) VALUES (?, ?, ?, 'tradingview-public-link', ?, NULL, NULL, 0, 'internal:watchlist-compiler', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ).bind(scanDefinitionId, name, INTERNAL_PROVIDER_KEY, `watchlist-set:${slug}`),
+    env.DB.prepare(
+      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ).bind(
+      id,
+      scanDefinitionId,
+      name,
+      slug,
+      existing.isActive ? 1 : 0,
+      existing.compileDaily ? 1 : 0,
+      existing.dailyCompileTimeLocal,
+      existing.dailyCompileTimezone,
+    ),
+    ...sources.map((source) =>
+      env.DB.prepare(
+        "INSERT INTO tv_watchlist_sources (id, set_id, source_name, source_url, source_sections, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ).bind(
+        crypto.randomUUID(),
+        id,
+        source.sourceName?.trim() || null,
+        source.sourceUrl.trim(),
+        source.sourceSections?.trim() || null,
+        source.sortOrder,
+        source.isActive ? 1 : 0,
+      ),
+    ),
+  ]);
+
   return { id };
 }
 
