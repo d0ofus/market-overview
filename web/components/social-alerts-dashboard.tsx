@@ -176,7 +176,7 @@ export function SocialAlertsDashboard() {
   const [message, setMessage] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [startDate, setStartDate] = useState(addDays(localIsoDate(), -1));
   const [limitPerHandle, setLimitPerHandle] = useState(DEFAULT_LIMIT_PER_HANDLE);
-  const [mode, setMode] = useState<"table" | "charts">("table");
+  const [mode, setMode] = useState<"table" | "charts">("charts");
   const [tickerFilter, setTickerFilter] = useState("");
   const [textFilter, setTextFilter] = useState("");
   const [handleFilter, setHandleFilter] = useState("");
