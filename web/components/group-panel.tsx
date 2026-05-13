@@ -1,11 +1,12 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { ChevronDown, Loader2, Maximize2, X } from "lucide-react";
+import { ChevronDown, Loader2, Maximize2 } from "lucide-react";
 import { HistogramSparkline } from "./histogram-sparkline";
 import { Sparkline } from "./sparkline";
 import { ChartGridPager } from "./chart-grid-pager";
+import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
 
@@ -91,13 +92,13 @@ function SmaStatusIndicator({ value }: { value: boolean | null }) {
 }
 
 export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 = false, anchorId }: Props) {
-  const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [activeEtf, setActiveEtf] = useState<{ ticker: string; name: string | null } | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number }>>([]);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker || activeEtf) });
   const [constituentPage, setConstituentPage] = useState(1);
   const showsEtfConstituents = title === "Sector ETFs" || title.startsWith("Industry/Thematic ETFs");
   const defaultSortKey = columns.includes("1D")
@@ -148,7 +149,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     return copy;
   }, [rows, sortDir, sortKey]);
   const selected = pinTop10 ? sortedRows.slice(0, 10) : sortedRows;
-  const columnCount = columns.length;
   const sortGlyph = (col: string): string => {
     if (sortKey !== col) return "";
     return sortDir === "asc" ? " ▲" : " ▼";
@@ -161,26 +161,56 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setSortKey(col);
     setSortDir(defaultSortDirectionFor(col));
   };
-  const toggleExpandedTicker = (ticker: string) => {
-    setExpandedTicker((current) => (current === ticker ? null : ticker));
+  const openExpandedChart = (ticker: string) => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(ticker);
+  };
+
+  const closeExpandedChart = () => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(null);
   };
   const renderCell = (row: Row, column: string) => {
     if (column === "ticker") {
       return (
-        <td key={`${row.ticker}-${column}`} className="px-3 py-2 font-semibold text-accent">
-          {showsEtfConstituents ? (
+        <td key={`${row.ticker}-${column}`} className="px-3 py-2 font-semibold">
+          <div className="flex items-center gap-2">
+            {showsEtfConstituents ? (
+              <button
+                className="text-left text-accent hover:underline"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void openEtfConstituents(row.ticker, row.displayName);
+                }}
+                onMouseEnter={(event) => hoverChart.openPreview(row.ticker, event.currentTarget)}
+                onMouseLeave={() => hoverChart.closePreviewForTicker(row.ticker)}
+                title={row.displayName ?? row.ticker}
+              >
+                {row.ticker}
+              </button>
+            ) : (
+              <span
+                className="text-accent"
+                onMouseEnter={(event) => hoverChart.openPreview(row.ticker, event.currentTarget)}
+                onMouseLeave={() => hoverChart.closePreviewForTicker(row.ticker)}
+                title={row.displayName ?? row.ticker}
+              >
+                {row.ticker}
+              </span>
+            )}
             <button
-              className="text-left hover:underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                void openEtfConstituents(row.ticker, row.displayName);
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-400 opacity-75 transition hover:bg-panelSoft/55 hover:text-accent focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/25"
+              onClick={(event) => {
+                event.stopPropagation();
+                openExpandedChart(row.ticker);
               }}
+              title={`Pin chart for ${row.ticker}`}
+              aria-label={`Pin chart for ${row.ticker}`}
             >
-              {row.ticker}
+              <Maximize2 className="h-3.5 w-3.5" />
             </button>
-          ) : (
-            row.ticker
-          )}
+          </div>
         </td>
       );
     }
@@ -251,6 +281,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   );
 
   const openEtfConstituents = async (ticker: string, name: string | null) => {
+    hoverChart.clearPreview();
     setActiveEtf({ ticker, name });
     setConstituentLoading(true);
     setConstituentWarning(null);
@@ -279,14 +310,15 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (activeChartTicker) {
-        setActiveChartTicker(null);
+        closeExpandedChart();
         return;
       }
+      hoverChart.clearPreview();
       setActiveEtf(null);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeChartTicker, activeEtf]);
+  }, [activeChartTicker, activeEtf, hoverChart]);
 
   useEffect(() => {
     setConstituentPage(1);
@@ -319,26 +351,14 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                 </tr>
               </thead>
               <tbody>
-                {selected.map((row) => {
-                  const isOpen = expandedTicker === row.ticker;
-                  return (
-                    <Fragment key={row.ticker}>
-                      <tr
-                        className="cursor-pointer border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
-                        onClick={() => toggleExpandedTicker(row.ticker)}
-                      >
-                        {columns.map((column) => renderCell(row, column))}
-                      </tr>
-                      {isOpen && (
-                        <tr className="border-t border-borderSoft/60 bg-slate-950/40">
-                          <td colSpan={columnCount} className="px-3 py-3">
-                            <TradingViewWidget ticker={row.ticker} compact />
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
+                {selected.map((row) => (
+                  <tr
+                    key={row.ticker}
+                    className="border-t border-borderSoft/80 transition-colors hover:bg-slate-900/30"
+                  >
+                    {columns.map((column) => renderCell(row, column))}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -415,7 +435,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       />
                       <button
                         className="mt-2 inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                        onClick={() => setActiveChartTicker(row.ticker)}
+                        onClick={() => openExpandedChart(row.ticker)}
                       >
                         <Maximize2 className="h-3.5 w-3.5" />
                         Expand chart
@@ -431,19 +451,13 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
           </div>
         </div>
       )}
-      {activeChartTicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setActiveChartTicker(null)}>
-          <div className="w-full max-w-5xl" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between rounded border border-borderSoft bg-panel px-3 py-2">
-              <h4 className="text-sm font-semibold text-slate-100">TradingView: {activeChartTicker}</h4>
-              <button className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-200" onClick={() => setActiveChartTicker(null)}>
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            <TradingViewWidget ticker={activeChartTicker} chartOnly showStatusLine fillContainer initialRange="3M" />
-          </div>
-        </div>
-      )}
+      <HoverChartPreviewPanel
+        preview={hoverChart.preview}
+        onPreviewMouseEnter={hoverChart.handlePreviewMouseEnter}
+        onPreviewMouseLeave={hoverChart.handlePreviewMouseLeave}
+        onPinChart={openExpandedChart}
+      />
+      <ExpandedTradingViewChartModal ticker={activeChartTicker} onClose={closeExpandedChart} />
     </>
   );
 }
