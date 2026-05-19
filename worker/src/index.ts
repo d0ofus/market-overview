@@ -2028,9 +2028,17 @@ app.get("/api/admin/etf-sync-status", async (c) => {
   const autoSyncLimit = Math.max(0, Math.min(3, Number(c.req.query("autoSyncLimit") ?? 1)));
 
   if (autoSyncLimit > 0) {
-    const candidates = await c.env.DB.prepare(
-      "SELECT w.ticker as ticker, w.fundName as fundName, s.last_synced_at as lastSyncedAt, s.status as status, s.error as error, s.source as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, s.coverage as coverage, s.source_tier as sourceTier, s.source_url as sourceUrl, s.provider_records_count as providerRecordsCount, s.expected_min_records as expectedMinRecords, s.last_full_synced_at as lastFullSyncedAt, s.last_partial_synced_at as lastPartialSyncedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT ticker, MAX(fund_name) as fundName FROM etf_watchlists GROUP BY ticker) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY w.ticker ASC",
-    ).all<Array<{ ticker: string; fundName: string | null } & EtfSyncStatusRow>[number]>();
+    const candidates = await (async () => {
+      try {
+        return await c.env.DB.prepare(
+          "SELECT w.ticker as ticker, w.fundName as fundName, s.last_synced_at as lastSyncedAt, s.status as status, s.error as error, s.source as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, s.coverage as coverage, s.source_tier as sourceTier, s.source_url as sourceUrl, s.provider_records_count as providerRecordsCount, s.expected_min_records as expectedMinRecords, s.last_full_synced_at as lastFullSyncedAt, s.last_partial_synced_at as lastPartialSyncedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT ticker, MAX(fund_name) as fundName FROM etf_watchlists GROUP BY ticker) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY w.ticker ASC",
+        ).all<Array<{ ticker: string; fundName: string | null } & EtfSyncStatusRow>[number]>();
+      } catch {
+        return await c.env.DB.prepare(
+          "SELECT w.ticker as ticker, w.fundName as fundName, s.last_synced_at as lastSyncedAt, s.status as status, s.error as error, s.source as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT ticker, MAX(fund_name) as fundName FROM etf_watchlists GROUP BY ticker) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY w.ticker ASC",
+        ).all<Array<{ ticker: string; fundName: string | null } & EtfSyncStatusRow>[number]>();
+      }
+    })();
 
     const ranked = (candidates.results ?? [])
       .map((row) => {
@@ -2091,11 +2099,21 @@ app.get("/api/admin/etf-sync-status", async (c) => {
     }
   }
 
-  const rows = await c.env.DB.prepare(
-    "SELECT w.ticker as etfTicker, s.last_synced_at as lastSyncedAt, COALESCE(s.status, 'pending') as status, s.error as error, COALESCE(s.source, 'watchlist:add') as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, s.coverage as coverage, s.source_tier as sourceTier, s.source_url as sourceUrl, s.provider_records_count as providerRecordsCount, s.expected_min_records as expectedMinRecords, s.last_full_synced_at as lastFullSyncedAt, s.last_partial_synced_at as lastPartialSyncedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(s.coverage, '') = 'partial' OR COALESCE(s.source_tier, '') = 'partial' OR COALESCE(s.status, '') = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, cs.latestConstituentUpdatedAt, s.updated_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
-  )
-    .bind(limit)
-    .all<EtfSyncStatusRow>();
+  const rows = await (async () => {
+    try {
+      return await c.env.DB.prepare(
+        "SELECT w.ticker as etfTicker, s.last_synced_at as lastSyncedAt, COALESCE(s.status, 'pending') as status, s.error as error, COALESCE(s.source, 'watchlist:add') as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, s.coverage as coverage, s.source_tier as sourceTier, s.source_url as sourceUrl, s.provider_records_count as providerRecordsCount, s.expected_min_records as expectedMinRecords, s.last_full_synced_at as lastFullSyncedAt, s.last_partial_synced_at as lastPartialSyncedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(s.coverage, '') = 'partial' OR COALESCE(s.source_tier, '') = 'partial' OR COALESCE(s.status, '') = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, cs.latestConstituentUpdatedAt, s.updated_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
+      )
+        .bind(limit)
+        .all<EtfSyncStatusRow>();
+    } catch {
+      return await c.env.DB.prepare(
+        "SELECT w.ticker as etfTicker, s.last_synced_at as lastSyncedAt, COALESCE(s.status, 'pending') as status, s.error as error, COALESCE(s.source, 'watchlist:add') as source, COALESCE(s.records_count, 0) as recordsCount, s.updated_at as updatedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 2 ELSE 3 END, datetime(COALESCE(s.last_synced_at, cs.latestConstituentUpdatedAt, s.updated_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
+      )
+        .bind(limit)
+        .all<EtfSyncStatusRow>();
+    }
+  })();
   return c.json({ rows: (rows.results ?? []).map(normalizeEtfSyncStatusRow) });
 });
 
@@ -4061,9 +4079,17 @@ app.post("/api/admin/etf-sync-backfill", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
   // Keep this low to avoid Cloudflare subrequest caps in one request.
   const limit = Math.max(1, Math.min(5, Number(body.limit ?? 3)));
-  const rows = await c.env.DB.prepare(
-    "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.records_count as recordsCount, s.coverage as coverage, s.source_tier as sourceTier, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(s.coverage, '') = 'partial' OR COALESCE(s.source_tier, '') = 'partial' OR COALESCE(s.status, '') = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC",
-  ).all<{ ticker: string; lastSyncedAt: string | null; status: string | null; recordsCount: number | null; coverage: string | null; sourceTier: string | null; actualRecordsCount: number | null }>();
+  const rows = await (async () => {
+    try {
+      return await c.env.DB.prepare(
+        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.records_count as recordsCount, s.coverage as coverage, s.source_tier as sourceTier, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(s.coverage, '') = 'partial' OR COALESCE(s.source_tier, '') = 'partial' OR COALESCE(s.status, '') = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC",
+      ).all<{ ticker: string; lastSyncedAt: string | null; status: string | null; recordsCount: number | null; coverage?: string | null; sourceTier?: string | null; actualRecordsCount: number | null }>();
+    } catch {
+      return await c.env.DB.prepare(
+        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.records_count as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN COALESCE(s.status, '') = 'error' THEN 1 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 2 ELSE 3 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC",
+      ).all<{ ticker: string; lastSyncedAt: string | null; status: string | null; recordsCount: number | null; coverage?: string | null; sourceTier?: string | null; actualRecordsCount: number | null }>();
+    }
+  })();
   const candidates = (rows.results ?? [])
     .filter((r) => (r.actualRecordsCount ?? r.recordsCount ?? 0) === 0 || r.status === "error" || r.status === "partial" || r.coverage === "partial" || r.sourceTier === "partial" || isStaleDate(r.lastSyncedAt, 45))
     .slice(0, limit);
@@ -4448,11 +4474,21 @@ async function syncMonthlyEtfSlice(env: Env): Promise<void> {
   // Process only a small stale slice per scheduled run to stay under worker subrequest budgets.
   const maxPerRun = 5;
   const staleDays = 14;
-  const staleRows = await env.DB.prepare(
-    "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.coverage as coverage, s.source_tier as sourceTier, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker WHERE s.last_synced_at IS NULL OR s.status = 'error' OR s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' OR COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN s.status = 'error' THEN 1 WHEN s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
-  )
-    .bind(staleDays, maxPerRun)
-    .all<{ ticker: string; lastSyncedAt: string | null; status: string | null; coverage: string | null; sourceTier: string | null; recordsCount: number | null; actualRecordsCount: number | null }>();
+  const staleRows = await (async () => {
+    try {
+      return await env.DB.prepare(
+        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.coverage as coverage, s.source_tier as sourceTier, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker WHERE s.last_synced_at IS NULL OR s.status = 'error' OR s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' OR COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN s.status = 'error' THEN 1 WHEN s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
+      )
+        .bind(staleDays, maxPerRun)
+        .all<{ ticker: string; lastSyncedAt: string | null; status: string | null; coverage?: string | null; sourceTier?: string | null; recordsCount: number | null; actualRecordsCount: number | null }>();
+    } catch {
+      return await env.DB.prepare(
+        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker WHERE s.last_synced_at IS NULL OR s.status = 'error' OR COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN s.status = 'error' THEN 1 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 2 ELSE 3 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
+      )
+        .bind(staleDays, maxPerRun)
+        .all<{ ticker: string; lastSyncedAt: string | null; status: string | null; coverage?: string | null; sourceTier?: string | null; recordsCount: number | null; actualRecordsCount: number | null }>();
+    }
+  })();
   const selected = staleRows.results ?? [];
   for (const row of selected) {
     try {
