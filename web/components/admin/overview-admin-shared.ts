@@ -46,9 +46,16 @@ export type EtfSyncStatusRow = {
   etfTicker: string;
   status: string | null;
   source: string | null;
+  sourceUrl?: string | null;
+  sourceTier?: string | null;
+  coverage?: string | null;
   lastSyncedAt: string | null;
   updatedAt: string | null;
   recordsCount: number;
+  providerRecordsCount?: number | null;
+  expectedMinRecords?: number | null;
+  lastFullSyncedAt?: string | null;
+  lastPartialSyncedAt?: string | null;
   error: string | null;
 };
 
@@ -60,7 +67,8 @@ export type EtfDiagnosticsResult = {
   db: { ok: boolean; error: string | null };
   watchlists: Array<{ listType: string; parentSector: string | null; industry: string | null; fundName: string | null; sourceUrl?: string | null }>;
   sourceUrl?: string | null;
-  syncStatus: { status: string | null; source: string | null; lastSyncedAt: string | null; updatedAt: string | null; recordsCount: number; error: string | null } | null;
+  sourceUrlOrigin?: string | null;
+  syncStatus: EtfSyncStatusRow | null;
   constituentSummary: { count: number; latestAsOfDate: string | null; latestUpdatedAt: string | null };
   topConstituents: Array<{ ticker: string; name: string | null; weight: number | null }>;
 };

@@ -72,7 +72,7 @@ export const ETF_CATALOG: EtfCatalogEntry[] = [
   { ticker: "PPH", sector: "Health Care", industry: "Pharmaceuticals", exactUrl: "https://www.invesco.com/us/en/financial-products/etfs/invesco-pharmaceuticals-etf.html" },
   { ticker: "FNGS", sector: "Multi-Sector", industry: "FANG+ Mega Cap Growth", exactUrl: "https://microsectors.com/fang/" },
   { ticker: "URA", sector: "Energy", industry: "Uranium & Nuclear Energy", exactUrl: "https://www.globalxetfs.com/funds/ura/" },
-  { ticker: "WGMI", sector: "Information Technology", industry: "Bitcoin Miners", exactUrl: "https://valkyrieinvest.com/etfs/" },
+  { ticker: "WGMI", sector: "Information Technology", industry: "Bitcoin Miners", exactUrl: "https://coinshares.com/us/etf/wgmi/" },
   { ticker: "REMX", sector: "Materials", industry: "Rare Earth & Strategic Metals", exactUrl: "https://www.vaneck.com/us/en/investments/rare-earth-strategic-metals-etf-remx/" },
 ];
 

@@ -22,9 +22,16 @@ function statusTone(status: string | null, error: string | null): "success" | "w
   if (error) return "danger";
   const normalized = String(status ?? "").toLowerCase();
   if (normalized.includes("fail") || normalized.includes("error")) return "danger";
-  if (normalized.includes("pending") || normalized.includes("queued") || normalized.includes("running")) return "warning";
+  if (normalized.includes("partial") || normalized.includes("pending") || normalized.includes("queued") || normalized.includes("running")) return "warning";
   if (normalized.includes("sync") || normalized.includes("ok") || normalized.includes("ready")) return "success";
   return "info";
+}
+
+function syncNeedsAttention(row: { status: string | null; error: string | null; lastSyncedAt: string | null; coverage?: string | null; sourceTier?: string | null }) {
+  const status = String(row.status ?? "").toLowerCase();
+  const statusOk = status === "ok" || status === "synced" || status === "ready";
+  const partial = row.coverage === "partial" || row.sourceTier === "partial" || status === "partial";
+  return Boolean(row.error || !row.lastSyncedAt || partial || !statusOk);
 }
 
 export function OverviewEtfUniversePanel({ state }: Props) {
@@ -32,7 +39,7 @@ export function OverviewEtfUniversePanel({ state }: Props) {
   const [deleteBusy, setDeleteBusy] = useState(false);
 
   const syncWarnings = useMemo(
-    () => state.etfSyncStatus.filter((row) => row.error || !row.lastSyncedAt || String(row.status ?? "").toLowerCase() !== "synced"),
+    () => state.etfSyncStatus.filter(syncNeedsAttention),
     [state.etfSyncStatus],
   );
 
@@ -145,18 +152,22 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                         <td className="px-4 py-3 text-text">{state.diagResult.backendRevision ?? "-"}</td>
                       </tr>
                       <tr className="border-b border-borderSoft/60">
-                        <td className="px-4 py-3 text-slate-400">Configured source URL</td>
+                        <td className="px-4 py-3 text-slate-400">Effective source URL</td>
                         <td className="px-4 py-3 break-all text-text">{state.diagResult.sourceUrl ?? "-"}</td>
                       </tr>
                       <tr className="border-b border-borderSoft/60 bg-panelSoft/30">
+                        <td className="px-4 py-3 text-slate-400">Source origin</td>
+                        <td className="px-4 py-3 text-text">{state.diagResult.sourceUrlOrigin ?? "-"}</td>
+                      </tr>
+                      <tr className="border-b border-borderSoft/60">
                         <td className="px-4 py-3 text-slate-400">Server time (UTC)</td>
                         <td className="px-4 py-3 text-text">{state.formatDateTimeCompact(state.diagResult.serverTimeUtc)}</td>
                       </tr>
-                      <tr className="border-b border-borderSoft/60">
+                      <tr className="border-b border-borderSoft/60 bg-panelSoft/30">
                         <td className="px-4 py-3 text-slate-400">Database connection</td>
                         <td className="px-4 py-3 text-text">{state.diagResult.db?.ok ? "OK" : `ERROR: ${state.diagResult.db?.error ?? "unknown"}`}</td>
                       </tr>
-                      <tr className="border-b border-borderSoft/60 bg-panelSoft/30">
+                      <tr className="border-b border-borderSoft/60">
                         <td className="px-4 py-3 text-slate-400">Watchlist membership</td>
                         <td className="px-4 py-3 text-text">
                           {(state.diagResult.watchlists ?? []).length > 0
@@ -167,6 +178,20 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                       <tr className="border-b border-borderSoft/60">
                         <td className="px-4 py-3 text-slate-400">Sync status</td>
                         <td className="px-4 py-3 text-text">{state.diagResult.syncStatus?.status ?? "-"}</td>
+                      </tr>
+                      <tr className="border-b border-borderSoft/60 bg-panelSoft/30">
+                        <td className="px-4 py-3 text-slate-400">Coverage</td>
+                        <td className="px-4 py-3 text-text">
+                          {state.diagResult.syncStatus?.coverage ?? "-"}
+                          {state.diagResult.syncStatus?.sourceTier ? ` / ${state.diagResult.syncStatus.sourceTier}` : ""}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-borderSoft/60">
+                        <td className="px-4 py-3 text-slate-400">Provider records</td>
+                        <td className="px-4 py-3 text-text">
+                          {state.diagResult.syncStatus?.providerRecordsCount ?? "-"}
+                          {state.diagResult.syncStatus?.expectedMinRecords ? ` / expected ${state.diagResult.syncStatus.expectedMinRecords}` : ""}
+                        </td>
                       </tr>
                       <tr className="border-b border-borderSoft/60 bg-panelSoft/30">
                         <td className="px-4 py-3 text-slate-400">Last synced</td>
@@ -378,7 +403,7 @@ export function OverviewEtfUniversePanel({ state }: Props) {
       <AdminCard title="ETF Sync Status" description="Track last sync times, source information, and any stale or failing ETF jobs.">
         {syncWarnings.length > 0 ? (
           <InlineAlert tone="warning" title="Some ETF syncs need attention">
-            {syncWarnings.length} ETF {syncWarnings.length === 1 ? "entry is" : "entries are"} stale, pending, or reporting an error.
+            {syncWarnings.length} ETF {syncWarnings.length === 1 ? "entry is" : "entries are"} stale, pending, partial, or reporting an error.
           </InlineAlert>
         ) : null}
 
@@ -392,6 +417,7 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                   <th className="px-4 py-3 font-medium">Ticker</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Source</th>
+                  <th className="px-4 py-3 font-medium">Coverage</th>
                   <th className="px-4 py-3 font-medium">Records</th>
                   <th className="px-4 py-3 font-medium">Last synced</th>
                   <th className="px-4 py-3 font-medium">Updated</th>
@@ -415,7 +441,14 @@ export function OverviewEtfUniversePanel({ state }: Props) {
                       </span>
                       {row.error ? <div className="mt-1 text-xs text-rose-200">{row.error}</div> : null}
                     </td>
-                    <td className="px-4 py-3 text-slate-300">{row.source ?? "-"}</td>
+                    <td className="px-4 py-3 text-slate-300">
+                      <div>{row.source ?? "-"}</div>
+                      {row.sourceUrl ? <div className="mt-1 max-w-[18rem] break-all text-xs text-slate-500">{row.sourceUrl}</div> : null}
+                    </td>
+                    <td className="px-4 py-3 text-slate-300">
+                      <div>{row.coverage ?? "-"}</div>
+                      {row.sourceTier ? <div className="mt-1 text-xs text-slate-500">{row.sourceTier}</div> : null}
+                    </td>
                     <td className="px-4 py-3 text-slate-300">{row.recordsCount}</td>
                     <td className="px-4 py-3 text-slate-300">{state.formatDateTimeCompact(row.lastSyncedAt)}</td>
                     <td className="px-4 py-3 text-slate-300">{state.formatDateTimeCompact(row.updatedAt)}</td>

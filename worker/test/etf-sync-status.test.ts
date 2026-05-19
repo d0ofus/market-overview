@@ -21,4 +21,27 @@ describe("normalizeEtfSyncStatusRow", () => {
       updatedAt: "2026-03-11T23:00:00.000Z",
     });
   });
+
+  it("preserves partial coverage in normalized status metadata", () => {
+    expect(normalizeEtfSyncStatusRow({
+      etfTicker: "WGMI",
+      lastSyncedAt: "2026-05-18T01:00:00.000Z",
+      status: null,
+      error: null,
+      source: "stockanalysis:holdings-page",
+      recordsCount: 25,
+      updatedAt: "2026-05-18T01:00:00.000Z",
+      coverage: "partial",
+      sourceTier: "partial",
+      providerRecordsCount: 25,
+      expectedMinRecords: 27,
+    })).toMatchObject({
+      status: "partial",
+      recordsCount: 25,
+      coverage: "partial",
+      sourceTier: "partial",
+      providerRecordsCount: 25,
+      expectedMinRecords: 27,
+    });
+  });
 });
