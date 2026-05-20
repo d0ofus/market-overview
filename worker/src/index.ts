@@ -1086,6 +1086,43 @@ async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, {
   return map;
 }
 
+async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; source: string }>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  const map = new Map<string, { change1d: number; lastPrice: number; source: string }>();
+  for (let index = 0; index < unique.length; index += 80) {
+    const batch = unique.slice(index, index + 80);
+    if (batch.length === 0) continue;
+    const rows = await env.DB.prepare(
+      `SELECT ticker, c, rowNumber FROM (
+         SELECT ticker, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rowNumber
+         FROM daily_bars
+         WHERE ticker IN (${batch.map(() => "?").join(",")})
+       )
+       WHERE rowNumber <= 2
+       ORDER BY ticker ASC, rowNumber ASC`,
+    )
+      .bind(...batch)
+      .all<{ ticker: string; c: number; rowNumber: number }>();
+    const closesByTicker = new Map<string, number[]>();
+    for (const row of rows.results ?? []) {
+      const ticker = row.ticker.toUpperCase();
+      const closes = closesByTicker.get(ticker) ?? [];
+      closes.push(row.c);
+      closesByTicker.set(ticker, closes);
+    }
+    for (const [ticker, closes] of closesByTicker.entries()) {
+      const lastPrice = closes[0] ?? 0;
+      const prev = closes[1] ?? 0;
+      map.set(ticker, {
+        change1d: lastPrice && prev ? ((lastPrice - prev) / prev) * 100 : 0,
+        lastPrice,
+        source: "daily-bars",
+      });
+    }
+  }
+  return map;
+}
+
 async function loadYahooPreferredDailyBarTickers(env: Env, tickers: string[]): Promise<string[]> {
   const preferred = new Set<string>();
   for (let i = 0; i < tickers.length; i += 80) {
@@ -1652,8 +1689,7 @@ app.get("/api/sectors/calendar", async (c) => {
 
 app.get("/api/etfs/sector", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "sector");
-  await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
-  const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
+  const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());
@@ -1666,8 +1702,7 @@ app.get("/api/etfs/sector", async (c) => {
 
 app.get("/api/etfs/industry", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "industry");
-  await refreshRecentBarsForTickers(c.env, rows.map((r: any) => r.ticker));
-  const statsMap = await get1dStatsMap(c.env, rows.map((r: any) => r.ticker));
+  const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());

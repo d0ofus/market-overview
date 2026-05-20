@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
@@ -118,6 +118,8 @@ type NarrativeTickerSuggestion = {
   ticker: string;
   name: string | null;
 };
+
+type StaleCheck = () => boolean;
 
 const SECTION_NAV_ITEMS: Array<{ id: string; label: string }> = [
   { id: "key-movers-tracker", label: "Key Movers Tracker" },
@@ -327,31 +329,52 @@ export function SectorTracker() {
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
 
-  const load = async () => {
-    const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
+  const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
+    const [entriesRes, calRes, symbolRes] = await Promise.allSettled([
       getSectorEntries(),
-      getSectorCalendar(month),
+      getSectorCalendar(targetMonth),
       getSectorSymbolOptions(),
-      getSectorEtfs(),
-      getIndustryEtfs(),
     ]);
+    if (isStale()) return;
 
     const entriesRows = entriesRes.status === "fulfilled" ? entriesRes.value.rows ?? [] : [];
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
-    const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
-    const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
     setSymbolOptions(symbolRows);
+  }, []);
+
+  const loadEtfData = useCallback(async (isStale: StaleCheck = () => false) => {
+    const [sectorEtfRes, industryEtfRes] = await Promise.allSettled([
+      getSectorEtfs(),
+      getIndustryEtfs(),
+    ]);
+    if (isStale()) return;
+
+    const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
+    const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
+
     setSectorEtfs((sectorRows.length > 0 ? sectorRows : FALLBACK_SECTOR_ETFS) as WatchlistEtf[]);
     setIndustryEtfs((industryRows.length > 0 ? industryRows : FALLBACK_INDUSTRY_ETFS) as WatchlistEtf[]);
-  };
+  }, []);
 
   useEffect(() => {
-    void load();
-  }, [month]);
+    let stale = false;
+    void loadKeyMoverData(month, () => stale);
+    return () => {
+      stale = true;
+    };
+  }, [loadKeyMoverData, month]);
+
+  useEffect(() => {
+    let stale = false;
+    void loadEtfData(() => stale);
+    return () => {
+      stale = true;
+    };
+  }, [loadEtfData]);
 
   useEffect(() => {
     setExpandedCalendarDates([]);
@@ -435,7 +458,7 @@ export function SectorTracker() {
       });
       setEditingEntry(null);
       setEditError(null);
-      await load();
+      await loadKeyMoverData(month);
     } catch (err) {
       setEditError(err instanceof Error ? err.message : "Failed to update sector/narrative entry.");
     }
@@ -447,7 +470,7 @@ export function SectorTracker() {
       await deleteSectorEntry(entryId);
       if (editingEntry?.id === entryId) setEditingEntry(null);
       if (activeNarrativeEntry?.id === entryId) setActiveNarrativeEntry(null);
-      await load();
+      await loadKeyMoverData(month);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to delete entry.");
     }
@@ -887,7 +910,7 @@ export function SectorTracker() {
                           setNotes("");
                           setSelectedTickers([]);
                           setTickerInput("");
-                          await load();
+                          await loadKeyMoverData(month);
                         } catch (err) {
                           setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
                         }
