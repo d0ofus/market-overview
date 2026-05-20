@@ -126,6 +126,13 @@ import {
   syncEarningsCalendarFromProviders,
 } from "./earnings-calendar-service";
 import {
+  loadEarningsSurprisesStatus,
+  maybeRunScheduledEarningsSurpriseSync,
+  queryEarningsSurprises,
+  syncEarningsSurprises,
+  type EarningsSurprisesQuery,
+} from "./earnings-surprise-service";
+import {
   buildFundamentalSeedQueue,
   loadFundamentalSeedErrors,
   loadFundamentalSeedStatus,
@@ -360,6 +367,39 @@ function readGappersFilters(req: Request): {
   return Object.values(filters).some((value) => value != null && (!(Array.isArray(value)) || value.length > 0))
     ? filters
     : null;
+}
+
+function readEarningsSurprisesQuery(req: Request): EarningsSurprisesQuery {
+  const url = new URL(req.url);
+  const toNumber = (key: string): number | null | undefined => {
+    const raw = url.searchParams.get(key);
+    if (raw == null || raw.trim() === "") return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const surpriseSideRaw = url.searchParams.get("surpriseSide");
+  const surpriseSide = surpriseSideRaw === "positive" || surpriseSideRaw === "negative" || surpriseSideRaw === "all"
+    ? surpriseSideRaw
+    : undefined;
+  const sortDirRaw = url.searchParams.get("sortDir");
+  const sortDir = sortDirRaw === "asc" || sortDirRaw === "desc" ? sortDirRaw : undefined;
+  return {
+    limit: toNumber("limit"),
+    offset: toNumber("offset"),
+    q: url.searchParams.get("q"),
+    season: url.searchParams.get("season"),
+    startDate: url.searchParams.get("startDate"),
+    endDate: url.searchParams.get("endDate"),
+    minMarketCap: toNumber("minMarketCap"),
+    maxMarketCap: toNumber("maxMarketCap"),
+    sector: url.searchParams.get("sector"),
+    industry: url.searchParams.get("industry"),
+    exchange: url.searchParams.get("exchange"),
+    includeOtc: url.searchParams.get("includeOtc") === "1",
+    surpriseSide,
+    sort: url.searchParams.get("sort"),
+    sortDir,
+  };
 }
 
 async function refreshSnapshotSafe(env: Env): Promise<void> {
@@ -800,7 +840,8 @@ type RefreshPage =
   | "scans"
   | "pattern-scanner"
   | "watchlist-compiler"
-  | "gappers";
+  | "gappers"
+  | "earnings";
 
 async function refreshPageScopedData(
   env: Env,
@@ -911,6 +952,14 @@ async function refreshPageScopedData(
       page,
       refreshedTickers: snapshot.rowCount,
       notes: `Refreshed gappers snapshot with ${snapshot.rowCount} ranked rows.`,
+    };
+  }
+  if (page === "earnings") {
+    const result = await syncEarningsSurprises(env, { mode: "incremental" });
+    return {
+      page,
+      refreshedTickers: result.rowsUpserted,
+      notes: `Synced earnings surprises from ${result.provider ?? "configured providers"}: ${result.rowsUpserted} row${result.rowsUpserted === 1 ? "" : "s"} upserted.`,
     };
   }
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
@@ -2237,6 +2286,24 @@ app.get("/api/gappers", async (c) => {
       warning: null,
       rows: [],
     }, 500);
+  }
+});
+
+app.get("/api/earnings/surprises", async (c) => {
+  try {
+    return c.json(await queryEarningsSurprises(c.env, readEarningsSurprisesQuery(c.req.raw)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings surprises.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/earnings/surprises/status", async (c) => {
+  try {
+    return c.json(await loadEarningsSurprisesStatus(c.env));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings surprise status.";
+    return c.json({ error: message }, 500);
   }
 });
 
@@ -4052,6 +4119,22 @@ app.post("/api/admin/earnings/process", async (c) => {
   }
 });
 
+app.post("/api/admin/earnings/surprises/sync", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const mode = c.req.query("mode") === "backfill" ? "backfill" : "incremental";
+    const result = await syncEarningsSurprises(c.env, { mode });
+    try {
+      await upsertAudit(c.env, "default", "EARNINGS_SURPRISE_SYNC", result);
+    } catch (auditError) {
+      console.error("earnings surprise sync audit failed", auditError);
+    }
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to sync earnings surprises." }, 500);
+  }
+});
+
 app.get("/api/admin/fundamentals/seed/status", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -4166,7 +4249,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers", "earnings"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -4557,6 +4640,11 @@ export default {
       await maybeRunScheduledEarningsCalendarSync(env, now);
     } catch (error) {
       console.error("scheduled earnings calendar sync failed", error);
+    }
+    try {
+      await maybeRunScheduledEarningsSurpriseSync(env, now);
+    } catch (error) {
+      console.error("scheduled earnings surprise sync failed", error);
     }
     try {
       await processDueEarningsFundamentalRefreshes(env, { limit: 5, now });

@@ -316,6 +316,116 @@ export type AdminEarningsProcessResponse = {
   }>;
 };
 
+export type EarningsSurpriseRow = {
+  id: string;
+  provider: string;
+  sourceSymbol: string;
+  ticker: string;
+  exchange: string | null;
+  companyName: string | null;
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
+  reportDate: string;
+  reportTimestamp: number | null;
+  reportTime: string | null;
+  fiscalPeriodEnd: string | null;
+  season: string;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  epsSurprisePct: number | null;
+  revenueActual: number | null;
+  revenueEstimate: number | null;
+  revenueSurprise: number | null;
+  revenueSurprisePct: number | null;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+};
+
+export type EarningsSurpriseFacet = {
+  value: string;
+  count: number;
+};
+
+export type EarningsSurprisesResponse = {
+  schemaReady: boolean;
+  warning: string | null;
+  generatedAt: string;
+  total: number;
+  limit: number;
+  offset: number;
+  rows: EarningsSurpriseRow[];
+  facets: {
+    seasons: EarningsSurpriseFacet[];
+    sectors: EarningsSurpriseFacet[];
+    industries: EarningsSurpriseFacet[];
+    exchanges: EarningsSurpriseFacet[];
+  };
+};
+
+export type EarningsSurprisesStatus = {
+  schemaReady: boolean;
+  warning: string | null;
+  counts: {
+    total: number;
+    positive: number;
+    negative: number;
+    latestReportDate: string | null;
+    earliestReportDate: string | null;
+  };
+  syncs: Array<{
+    provider: string;
+    status: string;
+    mode: string | null;
+    windowStart: string | null;
+    windowEnd: string | null;
+    lastStartedAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    rowsSeen: number | null;
+    rowsUpserted: number | null;
+    updatedAt: string | null;
+  }>;
+  latestRows: EarningsSurpriseRow[];
+};
+
+export type EarningsSurprisesQuery = {
+  limit?: number;
+  offset?: number;
+  q?: string | null;
+  season?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  minMarketCap?: number | null;
+  maxMarketCap?: number | null;
+  sector?: string | null;
+  industry?: string | null;
+  exchange?: string | null;
+  includeOtc?: boolean;
+  surpriseSide?: "all" | "positive" | "negative";
+  sort?: string | null;
+  sortDir?: "asc" | "desc";
+};
+
+export type EarningsSurpriseSyncResponse = {
+  ok: boolean;
+  mode: "incremental" | "backfill";
+  windowStart: string;
+  windowEnd: string;
+  provider: string | null;
+  providers: Array<{
+    provider: string;
+    status: "ok" | "skipped" | "error";
+    rowsSeen: number;
+    rowsUpserted: number;
+    error: string | null;
+  }>;
+  rowsSeen: number;
+  rowsUpserted: number;
+  warning: string | null;
+};
+
 export type AdminFundamentalsSeedQueueRow = {
   ticker: string;
   companyName: string | null;
@@ -1893,6 +2003,37 @@ export function processAdminEarningsRefresh(limit = 5) {
   );
 }
 
+export function getEarningsSurprises(query?: EarningsSurprisesQuery) {
+  return getJson<EarningsSurprisesResponse>(appendQuery("/api/earnings/surprises", {
+    limit: query?.limit,
+    offset: query?.offset,
+    q: query?.q,
+    season: query?.season,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
+    surpriseSide: query?.surpriseSide,
+    sort: query?.sort,
+    sortDir: query?.sortDir,
+  }));
+}
+
+export function getEarningsSurprisesStatus() {
+  return getJson<EarningsSurprisesStatus>("/api/earnings/surprises/status");
+}
+
+export function syncAdminEarningsSurprises(mode: "incremental" | "backfill" = "incremental") {
+  return adminFetch<EarningsSurpriseSyncResponse>(
+    appendQuery("/api/admin/earnings/surprises/sync", { mode }),
+    { method: "POST" },
+  );
+}
+
 export function getAdminFundamentalsSeedStatus() {
   return adminFetch<AdminFundamentalsSeedStatus>("/api/admin/fundamentals/seed/status");
 }
@@ -2856,6 +2997,9 @@ export function refreshPageData(page: string, ticker?: string | null) {
     }
     if (page === "gappers") {
       return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support gappers refresh endpoint." };
+    }
+    if (page === "earnings") {
+      return { ok: true, page, refreshedTickers: 0, notes: "Legacy API host does not support earnings refresh endpoint." };
     }
 
     await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });
