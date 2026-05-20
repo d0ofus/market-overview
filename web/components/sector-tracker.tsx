@@ -279,8 +279,7 @@ function EtfTile({
       <div className="bg-slate-950/20 p-2.5">
         <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" surface="plain" />
       </div>
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-slate-500">Click the ticker to open constituent detail.</p>
+      <div className="flex items-center justify-end gap-3">
         <button className={SECONDARY_BUTTON_CLASS} onClick={onExpandChart}>
           <Maximize2 className="h-3.5 w-3.5" />
           Expand chart
@@ -1214,7 +1213,6 @@ export function SectorTracker() {
                         {parentSector}
                       </div>
                       <h4 className="text-lg font-semibold text-slate-100">{industry}</h4>
-                      <p className="text-sm text-slate-400">{rows.length} related fund{rows.length === 1 ? "" : "s"} in this group.</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(maxChange)}`}>
