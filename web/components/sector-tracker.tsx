@@ -955,7 +955,7 @@ export function SectorTracker() {
                     <label className="inline-flex items-center gap-2 rounded-2xl border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-sm text-slate-300">
                       <CalendarDays className="h-4 w-4 text-slate-400" />
                       <span className="text-slate-400">Month</span>
-                      <input type="month" className="bg-transparent text-slate-100 outline-none" value={month} onChange={(e) => setMonth(e.target.value)} />
+                      <input type="month" className="themed-date-input bg-transparent text-slate-100 outline-none" value={month} onChange={(e) => setMonth(e.target.value)} />
                     </label>
                   ) : null}
                 </div>
