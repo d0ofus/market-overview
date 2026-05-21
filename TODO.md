@@ -1,8 +1,7 @@
 # TODO
 
-## Overview
+## OVERVIEW
 > Add macro stuff like 10Y yields and yield curve chart
-> Add hover charts for tickers like Key Movers Tracker in /sectors
 - Check source of data for EQ Index Futures, they seem wrong.
 - Add yield curve structure
 - Amend implied rate path to intervals of 0.1% on the y-axis
@@ -11,7 +10,7 @@
 - Put the same EW Sector ETF on the same row as the non-EW one. Sort by non-EW
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 
-## Breadth
+## BREADTH
 - Add volume traded on majors as a breadth metric
 - Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
@@ -19,43 +18,42 @@
 - Add in Chart of S&P with mcllean oscillator
 - Define Overall Universe (worden universe) so that those rows are accurate
 
-## 13F Tracker
+## 13F TRACKER
 - Automatic weekly/monthly pull of data for 13F 
 - Add dropdown list for 13F filings to choose hedge fund
 - Add other funds to track like Drunkenmiller
 
-## Sector Tracker
-> Add in finviz themes map
+## SECTOR TRACKER
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
-## Alerts
+## ALERTS
 > Find out why some companies are not filing with SEC for their quarterly earnings
 
 ## SOCIAL ALERTS
 > Add scheduler for 12-hourly scrapes
 
-## Peer Groups
+## PEER GROUPS
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
 
-## Correlation
+## CORRELATION
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
-## Scans
+## SCANS
+> Add Strong earnings scanner
 > Make the UI better to segregate each input field
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
 > Put a preset for US market to have exchange, symbol type preconfigured
 - Add strongest FA scan
-- Add Strong earnings scanner
 - Colour by industry
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
-## Watchlist Compiler
+## WATCHLIST COMPILER
 
-## Gappers
+## GAPPERS
 - Add avg traded volume column in table
 - Change title to pre-market scan
 - Remove ETFs, closed ended funds, and OTC tickers

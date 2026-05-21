@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
 import {
@@ -118,6 +118,8 @@ type NarrativeTickerSuggestion = {
   ticker: string;
   name: string | null;
 };
+
+type StaleCheck = () => boolean;
 
 const SECTION_NAV_ITEMS: Array<{ id: string; label: string }> = [
   { id: "key-movers-tracker", label: "Key Movers Tracker" },
@@ -277,8 +279,7 @@ function EtfTile({
       <div className="bg-slate-950/20 p-2.5">
         <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" surface="plain" />
       </div>
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-slate-500">Click the ticker to open constituent detail.</p>
+      <div className="flex items-center justify-end gap-3">
         <button className={SECONDARY_BUTTON_CLASS} onClick={onExpandChart}>
           <Maximize2 className="h-3.5 w-3.5" />
           Expand chart
@@ -327,31 +328,52 @@ export function SectorTracker() {
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
 
-  const load = async () => {
-    const [entriesRes, calRes, symbolRes, sectorEtfRes, industryEtfRes] = await Promise.allSettled([
+  const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
+    const [entriesRes, calRes, symbolRes] = await Promise.allSettled([
       getSectorEntries(),
-      getSectorCalendar(month),
+      getSectorCalendar(targetMonth),
       getSectorSymbolOptions(),
-      getSectorEtfs(),
-      getIndustryEtfs(),
     ]);
+    if (isStale()) return;
 
     const entriesRows = entriesRes.status === "fulfilled" ? entriesRes.value.rows ?? [] : [];
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
-    const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
-    const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
     setSymbolOptions(symbolRows);
+  }, []);
+
+  const loadEtfData = useCallback(async (isStale: StaleCheck = () => false) => {
+    const [sectorEtfRes, industryEtfRes] = await Promise.allSettled([
+      getSectorEtfs(),
+      getIndustryEtfs(),
+    ]);
+    if (isStale()) return;
+
+    const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
+    const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
+
     setSectorEtfs((sectorRows.length > 0 ? sectorRows : FALLBACK_SECTOR_ETFS) as WatchlistEtf[]);
     setIndustryEtfs((industryRows.length > 0 ? industryRows : FALLBACK_INDUSTRY_ETFS) as WatchlistEtf[]);
-  };
+  }, []);
 
   useEffect(() => {
-    void load();
-  }, [month]);
+    let stale = false;
+    void loadKeyMoverData(month, () => stale);
+    return () => {
+      stale = true;
+    };
+  }, [loadKeyMoverData, month]);
+
+  useEffect(() => {
+    let stale = false;
+    void loadEtfData(() => stale);
+    return () => {
+      stale = true;
+    };
+  }, [loadEtfData]);
 
   useEffect(() => {
     setExpandedCalendarDates([]);
@@ -435,7 +457,7 @@ export function SectorTracker() {
       });
       setEditingEntry(null);
       setEditError(null);
-      await load();
+      await loadKeyMoverData(month);
     } catch (err) {
       setEditError(err instanceof Error ? err.message : "Failed to update sector/narrative entry.");
     }
@@ -447,7 +469,7 @@ export function SectorTracker() {
       await deleteSectorEntry(entryId);
       if (editingEntry?.id === entryId) setEditingEntry(null);
       if (activeNarrativeEntry?.id === entryId) setActiveNarrativeEntry(null);
-      await load();
+      await loadKeyMoverData(month);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to delete entry.");
     }
@@ -887,7 +909,7 @@ export function SectorTracker() {
                           setNotes("");
                           setSelectedTickers([]);
                           setTickerInput("");
-                          await load();
+                          await loadKeyMoverData(month);
                         } catch (err) {
                           setFormError(err instanceof Error ? err.message : "Failed to add sector/narrative entry.");
                         }
@@ -932,7 +954,7 @@ export function SectorTracker() {
                     <label className="inline-flex items-center gap-2 rounded-2xl border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-sm text-slate-300">
                       <CalendarDays className="h-4 w-4 text-slate-400" />
                       <span className="text-slate-400">Month</span>
-                      <input type="month" className="bg-transparent text-slate-100 outline-none" value={month} onChange={(e) => setMonth(e.target.value)} />
+                      <input type="month" className="themed-date-input bg-transparent text-slate-100 outline-none" value={month} onChange={(e) => setMonth(e.target.value)} />
                     </label>
                   ) : null}
                 </div>
@@ -1191,7 +1213,6 @@ export function SectorTracker() {
                         {parentSector}
                       </div>
                       <h4 className="text-lg font-semibold text-slate-100">{industry}</h4>
-                      <p className="text-sm text-slate-400">{rows.length} related fund{rows.length === 1 ? "" : "s"} in this group.</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(maxChange)}`}>

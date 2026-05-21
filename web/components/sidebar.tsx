@@ -8,6 +8,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   Bell,
+  CalendarClock,
   ChartCandlestick,
   FlaskConical,
   Landmark,
@@ -38,6 +39,7 @@ const links: Array<{ href: string; label: string; Icon: LucideIcon }> = [
   { href: "/correlation", label: "Correlation", Icon: Network },
   { href: "/scans", label: "Scans", Icon: ScanSearch },
   { href: "/pattern-scanner", label: "Pattern Scanner", Icon: ChartCandlestick },
+  { href: "/earnings", label: "Earnings", Icon: CalendarClock },
   { href: "/watchlist-compiler", label: "Watchlist Compiler", Icon: ListChecks },
   { href: "/research-lab", label: "Research Lab", Icon: FlaskConical },
   { href: "/gappers", label: "Gappers", Icon: TrendingUp },

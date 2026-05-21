@@ -86,3 +86,11 @@ html.light .border-slate-800 { border-color: rgb(203 213 225); }
 html.light .card {
   box-shadow: 0 8px 26px rgba(30, 41, 59, 0.08);
 }
+
+.themed-date-input {
+  color-scheme: dark;
+}
+
+html.light .themed-date-input {
+  color-scheme: light;
+}
