@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Trash2, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Plus, Star, Trash2, X } from "lucide-react";
 import {
   adminFetch,
   deleteSectorEntry,
@@ -11,10 +11,13 @@ import {
   getSectorCalendar,
   getSectorEntries,
   getSectorEtfs,
+  getSectorFocusNarratives,
   getSectorSymbolOptions,
   getSectorTickerMetrics,
+  updateSectorFocusNarratives,
   updateSectorEntry,
   type PeerMetricRow,
+  type SectorFocusNarrative,
 } from "@/lib/api";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -93,6 +96,15 @@ type SectorEntry = {
   trendScore: number;
   notes: string | null;
   symbols: EntrySymbol[];
+};
+
+type NarrativeChartCollection = {
+  id: string;
+  sectorName: string;
+  eventDate: string | null;
+  notes: string | null;
+  symbols: EntrySymbol[];
+  mode: "entry" | "focus";
 };
 
 type WatchlistEtf = {
@@ -297,6 +309,10 @@ export function SectorTracker() {
   const [symbolOptions, setSymbolOptions] = useState<Array<{ ticker: string; name: string | null }>>([]);
   const [sectorEtfs, setSectorEtfs] = useState<WatchlistEtf[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<WatchlistEtf[]>([]);
+  const [focusNarratives, setFocusNarratives] = useState<SectorFocusNarrative[]>([]);
+  const [focusNarrativeInput, setFocusNarrativeInput] = useState("");
+  const [focusNarrativeSaving, setFocusNarrativeSaving] = useState(false);
+  const [focusNarrativeError, setFocusNarrativeError] = useState<string | null>(null);
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
@@ -310,7 +326,7 @@ export function SectorTracker() {
   const [constituents, setConstituents] = useState<EtfConstituent[]>([]);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
-  const [activeNarrativeEntry, setActiveNarrativeEntry] = useState<SectorEntry | null>(null);
+  const [activeNarrativeCollection, setActiveNarrativeCollection] = useState<NarrativeChartCollection | null>(null);
   const [narrativePage, setNarrativePage] = useState(1);
   const [narrativeMetrics, setNarrativeMetrics] = useState<Record<string, PeerMetricRow>>({});
   const [narrativeMetricsWarning, setNarrativeMetricsWarning] = useState<string | null>(null);
@@ -329,20 +345,23 @@ export function SectorTracker() {
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
 
   const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
-    const [entriesRes, calRes, symbolRes] = await Promise.allSettled([
+    const [entriesRes, calRes, symbolRes, focusRes] = await Promise.allSettled([
       getSectorEntries(),
       getSectorCalendar(targetMonth),
       getSectorSymbolOptions(),
+      getSectorFocusNarratives(),
     ]);
     if (isStale()) return;
 
     const entriesRows = entriesRes.status === "fulfilled" ? entriesRes.value.rows ?? [] : [];
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
+    const focusRows = focusRes.status === "fulfilled" ? focusRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
     setSymbolOptions(symbolRows);
+    setFocusNarratives(focusRows);
   }, []);
 
   const loadEtfData = useCallback(async (isStale: StaleCheck = () => false) => {
@@ -400,7 +419,7 @@ export function SectorTracker() {
 
   const openNarrativeEntry = (entry: SectorEntry) => {
     hoverChart.clearPreview();
-    setActiveNarrativeEntry(entry);
+    setActiveNarrativeCollection({ ...entry, mode: "entry" });
     setNarrativePage(1);
   };
 
@@ -468,7 +487,7 @@ export function SectorTracker() {
     try {
       await deleteSectorEntry(entryId);
       if (editingEntry?.id === entryId) setEditingEntry(null);
-      if (activeNarrativeEntry?.id === entryId) setActiveNarrativeEntry(null);
+      if (activeNarrativeCollection?.id === entryId) setActiveNarrativeCollection(null);
       await loadKeyMoverData(month);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to delete entry.");
@@ -540,8 +559,8 @@ export function SectorTracker() {
   );
 
   const pagedNarrativeSymbols = useMemo(
-    () => (activeNarrativeEntry?.symbols ?? []).slice((narrativePage - 1) * CHARTS_PER_PAGE, narrativePage * CHARTS_PER_PAGE),
-    [activeNarrativeEntry, narrativePage],
+    () => (activeNarrativeCollection?.symbols ?? []).slice((narrativePage - 1) * CHARTS_PER_PAGE, narrativePage * CHARTS_PER_PAGE),
+    [activeNarrativeCollection, narrativePage],
   );
 
   const etfModalItems = useMemo<TickerCollectionModalItem[]>(
@@ -567,7 +586,7 @@ export function SectorTracker() {
   const narrativeModalItems = useMemo<TickerCollectionModalItem[]>(
     () =>
       pagedNarrativeSymbols.map((symbol) => ({
-        key: `${activeNarrativeEntry?.id ?? "entry"}-${symbol.ticker}`,
+        key: `${activeNarrativeCollection?.id ?? "entry"}-${symbol.ticker}`,
         ticker: symbol.ticker,
         name: null,
         stats: (() => {
@@ -597,7 +616,7 @@ export function SectorTracker() {
           );
         })(),
       })),
-    [activeNarrativeEntry?.id, narrativeMetrics, pagedNarrativeSymbols],
+    [activeNarrativeCollection?.id, narrativeMetrics, pagedNarrativeSymbols],
   );
 
   const sectorNarrativeOptions = useMemo(() => {
@@ -646,6 +665,57 @@ export function SectorTracker() {
     [suggestedNarrativeTickers],
   );
   const selectedSuggestedTickerCount = suggestedNarrativeTickers.filter((item) => selectedTickerSet.has(item.ticker)).length;
+  const focusNarrativeRows = useMemo(
+    () => focusNarratives.filter((row) => sectorNarrativeOptions.includes(row.sectorName)),
+    [focusNarratives, sectorNarrativeOptions],
+  );
+  const focusNarrativeNames = useMemo(() => focusNarrativeRows.map((row) => row.sectorName), [focusNarrativeRows]);
+  const availableFocusNarrativeOptions = useMemo(() => {
+    const focused = new Set(focusNarrativeNames);
+    return sectorNarrativeOptions.filter((name) => !focused.has(name));
+  }, [focusNarrativeNames, sectorNarrativeOptions]);
+
+  const persistFocusNarratives = async (sectorNames: string[]) => {
+    setFocusNarrativeSaving(true);
+    setFocusNarrativeError(null);
+    try {
+      const res = await updateSectorFocusNarratives(sectorNames);
+      setFocusNarratives(res.rows ?? []);
+      setFocusNarrativeInput("");
+    } catch (err) {
+      setFocusNarrativeError(err instanceof Error ? err.message : "Failed to update focus narratives.");
+    } finally {
+      setFocusNarrativeSaving(false);
+    }
+  };
+
+  const addFocusNarrative = async () => {
+    const sectorName = focusNarrativeInput.trim();
+    if (!sectorName || focusNarrativeSaving) return;
+    await persistFocusNarratives([...focusNarrativeNames, sectorName]);
+  };
+
+  const removeFocusNarrative = async (sectorName: string) => {
+    if (focusNarrativeSaving) return;
+    if (activeNarrativeCollection?.mode === "focus" && activeNarrativeCollection.sectorName === sectorName) {
+      setActiveNarrativeCollection(null);
+    }
+    await persistFocusNarratives(focusNarrativeNames.filter((name) => name !== sectorName));
+  };
+
+  const openFocusNarrative = (sectorName: string) => {
+    const symbols = narrativeTickerSuggestionsByName.get(sectorName) ?? [];
+    hoverChart.clearPreview();
+    setActiveNarrativeCollection({
+      id: `focus-${sectorName}`,
+      sectorName,
+      eventDate: null,
+      notes: null,
+      symbols,
+      mode: "focus",
+    });
+    setNarrativePage(1);
+  };
 
   const toggleSuggestedTicker = (ticker: string) => {
     setSelectedTickers((prev) => {
@@ -682,16 +752,16 @@ export function SectorTracker() {
 
   useEffect(() => {
     setNarrativePage(1);
-  }, [activeNarrativeEntry?.id, activeNarrativeEntry?.symbols.length]);
+  }, [activeNarrativeCollection?.id, activeNarrativeCollection?.symbols.length]);
 
   useEffect(() => {
-    if (!activeNarrativeEntry) {
+    if (!activeNarrativeCollection) {
       setNarrativeMetrics({});
       setNarrativeMetricsWarning(null);
       return;
     }
 
-    const tickers = (activeNarrativeEntry.symbols ?? []).map((symbol) => symbol.ticker);
+    const tickers = (activeNarrativeCollection.symbols ?? []).map((symbol) => symbol.ticker);
     if (tickers.length === 0) {
       setNarrativeMetrics({});
       setNarrativeMetricsWarning(null);
@@ -716,7 +786,7 @@ export function SectorTracker() {
     return () => {
       cancelled = true;
     };
-  }, [activeNarrativeEntry]);
+  }, [activeNarrativeCollection]);
 
   return (
     <div className="space-y-5">
@@ -737,6 +807,91 @@ export function SectorTracker() {
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{entries.length} entries</span>}
         >
           <div className="space-y-4">
+            <div className="rounded-[24px] border border-accent/25 bg-accent/8 p-4 shadow-[inset_0_0_0_1px_rgba(56,189,248,0.08)]">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-accent/35 bg-accent/12 text-accent">
+                      <Star className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-accent/80">Focus Now</p>
+                      <h3 className="text-base font-semibold text-slate-100">Narratives to keep on deck</h3>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {focusNarrativeRows.map((row) => {
+                      const tickerCount = narrativeTickerSuggestionsByName.get(row.sectorName)?.length ?? 0;
+                      return (
+                        <div
+                          key={`focus-narrative-${row.id}`}
+                          className="inline-flex max-w-full overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)]"
+                        >
+                          <button
+                            type="button"
+                            className="min-w-0 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
+                            onClick={() => openFocusNarrative(row.sectorName)}
+                            aria-label={`Open focus narrative charts for ${row.sectorName}`}
+                          >
+                            <span className="block truncate font-semibold text-slate-100">{row.sectorName}</span>
+                            <span className="mt-0.5 block text-xs text-slate-400">
+                              {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => void removeFocusNarrative(row.sectorName)}
+                            disabled={focusNarrativeSaving}
+                            aria-label={`Remove ${row.sectorName} from focus narratives`}
+                            title="Remove"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {focusNarrativeRows.length === 0 ? (
+                      <p className="rounded-2xl border border-borderSoft/60 bg-panel/45 px-3 py-2 text-sm text-slate-400">
+                        No focus narratives selected.
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="flex w-full flex-col gap-2 xl:w-[24rem]">
+                  <div className="flex gap-2">
+                    <select
+                      className={INPUT_CLASS}
+                      value={focusNarrativeInput}
+                      onChange={(e) => setFocusNarrativeInput(e.target.value)}
+                      disabled={availableFocusNarrativeOptions.length === 0 || focusNarrativeSaving}
+                    >
+                      <option value="">
+                        {availableFocusNarrativeOptions.length === 0 ? "No more narratives" : "Add existing narrative..."}
+                      </option>
+                      {availableFocusNarrativeOptions.map((name) => (
+                        <option key={`focus-option-${name}`} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className={`${SECONDARY_BUTTON_CLASS} shrink-0 disabled:cursor-not-allowed disabled:opacity-50`}
+                      onClick={() => void addFocusNarrative()}
+                      disabled={!focusNarrativeInput || focusNarrativeSaving}
+                    >
+                      <Plus className="h-4 w-4" />
+                      {focusNarrativeSaving ? "Saving" : "Add"}
+                    </button>
+                  </div>
+                  {focusNarrativeError ? <p className="text-sm text-red-300">{focusNarrativeError}</p> : null}
+                </div>
+              </div>
+            </div>
+
             <div className="bg-panelSoft/20 p-4">
               <div className="flex justify-end">
                 <button className={SECONDARY_BUTTON_CLASS} onClick={() => setAddFormOpen((v) => !v)}>
@@ -1362,26 +1517,32 @@ export function SectorTracker() {
         />
       ) : null}
 
-      {activeNarrativeEntry ? (
+      {activeNarrativeCollection ? (
         <TickerCollectionModal
-          eyebrow="Sector / Narrative"
-          title={activeNarrativeEntry.sectorName}
+          eyebrow={activeNarrativeCollection.mode === "focus" ? "Focus Narrative" : "Sector / Narrative"}
+          title={activeNarrativeCollection.sectorName}
           description={
             <div className="space-y-1">
-              <p>{activeNarrativeEntry.eventDate}</p>
-              {activeNarrativeEntry.notes ? <p className="max-w-3xl leading-relaxed text-slate-400">{activeNarrativeEntry.notes}</p> : null}
+              {activeNarrativeCollection.mode === "focus" ? (
+                <p>
+                  {activeNarrativeCollection.symbols.length} prior ticker{activeNarrativeCollection.symbols.length === 1 ? "" : "s"}
+                </p>
+              ) : (
+                <p>{activeNarrativeCollection.eventDate}</p>
+              )}
+              {activeNarrativeCollection.notes ? <p className="max-w-3xl leading-relaxed text-slate-400">{activeNarrativeCollection.notes}</p> : null}
             </div>
           }
           items={narrativeModalItems}
-          totalItems={activeNarrativeEntry.symbols.length}
+          totalItems={activeNarrativeCollection.symbols.length}
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
           maxColumns={3}
           warning={narrativeMetricsWarning ? `Snapshot metrics warning: ${narrativeMetricsWarning}` : null}
-          emptyMessage="No tickers are attached to this narrative entry yet."
+          emptyMessage={activeNarrativeCollection.mode === "focus" ? "No prior tickers found for this narrative yet." : "No tickers are attached to this narrative entry yet."}
           onPageChange={setNarrativePage}
-          onClose={() => setActiveNarrativeEntry(null)}
+          onClose={() => setActiveNarrativeCollection(null)}
           onExpandChart={openExpandedChart}
         />
       ) : null}

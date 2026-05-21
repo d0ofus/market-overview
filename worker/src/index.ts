@@ -1690,6 +1690,48 @@ app.post("/api/sectors/narratives", async (c) => {
   return c.json({ ok: true, id });
 });
 
+app.get("/api/sectors/focus-narratives", async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT f.id, f.sector_name as sectorName, f.sort_order as sortOrder, f.created_at as createdAt, f.updated_at as updatedAt
+     FROM sector_focus_narratives f
+     INNER JOIN (SELECT DISTINCT sector_name FROM sector_tracker_entries WHERE TRIM(sector_name) <> '') e
+       ON e.sector_name = f.sector_name
+     ORDER BY f.sort_order ASC, f.created_at ASC, f.sector_name ASC`,
+  ).all();
+  return c.json({ rows: rows.results ?? [] });
+});
+
+app.put("/api/sectors/focus-narratives", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as { sectorNames?: unknown };
+  if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
+
+  const requestedNames = Array.from(new Set(
+    body.sectorNames
+      .map((value) => (typeof value === "string" ? value.trim() : ""))
+      .filter(Boolean),
+  ));
+
+  const existingRows = await c.env.DB.prepare(
+    "SELECT DISTINCT sector_name as sectorName FROM sector_tracker_entries WHERE TRIM(sector_name) <> '' ORDER BY sector_name ASC",
+  ).all<{ sectorName: string }>();
+  const existingNames = new Set((existingRows.results ?? []).map((row) => row.sectorName));
+  const sectorNames = requestedNames.filter((name) => existingNames.has(name));
+
+  const deleteExisting = c.env.DB.prepare("DELETE FROM sector_focus_narratives");
+  const insertFocusRows = sectorNames.map((sectorName, index) =>
+    c.env.DB.prepare(
+      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+    ).bind(crypto.randomUUID(), sectorName, index),
+  );
+  await c.env.DB.batch([deleteExisting, ...insertFocusRows]);
+
+  const rows = await c.env.DB.prepare(
+    "SELECT id, sector_name as sectorName, sort_order as sortOrder, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
+  ).all();
+  return c.json({ rows: rows.results ?? [] });
+});
+
 app.get("/api/sectors/symbol-options", async (c) => {
   const sector = c.req.query("sector");
   const rows = sector

@@ -1927,6 +1927,25 @@ export function getSectorNarratives() {
   return getJson<{ rows: any[] }>("/api/sectors/narratives");
 }
 
+export type SectorFocusNarrative = {
+  id: string;
+  sectorName: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function getSectorFocusNarratives() {
+  return getJson<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives");
+}
+
+export function updateSectorFocusNarratives(sectorNames: string[]) {
+  return adminFetch<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives", {
+    method: "PUT",
+    body: JSON.stringify({ sectorNames }),
+  });
+}
+
 export function getSectorSymbolOptions(sector?: string) {
   return getJson<{ rows: any[] }>(`/api/sectors/symbol-options${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`);
 }
