@@ -51,6 +51,17 @@
 - Colour by industry
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
+## PATTERN SCANNER
+
+## EARNINGS
+> Add multi-chart view
+> Add hover-over chart view
+> Add paging function, and allow quick way to go to the first/last page.
+
+For /earnings, is EPS % DESC the EPS surprise %? can I add a average volume * price filter? and add a minimum EPS % Desc filter? Also, can I add a screener to screen out stocks that gapped up on earnings release, where they do not have to be earnings surprises, as long as the price gaps up on the earnings release date.
+
+What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
+
 ## WATCHLIST COMPILER
 
 ## GAPPERS

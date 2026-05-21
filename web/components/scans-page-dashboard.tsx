@@ -193,7 +193,9 @@ const PRIMARY_BUTTON_CLASS =
 const DANGER_BUTTON_CLASS =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 px-2.5 py-1.5 text-xs font-medium text-red-300 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50";
 const TABLE_HEAD_CLASS =
-  "px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300";
+  "px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-[0.08em] text-white/85";
+const TABLE_HEAD_BAR_CLASS =
+  "bg-slate-950/95 shadow-lg shadow-slate-950/15 ring-1 ring-inset ring-white/10 backdrop-blur";
 const NUMERIC_CELL_CLASS = "px-3 py-3 text-right tabular-nums text-slate-300";
 const TEXT_CELL_CLASS = "px-3 py-3 text-slate-300";
 
@@ -1339,7 +1341,7 @@ export function ScansPageDashboard() {
           ) : (
             <div className="max-h-[70vh] overflow-auto">
               <table className="min-w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-slate-900/90 backdrop-blur">
+                <thead className={`sticky top-0 z-10 ${TABLE_HEAD_BAR_CLASS}`}>
                   <tr>
                     {orderedVisibleColumns.map((column) => {
                       const rightAligned = RIGHT_ALIGNED_RESULT_COLUMNS.has(column.key);
@@ -1347,7 +1349,7 @@ export function ScansPageDashboard() {
                       return (
                         <th key={column.key} className={`${TABLE_HEAD_CLASS} ${rightAligned ? "text-right" : "text-left"}`}>
                           <button
-                            className={`inline-flex w-full items-center gap-1 ${rightAligned ? "justify-end text-right" : "justify-start text-left"} hover:text-slate-100`}
+                            className={`inline-flex w-full items-center gap-1 text-inherit transition-colors ${rightAligned ? "justify-end text-right" : "justify-start text-left"} hover:text-white`}
                             onClick={() => onSort(column.key as SortKey)}
                           >
                             {column.label}
@@ -1439,7 +1441,7 @@ export function ScansPageDashboard() {
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
-                <thead className="bg-slate-900/80">
+                <thead className={TABLE_HEAD_BAR_CLASS}>
                   <tr>
                     {["Ticker", "Company", "Hits", "1D Change %", "Price", "Preset Matches"].map((label, index) => (
                       <th key={label} className={`${TABLE_HEAD_CLASS} ${index >= 2 && index <= 4 ? "text-right" : "text-left"}`}>
