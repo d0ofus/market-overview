@@ -33,6 +33,7 @@
 > Find out why some companies are not filing with SEC for their quarterly earnings
 
 ## SOCIAL ALERTS
+> Add scheduler for 12-hourly scrapes
 
 ## Peer Groups
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
