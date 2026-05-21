@@ -220,13 +220,11 @@ function metricChangeClass(value: number | null | undefined): string {
 
 function CollapsibleSection({
   title,
-  description,
   defaultOpen = true,
   children,
   rightSlot,
 }: {
   title: string;
-  description?: string;
   defaultOpen?: boolean;
   children: ReactNode;
   rightSlot?: ReactNode;
@@ -237,12 +235,10 @@ function CollapsibleSection({
     <Collapsible.Root open={open} onOpenChange={setOpen} className="card overflow-hidden">
       <Collapsible.Trigger className="flex w-full items-center justify-between gap-4 border-b border-borderSoft/70 bg-gradient-to-r from-panelSoft/55 to-panel/35 px-5 py-4 text-left transition hover:from-panelSoft/65 hover:to-panel/45">
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Section</div>
-          <div className="mt-1 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="text-base font-semibold text-slate-100">{title}</span>
             {rightSlot}
           </div>
-          {description ? <p className="mt-1 max-w-3xl text-sm text-slate-400">{description}</p> : null}
         </div>
         <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35">
           <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -803,7 +799,6 @@ export function SectorTracker() {
       <div id="key-movers-tracker" className="scroll-mt-28 md:scroll-mt-32">
         <CollapsibleSection
           title="Key Movers Tracker"
-          description="Capture sector narratives, keep a running calendar, and jump straight into the tickers that matter."
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{entries.length} entries</span>}
         >
           <div className="space-y-4">
@@ -892,8 +887,8 @@ export function SectorTracker() {
               </div>
             </div>
 
-            <div className="bg-panelSoft/20 p-4">
-              <div className="flex justify-end">
+            <div className={`border border-borderSoft/60 bg-panelSoft/20 ${addFormOpen ? "p-4" : "px-3 py-2"}`}>
+              <div className="flex flex-wrap items-center justify-start gap-2">
                 <button className={SECONDARY_BUTTON_CLASS} onClick={() => setAddFormOpen((v) => !v)}>
                   <ChevronDown className={`h-4 w-4 transition-transform ${addFormOpen ? "rotate-180" : ""}`} />
                   {addFormOpen ? "Hide entry form" : "Add entry"}
@@ -1333,7 +1328,6 @@ export function SectorTracker() {
       <div id="sector-etfs" className="scroll-mt-28 md:scroll-mt-32">
         <CollapsibleSection
           title="Sector ETFs"
-          description="Primary sector funds with constituent drilldowns and faster chart scanning."
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{sectorEtfs.length} ETFs</span>}
         >
           <div className="grid gap-x-6 gap-y-8 md:grid-cols-2 xl:grid-cols-3">
@@ -1353,7 +1347,6 @@ export function SectorTracker() {
       <div id="industry-etfs" className="scroll-mt-28 md:scroll-mt-32">
         <CollapsibleSection
           title="Industry ETFs"
-          description="Industry funds stay grouped by parent sector so the distinctions read clearly before you drill into charts."
           rightSlot={<span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">{industryEtfs.length} ETFs</span>}
         >
           <div className="space-y-4">
