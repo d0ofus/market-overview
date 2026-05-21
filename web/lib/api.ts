@@ -426,6 +426,112 @@ export type EarningsSurpriseSyncResponse = {
   warning: string | null;
 };
 
+export type EarningsGapSource = "postmarket" | "regular_open" | "both";
+
+export type EarningsGapRow = {
+  id: string;
+  provider: string;
+  sourceSymbol: string;
+  ticker: string;
+  exchange: string | null;
+  companyName: string | null;
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
+  price: number | null;
+  avgVolume30d: number | null;
+  avgDollarVolume30d: number | null;
+  reportDate: string;
+  reportTimestamp: number | null;
+  reportTime: string | null;
+  reactionDate: string | null;
+  previousClose: number | null;
+  reactionOpen: number | null;
+  regularOpenGapPct: number | null;
+  postmarketPrice: number | null;
+  postmarketGapPct: number | null;
+  postmarketVolume: number | null;
+  qualifyingGapPct: number;
+  gapSource: EarningsGapSource;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+};
+
+export type EarningsGapsQuery = {
+  limit?: number;
+  offset?: number;
+  q?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  minMarketCap?: number | null;
+  maxMarketCap?: number | null;
+  minAvgDollarVolume?: number | null;
+  minGapPct?: number | null;
+  sector?: string | null;
+  industry?: string | null;
+  exchange?: string | null;
+  includeOtc?: boolean;
+  sort?: string | null;
+  sortDir?: "asc" | "desc";
+};
+
+export type EarningsGapsResponse = {
+  schemaReady: boolean;
+  warning: string | null;
+  generatedAt: string;
+  total: number;
+  limit: number;
+  offset: number;
+  rows: EarningsGapRow[];
+  facets: {
+    sectors: EarningsSurpriseFacet[];
+    industries: EarningsSurpriseFacet[];
+    exchanges: EarningsSurpriseFacet[];
+    gapSources: EarningsSurpriseFacet[];
+  };
+};
+
+export type EarningsGapsStatus = {
+  schemaReady: boolean;
+  warning: string | null;
+  counts: {
+    total: number;
+    postmarket: number;
+    regularOpen: number;
+    both: number;
+    latestReportDate: string | null;
+    earliestReportDate: string | null;
+  };
+  syncs: Array<{
+    id: string;
+    provider: string;
+    status: string;
+    mode: string | null;
+    scheduledLocalDate: string | null;
+    windowStart: string | null;
+    windowEnd: string | null;
+    lastStartedAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    rowsSeen: number | null;
+    rowsUpserted: number | null;
+    updatedAt: string | null;
+  }>;
+  latestRows: EarningsGapRow[];
+};
+
+export type EarningsGapSyncResponse = {
+  ok: boolean;
+  mode: "incremental" | "backfill";
+  windowStart: string;
+  windowEnd: string;
+  provider: string;
+  rowsSeen: number;
+  rowsUpserted: number;
+  scheduledLocalDate: string | null;
+  warning: string | null;
+};
+
 export type AdminFundamentalsSeedQueueRow = {
   ticker: string;
   companyName: string | null;
@@ -2030,6 +2136,37 @@ export function getEarningsSurprisesStatus() {
 export function syncAdminEarningsSurprises(mode: "incremental" | "backfill" = "incremental") {
   return adminFetch<EarningsSurpriseSyncResponse>(
     appendQuery("/api/admin/earnings/surprises/sync", { mode }),
+    { method: "POST" },
+  );
+}
+
+export function getEarningsGaps(query?: EarningsGapsQuery) {
+  return getJson<EarningsGapsResponse>(appendQuery("/api/earnings/gaps", {
+    limit: query?.limit,
+    offset: query?.offset,
+    q: query?.q,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    minAvgDollarVolume: query?.minAvgDollarVolume,
+    minGapPct: query?.minGapPct,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
+    sort: query?.sort,
+    sortDir: query?.sortDir,
+  }));
+}
+
+export function getEarningsGapsStatus() {
+  return getJson<EarningsGapsStatus>("/api/earnings/gaps/status");
+}
+
+export function syncAdminEarningsGaps(mode: "incremental" | "backfill" = "incremental") {
+  return adminFetch<EarningsGapSyncResponse>(
+    appendQuery("/api/admin/earnings/gaps/sync", { mode }),
     { method: "POST" },
   );
 }

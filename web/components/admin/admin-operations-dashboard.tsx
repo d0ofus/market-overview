@@ -540,6 +540,7 @@ export function AdminOperationsDashboard() {
                       </div>
                       <p className="mt-3 text-xs text-slate-500">
                         Fixed Cloudflare cron cadence: <span className="font-mono text-slate-300">{workerSchedule.cronExpression}</span>
+                        <span className="ml-2 text-slate-400">Earnings gap scan runs daily after 8:00pm ET from this heartbeat.</span>
                       </p>
                     </div>
 

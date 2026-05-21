@@ -133,6 +133,13 @@ import {
   type EarningsSurprisesQuery,
 } from "./earnings-surprise-service";
 import {
+  loadEarningsGapsStatus,
+  maybeRunScheduledEarningsGapSync,
+  queryEarningsGaps,
+  syncEarningsGaps,
+  type EarningsGapsQuery,
+} from "./earnings-gap-service";
+import {
   buildFundamentalSeedQueue,
   loadFundamentalSeedErrors,
   loadFundamentalSeedStatus,
@@ -397,6 +404,35 @@ function readEarningsSurprisesQuery(req: Request): EarningsSurprisesQuery {
     exchange: url.searchParams.get("exchange"),
     includeOtc: url.searchParams.get("includeOtc") === "1",
     surpriseSide,
+    sort: url.searchParams.get("sort"),
+    sortDir,
+  };
+}
+
+function readEarningsGapsQuery(req: Request): EarningsGapsQuery {
+  const url = new URL(req.url);
+  const toNumber = (key: string): number | null | undefined => {
+    const raw = url.searchParams.get(key);
+    if (raw == null || raw.trim() === "") return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const sortDirRaw = url.searchParams.get("sortDir");
+  const sortDir = sortDirRaw === "asc" || sortDirRaw === "desc" ? sortDirRaw : undefined;
+  return {
+    limit: toNumber("limit"),
+    offset: toNumber("offset"),
+    q: url.searchParams.get("q"),
+    startDate: url.searchParams.get("startDate"),
+    endDate: url.searchParams.get("endDate"),
+    minMarketCap: toNumber("minMarketCap"),
+    maxMarketCap: toNumber("maxMarketCap"),
+    minAvgDollarVolume: toNumber("minAvgDollarVolume"),
+    minGapPct: toNumber("minGapPct"),
+    sector: url.searchParams.get("sector"),
+    industry: url.searchParams.get("industry"),
+    exchange: url.searchParams.get("exchange"),
+    includeOtc: url.searchParams.get("includeOtc") === "1",
     sort: url.searchParams.get("sort"),
     sortDir,
   };
@@ -2307,6 +2343,24 @@ app.get("/api/earnings/surprises/status", async (c) => {
   }
 });
 
+app.get("/api/earnings/gaps", async (c) => {
+  try {
+    return c.json(await queryEarningsGaps(c.env, readEarningsGapsQuery(c.req.raw)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings gap-ups.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/earnings/gaps/status", async (c) => {
+  try {
+    return c.json(await loadEarningsGapsStatus(c.env));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings gap status.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/peer-groups/groups", async (c) => {
   const includeInactive = c.req.query("includeInactive") === "1";
   const rows = await listPeerGroups(c.env, includeInactive);
@@ -4135,6 +4189,22 @@ app.post("/api/admin/earnings/surprises/sync", async (c) => {
   }
 });
 
+app.post("/api/admin/earnings/gaps/sync", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const mode = c.req.query("mode") === "backfill" ? "backfill" : "incremental";
+    const result = await syncEarningsGaps(c.env, { mode });
+    try {
+      await upsertAudit(c.env, "default", "EARNINGS_GAP_SYNC", result);
+    } catch (auditError) {
+      console.error("earnings gap sync audit failed", auditError);
+    }
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to sync earnings gap-ups." }, 500);
+  }
+});
+
 app.get("/api/admin/fundamentals/seed/status", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -4645,6 +4715,11 @@ export default {
       await maybeRunScheduledEarningsSurpriseSync(env, now);
     } catch (error) {
       console.error("scheduled earnings surprise sync failed", error);
+    }
+    try {
+      await maybeRunScheduledEarningsGapSync(env, now);
+    } catch (error) {
+      console.error("scheduled earnings gap sync failed", error);
     }
     try {
       await processDueEarningsFundamentalRefreshes(env, { limit: 5, now });

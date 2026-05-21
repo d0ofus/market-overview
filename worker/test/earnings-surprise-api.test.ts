@@ -60,6 +60,29 @@ describe("earnings surprise API", () => {
     expect(json.warning).toContain("0051_earnings_surprises.sql");
   });
 
+  it("returns a schema warning from the public gap endpoint before migration", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/earnings/gaps?limit=10"),
+      createMissingSchemaEnv(),
+      {} as ExecutionContext,
+    );
+    const json = await res.json() as { schemaReady?: boolean; warning?: string };
+
+    expect(res.status).toBe(200);
+    expect(json.schemaReady).toBe(false);
+    expect(json.warning).toContain("0052_earnings_gaps.sql");
+  });
+
+  it("protects the admin gap sync endpoint", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/admin/earnings/gaps/sync", { method: "POST" }),
+      createMissingSchemaEnv(),
+      {} as ExecutionContext,
+    );
+
+    expect(res.status).toBe(401);
+  });
+
   it("protects the admin sync endpoint", async () => {
     const res = await worker.fetch(
       new Request("http://localhost/api/admin/earnings/surprises/sync", { method: "POST" }),
@@ -83,5 +106,20 @@ describe("earnings surprise API", () => {
 
     expect(res.status).toBe(500);
     expect(json.error).toContain("0051_earnings_surprises.sql");
+  });
+
+  it("surfaces missing schema from the authorized admin gap sync endpoint", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/admin/earnings/gaps/sync", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret" },
+      }),
+      createMissingSchemaEnv(),
+      {} as ExecutionContext,
+    );
+    const json = await res.json() as { error?: string };
+
+    expect(res.status).toBe(500);
+    expect(json.error).toContain("0052_earnings_gaps.sql");
   });
 });
