@@ -1,4 +1,7 @@
 # TODO
+## GENERAL
+> Check out whether there is any password login required and how to safeguard the repo/deployment since it is now a good app with many features
+- See what other features in google sheets dashboard that are good
 
 ## OVERVIEW
 > Add macro stuff like 10Y yields and yield curve chart
@@ -88,9 +91,6 @@ What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
 - Create export function to get all teh Industry and sector ETFs in the list
 - Add/remove ETFs
 >> Remove NWX
-
-## General
-- See what other features in google sheets dashboard that are good
 
 ## Research Lab
 ==>> Make token use more efficient
