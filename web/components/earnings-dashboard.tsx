@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Database, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Database, Loader2, Maximize2, RefreshCw, Search } from "lucide-react";
 import {
   getEarningsGaps,
   getEarningsGapsStatus,
@@ -20,6 +20,7 @@ import {
   type EarningsSurprisesResponse,
   type EarningsSurprisesStatus,
 } from "@/lib/api";
+import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 
 type SortKey =
   | "reportDate"
@@ -252,6 +253,43 @@ function StatCard({ label, value, helper }: { label: string; value: string; help
   );
 }
 
+type HoverChartController = ReturnType<typeof useHoverChartPreview>;
+
+function TickerHoverCell({
+  ticker,
+  hoverChart,
+  onPinChart,
+}: {
+  ticker: string;
+  hoverChart: HoverChartController;
+  onPinChart: (ticker: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <Link
+        href={`/ticker/${encodeURIComponent(ticker)}`}
+        className="font-mono font-semibold text-accent hover:underline"
+        onMouseEnter={(event) => hoverChart.openPreview(ticker, event.currentTarget)}
+        onMouseLeave={() => hoverChart.closePreviewForTicker(ticker)}
+      >
+        {ticker}
+      </Link>
+      <button
+        type="button"
+        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-400 opacity-75 transition hover:bg-panelSoft/55 hover:text-accent focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/25"
+        onClick={(event) => {
+          event.stopPropagation();
+          onPinChart(ticker);
+        }}
+        title={`Pin chart for ${ticker}`}
+        aria-label={`Pin chart for ${ticker}`}
+      >
+        <Maximize2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
 function ViewTabs({ view, onChange }: { view: EarningsView; onChange: (view: EarningsView) => void }) {
   const buttonClass = (key: EarningsView) =>
     `h-10 rounded border px-3 text-sm font-medium transition ${
@@ -291,6 +329,8 @@ function EarningsSurprisesPanel() {
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const limit = query.limit ?? 100;
@@ -394,8 +434,19 @@ function EarningsSurprisesPanel() {
     setQuery((current) => ({ ...current, offset: nextOffset }));
   };
 
+  const openExpandedChart = (ticker: string) => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(ticker);
+  };
+
+  const closeExpandedChart = () => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(null);
+  };
+
   return (
-    <section className="space-y-5">
+    <>
+      <section className="space-y-5">
       {error ? (
         <div className="rounded border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div>
       ) : null}
@@ -574,7 +625,7 @@ function EarningsSurprisesPanel() {
                 <tr key={row.id} className="hover:bg-panelSoft/35">
                   <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300">{row.reportDate}</td>
                   <td className="whitespace-nowrap px-3 py-3">
-                    <Link href={`/ticker/${encodeURIComponent(row.ticker)}`} className="font-mono font-semibold text-accent hover:underline">{row.ticker}</Link>
+                    <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />
                   </td>
                   <td className="max-w-[16rem] truncate px-3 py-3 text-slate-200" title={row.companyName ?? undefined}>{row.companyName ?? "-"}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-slate-300">{row.season}</td>
@@ -593,7 +644,15 @@ function EarningsSurprisesPanel() {
           </table>
         </div>
       </div>
-    </section>
+      </section>
+      <HoverChartPreviewPanel
+        preview={hoverChart.preview}
+        onPreviewMouseEnter={hoverChart.handlePreviewMouseEnter}
+        onPreviewMouseLeave={hoverChart.handlePreviewMouseLeave}
+        onPinChart={openExpandedChart}
+      />
+      <ExpandedTradingViewChartModal ticker={activeChartTicker} onClose={closeExpandedChart} />
+    </>
   );
 }
 
@@ -615,6 +674,8 @@ function EarningsGapsPanel() {
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const limit = query.limit ?? 100;
@@ -774,8 +835,19 @@ function EarningsGapsPanel() {
     setQuery((current) => ({ ...current, offset: nextOffset }));
   };
 
+  const openExpandedChart = (ticker: string) => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(ticker);
+  };
+
+  const closeExpandedChart = () => {
+    hoverChart.clearPreview();
+    setActiveChartTicker(null);
+  };
+
   return (
-    <section className="space-y-5">
+    <>
+      <section className="space-y-5">
       {error ? (
         <div className="rounded border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div>
       ) : null}
@@ -947,7 +1019,7 @@ function EarningsGapsPanel() {
                 <tr key={row.id} className="hover:bg-panelSoft/35">
                   <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300">{row.reportDate}</td>
                   <td className="whitespace-nowrap px-3 py-3">
-                    <Link href={`/ticker/${encodeURIComponent(row.ticker)}`} className="font-mono font-semibold text-accent hover:underline">{row.ticker}</Link>
+                    <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />
                   </td>
                   <td className="max-w-[16rem] truncate px-3 py-3 text-slate-200" title={row.companyName ?? undefined}>{row.companyName ?? "-"}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-slate-300">{gapSourceLabel(row.gapSource)}</td>
@@ -968,6 +1040,14 @@ function EarningsGapsPanel() {
           </table>
         </div>
       </div>
-    </section>
+      </section>
+      <HoverChartPreviewPanel
+        preview={hoverChart.preview}
+        onPreviewMouseEnter={hoverChart.handlePreviewMouseEnter}
+        onPreviewMouseLeave={hoverChart.handlePreviewMouseLeave}
+        onPinChart={openExpandedChart}
+      />
+      <ExpandedTradingViewChartModal ticker={activeChartTicker} onClose={closeExpandedChart} />
+    </>
   );
 }
