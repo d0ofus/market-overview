@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadTickerFundamentals, parseSecCompanyFundamentals, refreshTickerFundamentals } from "../src/fundamentals-service";
+import worker from "../src/index";
+import {
+  classifyYoyMomentumTrend,
+  loadFundamentalsTrends,
+  loadTickerFundamentals,
+  parseSecCompanyFundamentals,
+  refreshTickerFundamentals,
+} from "../src/fundamentals-service";
 
 const issuer = {
   ticker: "TEST",
@@ -137,6 +144,45 @@ function createReadableFundamentalsDb() {
   } as unknown as D1Database;
 }
 
+function createTrendFundamentalsDb() {
+  const rows = [
+    { ticker: "UP", companyName: "Up Co", fiscalYear: 2025, fiscalQuarter: 1, periodEnd: "2025-03-31", revenue: 100, netIncome: 10, revenueYoY: 8, netIncomeYoY: 9 },
+    { ticker: "UP", companyName: "Up Co", fiscalYear: 2025, fiscalQuarter: 2, periodEnd: "2025-06-30", revenue: 115, netIncome: 13, revenueYoY: 11, netIncomeYoY: 15 },
+    { ticker: "UP", companyName: "Up Co", fiscalYear: 2025, fiscalQuarter: 3, periodEnd: "2025-09-30", revenue: 132, netIncome: 17, revenueYoY: 13, netIncomeYoY: 19 },
+    { ticker: "DOWN", companyName: "Down Co", fiscalYear: 2025, fiscalQuarter: 1, periodEnd: "2025-03-31", revenue: 100, netIncome: 10, revenueYoY: -5, netIncomeYoY: -4 },
+    { ticker: "DOWN", companyName: "Down Co", fiscalYear: 2025, fiscalQuarter: 2, periodEnd: "2025-06-30", revenue: 90, netIncome: 8, revenueYoY: -8, netIncomeYoY: -9 },
+    { ticker: "DOWN", companyName: "Down Co", fiscalYear: 2025, fiscalQuarter: 3, periodEnd: "2025-09-30", revenue: 80, netIncome: 6, revenueYoY: -10, netIncomeYoY: -11 },
+  ];
+
+  return {
+    prepare(sql: string) {
+      return {
+        async first<T>() {
+          if (sql.includes("sqlite_master")) return { count: 2 } as T;
+          throw new Error(`Unhandled first query: ${sql}`);
+        },
+        bind(...args: unknown[]) {
+          return {
+            async all<T>() {
+              if (sql.includes("ROW_NUMBER()") && sql.includes("FROM fundamental_quarters")) {
+                const tickers = new Set(args.slice(0, -1).map((arg) => String(arg).toUpperCase()));
+                const limit = Number(args.at(-1) ?? 8);
+                return {
+                  results: rows
+                    .filter((row) => tickers.has(row.ticker))
+                    .sort((left, right) => left.ticker.localeCompare(right.ticker) || left.periodEnd.localeCompare(right.periodEnd))
+                    .slice(0, Math.max(1, limit * Math.max(1, tickers.size))),
+                } as T;
+              }
+              throw new Error(`Unhandled trend all query: ${sql}`);
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -180,6 +226,60 @@ describe("fundamentals SEC parser", () => {
     expect(payload.issuer?.ticker).toBe("TEST");
     expect(payload.rows.map((row) => `${row.fiscalYear}Q${row.fiscalQuarter}`)).toEqual(["2025Q1", "2025Q2"]);
     expect(payload.rows[0]?.warnings).toEqual(["checked"]);
+  });
+
+  it("classifies YoY momentum trends", () => {
+    expect(classifyYoyMomentumTrend([8, 11, 13])).toBe("up");
+    expect(classifyYoyMomentumTrend([-5, -8, -10])).toBe("down");
+    expect(classifyYoyMomentumTrend([8, 20, 10])).toBe("mixed");
+    expect(classifyYoyMomentumTrend([null, 20])).toBe("unknown");
+    expect(classifyYoyMomentumTrend([8, 11, 13, null])).toBe("unknown");
+  });
+
+  it("loads cached fundamentals trend rows for requested tickers", async () => {
+    const db = createTrendFundamentalsDb();
+    const payload = await loadFundamentalsTrends(
+      { DB: db, FUNDAMENTALS_DB: db } as never,
+      ["up", "missing", "down"],
+      3,
+    );
+
+    expect(payload.schemaReady).toBe(true);
+    expect(payload.rows.map((row) => row.ticker)).toEqual(["UP", "MISSING", "DOWN"]);
+    expect(payload.rows[0]).toMatchObject({
+      ticker: "UP",
+      companyName: "Up Co",
+      revenueTrend: "up",
+      netIncomeTrend: "up",
+      combinedTrend: "up",
+      latestRevenueYoY: 13,
+      latestNetIncomeYoY: 19,
+    });
+    expect(payload.rows[1]).toMatchObject({
+      ticker: "MISSING",
+      quarters: [],
+      revenueTrend: "unknown",
+      netIncomeTrend: "unknown",
+      combinedTrend: "unknown",
+      warning: "No cached fundamentals found for this ticker.",
+    });
+    expect(payload.rows[2]?.combinedTrend).toBe("down");
+  });
+
+  it("serves batch trend data from the public API route", async () => {
+    const db = createTrendFundamentalsDb();
+    const response = await worker.fetch(
+      new Request("https://example.test/api/fundamentals/trends?tickers=up,missing&quarters=3"),
+      { DB: db, FUNDAMENTALS_DB: db } as never,
+      {} as ExecutionContext,
+    );
+    const payload = await response.json() as Awaited<ReturnType<typeof loadFundamentalsTrends>>;
+
+    expect(response.status).toBe(200);
+    expect(payload.schemaReady).toBe(true);
+    expect(payload.rows.map((row) => row.ticker)).toEqual(["UP", "MISSING"]);
+    expect(payload.rows[0]?.combinedTrend).toBe("up");
+    expect(payload.rows[1]?.warning).toBe("No cached fundamentals found for this ticker.");
   });
 
   it("refreshes from SEC and prepares issuer plus quarter upserts", async () => {

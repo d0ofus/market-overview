@@ -1,22 +1,29 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
-import { Loader2, Search } from "lucide-react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, BarChart3, Loader2, Search } from "lucide-react";
 import {
+  getFundamentalsTrends,
   getPeerDirectory,
   getPeerGroups,
   getPeerTickerDetail,
   getPeerTickerMetrics,
+  type FundamentalTrendRow,
   type PeerDirectoryRow,
   type PeerGroupRow,
   type PeerMetricRow,
   type PeerTickerDetail,
 } from "@/lib/api";
+import { FundamentalsModal } from "./fundamentals-modal";
+import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
 import { TickerMultiGrid } from "./ticker-multi-grid";
 
 type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
 type MultiChartSortKey = "change1d" | "marketCap";
+type LoadTickerOptions = {
+  scrollToCharts?: boolean;
+};
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "change1d", label: "1D % Change" },
   { key: "marketCap", label: "Market Capitalization" },
@@ -95,6 +102,9 @@ function buildCorrelationLaunchHref(tickers: string[], groupId: string, groupNam
 
 export function PeerGroupsDashboard() {
   const router = useRouter();
+  const searchPanelRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const multiChartSectionRef = useRef<HTMLDivElement | null>(null);
   const [groups, setGroups] = useState<PeerGroupRow[]>([]);
   const [directory, setDirectory] = useState<PeerDirectoryRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -110,6 +120,11 @@ export function PeerGroupsDashboard() {
   const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
+  const [trendRows, setTrendRows] = useState<FundamentalTrendRow[]>([]);
+  const [loadingTrends, setLoadingTrends] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
+  const [pendingChartScrollTicker, setPendingChartScrollTicker] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [chartSortKey, setChartSortKey] = useState<MultiChartSortKey>("change1d");
   const [chartsPerPage, setChartsPerPage] = useState(12);
@@ -153,10 +168,11 @@ export function PeerGroupsDashboard() {
       .finally(() => setLoadingDirectory(false));
   }, [deferredQuery, groupFilter, offset]);
 
-  const loadTicker = async (tickerInput: string) => {
+  const loadTicker = async (tickerInput: string, options: LoadTickerOptions = {}) => {
     const ticker = tickerInput.trim().toUpperCase();
     if (!ticker) return;
     setSelectedTicker(ticker);
+    setPendingChartScrollTicker(options.scrollToCharts ? ticker : null);
     setLoadingDetail(true);
     setLoadingMetrics(true);
     setDetailError(null);
@@ -175,6 +191,7 @@ export function PeerGroupsDashboard() {
     } else {
       setDetail(null);
       setSelectedGroupId(null);
+      setPendingChartScrollTicker(null);
       setDetailError(detailRes.reason instanceof Error ? detailRes.reason.message : "Failed to load peer detail.");
     }
 
@@ -189,6 +206,18 @@ export function PeerGroupsDashboard() {
     setLoadingDetail(false);
     setLoadingMetrics(false);
   };
+
+  const prefersReducedMotion = useCallback(() => (
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ), []);
+
+  const scrollBackToSearch = useCallback(() => {
+    searchPanelRef.current?.scrollIntoView({
+      block: "start",
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+    window.setTimeout(() => searchInputRef.current?.focus(), prefersReducedMotion() ? 0 : 240);
+  }, [prefersReducedMotion]);
 
   const activeGroup = useMemo(
     () => detail?.groups.find((group) => group.id === selectedGroupId) ?? detail?.groups[0] ?? null,
@@ -225,7 +254,7 @@ export function PeerGroupsDashboard() {
     });
     return rows;
   }, [activeGroup, detail, memberSortDir, memberSortKey, metricsByTicker]);
-  const chartItems = useMemo(() => {
+  const chartMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
     const ordered = [...sortedMemberRows].sort((a, b) => {
       const left = chartSortKey === "change1d"
@@ -238,14 +267,38 @@ export function PeerGroupsDashboard() {
       return a.ticker.localeCompare(b.ticker);
     });
     const startIndex = (chartPage - 1) * chartsPerPage;
-    const paged = ordered.slice(startIndex, startIndex + chartsPerPage);
-    return paged.map(({ ticker, name, metric }) => {
+    return ordered.slice(startIndex, startIndex + chartsPerPage);
+  }, [activeGroup, chartPage, chartSortKey, chartsPerPage, detail, sortedMemberRows]);
+  const visibleChartTickerKey = useMemo(() => (
+    chartMemberRows.map((row) => row.ticker).join(",")
+  ), [chartMemberRows]);
+  const trendRowsByTicker = useMemo(
+    () => new Map(trendRows.map((row) => [row.ticker.toUpperCase(), row])),
+    [trendRows],
+  );
+  const chartItems = useMemo(() => {
+    return chartMemberRows.map(({ ticker, name, metric }) => {
       const change1d = metric?.change1d ?? null;
+      const trendRow = trendRowsByTicker.get(ticker.toUpperCase());
       return {
         key: ticker,
         ticker,
         title: ticker,
         subtitle: name,
+        headerAction: (
+          <button
+            type="button"
+            aria-label={`Open fundamentals for ${ticker}`}
+            title={`Open fundamentals for ${ticker}`}
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-borderSoft/70 bg-panelSoft/35 text-slate-300 transition hover:border-accent/40 hover:bg-accent/10 hover:text-accent"
+            onClick={(event) => {
+              event.stopPropagation();
+              setActiveFundamentalsTicker(ticker);
+            }}
+          >
+            <BarChart3 className="h-3.5 w-3.5" />
+          </button>
+        ),
         headerDetail: (
           <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-right text-[11px] text-slate-400">
             <div>Price: <span className="text-slate-200">{fmtPrice(metric?.price)}</span></div>
@@ -254,9 +307,16 @@ export function PeerGroupsDashboard() {
             <div>Avg Vol: <span className="text-slate-200">{fmtCompact(metric?.avgVolume)}</span></div>
           </div>
         ),
+        detail: (
+          <FundamentalsTrendStrip
+            row={trendRow}
+            loading={loadingTrends}
+            error={trendError}
+          />
+        ),
       };
     });
-  }, [activeGroup, chartPage, chartSortKey, chartsPerPage, detail, sortedMemberRows]);
+  }, [chartMemberRows, loadingTrends, trendError, trendRowsByTicker]);
   const totalChartPages = useMemo(
     () => Math.max(1, Math.ceil(sortedMemberRows.length / chartsPerPage)),
     [chartsPerPage, sortedMemberRows.length],
@@ -272,6 +332,38 @@ export function PeerGroupsDashboard() {
   const canLaunchCorrelation = !!activeGroup && correlationLaunchTickers.length >= 2;
 
   useEffect(() => {
+    const tickers = visibleChartTickerKey ? visibleChartTickerKey.split(",").filter(Boolean) : [];
+    if (!detail || tickers.length === 0) {
+      setTrendRows([]);
+      setTrendError(null);
+      setLoadingTrends(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingTrends(true);
+    setTrendError(null);
+    getFundamentalsTrends(tickers, 8)
+      .then((response) => {
+        if (cancelled) return;
+        setTrendRows(response.rows ?? []);
+        setTrendError(response.warning ?? (!response.schemaReady ? "Fundamentals cache is not ready." : null));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setTrendRows([]);
+        setTrendError(error instanceof Error ? error.message : "Failed to load fundamentals trends.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingTrends(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeGroup?.id, detail, visibleChartTickerKey]);
+
+  useEffect(() => {
     setChartPage(1);
   }, [activeGroup?.id, chartSortKey, chartsPerPage]);
 
@@ -285,6 +377,21 @@ export function PeerGroupsDashboard() {
     setCorrelationSelection([]);
     setCorrelationSelectionError(null);
   }, [activeGroup?.id, detail?.symbol.ticker]);
+
+  useEffect(() => {
+    if (!pendingChartScrollTicker || loadingDetail || !detail) return;
+    if (detail.symbol.ticker !== pendingChartScrollTicker) return;
+    const target = multiChartSectionRef.current;
+    if (!target) return;
+    const animationFrame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({
+        block: "start",
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+      });
+      setPendingChartScrollTicker(null);
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [detail, loadingDetail, pendingChartScrollTicker, prefersReducedMotion]);
 
   const onMemberSort = (key: PeerMemberSortKey) => {
     if (memberSortKey === key) {
@@ -342,13 +449,14 @@ export function PeerGroupsDashboard() {
 
   return (
     <div className="space-y-4">
-      <div className="card p-3">
+      <div className="card scroll-mt-4 p-3" ref={searchPanelRef}>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),14rem,auto]">
           <label className="text-xs text-slate-300">
             Search ticker or company
             <div className="mt-1 flex items-center rounded border border-borderSoft bg-panelSoft px-2">
               <Search className="h-4 w-4 text-slate-400" />
               <input
+                ref={searchInputRef}
                 className="w-full bg-transparent px-2 py-2 text-sm outline-none"
                 value={query}
                 onChange={(event) => {
@@ -414,7 +522,7 @@ export function PeerGroupsDashboard() {
                   <tr
                     key={row.ticker}
                     className={`cursor-pointer border-t border-borderSoft/60 ${selectedTicker === row.ticker ? "bg-accent/10" : "hover:bg-slate-900/30"}`}
-                    onClick={() => void loadTicker(row.ticker)}
+                    onClick={() => void loadTicker(row.ticker, { scrollToCharts: true })}
                   >
                     <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
                     <td className="px-3 py-2 text-slate-300">{row.name ?? "-"}</td>
@@ -568,7 +676,7 @@ export function PeerGroupsDashboard() {
       </div>
 
       {detail && (
-        <div className="space-y-3">
+        <div className="scroll-mt-4 space-y-3" ref={multiChartSectionRef}>
           <div className="card p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
@@ -600,7 +708,17 @@ export function PeerGroupsDashboard() {
                   />
                 </label>
               </div>
-              <MultiChartPager page={chartPage} totalPages={totalChartPages} onPageChange={setChartPage} />
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60 hover:text-slate-100"
+                  onClick={scrollBackToSearch}
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                  Back to Search
+                </button>
+                <MultiChartPager page={chartPage} totalPages={totalChartPages} onPageChange={setChartPage} />
+              </div>
             </div>
           </div>
           <TickerMultiGrid
@@ -616,6 +734,10 @@ export function PeerGroupsDashboard() {
           </div>
         </div>
       )}
+
+      {activeFundamentalsTicker ? (
+        <FundamentalsModal ticker={activeFundamentalsTicker} onClose={() => setActiveFundamentalsTicker(null)} />
+      ) : null}
 
       {correlationPickerState && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setCorrelationPickerState(null)}>

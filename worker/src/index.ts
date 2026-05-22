@@ -118,7 +118,7 @@ import {
 } from "./peer-groups-service";
 import { loadPeerMetrics } from "./peer-metrics-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
-import { loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
+import { loadFundamentalsTrends, loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
 import {
   loadEarningsRefreshStatus,
   maybeRunScheduledEarningsCalendarSync,
@@ -2491,6 +2491,16 @@ app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
 app.get("/api/fundamentals/ticker/:ticker", async (c) => {
   const quarters = c.req.query("quarters") ? Number(c.req.query("quarters")) : 8;
   const payload = await loadTickerFundamentals(c.env, c.req.param("ticker"), quarters);
+  return c.json(payload);
+});
+
+app.get("/api/fundamentals/trends", async (c) => {
+  const tickers = String(c.req.query("tickers") ?? "")
+    .split(",")
+    .map((ticker) => ticker.trim())
+    .filter(Boolean);
+  const quarters = c.req.query("quarters") ? Number(c.req.query("quarters")) : 8;
+  const payload = await loadFundamentalsTrends(c.env, tickers, quarters);
   return c.json(payload);
 });
 

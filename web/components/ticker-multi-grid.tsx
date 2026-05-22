@@ -11,6 +11,7 @@ export type TickerMultiGridItem = {
   subtitle?: string | null;
   detail?: ReactNode;
   headerDetail?: ReactNode;
+  headerAction?: ReactNode;
   onTitleClick?: () => void;
   popupTitle?: string;
   popupSubtitle?: ReactNode;
@@ -128,7 +129,12 @@ export function TickerMultiGrid({
                       </button>
                     )}
                   </div>
-                  {item.headerDetail ? <div className="shrink-0">{item.headerDetail}</div> : null}
+                  {item.headerAction || item.headerDetail ? (
+                    <div className="flex shrink-0 items-start gap-2">
+                      {item.headerAction ? <div className="shrink-0">{item.headerAction}</div> : null}
+                      {item.headerDetail ? <div className="shrink-0">{item.headerDetail}</div> : null}
+                    </div>
+                  ) : null}
                 </div>
                 <TradingViewWidget
                   ticker={item.ticker}

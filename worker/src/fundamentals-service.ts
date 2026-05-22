@@ -90,6 +90,36 @@ export type FundamentalsPayload = {
   warning: string | null;
 };
 
+export type FundamentalTrendDirection = "up" | "down" | "mixed" | "unknown";
+
+export type FundamentalTrendQuarter = {
+  fiscalYear: number;
+  fiscalQuarter: number;
+  periodEnd: string;
+  revenue: number | null;
+  netIncome: number | null;
+  revenueYoY: number | null;
+  netIncomeYoY: number | null;
+};
+
+export type FundamentalTrendRow = {
+  ticker: string;
+  companyName: string | null;
+  quarters: FundamentalTrendQuarter[];
+  revenueTrend: FundamentalTrendDirection;
+  netIncomeTrend: FundamentalTrendDirection;
+  combinedTrend: FundamentalTrendDirection;
+  latestRevenueYoY: number | null;
+  latestNetIncomeYoY: number | null;
+  warning: string | null;
+};
+
+export type FundamentalsTrendsPayload = {
+  schemaReady: boolean;
+  rows: FundamentalTrendRow[];
+  warning: string | null;
+};
+
 export type FundamentalsRefreshResult = {
   ticker: string;
   cik: string;
@@ -129,6 +159,10 @@ const METRICS: Record<"revenue" | "netIncome", MetricConfig> = {
     ],
   },
 };
+
+const MAX_TREND_TICKERS = 48;
+const MAX_TREND_QUARTERS = 40;
+const YOY_MOMENTUM_DECELERATION_TOLERANCE = 2;
 
 let companyTickerCache:
   | {
@@ -502,6 +536,59 @@ function decodeWarnings(value: string | null): string[] {
   }
 }
 
+function normalizeTrendTickers(values: string[]): string[] {
+  const seen = new Set<string>();
+  const tickers: string[] = [];
+  for (const value of values) {
+    const ticker = normalizeTicker(value);
+    if (!ticker || seen.has(ticker) || !/^[A-Z0-9.\-^]{1,20}$/.test(ticker)) continue;
+    seen.add(ticker);
+    tickers.push(ticker);
+    if (tickers.length >= MAX_TREND_TICKERS) break;
+  }
+  return tickers;
+}
+
+function normalizeTrendQuarterLimit(value: number | null | undefined): number {
+  return Math.max(1, Math.min(MAX_TREND_QUARTERS, Number(value ?? 8) || 8));
+}
+
+export function classifyYoyMomentumTrend(values: Array<number | null | undefined>): FundamentalTrendDirection {
+  if (values.length < 3) return "unknown";
+  const latestThree = values.slice(-3);
+  if (!latestThree.every(isFiniteNumber)) return "unknown";
+  const latest = latestThree.at(-1);
+  const previous = latestThree.at(-2);
+  if (!isFiniteNumber(latest) || !isFiniteNumber(previous)) return "unknown";
+
+  const positiveCount = latestThree.filter((value) => value > 0).length;
+  const negativeCount = latestThree.filter((value) => value < 0).length;
+  if (
+    latest > 0
+    && positiveCount >= 2
+    && latest >= previous - YOY_MOMENTUM_DECELERATION_TOLERANCE
+  ) {
+    return "up";
+  }
+  if (
+    latest < 0
+    && negativeCount >= 2
+    && latest <= previous + YOY_MOMENTUM_DECELERATION_TOLERANCE
+  ) {
+    return "down";
+  }
+  return "mixed";
+}
+
+function combineTrendDirections(
+  revenueTrend: FundamentalTrendDirection,
+  netIncomeTrend: FundamentalTrendDirection,
+): FundamentalTrendDirection {
+  if (revenueTrend === netIncomeTrend) return revenueTrend;
+  if (revenueTrend === "unknown" && netIncomeTrend === "unknown") return "unknown";
+  return "mixed";
+}
+
 export async function loadTickerFundamentals(env: Env, tickerInput: string, quarters = 8): Promise<FundamentalsPayload> {
   const ticker = normalizeTicker(tickerInput);
   const db = fundamentalsDb(env);
@@ -608,6 +695,115 @@ export async function loadTickerFundamentals(env: Env, tickerInput: string, quar
     } : null,
     rows,
     warning: rows.length === 0 ? "No cached SEC fundamentals found for this ticker." : null,
+  };
+}
+
+export async function loadFundamentalsTrends(
+  env: Env,
+  tickerInputs: string[],
+  quarters = 8,
+): Promise<FundamentalsTrendsPayload> {
+  const tickers = normalizeTrendTickers(tickerInputs);
+  const limit = normalizeTrendQuarterLimit(quarters);
+  const db = fundamentalsDb(env);
+  if (!db) {
+    return {
+      schemaReady: false,
+      rows: [],
+      warning: "FUNDAMENTALS_DB binding is not configured.",
+    };
+  }
+  if (!(await hasFundamentalsSchema(db))) {
+    return {
+      schemaReady: false,
+      rows: [],
+      warning: "Fundamentals schema is missing. Apply worker/fundamentals-migrations/0001_fundamentals.sql.",
+    };
+  }
+  if (tickers.length === 0) {
+    return {
+      schemaReady: true,
+      rows: [],
+      warning: "No valid tickers were requested.",
+    };
+  }
+
+  const placeholders = tickers.map(() => "?").join(",");
+  const rowsResult = await db.prepare(
+    `SELECT ticker, companyName, fiscalYear, fiscalQuarter, periodEnd, revenue, netIncome, revenueYoY, netIncomeYoY
+     FROM (
+       SELECT
+         fq.ticker,
+         fi.company_name as companyName,
+         fq.fiscal_year as fiscalYear,
+         fq.fiscal_quarter as fiscalQuarter,
+         fq.period_end as periodEnd,
+         fq.revenue,
+         fq.net_income as netIncome,
+         fq.revenue_yoy as revenueYoY,
+         fq.net_income_yoy as netIncomeYoY,
+         ROW_NUMBER() OVER (PARTITION BY fq.ticker ORDER BY fq.period_end DESC) as rowNumber
+       FROM fundamental_quarters fq
+       LEFT JOIN fundamental_issuers fi ON fi.ticker = fq.ticker
+       WHERE fq.ticker IN (${placeholders})
+     )
+     WHERE rowNumber <= ?
+     ORDER BY ticker ASC, periodEnd ASC`,
+  ).bind(...tickers, limit).all<{
+    ticker: string;
+    companyName: string | null;
+    fiscalYear: number;
+    fiscalQuarter: number;
+    periodEnd: string;
+    revenue: number | null;
+    netIncome: number | null;
+    revenueYoY: number | null;
+    netIncomeYoY: number | null;
+  }>();
+
+  const rowsByTicker = new Map<string, Array<{
+    companyName: string | null;
+    quarter: FundamentalTrendQuarter;
+  }>>();
+  for (const row of rowsResult.results ?? []) {
+    const ticker = normalizeTicker(row.ticker);
+    const current = rowsByTicker.get(ticker) ?? [];
+    current.push({
+      companyName: row.companyName,
+      quarter: {
+        fiscalYear: Number(row.fiscalYear),
+        fiscalQuarter: Number(row.fiscalQuarter),
+        periodEnd: row.periodEnd,
+        revenue: row.revenue,
+        netIncome: row.netIncome,
+        revenueYoY: row.revenueYoY,
+        netIncomeYoY: row.netIncomeYoY,
+      },
+    });
+    rowsByTicker.set(ticker, current);
+  }
+
+  return {
+    schemaReady: true,
+    rows: tickers.map((ticker) => {
+      const entries = rowsByTicker.get(ticker) ?? [];
+      const quarters = entries.map((entry) => entry.quarter);
+      const latest = quarters.at(-1) ?? null;
+      const revenueTrend = classifyYoyMomentumTrend(quarters.map((quarter) => quarter.revenueYoY));
+      const netIncomeTrend = classifyYoyMomentumTrend(quarters.map((quarter) => quarter.netIncomeYoY));
+      return {
+        ticker,
+        companyName: entries.at(-1)?.companyName ?? null,
+        quarters,
+        revenueTrend,
+        netIncomeTrend,
+        combinedTrend: combineTrendDirections(revenueTrend, netIncomeTrend),
+        latestRevenueYoY: latest?.revenueYoY ?? null,
+        latestNetIncomeYoY: latest?.netIncomeYoY ?? null,
+        warning: quarters.length === 0 ? "No cached fundamentals found for this ticker." : null,
+      };
+    }),
+    warning: null,
   };
 }
 

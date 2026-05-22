@@ -247,6 +247,36 @@ export type FundamentalsResponse = {
   warning: string | null;
 };
 
+export type FundamentalTrendDirection = "up" | "down" | "mixed" | "unknown";
+
+export type FundamentalTrendQuarter = {
+  fiscalYear: number;
+  fiscalQuarter: number;
+  periodEnd: string;
+  revenue: number | null;
+  netIncome: number | null;
+  revenueYoY: number | null;
+  netIncomeYoY: number | null;
+};
+
+export type FundamentalTrendRow = {
+  ticker: string;
+  companyName: string | null;
+  quarters: FundamentalTrendQuarter[];
+  revenueTrend: FundamentalTrendDirection;
+  netIncomeTrend: FundamentalTrendDirection;
+  combinedTrend: FundamentalTrendDirection;
+  latestRevenueYoY: number | null;
+  latestNetIncomeYoY: number | null;
+  warning: string | null;
+};
+
+export type FundamentalsTrendsResponse = {
+  schemaReady: boolean;
+  rows: FundamentalTrendRow[];
+  warning: string | null;
+};
+
 export type FundamentalsRefreshResponse = {
   ok: boolean;
   ticker: string;
@@ -2115,6 +2145,13 @@ export function getSocialAlertResults(params?: {
 export function getTickerFundamentals(ticker: string, quarters = 8) {
   return getJson<FundamentalsResponse>(
     appendQuery(`/api/fundamentals/ticker/${encodeURIComponent(ticker)}`, { quarters }),
+  );
+}
+
+export function getFundamentalsTrends(tickers: string[], quarters = 8) {
+  const normalized = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))).slice(0, 48);
+  return getJson<FundamentalsTrendsResponse>(
+    appendQuery("/api/fundamentals/trends", { tickers: normalized.join(","), quarters }),
   );
 }
 
