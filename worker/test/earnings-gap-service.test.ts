@@ -4,6 +4,7 @@ import {
   computeEarningsGapEvents,
   maybeRunScheduledEarningsGapSync,
   parseTradingViewEarningsGapRows,
+  syncEarningsGaps,
   type EarningsGapEventInput,
   type EarningsGapReleaseInput,
 } from "../src/earnings-gap-service";
@@ -96,10 +97,12 @@ function release(input: Partial<EarningsGapReleaseInput> & { ticker: string; rep
 function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): Env & {
   __events: StoredEvent[];
   __syncs: StoredSync[];
+  __metrics: { cleanupRuns: number; dailyBarQueries: number };
 } {
   const bars = input.bars ?? [];
   const syncs = [...(input.syncs ?? [])];
   const events: StoredEvent[] = [];
+  const metrics = { cleanupRuns: 0, dailyBarQueries: 0 };
 
   const db = {
     prepare(sql: string) {
@@ -116,6 +119,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
         },
         async all<T>() {
           if (sql.includes("FROM daily_bars")) {
+            metrics.dailyBarQueries += 1;
             const startDate = String(args.at(-2) ?? "1900-01-01");
             const endDate = String(args.at(-1) ?? "9999-12-31");
             const tickers = new Set(args.slice(0, -2).map((value) => String(value)));
@@ -158,6 +162,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
             }
           }
           if (sql.includes("DELETE FROM earnings_gap_events")) {
+            metrics.cleanupRuns += 1;
             return { meta: { changes: 0 } };
           }
           return { meta: { changes: 0 } };
@@ -244,7 +249,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
     },
   };
 
-  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs };
+  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs, __metrics: metrics };
 }
 
 describe("earnings gap service", () => {
@@ -318,6 +323,95 @@ describe("earnings gap service", () => {
     expect(byTicker.get("BOTH")?.gapSource).toBe("both");
     expect(byTicker.get("BOTH")?.qualifyingGapPct).toBeCloseTo(11.111, 3);
     expect(byTicker.has("NOPE")).toBe(false);
+  });
+
+  it("runs backfills as a 90-day window split into 7-day batches", async () => {
+    const env = createEnv();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ totalCount: 0, data: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await syncEarningsGaps(env, { mode: "backfill", now: new Date("2026-05-22T00:00:00Z") });
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
+
+    expect(result.totalWindowStart).toBe("2026-02-21");
+    expect(result.totalWindowEnd).toBe("2026-05-21");
+    expect(result.batchWindowStart).toBe("2026-02-21");
+    expect(result.batchWindowEnd).toBe("2026-02-27");
+    expect(result.windowStart).toBe("2026-02-21");
+    expect(result.windowEnd).toBe("2026-02-27");
+    expect(result.nextCursor).toBe("2026-02-28");
+    expect(result.done).toBe(false);
+    expect(env.__metrics.cleanupRuns).toBe(0);
+    expect(payload.filter[0].right).toEqual([unix("2026-02-21T00:00:00Z"), unix("2026-02-27T23:59:59Z")]);
+  });
+
+  it("marks the final backfill batch done and runs retention cleanup once", async () => {
+    const env = createEnv();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ totalCount: 0, data: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await syncEarningsGaps(env, {
+      mode: "backfill",
+      cursor: "2026-05-21",
+      now: new Date("2026-05-22T00:00:00Z"),
+    });
+
+    expect(result.batchWindowStart).toBe("2026-05-21");
+    expect(result.batchWindowEnd).toBe("2026-05-21");
+    expect(result.nextCursor).toBeNull();
+    expect(result.done).toBe(true);
+    expect(env.__metrics.cleanupRuns).toBe(1);
+  });
+
+  it("keeps incremental sync as a single completed window", async () => {
+    const env = createEnv();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ totalCount: 0, data: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await syncEarningsGaps(env, { mode: "incremental", now: new Date("2026-05-22T00:00:00Z") });
+
+    expect(result.windowStart).toBe("2026-05-15");
+    expect(result.windowEnd).toBe("2026-05-21");
+    expect(result.batchWindowStart).toBe("2026-05-15");
+    expect(result.batchWindowEnd).toBe("2026-05-21");
+    expect(result.totalWindowStart).toBe("2026-05-15");
+    expect(result.totalWindowEnd).toBe("2026-05-21");
+    expect(result.nextCursor).toBeNull();
+    expect(result.done).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(env.__metrics.cleanupRuns).toBe(1);
+  });
+
+  it("keeps one backfill batch inside the expected provider and D1 call counts", async () => {
+    const env = createEnv();
+    const data = Array.from({ length: 240 }, (_, index) => tvRow({
+      symbol: `B${index}`,
+      name: `Batch ${index}`,
+      exchange: "NASDAQ",
+      reportIso: "2026-02-22T21:00:00Z",
+    }));
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ totalCount: data.length, data }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await syncEarningsGaps(env, { mode: "backfill", now: new Date("2026-05-22T00:00:00Z") });
+
+    expect(result.rowsSeen).toBe(240);
+    expect(result.rowsUpserted).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(env.__metrics.dailyBarQueries).toBe(3);
+    expect(env.__metrics.cleanupRuns).toBe(0);
   });
 
   it("does not run the scheduled scan before 8pm ET", async () => {

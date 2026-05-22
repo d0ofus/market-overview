@@ -86,6 +86,9 @@ const BUTTON_CLASS =
   "inline-flex h-10 items-center justify-center gap-2 rounded border border-borderSoft/80 bg-panelSoft/80 px-3 text-sm font-medium text-slate-100 transition hover:bg-panelSoft disabled:cursor-not-allowed disabled:opacity-50";
 const PRIMARY_BUTTON_CLASS =
   "inline-flex h-10 items-center justify-center gap-2 rounded bg-accent px-3 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50";
+const SURPRISE_HISTORY_DAYS = 183;
+const GAP_HISTORY_DAYS = 90;
+const GAP_BACKFILL_BATCH_DAYS = 7;
 
 function isoDateDaysAgo(days: number): string {
   const date = new Date();
@@ -97,10 +100,28 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function addDaysIso(isoDate: string, days: number): string {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function inclusiveDayCount(startDate: string, endDate: string): number {
+  const start = Date.parse(`${startDate}T00:00:00Z`);
+  const end = Date.parse(`${endDate}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return Math.floor((end - start) / 86_400_000) + 1;
+}
+
+function estimateBackfillBatchCount(startDate: string, endDate: string): number {
+  const days = inclusiveDayCount(startDate, endDate);
+  return Math.max(1, Math.ceil(days / GAP_BACKFILL_BATCH_DAYS));
+}
+
 function defaultDraftFilters(): DraftFilters {
   return {
     q: "",
-    startDate: isoDateDaysAgo(183),
+    startDate: isoDateDaysAgo(SURPRISE_HISTORY_DAYS),
     endDate: todayIso(),
     minMarketCap: "",
     maxMarketCap: "",
@@ -117,7 +138,7 @@ function defaultDraftFilters(): DraftFilters {
 function defaultGapDraftFilters(): GapDraftFilters {
   return {
     q: "",
-    startDate: isoDateDaysAgo(183),
+    startDate: isoDateDaysAgo(GAP_HISTORY_DAYS),
     endDate: todayIso(),
     minMarketCap: "",
     maxMarketCap: "",
@@ -661,12 +682,67 @@ function EarningsGapsPanel() {
     setSyncing(mode);
     setMessage(null);
     setError(null);
+    let retryCursor: string | null = null;
+    let failedSlice = mode === "backfill" ? "the first batch" : "";
     try {
-      const result = await syncAdminEarningsGaps(mode);
-      setMessage(`${mode === "backfill" ? "Gap backfill" : "Gap sync"} complete: ${result.rowsUpserted} qualifying row${result.rowsUpserted === 1 ? "" : "s"} upserted from ${result.rowsSeen} release row${result.rowsSeen === 1 ? "" : "s"}.`);
+      if (mode === "incremental") {
+        const result = await syncAdminEarningsGaps(mode);
+        setMessage(`Gap sync complete: ${result.rowsUpserted} qualifying row${result.rowsUpserted === 1 ? "" : "s"} upserted from ${result.rowsSeen} release row${result.rowsSeen === 1 ? "" : "s"}.`);
+        await load();
+        return;
+      }
+
+      let cursor: string | null = null;
+      let totalWindowStart: string | null = null;
+      let totalWindowEnd: string | null = null;
+      let batchCount = 0;
+      let totalRowsSeen = 0;
+      let totalRowsUpserted = 0;
+      setMessage("Starting 90-day gap backfill...");
+
+      while (true) {
+        if (cursor && totalWindowEnd) {
+          const estimatedEnd = addDaysIso(cursor, GAP_BACKFILL_BATCH_DAYS - 1);
+          const batchEnd = estimatedEnd <= totalWindowEnd ? estimatedEnd : totalWindowEnd;
+          const totalBatches = totalWindowStart ? estimateBackfillBatchCount(totalWindowStart, totalWindowEnd) : null;
+          failedSlice = `${cursor} to ${batchEnd}`;
+          retryCursor = cursor;
+          setMessage(`Backfilling ${failedSlice}... batch ${batchCount + 1}${totalBatches ? `/${totalBatches}` : ""}.`);
+        } else {
+          failedSlice = "the first batch";
+          retryCursor = null;
+        }
+
+        const result = await syncAdminEarningsGaps("backfill", {
+          cursor,
+          windowStart: totalWindowStart,
+          windowEnd: totalWindowEnd,
+        });
+        batchCount += 1;
+        totalWindowStart = result.totalWindowStart;
+        totalWindowEnd = result.totalWindowEnd;
+        totalRowsSeen += result.rowsSeen;
+        totalRowsUpserted += result.rowsUpserted;
+        failedSlice = `${result.batchWindowStart} to ${result.batchWindowEnd}`;
+        const totalBatches = estimateBackfillBatchCount(result.totalWindowStart, result.totalWindowEnd);
+
+        if (result.done) {
+          setMessage(`Gap backfill complete: ${totalRowsUpserted} qualifying row${totalRowsUpserted === 1 ? "" : "s"} upserted from ${totalRowsSeen} release row${totalRowsSeen === 1 ? "" : "s"} across ${batchCount}/${totalBatches} batch${totalBatches === 1 ? "" : "es"}.`);
+          break;
+        }
+
+        const previousCursor: string | null = cursor;
+        cursor = result.nextCursor;
+        if (!cursor || cursor === previousCursor) {
+          throw new Error("Gap backfill did not return a valid next cursor.");
+        }
+        setMessage(`Backfilled ${failedSlice}; continuing... batch ${batchCount}/${totalBatches}.`);
+      }
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to sync earnings gap-ups.");
+      const message = err instanceof Error ? err.message : "Failed to sync earnings gap-ups.";
+      const retry = mode === "backfill" ? ` Failed batch: ${failedSlice}. Retry cursor: ${retryCursor ?? "start"}.` : "";
+      setError(`${message}${retry}`);
     } finally {
       setSyncing(null);
     }

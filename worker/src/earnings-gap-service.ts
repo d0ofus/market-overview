@@ -3,9 +3,10 @@ import type { Env } from "./types";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const PRIMARY_PROVIDER = "tradingview";
-const BACKFILL_DAYS = 183;
+const BACKFILL_DAYS = 90;
+const BACKFILL_BATCH_DAYS = 7;
 const INCREMENTAL_LOOKBACK_DAYS = 7;
-const RETENTION_DAYS = 183;
+const RETENTION_DAYS = 90;
 const TV_PAGE_SIZE = 500;
 const TV_MAX_PROVIDER_ROWS = 10_000;
 const SYNC_BATCH_SIZE = 80;
@@ -135,6 +136,12 @@ export type EarningsGapSyncResult = {
   mode: EarningsGapSyncMode;
   windowStart: string;
   windowEnd: string;
+  batchWindowStart: string;
+  batchWindowEnd: string;
+  totalWindowStart: string;
+  totalWindowEnd: string;
+  nextCursor: string | null;
+  done: boolean;
   provider: string;
   rowsSeen: number;
   rowsUpserted: number;
@@ -263,6 +270,14 @@ function addDaysIso(isoDate: string, days: number): string {
   const date = new Date(`${isoDate}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function minDateIso(left: string, right: string): string {
+  return left <= right ? left : right;
+}
+
+function maxDateIso(left: string, right: string): string {
+  return left >= right ? left : right;
 }
 
 function isoDateDaysAgo(days: number, now = new Date()): string {
@@ -705,15 +720,45 @@ export async function cleanupOldEarningsGapEvents(env: Env, retentionDays = RETE
 
 export async function syncEarningsGaps(
   env: Env,
-  options: { mode?: EarningsGapSyncMode; now?: Date; scheduledLocalDate?: string | null } = {},
+  options: {
+    mode?: EarningsGapSyncMode;
+    now?: Date;
+    scheduledLocalDate?: string | null;
+    cursor?: string | null;
+    windowStart?: string | null;
+    windowEnd?: string | null;
+  } = {},
 ): Promise<EarningsGapSyncResult> {
   await requireEarningsGapSchema(env);
   const mode = options.mode ?? "incremental";
   const now = options.now ?? new Date();
-  const windowEnd = zonedParts(now, "America/New_York").localDate;
-  const windowStart = mode === "backfill"
-    ? isoDateDaysAgo(BACKFILL_DAYS, now)
-    : isoDateDaysAgo(INCREMENTAL_LOOKBACK_DAYS, now);
+  const nyWindowEnd = zonedParts(now, "America/New_York").localDate;
+  const incrementalWindowStart = isoDateDaysAgo(INCREMENTAL_LOOKBACK_DAYS, now);
+  const requestedWindowEnd = normalizeDate(options.windowEnd) ?? nyWindowEnd;
+  const totalWindowEnd = minDateIso(requestedWindowEnd, nyWindowEnd);
+  const earliestAllowedBackfillStart = addDaysIso(totalWindowEnd, -(BACKFILL_DAYS - 1));
+  const requestedWindowStart = normalizeDate(options.windowStart) ?? earliestAllowedBackfillStart;
+  if (mode === "backfill" && requestedWindowStart > totalWindowEnd) {
+    throw new Error("Earnings gap backfill start date cannot be after the end date.");
+  }
+  const totalWindowStart = mode === "backfill"
+    ? maxDateIso(requestedWindowStart, earliestAllowedBackfillStart)
+    : incrementalWindowStart;
+  const totalWindowEndResolved = mode === "backfill" ? totalWindowEnd : nyWindowEnd;
+  const cursorDate = normalizeDate(options.cursor);
+  const backfillCursorStart = minDateIso(maxDateIso(cursorDate ?? totalWindowStart, totalWindowStart), totalWindowEndResolved);
+  const batchWindowStart = mode === "backfill"
+    ? backfillCursorStart
+    : totalWindowStart;
+  const batchWindowEnd = mode === "backfill"
+    ? minDateIso(addDaysIso(batchWindowStart, BACKFILL_BATCH_DAYS - 1), totalWindowEndResolved)
+    : totalWindowEndResolved;
+  const nextCursor = mode === "backfill" && batchWindowEnd < totalWindowEndResolved
+    ? addDaysIso(batchWindowEnd, 1)
+    : null;
+  const done = nextCursor == null;
+  const windowStart = batchWindowStart;
+  const windowEnd = batchWindowEnd;
   const syncId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   await recordSyncStart(env, syncId, {
@@ -727,7 +772,9 @@ export async function syncEarningsGaps(
     const releases = await fetchTradingViewEarningsReleases(windowStart, windowEnd);
     const rows = await computeEarningsGapEvents(env, releases, now);
     const rowsUpserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
-    await cleanupOldEarningsGapEvents(env, RETENTION_DAYS, now);
+    if (mode !== "backfill" || done) {
+      await cleanupOldEarningsGapEvents(env, RETENTION_DAYS, now);
+    }
     await recordSyncDone(env, syncId, {
       status: "ok",
       successAt: new Date().toISOString(),
@@ -739,6 +786,12 @@ export async function syncEarningsGaps(
       mode,
       windowStart,
       windowEnd,
+      batchWindowStart: windowStart,
+      batchWindowEnd: windowEnd,
+      totalWindowStart,
+      totalWindowEnd: totalWindowEndResolved,
+      nextCursor,
+      done,
       provider: PRIMARY_PROVIDER,
       rowsSeen: releases.length,
       rowsUpserted,

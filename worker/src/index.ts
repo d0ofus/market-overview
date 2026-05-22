@@ -4235,7 +4235,12 @@ app.post("/api/admin/earnings/gaps/sync", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
     const mode = c.req.query("mode") === "backfill" ? "backfill" : "incremental";
-    const result = await syncEarningsGaps(c.env, { mode });
+    const result = await syncEarningsGaps(c.env, {
+      mode,
+      cursor: c.req.query("cursor"),
+      windowStart: c.req.query("windowStart"),
+      windowEnd: c.req.query("windowEnd"),
+    });
     try {
       await upsertAudit(c.env, "default", "EARNINGS_GAP_SYNC", result);
     } catch (auditError) {

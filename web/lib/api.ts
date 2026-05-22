@@ -525,11 +525,23 @@ export type EarningsGapSyncResponse = {
   mode: "incremental" | "backfill";
   windowStart: string;
   windowEnd: string;
+  batchWindowStart: string;
+  batchWindowEnd: string;
+  totalWindowStart: string;
+  totalWindowEnd: string;
+  nextCursor: string | null;
+  done: boolean;
   provider: string;
   rowsSeen: number;
   rowsUpserted: number;
   scheduledLocalDate: string | null;
   warning: string | null;
+};
+
+export type EarningsGapSyncOptions = {
+  cursor?: string | null;
+  windowStart?: string | null;
+  windowEnd?: string | null;
 };
 
 export type AdminFundamentalsSeedQueueRow = {
@@ -2183,9 +2195,14 @@ export function getEarningsGapsStatus() {
   return getJson<EarningsGapsStatus>("/api/earnings/gaps/status");
 }
 
-export function syncAdminEarningsGaps(mode: "incremental" | "backfill" = "incremental") {
+export function syncAdminEarningsGaps(mode: "incremental" | "backfill" = "incremental", options: EarningsGapSyncOptions = {}) {
   return adminFetch<EarningsGapSyncResponse>(
-    appendQuery("/api/admin/earnings/gaps/sync", { mode }),
+    appendQuery("/api/admin/earnings/gaps/sync", {
+      mode,
+      cursor: options.cursor,
+      windowStart: options.windowStart,
+      windowEnd: options.windowEnd,
+    }),
     { method: "POST" },
   );
 }
