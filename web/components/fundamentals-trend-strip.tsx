@@ -12,60 +12,44 @@ function trendClasses(direction: FundamentalTrendDirection): string {
   return "border-borderSoft/60 bg-panelSoft/30 text-slate-300";
 }
 
+function trendPanelClasses(direction: FundamentalTrendDirection): string {
+  if (direction === "up") return "border-emerald-400/25 bg-emerald-400/[0.06]";
+  if (direction === "down") return "border-red-400/25 bg-red-400/[0.06]";
+  return "border-borderSoft/60 bg-panelSoft/25";
+}
+
 function TrendIcon({ direction }: { direction: FundamentalTrendDirection }) {
   if (direction === "up") return <TrendingUp className="h-3 w-3" />;
   if (direction === "down") return <TrendingDown className="h-3 w-3" />;
   return <Minus className="h-3 w-3" />;
 }
 
-function TrendChip({
-  label,
-  direction,
-  value,
-}: {
-  label: string;
-  direction: FundamentalTrendDirection;
-  value: number | null;
-}) {
-  return (
-    <span
-      className={`inline-flex h-6 items-center gap-1 rounded border px-1.5 text-[10px] font-medium ${trendClasses(direction)}`}
-      title={`${label} YoY momentum: ${direction}, latest ${formatPct(value)}`}
-    >
-      <span>{label}</span>
-      <TrendIcon direction={direction} />
-      <span className="font-mono">{formatPct(value)}</span>
-    </span>
-  );
-}
-
-function MiniBars({
+function MiniBarChart({
   values,
   color,
   negativeColor,
-  y,
-  height,
 }: {
   values: Array<number | null>;
   color: string;
   negativeColor: string;
-  y: number;
-  height: number;
 }) {
+  const width = 160;
+  const height = 48;
   const finiteValues = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   const maxAbs = Math.max(1, ...finiteValues.map((value) => Math.abs(value)));
-  const slotWidth = 96 / Math.max(1, values.length);
-  const barWidth = Math.max(2, slotWidth - 2);
-  const midY = y + height / 2;
+  const slotWidth = width / Math.max(1, values.length);
+  const barWidth = Math.max(3, slotWidth - 3);
+  const midY = height / 2;
+  const maxBarHeight = (height / 2) - 4;
   return (
-    <>
-      <line x1={0} x2={96} y1={midY} y2={midY} stroke="rgba(148, 163, 184, 0.18)" strokeWidth={0.75} />
+    <svg className="mt-1 h-12 w-full" viewBox={`0 0 ${width} ${height}`} role="presentation" aria-hidden="true">
+      <line x1={0} x2={width} y1={midY} y2={midY} stroke="rgba(148, 163, 184, 0.18)" strokeWidth={0.75} />
       {values.map((value, index) => {
         const x = index * slotWidth + 1;
         if (typeof value !== "number" || !Number.isFinite(value)) {
           return <rect key={`missing-${index}`} x={x} y={midY - 1} width={barWidth} height={2} rx={0.8} fill="rgba(100, 116, 139, 0.55)" />;
         }
-        const normalized = Math.max(2, (Math.abs(value) / maxAbs) * (height / 2 - 1));
+        const normalized = Math.max(3, (Math.abs(value) / maxAbs) * maxBarHeight);
         const isNegative = value < 0;
         return (
           <rect
@@ -76,22 +60,47 @@ function MiniBars({
             height={normalized}
             rx={0.8}
             fill={isNegative ? negativeColor : color}
-          />
+          >
+            <title>{value.toLocaleString("en-US")}</title>
+          </rect>
         );
       })}
-    </>
+    </svg>
   );
 }
 
-function TrendBars({ row }: { row: FundamentalTrendRow }) {
-  const quarters = row.quarters.slice(-8);
-  const revenueValues = quarters.map((quarter) => quarter.revenue);
-  const netIncomeValues = quarters.map((quarter) => quarter.netIncome);
+function TrendMetricPanel({
+  label,
+  direction,
+  value,
+  values,
+  color,
+  negativeColor,
+}: {
+  label: string;
+  direction: FundamentalTrendDirection;
+  value: number | null;
+  values: Array<number | null>;
+  color: string;
+  negativeColor: string;
+}) {
+  const formattedValue = formatPct(value);
   return (
-    <svg className="h-9 w-24 shrink-0" viewBox="0 0 96 36" role="img" aria-label={`${row.ticker} revenue and net income trend`}>
-      <MiniBars values={revenueValues} color="#5eead4" negativeColor="#f87171" y={0} height={16} />
-      <MiniBars values={netIncomeValues} color="#facc15" negativeColor="#fb7185" y={20} height={16} />
-    </svg>
+    <div
+      className={`min-w-[8.75rem] rounded border px-2 py-1.5 ${trendPanelClasses(direction)}`}
+      title={`${label} YoY momentum: ${direction}, latest ${formattedValue}`}
+    >
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+          {label}
+        </span>
+        <span className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${trendClasses(direction)}`}>
+          <TrendIcon direction={direction} />
+          <span className="font-mono">{formattedValue}</span>
+        </span>
+      </div>
+      <MiniBarChart values={values} color={color} negativeColor={negativeColor} />
+    </div>
   );
 }
 
@@ -126,12 +135,23 @@ export function FundamentalsTrendStrip({
   }
 
   return (
-    <div className="flex min-h-10 items-center justify-between gap-2 rounded border border-borderSoft/50 bg-panelSoft/20 px-2 py-1">
-      <TrendBars row={row} />
-      <div className="flex flex-col items-end gap-1">
-        <TrendChip label="Rev" direction={row.revenueTrend} value={row.latestRevenueYoY} />
-        <TrendChip label="NI" direction={row.netIncomeTrend} value={row.latestNetIncomeYoY} />
-      </div>
+    <div className="grid gap-2 sm:grid-cols-2">
+      <TrendMetricPanel
+        label="Revenue"
+        direction={row.revenueTrend}
+        value={row.latestRevenueYoY}
+        values={row.quarters.slice(-8).map((quarter) => quarter.revenue)}
+        color="#5eead4"
+        negativeColor="#f87171"
+      />
+      <TrendMetricPanel
+        label="Net income"
+        direction={row.netIncomeTrend}
+        value={row.latestNetIncomeYoY}
+        values={row.quarters.slice(-8).map((quarter) => quarter.netIncome)}
+        color="#facc15"
+        negativeColor="#fb7185"
+      />
     </div>
   );
 }
