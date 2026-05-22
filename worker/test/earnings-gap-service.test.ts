@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildTradingViewEarningsGapPayload,
   computeEarningsGapEvents,
+  exportEarningsGapTickers,
   maybeRunScheduledEarningsGapSync,
   parseTradingViewEarningsGapRows,
   queryEarningsGaps,
@@ -163,7 +164,24 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
     } else if (sql.includes("UPPER(exchange) IN ('NASDAQ', 'NYSE', 'AMEX')")) {
       rows = rows.filter((row) => ["NASDAQ", "NYSE", "AMEX"].includes(String(row.exchange ?? "").toUpperCase()));
     }
-    if (sql.includes("ORDER BY season ASC")) rows.sort((left, right) => left.season.localeCompare(right.season) || left.ticker.localeCompare(right.ticker));
+    const sortMatch = sql.match(/ORDER BY ([a-z_]+) (ASC|DESC)/);
+    if (sortMatch) {
+      const [, column, direction] = sortMatch;
+      const map: Record<string, keyof StoredEvent> = {
+        season: "season",
+        qualifying_gap_pct: "qualifyingGapPct",
+        ticker: "ticker",
+      };
+      const key = map[column] ?? "ticker";
+      rows.sort((left, right) => {
+        const a = left[key] ?? "";
+        const b = right[key] ?? "";
+        const result = typeof a === "number" && typeof b === "number"
+          ? a - b
+          : String(a).localeCompare(String(b));
+        return direction === "ASC" ? result : -result;
+      });
+    }
     return rows;
   };
 
@@ -208,6 +226,10 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
             return { results: rows as T[] };
           }
           if (sql.includes("FROM earnings_gap_events")) {
+            if (sql.includes("SELECT ticker")) {
+              const limit = Number(args.at(-1) ?? 100);
+              return { results: applyEventFilters(sql, args.slice(0, -1)).slice(0, limit).map((row) => ({ ticker: row.ticker })) as T[] };
+            }
             return { results: applyEventFilters(sql, args) as T[] };
           }
           return { results: [] as T[] };
@@ -563,6 +585,35 @@ describe("earnings gap service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["B", "C"]);
     expect(result.rows.every((row) => row.season === "2026 Q2")).toBe(true);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q2", count: 2 });
+  });
+
+  it("exports top gap tickers with filters, sorting, and export limit clamp", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "AAA", reportDate: "2026-05-10", season: "2026 Q2", qualifyingGapPct: 7 }),
+        storedEvent({ ticker: "BBB", reportDate: "2026-05-11", season: "2026 Q2", qualifyingGapPct: 31 }),
+        storedEvent({ ticker: "CCC", reportDate: "2026-05-12", season: "2026 Q2", qualifyingGapPct: 18 }),
+        ...Array.from({ length: 1005 }, (_, index) => storedEvent({
+          ticker: `X${String(index).padStart(4, "0")}`,
+          reportDate: "2026-05-13",
+          season: "2026 Q2",
+          qualifyingGapPct: -index - 1,
+        })),
+      ],
+    });
+
+    const topTwo = await exportEarningsGapTickers(env, {
+      startDate: "2026-01-01",
+      season: "2026 Q2",
+      includeOtc: true,
+      sort: "qualifyingGapPct",
+      sortDir: "desc",
+      limit: 2,
+    });
+    const clamped = await exportEarningsGapTickers(env, { startDate: "2026-01-01", includeOtc: true, limit: 5000 });
+
+    expect(topTwo).toEqual(["BBB", "CCC"]);
+    expect(clamped).toHaveLength(1000);
   });
 
   it("reports the season migration when gap tables exist without the season column", async () => {

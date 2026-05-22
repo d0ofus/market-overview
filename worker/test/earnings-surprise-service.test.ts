@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildTradingViewEarningsSurprisePayload,
   deriveEarningsSeason,
+  exportEarningsSurpriseTickers,
   parseTradingViewEarningsSurpriseRows,
   queryEarningsSurprises,
   syncEarningsSurprises,
@@ -176,6 +177,10 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
             return { results: Array.from(counts.entries()).map(([value, count]) => ({ value, count })) as T[] };
           }
           if (sql.includes("FROM earnings_surprise_events")) {
+            if (sql.includes("SELECT ticker")) {
+              const limit = Number(args.at(-1) ?? 100);
+              return { results: applyFilters(sql, args.slice(0, -1)).slice(0, limit).map((row) => ({ ticker: row.ticker })) as T[] };
+            }
             const limit = Number(args.at(-2) ?? 100);
             const offset = Number(args.at(-1) ?? 0);
             return { results: applyFilters(sql, args.slice(0, -2)).slice(offset, offset + limit) as T[] };
@@ -433,5 +438,34 @@ describe("earnings surprise service", () => {
     expect(result.total).toBe(1);
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
+  });
+
+  it("exports top surprise tickers with filters, sorting, and export limit clamp", async () => {
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const env = createEnv([
+      { ...base, id: "1", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", reportDate: "2026-05-01", epsSurprisePct: 5 },
+      { ...base, id: "2", sourceSymbol: "NASDAQ:BBB", ticker: "BBB", reportDate: "2026-05-02", epsSurprisePct: 25 },
+      { ...base, id: "3", sourceSymbol: "NASDAQ:CCC", ticker: "CCC", reportDate: "2026-05-03", epsSurprisePct: 15 },
+      ...Array.from({ length: 1005 }, (_, index) => ({
+        ...base,
+        id: `extra-${index}`,
+        sourceSymbol: `NASDAQ:X${index}`,
+        ticker: `X${String(index).padStart(4, "0")}`,
+        reportDate: "2026-05-04",
+        epsSurprisePct: -index - 1,
+      })),
+    ]);
+
+    const topTwo = await exportEarningsSurpriseTickers(env, {
+      startDate: "2026-01-01",
+      surpriseSide: "positive",
+      sort: "epsSurprisePct",
+      sortDir: "desc",
+      limit: 2,
+    });
+    const clamped = await exportEarningsSurpriseTickers(env, { startDate: "2026-01-01", includeOtc: true, limit: 5000 });
+
+    expect(topTwo).toEqual(["BBB", "CCC"]);
+    expect(clamped).toHaveLength(1000);
   });
 });

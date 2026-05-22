@@ -10,6 +10,7 @@ const TV_MAX_PROVIDER_ROWS = 10_000;
 const SYNC_BATCH_SIZE = 80;
 const DEFAULT_QUERY_LIMIT = 100;
 const MAX_QUERY_LIMIT = 250;
+const EXPORT_MAX_LIMIT = 1000;
 const FMP_EARNINGS_URL = "https://financialmodelingprep.com/stable/earnings-calendar";
 const FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings";
 
@@ -932,6 +933,22 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
     rows: (rows.results ?? []).map(mapRow),
     facets: { seasons, sectors, industries, exchanges },
   };
+}
+
+export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSurprisesQuery = {}): Promise<string[]> {
+  if (!(await hasEarningsSurpriseSchema(env))) return [];
+  const limit = Math.max(1, Math.min(EXPORT_MAX_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
+  const sortDir = query.sortDir === "asc" ? "asc" : "desc";
+  const { sql: whereSql, args } = buildWhereClause(query);
+  const rows = await env.DB.prepare(
+    `SELECT ticker
+     FROM earnings_surprise_events
+     ${whereSql}
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     LIMIT ?`,
+  ).bind(...args, limit).all<{ ticker: string }>();
+  return (rows.results ?? []).map((row) => String(row.ticker ?? "").trim()).filter(Boolean);
 }
 
 export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSurprisesStatus> {

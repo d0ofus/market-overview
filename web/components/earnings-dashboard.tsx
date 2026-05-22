@@ -1,12 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Database, Loader2, Maximize2, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, RefreshCw, Search } from "lucide-react";
 import {
   getEarningsGaps,
+  getEarningsGapsExportUrl,
   getEarningsGapsStatus,
   getEarningsSurprises,
+  getEarningsSurprisesExportUrl,
   getEarningsSurprisesStatus,
   syncAdminEarningsGaps,
   syncAdminEarningsSurprises,
@@ -83,6 +85,51 @@ type GapDraftFilters = {
   limit: string;
 };
 
+type ColumnAlign = "left" | "right";
+
+type EarningsTableColumn<Key extends string, Row, Sort extends string> = {
+  key: Key;
+  label: string;
+  sortKey?: Sort;
+  align?: ColumnAlign;
+  cellClassName: string;
+  title?: (row: Row) => string | undefined;
+  render: (row: Row) => ReactNode;
+};
+
+type SurpriseColumnKey =
+  | "reportDate"
+  | "ticker"
+  | "companyName"
+  | "season"
+  | "epsSurprisePct"
+  | "epsSurprise"
+  | "epsActual"
+  | "epsEstimate"
+  | "revenueSurprisePct"
+  | "marketCap"
+  | "sector"
+  | "industry"
+  | "exchange";
+
+type GapColumnKey =
+  | "reportDate"
+  | "ticker"
+  | "companyName"
+  | "season"
+  | "gapSource"
+  | "qualifyingGapPct"
+  | "postmarketGapPct"
+  | "postmarketPrice"
+  | "postmarketVolume"
+  | "regularOpenGapPct"
+  | "reactionOpen"
+  | "avgDollarVolume30d"
+  | "marketCap"
+  | "sector"
+  | "industry"
+  | "exchange";
+
 const INPUT_CLASS =
   "h-10 w-full rounded border border-borderSoft/80 bg-panelSoft/85 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
 const BUTTON_CLASS =
@@ -92,6 +139,43 @@ const PRIMARY_BUTTON_CLASS =
 const SURPRISE_HISTORY_DAYS = 183;
 const GAP_HISTORY_DAYS = 90;
 const GAP_BACKFILL_BATCH_DAYS = 7;
+const EXPORT_LIMIT_DEFAULT = 100;
+const EXPORT_LIMIT_MAX = 1000;
+const SURPRISE_COLUMNS_STORAGE_KEY = "earnings-surprises-column-order-v1";
+const GAP_COLUMNS_STORAGE_KEY = "earnings-gaps-column-order-v1";
+const DEFAULT_SURPRISE_COLUMN_ORDER: SurpriseColumnKey[] = [
+  "reportDate",
+  "ticker",
+  "companyName",
+  "season",
+  "epsSurprisePct",
+  "epsSurprise",
+  "epsActual",
+  "epsEstimate",
+  "revenueSurprisePct",
+  "marketCap",
+  "sector",
+  "industry",
+  "exchange",
+];
+const DEFAULT_GAP_COLUMN_ORDER: GapColumnKey[] = [
+  "reportDate",
+  "ticker",
+  "companyName",
+  "season",
+  "gapSource",
+  "qualifyingGapPct",
+  "postmarketGapPct",
+  "postmarketPrice",
+  "postmarketVolume",
+  "regularOpenGapPct",
+  "reactionOpen",
+  "avgDollarVolume30d",
+  "marketCap",
+  "sector",
+  "industry",
+  "exchange",
+];
 
 function isoDateDaysAgo(days: number): string {
   const date = new Date();
@@ -247,6 +331,195 @@ function facetOptions(rows: EarningsSurpriseFacet[], selected: string): Earnings
   return [{ value: selected, count: 0 }, ...rows];
 }
 
+function clampExportLimit(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return EXPORT_LIMIT_DEFAULT;
+  return Math.max(1, Math.min(EXPORT_LIMIT_MAX, Math.floor(parsed)));
+}
+
+function exportDateSuffix(): string {
+  const date = new Date();
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${day}_${month}`;
+}
+
+function normalizeColumnOrder<Key extends string>(stored: unknown, defaults: Key[]): Key[] {
+  if (!Array.isArray(stored)) return defaults;
+  const defaultSet = new Set(defaults);
+  const seen = new Set<Key>();
+  const ordered = stored.filter((item): item is Key => {
+    if (typeof item !== "string" || !defaultSet.has(item as Key) || seen.has(item as Key)) return false;
+    seen.add(item as Key);
+    return true;
+  });
+  return ordered.length > 0 ? [...ordered, ...defaults.filter((key) => !seen.has(key))] : defaults;
+}
+
+function moveColumn<Key extends string>(columns: Key[], draggedKey: Key, targetKey: Key): Key[] {
+  if (draggedKey === targetKey) return columns;
+  const next = columns.filter((key) => key !== draggedKey);
+  const targetIndex = next.indexOf(targetKey);
+  if (targetIndex < 0) return columns;
+  next.splice(targetIndex, 0, draggedKey);
+  return next;
+}
+
+function usePersistedColumnOrder<Key extends string>(storageKey: string, defaults: Key[]) {
+  const [order, setOrder] = useState<Key[]>(defaults);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(storageKey);
+    if (!stored) return;
+    try {
+      setOrder(normalizeColumnOrder(JSON.parse(stored), defaults));
+    } catch {
+      setOrder(defaults);
+    }
+  }, [defaults, storageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(storageKey, JSON.stringify(order));
+  }, [order, storageKey]);
+
+  return [order, setOrder] as const;
+}
+
+function ResultsPager({
+  loading,
+  limit,
+  offset,
+  total,
+  pageStart,
+  pageEnd,
+  onPage,
+}: {
+  loading: boolean;
+  limit: number;
+  offset: number;
+  total: number;
+  pageStart: number;
+  pageEnd: number;
+  onPage: (offset: number) => void;
+}) {
+  const totalPages = total > 0 ? Math.ceil(total / limit) : 0;
+  const currentPage = total > 0 ? Math.floor(offset / limit) + 1 : 0;
+  const lastOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
+  const canGoBack = offset > 0 && !loading;
+  const canGoForward = offset + limit < total && !loading;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+      <button type="button" className={BUTTON_CLASS} disabled={!canGoBack} onClick={() => onPage(0)} aria-label="First page">
+        <ChevronsLeft className="h-4 w-4" />
+      </button>
+      <button type="button" className={BUTTON_CLASS} disabled={!canGoBack} onClick={() => onPage(Math.max(0, offset - limit))} aria-label="Previous page">
+        <ChevronLeft className="h-4 w-4" />
+      </button>
+      <span className="min-w-24 text-center">Page {currentPage} / {totalPages}</span>
+      <span className="min-w-28 text-center">{pageStart}-{pageEnd} of {formatCompact(total)}</span>
+      <button type="button" className={BUTTON_CLASS} disabled={!canGoForward} onClick={() => onPage(offset + limit)} aria-label="Next page">
+        <ChevronRight className="h-4 w-4" />
+      </button>
+      <button type="button" className={BUTTON_CLASS} disabled={!canGoForward} onClick={() => onPage(lastOffset)} aria-label="Last page">
+        <ChevronsRight className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
+function ExportTickersControl({
+  href,
+  value,
+  onChange,
+}: {
+  href: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="text-xs text-slate-400">
+        Export top
+        <input
+          className={`${INPUT_CLASS} mt-1 h-9 w-24`}
+          value={value}
+          inputMode="numeric"
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+      <a className={`${BUTTON_CLASS} h-9`} href={href} target="_blank" rel="noreferrer">
+        <Download className="h-4 w-4" />
+        Export TXT
+      </a>
+    </div>
+  );
+}
+
+function DraggableColumnHeader<Key extends string, Row, Sort extends string>({
+  column,
+  sortKey,
+  sortDir,
+  draggedKey,
+  onSort,
+  onDragStart,
+  onDrop,
+  onDragEnd,
+}: {
+  column: EarningsTableColumn<Key, Row, Sort>;
+  sortKey: Sort;
+  sortDir: "asc" | "desc";
+  draggedKey: Key | null;
+  onSort: (key: Sort) => void;
+  onDragStart: (key: Key) => void;
+  onDrop: (key: Key) => void;
+  onDragEnd: () => void;
+}) {
+  const align = column.align ?? "left";
+  const isDragging = draggedKey === column.key;
+  return (
+    <th
+      className={`px-3 py-3 ${align === "right" ? "text-right" : "text-left"} ${isDragging ? "bg-accent/10" : ""}`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={() => onDrop(column.key)}
+    >
+      <div className={`flex items-center gap-1.5 ${align === "right" ? "justify-end" : "justify-start"}`}>
+        <button
+          type="button"
+          draggable
+          className="inline-flex h-6 w-5 shrink-0 cursor-grab items-center justify-center rounded text-slate-500 transition hover:bg-panelSoft hover:text-slate-200 active:cursor-grabbing"
+          title={`Drag ${column.label} column`}
+          aria-label={`Drag ${column.label} column`}
+          onDragStart={(event) => {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", column.key);
+            onDragStart(column.key);
+          }}
+          onDragEnd={onDragEnd}
+        >
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+        {column.sortKey ? (
+          <button
+            type="button"
+            className={`inline-flex min-w-max items-center gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
+            onClick={() => onSort(column.sortKey as Sort)}
+          >
+            {column.label}
+            {sortKey === column.sortKey ? <span className="text-accent">{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
+          </button>
+        ) : (
+          <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{column.label}</span>
+        )}
+      </div>
+    </th>
+  );
+}
+
 function StatCard({ label, value, helper }: { label: string; value: string; helper: string }) {
   return (
     <div className="rounded border border-borderSoft/70 bg-panelSoft/60 p-4">
@@ -331,6 +604,9 @@ function EarningsSurprisesPanel() {
   const [status, setStatus] = useState<EarningsSurprisesStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
+  const [exportLimit, setExportLimit] = useState(String(EXPORT_LIMIT_DEFAULT));
+  const [columnOrder, setColumnOrder] = usePersistedColumnOrder(SURPRISE_COLUMNS_STORAGE_KEY, DEFAULT_SURPRISE_COLUMN_ORDER);
+  const [draggedColumn, setDraggedColumn] = useState<SurpriseColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
@@ -344,6 +620,10 @@ function EarningsSurprisesPanel() {
   const latestSync = status?.syncs[0] ?? null;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + rows.length, total);
+  const exportUrl = useMemo(
+    () => getEarningsSurprisesExportUrl({ ...query, limit: clampExportLimit(exportLimit), offset: 0 }, exportDateSuffix()),
+    [exportLimit, queryKey],
+  );
 
   const load = async () => {
     setLoading(true);
@@ -419,23 +699,8 @@ function EarningsSurprisesPanel() {
     setQuery((current) => ({ ...current, sort: key, sortDir: nextDir, offset: 0 }));
   };
 
-  const sortButton = (key: SortKey, label: string, align: "left" | "right" = "left") => (
-    <button
-      type="button"
-      className={`inline-flex w-full items-center gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
-      onClick={() => changeSort(key)}
-    >
-      {label}
-      {sortKey === key ? <span className="text-accent">{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
-    </button>
-  );
-
-  const goPage = (direction: "prev" | "next") => {
-    const nextOffset = direction === "prev"
-      ? Math.max(0, offset - limit)
-      : offset + limit;
-    if (direction === "next" && nextOffset >= total) return;
-    setQuery((current) => ({ ...current, offset: nextOffset }));
+  const goPage = (nextOffset: number) => {
+    setQuery((current) => ({ ...current, offset: Math.max(0, nextOffset) }));
   };
 
   const openExpandedChart = (ticker: string) => {
@@ -446,6 +711,114 @@ function EarningsSurprisesPanel() {
   const closeExpandedChart = () => {
     hoverChart.clearPreview();
     setActiveChartTicker(null);
+  };
+
+  const surpriseColumns: Array<EarningsTableColumn<SurpriseColumnKey, EarningsSurpriseRow, SortKey>> = [
+    {
+      key: "reportDate",
+      label: "Report",
+      sortKey: "reportDate",
+      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300",
+      render: (row) => row.reportDate,
+    },
+    {
+      key: "ticker",
+      label: "Ticker",
+      sortKey: "ticker",
+      cellClassName: "whitespace-nowrap px-3 py-3",
+      render: (row) => <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />,
+    },
+    {
+      key: "companyName",
+      label: "Company",
+      sortKey: "companyName",
+      cellClassName: "max-w-[16rem] truncate px-3 py-3 text-slate-200",
+      title: (row) => row.companyName ?? undefined,
+      render: (row) => row.companyName ?? "-",
+    },
+    {
+      key: "season",
+      label: "Season",
+      sortKey: "season",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-slate-300",
+      render: (row) => row.season,
+    },
+    {
+      key: "epsSurprisePct",
+      label: "EPS %",
+      sortKey: "epsSurprisePct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      render: (row) => <span className={pctClass(row.epsSurprisePct)}>{formatPct(row.epsSurprisePct)}</span>,
+    },
+    {
+      key: "epsSurprise",
+      label: "EPS Diff",
+      sortKey: "epsSurprise",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.epsSurprise)}>{formatNumber(row.epsSurprise, 3)}</span>,
+    },
+    {
+      key: "epsActual",
+      label: "Actual",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatNumber(row.epsActual, 3),
+    },
+    {
+      key: "epsEstimate",
+      label: "Estimate",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatNumber(row.epsEstimate, 3),
+    },
+    {
+      key: "revenueSurprisePct",
+      label: "Rev %",
+      sortKey: "revenueSurprisePct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.revenueSurprisePct)}>{formatPct(row.revenueSurprisePct)}</span>,
+    },
+    {
+      key: "marketCap",
+      label: "Market Cap",
+      sortKey: "marketCap",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatCompact(row.marketCap),
+    },
+    {
+      key: "sector",
+      label: "Sector",
+      sortKey: "sector",
+      cellClassName: "max-w-[12rem] truncate px-3 py-3 text-slate-300",
+      title: (row) => row.sector ?? undefined,
+      render: (row) => row.sector ?? "-",
+    },
+    {
+      key: "industry",
+      label: "Industry",
+      sortKey: "industry",
+      cellClassName: "max-w-[14rem] truncate px-3 py-3 text-slate-300",
+      title: (row) => row.industry ?? undefined,
+      render: (row) => row.industry ?? "-",
+    },
+    {
+      key: "exchange",
+      label: "Exchange",
+      sortKey: "exchange",
+      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-400",
+      render: (row) => row.exchange ?? "-",
+    },
+  ];
+  const surpriseColumnsByKey = new Map(surpriseColumns.map((column) => [column.key, column]));
+  const orderedColumns = columnOrder.map((key) => surpriseColumnsByKey.get(key)).filter((column): column is EarningsTableColumn<SurpriseColumnKey, EarningsSurpriseRow, SortKey> => Boolean(column));
+  const dropColumn = (targetKey: SurpriseColumnKey) => {
+    if (!draggedColumn) return;
+    setColumnOrder((current) => moveColumn(current, draggedColumn, targetKey));
+    setDraggedColumn(null);
   };
 
   return (
@@ -585,63 +958,48 @@ function EarningsSurprisesPanel() {
             <h3 className="text-sm font-semibold text-slate-100">Surprise Log</h3>
             <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <button type="button" className={BUTTON_CLASS} disabled={offset <= 0 || loading} onClick={() => goPage("prev")} aria-label="Previous page">
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            <span className="min-w-28 text-center">{pageStart}-{pageEnd} of {formatCompact(total)}</span>
-            <button type="button" className={BUTTON_CLASS} disabled={offset + limit >= total || loading} onClick={() => goPage("next")} aria-label="Next page">
-              <ChevronRight className="h-4 w-4" />
-            </button>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <ExportTickersControl href={exportUrl} value={exportLimit} onChange={setExportLimit} />
+            <ResultsPager loading={loading} limit={limit} offset={offset} total={total} pageStart={pageStart} pageEnd={pageEnd} onPage={goPage} />
           </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[82rem] text-left text-sm">
             <thead className="border-b border-borderSoft/70 bg-panelSoft/35">
               <tr>
-                <th className="px-3 py-3">{sortButton("reportDate", "Report")}</th>
-                <th className="px-3 py-3">{sortButton("ticker", "Ticker")}</th>
-                <th className="px-3 py-3">{sortButton("companyName", "Company")}</th>
-                <th className="px-3 py-3">{sortButton("season", "Season")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("epsSurprisePct", "EPS %", "right")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("epsSurprise", "EPS Diff", "right")}</th>
-                <th className="px-3 py-3 text-right">Actual</th>
-                <th className="px-3 py-3 text-right">Estimate</th>
-                <th className="px-3 py-3 text-right">{sortButton("revenueSurprisePct", "Rev %", "right")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("marketCap", "Market Cap", "right")}</th>
-                <th className="px-3 py-3">{sortButton("sector", "Sector")}</th>
-                <th className="px-3 py-3">{sortButton("industry", "Industry")}</th>
-                <th className="px-3 py-3">{sortButton("exchange", "Exchange")}</th>
+                {orderedColumns.map((column) => (
+                  <DraggableColumnHeader
+                    key={column.key}
+                    column={column}
+                    sortKey={sortKey}
+                    sortDir={sortDir}
+                    draggedKey={draggedColumn}
+                    onSort={changeSort}
+                    onDragStart={setDraggedColumn}
+                    onDrop={dropColumn}
+                    onDragEnd={() => setDraggedColumn(null)}
+                  />
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-borderSoft/60">
               {loading ? (
                 <tr>
-                  <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-400">
+                  <td colSpan={orderedColumns.length} className="px-4 py-10 text-center text-sm text-slate-400">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading earnings surprises...</span>
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-400">No earnings surprise rows match the current filters.</td>
+                  <td colSpan={orderedColumns.length} className="px-4 py-10 text-center text-sm text-slate-400">No earnings surprise rows match the current filters.</td>
                 </tr>
               ) : rows.map((row: EarningsSurpriseRow) => (
                 <tr key={row.id} className="hover:bg-panelSoft/35">
-                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300">{row.reportDate}</td>
-                  <td className="whitespace-nowrap px-3 py-3">
-                    <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />
-                  </td>
-                  <td className="max-w-[16rem] truncate px-3 py-3 text-slate-200" title={row.companyName ?? undefined}>{row.companyName ?? "-"}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-slate-300">{row.season}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono font-semibold ${pctClass(row.epsSurprisePct)}`}>{formatPct(row.epsSurprisePct)}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${pctClass(row.epsSurprise)}`}>{formatNumber(row.epsSurprise, 3)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatNumber(row.epsActual, 3)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatNumber(row.epsEstimate, 3)}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${pctClass(row.revenueSurprisePct)}`}>{formatPct(row.revenueSurprisePct)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatCompact(row.marketCap)}</td>
-                  <td className="max-w-[12rem] truncate px-3 py-3 text-slate-300" title={row.sector ?? undefined}>{row.sector ?? "-"}</td>
-                  <td className="max-w-[14rem] truncate px-3 py-3 text-slate-300" title={row.industry ?? undefined}>{row.industry ?? "-"}</td>
-                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-400">{row.exchange ?? "-"}</td>
+                  {orderedColumns.map((column) => (
+                    <td key={column.key} className={column.cellClassName} title={column.title?.(row)}>
+                      {column.render(row)}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -676,6 +1034,9 @@ function EarningsGapsPanel() {
   const [status, setStatus] = useState<EarningsGapsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
+  const [exportLimit, setExportLimit] = useState(String(EXPORT_LIMIT_DEFAULT));
+  const [columnOrder, setColumnOrder] = usePersistedColumnOrder(GAP_COLUMNS_STORAGE_KEY, DEFAULT_GAP_COLUMN_ORDER);
+  const [draggedColumn, setDraggedColumn] = useState<GapColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
@@ -690,6 +1051,10 @@ function EarningsGapsPanel() {
   const latestScheduledSync = status?.syncs.find((row) => row.scheduledLocalDate) ?? null;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + rows.length, total);
+  const exportUrl = useMemo(
+    () => getEarningsGapsExportUrl({ ...query, limit: clampExportLimit(exportLimit), offset: 0 }, exportDateSuffix()),
+    [exportLimit, queryKey],
+  );
 
   const load = async () => {
     setLoading(true);
@@ -820,23 +1185,8 @@ function EarningsGapsPanel() {
     setQuery((current) => ({ ...current, sort: key, sortDir: nextDir, offset: 0 }));
   };
 
-  const sortButton = (key: GapSortKey, label: string, align: "left" | "right" = "left") => (
-    <button
-      type="button"
-      className={`inline-flex w-full items-center gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
-      onClick={() => changeSort(key)}
-    >
-      {label}
-      {sortKey === key ? <span className="text-accent">{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
-    </button>
-  );
-
-  const goPage = (direction: "prev" | "next") => {
-    const nextOffset = direction === "prev"
-      ? Math.max(0, offset - limit)
-      : offset + limit;
-    if (direction === "next" && nextOffset >= total) return;
-    setQuery((current) => ({ ...current, offset: nextOffset }));
+  const goPage = (nextOffset: number) => {
+    setQuery((current) => ({ ...current, offset: Math.max(0, nextOffset) }));
   };
 
   const openExpandedChart = (ticker: string) => {
@@ -847,6 +1197,136 @@ function EarningsGapsPanel() {
   const closeExpandedChart = () => {
     hoverChart.clearPreview();
     setActiveChartTicker(null);
+  };
+
+  const gapColumns: Array<EarningsTableColumn<GapColumnKey, EarningsGapRow, GapSortKey>> = [
+    {
+      key: "reportDate",
+      label: "Report",
+      sortKey: "reportDate",
+      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300",
+      render: (row) => row.reportDate,
+    },
+    {
+      key: "ticker",
+      label: "Ticker",
+      sortKey: "ticker",
+      cellClassName: "whitespace-nowrap px-3 py-3",
+      render: (row) => <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />,
+    },
+    {
+      key: "companyName",
+      label: "Company",
+      sortKey: "companyName",
+      cellClassName: "max-w-[16rem] truncate px-3 py-3 text-slate-200",
+      title: (row) => row.companyName ?? undefined,
+      render: (row) => row.companyName ?? "-",
+    },
+    {
+      key: "season",
+      label: "Season",
+      sortKey: "season",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-slate-300",
+      render: (row) => row.season,
+    },
+    {
+      key: "gapSource",
+      label: "Source",
+      sortKey: "gapSource",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-slate-300",
+      render: (row) => gapSourceLabel(row.gapSource),
+    },
+    {
+      key: "qualifyingGapPct",
+      label: "Best Gap",
+      sortKey: "qualifyingGapPct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      render: (row) => <span className={pctClass(row.qualifyingGapPct)}>{formatPct(row.qualifyingGapPct)}</span>,
+    },
+    {
+      key: "postmarketGapPct",
+      label: "Post %",
+      sortKey: "postmarketGapPct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.postmarketGapPct)}>{formatPct(row.postmarketGapPct)}</span>,
+    },
+    {
+      key: "postmarketPrice",
+      label: "Post Price",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatNumber(row.postmarketPrice, 2),
+    },
+    {
+      key: "postmarketVolume",
+      label: "Post Vol",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatCompact(row.postmarketVolume),
+    },
+    {
+      key: "regularOpenGapPct",
+      label: "Open %",
+      sortKey: "regularOpenGapPct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.regularOpenGapPct)}>{formatPct(row.regularOpenGapPct)}</span>,
+    },
+    {
+      key: "reactionOpen",
+      label: "Reaction Open",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => row.reactionDate ? `${row.reactionDate} @ ${formatNumber(row.reactionOpen, 2)}` : "-",
+    },
+    {
+      key: "avgDollarVolume30d",
+      label: "$ Volume",
+      sortKey: "avgDollarVolume30d",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatCompact(row.avgDollarVolume30d),
+    },
+    {
+      key: "marketCap",
+      label: "Market Cap",
+      sortKey: "marketCap",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatCompact(row.marketCap),
+    },
+    {
+      key: "sector",
+      label: "Sector",
+      sortKey: "sector",
+      cellClassName: "max-w-[12rem] truncate px-3 py-3 text-slate-300",
+      title: (row) => row.sector ?? undefined,
+      render: (row) => row.sector ?? "-",
+    },
+    {
+      key: "industry",
+      label: "Industry",
+      sortKey: "industry",
+      cellClassName: "max-w-[14rem] truncate px-3 py-3 text-slate-300",
+      title: (row) => row.industry ?? undefined,
+      render: (row) => row.industry ?? "-",
+    },
+    {
+      key: "exchange",
+      label: "Exchange",
+      sortKey: "exchange",
+      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-400",
+      render: (row) => row.exchange ?? "-",
+    },
+  ];
+  const gapColumnsByKey = new Map(gapColumns.map((column) => [column.key, column]));
+  const orderedColumns = columnOrder.map((key) => gapColumnsByKey.get(key)).filter((column): column is EarningsTableColumn<GapColumnKey, EarningsGapRow, GapSortKey> => Boolean(column));
+  const dropColumn = (targetKey: GapColumnKey) => {
+    if (!draggedColumn) return;
+    setColumnOrder((current) => moveColumn(current, draggedColumn, targetKey));
+    setDraggedColumn(null);
   };
 
   return (
@@ -986,69 +1466,48 @@ function EarningsGapsPanel() {
             <h3 className="text-sm font-semibold text-slate-100">Release Gap-Ups</h3>
             <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <button type="button" className={BUTTON_CLASS} disabled={offset <= 0 || loading} onClick={() => goPage("prev")} aria-label="Previous page">
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            <span className="min-w-28 text-center">{pageStart}-{pageEnd} of {formatCompact(total)}</span>
-            <button type="button" className={BUTTON_CLASS} disabled={offset + limit >= total || loading} onClick={() => goPage("next")} aria-label="Next page">
-              <ChevronRight className="h-4 w-4" />
-            </button>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <ExportTickersControl href={exportUrl} value={exportLimit} onChange={setExportLimit} />
+            <ResultsPager loading={loading} limit={limit} offset={offset} total={total} pageStart={pageStart} pageEnd={pageEnd} onPage={goPage} />
           </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[96rem] text-left text-sm">
             <thead className="border-b border-borderSoft/70 bg-panelSoft/35">
               <tr>
-                <th className="px-3 py-3">{sortButton("reportDate", "Report")}</th>
-                <th className="px-3 py-3">{sortButton("ticker", "Ticker")}</th>
-                <th className="px-3 py-3">{sortButton("companyName", "Company")}</th>
-                <th className="px-3 py-3">{sortButton("season", "Season")}</th>
-                <th className="px-3 py-3">{sortButton("gapSource", "Source")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("qualifyingGapPct", "Best Gap", "right")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("postmarketGapPct", "Post %", "right")}</th>
-                <th className="px-3 py-3 text-right">Post Price</th>
-                <th className="px-3 py-3 text-right">Post Vol</th>
-                <th className="px-3 py-3 text-right">{sortButton("regularOpenGapPct", "Open %", "right")}</th>
-                <th className="px-3 py-3 text-right">Reaction Open</th>
-                <th className="px-3 py-3 text-right">{sortButton("avgDollarVolume30d", "$ Volume", "right")}</th>
-                <th className="px-3 py-3 text-right">{sortButton("marketCap", "Market Cap", "right")}</th>
-                <th className="px-3 py-3">{sortButton("sector", "Sector")}</th>
-                <th className="px-3 py-3">{sortButton("industry", "Industry")}</th>
-                <th className="px-3 py-3">{sortButton("exchange", "Exchange")}</th>
+                {orderedColumns.map((column) => (
+                  <DraggableColumnHeader
+                    key={column.key}
+                    column={column}
+                    sortKey={sortKey}
+                    sortDir={sortDir}
+                    draggedKey={draggedColumn}
+                    onSort={changeSort}
+                    onDragStart={setDraggedColumn}
+                    onDrop={dropColumn}
+                    onDragEnd={() => setDraggedColumn(null)}
+                  />
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-borderSoft/60">
               {loading ? (
                 <tr>
-                  <td colSpan={16} className="px-4 py-10 text-center text-sm text-slate-400">
+                  <td colSpan={orderedColumns.length} className="px-4 py-10 text-center text-sm text-slate-400">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading earnings gap-ups...</span>
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={16} className="px-4 py-10 text-center text-sm text-slate-400">No earnings gap-up rows match the current filters.</td>
+                  <td colSpan={orderedColumns.length} className="px-4 py-10 text-center text-sm text-slate-400">No earnings gap-up rows match the current filters.</td>
                 </tr>
               ) : rows.map((row: EarningsGapRow) => (
                 <tr key={row.id} className="hover:bg-panelSoft/35">
-                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300">{row.reportDate}</td>
-                  <td className="whitespace-nowrap px-3 py-3">
-                    <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />
-                  </td>
-                  <td className="max-w-[16rem] truncate px-3 py-3 text-slate-200" title={row.companyName ?? undefined}>{row.companyName ?? "-"}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-slate-300">{row.season}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-slate-300">{gapSourceLabel(row.gapSource)}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono font-semibold ${pctClass(row.qualifyingGapPct)}`}>{formatPct(row.qualifyingGapPct)}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${pctClass(row.postmarketGapPct)}`}>{formatPct(row.postmarketGapPct)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatNumber(row.postmarketPrice, 2)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatCompact(row.postmarketVolume)}</td>
-                  <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${pctClass(row.regularOpenGapPct)}`}>{formatPct(row.regularOpenGapPct)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{row.reactionDate ? `${row.reactionDate} @ ${formatNumber(row.reactionOpen, 2)}` : "-"}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatCompact(row.avgDollarVolume30d)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300">{formatCompact(row.marketCap)}</td>
-                  <td className="max-w-[12rem] truncate px-3 py-3 text-slate-300" title={row.sector ?? undefined}>{row.sector ?? "-"}</td>
-                  <td className="max-w-[14rem] truncate px-3 py-3 text-slate-300" title={row.industry ?? undefined}>{row.industry ?? "-"}</td>
-                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-400">{row.exchange ?? "-"}</td>
+                  {orderedColumns.map((column) => (
+                    <td key={column.key} className={column.cellClassName} title={column.title?.(row)}>
+                      {column.render(row)}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>

@@ -12,6 +12,7 @@ const TV_MAX_PROVIDER_ROWS = 10_000;
 const SYNC_BATCH_SIZE = 80;
 const DEFAULT_QUERY_LIMIT = 100;
 const MAX_QUERY_LIMIT = 250;
+const EXPORT_MAX_LIMIT = 1000;
 const DAILY_SCAN_MINUTES_ET = 20 * 60;
 
 type EarningsGapSyncMode = "incremental" | "backfill";
@@ -1009,6 +1010,22 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
     rows: (rows.results ?? []).map(mapRow),
     facets: { seasons, sectors, industries, exchanges, gapSources },
   };
+}
+
+export async function exportEarningsGapTickers(env: Env, query: EarningsGapsQuery = {}): Promise<string[]> {
+  if (await earningsGapSchemaWarning(env)) return [];
+  const limit = Math.max(1, Math.min(EXPORT_MAX_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
+  const sortDir = query.sortDir === "asc" ? "asc" : "desc";
+  const { sql: whereSql, args } = buildWhereClause(query);
+  const rows = await env.DB.prepare(
+    `SELECT ticker
+     FROM earnings_gap_events
+     ${whereSql}
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     LIMIT ?`,
+  ).bind(...args, limit).all<{ ticker: string }>();
+  return (rows.results ?? []).map((row) => String(row.ticker ?? "").trim()).filter(Boolean);
 }
 
 export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStatus> {

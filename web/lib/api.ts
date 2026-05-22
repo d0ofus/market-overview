@@ -2163,6 +2163,26 @@ export function getEarningsSurprises(query?: EarningsSurprisesQuery) {
   }));
 }
 
+export function getEarningsSurprisesExportUrl(query?: EarningsSurprisesQuery, dateSuffix?: string | null) {
+  return apiUrl(appendQuery("/api/earnings/surprises/export.txt", {
+    limit: query?.limit,
+    q: query?.q,
+    season: query?.season,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
+    surpriseSide: query?.surpriseSide,
+    sort: query?.sort,
+    sortDir: query?.sortDir,
+    dateSuffix: dateSuffix ?? undefined,
+  }));
+}
+
 export function getEarningsSurprisesStatus() {
   return getJson<EarningsSurprisesStatus>("/api/earnings/surprises/status");
 }
@@ -2192,6 +2212,27 @@ export function getEarningsGaps(query?: EarningsGapsQuery) {
     includeOtc: query?.includeOtc ? 1 : undefined,
     sort: query?.sort,
     sortDir: query?.sortDir,
+  }));
+}
+
+export function getEarningsGapsExportUrl(query?: EarningsGapsQuery, dateSuffix?: string | null) {
+  return apiUrl(appendQuery("/api/earnings/gaps/export.txt", {
+    limit: query?.limit,
+    q: query?.q,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    season: query?.season,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    minAvgDollarVolume: query?.minAvgDollarVolume,
+    minGapPct: query?.minGapPct,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
+    sort: query?.sort,
+    sortDir: query?.sortDir,
+    dateSuffix: dateSuffix ?? undefined,
   }));
 }
 

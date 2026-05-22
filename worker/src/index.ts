@@ -126,6 +126,7 @@ import {
   syncEarningsCalendarFromProviders,
 } from "./earnings-calendar-service";
 import {
+  exportEarningsSurpriseTickers,
   loadEarningsSurprisesStatus,
   maybeRunScheduledEarningsSurpriseSync,
   queryEarningsSurprises,
@@ -133,6 +134,7 @@ import {
   type EarningsSurprisesQuery,
 } from "./earnings-surprise-service";
 import {
+  exportEarningsGapTickers,
   loadEarningsGapsStatus,
   maybeRunScheduledEarningsGapSync,
   queryEarningsGaps,
@@ -437,6 +439,14 @@ function readEarningsGapsQuery(req: Request): EarningsGapsQuery {
     sort: url.searchParams.get("sort"),
     sortDir,
   };
+}
+
+function formatDayMonthExportSuffix(rawValue: string | null | undefined): string {
+  const value = String(rawValue ?? "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value.slice(8, 10)}_${value.slice(5, 7)}`;
+  if (/^\d{2}_\d{2}$/.test(value)) return value;
+  const fallback = new Date().toISOString();
+  return `${fallback.slice(8, 10)}_${fallback.slice(5, 7)}`;
 }
 
 async function refreshSnapshotSafe(env: Env): Promise<void> {
@@ -2377,6 +2387,22 @@ app.get("/api/earnings/surprises", async (c) => {
   }
 });
 
+app.get("/api/earnings/surprises/export.txt", async (c) => {
+  try {
+    const tickers = await exportEarningsSurpriseTickers(c.env, {
+      ...readEarningsSurprisesQuery(c.req.raw),
+      offset: 0,
+    });
+    const dateSuffix = formatDayMonthExportSuffix(c.req.query("dateSuffix"));
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Content-Disposition", `attachment; filename="Earnings_Surprise_${dateSuffix}.txt"`);
+    return c.body(tickers.join("\n"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to export earnings surprise tickers.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/earnings/surprises/status", async (c) => {
   try {
     return c.json(await loadEarningsSurprisesStatus(c.env));
@@ -2391,6 +2417,22 @@ app.get("/api/earnings/gaps", async (c) => {
     return c.json(await queryEarningsGaps(c.env, readEarningsGapsQuery(c.req.raw)));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load earnings gap-ups.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/earnings/gaps/export.txt", async (c) => {
+  try {
+    const tickers = await exportEarningsGapTickers(c.env, {
+      ...readEarningsGapsQuery(c.req.raw),
+      offset: 0,
+    });
+    const dateSuffix = formatDayMonthExportSuffix(c.req.query("dateSuffix"));
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Content-Disposition", `attachment; filename="Earnings_GapUp_${dateSuffix}.txt"`);
+    return c.body(tickers.join("\n"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to export earnings gap-up tickers.";
     return c.json({ error: message }, 500);
   }
 });

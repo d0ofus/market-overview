@@ -65,6 +65,41 @@ function createMissingGapSeasonEnv(): Env {
   };
 }
 
+function createExportEnv(): Env {
+  return {
+    ADMIN_SECRET: "secret",
+    DB: {
+      prepare(sql: string) {
+        const statement = {
+          async first<T>() {
+            if (sql.includes("sqlite_master")) return { count: 1 } as T;
+            if (sql.includes("pragma_table_info")) return { count: 1 } as T;
+            return null as T;
+          },
+          async all<T>() {
+            if (sql.includes("SELECT ticker")) {
+              return { results: [{ ticker: "AAA" }, { ticker: "BBB" }] as T[] };
+            }
+            return { results: [] as T[] };
+          },
+          async run() {
+            return {};
+          },
+        };
+        return {
+          bind() {
+            return statement;
+          },
+          ...statement,
+        };
+      },
+      async batch() {
+        return [];
+      },
+    } as unknown as D1Database,
+  };
+}
+
 describe("earnings surprise API", () => {
   it("returns a schema warning from the public list endpoint before migration", async () => {
     const res = await worker.fetch(
@@ -116,6 +151,32 @@ describe("earnings surprise API", () => {
     expect(res.status).toBe(200);
     expect(json.schemaReady).toBe(false);
     expect(json.warning).toContain("0054_earnings_gap_season.sql");
+  });
+
+  it("exports surprise tickers as TXT with the requested day-month filename", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/earnings/surprises/export.txt?limit=2&dateSuffix=2026-05-22"),
+      createExportEnv(),
+      {} as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/plain");
+    expect(res.headers.get("Content-Disposition")).toContain("Earnings_Surprise_22_05.txt");
+    expect(await res.text()).toBe("AAA\nBBB");
+  });
+
+  it("exports gap tickers as TXT with the requested day-month filename", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/earnings/gaps/export.txt?limit=2&dateSuffix=2026-05-22"),
+      createExportEnv(),
+      {} as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/plain");
+    expect(res.headers.get("Content-Disposition")).toContain("Earnings_GapUp_22_05.txt");
+    expect(await res.text()).toBe("AAA\nBBB");
   });
 
   it("protects the admin gap sync endpoint", async () => {
