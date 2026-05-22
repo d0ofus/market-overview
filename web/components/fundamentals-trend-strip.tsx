@@ -109,19 +109,21 @@ function TrendMetricPanel({
   const formattedValue = formatPct(value);
   return (
     <div
-      className={`min-w-[8.75rem] rounded border px-2 py-1.5 ${trendPanelClasses(direction)}`}
+      className={`grid min-h-20 min-w-[8.75rem] grid-cols-[4.75rem,minmax(0,1fr)] items-center gap-2 rounded border px-2 py-2 ${trendPanelClasses(direction)}`}
       title={`${label} YoY momentum: ${direction}, latest ${formattedValue}`}
     >
-      <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+      <div className="flex min-w-0 flex-col justify-center gap-1">
+        <span className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
           {label}
         </span>
-        <span className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${trendClasses(direction)}`}>
+        <span className={`inline-flex w-fit max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${trendClasses(direction)}`}>
           <TrendIcon direction={direction} />
-          <span className="font-mono">{formattedValue}</span>
+          <span className="truncate font-mono">{formattedValue}</span>
         </span>
       </div>
-      <MiniBarChart values={values} color={color} negativeColor={negativeColor} />
+      <div className="min-w-0">
+        <MiniBarChart values={values} color={color} negativeColor={negativeColor} />
+      </div>
     </div>
   );
 }
