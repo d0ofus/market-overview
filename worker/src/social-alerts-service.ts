@@ -16,6 +16,9 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_DAILY_SCRAPE_TIME_LOCAL = "10:00";
 const DEFAULT_DAILY_SCRAPE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS = 1;
+const DEFAULT_SCRAPE_INTERVAL_HOURS = 6;
+const VALID_SCRAPE_INTERVAL_HOURS = [1, 2, 3, 4, 6, 8, 12, 24] as const;
+const MINUTES_PER_DAY = 24 * 60;
 const MAX_LOG_QUERY_ROWS = 5_000;
 
 export type SocialAlertHealthStatus =
@@ -72,6 +75,7 @@ export type SocialAlertSettings = {
   dailyScrapeTimeLocal: string;
   dailyScrapeTimezone: string;
   dailyScrapeLookbackDays: number;
+  scrapeIntervalHours: number;
   updatedAt: string;
 };
 
@@ -154,6 +158,10 @@ const settingsPatchSchema = z.object({
   dailyScrapeTimeLocal: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
   dailyScrapeTimezone: z.string().trim().min(1).max(80),
   dailyScrapeLookbackDays: z.number().int().min(1).max(DEFAULT_LOG_RETENTION_DAYS),
+  scrapeIntervalHours: z.number().int().refine(
+    (value) => VALID_SCRAPE_INTERVAL_HOURS.includes(value as typeof VALID_SCRAPE_INTERVAL_HOURS[number]),
+    "Scrape interval must divide 24 hours.",
+  ).optional().default(DEFAULT_SCRAPE_INTERVAL_HOURS),
 });
 
 export function validateSocialAlertScrapePayload(body: unknown): z.infer<typeof scrapeSchema> {
@@ -199,6 +207,13 @@ function normalizeStatus(value: string | null | undefined): SocialAlertHealthSta
   if (text.includes("rate")) return "rate_limited";
   if (text.includes("expired") || text.includes("unauthorized") || text.includes("forbidden")) return "expired";
   return "error";
+}
+
+function normalizeScrapeIntervalHours(value: number | null | undefined): number {
+  const interval = Number(value ?? DEFAULT_SCRAPE_INTERVAL_HOURS);
+  return VALID_SCRAPE_INTERVAL_HOURS.includes(interval as typeof VALID_SCRAPE_INTERVAL_HOURS[number])
+    ? interval
+    : DEFAULT_SCRAPE_INTERVAL_HOURS;
 }
 
 export function normalizeSocialHandle(raw: string): string {
@@ -318,6 +333,11 @@ function isMissingTableError(error: unknown): boolean {
   return message.toLowerCase().includes("no such table");
 }
 
+function isMissingColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.toLowerCase().includes("no such column");
+}
+
 async function callScweetService(
   env: Env,
   payload: Record<string, unknown>,
@@ -426,6 +446,7 @@ function mapSettingsRow(row: {
   dailyScrapeTimeLocal: string | null;
   dailyScrapeTimezone: string | null;
   dailyScrapeLookbackDays: number | null;
+  scrapeIntervalHours?: number | null;
   updatedAt: string | null;
 } | null): SocialAlertSettings {
   return {
@@ -434,18 +455,30 @@ function mapSettingsRow(row: {
     dailyScrapeTimeLocal: row?.dailyScrapeTimeLocal ?? DEFAULT_DAILY_SCRAPE_TIME_LOCAL,
     dailyScrapeTimezone: row?.dailyScrapeTimezone ?? DEFAULT_DAILY_SCRAPE_TIMEZONE,
     dailyScrapeLookbackDays: Math.max(1, Math.min(DEFAULT_LOG_RETENTION_DAYS, Number(row?.dailyScrapeLookbackDays ?? DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS))),
+    scrapeIntervalHours: normalizeScrapeIntervalHours(row?.scrapeIntervalHours),
     updatedAt: row?.updatedAt ?? nowIso(),
   };
 }
 
 async function ensureSocialAlertSettingsRow(env: Env): Promise<void> {
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO social_alert_settings
-      (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
-     VALUES (?, 0, ?, ?, ?, CURRENT_TIMESTAMP)`,
-  )
-    .bind(DEFAULT_SETTINGS_ID, DEFAULT_DAILY_SCRAPE_TIME_LOCAL, DEFAULT_DAILY_SCRAPE_TIMEZONE, DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS)
-    .run();
+  try {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO social_alert_settings
+        (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, scrape_interval_hours, updated_at)
+       VALUES (?, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+    )
+      .bind(DEFAULT_SETTINGS_ID, DEFAULT_DAILY_SCRAPE_TIME_LOCAL, DEFAULT_DAILY_SCRAPE_TIMEZONE, DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS, DEFAULT_SCRAPE_INTERVAL_HOURS)
+      .run();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO social_alert_settings
+        (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
+       VALUES (?, 0, ?, ?, ?, CURRENT_TIMESTAMP)`,
+    )
+      .bind(DEFAULT_SETTINGS_ID, DEFAULT_DAILY_SCRAPE_TIME_LOCAL, DEFAULT_DAILY_SCRAPE_TIMEZONE, DEFAULT_DAILY_SCRAPE_LOOKBACK_DAYS)
+      .run();
+  }
 }
 
 export async function getSocialAlertSettings(env: Env): Promise<SocialAlertSettings> {
@@ -458,6 +491,7 @@ export async function getSocialAlertSettings(env: Env): Promise<SocialAlertSetti
          daily_scrape_time_local as dailyScrapeTimeLocal,
          daily_scrape_timezone as dailyScrapeTimezone,
          daily_scrape_lookback_days as dailyScrapeLookbackDays,
+         scrape_interval_hours as scrapeIntervalHours,
          updated_at as updatedAt
        FROM social_alert_settings
        WHERE id = ?
@@ -470,11 +504,36 @@ export async function getSocialAlertSettings(env: Env): Promise<SocialAlertSetti
         dailyScrapeTimeLocal: string | null;
         dailyScrapeTimezone: string | null;
         dailyScrapeLookbackDays: number | null;
+        scrapeIntervalHours: number | null;
         updatedAt: string | null;
       }>();
     return mapSettingsRow(row ?? null);
   } catch (error) {
     if (isMissingTableError(error)) return mapSettingsRow(null);
+    if (isMissingColumnError(error)) {
+      const row = await env.DB.prepare(
+        `SELECT
+           id,
+           daily_scrape_enabled as dailyScrapeEnabled,
+           daily_scrape_time_local as dailyScrapeTimeLocal,
+           daily_scrape_timezone as dailyScrapeTimezone,
+           daily_scrape_lookback_days as dailyScrapeLookbackDays,
+           updated_at as updatedAt
+         FROM social_alert_settings
+         WHERE id = ?
+         LIMIT 1`,
+      )
+        .bind(DEFAULT_SETTINGS_ID)
+        .first<{
+          id: string;
+          dailyScrapeEnabled: number | null;
+          dailyScrapeTimeLocal: string | null;
+          dailyScrapeTimezone: string | null;
+          dailyScrapeLookbackDays: number | null;
+          updatedAt: string | null;
+        }>();
+      return mapSettingsRow(row ?? null);
+    }
     throw error;
   }
 }
@@ -482,25 +541,50 @@ export async function getSocialAlertSettings(env: Env): Promise<SocialAlertSetti
 export async function updateSocialAlertSettings(env: Env, body: unknown): Promise<{ ok: true; settings: SocialAlertSettings }> {
   const payload = settingsPatchSchema.parse(body);
   await ensureSocialAlertSettingsRow(env);
-  await env.DB.prepare(
-    `INSERT INTO social_alert_settings
-      (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(id) DO UPDATE SET
-       daily_scrape_enabled = excluded.daily_scrape_enabled,
-       daily_scrape_time_local = excluded.daily_scrape_time_local,
-       daily_scrape_timezone = excluded.daily_scrape_timezone,
-       daily_scrape_lookback_days = excluded.daily_scrape_lookback_days,
-       updated_at = CURRENT_TIMESTAMP`,
-  )
-    .bind(
-      DEFAULT_SETTINGS_ID,
-      payload.dailyScrapeEnabled ? 1 : 0,
-      payload.dailyScrapeTimeLocal,
-      payload.dailyScrapeTimezone,
-      payload.dailyScrapeLookbackDays,
+  try {
+    await env.DB.prepare(
+      `INSERT INTO social_alert_settings
+        (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, scrape_interval_hours, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET
+         daily_scrape_enabled = excluded.daily_scrape_enabled,
+         daily_scrape_time_local = excluded.daily_scrape_time_local,
+         daily_scrape_timezone = excluded.daily_scrape_timezone,
+         daily_scrape_lookback_days = excluded.daily_scrape_lookback_days,
+         scrape_interval_hours = excluded.scrape_interval_hours,
+         updated_at = CURRENT_TIMESTAMP`,
     )
-    .run();
+      .bind(
+        DEFAULT_SETTINGS_ID,
+        payload.dailyScrapeEnabled ? 1 : 0,
+        payload.dailyScrapeTimeLocal,
+        payload.dailyScrapeTimezone,
+        payload.dailyScrapeLookbackDays,
+        payload.scrapeIntervalHours,
+      )
+      .run();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    await env.DB.prepare(
+      `INSERT INTO social_alert_settings
+        (id, daily_scrape_enabled, daily_scrape_time_local, daily_scrape_timezone, daily_scrape_lookback_days, updated_at)
+       VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET
+         daily_scrape_enabled = excluded.daily_scrape_enabled,
+         daily_scrape_time_local = excluded.daily_scrape_time_local,
+         daily_scrape_timezone = excluded.daily_scrape_timezone,
+         daily_scrape_lookback_days = excluded.daily_scrape_lookback_days,
+         updated_at = CURRENT_TIMESTAMP`,
+    )
+      .bind(
+        DEFAULT_SETTINGS_ID,
+        payload.dailyScrapeEnabled ? 1 : 0,
+        payload.dailyScrapeTimeLocal,
+        payload.dailyScrapeTimezone,
+        payload.dailyScrapeLookbackDays,
+      )
+      .run();
+  }
   return { ok: true, settings: await getSocialAlertSettings(env) };
 }
 
@@ -747,7 +831,7 @@ export async function runSocialAlertScrape(env: Env, body: unknown): Promise<{
 export async function runSocialAlertScrape(
   env: Env,
   body: unknown,
-  options?: { trigger?: "manual" | "scheduled"; scheduledLocalDate?: string | null },
+  options?: { trigger?: "manual" | "scheduled"; scheduledLocalDate?: string | null; scheduledLocalSlot?: string | null },
 ): Promise<{
   ok: boolean;
   run: { id: string; status: string; startDate: string; limitPerHandle: number };
@@ -761,11 +845,21 @@ export async function runSocialAlertScrape(
   const runId = crypto.randomUUID();
   const trigger = options?.trigger ?? "manual";
   const scheduledLocalDate = trigger === "scheduled" ? options?.scheduledLocalDate ?? null : null;
-  await env.DB.prepare(
-    "INSERT INTO social_alert_runs (id, status, start_date, limit_per_handle, selected_handles_json, \"trigger\", scheduled_local_date, started_at, created_at) VALUES (?, 'running', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-  )
-    .bind(runId, payload.startDate, payload.limitPerHandle, JSON.stringify(handles.map((row) => row.handle)), trigger, scheduledLocalDate)
-    .run();
+  const scheduledLocalSlot = trigger === "scheduled" ? options?.scheduledLocalSlot ?? null : null;
+  try {
+    await env.DB.prepare(
+      "INSERT INTO social_alert_runs (id, status, start_date, limit_per_handle, selected_handles_json, \"trigger\", scheduled_local_date, scheduled_local_slot, started_at, created_at) VALUES (?, 'running', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    )
+      .bind(runId, payload.startDate, payload.limitPerHandle, JSON.stringify(handles.map((row) => row.handle)), trigger, scheduledLocalDate, scheduledLocalSlot)
+      .run();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    await env.DB.prepare(
+      "INSERT INTO social_alert_runs (id, status, start_date, limit_per_handle, selected_handles_json, \"trigger\", scheduled_local_date, started_at, created_at) VALUES (?, 'running', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    )
+      .bind(runId, payload.startDate, payload.limitPerHandle, JSON.stringify(handles.map((row) => row.handle)), trigger, scheduledLocalDate)
+      .run();
+  }
 
   try {
     const credential = await loadCredential(env);
@@ -957,17 +1051,37 @@ type SocialAlertRunRecord = {
   runtimeMs: number | null;
   trigger?: string | null;
   scheduledLocalDate?: string | null;
+  scheduledLocalSlot?: string | null;
   createdAt: string;
   completedAt: string | null;
 };
 
 async function loadSocialAlertRunRecord(env: Env, runId?: string | null): Promise<SocialAlertRunRecord | null> {
-  const selectRun =
-    "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson, error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs, \"trigger\" as trigger, scheduled_local_date as scheduledLocalDate, created_at as createdAt, completed_at as completedAt FROM social_alert_runs";
-  if (runId) {
-    return await env.DB.prepare(`${selectRun} WHERE id = ? LIMIT 1`).bind(runId).first<SocialAlertRunRecord>();
+  const selectRun = [
+    "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson,",
+    "error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs,",
+    "\"trigger\" as trigger, scheduled_local_date as scheduledLocalDate, scheduled_local_slot as scheduledLocalSlot,",
+    "created_at as createdAt, completed_at as completedAt FROM social_alert_runs",
+  ].join(" ");
+  const legacySelectRun = [
+    "SELECT id, status, start_date as startDate, limit_per_handle as limitPerHandle, selected_handles_json as selectedHandlesJson,",
+    "error, tweets, cashtag_hits as cashtagHits, unique_tickers as uniqueTickers, failures, runtime_ms as runtimeMs,",
+    "\"trigger\" as trigger, scheduled_local_date as scheduledLocalDate,",
+    "created_at as createdAt, completed_at as completedAt FROM social_alert_runs",
+  ].join(" ");
+  const suffix = runId ? " WHERE id = ? LIMIT 1" : " ORDER BY datetime(created_at) DESC LIMIT 1";
+  try {
+    if (runId) {
+      return await env.DB.prepare(`${selectRun}${suffix}`).bind(runId).first<SocialAlertRunRecord>();
+    }
+    return await env.DB.prepare(`${selectRun}${suffix}`).first<SocialAlertRunRecord>();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    if (runId) {
+      return await env.DB.prepare(`${legacySelectRun}${suffix}`).bind(runId).first<SocialAlertRunRecord>();
+    }
+    return await env.DB.prepare(`${legacySelectRun}${suffix}`).first<SocialAlertRunRecord>();
   }
-  return await env.DB.prepare(`${selectRun} ORDER BY datetime(created_at) DESC LIMIT 1`).first<SocialAlertRunRecord>();
 }
 
 export async function getSocialAlertResults(env: Env, query: {
@@ -992,6 +1106,7 @@ export async function getSocialAlertResults(env: Env, query: {
     completedAt: string | null;
     trigger?: string | null;
     scheduledLocalDate?: string | null;
+    scheduledLocalSlot?: string | null;
   } | null;
   metrics: SocialAlertMetrics;
   rows: SocialAlertResultRow[];
@@ -1073,6 +1188,7 @@ export async function getSocialAlertResults(env: Env, query: {
       completedAt: run.completedAt ?? null,
       trigger: run.trigger ?? "manual",
       scheduledLocalDate: run.scheduledLocalDate ?? null,
+      scheduledLocalSlot: run.scheduledLocalSlot ?? null,
     } : null,
     metrics: {
       ...metrics,
@@ -1121,26 +1237,58 @@ export async function cleanupOldSocialAlertData(env: Env, retentionDays = DEFAUL
   };
 }
 
-export function shouldRunScheduledSocialAlertScrape(now: Date, settings: SocialAlertSettings): { shouldRun: boolean; localDate: string } {
+function formatLocalSlotTime(minutesOfDay: number): string {
+  const hour = Math.floor(minutesOfDay / 60);
+  const minute = minutesOfDay % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function scheduledSlotMinutes(targetMinutes: number, intervalHours: number): number[] {
+  const intervalMinutes = normalizeScrapeIntervalHours(intervalHours) * 60;
+  const slots: number[] = [];
+  for (let offset = 0; offset < MINUTES_PER_DAY; offset += intervalMinutes) {
+    slots.push((targetMinutes + offset) % MINUTES_PER_DAY);
+  }
+  return slots.sort((left, right) => left - right);
+}
+
+export function shouldRunScheduledSocialAlertScrape(now: Date, settings: SocialAlertSettings): { shouldRun: boolean; localDate: string; scheduledLocalSlot: string | null } {
+  const timezone = settings.dailyScrapeTimezone || DEFAULT_DAILY_SCRAPE_TIMEZONE;
   if (!settings.dailyScrapeEnabled) {
-    return { shouldRun: false, localDate: zonedParts(now, settings.dailyScrapeTimezone).localDate };
+    return { shouldRun: false, localDate: zonedParts(now, timezone).localDate, scheduledLocalSlot: null };
   }
   const target = parseLocalTime(settings.dailyScrapeTimeLocal) ?? { hour: 10, minute: 0 };
-  const local = zonedParts(now, settings.dailyScrapeTimezone || DEFAULT_DAILY_SCRAPE_TIMEZONE);
+  const local = zonedParts(now, timezone);
   const targetMinutes = target.hour * 60 + target.minute;
+  const slots = scheduledSlotMinutes(targetMinutes, settings.scrapeIntervalHours);
+  const currentDaySlot = [...slots].reverse().find((slot) => slot <= local.minutesOfDay);
+  const slotDate = currentDaySlot == null ? addDaysIso(local.localDate, -1) : local.localDate;
+  const slotMinutes = currentDaySlot ?? slots[slots.length - 1] ?? targetMinutes;
+  const scheduledLocalSlot = `${slotDate}T${formatLocalSlotTime(slotMinutes)}`;
   return {
-    shouldRun: local.minutesOfDay >= targetMinutes,
-    localDate: local.localDate,
+    shouldRun: true,
+    localDate: slotDate,
+    scheduledLocalSlot,
   };
 }
 
-async function hasScheduledSocialAlertRunForDate(env: Env, localDate: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_date = ? LIMIT 1",
-  )
-    .bind(localDate)
-    .first<{ id: string }>();
-  return Boolean(row?.id);
+async function hasScheduledSocialAlertRunForSlot(env: Env, localDate: string, scheduledLocalSlot: string): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_slot = ? LIMIT 1",
+    )
+      .bind(scheduledLocalSlot)
+      .first<{ id: string }>();
+    return Boolean(row?.id);
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    const row = await env.DB.prepare(
+      "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_date = ? LIMIT 1",
+    )
+      .bind(localDate)
+      .first<{ id: string }>();
+    return Boolean(row?.id);
+  }
 }
 
 export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Date()): Promise<{
@@ -1148,12 +1296,15 @@ export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Dat
   reason?: string;
   runId?: string;
   localDate?: string;
+  scheduledLocalSlot?: string | null;
 }> {
   const settings = await getSocialAlertSettings(env);
   const decision = shouldRunScheduledSocialAlertScrape(now, settings);
-  if (!decision.shouldRun) return { skipped: true, reason: "not_due", localDate: decision.localDate };
-  if (await hasScheduledSocialAlertRunForDate(env, decision.localDate)) {
-    return { skipped: true, reason: "already_ran", localDate: decision.localDate };
+  if (!decision.shouldRun || !decision.scheduledLocalSlot) {
+    return { skipped: true, reason: "not_due", localDate: decision.localDate, scheduledLocalSlot: decision.scheduledLocalSlot };
+  }
+  if (await hasScheduledSocialAlertRunForSlot(env, decision.localDate, decision.scheduledLocalSlot)) {
+    return { skipped: true, reason: "already_ran", localDate: decision.localDate, scheduledLocalSlot: decision.scheduledLocalSlot };
   }
   const startDate = addDaysIso(decision.localDate, -settings.dailyScrapeLookbackDays);
   const result = await runSocialAlertScrape(env, {
@@ -1163,10 +1314,12 @@ export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Dat
   }, {
     trigger: "scheduled",
     scheduledLocalDate: decision.localDate,
+    scheduledLocalSlot: decision.scheduledLocalSlot,
   });
   return {
     skipped: false,
     runId: result.run.id,
     localDate: decision.localDate,
+    scheduledLocalSlot: decision.scheduledLocalSlot,
   };
 }

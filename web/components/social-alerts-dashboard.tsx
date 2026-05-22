@@ -27,6 +27,7 @@ import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 
 const SCRAPE_PRESETS = [1, 3, 7, 14, 30] as const;
+const SCRAPE_INTERVAL_PRESETS = [1, 2, 3, 4, 6, 8, 12, 24] as const;
 const LOG_PRESETS = [1, 3, 7, 10] as const;
 const DEFAULT_LIMIT_PER_HANDLE = 50;
 const MAX_LIMIT_PER_HANDLE = 500;
@@ -55,6 +56,7 @@ const DEFAULT_SETTINGS: SocialAlertSettings = {
   dailyScrapeTimeLocal: "10:00",
   dailyScrapeTimezone: "Australia/Melbourne",
   dailyScrapeLookbackDays: 1,
+  scrapeIntervalHours: 6,
   updatedAt: "",
 };
 
@@ -354,6 +356,7 @@ export function SocialAlertsDashboard() {
         dailyScrapeTimeLocal: settings.dailyScrapeTimeLocal,
         dailyScrapeTimezone: settings.dailyScrapeTimezone,
         dailyScrapeLookbackDays: settings.dailyScrapeLookbackDays,
+        scrapeIntervalHours: settings.scrapeIntervalHours,
       });
       setSettings(res.settings);
       setMessage({ tone: "success", text: "Saved Social Alerts schedule settings." });
@@ -576,7 +579,7 @@ export function SocialAlertsDashboard() {
           <div>
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-accent" />
-              <h3 className="text-sm font-semibold text-slate-100">Daily 1D Scweet Scrape</h3>
+              <h3 className="text-sm font-semibold text-slate-100">Scheduled Scweet Scrape</h3>
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-[auto,1fr]">
               <label className="flex items-center gap-2 rounded-lg border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-sm text-slate-300">
@@ -587,14 +590,19 @@ export function SocialAlertsDashboard() {
                 />
                 Enabled
               </label>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-4">
                 <input className={INPUT_CLASS} type="time" value={settings.dailyScrapeTimeLocal} onChange={(event) => setSettings((current) => ({ ...current, dailyScrapeTimeLocal: event.target.value }))} />
                 <input className={INPUT_CLASS} value={settings.dailyScrapeTimezone} onChange={(event) => setSettings((current) => ({ ...current, dailyScrapeTimezone: event.target.value }))} />
+                <select className={INPUT_CLASS} value={settings.scrapeIntervalHours} onChange={(event) => setSettings((current) => ({ ...current, scrapeIntervalHours: Number(event.target.value) || 6 }))}>
+                  {SCRAPE_INTERVAL_PRESETS.map((hours) => (
+                    <option key={hours} value={hours}>Every {hours} hour{hours === 1 ? "" : "s"}</option>
+                  ))}
+                </select>
                 <input className={INPUT_CLASS} type="number" min={1} max={10} value={settings.dailyScrapeLookbackDays} onChange={(event) => setSettings((current) => ({ ...current, dailyScrapeLookbackDays: Math.max(1, Math.min(10, Number(event.target.value) || 1)) }))} />
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-              <span>Scope: all active handles, capped at {MAX_HANDLES_PER_RUN}. Default remains off until saved enabled.</span>
+              <span>Scope: all active handles, capped at {MAX_HANDLES_PER_RUN}. Cadence starts at {settings.dailyScrapeTimeLocal} {settings.dailyScrapeTimezone}.</span>
               <button className={PRIMARY_BUTTON_CLASS} disabled={savingSettings} onClick={() => void saveScheduleSettings()} type="button">
                 {savingSettings ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Clock className="h-3.5 w-3.5" />}
                 Save Schedule

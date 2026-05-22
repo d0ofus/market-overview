@@ -142,6 +142,7 @@ export type SocialAlertSettings = {
   dailyScrapeTimeLocal: string;
   dailyScrapeTimezone: string;
   dailyScrapeLookbackDays: number;
+  scrapeIntervalHours: number;
   updatedAt: string;
 };
 
@@ -174,6 +175,7 @@ export type SocialAlertRunSummary = {
   completedAt: string | null;
   trigger?: string | null;
   scheduledLocalDate?: string | null;
+  scheduledLocalSlot?: string | null;
 };
 
 export type SocialAlertHealthResponse = {
