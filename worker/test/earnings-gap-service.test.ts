@@ -4,6 +4,7 @@ import {
   computeEarningsGapEvents,
   maybeRunScheduledEarningsGapSync,
   parseTradingViewEarningsGapRows,
+  queryEarningsGaps,
   syncEarningsGaps,
   type EarningsGapEventInput,
   type EarningsGapReleaseInput,
@@ -86,6 +87,7 @@ function release(input: Partial<EarningsGapReleaseInput> & { ticker: string; rep
     avgVolume30d: input.avgVolume30d ?? 500_000,
     avgDollarVolume30d: input.avgDollarVolume30d ?? 50_000_000,
     reportDate: input.reportDate,
+    season: input.season ?? `${input.reportDate.slice(0, 4)} Q${Math.ceil(Number(input.reportDate.slice(5, 7)) / 3)}`,
     reportTimestamp: input.reportTimestamp ?? null,
     reportTime: input.reportTime ?? "after-market",
     postmarketPrice: input.postmarketPrice ?? null,
@@ -94,15 +96,76 @@ function release(input: Partial<EarningsGapReleaseInput> & { ticker: string; rep
   };
 }
 
-function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): Env & {
+function storedEvent(input: Partial<EarningsGapEventInput> & { ticker: string; reportDate: string; qualifyingGapPct?: number }): StoredEvent {
+  const base = release(input);
+  return {
+    id: `id-${input.ticker}-${input.reportDate}`,
+    ...base,
+    reactionDate: input.reactionDate ?? input.reportDate,
+    previousClose: input.previousClose ?? 100,
+    reactionOpen: input.reactionOpen ?? 110,
+    regularOpenGapPct: input.regularOpenGapPct ?? 10,
+    postmarketGapPct: input.postmarketGapPct ?? null,
+    qualifyingGapPct: input.qualifyingGapPct ?? 10,
+    gapSource: input.gapSource ?? "regular_open",
+    firstSeenAt: null,
+    lastSeenAt: null,
+  };
+}
+
+function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: StoredEvent[]; hasSeasonColumn?: boolean } = {}): Env & {
   __events: StoredEvent[];
   __syncs: StoredSync[];
   __metrics: { cleanupRuns: number; dailyBarQueries: number };
 } {
   const bars = input.bars ?? [];
   const syncs = [...(input.syncs ?? [])];
-  const events: StoredEvent[] = [];
+  const events: StoredEvent[] = [...(input.events ?? [])];
+  const hasSeasonColumn = input.hasSeasonColumn ?? true;
   const metrics = { cleanupRuns: 0, dailyBarQueries: 0 };
+
+  const countPlaceholders = (sql: string, field: string) => {
+    const match = sql.match(new RegExp(`${field} IN \\(([^)]*)\\)`));
+    return match ? (match[1].match(/\?/g) ?? []).length : 0;
+  };
+  const applyEventFilters = (sql: string, args: unknown[]) => {
+    let cursor = 0;
+    let rows = [...events];
+    if (sql.includes("report_date >= ?")) {
+      const startDate = String(args[cursor++] ?? "1900-01-01");
+      rows = rows.filter((row) => row.reportDate >= startDate);
+    }
+    if (sql.includes("report_date <= ?")) {
+      const endDate = String(args[cursor++] ?? "9999-12-31");
+      rows = rows.filter((row) => row.reportDate <= endDate);
+    }
+    if (sql.includes("(ticker LIKE ? OR company_name LIKE ? COLLATE NOCASE)")) {
+      const tickerPrefix = String(args[cursor++] ?? "").replace(/%$/, "");
+      const companyQuery = String(args[cursor++] ?? "").replace(/^%|%$/g, "").toLowerCase();
+      rows = rows.filter((row) => row.ticker.startsWith(tickerPrefix) || String(row.companyName ?? "").toLowerCase().includes(companyQuery));
+    }
+    if (sql.includes("market_cap >= ?")) rows = rows.filter((row) => Number(row.marketCap ?? 0) >= Number(args[cursor++] ?? 0));
+    if (sql.includes("market_cap <= ?")) rows = rows.filter((row) => Number(row.marketCap ?? 0) <= Number(args[cursor++] ?? 0));
+    if (sql.includes("avg_dollar_volume_30d >= ?")) rows = rows.filter((row) => Number(row.avgDollarVolume30d ?? 0) >= Number(args[cursor++] ?? 0));
+    if (sql.includes("qualifying_gap_pct >= ?")) rows = rows.filter((row) => row.qualifyingGapPct >= Number(args[cursor++] ?? 0));
+    for (const field of ["season", "sector", "industry"] as const) {
+      const count = countPlaceholders(sql, field);
+      if (count > 0) {
+        const values = new Set(args.slice(cursor, cursor + count).map((value) => String(value)));
+        cursor += count;
+        rows = rows.filter((row) => values.has(String(row[field] ?? "")));
+      }
+    }
+    const exchangeCount = countPlaceholders(sql, "UPPER\\(exchange\\)");
+    if (exchangeCount > 0) {
+      const values = new Set(args.slice(cursor, cursor + exchangeCount).map((value) => String(value).toUpperCase()));
+      rows = rows.filter((row) => values.has(String(row.exchange ?? "").toUpperCase()));
+    } else if (sql.includes("UPPER(exchange) IN ('NASDAQ', 'NYSE', 'AMEX')")) {
+      rows = rows.filter((row) => ["NASDAQ", "NYSE", "AMEX"].includes(String(row.exchange ?? "").toUpperCase()));
+    }
+    if (sql.includes("ORDER BY season ASC")) rows.sort((left, right) => left.season.localeCompare(right.season) || left.ticker.localeCompare(right.ticker));
+    return rows;
+  };
 
   const db = {
     prepare(sql: string) {
@@ -111,9 +174,13 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
         __args: args,
         async first<T>() {
           if (sql.includes("sqlite_master")) return { count: 1 } as T;
+          if (sql.includes("pragma_table_info")) return { count: hasSeasonColumn ? 1 : 0 } as T;
           if (sql.includes("FROM earnings_gap_syncs WHERE scheduled_local_date")) {
             const localDate = String(args[0] ?? "");
             return (syncs.find((row) => row.scheduledLocalDate === localDate && row.status === "ok") ?? null) as T;
+          }
+          if (sql.includes("SELECT COUNT(*) as count FROM earnings_gap_events")) {
+            return { count: applyEventFilters(sql, args).length } as T;
           }
           return null as T;
         },
@@ -127,6 +194,21 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
               .filter((bar) => tickers.has(bar.ticker) && bar.date >= startDate && bar.date <= endDate)
               .sort((left, right) => left.ticker.localeCompare(right.ticker) || left.date.localeCompare(right.date));
             return { results: rows as T[] };
+          }
+          if (sql.includes("FROM earnings_gap_events") && sql.includes("GROUP BY")) {
+            const rawField = sql.match(/SELECT ([a-z_]+) as value/)?.[1] ?? "season";
+            const field = (rawField === "gap_source" ? "gapSource" : rawField) as keyof StoredEvent;
+            const counts = new Map<string, number>();
+            for (const row of applyEventFilters(sql, args)) {
+              const value = String(row[field] ?? "");
+              if (!value) continue;
+              counts.set(value, (counts.get(value) ?? 0) + 1);
+            }
+            const rows = Array.from(counts, ([value, count]) => ({ value, count }));
+            return { results: rows as T[] };
+          }
+          if (sql.includes("FROM earnings_gap_events")) {
+            return { results: applyEventFilters(sql, args) as T[] };
           }
           return { results: [] as T[] };
         },
@@ -202,6 +284,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
           avgVolume30d,
           avgDollarVolume30d,
           reportDate,
+          season,
           reportTimestamp,
           reportTime,
           reactionDate,
@@ -229,6 +312,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[] } = {}): En
           avgVolume30d: avgVolume30d == null ? null : Number(avgVolume30d),
           avgDollarVolume30d: avgDollarVolume30d == null ? null : Number(avgDollarVolume30d),
           reportDate: String(reportDate),
+          season: String(season),
           reportTimestamp: reportTimestamp == null ? null : Number(reportTimestamp),
           reportTime: reportTime == null ? null : String(reportTime),
           reactionDate: reactionDate == null ? null : String(reactionDate),
@@ -289,6 +373,7 @@ describe("earnings gap service", () => {
     expect(rows[0]).toMatchObject({
       ticker: "AAPL",
       reportDate: "2026-05-21",
+      season: "2026 Q2",
       reportTime: "after-market",
       postmarketPrice: 106,
       postmarketVolume: 900_000,
@@ -451,9 +536,42 @@ describe("earnings gap service", () => {
     expect(first?.rowsUpserted).toBe(1);
     expect(first?.scheduledLocalDate).toBe("2026-05-21");
     expect(env.__events).toHaveLength(1);
+    expect(env.__events[0].season).toBe("2026 Q2");
     expect(env.__syncs.some((row) => row.status === "ok" && row.scheduledLocalDate === "2026-05-21")).toBe(true);
     expect(second).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("filters, sorts, and facets gap rows by season", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "A", reportDate: "2026-02-10", season: "2026 Q1", qualifyingGapPct: 5 }),
+        storedEvent({ ticker: "B", reportDate: "2026-05-10", season: "2026 Q2", qualifyingGapPct: 12 }),
+        storedEvent({ ticker: "C", reportDate: "2026-05-11", season: "2026 Q2", qualifyingGapPct: 8 }),
+      ],
+    });
+
+    const result = await queryEarningsGaps(env, {
+      startDate: "2026-01-01",
+      season: "2026 Q2",
+      includeOtc: true,
+      sort: "season",
+      sortDir: "asc",
+    });
+
+    expect(result.total).toBe(2);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["B", "C"]);
+    expect(result.rows.every((row) => row.season === "2026 Q2")).toBe(true);
+    expect(result.facets.seasons).toContainEqual({ value: "2026 Q2", count: 2 });
+  });
+
+  it("reports the season migration when gap tables exist without the season column", async () => {
+    const env = createEnv({ hasSeasonColumn: false });
+
+    const result = await queryEarningsGaps(env);
+
+    expect(result.schemaReady).toBe(false);
+    expect(result.warning).toContain("0054_earnings_gap_season.sql");
   });
 
   it("uses New York time across standard-time and daylight-time offsets", async () => {

@@ -51,6 +51,7 @@ export type EarningsGapReleaseInput = {
   avgVolume30d: number | null;
   avgDollarVolume30d: number | null;
   reportDate: string;
+  season: string;
   reportTimestamp: number | null;
   reportTime: string | null;
   postmarketPrice: number | null;
@@ -82,6 +83,7 @@ export type EarningsGapRow = {
   avgVolume30d: number | null;
   avgDollarVolume30d: number | null;
   reportDate: string;
+  season: string;
   reportTimestamp: number | null;
   reportTime: string | null;
   reactionDate: string | null;
@@ -103,6 +105,7 @@ export type EarningsGapsQuery = {
   q?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  season?: string | string[] | null;
   minMarketCap?: number | null;
   maxMarketCap?: number | null;
   minAvgDollarVolume?: number | null;
@@ -124,6 +127,7 @@ export type EarningsGapsResponse = {
   offset: number;
   rows: EarningsGapRow[];
   facets: {
+    seasons: Array<{ value: string; count: number }>;
     sectors: Array<{ value: string; count: number }>;
     industries: Array<{ value: string; count: number }>;
     exchanges: Array<{ value: string; count: number }>;
@@ -209,6 +213,7 @@ const SORT_COLUMNS: Record<string, string> = {
   reportDate: "report_date",
   ticker: "ticker",
   companyName: "company_name",
+  season: "season",
   marketCap: "market_cap",
   avgDollarVolume30d: "avg_dollar_volume_30d",
   regularOpenGapPct: "regular_open_gap_pct",
@@ -298,6 +303,19 @@ function dateToUnixEnd(isoDate: string): number {
   return Math.floor(Date.parse(`${isoDate}T23:59:59Z`) / 1000);
 }
 
+function seasonForDate(isoDate: string | null): string {
+  const normalized = normalizeDate(isoDate);
+  if (!normalized) return "Unknown";
+  const year = Number(normalized.slice(0, 4));
+  const month = Number(normalized.slice(5, 7));
+  const quarter = Math.max(1, Math.min(4, Math.ceil(month / 3)));
+  return `${year} Q${quarter}`;
+}
+
+function deriveEarningsGapSeason(reportDate: string): string {
+  return seasonForDate(reportDate);
+}
+
 function normalizeReportTime(value: unknown): string | null {
   const numeric = parseMaybeNumber(value);
   if (numeric === -1) return "before-market";
@@ -346,18 +364,35 @@ async function tableExists(env: Env, tableName: string): Promise<boolean> {
   return Number(row?.count ?? 0) > 0;
 }
 
-async function hasEarningsGapSchema(env: Env): Promise<boolean> {
+async function columnExists(env: Env, tableName: string, columnName: string): Promise<boolean> {
+  const safeTable = tableName === "earnings_gap_events" ? "earnings_gap_events" : tableName;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count FROM pragma_table_info('${safeTable}') WHERE name = ?`,
+  ).bind(columnName).first<{ count: number }>();
+  return Number(row?.count ?? 0) > 0;
+}
+
+async function earningsGapSchemaWarning(env: Env): Promise<string | null> {
   const [events, syncs] = await Promise.all([
     tableExists(env, "earnings_gap_events"),
     tableExists(env, "earnings_gap_syncs"),
   ]);
-  return events && syncs;
+  if (!events || !syncs) {
+    return "Earnings gap schema is missing. Apply worker/migrations/0052_earnings_gaps.sql.";
+  }
+  if (!(await columnExists(env, "earnings_gap_events", "season"))) {
+    return "Earnings gap season schema is missing. Apply worker/migrations/0054_earnings_gap_season.sql.";
+  }
+  return null;
+}
+
+async function hasEarningsGapSchema(env: Env): Promise<boolean> {
+  return (await earningsGapSchemaWarning(env)) == null;
 }
 
 async function requireEarningsGapSchema(env: Env): Promise<void> {
-  if (!(await hasEarningsGapSchema(env))) {
-    throw new Error("Earnings gap schema is missing. Apply worker/migrations/0052_earnings_gaps.sql.");
-  }
+  const warning = await earningsGapSchemaWarning(env);
+  if (warning) throw new Error(warning);
 }
 
 export function buildTradingViewEarningsGapPayload(input: {
@@ -408,6 +443,7 @@ export function parseTradingViewEarningsGapRows(response: TradingViewScanRespons
         avgVolume30d,
         avgDollarVolume30d,
         reportDate,
+        season: deriveEarningsGapSeason(reportDate),
         reportTimestamp,
         reportTime: normalizeReportTime(data[11]),
         postmarketPrice: parseMaybeNumber(data[13]),
@@ -436,6 +472,7 @@ function dedupeReleases(rows: EarningsGapReleaseInput[]): EarningsGapReleaseInpu
       price: existing.price ?? row.price,
       avgVolume30d: existing.avgVolume30d ?? row.avgVolume30d,
       avgDollarVolume30d: existing.avgDollarVolume30d ?? row.avgDollarVolume30d,
+      season: existing.season || row.season,
       reportTimestamp: existing.reportTimestamp ?? row.reportTimestamp,
       reportTime: existing.reportTime ?? row.reportTime,
       postmarketPrice: existing.postmarketPrice ?? row.postmarketPrice,
@@ -642,12 +679,12 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     `INSERT INTO earnings_gap_events (
        id, provider, source_symbol, ticker, exchange, company_name, sector, industry,
        market_cap, price, avg_volume_30d, avg_dollar_volume_30d,
-       report_date, report_timestamp, report_time, reaction_date, previous_close,
+       report_date, season, report_timestamp, report_time, reaction_date, previous_close,
        reaction_open, regular_open_gap_pct, postmarket_price, postmarket_gap_pct,
        postmarket_volume, qualifying_gap_pct, gap_source, raw_json,
        first_seen_at, last_seen_at, created_at, updated_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(ticker, report_date) DO UPDATE SET
        provider = excluded.provider,
        source_symbol = COALESCE(excluded.source_symbol, earnings_gap_events.source_symbol),
@@ -659,6 +696,7 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
        price = COALESCE(excluded.price, earnings_gap_events.price),
        avg_volume_30d = COALESCE(excluded.avg_volume_30d, earnings_gap_events.avg_volume_30d),
        avg_dollar_volume_30d = COALESCE(excluded.avg_dollar_volume_30d, earnings_gap_events.avg_dollar_volume_30d),
+       season = COALESCE(excluded.season, earnings_gap_events.season),
        report_timestamp = COALESCE(excluded.report_timestamp, earnings_gap_events.report_timestamp),
        report_time = COALESCE(excluded.report_time, earnings_gap_events.report_time),
        reaction_date = COALESCE(excluded.reaction_date, earnings_gap_events.reaction_date),
@@ -687,6 +725,7 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     row.avgVolume30d,
     row.avgDollarVolume30d,
     row.reportDate,
+    row.season,
     row.reportTimestamp,
     row.reportTime,
     row.reactionDate,
@@ -841,6 +880,11 @@ function buildWhereClause(query: EarningsGapsQuery): { sql: string; args: unknow
     clauses.push("qualifying_gap_pct >= ?");
     args.push(query.minGapPct);
   }
+  const seasons = normalizeArrayFilter(query.season);
+  if (seasons.length > 0) {
+    clauses.push(`season IN (${seasons.map(() => "?").join(",")})`);
+    args.push(...seasons);
+  }
   const sectors = normalizeArrayFilter(query.sector);
   if (sectors.length > 0) {
     clauses.push(`sector IN (${sectors.map(() => "?").join(",")})`);
@@ -880,6 +924,7 @@ function mapRow(row: Record<string, unknown>): EarningsGapRow {
     avgVolume30d: parseMaybeNumber(row.avgVolume30d),
     avgDollarVolume30d: parseMaybeNumber(row.avgDollarVolume30d),
     reportDate: String(row.reportDate ?? ""),
+    season: String(row.season ?? ""),
     reportTimestamp: parseMaybeNumber(row.reportTimestamp),
     reportTime: row.reportTime == null ? null : String(row.reportTime),
     reactionDate: row.reactionDate == null ? null : String(row.reactionDate),
@@ -896,7 +941,7 @@ function mapRow(row: Record<string, unknown>): EarningsGapRow {
   };
 }
 
-async function loadFacet(env: Env, field: "sector" | "industry" | "exchange" | "gap_source", whereSql: string, args: unknown[]): Promise<Array<{ value: string; count: number }>> {
+async function loadFacet(env: Env, field: "season" | "sector" | "industry" | "exchange" | "gap_source", whereSql: string, args: unknown[]): Promise<Array<{ value: string; count: number }>> {
   const rows = await env.DB.prepare(
     `SELECT ${field} as value, COUNT(*) as count
      FROM earnings_gap_events
@@ -910,16 +955,17 @@ async function loadFacet(env: Env, field: "sector" | "industry" | "exchange" | "
 }
 
 export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {}): Promise<EarningsGapsResponse> {
-  if (!(await hasEarningsGapSchema(env))) {
+  const schemaWarning = await earningsGapSchemaWarning(env);
+  if (schemaWarning) {
     return {
       schemaReady: false,
-      warning: "Earnings gap schema is missing. Apply worker/migrations/0052_earnings_gaps.sql.",
+      warning: schemaWarning,
       generatedAt: new Date().toISOString(),
       total: 0,
       limit: DEFAULT_QUERY_LIMIT,
       offset: 0,
       rows: [],
-      facets: { sectors: [], industries: [], exchanges: [], gapSources: [] },
+      facets: { seasons: [], sectors: [], industries: [], exchanges: [], gapSources: [] },
     };
   }
   const limit = Math.max(1, Math.min(MAX_QUERY_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
@@ -935,7 +981,7 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
        id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
        sector, industry, market_cap as marketCap, price, avg_volume_30d as avgVolume30d,
        avg_dollar_volume_30d as avgDollarVolume30d, report_date as reportDate,
-       report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
+       season, report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
        previous_close as previousClose, reaction_open as reactionOpen,
        regular_open_gap_pct as regularOpenGapPct, postmarket_price as postmarketPrice,
        postmarket_gap_pct as postmarketGapPct, postmarket_volume as postmarketVolume,
@@ -946,7 +992,8 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
      ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
      LIMIT ? OFFSET ?`,
   ).bind(...args, limit, offset).all<Record<string, unknown>>();
-  const [sectors, industries, exchanges, gapSources] = await Promise.all([
+  const [seasons, sectors, industries, exchanges, gapSources] = await Promise.all([
+    loadFacet(env, "season", whereSql, args),
     loadFacet(env, "sector", whereSql, args),
     loadFacet(env, "industry", whereSql, args),
     loadFacet(env, "exchange", whereSql, args),
@@ -960,15 +1007,16 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
     limit,
     offset,
     rows: (rows.results ?? []).map(mapRow),
-    facets: { sectors, industries, exchanges, gapSources },
+    facets: { seasons, sectors, industries, exchanges, gapSources },
   };
 }
 
 export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStatus> {
-  if (!(await hasEarningsGapSchema(env))) {
+  const schemaWarning = await earningsGapSchemaWarning(env);
+  if (schemaWarning) {
     return {
       schemaReady: false,
-      warning: "Earnings gap schema is missing. Apply worker/migrations/0052_earnings_gaps.sql.",
+      warning: schemaWarning,
       counts: { total: 0, postmarket: 0, regularOpen: 0, both: 0, latestReportDate: null, earliestReportDate: null },
       syncs: [],
       latestRows: [],

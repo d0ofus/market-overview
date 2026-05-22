@@ -425,6 +425,7 @@ function readEarningsGapsQuery(req: Request): EarningsGapsQuery {
     q: url.searchParams.get("q"),
     startDate: url.searchParams.get("startDate"),
     endDate: url.searchParams.get("endDate"),
+    season: url.searchParams.get("season"),
     minMarketCap: toNumber("minMarketCap"),
     maxMarketCap: toNumber("maxMarketCap"),
     minAvgDollarVolume: toNumber("minAvgDollarVolume"),

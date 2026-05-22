@@ -41,6 +41,7 @@ type GapSortKey =
   | "reportDate"
   | "ticker"
   | "companyName"
+  | "season"
   | "qualifyingGapPct"
   | "postmarketGapPct"
   | "regularOpenGapPct"
@@ -74,6 +75,7 @@ type GapDraftFilters = {
   maxMarketCap: string;
   minAvgDollarVolume: string;
   minGapPct: string;
+  season: string;
   sector: string;
   industry: string;
   exchange: string;
@@ -145,6 +147,7 @@ function defaultGapDraftFilters(): GapDraftFilters {
     maxMarketCap: "",
     minAvgDollarVolume: "",
     minGapPct: "",
+    season: "",
     sector: "",
     industry: "",
     exchange: "",
@@ -193,6 +196,7 @@ function gapDraftToQuery(draft: GapDraftFilters, sort: GapSortKey, sortDir: "asc
     q: draft.q.trim() || null,
     startDate: draft.startDate || null,
     endDate: draft.endDate || null,
+    season: draft.season || null,
     sector: draft.sector || null,
     industry: draft.industry || null,
     exchange: draft.exchange || null,
@@ -810,7 +814,7 @@ function EarningsGapsPanel() {
   };
 
   const changeSort = (key: GapSortKey) => {
-    const nextDir = key === sortKey ? (sortDir === "asc" ? "desc" : "asc") : key === "ticker" || key === "companyName" || key === "gapSource" || key === "sector" || key === "industry" || key === "exchange" ? "asc" : "desc";
+    const nextDir = key === sortKey ? (sortDir === "asc" ? "desc" : "asc") : key === "ticker" || key === "companyName" || key === "season" || key === "gapSource" || key === "sector" || key === "industry" || key === "exchange" ? "asc" : "desc";
     setSortKey(key);
     setSortDir(nextDir);
     setQuery((current) => ({ ...current, sort: key, sortDir: nextDir, offset: 0 }));
@@ -894,6 +898,15 @@ function EarningsGapsPanel() {
           <label className="text-xs text-slate-400">
             Min $ volume, $M
             <input className={`${INPUT_CLASS} mt-1`} value={draft.minAvgDollarVolume} inputMode="decimal" onChange={(event) => setDraft((current) => ({ ...current, minAvgDollarVolume: event.target.value }))} />
+          </label>
+          <label className="text-xs text-slate-400">
+            Season
+            <select className={`${INPUT_CLASS} mt-1`} value={draft.season} onChange={(event) => setDraft((current) => ({ ...current, season: event.target.value }))}>
+              <option value="">All seasons</option>
+              {facetOptions(data?.facets.seasons ?? [], draft.season).map((item) => (
+                <option key={item.value} value={item.value}>{item.value} ({item.count})</option>
+              ))}
+            </select>
           </label>
           <label className="text-xs text-slate-400">
             Sector
@@ -990,6 +1003,7 @@ function EarningsGapsPanel() {
                 <th className="px-3 py-3">{sortButton("reportDate", "Report")}</th>
                 <th className="px-3 py-3">{sortButton("ticker", "Ticker")}</th>
                 <th className="px-3 py-3">{sortButton("companyName", "Company")}</th>
+                <th className="px-3 py-3">{sortButton("season", "Season")}</th>
                 <th className="px-3 py-3">{sortButton("gapSource", "Source")}</th>
                 <th className="px-3 py-3 text-right">{sortButton("qualifyingGapPct", "Best Gap", "right")}</th>
                 <th className="px-3 py-3 text-right">{sortButton("postmarketGapPct", "Post %", "right")}</th>
@@ -1007,13 +1021,13 @@ function EarningsGapsPanel() {
             <tbody className="divide-y divide-borderSoft/60">
               {loading ? (
                 <tr>
-                  <td colSpan={15} className="px-4 py-10 text-center text-sm text-slate-400">
+                  <td colSpan={16} className="px-4 py-10 text-center text-sm text-slate-400">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading earnings gap-ups...</span>
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={15} className="px-4 py-10 text-center text-sm text-slate-400">No earnings gap-up rows match the current filters.</td>
+                  <td colSpan={16} className="px-4 py-10 text-center text-sm text-slate-400">No earnings gap-up rows match the current filters.</td>
                 </tr>
               ) : rows.map((row: EarningsGapRow) => (
                 <tr key={row.id} className="hover:bg-panelSoft/35">
@@ -1022,6 +1036,7 @@ function EarningsGapsPanel() {
                     <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />
                   </td>
                   <td className="max-w-[16rem] truncate px-3 py-3 text-slate-200" title={row.companyName ?? undefined}>{row.companyName ?? "-"}</td>
+                  <td className="whitespace-nowrap px-3 py-3 text-slate-300">{row.season}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-slate-300">{gapSourceLabel(row.gapSource)}</td>
                   <td className={`whitespace-nowrap px-3 py-3 text-right font-mono font-semibold ${pctClass(row.qualifyingGapPct)}`}>{formatPct(row.qualifyingGapPct)}</td>
                   <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${pctClass(row.postmarketGapPct)}`}>{formatPct(row.postmarketGapPct)}</td>

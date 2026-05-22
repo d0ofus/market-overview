@@ -442,6 +442,7 @@ export type EarningsGapRow = {
   avgVolume30d: number | null;
   avgDollarVolume30d: number | null;
   reportDate: string;
+  season: string;
   reportTimestamp: number | null;
   reportTime: string | null;
   reactionDate: string | null;
@@ -463,6 +464,7 @@ export type EarningsGapsQuery = {
   q?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  season?: string | null;
   minMarketCap?: number | null;
   maxMarketCap?: number | null;
   minAvgDollarVolume?: number | null;
@@ -484,6 +486,7 @@ export type EarningsGapsResponse = {
   offset: number;
   rows: EarningsGapRow[];
   facets: {
+    seasons: EarningsSurpriseFacet[];
     sectors: EarningsSurpriseFacet[];
     industries: EarningsSurpriseFacet[];
     exchanges: EarningsSurpriseFacet[];
@@ -2178,6 +2181,7 @@ export function getEarningsGaps(query?: EarningsGapsQuery) {
     q: query?.q,
     startDate: query?.startDate,
     endDate: query?.endDate,
+    season: query?.season,
     minMarketCap: query?.minMarketCap,
     maxMarketCap: query?.maxMarketCap,
     minAvgDollarVolume: query?.minAvgDollarVolume,
