@@ -300,11 +300,21 @@ export function PeerGroupsDashboard() {
           </button>
         ),
         headerDetail: (
-          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-right text-[11px] text-slate-400">
-            <div>Price: <span className="text-slate-200">{fmtPrice(metric?.price)}</span></div>
-            <div>1D: <span className={change1d != null && change1d < 0 ? "text-neg" : "text-pos"}>{fmtPct(change1d)}</span></div>
-            <div>Mkt Cap: <span className="text-slate-200">{fmtCompact(metric?.marketCap)}</span></div>
-            <div>Avg Vol: <span className="text-slate-200">{fmtCompact(metric?.avgVolume)}</span></div>
+          <div className="grid min-w-0 grid-cols-3 gap-x-2 text-right">
+            <div className="min-w-0">
+              <div className="whitespace-nowrap text-xs text-slate-400">1D</div>
+              <div className={`mt-0.5 truncate text-sm font-semibold ${change1d != null && change1d < 0 ? "text-neg" : "text-pos"}`}>
+                {fmtPct(change1d)}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="whitespace-nowrap text-xs text-slate-400">Mkt Cap</div>
+              <div className="mt-0.5 truncate text-sm font-semibold text-slate-200">{fmtCompact(metric?.marketCap)}</div>
+            </div>
+            <div className="min-w-0">
+              <div className="whitespace-nowrap text-xs text-slate-400">Avg Vol</div>
+              <div className="mt-0.5 truncate text-sm font-semibold text-slate-200">{fmtCompact(metric?.avgVolume)}</div>
+            </div>
           </div>
         ),
         detail: (

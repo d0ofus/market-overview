@@ -1,7 +1,9 @@
 # TODO
 ## GENERAL
 > Check out whether there is any password login required and how to safeguard the repo/deployment since it is now a good app with many features
+> Do a general cleanup of github repo and mark code properly for easy reference by LLMs
 - See what other features in google sheets dashboard that are good
+> For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
 > Add macro stuff like 10Y yields and yield curve chart
@@ -60,6 +62,7 @@
 > Add multi-chart view
 > Add hover-over chart view
 > Add paging function, and allow quick way to go to the first/last page.
+> ranked by distance of close from highs + volume multiple of average + % gain
 
 For /earnings, is EPS % DESC the EPS surprise %? can I add a average volume * price filter? and add a minimum EPS % Desc filter? Also, can I add a screener to screen out stocks that gapped up on earnings release, where they do not have to be earnings surprises, as long as the price gaps up on the earnings release date.
 
@@ -107,7 +110,6 @@ What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
 - Create a research repository (maybe in peer-groups or new page?)
 
 ## New Functions
-> Create a earnings gap up scanner, ranked by distance of close from highs + volume multiple of average + % gain
 - Add in morning brief section using Claude API
 - Add macro dashboard (https://x.com/investingluc/status/2044560364424032433?s=20)
 - Add unusual options analysis/insider transactions tracker

@@ -107,21 +107,21 @@ export function TickerMultiGrid({
                 key={item.key}
                 className={`rounded border ${showChartStatusLine ? "p-1.5" : "p-2"} ${isSelected ? "border-accent/60" : "border-borderSoft/60"}`}
               >
-                <div className="mb-2 flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
+                <div className="mb-2 flex items-start gap-3">
+                  <div className={`min-w-0 ${item.headerDetail ? "w-16 shrink-0 sm:w-20" : "flex-1"}`}>
                     {item.onTitleClick ? (
                       <button
-                        className="block text-left text-sm font-semibold text-accent hover:underline"
+                        className="block max-w-full truncate text-left text-sm font-semibold text-accent hover:underline"
                         onClick={item.onTitleClick}
                       >
                         {item.title ?? item.ticker}
                       </button>
                     ) : (
-                      <div className="text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
+                      <div className="truncate text-sm font-semibold text-accent">{item.title ?? item.ticker}</div>
                     )}
                     {item.subtitle && (
                       <button
-                        className={`mt-0.5 block w-full text-left text-[11px] text-slate-400 ${onSelect ? "" : "cursor-default"}`}
+                        className={`mt-0.5 block w-full truncate text-left text-[11px] text-slate-400 ${onSelect ? "" : "cursor-default"}`}
                         onClick={() => onSelect?.(item.key)}
                         disabled={!onSelect}
                       >
@@ -129,12 +129,8 @@ export function TickerMultiGrid({
                       </button>
                     )}
                   </div>
-                  {item.headerAction || item.headerDetail ? (
-                    <div className="flex shrink-0 items-start gap-2">
-                      {item.headerAction ? <div className="shrink-0">{item.headerAction}</div> : null}
-                      {item.headerDetail ? <div className="shrink-0">{item.headerDetail}</div> : null}
-                    </div>
-                  ) : null}
+                  {item.headerDetail ? <div className="min-w-0 flex-1">{item.headerDetail}</div> : null}
+                  {item.headerAction ? <div className="shrink-0">{item.headerAction}</div> : null}
                 </div>
                 <TradingViewWidget
                   ticker={item.ticker}
