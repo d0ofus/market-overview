@@ -34,30 +34,52 @@ function MiniBarChart({
   negativeColor: string;
 }) {
   const width = 160;
-  const height = 48;
+  const height = 64;
+  const verticalPadding = 4;
+  const minBarHeight = 3;
   const finiteValues = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  const maxAbs = Math.max(1, ...finiteValues.map((value) => Math.abs(value)));
+  const hasFiniteValues = finiteValues.length > 0;
+  const rawMin = hasFiniteValues ? Math.min(...finiteValues) : 0;
+  const rawMax = hasFiniteValues ? Math.max(...finiteValues) : 0;
+  const [minValue, maxValue] = !hasFiniteValues
+    ? [-1, 1]
+    : rawMin >= 0
+      ? [0, rawMax || 1]
+      : rawMax <= 0
+        ? [rawMin || -1, 0]
+        : [rawMin, rawMax];
+  const range = maxValue - minValue || 1;
+  const plotTop = verticalPadding;
+  const plotBottom = height - verticalPadding;
+  const plotHeight = plotBottom - plotTop;
+  const zeroY = plotTop + ((maxValue / range) * plotHeight);
   const slotWidth = width / Math.max(1, values.length);
   const barWidth = Math.max(3, slotWidth - 3);
-  const midY = height / 2;
-  const maxBarHeight = (height / 2) - 4;
+  const yForValue = (value: number) => plotTop + (((maxValue - value) / range) * plotHeight);
   return (
-    <svg className="mt-1 h-12 w-full" viewBox={`0 0 ${width} ${height}`} role="presentation" aria-hidden="true">
-      <line x1={0} x2={width} y1={midY} y2={midY} stroke="rgba(148, 163, 184, 0.18)" strokeWidth={0.75} />
+    <svg className="mt-1 h-16 w-full" viewBox={`0 0 ${width} ${height}`} role="presentation" aria-hidden="true">
+      <line x1={0} x2={width} y1={zeroY} y2={zeroY} stroke="rgba(148, 163, 184, 0.18)" strokeWidth={0.75} />
       {values.map((value, index) => {
         const x = index * slotWidth + 1;
         if (typeof value !== "number" || !Number.isFinite(value)) {
-          return <rect key={`missing-${index}`} x={x} y={midY - 1} width={barWidth} height={2} rx={0.8} fill="rgba(100, 116, 139, 0.55)" />;
+          return <rect key={`missing-${index}`} x={x} y={zeroY - 1} width={barWidth} height={2} rx={0.8} fill="rgba(100, 116, 139, 0.55)" />;
         }
-        const normalized = Math.max(3, (Math.abs(value) / maxAbs) * maxBarHeight);
+        if (value === 0) {
+          return <rect key={`${index}-${value}`} x={x} y={zeroY - 1} width={barWidth} height={2} rx={0.8} fill={color} />;
+        }
         const isNegative = value < 0;
+        const valueY = yForValue(value);
+        const rawHeight = Math.abs(valueY - zeroY);
+        const normalizedHeight = Math.max(minBarHeight, rawHeight);
+        const y = isNegative ? zeroY : Math.max(plotTop, zeroY - normalizedHeight);
+        const barHeight = isNegative ? Math.min(normalizedHeight, plotBottom - zeroY) : Math.min(normalizedHeight, zeroY - plotTop);
         return (
           <rect
             key={`${index}-${value}`}
             x={x}
-            y={isNegative ? midY : midY - normalized}
+            y={y}
             width={barWidth}
-            height={normalized}
+            height={barHeight}
             rx={0.8}
             fill={isNegative ? negativeColor : color}
           >
