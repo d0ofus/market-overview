@@ -3,7 +3,8 @@ import { GroupPanel } from "@/components/group-panel";
 import { StatusBar } from "@/components/status-bar";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
-import { getDashboard, getFedWatch, getStatus, type FedWatchResponse } from "@/lib/api";
+import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
+import { getDashboard, getFedWatch, getMarketCommentary, getStatus, type FedWatchResponse, type MarketCommentaryResponse } from "@/lib/api";
 
 export const revalidate = 0;
 
@@ -46,7 +47,7 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const [dashboard, statusValue, fedWatch] = await Promise.all([
+  const [dashboard, statusValue, fedWatch, marketCommentary] = await Promise.all([
     getDashboard().catch(() => null),
     getStatus("overview").catch(() => ({
       timezone: "Australia/Melbourne",
@@ -61,6 +62,11 @@ export default async function HomePage() {
       warning: "FedWatch data could not be loaded.",
       data: null,
     } satisfies FedWatchResponse)),
+    getMarketCommentary().catch(() => ({
+      status: "empty",
+      warning: "Market commentary could not be loaded.",
+      report: null,
+    } satisfies MarketCommentaryResponse)),
   ]);
   const dashboardValue = dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
@@ -76,6 +82,7 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-4">
+      <MarketCommentaryPanel initial={marketCommentary} />
       <StatusBar
         asOfDate={statusValue.asOfDate}
         lastUpdated={statusValue.lastUpdated}

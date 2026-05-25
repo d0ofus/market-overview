@@ -80,6 +80,10 @@ import {
   getFedWatchSnapshot,
 } from "./fedwatch-service";
 import {
+  loadLatestMarketCommentary,
+  refreshMarketCommentary,
+} from "./market-commentary-service";
+import {
   cleanupOldScansPageData,
   deleteScanCompilePreset,
   loadCompiledScansSnapshot,
@@ -1384,6 +1388,18 @@ app.get("/api/fedwatch", async (c) => {
     return c.json(snapshot);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to load FedWatch." }, 500);
+  }
+});
+
+app.get("/api/market-commentary", async (c) => {
+  try {
+    const snapshot = await loadLatestMarketCommentary(c.env);
+    c.header("Cache-Control", "no-store");
+    return c.json(snapshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load market commentary.";
+    console.error("market commentary load failed", error);
+    return c.json({ status: "empty", warning: message, report: null }, 200);
   }
 });
 
@@ -4077,6 +4093,18 @@ app.post("/api/admin/gappers/refresh", async (c) => {
     return c.json({ ok: true, snapshot });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to refresh gappers." }, 500);
+  }
+});
+
+app.post("/api/admin/market-commentary/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const result = await refreshMarketCommentary(c.env, { force: c.req.query("force") === "1" });
+    return c.json({ ok: result.status === "ready", ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "market commentary refresh failed";
+    console.error("admin market commentary refresh failed", error);
+    return c.json({ ok: false, status: "failed", warning: message, report: null }, 200);
   }
 });
 

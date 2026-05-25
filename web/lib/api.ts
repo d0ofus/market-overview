@@ -45,6 +45,47 @@ export type FedWatchResponse = {
   data: FedWatchData | null;
 };
 
+export type MarketCommentarySourceAudit = {
+  sourceName: string;
+  url: string | null;
+  dataUsed: string;
+  timestamp: string | null;
+  note?: string | null;
+};
+
+export type MarketCommentaryDataQuality = {
+  metric: string;
+  status: "ok" | "stale" | "unavailable" | "not_configured";
+  note: string;
+};
+
+export type MarketCommentaryReport = {
+  id: string;
+  sessionDate: string;
+  asOf: string;
+  generatedAt: string;
+  marketSession: "pre_market" | "regular" | "after_hours" | "closed";
+  marketSessionLabel: string;
+  dataBasis: "intraday" | "closing" | "pre_market" | "closed_market";
+  provider: string;
+  model: string;
+  status: "ready" | "failed";
+  reportMarkdown: string;
+  sourceAudit: MarketCommentarySourceAudit[];
+  dataQuality: MarketCommentaryDataQuality[];
+  error: string | null;
+};
+
+export type MarketCommentaryResponse = {
+  status: "empty" | "ready" | "failed";
+  warning: string | null;
+  report: MarketCommentaryReport | null;
+};
+
+export type MarketCommentaryRefreshResponse = MarketCommentaryResponse & {
+  ok: boolean;
+};
+
 export type AlertLogRow = {
   id: string;
   ticker: string;
@@ -1900,6 +1941,17 @@ export function getBreadth(universeId = "sp500-core") {
 
 export function getFedWatch(force = false) {
   return getJson<FedWatchResponse>(appendQuery("/api/fedwatch", { force: force ? 1 : undefined }));
+}
+
+export function getMarketCommentary() {
+  return getJson<MarketCommentaryResponse>("/api/market-commentary");
+}
+
+export function refreshMarketCommentary(force = false) {
+  return adminFetch<MarketCommentaryRefreshResponse>(
+    appendQuery("/api/admin/market-commentary/refresh", { force: force ? 1 : undefined }),
+    { method: "POST" },
+  );
 }
 
 export function getBreadthSummary() {

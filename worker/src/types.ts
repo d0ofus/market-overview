@@ -38,6 +38,11 @@ export type Env = {
   OPENAI_MODEL?: string;
   PERPLEXITY_API_KEY?: string;
   PERPLEXITY_MODEL?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
+  GEMINI_SEARCH_GROUNDING_ENABLED?: string;
+  BRAVE_SEARCH_API_KEY?: string;
+  MARKET_COMMENTARY_RETENTION_DAYS?: string;
   SYMBOL_CATALOG_SYNC_ENABLED?: string;
 };
 

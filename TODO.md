@@ -6,6 +6,8 @@
 > For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
+> Check why macro rates not showing other timelines (1M, 3M, 6M ago)
+> In ETF pop ups, highlight the 1D% change figure.
 > Add macro stuff like 10Y yields and yield curve chart
 - Check source of data for EQ Index Futures, they seem wrong.
 - Add yield curve structure
@@ -48,7 +50,6 @@
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
 ## SCANS
-> Add Strong earnings scanner
 > Make the UI better to segregate each input field
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
 > Put a preset for US market to have exchange, symbol type preconfigured
@@ -57,12 +58,14 @@
 - Add ability to ingest tickers from watchlist compiler and run scan like Within 5EMA
 
 ## PATTERN SCANNER
+> Add in filter for min EPS % 
 
 ## EARNINGS
 > Add multi-chart view
 > Add hover-over chart view
 > Add paging function, and allow quick way to go to the first/last page.
 > ranked by distance of close from highs + volume multiple of average + % gain
+> Make default filters to 300M mkt cap, min gap 3%, min volume 5M
 
 For /earnings, is EPS % DESC the EPS surprise %? can I add a average volume * price filter? and add a minimum EPS % Desc filter? Also, can I add a screener to screen out stocks that gapped up on earnings release, where they do not have to be earnings surprises, as long as the price gaps up on the earnings release date.
 
@@ -78,7 +81,8 @@ What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
 - Add $ on gap = Pre Vol * Price
 - Add Average $ traded filter
 
-## Admin
+## ADMIN
+> Make it such that when user clicks on a selected group, the batch target changes to that group, 
 > Add password protection to access admin
 > Remove bootstrap seed batch function in peer groups
 > Only can add 12 names, can't add in the rest
