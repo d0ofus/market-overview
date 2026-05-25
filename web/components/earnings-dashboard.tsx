@@ -136,8 +136,7 @@ const BUTTON_CLASS =
   "inline-flex h-10 items-center justify-center gap-2 rounded border border-borderSoft/80 bg-panelSoft/80 px-3 text-sm font-medium text-slate-100 transition hover:bg-panelSoft disabled:cursor-not-allowed disabled:opacity-50";
 const PRIMARY_BUTTON_CLASS =
   "inline-flex h-10 items-center justify-center gap-2 rounded bg-accent px-3 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50";
-const SURPRISE_HISTORY_DAYS = 183;
-const GAP_HISTORY_DAYS = 90;
+const EARNINGS_HISTORY_MONTHS = 3;
 const GAP_BACKFILL_BATCH_DAYS = 7;
 const EXPORT_LIMIT_DEFAULT = 100;
 const EXPORT_LIMIT_MAX = 1000;
@@ -177,9 +176,12 @@ const DEFAULT_GAP_COLUMN_ORDER: GapColumnKey[] = [
   "exchange",
 ];
 
-function isoDateDaysAgo(days: number): string {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - days);
+function isoDateMonthsAgo(months: number): string {
+  const now = new Date();
+  const day = now.getUTCDate();
+  const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, 1));
+  const lastDayOfTargetMonth = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+  date.setUTCDate(Math.min(day, lastDayOfTargetMonth));
   return date.toISOString().slice(0, 10);
 }
 
@@ -208,35 +210,35 @@ function estimateBackfillBatchCount(startDate: string, endDate: string): number 
 function defaultDraftFilters(): DraftFilters {
   return {
     q: "",
-    startDate: isoDateDaysAgo(SURPRISE_HISTORY_DAYS),
+    startDate: isoDateMonthsAgo(EARNINGS_HISTORY_MONTHS),
     endDate: todayIso(),
-    minMarketCap: "",
+    minMarketCap: "300",
     maxMarketCap: "",
     season: "",
     sector: "",
     industry: "",
     exchange: "",
-    surpriseSide: "all",
+    surpriseSide: "positive",
     includeOtc: false,
-    limit: "100",
+    limit: "0",
   };
 }
 
 function defaultGapDraftFilters(): GapDraftFilters {
   return {
     q: "",
-    startDate: isoDateDaysAgo(GAP_HISTORY_DAYS),
+    startDate: isoDateMonthsAgo(EARNINGS_HISTORY_MONTHS),
     endDate: todayIso(),
-    minMarketCap: "",
+    minMarketCap: "300",
     maxMarketCap: "",
-    minAvgDollarVolume: "",
-    minGapPct: "",
+    minAvgDollarVolume: "5",
+    minGapPct: "3",
     season: "",
     sector: "",
     industry: "",
     exchange: "",
     includeOtc: false,
-    limit: "100",
+    limit: "0",
   };
 }
 
@@ -247,12 +249,21 @@ function toNumber(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function draftLimitToQuery(value: string): number {
+  const trimmed = value.trim();
+  if (trimmed === "0") return 0;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return 100;
+  return Math.max(25, Math.min(250, Math.floor(parsed)));
+}
+
 function draftToQuery(draft: DraftFilters, sort: SortKey, sortDir: "asc" | "desc", offset = 0): EarningsSurprisesQuery {
   const minMarketCap = toNumber(draft.minMarketCap);
   const maxMarketCap = toNumber(draft.maxMarketCap);
+  const limit = draftLimitToQuery(draft.limit);
   return {
-    limit: Math.max(25, Math.min(250, Number(draft.limit) || 100)),
-    offset,
+    limit,
+    offset: limit === 0 ? 0 : offset,
     q: draft.q.trim() || null,
     startDate: draft.startDate || null,
     endDate: draft.endDate || null,
@@ -274,9 +285,10 @@ function gapDraftToQuery(draft: GapDraftFilters, sort: GapSortKey, sortDir: "asc
   const maxMarketCap = toNumber(draft.maxMarketCap);
   const minAvgDollarVolume = toNumber(draft.minAvgDollarVolume);
   const minGapPct = toNumber(draft.minGapPct);
+  const limit = draftLimitToQuery(draft.limit);
   return {
-    limit: Math.max(25, Math.min(250, Number(draft.limit) || 100)),
-    offset,
+    limit,
+    offset: limit === 0 ? 0 : offset,
     q: draft.q.trim() || null,
     startDate: draft.startDate || null,
     endDate: draft.endDate || null,
@@ -404,11 +416,12 @@ function ResultsPager({
   pageEnd: number;
   onPage: (offset: number) => void;
 }) {
-  const totalPages = total > 0 ? Math.ceil(total / limit) : 0;
-  const currentPage = total > 0 ? Math.floor(offset / limit) + 1 : 0;
-  const lastOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
-  const canGoBack = offset > 0 && !loading;
-  const canGoForward = offset + limit < total && !loading;
+  const allMatches = limit === 0;
+  const totalPages = total > 0 ? (allMatches ? 1 : Math.ceil(total / limit)) : 0;
+  const currentPage = total > 0 ? (allMatches ? 1 : Math.floor(offset / limit) + 1) : 0;
+  const lastOffset = total > 0 && !allMatches ? Math.floor((total - 1) / limit) * limit : 0;
+  const canGoBack = !allMatches && offset > 0 && !loading;
+  const canGoForward = !allMatches && offset + limit < total && !loading;
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
       <button type="button" className={BUTTON_CLASS} disabled={!canGoBack} onClick={() => onPage(0)} aria-label="First page">

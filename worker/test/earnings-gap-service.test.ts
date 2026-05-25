@@ -3,6 +3,7 @@ import {
   buildTradingViewEarningsGapPayload,
   computeEarningsGapEvents,
   exportEarningsGapTickers,
+  loadEarningsGapsStatus,
   maybeRunScheduledEarningsGapSync,
   parseTradingViewEarningsGapRows,
   queryEarningsGaps,
@@ -10,6 +11,7 @@ import {
   type EarningsGapEventInput,
   type EarningsGapReleaseInput,
 } from "../src/earnings-gap-service";
+import { isExcludedEarningsIssue } from "../src/earnings-issue-filter";
 import type { Env } from "../src/types";
 
 type StoredSync = {
@@ -131,7 +133,7 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
   };
   const applyEventFilters = (sql: string, args: unknown[]) => {
     let cursor = 0;
-    let rows = [...events];
+    let rows = events.filter((row) => !isExcludedEarningsIssue(row));
     if (sql.includes("report_date >= ?")) {
       const startDate = String(args[cursor++] ?? "1900-01-01");
       rows = rows.filter((row) => row.reportDate >= startDate);
@@ -199,6 +201,17 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
           }
           if (sql.includes("SELECT COUNT(*) as count FROM earnings_gap_events")) {
             return { count: applyEventFilters(sql, args).length } as T;
+          }
+          if (sql.includes("MAX(report_date)")) {
+            const rows = applyEventFilters(sql, args);
+            return {
+              total: rows.length,
+              postmarket: rows.filter((row) => row.gapSource === "postmarket").length,
+              regularOpen: rows.filter((row) => row.gapSource === "regular_open").length,
+              both: rows.filter((row) => row.gapSource === "both").length,
+              latestReportDate: rows.map((row) => row.reportDate).sort().at(-1) ?? null,
+              earliestReportDate: rows.map((row) => row.reportDate).sort()[0] ?? null,
+            } as T;
           }
           return null as T;
         },
@@ -403,6 +416,18 @@ describe("earnings gap service", () => {
     });
   });
 
+  it("skips TradingView preferred and non-common gap rows", () => {
+    const rows = parseTradingViewEarningsGapRows({
+      data: [
+        tvRow({ symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+        tvRow({ symbol: "FBIOP", name: "Fortress Biotech Inc. Series A Cumulative Redeemable Perpetual Preferred Stock", exchange: "NASDAQ", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+        tvRow({ symbol: "TDS/PU", name: "Telephone and Data Systems Depositary Shares", exchange: "NYSE", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+      ],
+    });
+
+    expect(rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+  });
+
   it("qualifies postmarket, regular-open, and both gap sources while excluding non-positive gaps", async () => {
     const env = createEnv({
       bars: [
@@ -585,6 +610,38 @@ describe("earnings gap service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["B", "C"]);
     expect(result.rows.every((row) => row.season === "2026 Q2")).toBe(true);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q2", count: 2 });
+  });
+
+  it("excludes preferred issues from gap query, export, status, and supports limit zero", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "AAPL", reportDate: "2026-05-10", season: "2026 Q2", qualifyingGapPct: 7, gapSource: "postmarket", sector: "Tech" }),
+        storedEvent({ ticker: "FBIOP", reportDate: "2026-05-11", season: "2026 Q2", qualifyingGapPct: 40, companyName: "Fortress Biotech Series A Cumulative Redeemable Perpetual Preferred Stock", sector: "Health" }),
+        storedEvent({ ticker: "CTO/PA", reportDate: "2026-05-12", season: "2026 Q2", qualifyingGapPct: 35, companyName: "CTO Realty Growth Preferred Stock", sector: "Finance" }),
+        storedEvent({ ticker: "TDS/PU", reportDate: "2026-05-13", season: "2026 Q2", qualifyingGapPct: 30, companyName: "Telephone and Data Systems Depositary Shares", sector: "Telecom" }),
+        storedEvent({ ticker: "TDS/PV", reportDate: "2026-05-14", season: "2026 Q2", qualifyingGapPct: 25, companyName: "Telephone and Data Systems Depositary Shares", sector: "Telecom" }),
+        storedEvent({ ticker: "SHO/PH", reportDate: "2026-05-15", season: "2026 Q2", qualifyingGapPct: 20, companyName: "Sunstone Hotel Investors Preferred Shares", sector: "Real Estate" }),
+      ],
+    });
+
+    const result = await queryEarningsGaps(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "qualifyingGapPct",
+      sortDir: "desc",
+      limit: 0,
+    });
+    const exported = await exportEarningsGapTickers(env, { startDate: "2026-01-01", includeOtc: true, limit: 0 });
+    const status = await loadEarningsGapsStatus(env);
+
+    expect(result.limit).toBe(1000);
+    expect(result.total).toBe(1);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(result.facets.sectors).toEqual([{ value: "Tech", count: 1 }]);
+    expect(exported).toEqual(["AAPL"]);
+    expect(status.counts.total).toBe(1);
+    expect(status.counts.postmarket).toBe(1);
+    expect(status.latestRows.map((row) => row.ticker)).toEqual(["AAPL"]);
   });
 
   it("exports top gap tickers with filters, sorting, and export limit clamp", async () => {

@@ -3,11 +3,13 @@ import {
   buildTradingViewEarningsSurprisePayload,
   deriveEarningsSeason,
   exportEarningsSurpriseTickers,
+  loadEarningsSurprisesStatus,
   parseTradingViewEarningsSurpriseRows,
   queryEarningsSurprises,
   syncEarningsSurprises,
   type EarningsSurpriseRow,
 } from "../src/earnings-surprise-service";
+import { isExcludedEarningsIssue } from "../src/earnings-issue-filter";
 import type { Env } from "../src/types";
 
 type StoredEvent = EarningsSurpriseRow & {
@@ -77,9 +79,11 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
 
   const applyFilters = (sql: string, args: unknown[]): StoredEvent[] => {
     let cursor = 0;
-    let rows = [...events];
-    const startDate = String(args[cursor++] ?? "1900-01-01");
-    rows = rows.filter((row) => row.reportDate >= startDate);
+    let rows = events.filter((row) => !isExcludedEarningsIssue(row));
+    if (sql.includes("report_date >= ?")) {
+      const startDate = String(args[cursor++] ?? "1900-01-01");
+      rows = rows.filter((row) => row.reportDate >= startDate);
+    }
     if (sql.includes("report_date <= ?")) {
       const endDate = String(args[cursor++] ?? "9999-12-31");
       rows = rows.filter((row) => row.reportDate <= endDate);
@@ -116,8 +120,8 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
     if (sql.includes("UPPER(exchange) IN ('NASDAQ', 'NYSE', 'AMEX')")) {
       rows = rows.filter((row) => ["NASDAQ", "NYSE", "AMEX"].includes(String(row.exchange ?? "").toUpperCase()));
     }
-    if (sql.includes("eps_surprise_pct > 0")) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) > 0);
-    if (sql.includes("eps_surprise_pct < 0")) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) < 0);
+    if (/(?:WHERE|AND)\s+eps_surprise_pct > 0/.test(sql)) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) > 0);
+    if (/(?:WHERE|AND)\s+eps_surprise_pct < 0/.test(sql)) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) < 0);
     const sortMatch = sql.match(/ORDER BY ([a-z_]+) (ASC|DESC)/);
     if (sortMatch) {
       const [, column, direction] = sortMatch;
@@ -151,12 +155,13 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
             return { count: applyFilters(sql, args).length } as T;
           }
           if (sql.includes("MAX(report_date)")) {
+            const rows = applyFilters(sql, args);
             return {
-              total: events.length,
-              positive: events.filter((row) => Number(row.epsSurprisePct ?? 0) > 0).length,
-              negative: events.filter((row) => Number(row.epsSurprisePct ?? 0) < 0).length,
-              latestReportDate: events.map((row) => row.reportDate).sort().at(-1) ?? null,
-              earliestReportDate: events.map((row) => row.reportDate).sort()[0] ?? null,
+              total: rows.length,
+              positive: rows.filter((row) => Number(row.epsSurprisePct ?? 0) > 0).length,
+              negative: rows.filter((row) => Number(row.epsSurprisePct ?? 0) < 0).length,
+              latestReportDate: rows.map((row) => row.reportDate).sort().at(-1) ?? null,
+              earliestReportDate: rows.map((row) => row.reportDate).sort()[0] ?? null,
             } as T;
           }
           if (sql.includes("last_success_at as lastSuccessAt")) {
@@ -362,6 +367,18 @@ describe("earnings surprise service", () => {
     expect(deriveEarningsSeason(null, "2026-05-20")).toBe("2026 Q2");
   });
 
+  it("skips TradingView preferred and non-common issue rows", () => {
+    const rows = parseTradingViewEarningsSurpriseRows({
+      data: [
+        tvRow({ symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", sector: "Tech", industry: "Hardware", marketCap: 3_000_000_000_000, epsActual: 2, epsEstimate: 1.8, epsSurprisePct: 11.1, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+        tvRow({ symbol: "FBIOP", name: "Fortress Biotech Inc. 9.375% Series A Cumulative Redeemable Perpetual Preferred Stock", exchange: "NASDAQ", sector: "Health Technology", industry: "Biotechnology", marketCap: 20_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+        tvRow({ symbol: "CTO/PA", name: "CTO Realty Growth Inc. Series A Preferred Stock", exchange: "NYSE", sector: "Finance", industry: "REITs", marketCap: 50_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+      ],
+    });
+
+    expect(rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+  });
+
   it("syncs positive and negative TradingView rows idempotently", async () => {
     const env = createEnv();
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -438,6 +455,37 @@ describe("earnings surprise service", () => {
     expect(result.total).toBe(1);
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
+  });
+
+  it("excludes preferred issues from query, export, status, and supports limit zero", async () => {
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const env = createEnv([
+      { ...base, id: "1", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", reportDate: "2026-05-01", epsSurprisePct: 5 },
+      { ...base, id: "2", sourceSymbol: "NASDAQ:FBIOP", ticker: "FBIOP", companyName: "Fortress Biotech Series A Cumulative Redeemable Perpetual Preferred Stock", reportDate: "2026-05-02", epsSurprisePct: 50 },
+      { ...base, id: "3", sourceSymbol: "NYSE:CTO/PA", ticker: "CTO/PA", companyName: "CTO Realty Growth Preferred Stock", reportDate: "2026-05-03", epsSurprisePct: 40 },
+      { ...base, id: "4", sourceSymbol: "NYSE:TDS/PU", ticker: "TDS/PU", companyName: "Telephone and Data Systems Depositary Shares", reportDate: "2026-05-04", epsSurprisePct: 30 },
+      { ...base, id: "5", sourceSymbol: "NYSE:TDS/PV", ticker: "TDS/PV", companyName: "Telephone and Data Systems Depositary Shares", reportDate: "2026-05-05", epsSurprisePct: 20 },
+      { ...base, id: "6", sourceSymbol: "NYSE:SHO/PH", ticker: "SHO/PH", companyName: "Sunstone Hotel Investors Preferred Shares", reportDate: "2026-05-06", epsSurprisePct: 10 },
+    ]);
+
+    const result = await queryEarningsSurprises(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "epsSurprisePct",
+      sortDir: "desc",
+      limit: 0,
+    });
+    const exported = await exportEarningsSurpriseTickers(env, { startDate: "2026-01-01", includeOtc: true, limit: 0 });
+    const status = await loadEarningsSurprisesStatus(env);
+
+    expect(result.limit).toBe(1000);
+    expect(result.total).toBe(1);
+    expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(result.facets.sectors).toEqual([{ value: "Tech", count: 1 }]);
+    expect(exported).toEqual(["AAPL"]);
+    expect(status.counts.total).toBe(1);
+    expect(status.counts.positive).toBe(1);
+    expect(status.latestRows.map((row) => row.ticker)).toEqual(["AAPL"]);
   });
 
   it("exports top surprise tickers with filters, sorting, and export limit clamp", async () => {

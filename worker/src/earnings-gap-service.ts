@@ -1,5 +1,11 @@
 import { zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
+import {
+  EARNINGS_ELIGIBLE_ISSUE_SQL,
+  isExcludedEarningsIssue,
+  normalizeEarningsQueryLimit,
+  normalizeEarningsQueryOffset,
+} from "./earnings-issue-filter";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const PRIMARY_PROVIDER = "tradingview";
@@ -423,9 +429,12 @@ export function parseTradingViewEarningsGapRows(response: TradingViewScanRespons
       const data = Array.isArray(entry.d) ? entry.d : [];
       const sourceSymbol = String(entry.s ?? "").trim().toUpperCase();
       const ticker = parseTradingViewTicker(sourceSymbol);
+      const companyName = normalizeText(data[0]) ?? normalizeText(data[1]);
+      const issueType = normalizeText(data[3]);
       const reportTimestamp = parseMaybeNumber(data[10]);
       const reportDate = timestampToNewYorkDate(reportTimestamp) ?? normalizeDate(data[12]);
       if (!ticker || !reportDate) return null;
+      if (isExcludedEarningsIssue({ ticker, sourceSymbol, companyName, issueType })) return null;
       const price = parseMaybeNumber(data[7]);
       const avgVolume30d = parseMaybeNumber(data[8]);
       const avgDollarVolume30d = parseMaybeNumber(data[9]) ?? (
@@ -436,7 +445,7 @@ export function parseTradingViewEarningsGapRows(response: TradingViewScanRespons
         sourceSymbol,
         ticker,
         exchange: normalizeExchange(data[2]),
-        companyName: normalizeText(data[0]) ?? normalizeText(data[1]),
+        companyName,
         sector: normalizeText(data[4]),
         industry: normalizeText(data[5]),
         marketCap: parseMaybeNumber(data[6]),
@@ -854,7 +863,7 @@ function normalizeArrayFilter(value: string | string[] | null | undefined): stri
 }
 
 function buildWhereClause(query: EarningsGapsQuery): { sql: string; args: unknown[] } {
-  const clauses = ["report_date >= ?"];
+  const clauses = ["report_date >= ?", EARNINGS_ELIGIBLE_ISSUE_SQL];
   const args: unknown[] = [query.startDate ? normalizeDate(query.startDate) ?? isoDateDaysAgo(RETENTION_DAYS) : isoDateDaysAgo(RETENTION_DAYS)];
   if (query.endDate && normalizeDate(query.endDate)) {
     clauses.push("report_date <= ?");
@@ -969,8 +978,8 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
       facets: { seasons: [], sectors: [], industries: [], exchanges: [], gapSources: [] },
     };
   }
-  const limit = Math.max(1, Math.min(MAX_QUERY_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
-  const offset = Math.max(0, Number(query.offset ?? 0));
+  const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query);
@@ -1014,7 +1023,7 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
 
 export async function exportEarningsGapTickers(env: Env, query: EarningsGapsQuery = {}): Promise<string[]> {
   if (await earningsGapSchemaWarning(env)) return [];
-  const limit = Math.max(1, Math.min(EXPORT_MAX_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
+  const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query);
@@ -1048,7 +1057,8 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
          SUM(CASE WHEN gap_source = 'both' THEN 1 ELSE 0 END) as both,
          MAX(report_date) as latestReportDate,
          MIN(report_date) as earliestReportDate
-       FROM earnings_gap_events`,
+       FROM earnings_gap_events
+       WHERE ${EARNINGS_ELIGIBLE_ISSUE_SQL}`,
     ).first<{ total: number; postmarket: number | null; regularOpen: number | null; both: number | null; latestReportDate: string | null; earliestReportDate: string | null }>(),
     env.DB.prepare(
       `SELECT id, provider, status, mode, scheduled_local_date as scheduledLocalDate,

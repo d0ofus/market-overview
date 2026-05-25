@@ -1,4 +1,10 @@
 import type { Env } from "./types";
+import {
+  EARNINGS_ELIGIBLE_ISSUE_SQL,
+  isExcludedEarningsIssue,
+  normalizeEarningsQueryLimit,
+  normalizeEarningsQueryOffset,
+} from "./earnings-issue-filter";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const PRIMARY_PROVIDER = "tradingview";
@@ -376,9 +382,12 @@ export function parseTradingViewEarningsSurpriseRows(response: TradingViewScanRe
       const data = Array.isArray(entry.d) ? entry.d : [];
       const sourceSymbol = String(entry.s ?? "").trim().toUpperCase();
       const ticker = parseTradingViewTicker(sourceSymbol);
+      const companyName = normalizeText(data[0]) ?? normalizeText(data[1]);
+      const issueType = normalizeText(data[3]);
       const reportTimestamp = parseMaybeNumber(data[15]);
       const reportDate = timestampToNewYorkDate(reportTimestamp);
       if (!ticker || !reportDate) return null;
+      if (isExcludedEarningsIssue({ ticker, sourceSymbol, companyName, issueType })) return null;
       const fiscalPeriodEnd = timestampToUtcDate(parseMaybeNumber(data[17]));
       const epsActual = parseMaybeNumber(data[7]);
       const epsEstimate = parseMaybeNumber(data[8]);
@@ -390,7 +399,7 @@ export function parseTradingViewEarningsSurpriseRows(response: TradingViewScanRe
         sourceSymbol,
         ticker,
         exchange: normalizeExchange(data[2]),
-        companyName: normalizeText(data[0]) ?? normalizeText(data[1]),
+        companyName,
         sector: normalizeText(data[4]),
         industry: normalizeText(data[5]),
         marketCap: parseMaybeNumber(data[6]),
@@ -506,8 +515,10 @@ async function fetchJson<T>(url: string, label: string): Promise<T> {
 function normalizeProviderEvent(raw: unknown, provider: Exclude<EarningsSurpriseProvider, "tradingview">): EarningsSurpriseEventInput | null {
   const row = raw as Record<string, unknown>;
   const ticker = normalizeTicker(pick(row, ["symbol", "ticker"]));
+  const companyName = normalizeText(pick(row, ["name", "companyName"]));
   const reportDate = normalizeDate(pick(row, ["date", "reportDate"]));
   if (!ticker || !reportDate) return null;
+  if (isExcludedEarningsIssue({ ticker, sourceSymbol: ticker, companyName, issueType: pick(row, ["type", "securityType", "assetType"]) })) return null;
   const epsActual = parseMaybeNumber(pick(row, ["epsActual", "eps", "actualEarningResult", "actual"]));
   const epsEstimate = parseMaybeNumber(pick(row, ["epsEstimate", "epsEstimated", "estimatedEarning", "estimate"]));
   const epsSurprise = epsActual != null && epsEstimate != null ? epsActual - epsEstimate : parseMaybeNumber(pick(row, ["epsSurprise", "surprise"]));
@@ -523,7 +534,7 @@ function normalizeProviderEvent(raw: unknown, provider: Exclude<EarningsSurprise
     sourceSymbol: ticker,
     ticker,
     exchange: normalizeExchange(pick(row, ["exchange"])),
-    companyName: normalizeText(pick(row, ["name", "companyName"])),
+    companyName,
     sector: null,
     industry: null,
     marketCap: null,
@@ -790,7 +801,7 @@ function normalizeArrayFilter(value: string | string[] | null | undefined): stri
 }
 
 function buildWhereClause(query: EarningsSurprisesQuery): { sql: string; args: unknown[] } {
-  const clauses = ["report_date >= ?"];
+  const clauses = ["report_date >= ?", EARNINGS_ELIGIBLE_ISSUE_SQL];
   const args: unknown[] = [query.startDate ? normalizeDate(query.startDate) ?? isoDateDaysAgo(RETENTION_DAYS) : isoDateDaysAgo(RETENTION_DAYS)];
   if (query.endDate && normalizeDate(query.endDate)) {
     clauses.push("report_date <= ?");
@@ -893,8 +904,8 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
       facets: { seasons: [], sectors: [], industries: [], exchanges: [] },
     };
   }
-  const limit = Math.max(1, Math.min(MAX_QUERY_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
-  const offset = Math.max(0, Number(query.offset ?? 0));
+  const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query);
@@ -937,7 +948,7 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
 
 export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSurprisesQuery = {}): Promise<string[]> {
   if (!(await hasEarningsSurpriseSchema(env))) return [];
-  const limit = Math.max(1, Math.min(EXPORT_MAX_LIMIT, Number(query.limit ?? DEFAULT_QUERY_LIMIT)));
+  const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query);
@@ -969,7 +980,8 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
          SUM(CASE WHEN eps_surprise_pct < 0 THEN 1 ELSE 0 END) as negative,
          MAX(report_date) as latestReportDate,
          MIN(report_date) as earliestReportDate
-       FROM earnings_surprise_events`,
+       FROM earnings_surprise_events
+       WHERE ${EARNINGS_ELIGIBLE_ISSUE_SQL}`,
     ).first<{ total: number; positive: number | null; negative: number | null; latestReportDate: string | null; earliestReportDate: string | null }>(),
     env.DB.prepare(
       `SELECT provider, status, mode, window_start as windowStart, window_end as windowEnd,
