@@ -62,11 +62,10 @@
 > Add in filter for min EPS % 
 
 ## EARNINGS
+> OTC/other exchanges are not selected but the results table still show them
+> Make default filters to 300M mkt cap, min gap 3%, min volume 5M, 3M prior start date, surprise positive, limit 0
 > Add multi-chart view
-> Add hover-over chart view
-> Add paging function, and allow quick way to go to the first/last page.
 > ranked by distance of close from highs + volume multiple of average + % gain
-> Make default filters to 300M mkt cap, min gap 3%, min volume 5M
 
 For /earnings, is EPS % DESC the EPS surprise %? can I add a average volume * price filter? and add a minimum EPS % Desc filter? Also, can I add a screener to screen out stocks that gapped up on earnings release, where they do not have to be earnings surprises, as long as the price gaps up on the earnings release date.
 
@@ -124,3 +123,8 @@ What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
 - Add polymarket overview like (https://www.perplexity.ai/computer/a/f87a4860-4de3-4184-96fb-a1da94a68b38?view=split)
 - Add momentum monitor like https://x.com/_Adi_B_/status/2029634187624693843/photo/1
 - Add Calendar of US holidays
+
+# API KEYS
+Brave: Cryptonerdo123@gmail.com
+
+Gemini: Cryptonerdo123@gmail.com
