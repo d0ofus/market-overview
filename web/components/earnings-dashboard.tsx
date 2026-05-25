@@ -220,7 +220,7 @@ function defaultDraftFilters(): DraftFilters {
     exchange: "",
     surpriseSide: "positive",
     includeOtc: false,
-    limit: "0",
+    limit: "",
   };
 }
 
@@ -238,7 +238,7 @@ function defaultGapDraftFilters(): GapDraftFilters {
     industry: "",
     exchange: "",
     includeOtc: false,
-    limit: "0",
+    limit: "",
   };
 }
 
@@ -251,7 +251,7 @@ function toNumber(value: string): number | null {
 
 function draftLimitToQuery(value: string): number {
   const trimmed = value.trim();
-  if (trimmed === "0") return 0;
+  if (!trimmed || trimmed === "0") return 0;
   const parsed = Number(trimmed);
   if (!Number.isFinite(parsed)) return 100;
   return Math.max(25, Math.min(250, Math.floor(parsed)));
