@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MARKET_COMMENTARY_SETTINGS,
+  loadMarketCommentarySettings,
   loadLatestMarketCommentary,
+  maybeRunScheduledMarketCommentary,
   pruneMarketCommentaryReports,
+  renderMarketCommentaryQueryTemplate,
   refreshMarketCommentary,
+  shouldRunScheduledMarketCommentary,
+  updateMarketCommentarySettings,
   type MarketCommentaryReport,
+  type MarketCommentarySettings,
 } from "../src/market-commentary-service";
 import type { Env } from "../src/types";
 
@@ -17,9 +24,11 @@ type StoredReport = Omit<MarketCommentaryReport, "sourceAudit" | "dataQuality" |
 
 class FakeMarketCommentaryDb {
   rows: StoredReport[];
+  settings: MarketCommentarySettings | null;
 
   constructor(rows: StoredReport[] = []) {
     this.rows = [...rows];
+    this.settings = null;
   }
 
   prepare(sql: string) {
@@ -31,6 +40,9 @@ class FakeMarketCommentaryDb {
         return statement;
       },
       async first<T>() {
+        if (sql.includes("FROM market_commentary_settings")) {
+          return (db.settings ? settingsToRow(db.settings) : null) as T;
+        }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("WHERE session_date = ?")) {
           const sessionDate = String(bound[0]);
           return (db.rows
@@ -46,6 +58,23 @@ class FakeMarketCommentaryDb {
         return { results: [] as T[] };
       },
       async run() {
+        if (sql.startsWith("INSERT INTO market_commentary_settings")) {
+          const now = "2026-05-25 00:00:00";
+          db.settings = {
+            id: String(bound[0]),
+            enabled: Number(bound[1]) === 1,
+            systemPromptTemplate: String(bound[2]),
+            staticSources: JSON.parse(String(bound[3])),
+            braveQueries: JSON.parse(String(bound[4])),
+            scheduleEnabled: Number(bound[5]) === 1,
+            scheduleTimezone: String(bound[6]),
+            scheduleLocalTime: String(bound[7]),
+            scheduleDays: JSON.parse(String(bound[8])),
+            createdAt: db.settings?.createdAt ?? now,
+            updatedAt: now,
+          };
+          return { meta: { rows_written: 1 } };
+        }
         if (sql.startsWith("DELETE FROM market_commentary_reports")) {
           const cutoff = String(bound[0]);
           const before = db.rows.length;
@@ -78,6 +107,22 @@ class FakeMarketCommentaryDb {
     };
     return statement;
   }
+}
+
+function settingsToRow(settings: MarketCommentarySettings) {
+  return {
+    id: settings.id,
+    enabled: settings.enabled ? 1 : 0,
+    systemPromptTemplate: settings.systemPromptTemplate,
+    staticSourcesJson: JSON.stringify(settings.staticSources),
+    braveQueriesJson: JSON.stringify(settings.braveQueries),
+    scheduleEnabled: settings.scheduleEnabled ? 1 : 0,
+    scheduleTimezone: settings.scheduleTimezone,
+    scheduleLocalTime: settings.scheduleLocalTime,
+    scheduleDaysJson: JSON.stringify(settings.scheduleDays),
+    createdAt: settings.createdAt,
+    updatedAt: settings.updatedAt,
+  };
 }
 
 function sortLatest(left: StoredReport, right: StoredReport): number {
@@ -114,6 +159,78 @@ function createEnv(db: FakeMarketCommentaryDb, extra?: Partial<Env>): Env {
 }
 
 describe("market commentary service", () => {
+  it("returns default configurable settings when no row exists", async () => {
+    const settings = await loadMarketCommentarySettings(createEnv(new FakeMarketCommentaryDb()));
+    expect(settings.enabled).toBe(true);
+    expect(settings.scheduleTimezone).toBe("Australia/Melbourne");
+    expect(settings.scheduleLocalTime).toBe("09:00");
+    expect(settings.scheduleDays).toEqual(["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
+    expect(settings.braveQueries[0]).toContain("{nyDate}");
+  });
+
+  it("persists configurable prompt, sources, queries, and schedule settings", async () => {
+    const db = new FakeMarketCommentaryDb();
+    const updated = await updateMarketCommentarySettings(createEnv(db), {
+      ...DEFAULT_MARKET_COMMENTARY_SETTINGS,
+      enabled: false,
+      systemPromptTemplate: `${DEFAULT_MARKET_COMMENTARY_SETTINGS.systemPromptTemplate}\nExtra instruction.`,
+      braveQueries: ["markets {sessionDate} {latestCompletedSessionDate} {marketStatus}"],
+      scheduleLocalTime: "10:15",
+      scheduleDays: ["Wednesday"],
+    });
+
+    expect(updated.enabled).toBe(false);
+    expect(updated.braveQueries).toEqual(["markets {sessionDate} {latestCompletedSessionDate} {marketStatus}"]);
+    expect(updated.scheduleLocalTime).toBe("10:15");
+    expect(updated.scheduleDays).toEqual(["Wednesday"]);
+  });
+
+  it("renders configured Brave query template variables", () => {
+    const rendered = renderMarketCommentaryQueryTemplate(
+      "market {nyDate} {sessionDate} {latestCompletedSessionDate} {marketStatus}",
+      {
+        nowIso: "2026-05-26T00:00:00.000Z",
+        nyDate: "2026-05-25",
+        nyTime: "20:00",
+        sessionDate: "2026-05-25",
+        latestCompletedSessionDate: "2026-05-25",
+        status: "after_hours",
+        label: "Post-close",
+        dataBasis: "closing",
+        isTradingDay: true,
+        closedReason: null,
+      },
+    );
+    expect(rendered).toBe("market 2026-05-25 2026-05-25 2026-05-25 after_hours");
+  });
+
+  it("runs the configured Melbourne schedule only in the target weekday window", () => {
+    const settings = { ...DEFAULT_MARKET_COMMENTARY_SETTINGS };
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:00:00.000Z"))).toBe(true);
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:14:59.000Z"))).toBe(true);
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:15:00.000Z"))).toBe(false);
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-05-24T23:00:00.000Z"))).toBe(false);
+  });
+
+  it("scheduled generation skips when a ready report already exists for the session", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("monday", "2026-06-01", "2026-06-01T22:30:00.000Z"),
+    ]);
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
+    expect(response?.status).toBe("ready");
+    expect(response?.warning).toContain("already exists");
+    expect(db.rows).toHaveLength(1);
+  });
+
+  it("scheduled generation stores an isolated failed report when provider config is missing", async () => {
+    const db = new FakeMarketCommentaryDb();
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.sessionDate).toBe("2026-06-01");
+    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(db.rows).toHaveLength(1);
+  });
+
   it("returns an empty state when no report exists", async () => {
     const response = await loadLatestMarketCommentary(createEnv(new FakeMarketCommentaryDb()));
     expect(response.status).toBe("empty");

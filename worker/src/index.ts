@@ -37,6 +37,7 @@ import {
   adminSymbolCatalogSyncSchema,
   adminSymbolCatalogScheduleSchema,
   adminWorkerSchedulePatchSchema,
+  marketCommentarySettingsPatchSchema,
   patternFeaturePatchSchema,
   patternCandidatesQuerySchema,
   patternLabelBulkSchema,
@@ -80,8 +81,12 @@ import {
   getFedWatchSnapshot,
 } from "./fedwatch-service";
 import {
+  loadMarketCommentarySettings,
   loadLatestMarketCommentary,
+  maybeRunScheduledMarketCommentary,
   refreshMarketCommentary,
+  resetMarketCommentarySettings,
+  updateMarketCommentarySettings,
 } from "./market-commentary-service";
 import {
   cleanupOldScansPageData,
@@ -3602,6 +3607,17 @@ app.get("/api/admin/worker-schedule", async (c) => {
   }
 });
 
+app.get("/api/admin/market-commentary/settings", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const settings = await loadMarketCommentarySettings(c.env);
+    return c.json(settings);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load market commentary settings.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/watchlist-compiler/sets", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const rows = await listWatchlistSets(c.env, true);
@@ -4489,6 +4505,34 @@ app.patch("/api/admin/worker-schedule", async (c) => {
   }
 });
 
+app.patch("/api/admin/market-commentary/settings", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = marketCommentarySettingsPatchSchema.parse(await c.req.json());
+    const settings = await updateMarketCommentarySettings(c.env, payload);
+    await upsertAudit(c.env, "default", "MARKET_COMMENTARY_SETTINGS_PATCH", payload);
+    return c.json({ ok: true, settings });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid market commentary settings payload." }, 400);
+    }
+    const message = error instanceof Error ? error.message : "Failed to update market commentary settings.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/market-commentary/settings/reset", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const settings = await resetMarketCommentarySettings(c.env);
+    await upsertAudit(c.env, "default", "MARKET_COMMENTARY_SETTINGS_RESET", { id: settings.id });
+    return c.json({ ok: true, settings });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to reset market commentary settings.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.patch("/api/admin/group/:groupId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const groupId = c.req.param("groupId");
@@ -4863,6 +4907,11 @@ export default {
       await maybeRunScheduledSocialAlertScrape(env, now);
     } catch (error) {
       console.error("scheduled social alerts scrape failed", error);
+    }
+    try {
+      await maybeRunScheduledMarketCommentary(env, now);
+    } catch (error) {
+      console.error("scheduled market commentary failed", error);
     }
     try {
       await syncMonthlyEtfSlice(env);

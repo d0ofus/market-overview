@@ -86,6 +86,20 @@ export type MarketCommentaryRefreshResponse = MarketCommentaryResponse & {
   ok: boolean;
 };
 
+export type MarketCommentarySettings = {
+  id: string;
+  enabled: boolean;
+  systemPromptTemplate: string;
+  staticSources: MarketCommentarySourceAudit[];
+  braveQueries: string[];
+  scheduleEnabled: boolean;
+  scheduleTimezone: string;
+  scheduleLocalTime: string;
+  scheduleDays: string[];
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
 export type AlertLogRow = {
   id: string;
   ticker: string;
@@ -1952,6 +1966,23 @@ export function refreshMarketCommentary(force = false) {
     appendQuery("/api/admin/market-commentary/refresh", { force: force ? 1 : undefined }),
     { method: "POST" },
   );
+}
+
+export function getAdminMarketCommentarySettings() {
+  return adminFetch<MarketCommentarySettings>("/api/admin/market-commentary/settings");
+}
+
+export function updateAdminMarketCommentarySettings(payload: Omit<MarketCommentarySettings, "createdAt" | "updatedAt">) {
+  return adminFetch<{ ok: boolean; settings: MarketCommentarySettings }>("/api/admin/market-commentary/settings", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function resetAdminMarketCommentarySettings() {
+  return adminFetch<{ ok: boolean; settings: MarketCommentarySettings }>("/api/admin/market-commentary/settings/reset", {
+    method: "POST",
+  });
 }
 
 export function getBreadthSummary() {

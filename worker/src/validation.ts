@@ -45,6 +45,45 @@ export const adminWorkerSchedulePatchSchema = z.object({
   patternScanMaxBatchesPerTick: z.number().int().min(1).max(20).default(4),
 });
 
+const marketCommentaryWeekdaySchema = z.enum([
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+]);
+
+function isSupportedTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const marketCommentarySourceSchema = z.object({
+  sourceName: z.string().trim().min(1).max(160),
+  url: z.string().trim().url().max(500).nullable().optional(),
+  dataUsed: z.string().trim().min(1).max(500),
+  timestamp: z.string().trim().max(120).nullable().optional(),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+
+export const marketCommentarySettingsPatchSchema = z.object({
+  id: z.string().trim().min(1).default("default"),
+  enabled: z.boolean(),
+  systemPromptTemplate: z.string().trim().min(500).max(50_000),
+  staticSources: z.array(marketCommentarySourceSchema).min(1).max(30),
+  braveQueries: z.array(z.string().trim().min(10).max(500)).min(1).max(12),
+  scheduleEnabled: z.boolean(),
+  scheduleTimezone: z.string().trim().min(1).max(80).refine(isSupportedTimezone, "Unsupported schedule timezone."),
+  scheduleLocalTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
+  scheduleDays: z.array(marketCommentaryWeekdaySchema).min(1).max(7),
+});
+
 const patternLabelValueSchema = z.enum(["approved", "rejected", "skipped"]);
 const patternLabelStatusSchema = z.enum(["active", "archived", "deleted"]);
 const patternSelectionModeSchema = z.enum(["chart_range", "fixed_window"]);

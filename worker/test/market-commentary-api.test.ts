@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_MARKET_COMMENTARY_SETTINGS, type MarketCommentarySettings } from "../src/market-commentary-service";
 import worker from "../src/index";
 import type { Env } from "../src/types";
 
@@ -22,6 +23,7 @@ type StoredReport = {
 
 class FakeMarketCommentaryDb {
   rows: StoredReport[] = [];
+  settings: MarketCommentarySettings | null = null;
 
   prepare(sql: string) {
     const db = this;
@@ -32,6 +34,9 @@ class FakeMarketCommentaryDb {
         return statement;
       },
       async first<T>() {
+        if (sql.includes("FROM market_commentary_settings")) {
+          return (db.settings ? settingsToRow(db.settings) : null) as T;
+        }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("WHERE session_date = ?")) {
           return (db.rows.filter((row) => row.sessionDate === String(bound[0])).sort(sortLatest)[0] ?? null) as T;
         }
@@ -44,6 +49,23 @@ class FakeMarketCommentaryDb {
         return { results: [] as T[] };
       },
       async run() {
+        if (sql.startsWith("INSERT INTO market_commentary_settings")) {
+          const now = "2026-05-25 00:00:00";
+          db.settings = {
+            id: String(bound[0]),
+            enabled: Number(bound[1]) === 1,
+            systemPromptTemplate: String(bound[2]),
+            staticSources: JSON.parse(String(bound[3])),
+            braveQueries: JSON.parse(String(bound[4])),
+            scheduleEnabled: Number(bound[5]) === 1,
+            scheduleTimezone: String(bound[6]),
+            scheduleLocalTime: String(bound[7]),
+            scheduleDays: JSON.parse(String(bound[8])),
+            createdAt: db.settings?.createdAt ?? now,
+            updatedAt: now,
+          };
+          return { meta: { rows_written: 1 } };
+        }
         if (sql.startsWith("DELETE FROM market_commentary_reports")) {
           const cutoff = String(bound[0]);
           const before = db.rows.length;
@@ -77,6 +99,22 @@ class FakeMarketCommentaryDb {
   }
 }
 
+function settingsToRow(settings: MarketCommentarySettings) {
+  return {
+    id: settings.id,
+    enabled: settings.enabled ? 1 : 0,
+    systemPromptTemplate: settings.systemPromptTemplate,
+    staticSourcesJson: JSON.stringify(settings.staticSources),
+    braveQueriesJson: JSON.stringify(settings.braveQueries),
+    scheduleEnabled: settings.scheduleEnabled ? 1 : 0,
+    scheduleTimezone: settings.scheduleTimezone,
+    scheduleLocalTime: settings.scheduleLocalTime,
+    scheduleDaysJson: JSON.stringify(settings.scheduleDays),
+    createdAt: settings.createdAt,
+    updatedAt: settings.updatedAt,
+  };
+}
+
 function sortLatest(left: StoredReport, right: StoredReport): number {
   return right.sessionDate.localeCompare(left.sessionDate) || right.createdAt.localeCompare(left.createdAt);
 }
@@ -91,6 +129,49 @@ function createEnv(db = new FakeMarketCommentaryDb(), extra?: Partial<Env>): Env
 }
 
 describe("market commentary API", () => {
+  it("requires admin auth for commentary settings", async () => {
+    const response = await worker.fetch(new Request("https://example.com/api/admin/market-commentary/settings"), createEnv(), {} as ExecutionContext);
+    expect(response.status).toBe(401);
+  });
+
+  it("returns, updates, and resets commentary settings", async () => {
+    const db = new FakeMarketCommentaryDb();
+    const env = createEnv(db);
+    const authed = { Authorization: "Bearer secret" };
+
+    const initial = await worker.fetch(new Request("https://example.com/api/admin/market-commentary/settings", { headers: authed }), env, {} as ExecutionContext);
+    expect(initial.status).toBe(200);
+    const initialPayload = await initial.json() as MarketCommentarySettings;
+    expect(initialPayload.scheduleLocalTime).toBe("09:00");
+
+    const patch = await worker.fetch(
+      new Request("https://example.com/api/admin/market-commentary/settings", {
+        method: "PATCH",
+        headers: authed,
+        body: JSON.stringify({
+          ...DEFAULT_MARKET_COMMENTARY_SETTINGS,
+          scheduleLocalTime: "10:15",
+          scheduleDays: ["Wednesday"],
+        }),
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    expect(patch.status).toBe(200);
+    const patchPayload = await patch.json() as { settings: MarketCommentarySettings };
+    expect(patchPayload.settings.scheduleLocalTime).toBe("10:15");
+    expect(patchPayload.settings.scheduleDays).toEqual(["Wednesday"]);
+
+    const reset = await worker.fetch(
+      new Request("https://example.com/api/admin/market-commentary/settings/reset", { method: "POST", headers: authed }),
+      env,
+      {} as ExecutionContext,
+    );
+    expect(reset.status).toBe(200);
+    const resetPayload = await reset.json() as { settings: MarketCommentarySettings };
+    expect(resetPayload.settings.scheduleLocalTime).toBe("09:00");
+  });
+
   it("returns an empty cached commentary state without affecting health", async () => {
     const env = createEnv();
     const commentary = await worker.fetch(new Request("https://example.com/api/market-commentary"), env, {} as ExecutionContext);
