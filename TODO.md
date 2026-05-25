@@ -6,6 +6,7 @@
 > For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
+> Add a current focus bullet point form in /overview -> E.g. Focus on retracements, focus on earnings gappers etc. 
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
 > Add macro stuff like 10Y yields and yield curve chart
