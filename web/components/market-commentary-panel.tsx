@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { AlertTriangle, CheckCircle2, ChevronDown, Database, ExternalLink, FileText, RefreshCw } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { refreshMarketCommentary, type MarketCommentaryResponse } from "@/lib/api";
 
 type TabKey = "report" | "sources" | "quality";
@@ -28,9 +31,9 @@ function formatDateTime(value: string | null | undefined): string {
 }
 
 function statusClass(status: MarketCommentaryResponse["status"]): string {
-  if (status === "ready") return "border-emerald-400/35 bg-emerald-500/10 text-emerald-200";
-  if (status === "failed") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
-  return "border-slate-600 bg-slate-800/70 text-slate-300";
+  if (status === "ready") return "border-success/35 bg-success/10 text-success";
+  if (status === "failed") return "border-warning/35 bg-warning/10 text-warning";
+  return "border-borderSoft bg-panelSoft text-text/70";
 }
 
 function sessionLabel(value: string | undefined): string {
@@ -41,100 +44,65 @@ function sessionLabel(value: string | undefined): string {
   return "No report";
 }
 
-function InlineMarkdown({ text }: { text: string }) {
-  const nodes = text.split(/(\*\*[^*]+\*\*)/g).map((part, index) => {
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return <strong key={index} className="font-semibold text-slate-100">{part.slice(2, -2)}</strong>;
-    }
-    return <span key={index}>{part}</span>;
-  });
-  return <>{nodes}</>;
-}
-
-function MarkdownTable({ lines }: { lines: string[] }) {
-  const rows = lines
-    .filter((line) => !/^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim()))
-    .map((line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()));
-  if (rows.length === 0) return null;
-  const [header, ...body] = rows;
-  return (
-    <div className="my-3 overflow-x-auto rounded border border-borderSoft/70">
-      <table className="min-w-full divide-y divide-borderSoft/70 text-left text-xs">
-        <thead className="bg-slate-950/60 text-slate-300">
-          <tr>
-            {header.map((cell, index) => (
-              <th key={index} className="px-3 py-2 font-medium">
-                <InlineMarkdown text={cell} />
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-borderSoft/50">
-          {body.map((row, rowIndex) => (
-            <tr key={rowIndex} className="align-top">
-              {row.map((cell, cellIndex) => (
-                <td key={cellIndex} className="px-3 py-2 text-slate-300">
-                  <InlineMarkdown text={cell} />
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+const markdownComponents: Components = {
+  h1: ({ node: _node, ...props }) => (
+    <h1 className="mb-5 text-xl font-semibold leading-tight text-text md:text-2xl" {...props} />
+  ),
+  h2: ({ node: _node, ...props }) => (
+    <h2 className="mt-8 border-t border-borderSoft/70 pt-5 text-lg font-semibold leading-tight text-text" {...props} />
+  ),
+  h3: ({ node: _node, ...props }) => (
+    <h3 className="mt-6 text-base font-semibold leading-snug text-text" {...props} />
+  ),
+  p: ({ node: _node, ...props }) => (
+    <p className="my-3 text-sm leading-6 text-text/85" {...props} />
+  ),
+  strong: ({ node: _node, ...props }) => (
+    <strong className="font-semibold text-text" {...props} />
+  ),
+  ul: ({ node: _node, ...props }) => (
+    <ul className="my-3 list-disc space-y-2 pl-5 text-sm leading-6 text-text/85" {...props} />
+  ),
+  ol: ({ node: _node, ...props }) => (
+    <ol className="my-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-text/85" {...props} />
+  ),
+  li: ({ node: _node, ...props }) => (
+    <li className="pl-1" {...props} />
+  ),
+  hr: ({ node: _node, ...props }) => (
+    <hr className="my-6 border-borderSoft/70" {...props} />
+  ),
+  a: ({ node: _node, ...props }) => (
+    <a className="font-medium text-accent underline underline-offset-2 hover:text-accent/80" target="_blank" rel="noreferrer" {...props} />
+  ),
+  table: ({ node: _node, ...props }) => (
+    <div className="my-5 overflow-x-auto rounded border border-borderSoft/70 bg-panel">
+      <table className="min-w-full divide-y divide-borderSoft/70 text-left text-xs" {...props} />
     </div>
-  );
-}
+  ),
+  thead: ({ node: _node, ...props }) => (
+    <thead className="bg-panelSoft text-text" {...props} />
+  ),
+  tbody: ({ node: _node, ...props }) => (
+    <tbody className="divide-y divide-borderSoft/50" {...props} />
+  ),
+  tr: ({ node: _node, ...props }) => (
+    <tr className="align-top" {...props} />
+  ),
+  th: ({ node: _node, ...props }) => (
+    <th className="px-3 py-2 font-semibold text-text" {...props} />
+  ),
+  td: ({ node: _node, ...props }) => (
+    <td className="px-3 py-2 text-text/80" {...props} />
+  ),
+};
 
 function MarkdownReport({ markdown }: { markdown: string }) {
-  const blocks = useMemo(() => {
-    const lines = markdown.split(/\r?\n/);
-    const output: Array<{ type: "line"; value: string; index: number } | { type: "table"; value: string[]; index: number }> = [];
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      if (line.trim().startsWith("|")) {
-        const table: string[] = [];
-        let cursor = index;
-        while (cursor < lines.length && lines[cursor].trim().startsWith("|")) {
-          table.push(lines[cursor]);
-          cursor += 1;
-        }
-        output.push({ type: "table", value: table, index });
-        index = cursor - 1;
-      } else {
-        output.push({ type: "line", value: line, index });
-      }
-    }
-    return output;
-  }, [markdown]);
-
   return (
-    <div className="space-y-1 break-words text-sm leading-6 text-slate-300">
-      {blocks.map((block) => {
-        if (block.type === "table") {
-          return <MarkdownTable key={block.index} lines={block.value} />;
-        }
-        const line = block.value.trim();
-        if (!line) return <div key={block.index} className="h-2" />;
-        if (/^={5,}$/.test(line)) return <div key={block.index} className="my-3 border-t border-borderSoft/60" />;
-        if (line.startsWith("# ")) {
-          return <h2 key={block.index} className="pt-2 text-lg font-semibold text-slate-50"><InlineMarkdown text={line.slice(2)} /></h2>;
-        }
-        if (line.startsWith("## ")) {
-          return <h3 key={block.index} className="pt-2 text-base font-semibold text-slate-100"><InlineMarkdown text={line.slice(3)} /></h3>;
-        }
-        if (/^\d+\.\s+[A-Z]/.test(line)) {
-          return <h3 key={block.index} className="pt-3 text-base font-semibold text-slate-100"><InlineMarkdown text={line} /></h3>;
-        }
-        if (line.startsWith("- ")) {
-          return (
-            <p key={block.index} className="pl-4">
-              <span className="mr-2 text-accent">-</span>
-              <InlineMarkdown text={line.slice(2)} />
-            </p>
-          );
-        }
-        return <p key={block.index}><InlineMarkdown text={line} /></p>;
-      })}
+    <div className="break-words">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {markdown}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -147,7 +115,7 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
       className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition ${
         active
           ? "border-accent/50 bg-accent/15 text-accent"
-          : "border-borderSoft bg-slate-900/40 text-slate-300 hover:border-slate-500"
+          : "border-borderSoft bg-panelSoft/70 text-text/70 hover:border-accent/40 hover:text-text"
       }`}
     >
       {icon}
@@ -186,18 +154,18 @@ export function MarketCommentaryPanel({ initial }: Props) {
       <div className="border-b border-borderSoft/70 bg-panel/50 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <Collapsible.Trigger className="flex min-w-0 items-center gap-3 text-left">
-            <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${open ? "" : "-rotate-90"}`} />
+            <ChevronDown className={`h-4 w-4 shrink-0 text-text/55 transition ${open ? "" : "-rotate-90"}`} />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-base font-semibold text-slate-50">US Market State of Play</h2>
+                <h2 className="text-base font-semibold text-text">US Market State of Play</h2>
                 <span className={`rounded-full border px-2 py-0.5 text-xs ${statusClass(commentary.status)}`}>
                   {commentary.status === "ready" ? "Ready" : commentary.status === "failed" ? "Needs attention" : "Not generated"}
                 </span>
-                <span className="rounded-full border border-borderSoft bg-slate-900/60 px-2 py-0.5 text-xs text-slate-300">
+                <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">
                   {sessionLabel(report?.marketSession)}
                 </span>
               </div>
-              <p className="mt-1 truncate text-xs text-slate-400">
+              <p className="mt-1 truncate text-xs text-text/60">
                 {report ? `${report.marketSessionLabel} - generated ${formatDateTime(report.generatedAt)}` : commentary.warning ?? "Generate the first report when ready."}
               </p>
             </div>
@@ -229,20 +197,20 @@ export function MarketCommentaryPanel({ initial }: Props) {
             </button>
           </div>
         </div>
-        {message && <p className="mt-2 text-xs text-slate-400">{message}</p>}
+        {message && <p className="mt-2 text-xs text-text/60">{message}</p>}
       </div>
 
       <Collapsible.Content>
         <div className="space-y-4 p-4">
           {commentary.status === "failed" && (
-            <div className="flex gap-2 rounded border border-amber-400/30 bg-amber-500/10 p-3 text-sm text-amber-100">
+            <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{commentary.warning ?? report?.error ?? "Commentary generation failed."}</span>
             </div>
           )}
 
           {!hasReport && (
-            <div className="rounded border border-borderSoft bg-slate-900/40 p-4 text-sm text-slate-300">
+            <div className="rounded border border-borderSoft bg-panelSoft/55 p-4 text-sm text-text/75">
               No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow.
             </div>
           )}
@@ -250,17 +218,17 @@ export function MarketCommentaryPanel({ initial }: Props) {
           {report && (
             <>
               <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded border border-borderSoft/70 bg-slate-950/35 p-3">
-                  <div className="text-xs uppercase text-slate-500">Session date</div>
-                  <div className="mt-1 font-mono text-sm text-slate-100">{report.sessionDate}</div>
+                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                  <div className="text-xs uppercase text-text/55">Session date</div>
+                  <div className="mt-1 font-mono text-sm text-text">{report.sessionDate}</div>
                 </div>
-                <div className="rounded border border-borderSoft/70 bg-slate-950/35 p-3">
-                  <div className="text-xs uppercase text-slate-500">As of</div>
-                  <div className="mt-1 text-sm text-slate-100">{formatDateTime(report.asOf)}</div>
+                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                  <div className="text-xs uppercase text-text/55">As of</div>
+                  <div className="mt-1 text-sm text-text">{formatDateTime(report.asOf)}</div>
                 </div>
-                <div className="rounded border border-borderSoft/70 bg-slate-950/35 p-3">
-                  <div className="text-xs uppercase text-slate-500">Model</div>
-                  <div className="mt-1 font-mono text-sm text-slate-100">{report.model}</div>
+                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                  <div className="text-xs uppercase text-text/55">Model</div>
+                  <div className="mt-1 font-mono text-sm text-text">{report.model}</div>
                 </div>
               </div>
 
@@ -271,25 +239,25 @@ export function MarketCommentaryPanel({ initial }: Props) {
               </div>
 
               {tab === "report" && (
-                <div className="max-h-[760px] overflow-auto rounded border border-borderSoft/70 bg-slate-950/35 p-4">
+                <div className="max-h-[760px] overflow-auto rounded border border-borderSoft/70 bg-panel p-4 shadow-sm">
                   <MarkdownReport markdown={report.reportMarkdown} />
                 </div>
               )}
 
               {tab === "sources" && (
-                <div className="max-h-[520px] overflow-auto rounded border border-borderSoft/70 bg-slate-950/35">
+                <div className="max-h-[520px] overflow-auto rounded border border-borderSoft/70 bg-panel">
                   {sources.length === 0 ? (
-                    <p className="p-4 text-sm text-slate-400">No sources were recorded for this report.</p>
+                    <p className="p-4 text-sm text-text/60">No sources were recorded for this report.</p>
                   ) : (
                     <div className="divide-y divide-borderSoft/60">
                       {sources.map((source, index) => (
                         <div key={`${source.url ?? source.sourceName}-${index}`} className="p-4 text-sm">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="font-medium text-slate-100">{source.sourceName}</div>
-                              <div className="mt-1 text-slate-400">{source.dataUsed}</div>
-                              {source.timestamp && <div className="mt-1 font-mono text-xs text-slate-500">{source.timestamp}</div>}
-                              {source.note && <div className="mt-1 text-xs text-slate-500">{source.note}</div>}
+                              <div className="font-medium text-text">{source.sourceName}</div>
+                              <div className="mt-1 text-text/65">{source.dataUsed}</div>
+                              {source.timestamp && <div className="mt-1 font-mono text-xs text-text/50">{source.timestamp}</div>}
+                              {source.note && <div className="mt-1 text-xs text-text/50">{source.note}</div>}
                             </div>
                             {source.url && (
                               <a
@@ -311,20 +279,20 @@ export function MarketCommentaryPanel({ initial }: Props) {
               )}
 
               {tab === "quality" && (
-                <div className="max-h-[520px] overflow-auto rounded border border-borderSoft/70 bg-slate-950/35">
+                <div className="max-h-[520px] overflow-auto rounded border border-borderSoft/70 bg-panel">
                   {dataQuality.length === 0 ? (
-                    <p className="p-4 text-sm text-slate-400">No data-quality notes were recorded for this report.</p>
+                    <p className="p-4 text-sm text-text/60">No data-quality notes were recorded for this report.</p>
                   ) : (
                     <div className="divide-y divide-borderSoft/60">
                       {dataQuality.map((item, index) => (
                         <div key={`${item.metric}-${index}`} className="flex gap-3 p-4 text-sm">
-                          <CheckCircle2 className={`mt-0.5 h-4 w-4 shrink-0 ${item.status === "ok" ? "text-emerald-300" : "text-amber-300"}`} />
+                          <CheckCircle2 className={`mt-0.5 h-4 w-4 shrink-0 ${item.status === "ok" ? "text-success" : "text-warning"}`} />
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-medium text-slate-100">{item.metric}</span>
-                              <span className="rounded-full border border-borderSoft bg-slate-900/60 px-2 py-0.5 text-xs text-slate-300">{item.status}</span>
+                              <span className="font-medium text-text">{item.metric}</span>
+                              <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">{item.status}</span>
                             </div>
-                            <div className="mt-1 text-slate-400">{item.note}</div>
+                            <div className="mt-1 text-text/65">{item.note}</div>
                           </div>
                         </div>
                       ))}
