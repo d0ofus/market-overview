@@ -60,6 +60,7 @@ type DraftFilters = {
   endDate: string;
   minMarketCap: string;
   maxMarketCap: string;
+  minEpsSurprisePct: string;
   season: string;
   sector: string;
   industry: string;
@@ -214,6 +215,7 @@ function defaultDraftFilters(): DraftFilters {
     endDate: todayIso(),
     minMarketCap: "300",
     maxMarketCap: "",
+    minEpsSurprisePct: "",
     season: "",
     sector: "",
     industry: "",
@@ -260,6 +262,7 @@ function draftLimitToQuery(value: string): number {
 function draftToQuery(draft: DraftFilters, sort: SortKey, sortDir: "asc" | "desc", offset = 0): EarningsSurprisesQuery {
   const minMarketCap = toNumber(draft.minMarketCap);
   const maxMarketCap = toNumber(draft.maxMarketCap);
+  const minEpsSurprisePct = toNumber(draft.minEpsSurprisePct);
   const limit = draftLimitToQuery(draft.limit);
   return {
     limit,
@@ -275,6 +278,7 @@ function draftToQuery(draft: DraftFilters, sort: SortKey, sortDir: "asc" | "desc
     surpriseSide: draft.surpriseSide,
     minMarketCap: minMarketCap == null ? null : minMarketCap * 1_000_000,
     maxMarketCap: maxMarketCap == null ? null : maxMarketCap * 1_000_000,
+    minEpsSurprisePct,
     sort,
     sortDir,
   };
@@ -887,6 +891,10 @@ function EarningsSurprisesPanel() {
           <label className="text-xs text-slate-400">
             Limit
             <input className={`${INPUT_CLASS} mt-1`} value={draft.limit} inputMode="numeric" onChange={(event) => setDraft((current) => ({ ...current, limit: event.target.value }))} />
+          </label>
+          <label className="text-xs text-slate-400">
+            Min EPS %
+            <input className={`${INPUT_CLASS} mt-1`} value={draft.minEpsSurprisePct} inputMode="decimal" onChange={(event) => setDraft((current) => ({ ...current, minEpsSurprisePct: event.target.value }))} />
           </label>
           <label className="text-xs text-slate-400">
             Season

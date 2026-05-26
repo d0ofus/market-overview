@@ -105,6 +105,10 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
       const max = Number(args[cursor++] ?? Number.POSITIVE_INFINITY);
       rows = rows.filter((row) => Number(row.marketCap ?? 0) <= max);
     }
+    if (sql.includes("eps_surprise_pct >= ?")) {
+      const min = Number(args[cursor++] ?? Number.NEGATIVE_INFINITY);
+      rows = rows.filter((row) => Number(row.epsSurprisePct ?? Number.NEGATIVE_INFINITY) >= min);
+    }
     const applyIn = (field: "sector" | "industry" | "exchange", regex: RegExp) => {
       const match = sql.match(regex);
       if (!match) return;
@@ -371,12 +375,15 @@ describe("earnings surprise service", () => {
     const rows = parseTradingViewEarningsSurpriseRows({
       data: [
         tvRow({ symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", sector: "Tech", industry: "Hardware", marketCap: 3_000_000_000_000, epsActual: 2, epsEstimate: 1.8, epsSurprisePct: 11.1, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+        tvRow({ symbol: "BABA", name: "Alibaba Group Holding Limited American Depositary Shares", exchange: "NYSE", sector: "Retail", industry: "Internet Retail", marketCap: 180_000_000_000, epsActual: 2, epsEstimate: 1.8, epsSurprisePct: 11.1, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
         tvRow({ symbol: "FBIOP", name: "Fortress Biotech Inc. 9.375% Series A Cumulative Redeemable Perpetual Preferred Stock", exchange: "NASDAQ", sector: "Health Technology", industry: "Biotechnology", marketCap: 20_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
         tvRow({ symbol: "CTO/PA", name: "CTO Realty Growth Inc. Series A Preferred Stock", exchange: "NYSE", sector: "Finance", industry: "REITs", marketCap: 50_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+        tvRow({ symbol: "ABCN", name: "ABC Holdings 6.250% Senior Notes due 2030", exchange: "NYSE", sector: "Finance", industry: "Finance", marketCap: 50_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
+        tvRow({ symbol: "XYZW", name: "XYZ Acquisition Corp. Warrants", exchange: "NASDAQ", sector: "Finance", industry: "SPAC", marketCap: 50_000_000, epsActual: 1, epsEstimate: 0.9, epsSurprisePct: 11.11, reportIso: "2026-05-01T20:30:00Z", fiscalIso: "2026-03-31T00:00:00Z" }),
       ],
     });
 
-    expect(rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(rows.map((row) => row.ticker)).toEqual(["AAPL", "BABA"]);
   });
 
   it("syncs positive and negative TradingView rows idempotently", async () => {
@@ -447,6 +454,7 @@ describe("earnings surprise service", () => {
       season: "2026 Q1",
       surpriseSide: "positive",
       minMarketCap: 1_000_000_000,
+      minEpsSurprisePct: 10,
       sort: "marketCap",
       sortDir: "desc",
       includeOtc: false,
@@ -512,8 +520,16 @@ describe("earnings surprise service", () => {
       limit: 2,
     });
     const clamped = await exportEarningsSurpriseTickers(env, { startDate: "2026-01-01", includeOtc: true, limit: 5000 });
+    const minFiltered = await exportEarningsSurpriseTickers(env, {
+      startDate: "2026-01-01",
+      minEpsSurprisePct: 10,
+      sort: "epsSurprisePct",
+      sortDir: "desc",
+      limit: 10,
+    });
 
     expect(topTwo).toEqual(["BBB", "CCC"]);
     expect(clamped).toHaveLength(1000);
+    expect(minFiltered).toEqual(["BBB", "CCC"]);
   });
 });

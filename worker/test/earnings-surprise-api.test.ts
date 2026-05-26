@@ -100,6 +100,86 @@ function createExportEnv(): Env {
   };
 }
 
+function createAdminExclusionsEnv(): Env {
+  const excludedRows = [
+    {
+      id: "pref",
+      provider: "tradingview",
+      sourceSymbol: "NASDAQ:FBIOP",
+      ticker: "FBIOP",
+      exchange: "NASDAQ",
+      companyName: "Fortress Biotech Series A Cumulative Redeemable Perpetual Preferred Stock",
+      reportDate: "2026-05-01",
+      metricValue: 50,
+      catalogIsActive: null,
+      catalogManaged: null,
+      listingSource: null,
+      assetClass: null,
+    },
+    {
+      id: "debt",
+      provider: "tradingview",
+      sourceSymbol: "NYSE:ABCN",
+      ticker: "ABCN",
+      exchange: "NYSE",
+      companyName: "ABC Holdings 6.250% Senior Notes due 2030",
+      reportDate: "2026-05-02",
+      metricValue: 40,
+      catalogIsActive: null,
+      catalogManaged: null,
+      listingSource: null,
+      assetClass: null,
+    },
+    {
+      id: "otc",
+      provider: "tradingview",
+      sourceSymbol: "OTC:OTCM",
+      ticker: "OTCM",
+      exchange: "OTC",
+      companyName: "OTC Markets Group Inc.",
+      reportDate: "2026-05-03",
+      metricValue: 30,
+      catalogIsActive: null,
+      catalogManaged: null,
+      listingSource: null,
+      assetClass: null,
+    },
+  ];
+  return {
+    ADMIN_SECRET: "secret",
+    DB: {
+      prepare(sql: string) {
+        const statement = {
+          async first<T>() {
+            if (sql.includes("sqlite_master")) return { count: 1 } as T;
+            if (sql.includes("pragma_table_info")) return { count: 0 } as T;
+            if (sql.includes("SELECT COUNT(*) as count") && sql.includes("FROM earnings_surprise_events")) {
+              return { count: excludedRows.length } as T;
+            }
+            return null as T;
+          },
+          async all<T>() {
+            if (sql.includes("FROM earnings_surprise_events")) return { results: excludedRows as T[] };
+            return { results: [] as T[] };
+          },
+          async run() {
+            return {};
+          },
+        };
+        return {
+          bind() {
+            return statement;
+          },
+          ...statement,
+        };
+      },
+      async batch() {
+        return [];
+      },
+    } as unknown as D1Database,
+  };
+}
+
 describe("earnings surprise API", () => {
   it("returns a schema warning from the public list endpoint before migration", async () => {
     const res = await worker.fetch(
@@ -197,6 +277,26 @@ describe("earnings surprise API", () => {
     );
 
     expect(res.status).toBe(401);
+  });
+
+  it("returns admin earnings exclusions with classifier reasons", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/admin/earnings/exclusions?dataset=surprises&limit=10", {
+        headers: { Authorization: "Bearer secret" },
+      }),
+      createAdminExclusionsEnv(),
+      {} as ExecutionContext,
+    );
+    const json = await res.json() as {
+      total?: number;
+      rows?: Array<{ ticker: string; reasons: string[] }>;
+    };
+
+    expect(res.status).toBe(200);
+    expect(json.total).toBe(3);
+    expect(json.rows?.find((row) => row.ticker === "FBIOP")?.reasons).toContain("Preferred/security text");
+    expect(json.rows?.find((row) => row.ticker === "ABCN")?.reasons).toContain("Debt/bond/note security text");
+    expect(json.rows?.find((row) => row.ticker === "OTCM")?.reasons).toContain("OTC or non-major exchange");
   });
 
   it("surfaces missing schema from the authorized admin sync endpoint", async () => {

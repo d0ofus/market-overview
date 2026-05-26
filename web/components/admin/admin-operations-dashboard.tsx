@@ -4,31 +4,26 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   adminFetch,
+  getAdminCronJobs,
   getAdminMarketCommentarySettings,
   getAdminSymbolCatalogStatus,
-  getAdminWorkerSchedule,
   refreshMarketCommentary,
   resetAdminMarketCommentarySettings,
-  setAdminSymbolCatalogSchedule,
   updateAdminMarketCommentarySettings,
-  updateAdminWorkerSchedule,
+  type AdminCronJobsResponse,
   type MarketCommentarySettings,
   type SymbolCatalogStatus,
-  type WorkerScheduleSettings,
 } from "@/lib/api";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { AdminCard } from "./admin-card";
 import { AdminPageHeader } from "./admin-page-header";
 import { AdminStatCard } from "./admin-stat-card";
+import { CronJobConfigurationPanel } from "./cron-job-configuration-panel";
 import { EmptyState } from "./empty-state";
 import { InlineAlert } from "./inline-alert";
 import {
-  buildRefreshLabel,
-  DEFAULT_REFRESH_TIME,
-  DEFAULT_REFRESH_TIMEZONE,
   EtfSyncStatusRow,
   OverviewAdminConfig,
-  refreshTimezoneOptions,
 } from "./overview-admin-shared";
 
 const pageTargetOptions = [
@@ -45,29 +40,17 @@ const pageTargetOptions = [
 
 type RefreshTarget = (typeof pageTargetOptions)[number]["value"];
 
-const commentaryWeekdayOptions = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-
 export function AdminOperationsDashboard() {
   const [config, setConfig] = useState<OverviewAdminConfig | null>(null);
   const [sectorEtfCount, setSectorEtfCount] = useState(0);
   const [industryEtfCount, setIndustryEtfCount] = useState(0);
   const [etfSyncStatus, setEtfSyncStatus] = useState<EtfSyncStatusRow[]>([]);
   const [symbolStatus, setSymbolStatus] = useState<SymbolCatalogStatus | null>(null);
-  const [workerSchedule, setWorkerSchedule] = useState<WorkerScheduleSettings | null>(null);
   const [commentarySettings, setCommentarySettings] = useState<MarketCommentarySettings | null>(null);
+  const [cronJobs, setCronJobs] = useState<AdminCronJobsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
-  const [refreshConfig, setRefreshConfig] = useState({
-    id: "default",
-    name: "Default Swing Dashboard",
-    timezone: DEFAULT_REFRESH_TIMEZONE,
-    eodRunLocalTime: DEFAULT_REFRESH_TIME,
-    eodRunTimeLabel: buildRefreshLabel(DEFAULT_REFRESH_TIME, DEFAULT_REFRESH_TIMEZONE),
-  });
   const [schedulePageTarget, setSchedulePageTarget] = useState<RefreshTarget>("overview");
-  const [savingSchedule, setSavingSchedule] = useState(false);
-  const [savingWorkerSchedule, setSavingWorkerSchedule] = useState(false);
-  const [savingSymbolSchedule, setSavingSymbolSchedule] = useState(false);
   const [savingCommentarySettings, setSavingCommentarySettings] = useState(false);
   const [resettingCommentarySettings, setResettingCommentarySettings] = useState(false);
   const [runningCommentaryRefresh, setRunningCommentaryRefresh] = useState(false);
@@ -76,29 +59,22 @@ export function AdminOperationsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const [configRes, sectorRes, industryRes, syncRes, symbolRes, workerScheduleRes, commentarySettingsRes] = await Promise.all([
+      const [configRes, sectorRes, industryRes, syncRes, symbolRes, commentarySettingsRes, cronJobsRes] = await Promise.all([
         adminFetch<OverviewAdminConfig>("/api/admin/config"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/sector"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/industry"),
         adminFetch<{ rows: EtfSyncStatusRow[] }>("/api/admin/etf-sync-status?limit=200"),
         getAdminSymbolCatalogStatus().catch(() => null),
-        getAdminWorkerSchedule().catch(() => null),
         getAdminMarketCommentarySettings().catch(() => null),
+        getAdminCronJobs().catch(() => null),
       ]);
       setConfig(configRes);
       setSectorEtfCount(sectorRes.rows?.length ?? 0);
       setIndustryEtfCount(industryRes.rows?.length ?? 0);
       setEtfSyncStatus(syncRes.rows ?? []);
       setSymbolStatus(symbolRes);
-      setWorkerSchedule(workerScheduleRes);
       setCommentarySettings(commentarySettingsRes);
-      setRefreshConfig({
-        id: configRes.id,
-        name: configRes.name,
-        timezone: configRes.timezone || DEFAULT_REFRESH_TIMEZONE,
-        eodRunLocalTime: configRes.eodRunLocalTime || DEFAULT_REFRESH_TIME,
-        eodRunTimeLabel: buildRefreshLabel(configRes.eodRunLocalTime || DEFAULT_REFRESH_TIME, configRes.timezone || DEFAULT_REFRESH_TIMEZONE),
-      });
+      setCronJobs(cronJobsRes);
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load admin operations." });
     } finally {
@@ -126,60 +102,6 @@ export function AdminOperationsDashboard() {
       pendingSyncCount,
     };
   }, [config, etfSyncStatus]);
-
-  const saveRefreshConfig = async () => {
-    setSavingSchedule(true);
-    try {
-      const nextLabel = buildRefreshLabel(refreshConfig.eodRunLocalTime, refreshConfig.timezone);
-      await adminFetch("/api/admin/config", {
-        method: "PATCH",
-        body: JSON.stringify({
-          id: refreshConfig.id,
-          name: refreshConfig.name.trim() || "Default Swing Dashboard",
-          timezone: refreshConfig.timezone,
-          eodRunLocalTime: refreshConfig.eodRunLocalTime,
-          eodRunTimeLabel: nextLabel,
-        }),
-      });
-      setRefreshConfig((current) => ({ ...current, eodRunTimeLabel: nextLabel }));
-      setMessage({ tone: "success", text: "Saved refresh schedule." });
-      await load();
-    } catch (error) {
-      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to save refresh schedule." });
-    } finally {
-      setSavingSchedule(false);
-    }
-  };
-
-  const saveWorkerSchedule = async () => {
-    if (!workerSchedule) return;
-    setSavingWorkerSchedule(true);
-    try {
-      const response = await updateAdminWorkerSchedule({
-        id: workerSchedule.id,
-        rsBackgroundEnabled: workerSchedule.rsBackgroundEnabled,
-        rsBackgroundBatchSize: workerSchedule.rsBackgroundBatchSize,
-        rsBackgroundMaxBatchesPerTick: workerSchedule.rsBackgroundMaxBatchesPerTick,
-        rsBackgroundTimeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        rsManualCacheReuseEnabled: workerSchedule.rsManualCacheReuseEnabled,
-        rsSharedConfigSnapshotFanoutEnabled: workerSchedule.rsSharedConfigSnapshotFanoutEnabled,
-        postCloseBarsEnabled: workerSchedule.postCloseBarsEnabled,
-        postCloseBarsOffsetMinutes: workerSchedule.postCloseBarsOffsetMinutes,
-        postCloseBarsBatchSize: workerSchedule.postCloseBarsBatchSize,
-        postCloseBarsMaxBatchesPerTick: workerSchedule.postCloseBarsMaxBatchesPerTick,
-        patternScanEnabled: workerSchedule.patternScanEnabled,
-        patternScanOffsetMinutes: workerSchedule.patternScanOffsetMinutes,
-        patternScanBatchSize: workerSchedule.patternScanBatchSize,
-        patternScanMaxBatchesPerTick: workerSchedule.patternScanMaxBatchesPerTick,
-      });
-      setWorkerSchedule(response.settings);
-      setMessage({ tone: "success", text: "Saved worker schedule settings." });
-    } catch (error) {
-      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to save worker schedule settings." });
-    } finally {
-      setSavingWorkerSchedule(false);
-    }
-  };
 
   const saveCommentarySettings = async () => {
     if (!commentarySettings) return;
@@ -232,19 +154,6 @@ export function AdminOperationsDashboard() {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to run commentary refresh." });
     } finally {
       setRunningCommentaryRefresh(false);
-    }
-  };
-
-  const toggleSymbolSchedule = async (enabled: boolean) => {
-    setSavingSymbolSchedule(true);
-    try {
-      const response = await setAdminSymbolCatalogSchedule(enabled);
-      setSymbolStatus(response.status);
-      setMessage({ tone: "success", text: `Symbol catalog scheduling ${enabled ? "enabled" : "disabled"}.` });
-    } catch (error) {
-      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to update symbol catalog scheduling." });
-    } finally {
-      setSavingSymbolSchedule(false);
     }
   };
 
@@ -338,77 +247,21 @@ export function AdminOperationsDashboard() {
                 </div>
               </AdminCard>
 
-              <AdminCard
-                title="Daily Price Refresh Schedule"
-                description="This controls the worker-driven daily schedule used for overview and related EOD workflows."
-                actions={<span className="rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1 text-xs text-slate-300">{refreshConfig.eodRunTimeLabel}</span>}
-              >
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr),12rem,12rem,auto]">
-                  <label className="text-xs text-slate-300">
-                    Dashboard name
-                    <input
-                      className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                      value={refreshConfig.name}
-                      onChange={(event) => setRefreshConfig((current) => ({ ...current, name: event.target.value }))}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-300">
-                    Timezone
-                    <select
-                      className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                      value={refreshConfig.timezone}
-                      onChange={(event) => setRefreshConfig((current) => ({ ...current, timezone: event.target.value }))}
-                    >
-                      {refreshTimezoneOptions.map((timezone) => (
-                        <option key={timezone.value} value={timezone.value}>
-                          {timezone.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="text-xs text-slate-300">
-                    Local time
-                    <input
-                      type="time"
-                      className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                      value={refreshConfig.eodRunLocalTime}
-                      onChange={(event) => setRefreshConfig((current) => ({ ...current, eodRunLocalTime: event.target.value }))}
-                    />
-                  </label>
-                  <div className="flex items-end">
-                    <button
-                      className="h-11 rounded-2xl bg-accent px-4 text-sm font-medium text-slate-950 transition hover:brightness-110 disabled:opacity-60"
-                      disabled={savingSchedule}
-                      onClick={() => void saveRefreshConfig()}
-                      type="button"
-                    >
-                      {savingSchedule ? "Saving..." : "Save Schedule"}
-                    </button>
-                  </div>
-                </div>
-              </AdminCard>
+              <CronJobConfigurationPanel data={cronJobs} onUpdated={setCronJobs} />
 
               {commentarySettings ? (
                 <AdminCard
                   title="Market Commentary Settings"
-                  description="Edit the Gemini report prompt, source references, Brave Search queries, and scheduled daily generation from Operations."
-                  actions={<span className="rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1 text-xs text-slate-300">{commentarySettings.scheduleTimezone} {commentarySettings.scheduleLocalTime}</span>}
+                  description="Edit the Gemini report prompt, source references, and Brave Search queries. Scheduled generation is configured in Cron Job Configuration."
                 >
                   <div className="space-y-5">
-                    <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid gap-3 md:grid-cols-2">
                       <button
                         className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
                         onClick={() => setCommentarySettings((current) => current ? { ...current, enabled: !current.enabled } : current)}
                         type="button"
                       >
                         Generation: {commentarySettings.enabled ? "Enabled" : "Disabled"}
-                      </button>
-                      <button
-                        className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
-                        onClick={() => setCommentarySettings((current) => current ? { ...current, scheduleEnabled: !current.scheduleEnabled } : current)}
-                        type="button"
-                      >
-                        Schedule: {commentarySettings.scheduleEnabled ? "Enabled" : "Disabled"}
                       </button>
                       <button
                         className="rounded-2xl border border-accent/50 bg-accent/15 px-4 py-2 text-left text-sm font-medium text-accent transition hover:bg-accent/20 disabled:opacity-60"
@@ -418,54 +271,6 @@ export function AdminOperationsDashboard() {
                       >
                         {runningCommentaryRefresh ? "Running..." : "Run Commentary Refresh Now"}
                       </button>
-                    </div>
-
-                    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr),12rem,16rem]">
-                      <label className="text-xs text-slate-300">
-                        Schedule timezone
-                        <input
-                          className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                          value={commentarySettings.scheduleTimezone}
-                          onChange={(event) => setCommentarySettings((current) => current ? { ...current, scheduleTimezone: event.target.value } : current)}
-                        />
-                      </label>
-                      <label className="text-xs text-slate-300">
-                        Local time
-                        <input
-                          type="time"
-                          className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                          value={commentarySettings.scheduleLocalTime}
-                          onChange={(event) => setCommentarySettings((current) => current ? { ...current, scheduleLocalTime: event.target.value } : current)}
-                        />
-                      </label>
-                      <div className="text-xs text-slate-300">
-                        Schedule days
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {commentaryWeekdayOptions.map((day) => {
-                            const active = commentarySettings.scheduleDays.includes(day);
-                            return (
-                              <button
-                                key={day}
-                                className={`rounded-full border px-3 py-1.5 text-xs transition ${
-                                  active
-                                    ? "border-accent/60 bg-accent/15 text-accent"
-                                    : "border-borderSoft/80 bg-panel text-slate-300 hover:bg-panelSoft"
-                                }`}
-                                onClick={() => setCommentarySettings((current) => {
-                                  if (!current) return current;
-                                  const nextDays = active
-                                    ? current.scheduleDays.filter((item) => item !== day)
-                                    : [...current.scheduleDays, day];
-                                  return { ...current, scheduleDays: nextDays };
-                                })}
-                                type="button"
-                              >
-                                {day.slice(0, 3)}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
                     </div>
 
                     <label className="block text-xs text-slate-300">
@@ -614,242 +419,6 @@ export function AdminOperationsDashboard() {
                 </AdminCard>
               ) : null}
 
-              {workerSchedule ? (
-                <AdminCard
-                  title="Worker Schedules"
-                  description="Control runtime worker behavior from admin while keeping the deployed Cloudflare cron cadence fixed."
-                  actions={<span className="rounded-full border border-borderSoft/70 bg-panelSoft/50 px-3 py-1 text-xs text-slate-300">{workerSchedule.cronExpression}</span>}
-                >
-                  <div className="space-y-5">
-                    <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Relative Strength Background</p>
-                          <p className="mt-2 text-sm text-slate-300">Queued or running RS jobs keep advancing after the page closes, using the fixed worker cron and same-request background kicks. Batch size controls tickers per RS chunk, while max batches per tick controls how many chunks one worker pass can consume.</p>
-                        </div>
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
-                          onClick={() => setWorkerSchedule((current) => current ? { ...current, rsBackgroundEnabled: !current.rsBackgroundEnabled } : current)}
-                          type="button"
-                        >
-                          {workerSchedule.rsBackgroundEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                      </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-3">
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
-                          onClick={() => setWorkerSchedule((current) => current ? { ...current, rsManualCacheReuseEnabled: !current.rsManualCacheReuseEnabled } : current)}
-                          type="button"
-                        >
-                          Manual cache reuse: {workerSchedule.rsManualCacheReuseEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-left text-sm text-slate-200 transition hover:bg-panelSoft"
-                          onClick={() => setWorkerSchedule((current) => current ? { ...current, rsSharedConfigSnapshotFanoutEnabled: !current.rsSharedConfigSnapshotFanoutEnabled } : current)}
-                          type="button"
-                        >
-                          Shared config fanout: {workerSchedule.rsSharedConfigSnapshotFanoutEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                        <label className="text-xs text-slate-300">
-                          Tickers per RS batch
-                          <input
-                            type="number"
-                            min={1}
-                            max={500}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.rsBackgroundBatchSize}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              rsBackgroundBatchSize: Number(event.target.value || current.rsBackgroundBatchSize),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Max batches per tick
-                          <input
-                            type="number"
-                            min={1}
-                            max={100}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.rsBackgroundMaxBatchesPerTick}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              rsBackgroundMaxBatchesPerTick: Number(event.target.value || current.rsBackgroundMaxBatchesPerTick),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Time budget per tick (ms)
-                          <input
-                            type="number"
-                            min={1000}
-                            max={30000}
-                            step={1000}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.rsBackgroundTimeBudgetMs}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              rsBackgroundTimeBudgetMs: Number(event.target.value || current.rsBackgroundTimeBudgetMs),
-                            } : current)}
-                          />
-                        </label>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Pattern Scanner</p>
-                          <p className="mt-2 text-sm text-slate-300">Run the learned pattern scanner after post-close bars are available, writing scores into the separate pattern D1 database.</p>
-                        </div>
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
-                          onClick={() => setWorkerSchedule((current) => current ? { ...current, patternScanEnabled: !current.patternScanEnabled } : current)}
-                          type="button"
-                        >
-                          {workerSchedule.patternScanEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                      </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-3">
-                        <label className="text-xs text-slate-300">
-                          Start offset after US close (min)
-                          <input
-                            type="number"
-                            min={0}
-                            max={360}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.patternScanOffsetMinutes}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              patternScanOffsetMinutes: Number(event.target.value || current.patternScanOffsetMinutes),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Tickers per batch
-                          <input
-                            type="number"
-                            min={1}
-                            max={500}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.patternScanBatchSize}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              patternScanBatchSize: Number(event.target.value || current.patternScanBatchSize),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Max pattern batches per tick
-                          <input
-                            type="number"
-                            min={1}
-                            max={20}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.patternScanMaxBatchesPerTick}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              patternScanMaxBatchesPerTick: Number(event.target.value || current.patternScanMaxBatchesPerTick),
-                            } : current)}
-                          />
-                        </label>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Post-Close Daily Bars</p>
-                          <p className="mt-2 text-sm text-slate-300">Load the latest session bar for the active Nasdaq Trader-backed common-stock universe before scheduled RS cache work runs.</p>
-                        </div>
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft"
-                          onClick={() => setWorkerSchedule((current) => current ? { ...current, postCloseBarsEnabled: !current.postCloseBarsEnabled } : current)}
-                          type="button"
-                        >
-                          {workerSchedule.postCloseBarsEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                      </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-3">
-                        <label className="text-xs text-slate-300">
-                          Start offset after US close (min)
-                          <input
-                            type="number"
-                            min={0}
-                            max={240}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.postCloseBarsOffsetMinutes}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              postCloseBarsOffsetMinutes: Number(event.target.value || current.postCloseBarsOffsetMinutes),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Tickers per batch
-                          <input
-                            type="number"
-                            min={20}
-                            max={2000}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.postCloseBarsBatchSize}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              postCloseBarsBatchSize: Number(event.target.value || current.postCloseBarsBatchSize),
-                            } : current)}
-                          />
-                        </label>
-                        <label className="text-xs text-slate-300">
-                          Max bar batches per tick
-                          <input
-                            type="number"
-                            min={1}
-                            max={20}
-                            className="mt-2 h-11 w-full rounded-2xl border border-borderSoft/80 bg-panel px-3 text-sm text-text"
-                            value={workerSchedule.postCloseBarsMaxBatchesPerTick}
-                            onChange={(event) => setWorkerSchedule((current) => current ? {
-                              ...current,
-                              postCloseBarsMaxBatchesPerTick: Number(event.target.value || current.postCloseBarsMaxBatchesPerTick),
-                            } : current)}
-                          />
-                        </label>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Symbol Catalog Schedule</p>
-                          <p className="mt-2 text-sm text-slate-300">This stays separate from RS and nightly bars, but it lives in the same worker-operations surface for convenience.</p>
-                        </div>
-                        <button
-                          className="rounded-2xl border border-borderSoft/80 bg-panel px-4 py-2 text-sm text-slate-200 transition hover:bg-panelSoft disabled:opacity-60"
-                          disabled={!symbolStatus || savingSymbolSchedule}
-                          onClick={() => void toggleSymbolSchedule(!(symbolStatus?.scheduledEnabled ?? false))}
-                          type="button"
-                        >
-                          {savingSymbolSchedule ? "Saving..." : symbolStatus?.scheduledEnabled ? "Enabled" : "Disabled"}
-                        </button>
-                      </div>
-                      <p className="mt-3 text-xs text-slate-500">
-                        Fixed Cloudflare cron cadence: <span className="font-mono text-slate-300">{workerSchedule.cronExpression}</span>
-                        <span className="ml-2 text-slate-400">Earnings gap scan runs daily after 8:00pm ET from this heartbeat.</span>
-                      </p>
-                    </div>
-
-                    <div className="flex justify-end">
-                      <button
-                        className="h-11 rounded-2xl bg-accent px-4 text-sm font-medium text-slate-950 transition hover:brightness-110 disabled:opacity-60"
-                        disabled={savingWorkerSchedule}
-                        onClick={() => void saveWorkerSchedule()}
-                        type="button"
-                      >
-                        {savingWorkerSchedule ? "Saving..." : "Save Worker Schedules"}
-                      </button>
-                    </div>
-                  </div>
-                </AdminCard>
-              ) : null}
             </div>
 
             <div className="space-y-6">

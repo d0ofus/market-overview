@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS cron_job_settings (
+  key TEXT PRIMARY KEY,
+  values_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+

@@ -26,6 +26,11 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     description: "Earnings refresh controls, SEC seed queue, and fundamentals cache health.",
   },
   {
+    href: "/admin/earnings",
+    label: "Earnings",
+    description: "Scanner universe, exclusion rules, and hidden earnings rows.",
+  },
+  {
     href: "/admin/watchlist-compiler",
     label: "Watchlist Compiler",
     description: "Saved watchlist sets, source URLs, and compile controls.",

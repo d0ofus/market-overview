@@ -990,52 +990,15 @@ export function PatternScannerDashboard() {
           <div className="card p-4">
             <h3 className="text-sm font-semibold text-slate-100">Schedule</h3>
             {workerSchedule ? (
-              <div className="mt-4 grid gap-3">
-                <button
-                  className={workerSchedule.patternScanEnabled ? PRIMARY_BUTTON_CLASS : BUTTON_CLASS}
-                  onClick={() => setWorkerSchedule((current) => current ? { ...current, patternScanEnabled: !current.patternScanEnabled } : current)}
-                  type="button"
-                >
-                  {workerSchedule.patternScanEnabled ? <Check className="h-3.5 w-3.5" /> : <CircleDashed className="h-3.5 w-3.5" />}
-                  {workerSchedule.patternScanEnabled ? "Enabled" : "Disabled"}
-                </button>
-                <label className="text-xs text-slate-300">
-                  Start offset after US close (min)
-                  <input
-                    className={INPUT_CLASS}
-                    min={0}
-                    max={360}
-                    type="number"
-                    value={workerSchedule.patternScanOffsetMinutes}
-                    onChange={(event) => setWorkerSchedule((current) => current ? { ...current, patternScanOffsetMinutes: Number(event.target.value || current.patternScanOffsetMinutes) } : current)}
-                  />
-                </label>
-                <label className="text-xs text-slate-300">
-                  Tickers per batch
-                  <input
-                    className={INPUT_CLASS}
-                    min={1}
-                    max={500}
-                    type="number"
-                    value={workerSchedule.patternScanBatchSize}
-                    onChange={(event) => setWorkerSchedule((current) => current ? { ...current, patternScanBatchSize: Number(event.target.value || current.patternScanBatchSize) } : current)}
-                  />
-                </label>
-                <label className="text-xs text-slate-300">
-                  Max batches per tick
-                  <input
-                    className={INPUT_CLASS}
-                    min={1}
-                    max={20}
-                    type="number"
-                    value={workerSchedule.patternScanMaxBatchesPerTick}
-                    onChange={(event) => setWorkerSchedule((current) => current ? { ...current, patternScanMaxBatchesPerTick: Number(event.target.value || current.patternScanMaxBatchesPerTick) } : current)}
-                  />
-                </label>
-                <button className={`${PRIMARY_BUTTON_CLASS} mt-2`} disabled={saving} onClick={() => void saveWorkerSchedule()} type="button">
-                  <Save className="h-3.5 w-3.5" />
-                  Save Schedule
-                </button>
+              <div className="mt-4 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-3 text-sm text-slate-300">
+                <div className="font-semibold text-slate-100">{workerSchedule.patternScanEnabled ? "Enabled" : "Disabled"}</div>
+                <div className="mt-1 text-xs text-slate-400">
+                  Starts {workerSchedule.patternScanOffsetMinutes} minutes after US close; {workerSchedule.patternScanBatchSize} tickers per batch, {workerSchedule.patternScanMaxBatchesPerTick} batches per tick.
+                </div>
+                <a className={`${PRIMARY_BUTTON_CLASS} mt-3 inline-flex`} href="/admin">
+                  <Settings2 className="h-3.5 w-3.5" />
+                  Manage in Operations
+                </a>
               </div>
             ) : (
               <div className="mt-4 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-amber-200">

@@ -696,35 +696,12 @@ export function PeerGroupsAdminPanel() {
                     NasdaqTrader catalog sync with manual overrides preserved for symbols you add directly.
                   </div>
                 </div>
-                <button
-                  className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-200 disabled:opacity-50"
-                  disabled={catalogScheduleSaving || !catalogStatus}
-                  onClick={async () => {
-                    if (!catalogStatus) return;
-                    setCatalogScheduleSaving(true);
-                    setMessage(null);
-                    try {
-                      const result = await setAdminSymbolCatalogSchedule(!catalogStatus.scheduledEnabled);
-                      setCatalogStatus(result.status);
-                      flashMessage(
-                        result.enabled
-                          ? "Automatic daily symbol sync enabled."
-                          : "Automatic daily symbol sync disabled.",
-                      );
-                    } catch (error) {
-                      setMessage(error instanceof Error ? error.message : "Failed to update automatic symbol sync.");
-                    } finally {
-                      setCatalogScheduleSaving(false);
-                    }
-                  }}
-                  type="button"
+                <a
+                  className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-200"
+                  href="/admin"
                 >
-                  {catalogScheduleSaving
-                    ? "Saving..."
-                    : catalogStatus?.scheduledEnabled
-                      ? "Disable Auto Sync"
-                      : "Enable Auto Sync"}
-                </button>
+                  Manage Auto Sync
+                </a>
                 <button
                   className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent disabled:opacity-50"
                   disabled={catalogSyncing}

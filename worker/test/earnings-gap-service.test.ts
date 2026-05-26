@@ -420,12 +420,15 @@ describe("earnings gap service", () => {
     const rows = parseTradingViewEarningsGapRows({
       data: [
         tvRow({ symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+        tvRow({ symbol: "BABA", name: "Alibaba Group Holding Limited American Depositary Shares", exchange: "NYSE", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
         tvRow({ symbol: "FBIOP", name: "Fortress Biotech Inc. Series A Cumulative Redeemable Perpetual Preferred Stock", exchange: "NASDAQ", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
         tvRow({ symbol: "TDS/PU", name: "Telephone and Data Systems Depositary Shares", exchange: "NYSE", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+        tvRow({ symbol: "ABCN", name: "ABC Holdings 6.250% Senior Notes due 2030", exchange: "NYSE", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
+        tvRow({ symbol: "XYZW", name: "XYZ Acquisition Corp. Warrants", exchange: "NASDAQ", reportIso: "2026-05-21T21:00:00Z", postmarketPrice: 106 }),
       ],
     });
 
-    expect(rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(rows.map((row) => row.ticker)).toEqual(["AAPL", "BABA"]);
   });
 
   it("qualifies postmarket, regular-open, and both gap sources while excluding non-positive gaps", async () => {
@@ -621,6 +624,8 @@ describe("earnings gap service", () => {
         storedEvent({ ticker: "TDS/PU", reportDate: "2026-05-13", season: "2026 Q2", qualifyingGapPct: 30, companyName: "Telephone and Data Systems Depositary Shares", sector: "Telecom" }),
         storedEvent({ ticker: "TDS/PV", reportDate: "2026-05-14", season: "2026 Q2", qualifyingGapPct: 25, companyName: "Telephone and Data Systems Depositary Shares", sector: "Telecom" }),
         storedEvent({ ticker: "SHO/PH", reportDate: "2026-05-15", season: "2026 Q2", qualifyingGapPct: 20, companyName: "Sunstone Hotel Investors Preferred Shares", sector: "Real Estate" }),
+        storedEvent({ ticker: "ABCN", reportDate: "2026-05-16", season: "2026 Q2", qualifyingGapPct: 18, companyName: "ABC Holdings 6.250% Senior Notes due 2030", sector: "Finance" }),
+        storedEvent({ ticker: "XYZW", reportDate: "2026-05-17", season: "2026 Q2", qualifyingGapPct: 16, companyName: "XYZ Acquisition Corp. Warrants", sector: "Finance" }),
       ],
     });
 

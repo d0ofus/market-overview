@@ -1,10 +1,15 @@
 import type { Env } from "./types";
 import {
-  EARNINGS_ELIGIBLE_ISSUE_SQL,
+  canUseEarningsSymbolCatalog,
+  earningsDefaultEligibleListedEquitySql,
+  earningsEligibleSecuritySql,
+  earningsMajorUsExchangeSql,
+  filterRowsByEarningsSymbolCatalog,
   isExcludedEarningsIssue,
   normalizeEarningsQueryLimit,
   normalizeEarningsQueryOffset,
 } from "./earnings-issue-filter";
+import { hasCentralCronIntervalElapsed, isCentralCronWindowOpen, type CronJobValues } from "./cron-jobs-service";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const PRIMARY_PROVIDER = "tradingview";
@@ -106,6 +111,7 @@ export type EarningsSurprisesQuery = {
   endDate?: string | null;
   minMarketCap?: number | null;
   maxMarketCap?: number | null;
+  minEpsSurprisePct?: number | null;
   sector?: string | string[] | null;
   industry?: string | string[] | null;
   exchange?: string | string[] | null;
@@ -737,7 +743,7 @@ export async function syncEarningsSurprises(
   let rows: EarningsSurpriseEventInput[] = [];
   let provider: EarningsSurpriseProvider | null = PRIMARY_PROVIDER;
   try {
-    rows = await fetchTradingViewEarningsSurprises(windowStart, windowEnd);
+    rows = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsSurprises(windowStart, windowEnd));
     const upserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
     await recordSync(env, PRIMARY_PROVIDER, {
       status: "ok",
@@ -762,7 +768,7 @@ export async function syncEarningsSurprises(
     providers.push(...backup.results);
     provider = backup.provider;
     if (backup.rows.length > 0 && backup.provider) {
-      rows = backup.rows;
+      rows = await filterRowsByEarningsSymbolCatalog(env, backup.rows);
       rowsUpserted = await upsertEvents(env, rows);
       await recordSync(env, backup.provider, {
         status: "ok",
@@ -800,8 +806,8 @@ function normalizeArrayFilter(value: string | string[] | null | undefined): stri
     .filter(Boolean);
 }
 
-function buildWhereClause(query: EarningsSurprisesQuery): { sql: string; args: unknown[] } {
-  const clauses = ["report_date >= ?", EARNINGS_ELIGIBLE_ISSUE_SQL];
+function buildWhereClause(query: EarningsSurprisesQuery, options: { includeCatalog?: boolean } = {}): { sql: string; args: unknown[] } {
+  const clauses = ["report_date >= ?", earningsEligibleSecuritySql("earnings_surprise_events", { includeCatalog: options.includeCatalog })];
   const args: unknown[] = [query.startDate ? normalizeDate(query.startDate) ?? isoDateDaysAgo(RETENTION_DAYS) : isoDateDaysAgo(RETENTION_DAYS)];
   if (query.endDate && normalizeDate(query.endDate)) {
     clauses.push("report_date <= ?");
@@ -824,6 +830,10 @@ function buildWhereClause(query: EarningsSurprisesQuery): { sql: string; args: u
     clauses.push("market_cap <= ?");
     args.push(query.maxMarketCap);
   }
+  if (query.minEpsSurprisePct != null && Number.isFinite(query.minEpsSurprisePct)) {
+    clauses.push("eps_surprise_pct >= ?");
+    args.push(query.minEpsSurprisePct);
+  }
   const sectors = normalizeArrayFilter(query.sector);
   if (sectors.length > 0) {
     clauses.push(`sector IN (${sectors.map(() => "?").join(",")})`);
@@ -839,7 +849,7 @@ function buildWhereClause(query: EarningsSurprisesQuery): { sql: string; args: u
     clauses.push(`UPPER(exchange) IN (${exchanges.map(() => "?").join(",")})`);
     args.push(...exchanges);
   } else if (!query.includeOtc) {
-    clauses.push("UPPER(exchange) IN ('NASDAQ', 'NYSE', 'AMEX')");
+    clauses.push(earningsMajorUsExchangeSql());
   }
   if (query.surpriseSide === "positive") clauses.push("eps_surprise_pct > 0");
   if (query.surpriseSide === "negative") clauses.push("eps_surprise_pct < 0");
@@ -908,7 +918,7 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
   const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
-  const { sql: whereSql, args } = buildWhereClause(query);
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const count = await env.DB.prepare(
     `SELECT COUNT(*) as count FROM earnings_surprise_events ${whereSql}`,
   ).bind(...args).first<{ count: number }>();
@@ -951,7 +961,7 @@ export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSur
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
-  const { sql: whereSql, args } = buildWhereClause(query);
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const rows = await env.DB.prepare(
     `SELECT ticker
      FROM earnings_surprise_events
@@ -972,6 +982,8 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
       latestRows: [],
     };
   }
+  const includeCatalog = await canUseEarningsSymbolCatalog(env);
+  const defaultEligibilitySql = earningsDefaultEligibleListedEquitySql("earnings_surprise_events", { includeCatalog });
   const [counts, syncs, latest] = await Promise.all([
     env.DB.prepare(
       `SELECT
@@ -981,7 +993,7 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
          MAX(report_date) as latestReportDate,
          MIN(report_date) as earliestReportDate
        FROM earnings_surprise_events
-       WHERE ${EARNINGS_ELIGIBLE_ISSUE_SQL}`,
+       WHERE ${defaultEligibilitySql}`,
     ).first<{ total: number; positive: number | null; negative: number | null; latestReportDate: string | null; earliestReportDate: string | null }>(),
     env.DB.prepare(
       `SELECT provider, status, mode, window_start as windowStart, window_end as windowEnd,
@@ -991,7 +1003,7 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
        FROM earnings_surprise_syncs
        ORDER BY updated_at DESC`,
     ).all<EarningsSurprisesStatus["syncs"][number]>(),
-    queryEarningsSurprises(env, { limit: 12, offset: 0, includeOtc: true, sort: "reportDate", sortDir: "desc" }),
+    queryEarningsSurprises(env, { limit: 12, offset: 0, includeOtc: false, sort: "reportDate", sortDir: "desc" }),
   ]);
   return {
     schemaReady: true,
@@ -1024,14 +1036,18 @@ function newYorkParts(now: Date): { date: string; hour: number } {
   };
 }
 
-export async function maybeRunScheduledEarningsSurpriseSync(env: Env, now = new Date()): Promise<EarningsSurpriseSyncResult | null> {
+export async function maybeRunScheduledEarningsSurpriseSync(env: Env, now = new Date(), settings?: CronJobValues): Promise<EarningsSurpriseSyncResult | null> {
   if (!(await hasEarningsSurpriseSchema(env))) return null;
-  const ny = newYorkParts(now);
-  if (!(ny.hour >= 21 || ny.hour <= 5)) return null;
+  const windowOpen = settings
+    ? isCentralCronWindowOpen(now, settings, { timezone: "America/New_York", start: "21:00", end: "05:59" })
+    : (() => {
+      const ny = newYorkParts(now);
+      return ny.hour >= 21 || ny.hour <= 5;
+    })();
+  if (!windowOpen) return null;
   const latest = await env.DB.prepare(
     "SELECT last_success_at as lastSuccessAt FROM earnings_surprise_syncs WHERE provider = ? AND status = 'ok' LIMIT 1",
   ).bind(PRIMARY_PROVIDER).first<{ lastSuccessAt: string | null }>();
-  const lastSuccessTime = latest?.lastSuccessAt ? Date.parse(latest.lastSuccessAt) : 0;
-  if (Number.isFinite(lastSuccessTime) && now.getTime() - lastSuccessTime < 20 * 60 * 60_000) return null;
+  if (!hasCentralCronIntervalElapsed(latest?.lastSuccessAt, settings ?? { enabled: true, intervalMinutes: 1_200 }, 1_200, now)) return null;
   return syncEarningsSurprises(env, { mode: "incremental", now });
 }

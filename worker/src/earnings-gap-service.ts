@@ -1,7 +1,12 @@
 import { zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
+import { shouldRunCentralCronLocalTime, type CronJobValues } from "./cron-jobs-service";
 import {
-  EARNINGS_ELIGIBLE_ISSUE_SQL,
+  canUseEarningsSymbolCatalog,
+  earningsDefaultEligibleListedEquitySql,
+  earningsEligibleSecuritySql,
+  earningsMajorUsExchangeSql,
+  filterRowsByEarningsSymbolCatalog,
   isExcludedEarningsIssue,
   normalizeEarningsQueryLimit,
   normalizeEarningsQueryOffset,
@@ -818,7 +823,7 @@ export async function syncEarningsGaps(
     startedAt,
   });
   try {
-    const releases = await fetchTradingViewEarningsReleases(windowStart, windowEnd);
+    const releases = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsReleases(windowStart, windowEnd));
     const rows = await computeEarningsGapEvents(env, releases, now);
     const rowsUpserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
     if (mode !== "backfill" || done) {
@@ -862,8 +867,8 @@ function normalizeArrayFilter(value: string | string[] | null | undefined): stri
     .filter(Boolean);
 }
 
-function buildWhereClause(query: EarningsGapsQuery): { sql: string; args: unknown[] } {
-  const clauses = ["report_date >= ?", EARNINGS_ELIGIBLE_ISSUE_SQL];
+function buildWhereClause(query: EarningsGapsQuery, options: { includeCatalog?: boolean } = {}): { sql: string; args: unknown[] } {
+  const clauses = ["report_date >= ?", earningsEligibleSecuritySql("earnings_gap_events", { includeCatalog: options.includeCatalog })];
   const args: unknown[] = [query.startDate ? normalizeDate(query.startDate) ?? isoDateDaysAgo(RETENTION_DAYS) : isoDateDaysAgo(RETENTION_DAYS)];
   if (query.endDate && normalizeDate(query.endDate)) {
     clauses.push("report_date <= ?");
@@ -910,7 +915,7 @@ function buildWhereClause(query: EarningsGapsQuery): { sql: string; args: unknow
     clauses.push(`UPPER(exchange) IN (${exchanges.map(() => "?").join(",")})`);
     args.push(...exchanges);
   } else if (!query.includeOtc) {
-    clauses.push("UPPER(exchange) IN ('NASDAQ', 'NYSE', 'AMEX')");
+    clauses.push(earningsMajorUsExchangeSql());
   }
   return {
     sql: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
@@ -982,7 +987,7 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
   const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
-  const { sql: whereSql, args } = buildWhereClause(query);
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const count = await env.DB.prepare(
     `SELECT COUNT(*) as count FROM earnings_gap_events ${whereSql}`,
   ).bind(...args).first<{ count: number }>();
@@ -1026,7 +1031,7 @@ export async function exportEarningsGapTickers(env: Env, query: EarningsGapsQuer
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
   const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
-  const { sql: whereSql, args } = buildWhereClause(query);
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const rows = await env.DB.prepare(
     `SELECT ticker
      FROM earnings_gap_events
@@ -1048,6 +1053,8 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
       latestRows: [],
     };
   }
+  const includeCatalog = await canUseEarningsSymbolCatalog(env);
+  const defaultEligibilitySql = earningsDefaultEligibleListedEquitySql("earnings_gap_events", { includeCatalog });
   const [counts, syncs, latest] = await Promise.all([
     env.DB.prepare(
       `SELECT
@@ -1058,7 +1065,7 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
          MAX(report_date) as latestReportDate,
          MIN(report_date) as earliestReportDate
        FROM earnings_gap_events
-       WHERE ${EARNINGS_ELIGIBLE_ISSUE_SQL}`,
+       WHERE ${defaultEligibilitySql}`,
     ).first<{ total: number; postmarket: number | null; regularOpen: number | null; both: number | null; latestReportDate: string | null; earliestReportDate: string | null }>(),
     env.DB.prepare(
       `SELECT id, provider, status, mode, scheduled_local_date as scheduledLocalDate,
@@ -1070,7 +1077,7 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
        ORDER BY datetime(updated_at) DESC
        LIMIT 12`,
     ).all<EarningsGapsStatus["syncs"][number]>(),
-    queryEarningsGaps(env, { limit: 12, offset: 0, includeOtc: true, sort: "reportDate", sortDir: "desc" }),
+    queryEarningsGaps(env, { limit: 12, offset: 0, includeOtc: false, sort: "reportDate", sortDir: "desc" }),
   ]);
   return {
     schemaReady: true,
@@ -1092,11 +1099,17 @@ function isWeekday(value: string): boolean {
   return ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(value);
 }
 
-export async function maybeRunScheduledEarningsGapSync(env: Env, now = new Date()): Promise<EarningsGapSyncResult | null> {
+export async function maybeRunScheduledEarningsGapSync(env: Env, now = new Date(), settings?: CronJobValues): Promise<EarningsGapSyncResult | null> {
   if (!(await hasEarningsGapSchema(env))) return null;
   const ny = zonedParts(now, "America/New_York");
-  if (!isWeekday(ny.weekday)) return null;
-  if (ny.minutesOfDay < DAILY_SCAN_MINUTES_ET) return null;
+  const due = settings
+    ? shouldRunCentralCronLocalTime(now, settings, {
+      timezone: "America/New_York",
+      localTime: "20:00",
+      days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    })
+    : isWeekday(ny.weekday) && ny.minutesOfDay >= DAILY_SCAN_MINUTES_ET;
+  if (!due) return null;
   const existing = await env.DB.prepare(
     "SELECT id FROM earnings_gap_syncs WHERE scheduled_local_date = ? AND status = 'ok' LIMIT 1",
   ).bind(ny.localDate).first<{ id: string }>();

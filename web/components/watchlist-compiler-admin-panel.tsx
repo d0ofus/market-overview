@@ -298,22 +298,17 @@ export function WatchlistCompilerAdminPanel() {
                 <input type="checkbox" checked={form.isActive} onChange={(event) => setForm((current) => ({ ...current, isActive: event.target.checked }))} />
                 Active
               </label>
-              <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={form.compileDaily} onChange={(event) => setForm((current) => ({ ...current, compileDaily: event.target.checked }))} />
-                Compile Daily
-              </label>
-              <label className="block text-xs text-slate-300">
-                Daily Time
-                <input type="time" className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.dailyCompileTimeLocal} onChange={(event) => setForm((current) => ({ ...current, dailyCompileTimeLocal: event.target.value }))} />
-              </label>
-              <label className="block text-xs text-slate-300">
-                Timezone
-                <select className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm" value={form.dailyCompileTimezone} onChange={(event) => setForm((current) => ({ ...current, dailyCompileTimezone: event.target.value }))}>
-                  {TIMEZONE_OPTIONS.map((timezone) => (
-                    <option key={timezone} value={timezone}>{timezone}</option>
-                  ))}
-                </select>
-              </label>
+              <div className="rounded border border-borderSoft bg-panelSoft px-3 py-2 text-sm text-slate-300 md:col-span-2">
+                <div className="font-semibold text-slate-100">
+                  Compile schedule: {form.compileDaily ? "daily" : "manual"}
+                </div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {form.dailyCompileTimeLocal} {form.dailyCompileTimezone}. Edit this schedule from Operations.
+                </div>
+                <a className="mt-2 inline-flex rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs text-accent" href="/admin">
+                  Manage in Operations
+                </a>
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button

@@ -58,6 +58,19 @@ import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { latestUsSessionAsOfDate, parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
+import {
+  CENTRAL_CRON_JOB_DEFINITIONS,
+  CRON_TIMEZONE_OPTIONS,
+  centralCronJobToAdminJob,
+  cronNumber,
+  isCentralCronEnabled,
+  loadCentralCronJobSettingsMap,
+  mergeCentralCronValues,
+  updateCentralCronJobSettings,
+  type AdminCronJob,
+  type CronJobField,
+  type CronJobValues,
+} from "./cron-jobs-service";
 import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
 import {
   cleanupOldAlertsData,
@@ -107,6 +120,7 @@ import {
   backfillScannerCacheRsCache,
   loadScannerCacheRsCacheStatus,
   processScannerCacheScanRun,
+  refreshActiveRelativeStrengthPresets,
   refreshScanCompilePreset,
   refreshScansSnapshot,
   requestScansRefresh,
@@ -150,6 +164,7 @@ import {
   syncEarningsGaps,
   type EarningsGapsQuery,
 } from "./earnings-gap-service";
+import { loadEarningsExclusions } from "./earnings-admin-service";
 import {
   buildFundamentalSeedQueue,
   loadFundamentalSeedErrors,
@@ -410,6 +425,7 @@ function readEarningsSurprisesQuery(req: Request): EarningsSurprisesQuery {
     endDate: url.searchParams.get("endDate"),
     minMarketCap: toNumber("minMarketCap"),
     maxMarketCap: toNumber("maxMarketCap"),
+    minEpsSurprisePct: toNumber("minEpsSurprisePct"),
     sector: url.searchParams.get("sector"),
     industry: url.searchParams.get("industry"),
     exchange: url.searchParams.get("exchange"),
@@ -1021,16 +1037,19 @@ async function refreshPageScopedData(
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
 }
 
-async function maybeRunAlertsHousekeeping(env: Env): Promise<void> {
+async function maybeRunAlertsHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   const now = Date.now();
-  if (now - lastAlertsHousekeepingAt < ALERTS_HOUSEKEEPING_INTERVAL_MS) return;
+  const intervalMs = cronNumber(settings ?? {}, "intervalMinutes", ALERTS_HOUSEKEEPING_INTERVAL_MS / 60_000) * 60_000;
+  if (now - lastAlertsHousekeepingAt < intervalMs) return;
   lastAlertsHousekeepingAt = now;
   try {
-    await cleanupOldAlertsData(env, 30);
+    await cleanupOldAlertsData(env, cronNumber(settings ?? {}, "retentionDays", 30));
   } catch (error) {
     console.error("alerts cleanup failed", error);
   }
-  if ((env.ALERTS_RECONCILE_ENABLED ?? "false") !== "true") return;
+  const reconcileEnabled = booleanValue(settings ?? {}, "reconcileEnabled", false) || (env.ALERTS_RECONCILE_ENABLED ?? "false") === "true";
+  if (!reconcileEnabled) return;
   try {
     await reconcileAlertsFromMailboxAdapters(env, 30);
   } catch (error) {
@@ -1038,48 +1057,390 @@ async function maybeRunAlertsHousekeeping(env: Env): Promise<void> {
   }
 }
 
-async function maybeRunSocialAlertsHousekeeping(env: Env): Promise<void> {
+async function maybeRunSocialAlertsHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   const now = Date.now();
-  if (now - lastSocialAlertsHousekeepingAt < SOCIAL_ALERTS_HOUSEKEEPING_INTERVAL_MS) return;
+  const intervalMs = cronNumber(settings ?? {}, "intervalMinutes", SOCIAL_ALERTS_HOUSEKEEPING_INTERVAL_MS / 60_000) * 60_000;
+  if (now - lastSocialAlertsHousekeepingAt < intervalMs) return;
   lastSocialAlertsHousekeepingAt = now;
   try {
-    await cleanupOldSocialAlertData(env, 10);
+    await cleanupOldSocialAlertData(env, cronNumber(settings ?? {}, "retentionDays", 10));
   } catch (error) {
     console.error("social alerts cleanup failed", error);
   }
 }
 
-async function maybeRunScanningHousekeeping(env: Env): Promise<void> {
+async function maybeRunScanningHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   const now = Date.now();
-  if (now - lastScanningHousekeepingAt < SCANNING_HOUSEKEEPING_INTERVAL_MS) return;
+  const intervalMs = cronNumber(settings ?? {}, "intervalMinutes", SCANNING_HOUSEKEEPING_INTERVAL_MS / 60_000) * 60_000;
+  if (now - lastScanningHousekeepingAt < intervalMs) return;
   lastScanningHousekeepingAt = now;
   try {
-    await cleanupOldScanningData(env, 1);
+    await cleanupOldScanningData(env, cronNumber(settings ?? {}, "retentionDays", 1));
   } catch (error) {
     console.error("scanning cleanup failed", error);
   }
 }
 
-async function maybeRunGappersHousekeeping(env: Env): Promise<void> {
+async function maybeRunGappersHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   const now = Date.now();
-  if (now - lastGappersHousekeepingAt < GAPPERS_HOUSEKEEPING_INTERVAL_MS) return;
+  const intervalMs = cronNumber(settings ?? {}, "intervalMinutes", GAPPERS_HOUSEKEEPING_INTERVAL_MS / 60_000) * 60_000;
+  if (now - lastGappersHousekeepingAt < intervalMs) return;
   lastGappersHousekeepingAt = now;
   try {
-    await cleanupOldGappersData(env, 1);
+    await cleanupOldGappersData(env, cronNumber(settings ?? {}, "retentionDays", 1));
   } catch (error) {
     console.error("gappers cleanup failed", error);
   }
 }
 
-async function maybeRunScansPageHousekeeping(env: Env): Promise<void> {
+async function maybeRunScansPageHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   const now = Date.now();
-  if (now - lastScansPageHousekeepingAt < SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS) return;
+  const intervalMs = cronNumber(settings ?? {}, "intervalMinutes", SCANS_PAGE_HOUSEKEEPING_INTERVAL_MS / 60_000) * 60_000;
+  if (now - lastScansPageHousekeepingAt < intervalMs) return;
   lastScansPageHousekeepingAt = now;
   try {
-    await cleanupOldScansPageData(env, 7);
+    await cleanupOldScansPageData(env, cronNumber(settings ?? {}, "retentionDays", 7));
   } catch (error) {
     console.error("scans page cleanup failed", error);
   }
+}
+
+const cronEnabledField: CronJobField = { key: "enabled", label: "Enabled", type: "boolean" };
+const cronTimezoneField: CronJobField = {
+  key: "timezone",
+  label: "Timezone",
+  type: "timezone",
+  options: [...CRON_TIMEZONE_OPTIONS],
+};
+const cronLocalTimeField: CronJobField = { key: "localTime", label: "Local time", type: "time" };
+const cronDaysField: CronJobField = { key: "days", label: "Days", type: "weekdays" };
+
+function cronNumberField(key: string, label: string, min: number, max: number, step = 1): CronJobField {
+  return { key, label, type: "number", min, max, step };
+}
+
+function cronSelectField(key: string, label: string, options: Array<{ label: string; value: string }>): CronJobField {
+  return { key, label, type: "select", options };
+}
+
+function asCronValues(body: unknown): CronJobValues {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const record = body as Record<string, unknown>;
+  const candidate = record.values && typeof record.values === "object" && !Array.isArray(record.values)
+    ? record.values as Record<string, unknown>
+    : record;
+  return candidate as CronJobValues;
+}
+
+function stringValue(values: CronJobValues, key: string, fallback: string): string {
+  const value = values[key];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function booleanValue(values: CronJobValues, key: string, fallback: boolean): boolean {
+  const value = values[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(text)) return true;
+    if (["false", "0", "no", "off"].includes(text)) return false;
+  }
+  return fallback;
+}
+
+function numberValue(values: CronJobValues, key: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(values[key] ?? fallback);
+  const value = Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function daysValue(values: CronJobValues, key: string, fallback: string[]): string[] {
+  if (!Array.isArray(values[key])) return fallback;
+  const allowed = new Set(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]);
+  const days = (values[key] as string[]).map((day) => String(day ?? "").trim()).filter((day) => allowed.has(day));
+  return days.length ? Array.from(new Set(days)) : fallback;
+}
+
+function buildCronJob(input: Omit<AdminCronJob, "fixedCronExpression">, fixedCronExpression: string): AdminCronJob {
+  return { ...input, fixedCronExpression };
+}
+
+async function listAdminCronJobs(env: Env): Promise<{ fixedCronExpression: string; timezoneOptions: typeof CRON_TIMEZONE_OPTIONS; jobs: AdminCronJob[] }> {
+  const [centralSettings, workerSchedule, marketCommentary, socialAlerts, symbolStatus, watchlistSets, defaultConfig] = await Promise.all([
+    loadCentralCronJobSettingsMap(env),
+    loadWorkerScheduleSettings(env),
+    loadMarketCommentarySettings(env),
+    getSocialAlertSettings(env),
+    loadSymbolCatalogStatus(env),
+    listWatchlistSets(env, true),
+    loadDefaultConfigRow(env),
+  ]);
+  const fixedCronExpression = workerSchedule.cronExpression;
+  const overviewCentral = mergeCentralCronValues("overview-eod", {
+    ...(centralSettings.get("overview-eod") ?? {}),
+    timezone: defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne",
+    localTime: defaultConfig?.eodRunLocalTime ?? "08:15",
+  });
+  const watchlistOptions = watchlistSets.map((set) => ({ label: set.name, value: set.id }));
+  const selectedWatchlist = watchlistSets[0] ?? null;
+  const watchlistSetMeta = watchlistSets.map((set) => ({
+    id: set.id,
+    label: set.name,
+    enabled: set.compileDaily,
+    localTime: set.dailyCompileTimeLocal ?? "08:15",
+    timezone: set.dailyCompileTimezone ?? "Australia/Sydney",
+    latestRunAt: set.latestRun?.ingestedAt ?? null,
+  }));
+
+  const jobs: AdminCronJob[] = [
+    buildCronJob({
+      key: "overview-eod",
+      label: "Overview EOD Refresh",
+      category: "Market/Data",
+      description: "Runs the dashboard snapshot refresh after the configured local time for the previous US session.",
+      kind: "local-time",
+      cadence: `${overviewCentral.localTime} ${overviewCentral.timezone} (previous US close)`,
+      values: overviewCentral,
+      fields: [cronEnabledField, cronTimezoneField, cronLocalTimeField],
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "post-close-bars",
+      label: "Post-Close Daily Bars",
+      category: "Market/Data",
+      description: "Loads the latest session bar for the active US common-stock universe after US close.",
+      kind: "runtime",
+      cadence: `${workerSchedule.postCloseBarsOffsetMinutes} minutes after US close`,
+      values: {
+        enabled: workerSchedule.postCloseBarsEnabled,
+        offsetMinutes: workerSchedule.postCloseBarsOffsetMinutes,
+        batchSize: workerSchedule.postCloseBarsBatchSize,
+        maxBatchesPerTick: workerSchedule.postCloseBarsMaxBatchesPerTick,
+      },
+      fields: [
+        cronEnabledField,
+        cronNumberField("offsetMinutes", "Offset after US close (min)", 0, 240),
+        cronNumberField("batchSize", "Tickers per batch", 20, 2_000),
+        cronNumberField("maxBatchesPerTick", "Max batches per tick", 1, 20),
+      ],
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "relative-strength-background",
+      label: "Relative Strength Background",
+      category: "Market/Data",
+      description: "Queues and advances active relative-strength scan refreshes in the background.",
+      kind: "runtime",
+      cadence: `Every heartbeat; ${workerSchedule.rsBackgroundBatchSize} tickers per batch`,
+      values: {
+        enabled: workerSchedule.rsBackgroundEnabled,
+        batchSize: workerSchedule.rsBackgroundBatchSize,
+        maxBatchesPerTick: workerSchedule.rsBackgroundMaxBatchesPerTick,
+        timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+        manualCacheReuseEnabled: workerSchedule.rsManualCacheReuseEnabled,
+        sharedConfigSnapshotFanoutEnabled: workerSchedule.rsSharedConfigSnapshotFanoutEnabled,
+      },
+      fields: [
+        cronEnabledField,
+        cronNumberField("batchSize", "Tickers per RS batch", 1, 500),
+        cronNumberField("maxBatchesPerTick", "Max batches per tick", 1, 100),
+        cronNumberField("timeBudgetMs", "Time budget per tick (ms)", 1_000, 30_000, 1_000),
+        { key: "manualCacheReuseEnabled", label: "Manual cache reuse", type: "boolean" },
+        { key: "sharedConfigSnapshotFanoutEnabled", label: "Shared config fanout", type: "boolean" },
+      ],
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "pattern-scanner",
+      label: "Pattern Scanner",
+      category: "Market/Data",
+      description: "Runs the learned pattern scanner after post-close bars are available.",
+      kind: "runtime",
+      cadence: `${workerSchedule.patternScanOffsetMinutes} minutes after US close`,
+      values: {
+        enabled: workerSchedule.patternScanEnabled,
+        offsetMinutes: workerSchedule.patternScanOffsetMinutes,
+        batchSize: workerSchedule.patternScanBatchSize,
+        maxBatchesPerTick: workerSchedule.patternScanMaxBatchesPerTick,
+      },
+      fields: [
+        cronEnabledField,
+        cronNumberField("offsetMinutes", "Offset after US close (min)", 0, 360),
+        cronNumberField("batchSize", "Tickers per batch", 1, 500),
+        cronNumberField("maxBatchesPerTick", "Max batches per tick", 1, 20),
+      ],
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "watchlist-compiler",
+      label: "Watchlist Compiler",
+      category: "Market/Data",
+      description: "Runs daily compiles for the selected TradingView watchlist set.",
+      kind: "watchlist-set",
+      cadence: selectedWatchlist ? `${selectedWatchlist.dailyCompileTimeLocal ?? "08:15"} ${selectedWatchlist.dailyCompileTimezone ?? "Australia/Sydney"}` : "No watchlist sets configured",
+      values: {
+        setId: selectedWatchlist?.id ?? "",
+        enabled: selectedWatchlist?.compileDaily ?? false,
+        localTime: selectedWatchlist?.dailyCompileTimeLocal ?? "08:15",
+        timezone: selectedWatchlist?.dailyCompileTimezone ?? "Australia/Sydney",
+      },
+      fields: [
+        cronSelectField("setId", "Watchlist set", watchlistOptions),
+        cronEnabledField,
+        cronTimezoneField,
+        cronLocalTimeField,
+      ],
+      meta: { watchlistSets: watchlistSetMeta },
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "symbol-catalog",
+      label: "Symbol Catalog",
+      category: "Market/Data",
+      description: "Syncs the Nasdaq Trader-backed common-stock symbol directory when a full day has elapsed.",
+      kind: "interval",
+      cadence: "Every 24 hours when enabled",
+      values: { enabled: symbolStatus.scheduledEnabled },
+      fields: [cronEnabledField],
+      meta: { schemaReady: symbolStatus.schemaReady, lastSyncedAt: symbolStatus.lastSyncedAt },
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "market-commentary",
+      label: "Market Commentary",
+      category: "Content/Social",
+      description: "Generates the scheduled market commentary report.",
+      kind: "local-time",
+      cadence: `${marketCommentary.scheduleLocalTime} ${marketCommentary.scheduleTimezone}`,
+      values: {
+        enabled: marketCommentary.scheduleEnabled,
+        timezone: marketCommentary.scheduleTimezone,
+        localTime: marketCommentary.scheduleLocalTime,
+        days: marketCommentary.scheduleDays,
+      },
+      fields: [cronEnabledField, cronTimezoneField, cronLocalTimeField, cronDaysField],
+    }, fixedCronExpression),
+    buildCronJob({
+      key: "social-alerts-scrape",
+      label: "Social Alerts Scrape",
+      category: "Content/Social",
+      description: "Runs Scweet scrapes for all active handles on the configured repeating local slots.",
+      kind: "local-time",
+      cadence: `Every ${socialAlerts.scrapeIntervalHours} hour${socialAlerts.scrapeIntervalHours === 1 ? "" : "s"} from ${socialAlerts.dailyScrapeTimeLocal} ${socialAlerts.dailyScrapeTimezone}`,
+      values: {
+        enabled: socialAlerts.dailyScrapeEnabled,
+        timezone: socialAlerts.dailyScrapeTimezone,
+        localTime: socialAlerts.dailyScrapeTimeLocal,
+        intervalHours: socialAlerts.scrapeIntervalHours,
+        lookbackDays: socialAlerts.dailyScrapeLookbackDays,
+      },
+      fields: [
+        cronEnabledField,
+        cronTimezoneField,
+        cronLocalTimeField,
+        cronSelectField("intervalHours", "Repeat interval", [1, 2, 3, 4, 6, 8, 12, 24].map((hours) => ({ label: `Every ${hours} hour${hours === 1 ? "" : "s"}`, value: String(hours) }))),
+        cronNumberField("lookbackDays", "Lookback days", 1, 10),
+      ],
+    }, fixedCronExpression),
+    ...CENTRAL_CRON_JOB_DEFINITIONS
+      .filter((definition) => definition.key !== "overview-eod")
+      .map((definition) => {
+        const values = centralSettings.get(definition.key) ?? mergeCentralCronValues(definition.key, definition.defaults);
+        return centralCronJobToAdminJob(definition, values, fixedCronExpression);
+      }),
+  ];
+
+  return { fixedCronExpression, timezoneOptions: CRON_TIMEZONE_OPTIONS, jobs };
+}
+
+async function updateAdminCronJob(env: Env, key: string, values: CronJobValues): Promise<void> {
+  if (key === "overview-eod") {
+    const config = await loadDefaultConfigRow(env);
+    const id = config?.id ?? "default";
+    const timezone = stringValue(values, "timezone", config?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne");
+    const localTime = stringValue(values, "localTime", config?.eodRunLocalTime ?? "08:15");
+    await updateCentralCronJobSettings(env, key, { enabled: booleanValue(values, "enabled", true) });
+    await env.DB.prepare(
+      "UPDATE dashboard_configs SET timezone = ?, eod_run_local_time = ?, eod_run_time_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).bind(timezone, localTime, formatAutoRefreshLabel(localTime, timezone), id).run();
+    await upsertAudit(env, id, "CRON_JOB_PATCH", { key, values: { enabled: values.enabled, timezone, localTime } });
+    return;
+  }
+
+  if (key === "post-close-bars" || key === "relative-strength-background" || key === "pattern-scanner") {
+    const current = await loadWorkerScheduleSettings(env);
+    const next = {
+      id: current.id,
+      rsBackgroundEnabled: key === "relative-strength-background" ? booleanValue(values, "enabled", current.rsBackgroundEnabled) : current.rsBackgroundEnabled,
+      rsBackgroundBatchSize: key === "relative-strength-background" ? numberValue(values, "batchSize", current.rsBackgroundBatchSize, 1, 500) : current.rsBackgroundBatchSize,
+      rsBackgroundMaxBatchesPerTick: key === "relative-strength-background" ? numberValue(values, "maxBatchesPerTick", current.rsBackgroundMaxBatchesPerTick, 1, 100) : current.rsBackgroundMaxBatchesPerTick,
+      rsBackgroundTimeBudgetMs: key === "relative-strength-background" ? numberValue(values, "timeBudgetMs", current.rsBackgroundTimeBudgetMs, 1_000, 30_000) : current.rsBackgroundTimeBudgetMs,
+      rsManualCacheReuseEnabled: key === "relative-strength-background" ? booleanValue(values, "manualCacheReuseEnabled", current.rsManualCacheReuseEnabled) : current.rsManualCacheReuseEnabled,
+      rsSharedConfigSnapshotFanoutEnabled: key === "relative-strength-background" ? booleanValue(values, "sharedConfigSnapshotFanoutEnabled", current.rsSharedConfigSnapshotFanoutEnabled) : current.rsSharedConfigSnapshotFanoutEnabled,
+      postCloseBarsEnabled: key === "post-close-bars" ? booleanValue(values, "enabled", current.postCloseBarsEnabled) : current.postCloseBarsEnabled,
+      postCloseBarsOffsetMinutes: key === "post-close-bars" ? numberValue(values, "offsetMinutes", current.postCloseBarsOffsetMinutes, 0, 240) : current.postCloseBarsOffsetMinutes,
+      postCloseBarsBatchSize: key === "post-close-bars" ? numberValue(values, "batchSize", current.postCloseBarsBatchSize, 20, 2_000) : current.postCloseBarsBatchSize,
+      postCloseBarsMaxBatchesPerTick: key === "post-close-bars" ? numberValue(values, "maxBatchesPerTick", current.postCloseBarsMaxBatchesPerTick, 1, 20) : current.postCloseBarsMaxBatchesPerTick,
+      patternScanEnabled: key === "pattern-scanner" ? booleanValue(values, "enabled", current.patternScanEnabled) : current.patternScanEnabled,
+      patternScanOffsetMinutes: key === "pattern-scanner" ? numberValue(values, "offsetMinutes", current.patternScanOffsetMinutes, 0, 360) : current.patternScanOffsetMinutes,
+      patternScanBatchSize: key === "pattern-scanner" ? numberValue(values, "batchSize", current.patternScanBatchSize, 1, 500) : current.patternScanBatchSize,
+      patternScanMaxBatchesPerTick: key === "pattern-scanner" ? numberValue(values, "maxBatchesPerTick", current.patternScanMaxBatchesPerTick, 1, 20) : current.patternScanMaxBatchesPerTick,
+    };
+    await updateWorkerScheduleSettings(env, next);
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, values });
+    return;
+  }
+
+  if (key === "market-commentary") {
+    const current = await loadMarketCommentarySettings(env);
+    await updateMarketCommentarySettings(env, {
+      ...current,
+      scheduleEnabled: booleanValue(values, "enabled", current.scheduleEnabled),
+      scheduleTimezone: stringValue(values, "timezone", current.scheduleTimezone),
+      scheduleLocalTime: stringValue(values, "localTime", current.scheduleLocalTime),
+      scheduleDays: daysValue(values, "days", current.scheduleDays),
+    });
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, values });
+    return;
+  }
+
+  if (key === "social-alerts-scrape") {
+    const current = await getSocialAlertSettings(env);
+    await updateSocialAlertSettings(env, {
+      dailyScrapeEnabled: booleanValue(values, "enabled", current.dailyScrapeEnabled),
+      dailyScrapeTimeLocal: stringValue(values, "localTime", current.dailyScrapeTimeLocal),
+      dailyScrapeTimezone: stringValue(values, "timezone", current.dailyScrapeTimezone),
+      dailyScrapeLookbackDays: numberValue(values, "lookbackDays", current.dailyScrapeLookbackDays, 1, 10),
+      scrapeIntervalHours: numberValue(values, "intervalHours", current.scrapeIntervalHours, 1, 24),
+    });
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, values });
+    return;
+  }
+
+  if (key === "watchlist-compiler") {
+    const setId = stringValue(values, "setId", "");
+    if (!setId) throw new Error("Choose a watchlist set.");
+    await updateWatchlistSet(env, setId, {
+      compileDaily: booleanValue(values, "enabled", false),
+      dailyCompileTimeLocal: stringValue(values, "localTime", "08:15"),
+      dailyCompileTimezone: stringValue(values, "timezone", "Australia/Sydney"),
+    });
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, setId, values });
+    return;
+  }
+
+  if (key === "symbol-catalog") {
+    await setSymbolCatalogSyncEnabled(env, booleanValue(values, "enabled", false));
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, values });
+    return;
+  }
+
+  if (CENTRAL_CRON_JOB_DEFINITIONS.some((definition) => definition.key === key)) {
+    const next = await updateCentralCronJobSettings(env, key, values);
+    await upsertAudit(env, "default", "CRON_JOB_PATCH", { key, values: next });
+    return;
+  }
+
+  throw new Error(`Unknown cron job: ${key}`);
 }
 
 type BreadthSentiment = {
@@ -3607,6 +3968,17 @@ app.get("/api/admin/worker-schedule", async (c) => {
   }
 });
 
+app.get("/api/admin/cron-jobs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await listAdminCronJobs(c.env));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load cron job settings.";
+    console.error("admin cron jobs load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/market-commentary/settings", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -4312,6 +4684,19 @@ app.post("/api/admin/earnings/process", async (c) => {
   }
 });
 
+app.get("/api/admin/earnings/exclusions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadEarningsExclusions(c.env, {
+      dataset: c.req.query("dataset"),
+      limit: Number(c.req.query("limit") ?? 100),
+      offset: Number(c.req.query("offset") ?? 0),
+    }));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load earnings exclusions." }, 500);
+  }
+});
+
 app.post("/api/admin/earnings/surprises/sync", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -4502,6 +4887,19 @@ app.patch("/api/admin/worker-schedule", async (c) => {
     }
     const message = error instanceof Error ? error.message : "Failed to update worker schedule.";
     return c.json({ error: message }, 500);
+  }
+});
+
+app.patch("/api/admin/cron-jobs/:key", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const key = c.req.param("key");
+    const values = asCronValues(await c.req.json().catch(() => ({})));
+    await updateAdminCronJob(c.env, key, values);
+    return c.json({ ok: true, ...(await listAdminCronJobs(c.env)) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update cron job settings.";
+    return c.json({ error: message }, 400);
   }
 });
 
@@ -4830,10 +5228,11 @@ app.get("/api/admin/audit", async (c) => {
   return c.json({ rows: rows.results ?? [] });
 });
 
-async function syncMonthlyEtfSlice(env: Env): Promise<void> {
+async function syncMonthlyEtfSlice(env: Env, settings?: CronJobValues): Promise<void> {
+  if (settings && !isCentralCronEnabled(settings)) return;
   // Process only a small stale slice per scheduled run to stay under worker subrequest budgets.
-  const maxPerRun = 5;
-  const staleDays = 14;
+  const maxPerRun = cronNumber(settings ?? {}, "batchLimit", 5);
+  const staleDays = cronNumber(settings ?? {}, "staleDays", 14);
   const staleRows = await (async () => {
     try {
       return await env.DB.prepare(
@@ -4865,12 +5264,20 @@ export default {
     await handleInboundTradingViewEmail(message, env);
   },
   scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
-    await maybeRunAlertsHousekeeping(env);
-    await maybeRunSocialAlertsHousekeeping(env);
-    await maybeRunScansPageHousekeeping(env);
-    await maybeRunScanningHousekeeping(env);
-    await maybeRunGappersHousekeeping(env);
-    await advanceResearchQueue(env);
+    const cronSettings = await loadCentralCronJobSettingsMap(env).catch((error) => {
+      console.error("scheduled cron settings load failed; using defaults", error);
+      return new Map<string, CronJobValues>();
+    });
+    const cron = (key: string) => cronSettings.get(key);
+    await maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping"));
+    await maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping"));
+    await maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping"));
+    await maybeRunScanningHousekeeping(env, cron("scanning-housekeeping"));
+    await maybeRunGappersHousekeeping(env, cron("gappers-housekeeping"));
+    const researchQueueSettings = cron("research-queue");
+    if (!researchQueueSettings || isCentralCronEnabled(researchQueueSettings)) {
+      await advanceResearchQueue(env, cronNumber(researchQueueSettings ?? {}, "batchLimit", 2));
+    }
     const now = new Date(event.scheduledTime || Date.now());
     await runDueWatchlistCompiles(env, now);
     try {
@@ -4879,27 +5286,33 @@ export default {
       console.error("scheduled symbol catalog sync failed", error);
     }
     try {
-      await maybeRunScheduledEarningsCalendarSync(env, now);
+      await maybeRunScheduledEarningsCalendarSync(env, now, cron("earnings-calendar"));
     } catch (error) {
       console.error("scheduled earnings calendar sync failed", error);
     }
     try {
-      await maybeRunScheduledEarningsSurpriseSync(env, now);
+      await maybeRunScheduledEarningsSurpriseSync(env, now, cron("earnings-surprises"));
     } catch (error) {
       console.error("scheduled earnings surprise sync failed", error);
     }
     try {
-      await maybeRunScheduledEarningsGapSync(env, now);
+      await maybeRunScheduledEarningsGapSync(env, now, cron("earnings-gaps"));
     } catch (error) {
       console.error("scheduled earnings gap sync failed", error);
     }
     try {
-      await processDueEarningsFundamentalRefreshes(env, { limit: 5, now });
+      const settings = cron("earnings-fundamentals-refresh");
+      if (!settings || isCentralCronEnabled(settings)) {
+        await processDueEarningsFundamentalRefreshes(env, { limit: cronNumber(settings ?? {}, "batchLimit", 5), now });
+      }
     } catch (error) {
       console.error("scheduled earnings fundamentals refresh failed", error);
     }
     try {
-      await maybeProcessFundamentalSeedQueue(env, now);
+      const settings = cron("fundamentals-seed-queue");
+      if (!settings || isCentralCronEnabled(settings)) {
+        await maybeProcessFundamentalSeedQueue(env, { limit: cronNumber(settings ?? {}, "batchLimit", 10), now });
+      }
     } catch (error) {
       console.error("scheduled fundamentals seed queue failed", error);
     }
@@ -4914,11 +5327,22 @@ export default {
       console.error("scheduled market commentary failed", error);
     }
     try {
-      await syncMonthlyEtfSlice(env);
+      await syncMonthlyEtfSlice(env, cron("etf-constituent-slice"));
     } catch (error) {
       console.error("scheduled etf constituent slice failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
+    if (workerSchedule.rsBackgroundEnabled) {
+      try {
+        await refreshActiveRelativeStrengthPresets(env, {
+          batchSize: workerSchedule.rsBackgroundBatchSize,
+          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
+          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+        });
+      } catch (error) {
+        console.error("scheduled relative strength background failed", error);
+      }
+    }
     let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
     try {
       postCloseJob = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
@@ -4931,6 +5355,8 @@ export default {
       console.error("scheduled pattern scan failed", error);
     }
     const defaultConfig = await loadDefaultConfigRow(env);
+    const overviewSettings = cron("overview-eod");
+    if (overviewSettings && !isCentralCronEnabled(overviewSettings)) return;
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
     const expectedAsOf = latestUsSessionAsOfDate(now);
