@@ -1833,6 +1833,36 @@ export type WorkerScheduleSettings = {
   patternScanMaxBatchesPerTick: number;
 };
 
+export type AdminCronJobField = {
+  key: string;
+  label: string;
+  type: "boolean" | "number" | "time" | "timezone" | "weekdays" | "select";
+  helper?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: Array<{ label: string; value: string }>;
+};
+
+export type AdminCronJob = {
+  key: string;
+  label: string;
+  category: string;
+  description: string;
+  kind: "local-time" | "window" | "interval" | "runtime" | "watchlist-set";
+  cadence: string;
+  fixedCronExpression: string;
+  values: Record<string, boolean | number | string | string[] | null>;
+  fields: AdminCronJobField[];
+  meta?: Record<string, unknown>;
+};
+
+export type AdminCronJobsResponse = {
+  fixedCronExpression: string;
+  timezoneOptions: Array<{ label: string; value: string }>;
+  jobs: AdminCronJob[];
+};
+
 export type PeerMetricRow = {
   ticker: string;
   price: number | null;
@@ -3269,6 +3299,17 @@ export function updateAdminWorkerSchedule(payload: Omit<WorkerScheduleSettings, 
   return adminFetch<{ ok: boolean; settings: WorkerScheduleSettings }>("/api/admin/worker-schedule", {
     method: "PATCH",
     body: JSON.stringify(payload),
+  });
+}
+
+export function getAdminCronJobs() {
+  return adminFetch<AdminCronJobsResponse>("/api/admin/cron-jobs");
+}
+
+export function updateAdminCronJob(key: string, values: AdminCronJob["values"]) {
+  return adminFetch<AdminCronJobsResponse & { ok: boolean }>(`/api/admin/cron-jobs/${encodeURIComponent(key)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ values }),
   });
 }
 

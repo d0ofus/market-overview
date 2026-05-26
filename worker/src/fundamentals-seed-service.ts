@@ -555,9 +555,13 @@ export async function processFundamentalSeedQueue(
   return { ok: true, attempted: queueRows.length, rows: processedRows };
 }
 
-export async function maybeProcessFundamentalSeedQueue(env: Env, now = new Date()): Promise<Awaited<ReturnType<typeof processFundamentalSeedQueue>> | null> {
+export async function maybeProcessFundamentalSeedQueue(
+  env: Env,
+  options: { limit?: number; now?: Date } | Date = {},
+): Promise<Awaited<ReturnType<typeof processFundamentalSeedQueue>> | null> {
   const db = fundamentalsDb(env);
   if (!db || !(await hasFundamentalSeedSchema(db))) return null;
+  const now = options instanceof Date ? options : options.now ?? new Date();
   const due = await db.prepare(
     `SELECT COUNT(*) as count
      FROM fundamental_seed_queue
@@ -565,7 +569,8 @@ export async function maybeProcessFundamentalSeedQueue(env: Env, now = new Date(
        AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime(?))`,
   ).bind(now.toISOString()).first<DbCountRow>();
   if (Number(due?.count ?? 0) <= 0) return null;
-  return processFundamentalSeedQueue(env, { limit: SCHEDULED_PROCESS_LIMIT, trigger: "scheduled", now });
+  const limit = options instanceof Date ? SCHEDULED_PROCESS_LIMIT : options.limit ?? SCHEDULED_PROCESS_LIMIT;
+  return processFundamentalSeedQueue(env, { limit, trigger: "scheduled", now });
 }
 
 function storageLabel(bytes: number): string {

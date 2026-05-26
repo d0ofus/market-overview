@@ -9,6 +9,7 @@ import {
   normalizeEarningsQueryLimit,
   normalizeEarningsQueryOffset,
 } from "./earnings-issue-filter";
+import { hasCentralCronIntervalElapsed, isCentralCronWindowOpen, type CronJobValues } from "./cron-jobs-service";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const PRIMARY_PROVIDER = "tradingview";
@@ -1035,14 +1036,18 @@ function newYorkParts(now: Date): { date: string; hour: number } {
   };
 }
 
-export async function maybeRunScheduledEarningsSurpriseSync(env: Env, now = new Date()): Promise<EarningsSurpriseSyncResult | null> {
+export async function maybeRunScheduledEarningsSurpriseSync(env: Env, now = new Date(), settings?: CronJobValues): Promise<EarningsSurpriseSyncResult | null> {
   if (!(await hasEarningsSurpriseSchema(env))) return null;
-  const ny = newYorkParts(now);
-  if (!(ny.hour >= 21 || ny.hour <= 5)) return null;
+  const windowOpen = settings
+    ? isCentralCronWindowOpen(now, settings, { timezone: "America/New_York", start: "21:00", end: "05:59" })
+    : (() => {
+      const ny = newYorkParts(now);
+      return ny.hour >= 21 || ny.hour <= 5;
+    })();
+  if (!windowOpen) return null;
   const latest = await env.DB.prepare(
     "SELECT last_success_at as lastSuccessAt FROM earnings_surprise_syncs WHERE provider = ? AND status = 'ok' LIMIT 1",
   ).bind(PRIMARY_PROVIDER).first<{ lastSuccessAt: string | null }>();
-  const lastSuccessTime = latest?.lastSuccessAt ? Date.parse(latest.lastSuccessAt) : 0;
-  if (Number.isFinite(lastSuccessTime) && now.getTime() - lastSuccessTime < 20 * 60 * 60_000) return null;
+  if (!hasCentralCronIntervalElapsed(latest?.lastSuccessAt, settings ?? { enabled: true, intervalMinutes: 1_200 }, 1_200, now)) return null;
   return syncEarningsSurprises(env, { mode: "incremental", now });
 }

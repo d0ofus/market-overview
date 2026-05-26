@@ -1,5 +1,6 @@
 import { zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
+import { shouldRunCentralCronLocalTime, type CronJobValues } from "./cron-jobs-service";
 import {
   canUseEarningsSymbolCatalog,
   earningsDefaultEligibleListedEquitySql,
@@ -1098,11 +1099,17 @@ function isWeekday(value: string): boolean {
   return ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(value);
 }
 
-export async function maybeRunScheduledEarningsGapSync(env: Env, now = new Date()): Promise<EarningsGapSyncResult | null> {
+export async function maybeRunScheduledEarningsGapSync(env: Env, now = new Date(), settings?: CronJobValues): Promise<EarningsGapSyncResult | null> {
   if (!(await hasEarningsGapSchema(env))) return null;
   const ny = zonedParts(now, "America/New_York");
-  if (!isWeekday(ny.weekday)) return null;
-  if (ny.minutesOfDay < DAILY_SCAN_MINUTES_ET) return null;
+  const due = settings
+    ? shouldRunCentralCronLocalTime(now, settings, {
+      timezone: "America/New_York",
+      localTime: "20:00",
+      days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    })
+    : isWeekday(ny.weekday) && ny.minutesOfDay >= DAILY_SCAN_MINUTES_ET;
+  if (!due) return null;
   const existing = await env.DB.prepare(
     "SELECT id FROM earnings_gap_syncs WHERE scheduled_local_date = ? AND status = 'ok' LIMIT 1",
   ).bind(ny.localDate).first<{ id: string }>();

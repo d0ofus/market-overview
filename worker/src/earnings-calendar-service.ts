@@ -5,6 +5,7 @@ import {
   refreshTickerFundamentals,
 } from "./fundamentals-service";
 import { fetchRecentFilings, type SecFilingItem } from "./research/providers/sec-direct";
+import { hasCentralCronIntervalElapsed, isCentralCronEnabled, type CronJobValues } from "./cron-jobs-service";
 
 const ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query";
 const FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings";
@@ -760,15 +761,15 @@ export async function processDueEarningsFundamentalRefreshes(
   return { ok: true, attempted: events.length, rows };
 }
 
-export async function maybeRunScheduledEarningsCalendarSync(env: Env, now = new Date()): Promise<null | Awaited<ReturnType<typeof syncEarningsCalendarFromProviders>>> {
+export async function maybeRunScheduledEarningsCalendarSync(env: Env, now = new Date(), settings?: CronJobValues): Promise<null | Awaited<ReturnType<typeof syncEarningsCalendarFromProviders>>> {
+  if (settings && !isCentralCronEnabled(settings)) return null;
   if (!env.ALPHA_VANTAGE_API_KEY && !env.FINNHUB_API_KEY && !env.FMP_API_KEY) return null;
   const db = fundamentalsDb(env);
   if (!db || !(await hasEarningsSchema(db))) return null;
   const latest = await db.prepare(
     "SELECT last_success_at as lastSuccessAt FROM earnings_calendar_syncs WHERE status = 'ok' ORDER BY datetime(last_success_at) DESC LIMIT 1",
   ).first<{ lastSuccessAt: string | null }>();
-  const lastSuccessTime = latest?.lastSuccessAt ? Date.parse(latest.lastSuccessAt) : 0;
-  if (Number.isFinite(lastSuccessTime) && now.getTime() - lastSuccessTime < 20 * 60 * 60_000) return null;
+  if (!hasCentralCronIntervalElapsed(latest?.lastSuccessAt, settings ?? { enabled: true, intervalMinutes: 1_200 }, 1_200, now)) return null;
   return syncEarningsCalendarFromProviders(env, { now });
 }
 
