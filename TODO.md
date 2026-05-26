@@ -6,6 +6,7 @@
 > For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
+> Add pre-market analysis
 > Add a current focus bullet point form in /overview -> E.g. Focus on retracements, focus on earnings gappers etc. 
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
@@ -42,6 +43,7 @@
 > Add scheduler for 12-hourly scrapes
 
 ## PEER GROUPS
+> Auto search for peers using perplexity headless browser and populate in /admin with a button
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
