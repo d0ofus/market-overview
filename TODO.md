@@ -62,16 +62,11 @@
 > Add in filter for min EPS % 
 
 ## EARNINGS
-> OTC/other exchanges are not selected but the results table still show them
-> Make default filters to 300M mkt cap, min gap 3%, min volume 5M, 3M prior start date, surprise positive, limit 0
 > Add multi-chart view
 > ranked by distance of close from highs + volume multiple of average + % gain
 
-For /earnings, is EPS % DESC the EPS surprise %? can I add a average volume * price filter? and add a minimum EPS % Desc filter? Also, can I add a screener to screen out stocks that gapped up on earnings release, where they do not have to be earnings surprises, as long as the price gaps up on the earnings release date.
-
-What is the cron schedule now? What does the 'sync' and 'backfill' buttons do?
-
 ## WATCHLIST COMPILER
+> Make a function to rank by factors (e.g. price contraction, volume expansion, price > SMA200, increasing rev/NI trend etc.)
 
 ## GAPPERS
 - Add avg traded volume column in table
