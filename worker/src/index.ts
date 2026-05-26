@@ -150,6 +150,7 @@ import {
   syncEarningsGaps,
   type EarningsGapsQuery,
 } from "./earnings-gap-service";
+import { loadEarningsExclusions } from "./earnings-admin-service";
 import {
   buildFundamentalSeedQueue,
   loadFundamentalSeedErrors,
@@ -410,6 +411,7 @@ function readEarningsSurprisesQuery(req: Request): EarningsSurprisesQuery {
     endDate: url.searchParams.get("endDate"),
     minMarketCap: toNumber("minMarketCap"),
     maxMarketCap: toNumber("maxMarketCap"),
+    minEpsSurprisePct: toNumber("minEpsSurprisePct"),
     sector: url.searchParams.get("sector"),
     industry: url.searchParams.get("industry"),
     exchange: url.searchParams.get("exchange"),
@@ -4309,6 +4311,19 @@ app.post("/api/admin/earnings/process", async (c) => {
     return c.json(result);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to process earnings fundamentals refreshes." }, 500);
+  }
+});
+
+app.get("/api/admin/earnings/exclusions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadEarningsExclusions(c.env, {
+      dataset: c.req.query("dataset"),
+      limit: Number(c.req.query("limit") ?? 100),
+      offset: Number(c.req.query("offset") ?? 0),
+    }));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load earnings exclusions." }, 500);
   }
 });
 

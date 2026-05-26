@@ -403,6 +403,42 @@ export type AdminEarningsProcessResponse = {
   }>;
 };
 
+export type AdminEarningsExclusionDataset = "surprises" | "gaps";
+
+export type AdminEarningsExcludedRow = {
+  id: string;
+  dataset: AdminEarningsExclusionDataset;
+  provider: string;
+  sourceSymbol: string;
+  ticker: string;
+  exchange: string | null;
+  companyName: string | null;
+  reportDate: string;
+  metricLabel: string;
+  metricValue: number | null;
+  reasons: string[];
+};
+
+export type AdminEarningsExclusionsResponse = {
+  schemaReady: boolean;
+  warning: string | null;
+  generatedAt: string;
+  dataset: AdminEarningsExclusionDataset;
+  limit: number;
+  offset: number;
+  total: number;
+  scanner: {
+    primarySource: string;
+    tradingViewMarket: string;
+    tradingViewSymbolTypes: string[];
+    backupProviders: string[];
+    defaultExchangePolicy: string;
+  };
+  rules: string[];
+  catalog: SymbolCatalogStatus | null;
+  rows: AdminEarningsExcludedRow[];
+};
+
 export type EarningsSurpriseRow = {
   id: string;
   provider: string;
@@ -486,6 +522,7 @@ export type EarningsSurprisesQuery = {
   endDate?: string | null;
   minMarketCap?: number | null;
   maxMarketCap?: number | null;
+  minEpsSurprisePct?: number | null;
   sector?: string | null;
   industry?: string | null;
   exchange?: string | null;
@@ -2265,6 +2302,18 @@ export function processAdminEarningsRefresh(limit = 5) {
   );
 }
 
+export function getAdminEarningsExclusions(query?: {
+  dataset?: AdminEarningsExclusionDataset;
+  limit?: number;
+  offset?: number;
+}) {
+  return adminFetch<AdminEarningsExclusionsResponse>(appendQuery("/api/admin/earnings/exclusions", {
+    dataset: query?.dataset,
+    limit: query?.limit,
+    offset: query?.offset,
+  }));
+}
+
 export function getEarningsSurprises(query?: EarningsSurprisesQuery) {
   return getJson<EarningsSurprisesResponse>(appendQuery("/api/earnings/surprises", {
     limit: query?.limit,
@@ -2275,6 +2324,7 @@ export function getEarningsSurprises(query?: EarningsSurprisesQuery) {
     endDate: query?.endDate,
     minMarketCap: query?.minMarketCap,
     maxMarketCap: query?.maxMarketCap,
+    minEpsSurprisePct: query?.minEpsSurprisePct,
     sector: query?.sector,
     industry: query?.industry,
     exchange: query?.exchange,
@@ -2294,6 +2344,7 @@ export function getEarningsSurprisesExportUrl(query?: EarningsSurprisesQuery, da
     endDate: query?.endDate,
     minMarketCap: query?.minMarketCap,
     maxMarketCap: query?.maxMarketCap,
+    minEpsSurprisePct: query?.minEpsSurprisePct,
     sector: query?.sector,
     industry: query?.industry,
     exchange: query?.exchange,
