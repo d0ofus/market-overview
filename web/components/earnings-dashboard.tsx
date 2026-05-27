@@ -139,6 +139,7 @@ const PRIMARY_BUTTON_CLASS =
   "inline-flex h-10 items-center justify-center gap-2 rounded bg-accent px-3 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50";
 const EARNINGS_HISTORY_MONTHS = 3;
 const GAP_BACKFILL_BATCH_DAYS = 7;
+const DEFAULT_RESULTS_LIMIT = 200;
 const EXPORT_LIMIT_DEFAULT = 100;
 const EXPORT_LIMIT_MAX = 1000;
 const SURPRISE_COLUMNS_STORAGE_KEY = "earnings-surprises-column-order-v1";
@@ -222,7 +223,7 @@ function defaultDraftFilters(): DraftFilters {
     exchange: "",
     surpriseSide: "positive",
     includeOtc: false,
-    limit: "",
+    limit: String(DEFAULT_RESULTS_LIMIT),
   };
 }
 
@@ -240,7 +241,7 @@ function defaultGapDraftFilters(): GapDraftFilters {
     industry: "",
     exchange: "",
     includeOtc: false,
-    limit: "",
+    limit: String(DEFAULT_RESULTS_LIMIT),
   };
 }
 
@@ -253,9 +254,10 @@ function toNumber(value: string): number | null {
 
 function draftLimitToQuery(value: string): number {
   const trimmed = value.trim();
-  if (!trimmed || trimmed === "0") return 0;
+  if (!trimmed) return DEFAULT_RESULTS_LIMIT;
+  if (trimmed === "0") return 0;
   const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return 100;
+  if (!Number.isFinite(parsed)) return DEFAULT_RESULTS_LIMIT;
   return Math.max(25, Math.min(250, Math.floor(parsed)));
 }
 
