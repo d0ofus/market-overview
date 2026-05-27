@@ -68,6 +68,8 @@ export default async function HomePage() {
   const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
+  const currentFocusAnchorId = "overview-current-focus";
+  const marketStateAnchorId = "overview-market-state";
   const macroRatesAnchorId = "overview-macro-rates";
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
   const jumpGroups = sectionLayouts.flatMap((entry) =>
@@ -75,7 +77,12 @@ export default async function HomePage() {
       .filter((group) => group.title !== "US Index Futures (Equal Weight)" && group.title !== "Sector ETFs (Equal Weight)")
       .map((group) => ({ id: groupAnchorId(group.id), label: overviewGroupLabel(group.title) })),
   );
-  const jumpItems = [...jumpGroups, { id: macroRatesAnchorId, label: "Macro Rates" }];
+  const jumpItems = [
+    { id: currentFocusAnchorId, label: "Current Focus" },
+    { id: marketStateAnchorId, label: "State of Play" },
+    ...jumpGroups,
+    { id: macroRatesAnchorId, label: "Macro Rates" },
+  ];
 
   return (
     <div className="space-y-4">
@@ -95,10 +102,13 @@ export default async function HomePage() {
         )}
       />
       <CurrentFocusPanel
+        anchorId={currentFocusAnchorId}
         initialItems={focusItems.rows}
         initialHistory={focusHistory.rows}
       />
-      <MarketCommentaryPanel />
+      <div id={marketStateAnchorId} className="scroll-mt-28 md:scroll-mt-32">
+        <MarketCommentaryPanel />
+      </div>
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">
           Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.

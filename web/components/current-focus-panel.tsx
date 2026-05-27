@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { Check, Plus, Pencil, Trash2, X } from "lucide-react";
+import { Check, Plus, Pencil, Target, Trash2, X } from "lucide-react";
 import {
   createOverviewFocusItem,
   deleteOverviewFocusItem,
@@ -17,6 +17,7 @@ type Props = {
   initialItems: OverviewFocusItem[];
   initialHistory: OverviewFocusHistoryItem[];
   configId?: string;
+  anchorId?: string;
 };
 
 function normalizeClientText(value: string): string {
@@ -37,7 +38,7 @@ function buttonClass(tone: "quiet" | "accent" | "danger" = "quiet"): string {
   return "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-borderSoft/70 bg-panelSoft/35 text-slate-400 transition hover:bg-panelSoft/60 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50";
 }
 
-export function CurrentFocusPanel({ initialItems, initialHistory, configId = "default" }: Props) {
+export function CurrentFocusPanel({ initialItems, initialHistory, configId = "default", anchorId }: Props) {
   const [items, setItems] = useState(initialItems);
   const [history, setHistory] = useState(initialHistory);
   const [draft, setDraft] = useState("");
@@ -142,142 +143,164 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
   }
 
   return (
-    <section className="card overflow-visible p-4">
-      <div>
-        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">Current Focus</div>
-        <h2 className="mt-1 text-xl font-semibold leading-tight text-slate-100 md:text-2xl">
-          Market Playbook
-        </h2>
+    <section id={anchorId} className="card scroll-mt-28 overflow-visible p-3 md:scroll-mt-32 md:p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">Current Focus</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-semibold leading-tight text-slate-100 md:text-2xl">Market Playbook</h2>
+            <span className="inline-flex h-6 items-center rounded-full border border-accent/30 bg-accent/10 px-2.5 text-xs font-semibold text-accent">
+              {items.length} active
+            </span>
+          </div>
+        </div>
       </div>
 
-      <div className="mt-4 space-y-3">
-        {items.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-borderSoft/80 bg-panelSoft/25 px-3 py-3 text-sm text-slate-400">
-            No active focus set.
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {items.map((item) => {
-              const isEditing = editingId === item.id;
-              const isBusy = busyId === item.id;
-              return (
-                <div
-                  key={item.id}
-                  className="group flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-borderSoft/75 bg-panelSoft/45 px-3 py-2 text-sm text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-                >
-                  {isEditing ? (
-                    <>
-                      <input
-                        className="min-w-[220px] flex-1 rounded-lg border border-borderSoft/80 bg-panel px-3 py-1.5 text-sm text-slate-100 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
-                        value={editingText}
-                        onChange={(event) => setEditingText(event.target.value)}
-                        onKeyDown={(event) => handleEditKeyDown(event, item.id)}
-                        autoFocus
-                      />
-                      <button
-                        type="button"
-                        className={buttonClass("accent")}
-                        disabled={isBusy}
-                        onClick={() => void saveEdit(item.id)}
-                        aria-label="Save focus"
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        className={buttonClass()}
-                        disabled={isBusy}
-                        onClick={() => {
-                          setEditingId(null);
-                          setEditingText("");
-                        }}
-                        aria-label="Cancel edit"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="max-w-[68vw] overflow-hidden text-ellipsis whitespace-nowrap md:max-w-3xl">
-                        {item.text}
-                      </span>
-                      <button
-                        type="button"
-                        className={buttonClass()}
-                        disabled={isBusy}
-                        onClick={() => {
-                          setEditingId(item.id);
-                          setEditingText(item.text);
-                        }}
-                        aria-label="Edit focus"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        className={buttonClass("danger")}
-                        disabled={isBusy}
-                        onClick={() => void deleteFocus(item.id)}
-                        aria-label="Delete focus"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+        <div className="min-w-0">
+          {items.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-borderSoft/80 bg-panelSoft/25 px-3 py-3 text-sm text-slate-400">
+              No active focus set.
+            </div>
+          ) : (
+            <div className="grid gap-2 lg:grid-cols-2">
+              {items.map((item) => {
+                const isEditing = editingId === item.id;
+                const isBusy = busyId === item.id;
+                return (
+                  <article
+                    key={item.id}
+                    className="group relative flex min-w-0 items-start gap-3 overflow-hidden rounded-xl border border-accent/20 bg-gradient-to-r from-accent/12 via-panelSoft/55 to-panelSoft/35 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                  >
+                    <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-accent/25 bg-accent/12 text-accent">
+                      <Target className="h-3.5 w-3.5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      {isEditing ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <input
+                            className="min-w-0 flex-1 rounded-lg border border-borderSoft/80 bg-panel px-3 py-1.5 text-sm text-slate-100 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                            value={editingText}
+                            onChange={(event) => setEditingText(event.target.value)}
+                            onKeyDown={(event) => handleEditKeyDown(event, item.id)}
+                            autoFocus
+                          />
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              className={buttonClass("accent")}
+                              disabled={isBusy}
+                              onClick={() => void saveEdit(item.id)}
+                              aria-label="Save focus"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              className={buttonClass()}
+                              disabled={isBusy}
+                              onClick={() => {
+                                setEditingId(null);
+                                setEditingText("");
+                              }}
+                              aria-label="Cancel edit"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                          <p className="min-w-0 flex-1 text-sm font-medium leading-6 text-slate-100 [overflow-wrap:anywhere]">
+                            {item.text}
+                          </p>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              className={buttonClass()}
+                              disabled={isBusy}
+                              onClick={() => {
+                                setEditingId(item.id);
+                                setEditingText(item.text);
+                              }}
+                              aria-label="Edit focus"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              className={buttonClass("danger")}
+                              disabled={isBusy}
+                              onClick={() => void deleteFocus(item.id)}
+                              aria-label="Delete focus"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-        <form className="grid gap-2 md:grid-cols-[minmax(180px,260px)_1fr_auto]" onSubmit={submitFocus}>
-          <select
-            className="h-11 rounded-xl border border-borderSoft/80 bg-panelSoft/40 px-3 text-sm text-slate-200 outline-none transition hover:bg-panelSoft/60 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50"
-            value={selectedHistoryText}
-            disabled={history.length === 0 || saving}
-            onChange={(event) => {
-              setSelectedHistoryText(event.target.value);
-              if (event.target.value) setDraft("");
-            }}
-          >
-            <option value="" className="bg-slate-900">
-              Previous focus
-            </option>
-            {history.map((row) => {
-              const alreadyActive = activeKeys.has(normalizeClientKey(row.text));
-              return (
-                <option key={`${row.text}-${row.lastUsedAt}`} value={row.text} className="bg-slate-900">
-                  {alreadyActive ? `${row.text} (active)` : row.text}
-                </option>
-              );
-            })}
-          </select>
-          <input
-            className="h-11 rounded-xl border border-borderSoft/80 bg-panel px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50"
-            value={draft}
-            disabled={saving}
-            maxLength={280}
-            placeholder="New focus text"
-            onChange={(event) => {
-              setDraft(event.target.value);
-              if (event.target.value) setSelectedHistoryText("");
-            }}
-            onKeyDown={handleDraftKeyDown}
-          />
-          <button
-            type="submit"
-            disabled={saving}
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-4 text-sm font-medium text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Plus className="h-4 w-4" />
-            Add
-          </button>
+        <form className="rounded-xl border border-borderSoft/70 bg-panelSoft/25 p-2.5" onSubmit={submitFocus}>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-slate-300">Add focus</span>
+            <span className="text-[11px] text-slate-500">{history.length} saved</span>
+          </div>
+          <div className="grid gap-2 md:grid-cols-[minmax(180px,260px)_minmax(0,1fr)_auto] xl:grid-cols-1">
+            <select
+              className="h-10 min-w-0 rounded-xl border border-borderSoft/80 bg-panelSoft/40 px-3 text-sm text-slate-200 outline-none transition hover:bg-panelSoft/60 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50"
+              value={selectedHistoryText}
+              disabled={history.length === 0 || saving}
+              onChange={(event) => {
+                setSelectedHistoryText(event.target.value);
+                if (event.target.value) setDraft("");
+              }}
+            >
+              <option value="" className="bg-slate-900">
+                Previous focus
+              </option>
+              {history.map((row) => {
+                const alreadyActive = activeKeys.has(normalizeClientKey(row.text));
+                return (
+                  <option key={`${row.text}-${row.lastUsedAt}`} value={row.text} className="bg-slate-900">
+                    {alreadyActive ? `${row.text} (active)` : row.text}
+                  </option>
+                );
+              })}
+            </select>
+            <input
+              className="h-10 min-w-0 rounded-xl border border-borderSoft/80 bg-panel px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50"
+              value={draft}
+              disabled={saving}
+              maxLength={280}
+              placeholder="New focus text"
+              onChange={(event) => {
+                setDraft(event.target.value);
+                if (event.target.value) setSelectedHistoryText("");
+              }}
+              onKeyDown={handleDraftKeyDown}
+            />
+            <button
+              type="submit"
+              disabled={saving}
+              className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 text-sm font-medium text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="h-4 w-4" />
+              Add
+            </button>
+          </div>
+          {message && (
+            <p className={`mt-2 text-xs ${message.tone === "danger" ? "text-danger" : "text-slate-400"}`}>
+              {message.text}
+            </p>
+          )}
         </form>
-        {message && (
-          <p className={`text-xs ${message.tone === "danger" ? "text-danger" : "text-slate-400"}`}>
-            {message.text}
-          </p>
-        )}
       </div>
     </section>
   );
