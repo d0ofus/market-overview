@@ -5,6 +5,7 @@ import { parseLocalTime, zonedParts } from "./refresh-timing";
 import type { Env, SnapshotResponse } from "./types";
 
 export type MarketCommentaryStatus = "ready" | "failed";
+type MarketCommentaryGenerationTrigger = "manual" | "scheduled";
 
 export type MarketCommentarySourceAudit = {
   sourceName: string;
@@ -59,6 +60,13 @@ type MarketCommentaryRow = {
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type MarketCommentaryScheduleDecision = {
+  due: boolean;
+  localDate: string | null;
+  timezone: string;
+  localTime: string;
 };
 
 type BraveSearchResult = {
@@ -116,6 +124,7 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+let marketCommentaryReportScheduleSchemaReady = false;
 const WEEKDAY_LONG_BY_SHORT: Record<string, string> = {
   Mon: "Monday",
   Tue: "Tuesday",
@@ -256,6 +265,43 @@ function boolFromDb(value: number | null | undefined, fallback: boolean): boolea
 function isMarketCommentarySettingsSchemaMissing(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
   return message.toLowerCase().includes("market_commentary_settings");
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.toLowerCase().includes("duplicate column name");
+}
+
+async function addMarketCommentaryReportColumn(env: Env, sql: string): Promise<void> {
+  try {
+    await env.DB.prepare(sql).run();
+  } catch (error) {
+    if (!isDuplicateColumnError(error)) throw error;
+  }
+}
+
+async function ensureMarketCommentaryReportScheduleSchema(env: Env): Promise<void> {
+  if (marketCommentaryReportScheduleSchemaReady) return;
+  await addMarketCommentaryReportColumn(
+    env,
+    "ALTER TABLE market_commentary_reports ADD COLUMN generation_trigger TEXT NOT NULL DEFAULT 'manual'",
+  );
+  await addMarketCommentaryReportColumn(
+    env,
+    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_local_date TEXT",
+  );
+  await addMarketCommentaryReportColumn(
+    env,
+    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_timezone TEXT",
+  );
+  await addMarketCommentaryReportColumn(
+    env,
+    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_local_time TEXT",
+  );
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_market_commentary_scheduled_attempt ON market_commentary_reports (generation_trigger, scheduled_local_date, session_date, created_at DESC)",
+  ).run();
+  marketCommentaryReportScheduleSchemaReady = true;
 }
 
 function normalizeSourceAuditRows(rows: MarketCommentarySourceAudit[]): MarketCommentarySourceAudit[] {
@@ -430,21 +476,40 @@ async function loadRecentReportForSession(env: Env, sessionDate: string): Promis
   return row ? normalizeRow(row) : null;
 }
 
-async function loadReadyReportForSession(env: Env, sessionDate: string): Promise<MarketCommentaryReport | null> {
+async function loadScheduledReportForAttempt(env: Env, scheduledLocalDate: string, sessionDate: string): Promise<MarketCommentaryReport | null> {
+  await ensureMarketCommentaryReportScheduleSchema(env);
   const row = await env.DB.prepare(
-    "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports WHERE session_date = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1",
-  ).bind(sessionDate).first<MarketCommentaryRow>();
+    "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports WHERE generation_trigger = 'scheduled' AND scheduled_local_date = ? AND session_date = ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(scheduledLocalDate, sessionDate).first<MarketCommentaryRow>();
   return row ? normalizeRow(row) : null;
+}
+
+async function overviewSnapshotReadyForSession(env: Env, sessionDate: string): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? AND as_of_date = ? ORDER BY generated_at DESC LIMIT 1",
+    ).bind("default", sessionDate).first<{ asOfDate: string | null }>();
+    return row?.asOfDate === sessionDate;
+  } catch (error) {
+    console.error("scheduled market commentary snapshot readiness check failed", error);
+    return false;
+  }
 }
 
 async function insertMarketCommentaryReport(
   env: Env,
-  input: Omit<MarketCommentaryReport, "id" | "generatedAt">,
+  input: Omit<MarketCommentaryReport, "id" | "generatedAt"> & {
+    generationTrigger?: MarketCommentaryGenerationTrigger;
+    scheduledLocalDate?: string | null;
+    scheduledTimezone?: string | null;
+    scheduledLocalTime?: string | null;
+  },
   nowIso: string,
 ): Promise<MarketCommentaryReport> {
   const id = crypto.randomUUID();
+  await ensureMarketCommentaryReportScheduleSchema(env);
   await env.DB.prepare(
-    "INSERT INTO market_commentary_reports (id, session_date, as_of, market_session, market_session_label, data_basis, provider, model, status, report_markdown, source_audit_json, data_quality_json, error_message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO market_commentary_reports (id, session_date, as_of, market_session, market_session_label, data_basis, provider, model, status, report_markdown, source_audit_json, data_quality_json, error_message, generation_trigger, scheduled_local_date, scheduled_timezone, scheduled_local_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
     .bind(
       id,
@@ -460,6 +525,10 @@ async function insertMarketCommentaryReport(
       JSON.stringify(input.sourceAudit),
       JSON.stringify(input.dataQuality),
       input.error,
+      input.generationTrigger ?? "manual",
+      input.scheduledLocalDate ?? null,
+      input.scheduledTimezone ?? null,
+      input.scheduledLocalTime ?? null,
       nowIso,
       nowIso,
     )
@@ -772,33 +841,68 @@ function fallbackReport(session: UsMarketSessionContext, message: string): strin
   ].join("\n");
 }
 
-export function shouldRunScheduledMarketCommentary(settings: MarketCommentarySettings, now = new Date()): boolean {
-  if (!settings.enabled || !settings.scheduleEnabled) return false;
+function scheduledMarketCommentaryDecision(settings: MarketCommentarySettings, now = new Date()): MarketCommentaryScheduleDecision {
+  const timezone = settings.scheduleTimezone;
+  const localTime = settings.scheduleLocalTime;
+  if (!settings.enabled || !settings.scheduleEnabled) {
+    return { due: false, localDate: null, timezone, localTime };
+  }
   const target = parseLocalTime(settings.scheduleLocalTime);
-  if (!target) return false;
+  if (!target) return { due: false, localDate: null, timezone, localTime };
   const local = zonedParts(now, settings.scheduleTimezone);
   const weekday = WEEKDAY_LONG_BY_SHORT[local.weekday] ?? local.weekday;
-  if (!settings.scheduleDays.includes(weekday)) return false;
+  if (!settings.scheduleDays.includes(weekday)) {
+    return { due: false, localDate: local.localDate, timezone, localTime };
+  }
   const targetMinutes = target.hour * 60 + target.minute;
-  return local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;
+  return {
+    due: local.minutesOfDay >= targetMinutes,
+    localDate: local.localDate,
+    timezone,
+    localTime,
+  };
+}
+
+export function shouldRunScheduledMarketCommentary(settings: MarketCommentarySettings, now = new Date()): boolean {
+  return scheduledMarketCommentaryDecision(settings, now).due;
 }
 
 export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date()): Promise<MarketCommentaryResponse | null> {
   const settings = await loadMarketCommentarySettings(env);
-  if (!shouldRunScheduledMarketCommentary(settings, now)) return null;
+  const decision = scheduledMarketCommentaryDecision(settings, now);
+  if (!decision.due || !decision.localDate) return null;
   const session = getUsMarketSessionContext(now);
-  const existingReady = await loadReadyReportForSession(env, session.sessionDate);
-  if (existingReady) {
+  const existingAttempt = await loadScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
+  if (existingAttempt) {
     return {
-      status: "ready",
-      warning: `Scheduled commentary skipped; a ready report already exists for ${session.sessionDate}.`,
-      report: existingReady,
+      status: existingAttempt.status,
+      warning: `Scheduled commentary skipped; a scheduled attempt already exists for ${decision.localDate} / ${session.sessionDate}.`,
+      report: existingAttempt,
     };
   }
-  return await refreshMarketCommentary(env, { now, force: true, trigger: "scheduled", settings });
+  if (!(await overviewSnapshotReadyForSession(env, session.latestCompletedSessionDate))) {
+    return null;
+  }
+  return await refreshMarketCommentary(env, {
+    now,
+    force: true,
+    trigger: "scheduled",
+    settings,
+    scheduledLocalDate: decision.localDate,
+    scheduledTimezone: decision.timezone,
+    scheduledLocalTime: decision.localTime,
+  });
 }
 
-export async function refreshMarketCommentary(env: Env, options?: { now?: Date; force?: boolean; trigger?: "manual" | "scheduled"; settings?: MarketCommentarySettings }): Promise<MarketCommentaryResponse> {
+export async function refreshMarketCommentary(env: Env, options?: {
+  now?: Date;
+  force?: boolean;
+  trigger?: MarketCommentaryGenerationTrigger;
+  settings?: MarketCommentarySettings;
+  scheduledLocalDate?: string | null;
+  scheduledTimezone?: string | null;
+  scheduledLocalTime?: string | null;
+}): Promise<MarketCommentaryResponse> {
   const now = options?.now ?? new Date();
   const nowIso = now.toISOString();
   const session = getUsMarketSessionContext(now);
@@ -844,6 +948,10 @@ export async function refreshMarketCommentary(env: Env, options?: { now?: Date; 
       sourceAudit: [...evidence.sourceAudit, ...result.sources],
       dataQuality: evidence.dataQuality,
       error: null,
+      generationTrigger: options?.trigger ?? "manual",
+      scheduledLocalDate: options?.trigger === "scheduled" ? options.scheduledLocalDate ?? null : null,
+      scheduledTimezone: options?.trigger === "scheduled" ? options.scheduledTimezone ?? null : null,
+      scheduledLocalTime: options?.trigger === "scheduled" ? options.scheduledLocalTime ?? null : null,
     }, nowIso);
     return { status: "ready", warning: null, report };
   } catch (error) {
@@ -867,6 +975,10 @@ export async function refreshMarketCommentary(env: Env, options?: { now?: Date; 
       sourceAudit: evidence?.sourceAudit ?? settings.staticSources,
       dataQuality,
       error: message,
+      generationTrigger: options?.trigger ?? "manual",
+      scheduledLocalDate: options?.trigger === "scheduled" ? options.scheduledLocalDate ?? null : null,
+      scheduledTimezone: options?.trigger === "scheduled" ? options.scheduledTimezone ?? null : null,
+      scheduledLocalTime: options?.trigger === "scheduled" ? options.scheduledLocalTime ?? null : null,
     }, nowIso);
     return { status: "failed", warning: message, report };
   }

@@ -2024,8 +2024,8 @@ export function getFedWatch(force = false) {
   return getJson<FedWatchResponse>(appendQuery("/api/fedwatch", { force: force ? 1 : undefined }));
 }
 
-export function getMarketCommentary() {
-  return getJson<MarketCommentaryResponse>("/api/market-commentary");
+export function getMarketCommentary(init?: RequestInit) {
+  return getJson<MarketCommentaryResponse>("/api/market-commentary", init);
 }
 
 export function refreshMarketCommentary(force = false) {

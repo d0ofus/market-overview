@@ -2,18 +2,25 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useRouter } from "next/navigation";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { AlertTriangle, CheckCircle2, ChevronDown, Database, ExternalLink, FileText, RefreshCw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { refreshMarketCommentary, type MarketCommentaryResponse } from "@/lib/api";
+import { getMarketCommentary, refreshMarketCommentary, type MarketCommentaryResponse } from "@/lib/api";
 
 type TabKey = "report" | "sources" | "quality";
 
 type Props = {
-  initial: MarketCommentaryResponse;
+  initial?: MarketCommentaryResponse | null;
+};
+
+const COMMENTARY_LOAD_TIMEOUT_MS = 10_000;
+
+const EMPTY_COMMENTARY: MarketCommentaryResponse = {
+  status: "empty",
+  warning: null,
+  report: null,
 };
 
 function formatDateTime(value: string | null | undefined): string {
@@ -34,6 +41,10 @@ function statusClass(status: MarketCommentaryResponse["status"]): string {
   if (status === "ready") return "border-success/35 bg-success/10 text-success";
   if (status === "failed") return "border-warning/35 bg-warning/10 text-warning";
   return "border-borderSoft bg-panelSoft text-text/70";
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function sessionLabel(value: string | undefined): string {
@@ -125,23 +136,85 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
 }
 
 export function MarketCommentaryPanel({ initial }: Props) {
-  const router = useRouter();
   const [open, setOpen] = useState(true);
   const [tab, setTab] = useState<TabKey>("report");
-  const [commentary, setCommentary] = useState<MarketCommentaryResponse>(initial);
+  const [commentary, setCommentary] = useState<MarketCommentaryResponse>(() => initial ?? EMPTY_COMMENTARY);
+  const [cachedLoading, setCachedLoading] = useState(() => !initial);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const messageTimerRef = useRef<number | null>(null);
+  const cachedLoadControllerRef = useRef<AbortController | null>(null);
+  const cachedLoadRequestRef = useRef(0);
   const report = commentary.report;
   const sources = report?.sourceAudit ?? [];
   const dataQuality = report?.dataQuality ?? [];
   const hasReport = Boolean(report);
+  const statusLabel =
+    cachedLoading && !hasReport
+      ? "Loading"
+      : commentary.status === "ready"
+        ? "Ready"
+        : commentary.status === "failed"
+          ? "Needs attention"
+          : "Not generated";
+  const summaryText = report
+    ? `${report.marketSessionLabel} - generated ${formatDateTime(report.generatedAt)}`
+    : cachedLoading
+      ? "Loading cached market commentary..."
+      : commentary.warning ?? "Generate the first report when ready.";
+  const emptyText = cachedLoading
+    ? "Loading market commentary. The rest of Overview is already available."
+    : commentary.warning ?? "No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow.";
 
   useEffect(() => {
     return () => {
       if (messageTimerRef.current != null) window.clearTimeout(messageTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (initial) {
+      setCommentary(initial);
+      setCachedLoading(false);
+      return;
+    }
+
+    const requestId = cachedLoadRequestRef.current + 1;
+    cachedLoadRequestRef.current = requestId;
+    const controller = new AbortController();
+    let cancelled = false;
+    cachedLoadControllerRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), COMMENTARY_LOAD_TIMEOUT_MS);
+
+    setCachedLoading(true);
+    getMarketCommentary({ signal: controller.signal })
+      .then((snapshot) => {
+        if (cancelled || cachedLoadRequestRef.current !== requestId) return;
+        setCommentary(snapshot);
+      })
+      .catch((error) => {
+        if (cancelled || cachedLoadRequestRef.current !== requestId) return;
+        const timeoutWarning =
+          isAbortError(error)
+            ? "Market commentary is taking too long to load. The rest of Overview is ready."
+            : error instanceof Error
+              ? error.message
+              : "Market commentary could not be loaded.";
+        setCommentary({ status: "empty", warning: timeoutWarning, report: null });
+      })
+      .finally(() => {
+        if (!cancelled && cachedLoadRequestRef.current === requestId) setCachedLoading(false);
+        if (cachedLoadControllerRef.current === controller) cachedLoadControllerRef.current = null;
+        window.clearTimeout(timeout);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (cachedLoadControllerRef.current === controller) cachedLoadControllerRef.current = null;
+      window.clearTimeout(timeout);
+    };
+  }, [initial]);
 
   function showMessage(value: string) {
     setMessage(value);
@@ -159,14 +232,14 @@ export function MarketCommentaryPanel({ initial }: Props) {
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-base font-semibold text-text">US Market State of Play</h2>
                 <span className={`rounded-full border px-2 py-0.5 text-xs ${statusClass(commentary.status)}`}>
-                  {commentary.status === "ready" ? "Ready" : commentary.status === "failed" ? "Needs attention" : "Not generated"}
+                  {statusLabel}
                 </span>
                 <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">
                   {sessionLabel(report?.marketSession)}
                 </span>
               </div>
               <p className="mt-1 truncate text-xs text-text/60">
-                {report ? `${report.marketSessionLabel} - generated ${formatDateTime(report.generatedAt)}` : commentary.warning ?? "Generate the first report when ready."}
+                {summaryText}
               </p>
             </div>
           </Collapsible.Trigger>
@@ -176,6 +249,9 @@ export function MarketCommentaryPanel({ initial }: Props) {
               className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
               disabled={loading}
               onClick={async () => {
+                cachedLoadRequestRef.current += 1;
+                cachedLoadControllerRef.current?.abort();
+                setCachedLoading(false);
                 setLoading(true);
                 setMessage(null);
                 try {
@@ -184,7 +260,6 @@ export function MarketCommentaryPanel({ initial }: Props) {
                   setOpen(true);
                   setTab("report");
                   showMessage(refreshed.warning ?? (refreshed.ok ? "Market commentary refreshed." : "Commentary refresh completed with warnings."));
-                  router.refresh();
                 } catch (error) {
                   showMessage(error instanceof Error ? error.message : "Commentary refresh failed.");
                 } finally {
@@ -211,7 +286,7 @@ export function MarketCommentaryPanel({ initial }: Props) {
 
           {!hasReport && (
             <div className="rounded border border-borderSoft bg-panelSoft/55 p-4 text-sm text-text/75">
-              No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow.
+              {emptyText}
             </div>
           )}
 

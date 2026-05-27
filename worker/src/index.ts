@@ -5269,17 +5269,45 @@ export default {
       return new Map<string, CronJobValues>();
     });
     const cron = (key: string) => cronSettings.get(key);
-    await maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping"));
-    await maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping"));
-    await maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping"));
-    await maybeRunScanningHousekeeping(env, cron("scanning-housekeeping"));
-    await maybeRunGappersHousekeeping(env, cron("gappers-housekeeping"));
-    const researchQueueSettings = cron("research-queue");
-    if (!researchQueueSettings || isCentralCronEnabled(researchQueueSettings)) {
-      await advanceResearchQueue(env, cronNumber(researchQueueSettings ?? {}, "batchLimit", 2));
-    }
     const now = new Date(event.scheduledTime || Date.now());
-    await runDueWatchlistCompiles(env, now);
+    try {
+      await maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping"));
+    } catch (error) {
+      console.error("scheduled alerts housekeeping failed", error);
+    }
+    try {
+      await maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping"));
+    } catch (error) {
+      console.error("scheduled social alerts housekeeping failed", error);
+    }
+    try {
+      await maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping"));
+    } catch (error) {
+      console.error("scheduled scans page housekeeping failed", error);
+    }
+    try {
+      await maybeRunScanningHousekeeping(env, cron("scanning-housekeeping"));
+    } catch (error) {
+      console.error("scheduled scanning housekeeping failed", error);
+    }
+    try {
+      await maybeRunGappersHousekeeping(env, cron("gappers-housekeeping"));
+    } catch (error) {
+      console.error("scheduled gappers housekeeping failed", error);
+    }
+    try {
+      const researchQueueSettings = cron("research-queue");
+      if (!researchQueueSettings || isCentralCronEnabled(researchQueueSettings)) {
+        await advanceResearchQueue(env, cronNumber(researchQueueSettings ?? {}, "batchLimit", 2));
+      }
+    } catch (error) {
+      console.error("scheduled research queue advancement failed", error);
+    }
+    try {
+      await runDueWatchlistCompiles(env, now);
+    } catch (error) {
+      console.error("scheduled watchlist compiles failed", error);
+    }
     try {
       await maybeRunScheduledSymbolCatalogSync(env, now);
     } catch (error) {

@@ -19,16 +19,22 @@ type StoredReport = Omit<MarketCommentaryReport, "sourceAudit" | "dataQuality" |
   sourceAuditJson: string;
   dataQualityJson: string;
   errorMessage: string | null;
+  generationTrigger: "manual" | "scheduled" | string;
+  scheduledLocalDate: string | null;
+  scheduledTimezone: string | null;
+  scheduledLocalTime: string | null;
   updatedAt: string;
 };
 
 class FakeMarketCommentaryDb {
   rows: StoredReport[];
   settings: MarketCommentarySettings | null;
+  snapshotAsOfDate: string | null;
 
-  constructor(rows: StoredReport[] = []) {
+  constructor(rows: StoredReport[] = [], options: { snapshotAsOfDate?: string | null } = {}) {
     this.rows = [...rows];
     this.settings = null;
+    this.snapshotAsOfDate = options.snapshotAsOfDate ?? null;
   }
 
   prepare(sql: string) {
@@ -42,6 +48,17 @@ class FakeMarketCommentaryDb {
       async first<T>() {
         if (sql.includes("FROM market_commentary_settings")) {
           return (db.settings ? settingsToRow(db.settings) : null) as T;
+        }
+        if (sql.includes("FROM snapshots_meta")) {
+          const requestedAsOfDate = String(bound[1] ?? "");
+          return (db.snapshotAsOfDate === requestedAsOfDate ? { asOfDate: db.snapshotAsOfDate } : null) as T;
+        }
+        if (sql.includes("FROM market_commentary_reports") && sql.includes("generation_trigger = 'scheduled'")) {
+          const scheduledLocalDate = String(bound[0]);
+          const sessionDate = String(bound[1]);
+          return (db.rows
+            .filter((row) => row.generationTrigger === "scheduled" && row.scheduledLocalDate === scheduledLocalDate && row.sessionDate === sessionDate)
+            .sort(sortLatest)[0] ?? null) as T;
         }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("WHERE session_date = ?")) {
           const sessionDate = String(bound[0]);
@@ -58,6 +75,9 @@ class FakeMarketCommentaryDb {
         return { results: [] as T[] };
       },
       async run() {
+        if (sql.startsWith("ALTER TABLE market_commentary_reports") || sql.startsWith("CREATE INDEX")) {
+          return { meta: { rows_written: 0 } };
+        }
         if (sql.startsWith("INSERT INTO market_commentary_settings")) {
           const now = "2026-05-25 00:00:00";
           db.settings = {
@@ -96,9 +116,13 @@ class FakeMarketCommentaryDb {
             sourceAuditJson: String(bound[10]),
             dataQualityJson: String(bound[11]),
             errorMessage: bound[12] == null ? null : String(bound[12]),
-            generatedAt: String(bound[13]),
-            createdAt: String(bound[13]),
-            updatedAt: String(bound[14]),
+            generationTrigger: String(bound[13]),
+            scheduledLocalDate: bound[14] == null ? null : String(bound[14]),
+            scheduledTimezone: bound[15] == null ? null : String(bound[15]),
+            scheduledLocalTime: bound[16] == null ? null : String(bound[16]),
+            generatedAt: String(bound[17]),
+            createdAt: String(bound[17]),
+            updatedAt: String(bound[18]),
           });
           return { meta: { rows_written: 1 } };
         }
@@ -129,7 +153,12 @@ function sortLatest(left: StoredReport, right: StoredReport): number {
   return right.sessionDate.localeCompare(left.sessionDate) || right.createdAt.localeCompare(left.createdAt);
 }
 
-function createReport(id: string, sessionDate: string, generatedAt: string): StoredReport {
+function createReport(
+  id: string,
+  sessionDate: string,
+  generatedAt: string,
+  options: Partial<Pick<StoredReport, "status" | "errorMessage" | "generationTrigger" | "scheduledLocalDate" | "scheduledTimezone" | "scheduledLocalTime">> = {},
+): StoredReport {
   return {
     id,
     sessionDate,
@@ -142,11 +171,15 @@ function createReport(id: string, sessionDate: string, generatedAt: string): Sto
     dataBasis: "closing",
     provider: "gemini",
     model: "gemini-3.5-flash",
-    status: "ready",
+    status: options.status ?? "ready",
     reportMarkdown: `# Report ${id}`,
     sourceAuditJson: "[]",
     dataQualityJson: "[]",
-    errorMessage: null,
+    errorMessage: options.errorMessage ?? null,
+    generationTrigger: options.generationTrigger ?? "manual",
+    scheduledLocalDate: options.scheduledLocalDate ?? null,
+    scheduledTimezone: options.scheduledTimezone ?? null,
+    scheduledLocalTime: options.scheduledLocalTime ?? null,
   };
 }
 
@@ -204,31 +237,100 @@ describe("market commentary service", () => {
     expect(rendered).toBe("market 2026-05-25 2026-05-25 2026-05-25 after_hours");
   });
 
-  it("runs the configured Melbourne schedule only in the target weekday window", () => {
+  it("runs the configured Melbourne schedule at or after the target time on configured days", () => {
     const settings = { ...DEFAULT_MARKET_COMMENTARY_SETTINGS };
     expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:00:00.000Z"))).toBe(true);
     expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:14:59.000Z"))).toBe(true);
-    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:15:00.000Z"))).toBe(false);
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T23:30:00.000Z"))).toBe(true);
+    expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-06-01T22:59:59.000Z"))).toBe(false);
     expect(shouldRunScheduledMarketCommentary(settings, new Date("2026-05-24T23:00:00.000Z"))).toBe(false);
   });
 
-  it("scheduled generation skips when a ready report already exists for the session", async () => {
+  it("runs the May 27 2026 Melbourne 9am schedule for the May 26 US session", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-26" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:00:00.000Z"));
+
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.sessionDate).toBe("2026-05-26");
+    expect(db.rows).toHaveLength(1);
+    expect(db.rows[0]).toMatchObject({
+      generationTrigger: "scheduled",
+      scheduledLocalDate: "2026-05-27",
+      scheduledTimezone: "Australia/Melbourne",
+      scheduledLocalTime: "09:00",
+    });
+  });
+
+  it("scheduled generation catches up after the target window when no same-day attempt exists", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-26" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
+
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.sessionDate).toBe("2026-05-26");
+    expect(db.rows[0]?.scheduledLocalDate).toBe("2026-05-27");
+  });
+
+  it("defers scheduled generation until the matching overview snapshot is ready", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-25" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
+
+    expect(response).toBeNull();
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("scheduled generation skips when a same-day ready scheduled attempt already exists", async () => {
     const db = new FakeMarketCommentaryDb([
-      createReport("monday", "2026-06-01", "2026-06-01T22:30:00.000Z"),
-    ]);
-    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
+      createReport("monday", "2026-06-01", "2026-06-01T23:00:00.000Z", {
+        generationTrigger: "scheduled",
+        scheduledLocalDate: "2026-06-02",
+        scheduledTimezone: "Australia/Melbourne",
+        scheduledLocalTime: "09:00",
+      }),
+    ], { snapshotAsOfDate: "2026-06-01" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:30:00.000Z"));
     expect(response?.status).toBe("ready");
-    expect(response?.warning).toContain("already exists");
+    expect(response?.warning).toContain("scheduled attempt already exists");
+    expect(db.rows).toHaveLength(1);
+  });
+
+  it("scheduled generation skips when a same-day failed scheduled attempt already exists", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("failed", "2026-05-26", "2026-05-26T23:00:00.000Z", {
+        status: "failed",
+        errorMessage: "Gemini failed.",
+        generationTrigger: "scheduled",
+        scheduledLocalDate: "2026-05-27",
+        scheduledTimezone: "Australia/Melbourne",
+        scheduledLocalTime: "09:00",
+      }),
+    ], { snapshotAsOfDate: "2026-05-26" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
+
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.id).toBe("failed");
     expect(db.rows).toHaveLength(1);
   });
 
   it("scheduled generation stores an isolated failed report when provider config is missing", async () => {
-    const db = new FakeMarketCommentaryDb();
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-01" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
     expect(response?.status).toBe("failed");
     expect(response?.report?.sessionDate).toBe("2026-06-01");
     expect(response?.report?.error).toContain("GEMINI_API_KEY");
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("does not let an older holiday report for the same session block a fresh scheduled day", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("memorial-day", "2026-05-22", "2026-05-25T04:48:27.877Z"),
+    ], { snapshotAsOfDate: "2026-05-22" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-25T23:00:00.000Z"));
+
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.sessionDate).toBe("2026-05-22");
+    expect(db.rows).toHaveLength(2);
+    expect(db.rows[1]?.generationTrigger).toBe("scheduled");
+    expect(db.rows[1]?.scheduledLocalDate).toBe("2026-05-26");
   });
 
   it("returns an empty state when no report exists", async () => {

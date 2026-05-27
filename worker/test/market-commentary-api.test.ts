@@ -17,6 +17,10 @@ type StoredReport = {
   sourceAuditJson: string;
   dataQualityJson: string;
   errorMessage: string | null;
+  generationTrigger: "manual" | "scheduled" | string;
+  scheduledLocalDate: string | null;
+  scheduledTimezone: string | null;
+  scheduledLocalTime: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,6 +53,9 @@ class FakeMarketCommentaryDb {
         return { results: [] as T[] };
       },
       async run() {
+        if (sql.startsWith("ALTER TABLE market_commentary_reports") || sql.startsWith("CREATE INDEX")) {
+          return { meta: { rows_written: 0 } };
+        }
         if (sql.startsWith("INSERT INTO market_commentary_settings")) {
           const now = "2026-05-25 00:00:00";
           db.settings = {
@@ -87,8 +94,12 @@ class FakeMarketCommentaryDb {
             sourceAuditJson: String(bound[10]),
             dataQualityJson: String(bound[11]),
             errorMessage: bound[12] == null ? null : String(bound[12]),
-            createdAt: String(bound[13]),
-            updatedAt: String(bound[14]),
+            generationTrigger: String(bound[13]),
+            scheduledLocalDate: bound[14] == null ? null : String(bound[14]),
+            scheduledTimezone: bound[15] == null ? null : String(bound[15]),
+            scheduledLocalTime: bound[16] == null ? null : String(bound[16]),
+            createdAt: String(bound[17]),
+            updatedAt: String(bound[18]),
           });
           return { meta: { rows_written: 1 } };
         }

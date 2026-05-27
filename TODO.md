@@ -1,4 +1,7 @@
 # TODO
+## PROBLEMS TO SOLVE
+- No time to research on peers + individual company by the time watchlist is sorted
+
 ## GENERAL
 > Check out whether there is any password login required and how to safeguard the repo/deployment since it is now a good app with many features
 > Do a general cleanup of github repo and mark code properly for easy reference by LLMs
@@ -7,6 +10,7 @@
 
 ## OVERVIEW
 > Add pre-market analysis
+> Overview taking too long to load - check i it's because o the market commentary
 > Add a current focus bullet point form in /overview -> E.g. Focus on retracements, focus on earnings gappers etc. 
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
