@@ -132,7 +132,9 @@ export type PostCloseDailyBarRefreshJob = {
   cursorOffset: number;
 };
 
-export type SnapshotResponse = {
+export type SnapshotReadyResponse = {
+  status?: "ready";
+  warning?: null;
   asOfDate: string;
   generatedAt: string;
   providerLabel: string;
@@ -172,3 +174,15 @@ export type SnapshotResponse = {
     }>;
   }>;
 };
+
+export type SnapshotEmptyResponse = {
+  status: "empty";
+  warning: string;
+  asOfDate: null;
+  generatedAt: null;
+  providerLabel: null;
+  config: null;
+  sections: [];
+};
+
+export type SnapshotResponse = SnapshotReadyResponse | SnapshotEmptyResponse;

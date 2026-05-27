@@ -127,7 +127,6 @@ import {
   upsertScanCompilePreset,
   upsertScanPreset,
 } from "./scans-page-service";
-import { isOverviewSnapshotStale } from "./overview-snapshot";
 import {
   createPeerGroup,
   deletePeerGroup,
@@ -1710,36 +1709,13 @@ app.get("/api/status", async (c) => {
 app.get("/api/dashboard", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const date = c.req.query("date");
-  try {
-    await ensureOverviewCatalogCoverage(c.env);
-  } catch (error) {
-    console.error("overview catalog ensure failed; continuing with existing config", error);
-  }
-  if (!date) {
-    try {
-      if (await isOverviewSnapshotStale(c.env, configId)) {
-        await ensureOverviewCatalogCoverage(c.env, { respectThrottle: false });
-        const tickers = await loadOverviewTickers(c.env);
-        await refreshRecentBarsForTickers(c.env, tickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
-        await recomputeDashboardFromStoredBars(c.env, undefined, configId);
-      }
-    } catch (error) {
-      console.error("overview stale snapshot refresh failed; falling back to stored snapshot data", error);
-    }
-  }
-  try {
-    await maybeRefreshOverviewBars(c.env);
-  } catch (error) {
-    console.error("overview background bar refresh failed; continuing with stored snapshot data", error);
-  }
 
   let data;
   try {
-    data = await loadSnapshot(c.env, configId, date);
+    data = await loadSnapshot(c.env, configId, date, { allowComputeOnMissing: false });
   } catch (error) {
-    console.error("dashboard load failed; retrying from stored bars", { configId, date, error });
-    const rebuilt = await recomputeDashboardFromStoredBars(c.env, date, configId);
-    data = await loadSnapshot(c.env, configId, rebuilt.asOfDate);
+    console.error("dashboard read-only load failed", { configId, date, error });
+    return c.json({ error: error instanceof Error ? error.message : "Failed to load dashboard snapshot." }, 500);
   }
   c.header("Cache-Control", "public, max-age=300");
   return c.json(data);

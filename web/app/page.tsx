@@ -63,7 +63,7 @@ export default async function HomePage() {
       data: null,
     } satisfies FedWatchResponse)),
   ]);
-  const dashboardValue = dashboard;
+  const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
   const macroRatesAnchorId = "overview-macro-rates";

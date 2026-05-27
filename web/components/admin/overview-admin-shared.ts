@@ -1,4 +1,4 @@
-import type { SnapshotResponse } from "@/types/dashboard";
+import type { SnapshotReadyResponse } from "@/types/dashboard";
 
 export const rankingOptions = ["1D", "5D", "1W", "YTD", "52W"] as const;
 export const allColumns = [
@@ -29,7 +29,7 @@ export const refreshTimezoneOptions = [
 export const DEFAULT_REFRESH_TIME = "08:15";
 export const DEFAULT_REFRESH_TIMEZONE = "Australia/Melbourne";
 
-export type OverviewAdminConfig = SnapshotResponse["config"];
+export type OverviewAdminConfig = SnapshotReadyResponse["config"];
 export type OverviewAdminSection = OverviewAdminConfig["sections"][number];
 export type OverviewAdminGroup = OverviewAdminSection["groups"][number];
 export type OverviewAdminItem = OverviewAdminGroup["items"][number];

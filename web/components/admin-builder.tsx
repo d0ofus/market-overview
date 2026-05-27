@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { adminFetch } from "@/lib/api";
-import type { SnapshotResponse } from "@/types/dashboard";
+import type { SnapshotReadyResponse } from "@/types/dashboard";
 
 const rankingOptions = ["1D", "5D", "1W", "YTD", "52W"] as const;
 const allColumns = ["ticker", "name", "price", "1D", "1W", "3M", "6M", "5D", "YTD", "pctFrom52WHigh", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"];
@@ -44,7 +44,7 @@ function formatDateTimeCompact(value: string | null | undefined): string {
 }
 
 export function AdminBuilder() {
-  const [data, setData] = useState<SnapshotResponse["config"] | null>(null);
+  const [data, setData] = useState<SnapshotReadyResponse["config"] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tickerInput, setTickerInput] = useState<Record<string, string>>({});
@@ -107,7 +107,7 @@ export function AdminBuilder() {
     setLoadError(null);
     setEtfError(null);
     try {
-      const config = await adminFetch<SnapshotResponse["config"]>("/api/admin/config");
+      const config = await adminFetch<SnapshotReadyResponse["config"]>("/api/admin/config");
       setData(config);
       setRefreshConfig({
         id: config.id,

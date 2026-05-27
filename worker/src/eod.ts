@@ -5,7 +5,7 @@ import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
-import type { Env, SnapshotResponse } from "./types";
+import type { Env, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
 
@@ -860,8 +860,42 @@ export async function computeAndStoreBreadth(
     .run();
 }
 
-export async function loadSnapshot(env: Env, configId = "default", requestedDate?: string): Promise<SnapshotResponse> {
+type LoadSnapshotOptions = {
+  allowComputeOnMissing?: boolean;
+};
+
+export function emptySnapshotResponse(warning = "No stored overview snapshot is available. Use Admin refresh to generate one."): SnapshotEmptyResponse {
+  return {
+    status: "empty",
+    warning,
+    asOfDate: null,
+    generatedAt: null,
+    providerLabel: null,
+    config: null,
+    sections: [],
+  };
+}
+
+export async function loadSnapshot(
+  env: Env,
+  configId?: string,
+  requestedDate?: string,
+  options?: { allowComputeOnMissing?: true },
+): Promise<SnapshotReadyResponse>;
+export async function loadSnapshot(
+  env: Env,
+  configId: string | undefined,
+  requestedDate: string | undefined,
+  options: { allowComputeOnMissing: false },
+): Promise<SnapshotResponse>;
+export async function loadSnapshot(
+  env: Env,
+  configId = "default",
+  requestedDate?: string,
+  options: LoadSnapshotOptions = {},
+): Promise<SnapshotResponse> {
   const config = await loadConfig(env, configId);
+  const allowComputeOnMissing = options.allowComputeOnMissing ?? true;
   const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
   const meta = requestedDate
     ? await env.DB.prepare(
@@ -874,6 +908,10 @@ export async function loadSnapshot(env: Env, configId = "default", requestedDate
       )
         .bind(configId, latestAllowedAsOfDate)
         .first<{ id: string; asOfDate: string; generatedAt: string; providerLabel: string }>();
+
+  if (!meta && !allowComputeOnMissing) {
+    return emptySnapshotResponse();
+  }
 
   if (!meta) {
     const computed = await computeAndStoreSnapshot(env, requestedDate, configId);
