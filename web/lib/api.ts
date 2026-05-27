@@ -1840,6 +1840,11 @@ export type PerplexityFinancePeerLookup = {
   status?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
   profileStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
   peersStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
+  cache?: {
+    mode: "hit" | "miss" | "refresh" | "stale_on_error";
+    storedAt: string | null;
+    ageSeconds: number | null;
+  };
   diagnostics?: {
     profileSource: string | null;
     peersSource: string | null;

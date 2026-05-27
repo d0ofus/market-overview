@@ -3,6 +3,7 @@ export type Env = {
   FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
   PATTERN_DB?: D1Database;
+  PERPLEXITY_CACHE_DB?: D1Database;
   ADMIN_SECRET?: string;
   DATA_PROVIDER?: string;
   ALPACA_API_KEY?: string;

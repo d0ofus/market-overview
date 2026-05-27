@@ -35,5 +35,10 @@ binding = "PATTERN_DB"
 database_name = "market_patterns"
 database_id = "979ab7bb-8c24-4978-b07a-66914d92ac04"
 
+[[d1_databases]]
+binding = "PERPLEXITY_CACHE_DB"
+database_name = "market_perplexity_cache"
+database_id = "efc8828b-6a94-41bd-9f7d-f3b6ece191c4"
+
 [triggers]
 crons = ["*/15 * * * *"]
