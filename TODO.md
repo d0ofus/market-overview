@@ -10,8 +10,7 @@
 
 ## OVERVIEW
 > Add pre-market analysis
-> Overview taking too long to load - check i it's because o the market commentary
-> Add a current focus bullet point form in /overview -> E.g. Focus on retracements, focus on earnings gappers etc. 
+
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
 > Add macro stuff like 10Y yields and yield curve chart
@@ -24,6 +23,7 @@
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 
 ## BREADTH
+> Check where the +4% and -4% data are coming from, doesn't look accurate referencing the stockbee page
 - Add volume traded on majors as a breadth metric
 - Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
@@ -47,7 +47,7 @@
 > Add scheduler for 12-hourly scrapes
 
 ## PEER GROUPS
-> Auto search for peers using perplexity headless browser and populate in /admin with a button
+> Integrate this with /admin to add the tickers into a new group
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
@@ -57,6 +57,7 @@
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
 ## SCANS
+> VCP and RS scans paused halfway, and only continue when I click the refresh scan button
 > Make the UI better to segregate each input field
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
 > Put a preset for US market to have exchange, symbol type preconfigured
