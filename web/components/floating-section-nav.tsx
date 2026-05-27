@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 type FloatingSectionNavItem = {
   id: string;
@@ -11,6 +12,7 @@ type Props = {
   items: FloatingSectionNavItem[];
   showHeading?: boolean;
   stickyOffset?: number;
+  actions?: ReactNode;
 };
 
 function navigationButtonClass(active: boolean) {
@@ -19,7 +21,7 @@ function navigationButtonClass(active: boolean) {
     : "bg-panelSoft/45 text-slate-300 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)] hover:bg-panelSoft/65";
 }
 
-export function FloatingSectionNav({ items, showHeading = true, stickyOffset = 148 }: Props) {
+export function FloatingSectionNav({ items, showHeading = true, stickyOffset = 148, actions }: Props) {
   const [activeSection, setActiveSection] = useState(items[0]?.id ?? "");
 
   useEffect(() => {
@@ -87,33 +89,38 @@ export function FloatingSectionNav({ items, showHeading = true, stickyOffset = 1
   if (items.length === 0) return null;
 
   return (
-    <div className="sticky top-4 z-20">
-      <nav className="overflow-x-auto rounded-[26px] border border-borderSoft/70 bg-panel/88 shadow-[0_18px_44px_rgba(2,6,23,0.24)] backdrop-blur-xl">
-        <div className="flex min-w-max items-center gap-3 px-4 py-4 md:px-5">
-          {showHeading ? (
-            <>
-              <div className="pr-1">
-                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Jump to</div>
-                <div className="mt-1 text-sm font-medium text-slate-300">Sections</div>
+    <div className="sticky top-4 z-[80]">
+      <nav className="overflow-visible rounded-[26px] border border-borderSoft/70 bg-panel/88 shadow-[0_18px_44px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+        <div className="flex flex-col gap-3 px-4 py-4 md:px-5 lg:flex-row lg:items-center">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            {showHeading ? (
+              <>
+                <div className="shrink-0 pr-1">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Jump to</div>
+                  <div className="mt-1 text-sm font-medium text-slate-300">Sections</div>
+                </div>
+                <div className="h-8 w-px shrink-0 bg-borderSoft/70" aria-hidden="true" />
+              </>
+            ) : null}
+            <div className="min-w-0 flex-1 overflow-x-auto">
+              <div className="flex min-w-max gap-2">
+                {items.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === item.id)}`}
+                    onClick={() => {
+                      setActiveSection(item.id);
+                      document.getElementById(item.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }}
+                    aria-pressed={activeSection === item.id}
+                  >
+                    {item.label}
+                  </button>
+                ))}
               </div>
-              <div className="h-8 w-px bg-borderSoft/70" aria-hidden="true" />
-            </>
-          ) : null}
-          <div className="flex min-w-max gap-2">
-            {items.map((item) => (
-              <button
-                key={item.id}
-                className={`rounded-full px-4 py-2 text-sm font-medium transition ${navigationButtonClass(activeSection === item.id)}`}
-                onClick={() => {
-                  setActiveSection(item.id);
-                  document.getElementById(item.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-                }}
-                aria-pressed={activeSection === item.id}
-              >
-                {item.label}
-              </button>
-            ))}
+            </div>
           </div>
+          {actions ? <div className="shrink-0 self-start lg:self-center">{actions}</div> : null}
         </div>
       </nav>
     </div>

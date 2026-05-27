@@ -1,6 +1,7 @@
 import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { CurrentFocusPanel } from "@/components/current-focus-panel";
+import { OverviewRefreshMenu } from "@/components/overview-refresh-menu";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
 import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
@@ -78,19 +79,26 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-4">
+      <FloatingSectionNav
+        items={jumpItems}
+        showHeading={false}
+        actions={(
+          <OverviewRefreshMenu
+            status={{
+              asOfDate: statusValue.asOfDate,
+              lastUpdated: statusValue.lastUpdated,
+              timezone: statusValue.timezone,
+              autoRefreshLabel: statusValue.autoRefreshLabel,
+              providerLabel: statusValue.providerLabel,
+            }}
+          />
+        )}
+      />
       <CurrentFocusPanel
         initialItems={focusItems.rows}
         initialHistory={focusHistory.rows}
-        refreshStatus={{
-          asOfDate: statusValue.asOfDate,
-          lastUpdated: statusValue.lastUpdated,
-          timezone: statusValue.timezone,
-          autoRefreshLabel: statusValue.autoRefreshLabel,
-          providerLabel: statusValue.providerLabel,
-        }}
       />
       <MarketCommentaryPanel />
-      <FloatingSectionNav items={jumpItems} showHeading={false} />
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">
           Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.
