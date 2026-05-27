@@ -1813,6 +1813,28 @@ export type PeerTickerDetail = {
   groups: Array<PeerGroupRow & { members: PeerTickerMember[] }>;
 };
 
+export type PerplexityFinancePeerLookup = {
+  ticker: string;
+  fetchedAt: string;
+  source: "perplexity_finance_dashboard";
+  peersUrl: string;
+  profileUrl: string;
+  company: {
+    name: string | null;
+    exchange: string | null;
+    sector: string | null;
+    industry: string | null;
+    description: string | null;
+  };
+  peers: Array<{
+    ticker: string;
+    name: string | null;
+    exchange: string | null;
+    rawText: string;
+  }>;
+  warning: string | null;
+};
+
 export type SymbolCatalogStatus = {
   sourceKey: string;
   scheduledEnabled: boolean;
@@ -3266,6 +3288,25 @@ export function getPeerTickerMetrics(ticker: string) {
   return getJson<{ ticker: string; rows: PeerMetricRow[]; error: string | null }>(
     `/api/peer-groups/ticker/${encodeURIComponent(ticker)}/metrics`,
   );
+}
+
+export async function getPerplexityFinancePeers(ticker: string) {
+  const path = appendQuery("/api/perplexity-finance/peers", { ticker });
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`Perplexity Finance lookup failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as PerplexityFinancePeerLookup;
 }
 
 export function getAdminPeerGroups() {

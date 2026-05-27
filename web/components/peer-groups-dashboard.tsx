@@ -2,14 +2,16 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, BarChart3, Loader2, Search } from "lucide-react";
+import { ArrowUp, BarChart3, ExternalLink, Loader2, Search, Sparkles } from "lucide-react";
 import {
   getFundamentalsTrends,
+  getPerplexityFinancePeers,
   getPeerDirectory,
   getPeerGroups,
   getPeerTickerDetail,
   getPeerTickerMetrics,
   type FundamentalTrendRow,
+  type PerplexityFinancePeerLookup,
   type PeerDirectoryRow,
   type PeerGroupRow,
   type PeerMetricRow,
@@ -24,6 +26,7 @@ type MultiChartSortKey = "change1d" | "marketCap";
 type LoadTickerOptions = {
   scrollToCharts?: boolean;
 };
+type PerplexityPeerStatus = "saved" | "perplexity";
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "change1d", label: "1D % Change" },
   { key: "marketCap", label: "Market Capitalization" },
@@ -120,6 +123,9 @@ export function PeerGroupsDashboard() {
   const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [perplexityLookup, setPerplexityLookup] = useState<PerplexityFinancePeerLookup | null>(null);
+  const [loadingPerplexity, setLoadingPerplexity] = useState(false);
+  const [perplexityError, setPerplexityError] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [trendRows, setTrendRows] = useState<FundamentalTrendRow[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
@@ -140,6 +146,7 @@ export function PeerGroupsDashboard() {
   const [correlationSelectionError, setCorrelationSelectionError] = useState<string | null>(null);
   const deferredQuery = useDeferredValue(query);
   const pageSize = 50;
+  const perplexityRequestIdRef = useRef(0);
 
   useEffect(() => {
     getPeerGroups()
@@ -172,6 +179,8 @@ export function PeerGroupsDashboard() {
     const ticker = tickerInput.trim().toUpperCase();
     if (!ticker) return;
     setSelectedTicker(ticker);
+    setPerplexityError(null);
+    setPerplexityLookup((current) => current?.ticker === ticker ? current : null);
     setPendingChartScrollTicker(options.scrollToCharts ? ticker : null);
     setLoadingDetail(true);
     setLoadingMetrics(true);
@@ -205,6 +214,27 @@ export function PeerGroupsDashboard() {
 
     setLoadingDetail(false);
     setLoadingMetrics(false);
+  };
+
+  const loadPerplexityLookup = async (tickerInput?: string | null) => {
+    const ticker = (tickerInput || selectedTicker || query).trim().toUpperCase();
+    if (!ticker) return;
+    const requestId = perplexityRequestIdRef.current + 1;
+    perplexityRequestIdRef.current = requestId;
+    setSelectedTicker(ticker);
+    setLoadingPerplexity(true);
+    setPerplexityError(null);
+    setPerplexityLookup(null);
+    try {
+      const result = await getPerplexityFinancePeers(ticker);
+      if (perplexityRequestIdRef.current !== requestId) return;
+      setPerplexityLookup(result);
+    } catch (error) {
+      if (perplexityRequestIdRef.current !== requestId) return;
+      setPerplexityError(error instanceof Error ? error.message : "Failed to load Perplexity Finance peers.");
+    } finally {
+      if (perplexityRequestIdRef.current === requestId) setLoadingPerplexity(false);
+    }
   };
 
   const prefersReducedMotion = useCallback(() => (
@@ -254,6 +284,25 @@ export function PeerGroupsDashboard() {
     });
     return rows;
   }, [activeGroup, detail, memberSortDir, memberSortKey, metricsByTicker]);
+  const savedGroupTickerSet = useMemo(
+    () => new Set(sortedMemberRows.map((row) => row.ticker.toUpperCase())),
+    [sortedMemberRows],
+  );
+  const perplexityPeerRows = useMemo(() => {
+    if (!perplexityLookup) return [];
+    return perplexityLookup.peers.map((peer) => ({
+      ...peer,
+      status: (savedGroupTickerSet.has(peer.ticker.toUpperCase()) ? "saved" : "perplexity") as PerplexityPeerStatus,
+    }));
+  }, [perplexityLookup, savedGroupTickerSet]);
+  const savedOnlyPeerRows = useMemo(() => {
+    if (!perplexityLookup || !detail || !activeGroup) return [];
+    const perplexityTickers = new Set(perplexityLookup.peers.map((peer) => peer.ticker.toUpperCase()));
+    return sortedMemberRows.filter((row) => (
+      row.ticker.toUpperCase() !== detail.symbol.ticker.toUpperCase()
+      && !perplexityTickers.has(row.ticker.toUpperCase())
+    ));
+  }, [activeGroup, detail, perplexityLookup, sortedMemberRows]);
   const chartMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
     const ordered = [...sortedMemberRows].sort((a, b) => {
@@ -498,13 +547,23 @@ export function PeerGroupsDashboard() {
               ))}
             </select>
           </label>
-          <div className="flex items-end">
+          <div className="flex flex-wrap items-end gap-2">
             <button
               className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent"
               onClick={() => void loadTicker(query)}
               disabled={!query.trim()}
+              type="button"
             >
               Analyze
+            </button>
+            <button
+              className="inline-flex items-center gap-2 rounded border border-violet-300/40 bg-violet-400/10 px-3 py-2 text-sm font-medium text-violet-200 transition hover:bg-violet-400/15 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void loadPerplexityLookup(query || selectedTicker)}
+              disabled={loadingPerplexity || !(query.trim() || selectedTicker)}
+              type="button"
+            >
+              {loadingPerplexity ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Perplexity
             </button>
           </div>
         </div>
@@ -614,6 +673,151 @@ export function PeerGroupsDashboard() {
               <p className="text-sm text-slate-400">Search or select a ticker to load peer analysis.</p>
             )}
           </div>
+
+          {(loadingPerplexity || perplexityLookup || perplexityError) && (
+            <div className="card p-3">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+                    <Sparkles className="h-4 w-4 text-accent" />
+                    Perplexity Finance
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Read-only dashboard lookup. Saved peer groups are not changed.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                  onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query)}
+                  disabled={loadingPerplexity || !(perplexityLookup?.ticker || selectedTicker || query.trim())}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {loadingPerplexity ? (
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading Perplexity Finance dashboard...
+                </div>
+              ) : null}
+
+              {perplexityError ? <p className="text-sm text-red-300">{perplexityError}</p> : null}
+
+              {perplexityLookup ? (
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-lg font-semibold text-accent">{perplexityLookup.ticker}</span>
+                      {perplexityLookup.company.name ? (
+                        <span className="text-sm text-slate-300">{perplexityLookup.company.name}</span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-400">
+                      {[
+                        perplexityLookup.company.exchange,
+                        perplexityLookup.company.sector,
+                        perplexityLookup.company.industry,
+                      ].filter(Boolean).join(" / ") || "Company metadata unavailable"}
+                    </div>
+                  </div>
+
+                  {perplexityLookup.company.description ? (
+                    <p className="max-h-56 overflow-auto rounded border border-borderSoft/70 bg-panelSoft/35 p-3 text-sm leading-6 text-slate-300">
+                      {perplexityLookup.company.description}
+                    </p>
+                  ) : null}
+
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <a
+                      href={perplexityLookup.peersUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-slate-300 transition hover:border-accent/40 hover:text-accent"
+                    >
+                      Peers page <ExternalLink className="h-3 w-3" />
+                    </a>
+                    <a
+                      href={perplexityLookup.profileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-slate-300 transition hover:border-accent/40 hover:text-accent"
+                    >
+                      Profile page <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+
+                  {perplexityLookup.warning ? (
+                    <p className="rounded border border-yellow-300/20 bg-yellow-300/10 px-3 py-2 text-xs text-yellow-100">
+                      {perplexityLookup.warning}
+                    </p>
+                  ) : null}
+
+                  <div>
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-slate-200">Perplexity Peers</h3>
+                      <span className="text-xs text-slate-400">{perplexityPeerRows.length} parsed</span>
+                    </div>
+                    {perplexityPeerRows.length > 0 ? (
+                      <div className="max-h-72 overflow-auto rounded border border-borderSoft/70">
+                        <table className="min-w-full text-xs">
+                          <thead className="bg-slate-900/60">
+                            <tr>
+                              <th className="px-2 py-1.5 text-left text-slate-300">Ticker</th>
+                              <th className="px-2 py-1.5 text-left text-slate-300">Company</th>
+                              <th className="px-2 py-1.5 text-left text-slate-300">Overlap</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {perplexityPeerRows.map((peer) => (
+                              <tr key={`perplexity-${peer.ticker}`} className="border-t border-borderSoft/60">
+                                <td className="px-2 py-1.5">
+                                  <button
+                                    type="button"
+                                    className="font-semibold text-accent hover:text-sky-200"
+                                    onClick={() => {
+                                      setQuery(peer.ticker);
+                                      void loadTicker(peer.ticker, { scrollToCharts: true });
+                                    }}
+                                  >
+                                    {peer.ticker}
+                                  </button>
+                                </td>
+                                <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
+                                <td className="px-2 py-1.5">
+                                  <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
+                                    {peer.status === "saved" ? "Already in current group" : "Only in Perplexity"}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs text-slate-400">
+                        No Perplexity peer rows were parsed for this ticker.
+                      </p>
+                    )}
+                  </div>
+
+                  {activeGroup && savedOnlyPeerRows.length > 0 ? (
+                    <div>
+                      <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Only in saved group</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {savedOnlyPeerRows.map((row) => (
+                          <span key={`saved-only-${row.ticker}`} className="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
+                            {row.ticker}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )}
 
           {detail && activeGroup && (
             <div className="card p-3">
