@@ -211,10 +211,10 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
                         </div>
                       ) : (
                         <div className="min-w-0">
-                          <p className="min-w-0 text-sm font-semibold leading-6 text-slate-100 [overflow-wrap:anywhere]">
+                          <p className="min-w-0 pr-16 text-sm font-semibold leading-6 text-slate-100 [overflow-wrap:anywhere]">
                             {item.text}
                           </p>
-                          <div className="mt-2 flex shrink-0 items-center justify-end gap-1">
+                          <div className="pointer-events-auto absolute right-2 top-2 flex shrink-0 items-center gap-1 opacity-100 transition duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(any-hover:hover)]:pointer-events-none [@media(any-hover:hover)]:opacity-0 [@media(any-hover:hover)]:group-hover:pointer-events-auto [@media(any-hover:hover)]:group-hover:opacity-100">
                             <button
                               type="button"
                               className={buttonClass()}
