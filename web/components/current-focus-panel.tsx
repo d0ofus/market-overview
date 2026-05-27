@@ -143,7 +143,7 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
   }
 
   return (
-    <section id={anchorId} className="card scroll-mt-28 overflow-visible p-3 md:scroll-mt-32 md:p-4">
+    <section id={anchorId} className="card scroll-mt-28 overflow-visible p-3 md:scroll-mt-32 md:p-4 xl:h-fit">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">Current Focus</div>
@@ -156,36 +156,36 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
         </div>
       </div>
 
-      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+      <div className="mt-3 space-y-3">
         <div className="min-w-0">
           {items.length === 0 ? (
             <div className="rounded-xl border border-dashed border-borderSoft/80 bg-panelSoft/25 px-3 py-3 text-sm text-slate-400">
               No active focus set.
             </div>
           ) : (
-            <div className="grid gap-2 lg:grid-cols-2">
+            <div className="grid gap-2">
               {items.map((item) => {
                 const isEditing = editingId === item.id;
                 const isBusy = busyId === item.id;
                 return (
                   <article
                     key={item.id}
-                    className="group relative flex min-w-0 items-start gap-3 overflow-hidden rounded-xl border border-accent/20 bg-gradient-to-r from-accent/12 via-panelSoft/55 to-panelSoft/35 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                    className="group relative grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)] gap-2.5 overflow-hidden rounded-xl border border-accent/20 bg-gradient-to-r from-accent/12 via-panelSoft/55 to-panelSoft/35 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                   >
                     <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-accent/25 bg-accent/12 text-accent">
                       <Target className="h-3.5 w-3.5" />
                     </span>
                     <div className="min-w-0 flex-1">
                       {isEditing ? (
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <div className="space-y-2">
                           <input
-                            className="min-w-0 flex-1 rounded-lg border border-borderSoft/80 bg-panel px-3 py-1.5 text-sm text-slate-100 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                            className="h-9 w-full min-w-0 rounded-lg border border-borderSoft/80 bg-panel px-3 text-sm text-slate-100 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
                             value={editingText}
                             onChange={(event) => setEditingText(event.target.value)}
                             onKeyDown={(event) => handleEditKeyDown(event, item.id)}
                             autoFocus
                           />
-                          <div className="flex shrink-0 items-center gap-1">
+                          <div className="flex shrink-0 items-center justify-end gap-1">
                             <button
                               type="button"
                               className={buttonClass("accent")}
@@ -210,11 +210,11 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
                           </div>
                         </div>
                       ) : (
-                        <div className="flex min-w-0 items-start justify-between gap-2">
-                          <p className="min-w-0 flex-1 text-sm font-medium leading-6 text-slate-100 [overflow-wrap:anywhere]">
+                        <div className="min-w-0">
+                          <p className="min-w-0 text-sm font-semibold leading-6 text-slate-100 [overflow-wrap:anywhere]">
                             {item.text}
                           </p>
-                          <div className="flex shrink-0 items-center gap-1">
+                          <div className="mt-2 flex shrink-0 items-center justify-end gap-1">
                             <button
                               type="button"
                               className={buttonClass()}
@@ -252,7 +252,7 @@ export function CurrentFocusPanel({ initialItems, initialHistory, configId = "de
             <span className="text-xs font-semibold text-slate-300">Add focus</span>
             <span className="text-[11px] text-slate-500">{history.length} saved</span>
           </div>
-          <div className="grid gap-2 md:grid-cols-[minmax(180px,260px)_minmax(0,1fr)_auto] xl:grid-cols-1">
+          <div className="grid gap-2">
             <select
               className="h-10 min-w-0 rounded-xl border border-borderSoft/80 bg-panelSoft/40 px-3 text-sm text-slate-200 outline-none transition hover:bg-panelSoft/60 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50"
               value={selectedHistoryText}

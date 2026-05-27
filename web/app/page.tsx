@@ -101,13 +101,15 @@ export default async function HomePage() {
           />
         )}
       />
-      <CurrentFocusPanel
-        anchorId={currentFocusAnchorId}
-        initialItems={focusItems.rows}
-        initialHistory={focusHistory.rows}
-      />
-      <div id={marketStateAnchorId} className="scroll-mt-28 md:scroll-mt-32">
-        <MarketCommentaryPanel />
+      <div className="grid gap-4 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] xl:items-start">
+        <CurrentFocusPanel
+          anchorId={currentFocusAnchorId}
+          initialItems={focusItems.rows}
+          initialHistory={focusHistory.rows}
+        />
+        <div id={marketStateAnchorId} className="scroll-mt-28 md:scroll-mt-32">
+          <MarketCommentaryPanel />
+        </div>
       </div>
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">
