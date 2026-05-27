@@ -82,6 +82,27 @@ function perplexityEmptyPeerMessage(lookup: PerplexityFinancePeerLookup): string
   return "No Perplexity peer rows were parsed for this ticker.";
 }
 
+function formatPerplexityAge(ageSeconds: number | null | undefined): string {
+  if (typeof ageSeconds !== "number" || !Number.isFinite(ageSeconds)) return "unknown age";
+  if (ageSeconds < 60) return "just now";
+  const minutes = Math.floor(ageSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 60) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
+}
+
+function perplexityCacheLabel(lookup: PerplexityFinancePeerLookup): string {
+  if (lookup.cache?.mode === "stale_on_error") return "Showing cached result; refresh failed";
+  if (lookup.cache?.mode === "hit") return `Cached ${formatPerplexityAge(lookup.cache.ageSeconds)}`;
+  if (lookup.cache?.mode === "refresh") return "Refreshed just now";
+  if (lookup.cache?.mode === "miss") return "Live result";
+  return "Live result";
+}
+
 function MultiChartPager({
   page,
   totalPages,
@@ -718,7 +739,7 @@ export function PeerGroupsDashboard() {
                   onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query, { refresh: true })}
                   disabled={loadingPerplexity || !(perplexityLookup?.ticker || selectedTicker || query.trim())}
                 >
-                  Refresh
+                  Refresh live
                 </button>
               </div>
 
@@ -744,6 +765,16 @@ export function PeerGroupsDashboard() {
                           {perplexityStatusLabel(perplexityLookup.status)}
                         </span>
                       ) : null}
+                      <span className={`rounded px-2 py-0.5 text-[11px] ${
+                        perplexityLookup.cache?.mode === "stale_on_error"
+                          ? "bg-yellow-300/10 text-yellow-100"
+                          : perplexityLookup.cache?.mode === "hit"
+                            ? "bg-emerald-400/10 text-emerald-200"
+                            : "bg-sky-400/10 text-sky-200"
+                      }`}
+                      >
+                        {perplexityCacheLabel(perplexityLookup)}
+                      </span>
                     </div>
                     <div className="mt-1 text-xs text-slate-400">
                       {[

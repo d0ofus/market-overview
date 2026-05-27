@@ -310,6 +310,12 @@ import {
   saveSocialAlertCredential,
   updateSocialAlertSettings,
 } from "./social-alerts-service";
+import {
+  loadPerplexityFinanceCache,
+  PerplexityFinanceCacheInputError,
+  PerplexityFinanceCacheUnavailableError,
+  upsertPerplexityFinanceCache,
+} from "./perplexity-finance-cache-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -2886,6 +2892,18 @@ app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
   });
 });
 
+app.get("/api/perplexity-finance/cache/:ticker", async (c) => {
+  try {
+    return c.json(await loadPerplexityFinanceCache(c.env, c.req.param("ticker")));
+  } catch (error) {
+    if (error instanceof PerplexityFinanceCacheInputError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    const message = error instanceof Error ? error.message : "Failed to load Perplexity Finance cache.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/fundamentals/ticker/:ticker", async (c) => {
   const quarters = c.req.query("quarters") ? Number(c.req.query("quarters")) : 8;
   const payload = await loadTickerFundamentals(c.env, c.req.param("ticker"), quarters);
@@ -4266,6 +4284,20 @@ app.post("/api/admin/research/search-template-versions", async (c) => {
     return c.json({ ok: true, id: created.id });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to create search template version." }, 400);
+  }
+});
+
+app.put("/api/admin/perplexity-finance/cache/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json();
+    return c.json(await upsertPerplexityFinanceCache(c.env, c.req.param("ticker"), payload));
+  } catch (error) {
+    if (error instanceof PerplexityFinanceCacheInputError || error instanceof PerplexityFinanceCacheUnavailableError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    const message = error instanceof Error ? error.message : "Failed to update Perplexity Finance cache.";
+    return c.json({ error: message }, 500);
   }
 });
 
