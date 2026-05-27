@@ -37,6 +37,7 @@
 - Add other funds to track like Drunkenmiller
 
 ## SECTOR TRACKER
+> Remove dropdown menu from tickers in new key movers tracker input
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
