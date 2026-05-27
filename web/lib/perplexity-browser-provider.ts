@@ -257,7 +257,7 @@ function browserbaseSessionPayload(config: BrowserbaseConfig, timeout: number, k
       blockAds: true,
       logSession: true,
       recordSession: true,
-      os: "windows" as const,
+      os: "linux" as const,
       solveCaptchas: config.solveCaptchas || undefined,
       verified: config.verified || undefined,
     },
