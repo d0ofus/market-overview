@@ -100,6 +100,21 @@ export type MarketCommentarySettings = {
   updatedAt: string | null;
 };
 
+export type OverviewFocusItem = {
+  id: string;
+  configId: string;
+  text: string;
+  sortOrder: number;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OverviewFocusHistoryItem = {
+  text: string;
+  lastUsedAt: string;
+};
+
 export type AlertLogRow = {
   id: string;
   ticker: string;
@@ -2026,6 +2041,34 @@ export function getFedWatch(force = false) {
 
 export function getMarketCommentary(init?: RequestInit) {
   return getJson<MarketCommentaryResponse>("/api/market-commentary", init);
+}
+
+export function getOverviewFocusItems(configId = "default") {
+  return getJson<{ rows: OverviewFocusItem[] }>(appendQuery("/api/overview/focus", { configId }));
+}
+
+export function getOverviewFocusHistory(configId = "default") {
+  return getJson<{ rows: OverviewFocusHistoryItem[] }>(appendQuery("/api/overview/focus/history", { configId }));
+}
+
+export function createOverviewFocusItem(text: string, configId = "default") {
+  return adminFetch<{ ok: boolean; item: OverviewFocusItem }>("/api/admin/overview-focus", {
+    method: "POST",
+    body: JSON.stringify({ configId, text }),
+  });
+}
+
+export function updateOverviewFocusItem(id: string, text: string) {
+  return adminFetch<{ ok: boolean; item: OverviewFocusItem }>(`/api/admin/overview-focus/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function deleteOverviewFocusItem(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/admin/overview-focus/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function refreshMarketCommentary(force = false) {

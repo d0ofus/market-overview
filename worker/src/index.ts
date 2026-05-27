@@ -102,6 +102,14 @@ import {
   updateMarketCommentarySettings,
 } from "./market-commentary-service";
 import {
+  createOverviewFocusItem,
+  deleteOverviewFocusItem,
+  listOverviewFocusHistory,
+  listOverviewFocusItems,
+  OverviewFocusError,
+  updateOverviewFocusItem,
+} from "./overview-focus-service";
+import {
   cleanupOldScansPageData,
   deleteScanCompilePreset,
   loadCompiledScansSnapshot,
@@ -340,6 +348,18 @@ function patternErrorResponse(c: any, error: unknown) {
     return c.json({ error: error.issues[0]?.message ?? "Invalid pattern scanner payload." }, 400);
   }
   const message = error instanceof Error ? error.message : "Pattern scanner request failed.";
+  return c.json({ error: message }, 500);
+}
+
+function overviewFocusErrorResponse(c: any, error: unknown) {
+  if (error instanceof OverviewFocusError) {
+    return c.json({ error: error.message }, error.status);
+  }
+  if (error instanceof ZodError) {
+    return c.json({ error: error.issues[0]?.message ?? "Invalid overview focus payload." }, 400);
+  }
+  const message = error instanceof Error ? error.message : "Overview focus request failed.";
+  console.error("overview focus request failed", error);
   return c.json({ error: message }, 500);
 }
 
@@ -1742,6 +1762,26 @@ app.get("/api/market-commentary", async (c) => {
     const message = error instanceof Error ? error.message : "Failed to load market commentary.";
     console.error("market commentary load failed", error);
     return c.json({ status: "empty", warning: message, report: null }, 200);
+  }
+});
+
+app.get("/api/overview/focus", async (c) => {
+  try {
+    const rows = await listOverviewFocusItems(c.env, c.req.query("configId") ?? "default");
+    c.header("Cache-Control", "no-store");
+    return c.json({ rows });
+  } catch (error) {
+    return overviewFocusErrorResponse(c, error);
+  }
+});
+
+app.get("/api/overview/focus/history", async (c) => {
+  try {
+    const rows = await listOverviewFocusHistory(c.env, c.req.query("configId") ?? "default");
+    c.header("Cache-Control", "no-store");
+    return c.json({ rows });
+  } catch (error) {
+    return overviewFocusErrorResponse(c, error);
   }
 });
 
@@ -3963,6 +4003,41 @@ app.get("/api/admin/market-commentary/settings", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load market commentary settings.";
     return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/overview-focus", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json().catch(() => ({}));
+    const item = await createOverviewFocusItem(c.env, payload);
+    await upsertAudit(c.env, item.configId, "OVERVIEW_FOCUS_CREATE", { id: item.id, text: item.text });
+    return c.json({ ok: true, item });
+  } catch (error) {
+    return overviewFocusErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/admin/overview-focus/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json().catch(() => ({}));
+    const item = await updateOverviewFocusItem(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, item.configId, "OVERVIEW_FOCUS_UPDATE", { id: item.id, text: item.text });
+    return c.json({ ok: true, item });
+  } catch (error) {
+    return overviewFocusErrorResponse(c, error);
+  }
+});
+
+app.delete("/api/admin/overview-focus/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const item = await deleteOverviewFocusItem(c.env, c.req.param("id"));
+    await upsertAudit(c.env, item.configId, "OVERVIEW_FOCUS_DELETE", { id: item.id, text: item.text });
+    return c.json({ ok: true, id: c.req.param("id") });
+  } catch (error) {
+    return overviewFocusErrorResponse(c, error);
   }
 });
 

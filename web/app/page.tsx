@@ -1,10 +1,9 @@
 import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
-import { StatusBar } from "@/components/status-bar";
-import { ManualRefreshButton } from "@/components/manual-refresh-button";
+import { CurrentFocusPanel } from "@/components/current-focus-panel";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
-import { getDashboard, getFedWatch, getStatus, type FedWatchResponse } from "@/lib/api";
+import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
 
 export const revalidate = 0;
 
@@ -47,7 +46,7 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const [dashboard, statusValue, fedWatch] = await Promise.all([
+  const [dashboard, statusValue, fedWatch, focusItems, focusHistory] = await Promise.all([
     getDashboard().catch(() => null),
     getStatus("overview").catch(() => ({
       timezone: "Australia/Melbourne",
@@ -62,6 +61,8 @@ export default async function HomePage() {
       warning: "FedWatch data could not be loaded.",
       data: null,
     } satisfies FedWatchResponse)),
+    getOverviewFocusItems().catch(() => ({ rows: [] })),
+    getOverviewFocusHistory().catch(() => ({ rows: [] })),
   ]);
   const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
@@ -77,15 +78,18 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-4">
-      <MarketCommentaryPanel />
-      <StatusBar
-        asOfDate={statusValue.asOfDate}
-        lastUpdated={statusValue.lastUpdated}
-        timezone={statusValue.timezone}
-        autoRefreshLabel={statusValue.autoRefreshLabel}
-        providerLabel={statusValue.providerLabel}
-        actions={<ManualRefreshButton page="overview" />}
+      <CurrentFocusPanel
+        initialItems={focusItems.rows}
+        initialHistory={focusHistory.rows}
+        refreshStatus={{
+          asOfDate: statusValue.asOfDate,
+          lastUpdated: statusValue.lastUpdated,
+          timezone: statusValue.timezone,
+          autoRefreshLabel: statusValue.autoRefreshLabel,
+          providerLabel: statusValue.providerLabel,
+        }}
       />
+      <MarketCommentaryPanel />
       <FloatingSectionNav items={jumpItems} showHeading={false} />
       {!dashboardValue && (
         <div className="card p-4 text-sm text-red-300">
