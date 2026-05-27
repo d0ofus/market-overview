@@ -1817,6 +1817,10 @@ export type PerplexityFinancePeerLookup = {
   ticker: string;
   fetchedAt: string;
   source: "perplexity_finance_dashboard";
+  provider?: "browserbase" | "local_chromium";
+  browserbaseConfigured?: boolean;
+  browserbaseSessionId?: string;
+  browserbaseSessionUrl?: string;
   peersUrl: string;
   profileUrl: string;
   company: {
@@ -1847,7 +1851,23 @@ export type PerplexityFinancePeerLookup = {
     peersTimedOut: boolean;
     observedEndpoints: string[];
     blockedEndpoints: string[];
+    providerWarning?: string | null;
   };
+};
+
+export type PerplexityBrowserbaseVerificationSession = {
+  ok: true;
+  sessionId: string;
+  expiresAt: string;
+  debuggerUrl: string;
+  debuggerFullscreenUrl: string;
+  pages: Array<{
+    id: string;
+    debuggerUrl: string;
+    debuggerFullscreenUrl: string;
+    title: string;
+    url: string;
+  }>;
 };
 
 export type SymbolCatalogStatus = {
@@ -3325,6 +3345,29 @@ export async function getPerplexityFinancePeers(ticker: string, options?: { refr
     throw new Error(`Perplexity Finance lookup failed: ${res.status}${detail}`);
   }
   return (await res.json()) as PerplexityFinancePeerLookup;
+}
+
+export async function createPerplexityBrowserbaseVerificationSession() {
+  const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
+  const res = await fetch("/api/perplexity-finance/browserbase/verify-session", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+    },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`Browserbase verification session failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as PerplexityBrowserbaseVerificationSession;
 }
 
 export function getAdminPeerGroups() {

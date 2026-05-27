@@ -2,8 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, BarChart3, ExternalLink, Loader2, Search, Sparkles } from "lucide-react";
+import { ArrowUp, BarChart3, ExternalLink, Loader2, Search, ShieldCheck, Sparkles } from "lucide-react";
 import {
+  createPerplexityBrowserbaseVerificationSession,
   getFundamentalsTrends,
   getPerplexityFinancePeers,
   getPeerDirectory,
@@ -152,6 +153,9 @@ export function PeerGroupsDashboard() {
   const [perplexityLookup, setPerplexityLookup] = useState<PerplexityFinancePeerLookup | null>(null);
   const [loadingPerplexity, setLoadingPerplexity] = useState(false);
   const [perplexityError, setPerplexityError] = useState<string | null>(null);
+  const [loadingPerplexityVerification, setLoadingPerplexityVerification] = useState(false);
+  const [perplexityVerificationError, setPerplexityVerificationError] = useState<string | null>(null);
+  const [perplexityVerificationUrl, setPerplexityVerificationUrl] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [trendRows, setTrendRows] = useState<FundamentalTrendRow[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
@@ -206,6 +210,7 @@ export function PeerGroupsDashboard() {
     if (!ticker) return;
     setSelectedTicker(ticker);
     setPerplexityError(null);
+    setPerplexityVerificationError(null);
     setPerplexityLookup((current) => current?.ticker === ticker ? current : null);
     setPendingChartScrollTicker(options.scrollToCharts ? ticker : null);
     setLoadingDetail(true);
@@ -250,6 +255,8 @@ export function PeerGroupsDashboard() {
     setSelectedTicker(ticker);
     setLoadingPerplexity(true);
     setPerplexityError(null);
+    setPerplexityVerificationError(null);
+    setPerplexityVerificationUrl(null);
     setPerplexityLookup(null);
     try {
       const result = await getPerplexityFinancePeers(ticker, { refresh: options.refresh });
@@ -260,6 +267,21 @@ export function PeerGroupsDashboard() {
       setPerplexityError(error instanceof Error ? error.message : "Failed to load Perplexity Finance peers.");
     } finally {
       if (perplexityRequestIdRef.current === requestId) setLoadingPerplexity(false);
+    }
+  };
+
+  const openPerplexityVerification = async () => {
+    setLoadingPerplexityVerification(true);
+    setPerplexityVerificationError(null);
+    try {
+      const session = await createPerplexityBrowserbaseVerificationSession();
+      const url = session.debuggerFullscreenUrl || session.debuggerUrl;
+      setPerplexityVerificationUrl(url);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setPerplexityVerificationError(error instanceof Error ? error.message : "Failed to create Browserbase verification session.");
+    } finally {
+      setLoadingPerplexityVerification(false);
     }
   };
 
@@ -329,6 +351,10 @@ export function PeerGroupsDashboard() {
       && !perplexityTickers.has(row.ticker.toUpperCase())
     ));
   }, [activeGroup, detail, perplexityLookup, sortedMemberRows]);
+  const canOpenPerplexityVerification = Boolean(
+    perplexityLookup?.browserbaseConfigured
+    && (perplexityLookup.status === "blocked" || perplexityLookup.profileStatus === "blocked" || perplexityLookup.peersStatus === "blocked"),
+  );
   const chartMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
     const ordered = [...sortedMemberRows].sort((a, b) => {
@@ -777,7 +803,44 @@ export function PeerGroupsDashboard() {
                     >
                       Profile page <ExternalLink className="h-3 w-3" />
                     </a>
+                    {perplexityLookup.provider ? (
+                      <span className="inline-flex items-center rounded border border-borderSoft px-2 py-1 text-slate-400">
+                        {perplexityLookup.provider === "browserbase" ? "Browserbase" : "Local Chromium"}
+                      </span>
+                    ) : null}
                   </div>
+
+                  {canOpenPerplexityVerification ? (
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-2 py-1 text-accent transition hover:bg-accent/25 disabled:opacity-50"
+                        onClick={() => void openPerplexityVerification()}
+                        disabled={loadingPerplexityVerification}
+                      >
+                        {loadingPerplexityVerification ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                        )}
+                        Verify session
+                      </button>
+                      {perplexityVerificationUrl ? (
+                        <a
+                          href={perplexityVerificationUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 rounded border border-borderSoft px-2 py-1 text-slate-300 transition hover:border-accent/40 hover:text-accent"
+                        >
+                          Live View <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {perplexityVerificationError ? (
+                    <p className="text-xs text-red-300">{perplexityVerificationError}</p>
+                  ) : null}
 
                   {perplexityLookup.warning ? (
                     <p className="rounded border border-yellow-300/20 bg-yellow-300/10 px-3 py-2 text-xs text-yellow-100">

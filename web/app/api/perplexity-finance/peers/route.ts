@@ -1,7 +1,11 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { NextResponse } from "next/server";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "playwright-core";
+import {
+  browserbaseConfigured,
+  launchPerplexityBrowser,
+  selectPerplexityBrowserProvider,
+  type PerplexityBrowserProvider,
+} from "@/lib/perplexity-browser-provider";
 import {
   analyzePerplexityBodyText,
   emptyCompany,
@@ -26,8 +30,6 @@ export const maxDuration = 45;
 
 const CACHE_CONTROL = "public, s-maxage=21600, stale-while-revalidate=86400";
 const DEFAULT_TIMEOUT_MS = 24_000;
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 type CapturedJson = {
   payload: unknown;
@@ -92,105 +94,6 @@ function buildPerplexityUrls(ticker: string) {
 function timeoutMs(): number {
   const parsed = Number(process.env.PERPLEXITY_FINANCE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
   return Number.isFinite(parsed) ? Math.max(8_000, Math.min(35_000, parsed)) : DEFAULT_TIMEOUT_MS;
-}
-
-function localChromiumCandidates(): string[] {
-  const candidates = [
-    process.env.PERPLEXITY_CHROMIUM_EXECUTABLE_PATH,
-    process.env.CHROME_EXECUTABLE_PATH,
-    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  ];
-
-  if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA;
-    const programFiles = process.env.ProgramFiles;
-    const programFilesX86 = process.env["PROGRAMFILES(X86)"];
-    candidates.push(
-      localAppData ? join(localAppData, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFiles ? join(programFiles, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFilesX86 ? join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFiles ? join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-      programFilesX86 ? join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-    );
-  } else if (process.platform === "darwin") {
-    candidates.push(
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    );
-  } else {
-    candidates.push(
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/chromium",
-    );
-  }
-
-  return candidates.filter((candidate): candidate is string => Boolean(candidate));
-}
-
-async function loadServerlessChromium(): Promise<{
-  args: string[];
-  defaultViewport: { width: number; height: number };
-  executablePath: () => Promise<string>;
-} | null> {
-  try {
-    const mod = await import("@sparticuz/chromium");
-    const chromium = (mod.default ?? mod) as {
-      args: string[];
-      defaultViewport: { width: number; height: number };
-      executablePath: () => Promise<string>;
-    };
-    return chromium;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveChromiumExecutablePath(serverlessChromium: Awaited<ReturnType<typeof loadServerlessChromium>>): Promise<string | null> {
-  const localCandidate = localChromiumCandidates().find((candidate) => existsSync(candidate));
-  if (localCandidate) return localCandidate;
-
-  if (!serverlessChromium) return null;
-  try {
-    return await serverlessChromium.executablePath();
-  } catch {
-    return null;
-  }
-}
-
-async function launchBrowser(): Promise<{ browser: Browser; context: BrowserContext }> {
-  const [{ chromium }, serverlessChromium] = await Promise.all([
-    import("playwright-core"),
-    loadServerlessChromium(),
-  ]);
-  const executablePath = await resolveChromiumExecutablePath(serverlessChromium);
-  if (!executablePath) {
-    throw new Error("No Chromium executable was available for Perplexity Finance extraction.");
-  }
-
-  const args = Array.from(new Set([
-    ...(serverlessChromium?.args ?? []),
-    "--disable-blink-features=AutomationControlled",
-    "--disable-dev-shm-usage",
-    "--disable-setuid-sandbox",
-    "--no-sandbox",
-  ]));
-  const browser = await chromium.launch({
-    executablePath,
-    headless: true,
-    args,
-  });
-  const context = await browser.newContext({
-    userAgent: USER_AGENT,
-    viewport: serverlessChromium?.defaultViewport ?? { width: 1280, height: 900 },
-    locale: "en-US",
-    extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  return { browser, context };
 }
 
 function relevantEndpointLabel(responseUrl: URL, status: number): string | null {
@@ -515,10 +418,17 @@ function warningFor(
   peerStatus: PerplexityFinanceLookupStatus,
   company: PerplexityFinanceCompany,
   peers: PerplexityFinancePeer[],
+  provider: PerplexityBrowserProvider,
+  hasBrowserbaseConfig: boolean,
 ): string | null {
   const warnings: string[] = [];
   if (status === "blocked" || profileStatus === "blocked" || peerStatus === "blocked") {
     warnings.push("Perplexity blocked the browser session before all finance data could be read.");
+    if (provider === "browserbase" && hasBrowserbaseConfig) {
+      warnings.push("Open a Browserbase verification session, complete any Perplexity check, then Refresh.");
+    } else if (!hasBrowserbaseConfig) {
+      warnings.push("Browserbase is not configured, so the lookup used local Chromium without a persistent verification context.");
+    }
   }
   if (peerStatus === "pending_timeout") {
     warnings.push("Perplexity was still generating the peers list when the lookup timed out. Try Refresh.");
@@ -532,6 +442,15 @@ function warningFor(
     warnings.push("No peer JSON or table rows were parseable from the Perplexity Finance peers dashboard.");
   }
   const uniqueWarnings = Array.from(new Set(warnings));
+  return uniqueWarnings.length > 0 ? uniqueWarnings.join(" ") : null;
+}
+
+function combineWarnings(...warnings: Array<string | null | undefined>): string | null {
+  const pieces = warnings
+    .flatMap((warning) => warning ? warning.split(/(?<=\.)\s+/) : [])
+    .map((warning) => warning.trim())
+    .filter(Boolean);
+  const uniqueWarnings = Array.from(new Set(pieces));
   return uniqueWarnings.length > 0 ? uniqueWarnings.join(" ") : null;
 }
 
@@ -559,8 +478,9 @@ export async function GET(request: Request) {
   const { peersUrl, profileUrl } = buildPerplexityUrls(ticker);
   const fetchedAt = new Date().toISOString();
   let browser: Browser | null = null;
+  const providerDecision = selectPerplexityBrowserProvider();
   try {
-    const launched = await launchBrowser();
+    const launched = await launchPerplexityBrowser();
     browser = launched.browser;
 
     const companyResult = await extractCompany(launched.context, ticker, profileUrl);
@@ -576,12 +496,27 @@ export async function GET(request: Request) {
     const peersSource = peersResult.peers.length > 0 ? peersResult.source : companyResult.peersHintSource ?? peersResult.source;
     const peersHttpStatus = peersResult.peers.length > 0 ? peersResult.httpStatus : companyResult.peersHintHttpStatus ?? peersResult.httpStatus;
     const status = overallStatus(companyResult.company, peers, companyResult.status, effectivePeersStatus);
-    const warning = warningFor(status, companyResult.status, effectivePeersStatus, companyResult.company, peers);
+    const warning = combineWarnings(
+      launched.providerWarning,
+      warningFor(
+        status,
+        companyResult.status,
+        effectivePeersStatus,
+        companyResult.company,
+        peers,
+        launched.provider,
+        launched.browserbaseConfigured,
+      ),
+    );
 
     return NextResponse.json({
       ticker,
       fetchedAt,
       source: "perplexity_finance_dashboard",
+      provider: launched.provider,
+      browserbaseConfigured: launched.browserbaseConfigured,
+      browserbaseSessionId: launched.browserbaseSessionId,
+      browserbaseSessionUrl: launched.browserbaseSessionUrl,
       peersUrl,
       profileUrl,
       company: companyResult.company,
@@ -601,6 +536,7 @@ export async function GET(request: Request) {
         peersTimedOut: peersResult.timedOut,
         observedEndpoints: Array.from(new Set([...companyResult.observedEndpoints, ...peersResult.observedEndpoints])),
         blockedEndpoints: Array.from(new Set([...companyResult.blockedEndpoints, ...peersResult.blockedEndpoints])),
+        providerWarning: launched.providerWarning,
       },
     }, {
       headers: { "Cache-Control": cacheControlFor(status, warning, refresh) },
@@ -610,6 +546,8 @@ export async function GET(request: Request) {
       ticker,
       fetchedAt,
       source: "perplexity_finance_dashboard",
+      provider: providerDecision.provider,
+      browserbaseConfigured: browserbaseConfigured(),
       peersUrl,
       profileUrl,
       company: emptyCompany(),
@@ -629,6 +567,7 @@ export async function GET(request: Request) {
         peersTimedOut: false,
         observedEndpoints: [],
         blockedEndpoints: [],
+        providerWarning: providerDecision.reason,
       },
     }, {
       headers: { "Cache-Control": "no-store" },
