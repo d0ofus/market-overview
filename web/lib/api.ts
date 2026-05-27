@@ -1833,6 +1833,21 @@ export type PerplexityFinancePeerLookup = {
     rawText: string;
   }>;
   warning: string | null;
+  status?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
+  profileStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
+  peersStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
+  diagnostics?: {
+    profileSource: string | null;
+    peersSource: string | null;
+    profileHttpStatus: number | null;
+    peersHttpStatus: number | null;
+    profileBodyState: string | null;
+    peersBodyState: string | null;
+    profileTimedOut: boolean;
+    peersTimedOut: boolean;
+    observedEndpoints: string[];
+    blockedEndpoints: string[];
+  };
 };
 
 export type SymbolCatalogStatus = {
@@ -3290,8 +3305,11 @@ export function getPeerTickerMetrics(ticker: string) {
   );
 }
 
-export async function getPerplexityFinancePeers(ticker: string) {
-  const path = appendQuery("/api/perplexity-finance/peers", { ticker });
+export async function getPerplexityFinancePeers(ticker: string, options?: { refresh?: boolean }) {
+  const path = appendQuery("/api/perplexity-finance/peers", {
+    ticker,
+    refresh: options?.refresh ? 1 : undefined,
+  });
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     cache: "no-store",

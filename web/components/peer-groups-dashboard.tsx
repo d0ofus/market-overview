@@ -26,6 +26,9 @@ type MultiChartSortKey = "change1d" | "marketCap";
 type LoadTickerOptions = {
   scrollToCharts?: boolean;
 };
+type PerplexityLookupOptions = {
+  refresh?: boolean;
+};
 type PerplexityPeerStatus = "saved" | "perplexity";
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "change1d", label: "1D % Change" },
@@ -54,6 +57,29 @@ function segmentedButtonClass(active: boolean): string {
   return active
     ? "bg-accent/20 text-accent shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
     : "text-slate-300 hover:bg-panelSoft/70 hover:text-slate-100";
+}
+
+function perplexityStatusLabel(status: PerplexityFinancePeerLookup["status"]): string | null {
+  if (!status) return null;
+  if (status === "ready") return "Ready";
+  if (status === "partial") return "Partial";
+  if (status === "pending_timeout") return "Still generating";
+  if (status === "blocked") return "Blocked";
+  if (status === "not_found") return "Not found";
+  return "Parse error";
+}
+
+function perplexityEmptyPeerMessage(lookup: PerplexityFinancePeerLookup): string {
+  if (lookup.peersStatus === "pending_timeout") {
+    return "Perplexity was still generating the peer list. Refresh can retry without using the cached response.";
+  }
+  if (lookup.peersStatus === "blocked") {
+    return "Perplexity blocked the browser session before peer rows could be read.";
+  }
+  if (lookup.peersStatus === "not_found") {
+    return "Perplexity did not return a peers page for this ticker.";
+  }
+  return "No Perplexity peer rows were parsed for this ticker.";
 }
 
 function MultiChartPager({
@@ -216,7 +242,7 @@ export function PeerGroupsDashboard() {
     setLoadingMetrics(false);
   };
 
-  const loadPerplexityLookup = async (tickerInput?: string | null) => {
+  const loadPerplexityLookup = async (tickerInput?: string | null, options: PerplexityLookupOptions = {}) => {
     const ticker = (tickerInput || selectedTicker || query).trim().toUpperCase();
     if (!ticker) return;
     const requestId = perplexityRequestIdRef.current + 1;
@@ -226,7 +252,7 @@ export function PeerGroupsDashboard() {
     setPerplexityError(null);
     setPerplexityLookup(null);
     try {
-      const result = await getPerplexityFinancePeers(ticker);
+      const result = await getPerplexityFinancePeers(ticker, { refresh: options.refresh });
       if (perplexityRequestIdRef.current !== requestId) return;
       setPerplexityLookup(result);
     } catch (error) {
@@ -689,7 +715,7 @@ export function PeerGroupsDashboard() {
                 <button
                   type="button"
                   className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
-                  onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query)}
+                  onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query, { refresh: true })}
                   disabled={loadingPerplexity || !(perplexityLookup?.ticker || selectedTicker || query.trim())}
                 >
                   Refresh
@@ -712,6 +738,11 @@ export function PeerGroupsDashboard() {
                       <span className="text-lg font-semibold text-accent">{perplexityLookup.ticker}</span>
                       {perplexityLookup.company.name ? (
                         <span className="text-sm text-slate-300">{perplexityLookup.company.name}</span>
+                      ) : null}
+                      {perplexityStatusLabel(perplexityLookup.status) ? (
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
+                          {perplexityStatusLabel(perplexityLookup.status)}
+                        </span>
                       ) : null}
                     </div>
                     <div className="mt-1 text-xs text-slate-400">
@@ -797,7 +828,7 @@ export function PeerGroupsDashboard() {
                       </div>
                     ) : (
                       <p className="rounded border border-borderSoft/70 bg-panelSoft/30 px-3 py-2 text-xs text-slate-400">
-                        No Perplexity peer rows were parsed for this ticker.
+                        {perplexityEmptyPeerMessage(perplexityLookup)}
                       </p>
                     )}
                   </div>
