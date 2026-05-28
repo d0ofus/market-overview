@@ -2087,7 +2087,7 @@ export function getDashboard(date?: string): Promise<SnapshotResponse> {
   return getJson(`/api/dashboard${date ? `?date=${date}` : ""}`);
 }
 
-export function getStatus(page?: "overview" | "breadth"): Promise<{
+export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   timezone: string;
   autoRefreshLabel: string;
   autoRefreshLocalTime?: string;

@@ -1,17 +1,33 @@
 import { SectorTracker } from "@/components/sector-tracker";
-import { ManualRefreshButton } from "@/components/manual-refresh-button";
+import { OverviewRefreshMenu } from "@/components/overview-refresh-menu";
+import { getStatus } from "@/lib/api";
 
-export default function SectorPage() {
+export default async function SectorPage() {
+  const status = await getStatus("sectors").catch(() => ({
+    timezone: "Australia/Melbourne",
+    autoRefreshLabel: "08:15 Australia/Melbourne",
+    autoRefreshLocalTime: "08:15",
+    lastUpdated: null,
+    asOfDate: null,
+    providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+  }));
+
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Key Sector Tracker</h2>
-      <p className="text-sm text-slate-400">
-        Track sector momentum, define narratives, and map related tickers across list and calendar views.
-      </p>
-      <div className="flex justify-end">
-        <ManualRefreshButton page="sectors" />
-      </div>
-      <SectorTracker />
+      <SectorTracker
+        navActions={(
+          <OverviewRefreshMenu
+            status={{
+              asOfDate: status.asOfDate,
+              lastUpdated: status.lastUpdated,
+              timezone: status.timezone,
+              autoRefreshLabel: status.autoRefreshLabel,
+              providerLabel: status.providerLabel,
+            }}
+            refreshPage="sectors"
+          />
+        )}
+      />
     </div>
   );
 }

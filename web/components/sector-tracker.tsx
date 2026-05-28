@@ -302,7 +302,11 @@ function EtfTile({
   );
 }
 
-export function SectorTracker() {
+type SectorTrackerProps = {
+  navActions?: ReactNode;
+};
+
+export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [view, setView] = useState<"list" | "calendar">("calendar");
   const [month, setMonth] = useState(formatLocalMonthKey());
   const [entries, setEntries] = useState<SectorEntry[]>([]);
@@ -874,7 +878,7 @@ export function SectorTracker() {
 
   return (
     <div className="space-y-5">
-      <FloatingSectionNav items={SECTION_NAV_ITEMS} />
+      <FloatingSectionNav items={SECTION_NAV_ITEMS} showHeading={false} actions={navActions} />
 
       <datalist id="sector-symbol-options">
         {symbolOptions.map((s) => (
@@ -1189,7 +1193,6 @@ export function SectorTracker() {
             <div className="bg-panel/20 p-4 md:p-5">
               <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div className="space-y-1">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Data View</p>
                   <h3 className="text-base font-semibold text-slate-100">
                     {view === "list" ? "Narrative list" : "Sector / narrative calendar"}
                   </h3>

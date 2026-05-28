@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ChevronDown, Clock3, Database } from "lucide-react";
-import { ManualRefreshButton } from "./manual-refresh-button";
+import { ManualRefreshButton, type ManualRefreshPage } from "./manual-refresh-button";
 
 export type OverviewRefreshStatus = {
   asOfDate: string | null;
@@ -15,6 +15,8 @@ export type OverviewRefreshStatus = {
 
 type Props = {
   status: OverviewRefreshStatus;
+  refreshPage?: ManualRefreshPage;
+  refreshIdleLabel?: string;
 };
 
 const TZ_OPTIONS = [
@@ -45,7 +47,7 @@ function asOfToIso(asOfDate: string | null): string | null {
   return `${asOfDate}T00:00:00Z`;
 }
 
-export function OverviewRefreshMenu({ status }: Props) {
+export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshIdleLabel = "Update This Page" }: Props) {
   const [selectedTz, setSelectedTz] = useState("Australia/Melbourne");
   const [hoverOpen, setHoverOpen] = useState(false);
   const [pinnedOpen, setPinnedOpen] = useState(false);
@@ -178,7 +180,7 @@ export function OverviewRefreshMenu({ status }: Props) {
                 <div className="mt-1 text-sm font-medium">{status.providerLabel}</div>
               </div>
             </div>
-            <ManualRefreshButton page="overview" idleLabel="Update This Page" />
+            <ManualRefreshButton page={refreshPage} idleLabel={refreshIdleLabel} />
           </div>
         </div>
       )}
