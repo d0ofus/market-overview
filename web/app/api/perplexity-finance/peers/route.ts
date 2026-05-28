@@ -31,7 +31,7 @@ export const maxDuration = 45;
 const DEFAULT_TIMEOUT_MS = 24_000;
 const CACHE_API_TIMEOUT_MS = 2_000;
 const WORKER_API_BASE = process.env.PERPLEXITY_CACHE_API_BASE ?? process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
-const WORKER_ADMIN_SECRET = process.env.PERPLEXITY_CACHE_ADMIN_SECRET ?? process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
+const WORKER_ADMIN_SECRET = process.env.PERPLEXITY_CACHE_ADMIN_SECRET ?? process.env.ADMIN_SECRET ?? "";
 
 type CacheMode = "hit" | "miss" | "refresh" | "stale_on_error";
 

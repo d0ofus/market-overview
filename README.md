@@ -124,7 +124,19 @@ Alerts news fallback order is:
 
 Web (`web/.env.local`):
 - `NEXT_PUBLIC_API_BASE=http://127.0.0.1:8787`
-- `NEXT_PUBLIC_ADMIN_SECRET=<same-admin-secret-for-dev-testing>`
+- `ADMIN_PASSWORD=<shared-admin-page-password>`
+- `ADMIN_SESSION_SECRET=<random-session-signing-secret>`
+- `ADMIN_SECRET=<same-secret-as-worker-ADMIN_SECRET>`
+
+Vercel web environment variables:
+```bash
+vercel env add ADMIN_PASSWORD production preview --sensitive
+vercel env add ADMIN_SESSION_SECRET production preview --sensitive
+vercel env add ADMIN_SECRET production preview --sensitive
+vercel env pull web/.env.local --yes
+```
+
+Do not use `NEXT_PUBLIC_ADMIN_SECRET` for admin authentication. `NEXT_PUBLIC_*` values are exposed to the browser bundle; rotate any admin secret that was previously deployed with that prefix.
 
 ## D1 Schema + Seed
 
@@ -207,10 +219,11 @@ npm run build -w worker
 wrangler deploy --config worker/wrangler.toml
 ```
 
-6. Deploy web to Cloudflare Pages:
+6. Deploy web to Vercel:
 - Build command: `npm run build -w web`
-- Output: `.next` (Next.js on Pages with adapter as needed)
-- Set `NEXT_PUBLIC_API_BASE` to Worker URL
+- Output: `web/.next`
+- Set `NEXT_PUBLIC_API_BASE` to the Worker URL
+- Set `ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET`, and `ADMIN_SECRET` as Sensitive Environment Variables
 
 ## Tests
 

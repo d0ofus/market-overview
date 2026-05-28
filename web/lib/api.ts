@@ -2077,6 +2077,12 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+function adminProxyPath(path: string): string {
+  if (path.startsWith("/api/admin")) return path;
+  if (path.startsWith("/api/")) return `/api/admin/proxy${path}`;
+  return path;
+}
+
 export function getDashboard(date?: string): Promise<SnapshotResponse> {
   return getJson(`/api/dashboard${date ? `?date=${date}` : ""}`);
 }
@@ -3360,13 +3366,12 @@ export async function getPerplexityFinancePeers(ticker: string, options?: { refr
 }
 
 export async function createPerplexityBrowserbaseVerificationSession() {
-  const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
   const res = await fetch("/api/perplexity-finance/browserbase/verify-session", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
     },
+    credentials: "same-origin",
     cache: "no-store",
   });
   if (!res.ok) {
@@ -3550,13 +3555,25 @@ export function bootstrapAdminPeerGroups(payload?: {
 }
 
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
-  const headers: Record<string, string> = {};
-  if (secret) headers.Authorization = `Bearer ${secret}`;
-  return getJson<T>(path, {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const res = await fetch(adminProxyPath(path), {
     ...init,
-    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
+    headers,
+    cache: "no-store",
+    credentials: "same-origin",
   });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`API ${path} failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as T;
 }
 
 export function refreshPageData(page: string, ticker?: string | null) {
