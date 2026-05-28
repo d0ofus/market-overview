@@ -2,8 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, BarChart3, ExternalLink, Loader2, Search, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowUp, BarChart3, ExternalLink, Info, Loader2, Plus, Search, ShieldCheck, Sparkles } from "lucide-react";
 import {
+  addAdminPeerGroupMember,
+  createAdminPeerGroup,
   createPerplexityBrowserbaseVerificationSession,
   getFundamentalsTrends,
   getPerplexityFinancePeers,
@@ -15,6 +17,7 @@ import {
   type PerplexityFinancePeerLookup,
   type PeerDirectoryRow,
   type PeerGroupRow,
+  type PeerGroupType,
   type PeerMetricRow,
   type PeerTickerDetail,
 } from "@/lib/api";
@@ -26,9 +29,18 @@ type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume"
 type MultiChartSortKey = "change1d" | "marketCap";
 type LoadTickerOptions = {
   scrollToCharts?: boolean;
+  selectGroupId?: string | null;
 };
 type PerplexityLookupOptions = {
   refresh?: boolean;
+};
+type PerplexityGroupDraft = {
+  name: string;
+  slug: string;
+  groupType: PeerGroupType;
+  description: string;
+  priority: string;
+  isActive: boolean;
 };
 type PerplexityPeerStatus = "saved" | "perplexity";
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
@@ -38,6 +50,7 @@ const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
 const CORRELATION_DEFAULT_LOOKBACK = "252D";
 const CORRELATION_DEFAULT_ROLLING_WINDOW = "60D";
 const CORRELATION_LAUNCH_MAX_TICKERS = 10;
+const PERPLEXITY_GROUP_DEFAULT_PRIORITY = "100";
 
 function fmtCompact(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
@@ -102,6 +115,43 @@ function perplexityCacheLabel(lookup: PerplexityFinancePeerLookup): string {
   if (lookup.cache?.mode === "refresh") return "Refreshed just now";
   if (lookup.cache?.mode === "miss") return "Live result";
   return "Live result";
+}
+
+function buildPerplexityGroupDraft(lookup: PerplexityFinancePeerLookup | null): PerplexityGroupDraft {
+  const ticker = lookup?.ticker?.trim().toUpperCase() || "Ticker";
+  return {
+    name: `${ticker} Perplexity Peers`,
+    slug: "",
+    groupType: "fundamental",
+    description: `Perplexity Finance peer group for ${ticker}.`,
+    priority: PERPLEXITY_GROUP_DEFAULT_PRIORITY,
+    isActive: true,
+  };
+}
+
+function parsePriority(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : 0;
+}
+
+function FieldTooltip({ label, children }: { label: string; children: string }) {
+  return (
+    <span className="group relative inline-flex">
+      <button
+        type="button"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-borderSoft/70 text-slate-400 transition hover:border-accent/40 hover:text-accent focus:outline-none focus:ring-1 focus:ring-accent/50"
+        aria-label={label}
+      >
+        <Info className="h-3 w-3" />
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-64 -translate-x-1/2 rounded border border-borderSoft bg-slate-950 px-3 py-2 text-[11px] leading-5 text-slate-300 opacity-0 shadow-xl transition group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {children}
+      </span>
+    </span>
+  );
 }
 
 function MultiChartPager({
@@ -177,6 +227,13 @@ export function PeerGroupsDashboard() {
   const [loadingPerplexityVerification, setLoadingPerplexityVerification] = useState(false);
   const [perplexityVerificationError, setPerplexityVerificationError] = useState<string | null>(null);
   const [perplexityVerificationUrl, setPerplexityVerificationUrl] = useState<string | null>(null);
+  const [perplexityGroupOpen, setPerplexityGroupOpen] = useState(false);
+  const [perplexityGroupDraft, setPerplexityGroupDraft] = useState<PerplexityGroupDraft>(() => buildPerplexityGroupDraft(null));
+  const [perplexityGroupSelectedTickers, setPerplexityGroupSelectedTickers] = useState<string[]>([]);
+  const [savingPerplexityGroup, setSavingPerplexityGroup] = useState(false);
+  const [perplexityGroupError, setPerplexityGroupError] = useState<string | null>(null);
+  const [perplexityGroupMessage, setPerplexityGroupMessage] = useState<string | null>(null);
+  const [perplexityGroupCreatedId, setPerplexityGroupCreatedId] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [trendRows, setTrendRows] = useState<FundamentalTrendRow[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
@@ -246,9 +303,14 @@ export function PeerGroupsDashboard() {
 
     if (detailRes.status === "fulfilled") {
       setDetail(detailRes.value);
-      setSelectedGroupId((current) => current && detailRes.value.groups.some((group) => group.id === current)
-        ? current
-        : detailRes.value.groups[0]?.id ?? null);
+      setSelectedGroupId((current) => {
+        if (options.selectGroupId && detailRes.value.groups.some((group) => group.id === options.selectGroupId)) {
+          return options.selectGroupId;
+        }
+        return current && detailRes.value.groups.some((group) => group.id === current)
+          ? current
+          : detailRes.value.groups[0]?.id ?? null;
+      });
     } else {
       setDetail(null);
       setSelectedGroupId(null);
@@ -364,6 +426,14 @@ export function PeerGroupsDashboard() {
       status: (savedGroupTickerSet.has(peer.ticker.toUpperCase()) ? "saved" : "perplexity") as PerplexityPeerStatus,
     }));
   }, [perplexityLookup, savedGroupTickerSet]);
+  const perplexityPeerTickerKey = useMemo(
+    () => perplexityLookup?.peers.map((peer) => peer.ticker.toUpperCase()).join(",") ?? "",
+    [perplexityLookup],
+  );
+  const perplexityGroupSelectedTickerSet = useMemo(
+    () => new Set(perplexityGroupSelectedTickers),
+    [perplexityGroupSelectedTickers],
+  );
   const savedOnlyPeerRows = useMemo(() => {
     if (!perplexityLookup || !detail || !activeGroup) return [];
     const perplexityTickers = new Set(perplexityLookup.peers.map((peer) => peer.ticker.toUpperCase()));
@@ -376,6 +446,8 @@ export function PeerGroupsDashboard() {
     perplexityLookup?.browserbaseConfigured
     && (perplexityLookup.status === "blocked" || perplexityLookup.profileStatus === "blocked" || perplexityLookup.peersStatus === "blocked"),
   );
+  const allPerplexityPeersSelected = perplexityPeerRows.length > 0
+    && perplexityPeerRows.every((peer) => perplexityGroupSelectedTickerSet.has(peer.ticker.toUpperCase()));
   const chartMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
     const ordered = [...sortedMemberRows].sort((a, b) => {
@@ -511,6 +583,26 @@ export function PeerGroupsDashboard() {
   }, [activeGroup?.id, detail?.symbol.ticker]);
 
   useEffect(() => {
+    if (!perplexityLookup) {
+      setPerplexityGroupOpen(false);
+      setPerplexityGroupDraft(buildPerplexityGroupDraft(null));
+      setPerplexityGroupSelectedTickers([]);
+      setPerplexityGroupError(null);
+      setPerplexityGroupMessage(null);
+      setPerplexityGroupCreatedId(null);
+      return;
+    }
+
+    setPerplexityGroupDraft(buildPerplexityGroupDraft(perplexityLookup));
+    setPerplexityGroupSelectedTickers(normalizeCorrelationTickers(
+      perplexityLookup.peers.map((peer) => peer.ticker),
+    ));
+    setPerplexityGroupError(null);
+    setPerplexityGroupMessage(null);
+    setPerplexityGroupCreatedId(null);
+  }, [perplexityLookup, perplexityPeerTickerKey]);
+
+  useEffect(() => {
     if (!pendingChartScrollTicker || loadingDetail || !detail) return;
     if (detail.symbol.ticker !== pendingChartScrollTicker) return;
     const target = multiChartSectionRef.current;
@@ -577,6 +669,96 @@ export function PeerGroupsDashboard() {
       return;
     }
     launchCorrelation(normalizedSelection, correlationPickerState.groupId, correlationPickerState.groupName);
+  };
+
+  const togglePerplexityGroupTicker = (ticker: string) => {
+    const normalized = ticker.trim().toUpperCase();
+    if (!normalized || savingPerplexityGroup) return;
+    setPerplexityGroupSelectedTickers((current) => (
+      current.includes(normalized)
+        ? current.filter((value) => value !== normalized)
+        : [...current, normalized]
+    ));
+    setPerplexityGroupError(null);
+    setPerplexityGroupMessage(null);
+  };
+
+  const selectAllPerplexityGroupTickers = () => {
+    setPerplexityGroupSelectedTickers(normalizeCorrelationTickers(perplexityPeerRows.map((peer) => peer.ticker)));
+    setPerplexityGroupError(null);
+    setPerplexityGroupMessage(null);
+  };
+
+  const clearPerplexityGroupTickers = () => {
+    setPerplexityGroupSelectedTickers([]);
+    setPerplexityGroupError(null);
+    setPerplexityGroupMessage(null);
+  };
+
+  const savePerplexityGroup = async () => {
+    if (!perplexityLookup || savingPerplexityGroup) return;
+    const name = perplexityGroupDraft.name.trim();
+    if (!name) {
+      setPerplexityGroupError("Group name is required.");
+      return;
+    }
+
+    const rootTicker = perplexityLookup.ticker.trim().toUpperCase();
+    const selectedPeers = normalizeCorrelationTickers(perplexityGroupSelectedTickers)
+      .filter((ticker) => ticker !== rootTicker);
+    const tickersToAdd = normalizeCorrelationTickers([rootTicker, ...selectedPeers]);
+
+    setSavingPerplexityGroup(true);
+    setPerplexityGroupError(null);
+    setPerplexityGroupMessage(null);
+    try {
+      let groupId = perplexityGroupCreatedId;
+      if (!groupId) {
+        const created = await createAdminPeerGroup({
+          name,
+          slug: perplexityGroupDraft.slug.trim() || null,
+          groupType: perplexityGroupDraft.groupType,
+          description: perplexityGroupDraft.description.trim() || null,
+          priority: parsePriority(perplexityGroupDraft.priority),
+          isActive: perplexityGroupDraft.isActive,
+        });
+        groupId = created.id;
+        setPerplexityGroupCreatedId(created.id);
+      }
+
+      const addedTickers: string[] = [];
+      const failedTickers: string[] = [];
+      for (const ticker of tickersToAdd) {
+        try {
+          await addAdminPeerGroupMember(groupId, { ticker, source: "manual", confidence: 1 });
+          addedTickers.push(ticker);
+        } catch {
+          failedTickers.push(ticker);
+        }
+      }
+
+      const nextGroups = await getPeerGroups();
+      setGroups(nextGroups.rows ?? []);
+      if (rootTicker) {
+        await loadTicker(rootTicker, { selectGroupId: groupId });
+      }
+
+      const failedPeers = failedTickers.filter((ticker) => ticker !== rootTicker);
+      setPerplexityGroupSelectedTickers(failedPeers);
+      setPerplexityGroupMessage([
+        `Created ${name}`,
+        `added ${addedTickers.length} ticker${addedTickers.length === 1 ? "" : "s"}`,
+        failedTickers.length ? `${failedTickers.length} failed` : null,
+      ].filter(Boolean).join("; ") + ".");
+      if (failedTickers.length === 0) {
+        setPerplexityGroupOpen(false);
+        setPerplexityGroupCreatedId(null);
+      }
+    } catch (error) {
+      setPerplexityGroupError(error instanceof Error ? error.message : "Failed to create Perplexity peer group.");
+    } finally {
+      setSavingPerplexityGroup(false);
+    }
   };
 
   return (
@@ -756,17 +938,33 @@ export function PeerGroupsDashboard() {
                     Perplexity Finance
                   </div>
                   <p className="mt-1 text-xs text-slate-400">
-                    Read-only dashboard lookup. Saved peer groups are not changed.
+                    Dashboard lookup results stay unchanged until you save a new group.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
-                  onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query, { refresh: true })}
-                  disabled={loadingPerplexity || !(perplexityLookup?.ticker || selectedTicker || query.trim())}
-                >
-                  Refresh live
-                </button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {perplexityLookup && perplexityPeerRows.length > 0 ? (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-2 py-1 text-xs text-accent transition hover:bg-accent/25 disabled:opacity-50"
+                      onClick={() => {
+                        setPerplexityGroupOpen((current) => !current);
+                        setPerplexityGroupError(null);
+                      }}
+                      disabled={savingPerplexityGroup}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Create Group
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                    onClick={() => void loadPerplexityLookup(perplexityLookup?.ticker || selectedTicker || query, { refresh: true })}
+                    disabled={loadingPerplexity || !(perplexityLookup?.ticker || selectedTicker || query.trim())}
+                  >
+                    Refresh live
+                  </button>
+                </div>
               </div>
 
               {loadingPerplexity ? (
@@ -877,6 +1075,195 @@ export function PeerGroupsDashboard() {
                     <p className="rounded border border-yellow-300/20 bg-yellow-300/10 px-3 py-2 text-xs text-yellow-100">
                       {perplexityLookup.warning}
                     </p>
+                  ) : null}
+
+                  {perplexityGroupMessage ? (
+                    <p className="rounded border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100">
+                      {perplexityGroupMessage}
+                    </p>
+                  ) : null}
+
+                  {perplexityGroupOpen ? (
+                    <div className="space-y-3 rounded border border-accent/25 bg-slate-950/35 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-100">Create Peer Group</h3>
+                          <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-slate-300">
+                            <span className="rounded border border-accent/30 bg-accent/10 px-2 py-1 font-semibold text-accent">
+                              {perplexityLookup.ticker} included
+                            </span>
+                            <span className="rounded border border-borderSoft/70 bg-panelSoft/50 px-2 py-1">
+                              {perplexityGroupSelectedTickers.length} peer{perplexityGroupSelectedTickers.length === 1 ? "" : "s"} selected
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="rounded border border-borderSoft px-2 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60"
+                          onClick={() => setPerplexityGroupOpen(false)}
+                          disabled={savingPerplexityGroup}
+                        >
+                          Close
+                        </button>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="block text-xs text-slate-300">
+                          <span>Name</span>
+                          <input
+                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                            value={perplexityGroupDraft.name}
+                            onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, name: event.target.value }))}
+                          />
+                        </label>
+                        <label className="block text-xs text-slate-300">
+                          <span className="inline-flex items-center gap-1">
+                            Slug
+                            <FieldTooltip label="What peer group slug means">
+                              Slug is the unique durable identifier for this group. Leave it blank to generate one from the name.
+                            </FieldTooltip>
+                          </span>
+                          <input
+                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                            value={perplexityGroupDraft.slug}
+                            onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, slug: event.target.value }))}
+                            placeholder="auto from name"
+                          />
+                        </label>
+                        <label className="block text-xs text-slate-300">
+                          <span>Group Type</span>
+                          <select
+                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                            value={perplexityGroupDraft.groupType}
+                            onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, groupType: event.target.value as PeerGroupType }))}
+                          >
+                            <option value="fundamental">fundamental</option>
+                            <option value="technical">technical</option>
+                            <option value="custom">custom</option>
+                          </select>
+                        </label>
+                        <label className="block text-xs text-slate-300">
+                          <span>Priority</span>
+                          <input
+                            className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                            value={perplexityGroupDraft.priority}
+                            onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, priority: event.target.value }))}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="block text-xs text-slate-300 md:col-span-2">
+                          <span>Description</span>
+                          <textarea
+                            className="mt-1 min-h-16 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1.5 text-sm"
+                            value={perplexityGroupDraft.description}
+                            onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, description: event.target.value }))}
+                          />
+                        </label>
+                        <div className="text-xs text-slate-300">
+                          <span className="inline-flex items-center gap-1">
+                            Active
+                            <FieldTooltip label="What active peer group means">
+                              Active groups appear in normal peer-group lists. Inactive groups stay saved for admin use but are hidden from the default group list.
+                            </FieldTooltip>
+                          </span>
+                          <label className="mt-2 inline-flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+                              checked={perplexityGroupDraft.isActive}
+                              onChange={(event) => setPerplexityGroupDraft((current) => ({ ...current, isActive: event.target.checked }))}
+                            />
+                            Enabled
+                          </label>
+                        </div>
+                      </div>
+
+                      <div className="rounded border border-borderSoft/70 bg-panelSoft/20">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-borderSoft/70 px-3 py-2">
+                          <div className="text-xs font-semibold text-slate-200">Perplexity Peer Selection</div>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                              onClick={selectAllPerplexityGroupTickers}
+                              disabled={allPerplexityPeersSelected || savingPerplexityGroup}
+                            >
+                              Select All
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                              onClick={clearPerplexityGroupTickers}
+                              disabled={perplexityGroupSelectedTickers.length === 0 || savingPerplexityGroup}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                        <div className="max-h-56 overflow-auto">
+                          <table className="min-w-full text-xs">
+                            <thead className="bg-slate-900/60">
+                              <tr>
+                                <th className="px-2 py-1.5 text-left text-slate-300">Use</th>
+                                <th className="px-2 py-1.5 text-left text-slate-300">Ticker</th>
+                                <th className="px-2 py-1.5 text-left text-slate-300">Company</th>
+                                <th className="px-2 py-1.5 text-left text-slate-300">Overlap</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {perplexityPeerRows.map((peer) => {
+                                const ticker = peer.ticker.toUpperCase();
+                                const checked = perplexityGroupSelectedTickerSet.has(ticker);
+                                return (
+                                  <tr key={`perplexity-create-${ticker}`} className="border-t border-borderSoft/60">
+                                    <td className="px-2 py-1.5">
+                                      <input
+                                        type="checkbox"
+                                        className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+                                        checked={checked}
+                                        disabled={savingPerplexityGroup}
+                                        onChange={() => togglePerplexityGroupTicker(ticker)}
+                                      />
+                                    </td>
+                                    <td className="px-2 py-1.5 font-semibold text-accent">{ticker}</td>
+                                    <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
+                                    <td className="px-2 py-1.5">
+                                      <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
+                                        {peer.status === "saved" ? "Already saved" : "Perplexity only"}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {perplexityGroupError ? (
+                        <p className="text-xs text-red-300">{perplexityGroupError}</p>
+                      ) : null}
+
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          type="button"
+                          className="rounded border border-borderSoft px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800/60"
+                          onClick={() => setPerplexityGroupOpen(false)}
+                          disabled={savingPerplexityGroup}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => void savePerplexityGroup()}
+                          disabled={savingPerplexityGroup || !perplexityGroupDraft.name.trim()}
+                        >
+                          {savingPerplexityGroup ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                          Save Group
+                        </button>
+                      </div>
+                    </div>
                   ) : null}
 
                   <div>
