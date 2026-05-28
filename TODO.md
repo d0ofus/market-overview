@@ -3,14 +3,13 @@
 - No time to research on peers + individual company by the time watchlist is sorted
 
 ## GENERAL
-> Check out whether there is any password login required and how to safeguard the repo/deployment since it is now a good app with many features
+>> Come up with a good prompt to analyse stock with its peers, including where it is in the cycle, leader/laggard etc.
 > Do a general cleanup of github repo and mark code properly for easy reference by LLMs
 - See what other features in google sheets dashboard that are good
 > For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
 > Add pre-market analysis
-
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
 > Add macro stuff like 10Y yields and yield curve chart
@@ -37,7 +36,6 @@
 - Add other funds to track like Drunkenmiller
 
 ## SECTOR TRACKER
-> Remove dropdown menu from tickers in new key movers tracker input
 - Change the source of URA to get the .csv from https://assets.globalxetfs.com/funds/holdings/ura_full-holdings_20260309.csv
 - Check on source of 1D % change. For example, many names in MSOS is not showing the correct % change in the ETF constituents pop up list
 
@@ -48,8 +46,9 @@
 > Add scheduler for 12-hourly scrapes
 
 ## PEER GROUPS
-> Integrate this with /admin to add the tickers into a new group
+> Add a tradingview chart comparison tool for correlation analysis (for both returns based and different scale based)
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
+> Solve or error: TradingView did not return live metrics for 29 tickers.
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups
@@ -58,7 +57,6 @@
 >> https://www.hiddenmetrix.com/guide/correlation-analysis/
 
 ## SCANS
-> VCP and RS scans paused halfway, and only continue when I click the refresh scan button
 > Make the UI better to segregate each input field
 > Put a link to github docs (https://shner-elmo.github.io/TradingView-Screener/fields/stocks.html) or helper to find the Field ID for specific fields
 > Put a preset for US market to have exchange, symbol type preconfigured
