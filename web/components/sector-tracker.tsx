@@ -8,6 +8,8 @@ import {
   deleteSectorEntry,
   getEtfConstituents,
   getIndustryEtfs,
+  getPeerDirectory,
+  getPeerGroups,
   getSectorCalendar,
   getSectorEntries,
   getSectorEtfs,
@@ -16,6 +18,7 @@ import {
   getSectorTickerMetrics,
   updateSectorFocusNarratives,
   updateSectorEntry,
+  type PeerGroupRow,
   type PeerMetricRow,
   type SectorFocusNarrative,
 } from "@/lib/api";
@@ -79,6 +82,7 @@ const deltaPillCls = (n: number) =>
     : "bg-rose-500/12 text-neg ring-1 ring-rose-400/20";
 const INPUT_CLASS =
   "w-full rounded-xl border border-borderSoft/70 bg-panel/75 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-accent/50 focus:ring-2 focus:ring-accent/15";
+const DISABLED_INPUT_CLASS = `${INPUT_CLASS} disabled:cursor-not-allowed disabled:opacity-45`;
 const SECONDARY_BUTTON_CLASS =
   "inline-flex items-center justify-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-sm text-slate-200 transition hover:bg-panelSoft/55";
 const ICON_BUTTON_CLASS =
@@ -87,6 +91,7 @@ const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
 const CHARTS_PER_PAGE = 20;
 const CALENDAR_COLLAPSED_ITEM_COUNT = 3;
+const PEER_GROUP_MEMBER_PAGE_SIZE = 100;
 
 type EntrySymbol = { ticker: string; name: string | null };
 type SectorEntry = {
@@ -306,12 +311,17 @@ export function SectorTracker() {
   const [sectorEtfs, setSectorEtfs] = useState<WatchlistEtf[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<WatchlistEtf[]>([]);
   const [focusNarratives, setFocusNarratives] = useState<SectorFocusNarrative[]>([]);
+  const [peerGroups, setPeerGroups] = useState<PeerGroupRow[]>([]);
   const [focusNarrativeInput, setFocusNarrativeInput] = useState("");
   const [focusNarrativeSaving, setFocusNarrativeSaving] = useState(false);
   const [focusNarrativeError, setFocusNarrativeError] = useState<string | null>(null);
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
+  const [sectorPeerGroupId, setSectorPeerGroupId] = useState("");
+  const [peerGroupTickerSuggestions, setPeerGroupTickerSuggestions] = useState<NarrativeTickerSuggestion[]>([]);
+  const [peerGroupTickerLoading, setPeerGroupTickerLoading] = useState(false);
+  const [peerGroupTickerError, setPeerGroupTickerError] = useState<string | null>(null);
   const [eventDate, setEventDate] = useState(() => getDefaultSectorEventDate());
   const [notes, setNotes] = useState("");
   const [tickerInput, setTickerInput] = useState("");
@@ -341,11 +351,12 @@ export function SectorTracker() {
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
 
   const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
-    const [entriesRes, calRes, symbolRes, focusRes] = await Promise.allSettled([
+    const [entriesRes, calRes, symbolRes, focusRes, peerGroupsRes] = await Promise.allSettled([
       getSectorEntries(),
       getSectorCalendar(targetMonth),
       getSectorSymbolOptions(),
       getSectorFocusNarratives(),
+      getPeerGroups(true),
     ]);
     if (isStale()) return;
 
@@ -353,11 +364,13 @@ export function SectorTracker() {
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
     const focusRows = focusRes.status === "fulfilled" ? focusRes.value.rows ?? [] : [];
+    const peerGroupRows = peerGroupsRes.status === "fulfilled" ? peerGroupsRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
     setSymbolOptions(symbolRows);
     setFocusNarratives(focusRows);
+    setPeerGroups(peerGroupRows);
   }, []);
 
   const loadEtfData = useCallback(async (isStale: StaleCheck = () => false) => {
@@ -393,6 +406,66 @@ export function SectorTracker() {
   useEffect(() => {
     setExpandedCalendarDates([]);
   }, [month]);
+
+  useEffect(() => {
+    if (!sectorPeerGroupId) {
+      setPeerGroupTickerSuggestions([]);
+      setPeerGroupTickerLoading(false);
+      setPeerGroupTickerError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setPeerGroupTickerSuggestions([]);
+    setPeerGroupTickerLoading(true);
+    setPeerGroupTickerError(null);
+
+    const loadPeerGroupTickers = async () => {
+      const suggestions: NarrativeTickerSuggestion[] = [];
+      const seen = new Set<string>();
+      let offset = 0;
+      let total = 0;
+
+      do {
+        const response = await getPeerDirectory({
+          groupId: sectorPeerGroupId,
+          limit: PEER_GROUP_MEMBER_PAGE_SIZE,
+          offset,
+        });
+        if (cancelled) return;
+
+        const rows = response.rows ?? [];
+        for (const row of rows) {
+          const ticker = row.ticker.trim().toUpperCase();
+          if (!ticker || seen.has(ticker)) continue;
+          seen.add(ticker);
+          suggestions.push({ ticker, name: row.name ?? null });
+        }
+
+        const responseLimit = Math.max(1, Number(response.limit ?? PEER_GROUP_MEMBER_PAGE_SIZE));
+        total = Number(response.total ?? 0);
+        offset += responseLimit;
+        if (rows.length === 0) break;
+      } while (offset < total);
+
+      suggestions.sort((a, b) => a.ticker.localeCompare(b.ticker));
+      if (!cancelled) setPeerGroupTickerSuggestions(suggestions);
+    };
+
+    void loadPeerGroupTickers()
+      .catch((error) => {
+        if (!cancelled) {
+          setPeerGroupTickerError(error instanceof Error ? error.message : "Failed to load peer group tickers.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPeerGroupTickerLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sectorPeerGroupId]);
 
   const openEtfPopup = async (ticker: string, fundName?: string | null) => {
     hoverChart.clearPreview();
@@ -653,9 +726,24 @@ export function SectorTracker() {
   }, [entries, calendarRows]);
 
   const selectedTickerSet = useMemo(() => new Set(selectedTickers), [selectedTickers]);
-  const suggestedNarrativeTickers = sectorNarrativeExisting
-    ? narrativeTickerSuggestionsByName.get(sectorNarrativeExisting) ?? []
-    : [];
+  const selectedPeerGroup = useMemo(
+    () => peerGroups.find((group) => group.id === sectorPeerGroupId) ?? null,
+    [peerGroups, sectorPeerGroupId],
+  );
+  const hasExistingNarrative = sectorNarrativeExisting.trim().length > 0;
+  const hasNewNarrative = sectorNarrativeNew.trim().length > 0;
+  const hasPeerGroup = sectorPeerGroupId.trim().length > 0;
+  const existingNarrativeDisabled = hasNewNarrative || hasPeerGroup;
+  const newNarrativeDisabled = hasExistingNarrative || hasPeerGroup;
+  const peerGroupDisabled = hasExistingNarrative || hasNewNarrative;
+  const suggestedTickerSourceName = selectedPeerGroup?.name || sectorNarrativeExisting || "selected peer group";
+  const suggestedNarrativeTickers = hasPeerGroup
+    ? peerGroupTickerSuggestions
+    : sectorNarrativeExisting
+      ? narrativeTickerSuggestionsByName.get(sectorNarrativeExisting) ?? []
+      : [];
+  const showSuggestedTickerPanel = hasExistingNarrative || hasPeerGroup;
+  const suggestedTickerPanelEyebrow = hasPeerGroup ? "Peer group tickers" : "Prior tickers";
   const suggestedNarrativeTickerSet = useMemo(
     () => new Set(suggestedNarrativeTickers.map((item) => item.ticker)),
     [suggestedNarrativeTickers],
@@ -897,10 +985,15 @@ export function SectorTracker() {
 
               {addFormOpen ? (
                 <div className="mt-4 space-y-4">
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-9">
                     <label className="space-y-1 xl:col-span-2">
                       <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Existing Narrative</span>
-                      <select className={INPUT_CLASS} value={sectorNarrativeExisting} onChange={(e) => setSectorNarrativeExisting(e.target.value)}>
+                      <select
+                        className={DISABLED_INPUT_CLASS}
+                        value={sectorNarrativeExisting}
+                        onChange={(e) => setSectorNarrativeExisting(e.target.value)}
+                        disabled={existingNarrativeDisabled}
+                      >
                         <option value="">Select existing Sector/Narrative...</option>
                         {sectorNarrativeOptions.map((opt) => (
                           <option key={`sector-narrative-${opt}`} value={opt}>
@@ -912,11 +1005,28 @@ export function SectorTracker() {
                     <label className="space-y-1 xl:col-span-2">
                       <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">New Narrative</span>
                       <input
-                        className={INPUT_CLASS}
+                        className={DISABLED_INPUT_CLASS}
                         placeholder="Or add new Sector/Narrative"
                         value={sectorNarrativeNew}
                         onChange={(e) => setSectorNarrativeNew(e.target.value)}
+                        disabled={newNarrativeDisabled}
                       />
+                    </label>
+                    <label className="space-y-1 xl:col-span-2">
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Peer Group</span>
+                      <select
+                        className={DISABLED_INPUT_CLASS}
+                        value={sectorPeerGroupId}
+                        onChange={(e) => setSectorPeerGroupId(e.target.value)}
+                        disabled={peerGroupDisabled}
+                      >
+                        <option value="">{peerGroups.length === 0 ? "No peer groups saved" : "Select saved peer group..."}</option>
+                        {peerGroups.map((group) => (
+                          <option key={`sector-peer-group-${group.id}`} value={group.id}>
+                            {group.name}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label className="space-y-1">
                       <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Date</span>
@@ -929,10 +1039,9 @@ export function SectorTracker() {
                         placeholder="Add tickers (comma-separated)"
                         value={tickerInput}
                         onChange={(e) => setTickerInput(e.target.value)}
-                        list="sector-symbol-options"
                       />
                     </label>
-                    <label className="space-y-1 xl:col-span-5">
+                    <label className="space-y-1 xl:col-span-8">
                       <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Notes</span>
                       <textarea className={`${INPUT_CLASS} min-h-24 resize-y`} placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
                     </label>
@@ -949,18 +1058,22 @@ export function SectorTracker() {
                     </div>
                   </div>
 
-                  {sectorNarrativeExisting ? (
+                  {showSuggestedTickerPanel ? (
                     <div className="rounded-2xl border border-borderSoft/60 bg-panel/35 p-3">
                       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                         <div>
-                          <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Prior tickers</p>
+                          <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">{suggestedTickerPanelEyebrow}</p>
                           <p className="mt-1 text-sm text-slate-400">
-                            {suggestedNarrativeTickers.length > 0
-                              ? `${selectedSuggestedTickerCount} of ${suggestedNarrativeTickers.length} selected from ${sectorNarrativeExisting}.`
-                              : `No prior tickers found for ${sectorNarrativeExisting}.`}
+                            {peerGroupTickerLoading
+                              ? `Loading tickers from ${suggestedTickerSourceName || "selected peer group"}...`
+                              : peerGroupTickerError
+                                ? peerGroupTickerError
+                                : suggestedNarrativeTickers.length > 0
+                                  ? `${selectedSuggestedTickerCount} of ${suggestedNarrativeTickers.length} selected from ${suggestedTickerSourceName}.`
+                                  : `No tickers found for ${suggestedTickerSourceName}.`}
                           </p>
                         </div>
-                        {suggestedNarrativeTickers.length > 0 ? (
+                        {suggestedNarrativeTickers.length > 0 && !peerGroupTickerLoading ? (
                           <div className="flex flex-wrap gap-2">
                             <button
                               type="button"
@@ -981,13 +1094,13 @@ export function SectorTracker() {
                           </div>
                         ) : null}
                       </div>
-                      {suggestedNarrativeTickers.length > 0 ? (
+                      {suggestedNarrativeTickers.length > 0 && !peerGroupTickerLoading ? (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {suggestedNarrativeTickers.map((item) => {
                             const selected = selectedTickerSet.has(item.ticker);
                             return (
                               <button
-                                key={`suggested-narrative-ticker-${sectorNarrativeExisting}-${item.ticker}`}
+                                key={`suggested-narrative-ticker-${suggestedTickerSourceName}-${item.ticker}`}
                                 type="button"
                                 className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
                                   selected
@@ -1037,7 +1150,7 @@ export function SectorTracker() {
                       className="inline-flex items-center justify-center rounded-xl bg-accent/18 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/24"
                       onClick={async () => {
                         setFormError(null);
-                        const sectorNarrative = (sectorNarrativeNew.trim() || sectorNarrativeExisting.trim()).trim();
+                        const sectorNarrative = (selectedPeerGroup?.name ?? (sectorNarrativeNew.trim() || sectorNarrativeExisting.trim())).trim();
                         if (!sectorNarrative || !eventDate) {
                           setFormError("Sector/Narrative and date are required.");
                           return;
@@ -1055,6 +1168,7 @@ export function SectorTracker() {
                           });
                           setSectorNarrativeExisting("");
                           setSectorNarrativeNew("");
+                          setSectorPeerGroupId("");
                           setEventDate(getDefaultSectorEventDate());
                           setNotes("");
                           setSelectedTickers([]);
