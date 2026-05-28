@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Plus, Star, Trash2, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, GripVertical, List, Maximize2, Pencil, Plus, Star, Trash2, X } from "lucide-react";
 import {
   adminFetch,
   deleteSectorEntry,
@@ -89,6 +89,22 @@ const ICON_BUTTON_CLASS =
   "inline-flex h-7 w-7 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-300 transition hover:bg-panelSoft/55";
 const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
+type FocusDropPosition = "before" | "after";
+const reorderFocusNarrativeRows = (rows: SectorFocusNarrative[], sectorNames: string[]) => {
+  const order = new Map(sectorNames.map((sectorName, index) => [sectorName, index]));
+  return [...rows]
+    .filter((row) => order.has(row.sectorName))
+    .sort((left, right) => (order.get(left.sectorName) ?? 0) - (order.get(right.sectorName) ?? 0))
+    .map((row, index) => ({ ...row, sortOrder: index }));
+};
+const moveFocusNameRelative = (sectorNames: string[], sourceName: string, targetName: string, position: FocusDropPosition) => {
+  if (sourceName === targetName || !sectorNames.includes(sourceName) || !sectorNames.includes(targetName)) return sectorNames;
+  const nextNames = sectorNames.filter((name) => name !== sourceName);
+  const targetIndex = nextNames.indexOf(targetName);
+  if (targetIndex < 0) return sectorNames;
+  nextNames.splice(position === "after" ? targetIndex + 1 : targetIndex, 0, sourceName);
+  return nextNames;
+};
 const CHARTS_PER_PAGE = 20;
 const CALENDAR_COLLAPSED_ITEM_COUNT = 3;
 const PEER_GROUP_MEMBER_PAGE_SIZE = 100;
@@ -319,6 +335,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [focusNarrativeInput, setFocusNarrativeInput] = useState("");
   const [focusNarrativeSaving, setFocusNarrativeSaving] = useState(false);
   const [focusNarrativeError, setFocusNarrativeError] = useState<string | null>(null);
+  const [draggedFocusNarrative, setDraggedFocusNarrative] = useState<string | null>(null);
+  const [focusDropTarget, setFocusDropTarget] = useState<{ sectorName: string; position: FocusDropPosition } | null>(null);
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
@@ -764,14 +782,22 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     return sectorNarrativeOptions.filter((name) => !focused.has(name));
   }, [focusNarrativeNames, sectorNarrativeOptions]);
 
-  const persistFocusNarratives = async (sectorNames: string[]) => {
+  const persistFocusNarratives = async (
+    sectorNames: string[],
+    options: { clearInput?: boolean; optimistic?: boolean } = { clearInput: true },
+  ) => {
+    const previousFocusNarratives = focusNarratives;
     setFocusNarrativeSaving(true);
     setFocusNarrativeError(null);
+    if (options.optimistic) {
+      setFocusNarratives(reorderFocusNarrativeRows(focusNarratives, sectorNames));
+    }
     try {
       const res = await updateSectorFocusNarratives(sectorNames);
       setFocusNarratives(res.rows ?? []);
-      setFocusNarrativeInput("");
+      if (options.clearInput ?? true) setFocusNarrativeInput("");
     } catch (err) {
+      if (options.optimistic) setFocusNarratives(previousFocusNarratives);
       setFocusNarrativeError(err instanceof Error ? err.message : "Failed to update focus narratives.");
     } finally {
       setFocusNarrativeSaving(false);
@@ -790,6 +816,44 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
       setActiveNarrativeCollection(null);
     }
     await persistFocusNarratives(focusNarrativeNames.filter((name) => name !== sectorName));
+  };
+
+  const persistFocusNarrativeOrder = async (sectorNames: string[]) => {
+    if (focusNarrativeSaving || sectorNames.join("\u0000") === focusNarrativeNames.join("\u0000")) return;
+    await persistFocusNarratives(sectorNames, { clearInput: false, optimistic: true });
+  };
+
+  const getFocusDropPosition = (event: ReactDragEvent<HTMLElement>): FocusDropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+  };
+
+  const handleFocusDragOver = (event: ReactDragEvent<HTMLDivElement>, sectorName: string) => {
+    if (!draggedFocusNarrative || focusNarrativeSaving) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setFocusDropTarget({ sectorName, position: getFocusDropPosition(event) });
+  };
+
+  const handleFocusDrop = async (event: ReactDragEvent<HTMLDivElement>, targetName: string) => {
+    event.preventDefault();
+    const sourceName = event.dataTransfer.getData("text/plain") || draggedFocusNarrative;
+    setDraggedFocusNarrative(null);
+    setFocusDropTarget(null);
+    if (!sourceName || focusNarrativeSaving) return;
+    const nextNames = moveFocusNameRelative(focusNarrativeNames, sourceName, targetName, getFocusDropPosition(event));
+    await persistFocusNarrativeOrder(nextNames);
+  };
+
+  const moveFocusNarrativeByOffset = async (sectorName: string, offset: number) => {
+    if (focusNarrativeSaving) return;
+    const index = focusNarrativeNames.indexOf(sectorName);
+    const targetIndex = index + offset;
+    if (index < 0 || targetIndex < 0 || targetIndex >= focusNarrativeNames.length) return;
+    const nextNames = [...focusNarrativeNames];
+    const [movedName] = nextNames.splice(index, 1);
+    nextNames.splice(targetIndex, 0, movedName);
+    await persistFocusNarrativeOrder(nextNames);
   };
 
   const openFocusNarrative = (sectorName: string) => {
@@ -909,16 +973,51 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                   </div>
 
                   <div className="mt-4 flex flex-wrap gap-2">
-                    {focusNarrativeRows.map((row) => {
+                    {focusNarrativeRows.map((row, index) => {
                       const tickerCount = narrativeTickerSuggestionsByName.get(row.sectorName)?.length ?? 0;
+                      const isDragging = draggedFocusNarrative === row.sectorName;
+                      const isDropTarget = focusDropTarget?.sectorName === row.sectorName;
+                      const canReorder = focusNarrativeRows.length > 1;
                       return (
                         <div
                           key={`focus-narrative-${row.id}`}
-                          className="inline-flex max-w-full overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)]"
+                          className={`inline-flex min-w-0 max-w-full overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)] transition ${
+                            isDragging ? "opacity-45" : ""
+                          } ${isDropTarget ? "ring-2 ring-accent/50" : ""} ${
+                            isDropTarget && focusDropTarget?.position === "before" ? "border-l-4 border-l-accent" : ""
+                          } ${isDropTarget && focusDropTarget?.position === "after" ? "border-r-4 border-r-accent" : ""}`}
+                          onDragOver={(event) => handleFocusDragOver(event, row.sectorName)}
+                          onDrop={(event) => void handleFocusDrop(event, row.sectorName)}
                         >
+                          <span className="inline-flex w-11 shrink-0 items-center justify-center border-r border-borderSoft/60 bg-accent/10 px-2 text-xs font-semibold text-accent">
+                            #{index + 1}
+                          </span>
+                          {canReorder ? (
+                            <button
+                              type="button"
+                              draggable={!focusNarrativeSaving}
+                              className="flex w-8 shrink-0 cursor-grab items-center justify-center border-r border-borderSoft/60 text-slate-500 transition hover:bg-accent/10 hover:text-slate-200 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+                              onDragStart={(event) => {
+                                if (focusNarrativeSaving) return;
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData("text/plain", row.sectorName);
+                                setDraggedFocusNarrative(row.sectorName);
+                                setFocusDropTarget(null);
+                              }}
+                              onDragEnd={() => {
+                                setDraggedFocusNarrative(null);
+                                setFocusDropTarget(null);
+                              }}
+                              disabled={focusNarrativeSaving}
+                              aria-label={`Drag ${row.sectorName} to rank focus narratives`}
+                              title="Drag to reorder"
+                            >
+                              <GripVertical className="h-4 w-4" />
+                            </button>
+                          ) : null}
                           <button
                             type="button"
-                            className="min-w-0 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
+                            className="min-w-0 flex-1 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
                             onClick={() => openFocusNarrative(row.sectorName)}
                             aria-label={`Open focus narrative charts for ${row.sectorName}`}
                           >
@@ -927,6 +1026,30 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                               {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
                             </span>
                           </button>
+                          {canReorder ? (
+                            <div className="flex shrink-0 border-l border-borderSoft/60">
+                              <button
+                                type="button"
+                                className="flex w-8 items-center justify-center text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                onClick={() => void moveFocusNarrativeByOffset(row.sectorName, -1)}
+                                disabled={focusNarrativeSaving || index === 0}
+                                aria-label={`Move ${row.sectorName} earlier`}
+                                title="Move earlier"
+                              >
+                                <ChevronLeft className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                className="flex w-8 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                onClick={() => void moveFocusNarrativeByOffset(row.sectorName, 1)}
+                                disabled={focusNarrativeSaving || index === focusNarrativeRows.length - 1}
+                                aria-label={`Move ${row.sectorName} later`}
+                                title="Move later"
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ) : null}
                           <button
                             type="button"
                             className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
