@@ -351,6 +351,11 @@ const scannerCachePulseSchema = z.object({
   runId: z.string().trim().min(1).nullable().optional(),
 });
 const SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS = 25_000;
+const SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS = 15_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function scannerCachePulseHeaders(env: Env): Headers {
   const headers = new Headers({ "content-type": "application/json" });
@@ -358,13 +363,19 @@ function scannerCachePulseHeaders(env: Env): Headers {
   return headers;
 }
 
-async function runScannerCacheScanPulse(env: Env, origin: string, runId?: string | null): Promise<void> {
+async function runScannerCacheScanPulse(env: Env, origin: string, runId?: string | null, initialDelayMs = 0): Promise<void> {
   try {
+    if (initialDelayMs > 0) {
+      await delay(initialDelayMs);
+    }
     const result = await advanceScannerCacheScanRuns(env, {
       runId: runId ?? null,
       timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
     });
-    if (!result.hasMore || !result.advanced) return;
+    if (!result.hasMore) return;
+    if (!result.advanced) {
+      await delay(SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS);
+    }
     const response = await fetch(`${origin}/api/internal/scans/runner/pulse`, {
       method: "POST",
       headers: scannerCachePulseHeaders(env),
@@ -378,9 +389,9 @@ async function runScannerCacheScanPulse(env: Env, origin: string, runId?: string
   }
 }
 
-function scheduleScannerCacheScanPulse(c: any, runId?: string | null): void {
+function scheduleScannerCacheScanPulse(c: any, runId?: string | null, initialDelayMs = 0): void {
   const origin = new URL(c.req.url).origin;
-  c.executionCtx.waitUntil(runScannerCacheScanPulse(c.env, origin, runId ?? null));
+  c.executionCtx.waitUntil(runScannerCacheScanPulse(c.env, origin, runId ?? null, initialDelayMs));
 }
 
 function patternErrorResponse(c: any, error: unknown) {
@@ -3629,8 +3640,12 @@ app.post("/api/internal/scans/runner/pulse", async (c) => {
       runId: payload.runId ?? null,
       timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
     });
-    if (result.hasMore && result.advanced) {
-      scheduleScannerCacheScanPulse(c, payload.runId ?? null);
+    if (result.hasMore) {
+      scheduleScannerCacheScanPulse(
+        c,
+        payload.runId ?? null,
+        result.advanced ? 0 : SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS,
+      );
     }
     return c.json({ ok: true, ...result });
   } catch (error) {

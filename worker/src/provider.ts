@@ -27,7 +27,33 @@ export interface MarketDataProvider {
 
 export type ProviderOptions = {
   yahooPreferredTickers?: Iterable<string>;
+  fallbackEnabled?: boolean;
 };
+
+const PROVIDER_FETCH_TIMEOUT_MS = 8_000;
+
+function isAbortLikeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || error.message.toLowerCase().includes("aborted");
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = PROVIDER_FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isAbortLikeError(error)) {
+      throw new Error(`Provider fetch timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function latestBarDate(bars: DailyBar[]): string | null {
   let latest: string | null = null;
@@ -110,6 +136,7 @@ class StooqProvider implements MarketDataProvider {
     private readonly yahooPreferredTickers = new Set<string>(),
     private readonly fmpApiKey = "",
     private readonly alphaVantageApiKey = "",
+    private readonly fallbackEnabled = true,
   ) {}
 
   private readonly aliases: Record<string, string> = {
@@ -146,7 +173,7 @@ class StooqProvider implements MarketDataProvider {
     const upper = ticker.trim().toUpperCase();
     if (upper !== "VIX" && upper !== "^VIX") return [];
     const url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       headers: {
         "User-Agent": "market-command-centre/1.0",
       },
@@ -188,7 +215,7 @@ class StooqProvider implements MarketDataProvider {
     const hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
     for (const host of hosts) {
       const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: {
           "User-Agent": "market-command-centre/1.0",
         },
@@ -321,13 +348,13 @@ class StooqProvider implements MarketDataProvider {
       Accept: "application/json",
       "User-Agent": "market-command-centre/1.0",
     };
-    const stable = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, { headers });
+    const stable = await fetchWithTimeout(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, { headers });
     if (stable.ok) {
       const rows = this.parseFmpBars(ticker, await stable.json() as never);
       if (rows.length > 0) return rows;
     }
 
-    const light = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/light?${params.toString()}`, { headers });
+    const light = await fetchWithTimeout(`https://financialmodelingprep.com/stable/historical-price-eod/light?${params.toString()}`, { headers });
     if (light.ok) {
       const rows = this.parseFmpLightBars(ticker, await light.json() as never);
       if (rows.length > 0) return rows;
@@ -339,7 +366,7 @@ class StooqProvider implements MarketDataProvider {
     if (startDate) legacyParams.set("from", startDate);
     if (endDate) legacyParams.set("to", endDate);
     const symbol = encodeURIComponent(ticker.trim().toUpperCase());
-    const legacy = await fetch(`https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?${legacyParams.toString()}`, { headers });
+    const legacy = await fetchWithTimeout(`https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?${legacyParams.toString()}`, { headers });
     if (!legacy.ok) return [];
     return this.parseFmpBars(ticker, await legacy.json() as never);
   }
@@ -352,7 +379,7 @@ class StooqProvider implements MarketDataProvider {
       outputsize: "compact",
       apikey: this.alphaVantageApiKey,
     });
-    const res = await fetch(`https://www.alphavantage.co/query?${params.toString()}`, {
+    const res = await fetchWithTimeout(`https://www.alphavantage.co/query?${params.toString()}`, {
       headers: {
         Accept: "application/json",
         "User-Agent": "market-command-centre/1.0",
@@ -397,7 +424,7 @@ class StooqProvider implements MarketDataProvider {
         const cboeVix = await this.fetchCboeVixBars(ticker);
         if (cboeVix.length > 0) return cboeVix;
       }
-      if (this.yahooPreferredTickers.has(upper)) {
+      if (this.fallbackEnabled && this.yahooPreferredTickers.has(upper)) {
         const yahooRows = await this.fetchYahooIndexBars(ticker);
         const yahooLatest = latestBarDate(yahooRows);
         if (yahooLatest && (!endDate || yahooLatest >= endDate)) return yahooRows;
@@ -413,7 +440,7 @@ class StooqProvider implements MarketDataProvider {
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
       let csv = "";
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: {
             "User-Agent": "market-command-centre/1.0",
           },
@@ -424,9 +451,9 @@ class StooqProvider implements MarketDataProvider {
         }
         await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
       }
-      if (!csv) return await this.fetchYahooIndexBars(ticker);
+      if (!csv) return this.fallbackEnabled ? await this.fetchYahooIndexBars(ticker) : [];
       const lines = csv.split("\n").map((l) => l.trim()).filter(Boolean);
-      if (lines.length <= 1) return await this.fetchYahooIndexBars(ticker);
+      if (lines.length <= 1) return this.fallbackEnabled ? await this.fetchYahooIndexBars(ticker) : [];
       const out: DailyBar[] = [];
       for (const line of lines.slice(1)) {
         const [date, o, h, l, c, v] = line.split(",");
@@ -448,10 +475,11 @@ class StooqProvider implements MarketDataProvider {
         });
       }
       if (out.length === 0) {
+        if (!this.fallbackEnabled) return [];
         return await this.fetchYahooIndexBars(ticker);
       }
       const stooqLatest = latestBarDate(out);
-      if (endDate && stooqLatest && stooqLatest < endDate) {
+      if (this.fallbackEnabled && endDate && stooqLatest && stooqLatest < endDate) {
         const yahooRows = await this.fetchYahooIndexBars(ticker);
         const yahooLatest = latestBarDate(yahooRows);
         if (yahooLatest && yahooLatest > stooqLatest) return yahooRows;
@@ -465,6 +493,7 @@ class StooqProvider implements MarketDataProvider {
       return out;
     } catch (error) {
       console.error("stooq ticker fetch failed", { ticker, error });
+      if (!this.fallbackEnabled) return [];
       try {
         const yahooRows = await this.fetchYahooIndexBars(ticker);
         if (yahooRows.length > 0) return yahooRows;
@@ -501,6 +530,7 @@ class AlpacaProvider implements MarketDataProvider {
   private readonly key: string;
   private readonly secret: string;
   private readonly feed: string;
+  private readonly fallbackEnabled: boolean;
   private readonly fallbackPreferredTickers: Set<string>;
   private readonly stooqFallback: StooqProvider;
 
@@ -508,8 +538,14 @@ class AlpacaProvider implements MarketDataProvider {
     this.key = env.ALPACA_API_KEY ?? "";
     this.secret = env.ALPACA_API_SECRET ?? "";
     this.feed = env.ALPACA_FEED ?? "iex";
+    this.fallbackEnabled = options.fallbackEnabled ?? true;
     this.fallbackPreferredTickers = buildFallbackPreferredTickers(options.yahooPreferredTickers);
-    this.stooqFallback = new StooqProvider(this.fallbackPreferredTickers, env.FMP_API_KEY ?? "", env.ALPHA_VANTAGE_API_KEY ?? "");
+    this.stooqFallback = new StooqProvider(
+      this.fallbackPreferredTickers,
+      env.FMP_API_KEY ?? "",
+      env.ALPHA_VANTAGE_API_KEY ?? "",
+      this.fallbackEnabled,
+    );
     if (!this.key || !this.secret) {
       throw new Error("ALPACA_API_KEY and ALPACA_API_SECRET are required when DATA_PROVIDER=alpaca");
     }
@@ -560,7 +596,7 @@ class AlpacaProvider implements MarketDataProvider {
         feed,
       });
       if (pageToken) params.set("page_token", pageToken);
-      const res = await fetch(`${this.baseUrl}?${params.toString()}`, {
+      const res = await fetchWithTimeout(`${this.baseUrl}?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
           "APCA-API-SECRET-KEY": this.secret,
@@ -607,7 +643,7 @@ class AlpacaProvider implements MarketDataProvider {
         const latest = latestByTicker.get(ticker);
         if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
       }
-      if (this.feed === "iex") {
+      if (this.fallbackEnabled && this.feed === "iex") {
         const preferredBatch = batch.filter((ticker) => this.fallbackPreferredTickers.has(ticker.toUpperCase()));
         if (preferredBatch.length > 0) {
           try {
@@ -628,7 +664,7 @@ class AlpacaProvider implements MarketDataProvider {
         const latest = latestByTicker.get(normalized);
         return !latest || latest < endDate || (this.feed === "iex" && this.fallbackPreferredTickers.has(normalized));
       });
-      if (missingOrStale.length > 0) {
+      if (this.fallbackEnabled && missingOrStale.length > 0) {
         try {
           const fallbackRows = await this.stooqFallback.getDailyBars(missingOrStale, startDate, endDate);
           all.push(
@@ -652,7 +688,7 @@ class AlpacaProvider implements MarketDataProvider {
         symbols: chunk.join(","),
         feed: this.feed,
       });
-      const res = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+      const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
           "APCA-API-SECRET-KEY": this.secret,
@@ -685,7 +721,7 @@ class AlpacaProvider implements MarketDataProvider {
         symbols: chunk.join(","),
         feed: this.feed,
       });
-      const res = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+      const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
           "APCA-API-SECRET-KEY": this.secret,
@@ -718,14 +754,14 @@ export function getProvider(env: Env, options: ProviderOptions = {}): MarketData
   const mode = (env.DATA_PROVIDER ?? "alpaca").toLowerCase();
   if (mode === "alpaca") {
     if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
-      return new StooqProvider();
+      return new StooqProvider(new Set(), "", "", options.fallbackEnabled ?? true);
     }
     return new AlpacaProvider(env, options);
   }
-  if (mode === "stooq") return new StooqProvider();
+  if (mode === "stooq") return new StooqProvider(new Set(), "", "", options.fallbackEnabled ?? true);
   if (mode === "synthetic" || mode === "csv") return new SyntheticProvider();
   if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
-    return new StooqProvider();
+    return new StooqProvider(new Set(), "", "", options.fallbackEnabled ?? true);
   }
   return new AlpacaProvider(env, options);
 }

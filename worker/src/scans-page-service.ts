@@ -563,6 +563,9 @@ const VCP_SCAN_TIME_BUDGET_MS = 20_000;
 const VCP_SCAN_LEASE_DURATION_MS = 60_000;
 const VCP_SCAN_STALE_RUN_MS = 30 * 60_000;
 const VCP_SCAN_MAX_UNIVERSE_SIZE = 10_000;
+const SCAN_DAILY_BAR_REFRESH_BATCH_SIZE = 8;
+const SCANNER_CACHE_SCAN_NO_PROGRESS_RETRY_DELAY_MS = 15_000;
+const SCANNER_CACHE_SCAN_NO_PROGRESS_WARNING_ATTEMPTS = 3;
 const POST_CLOSE_DAILY_BARS_SCOPE = "active-us-common-stocks";
 const MAX_FETCH_RANGE = 1000;
 const MAX_PAGINATED_FETCH_TOTAL = 50000;
@@ -2807,6 +2810,12 @@ type ScannerCacheScanRunQueueRow = {
   nextAttemptAt: string | null;
 };
 
+type DailyBarRefreshOptions = {
+  providerBatchSize?: number;
+  continueOnError?: boolean;
+  fallbackEnabled?: boolean;
+};
+
 export type ScannerCacheScanRunAdvanceResult = {
   jobs: ScanRefreshJob[];
   hasMore: boolean;
@@ -2885,6 +2894,51 @@ async function markScannerCacheScanRunQueueAttempt(env: Env, runId: string): Pro
   } catch (error) {
     if (isScannerCacheQueueMissingError(error)) return;
     console.warn("scanner cache scan run queue attempt update failed", error);
+    throw error;
+  }
+}
+
+async function resetScannerCacheScanRunQueueAttempts(env: Env, runId: string): Promise<void> {
+  if (!hasScannerCacheStorage(env)) return;
+  try {
+    await env.SCANNER_CACHE_DB.prepare(
+      `UPDATE scanner_cache_scan_run_queue
+       SET attempts = 0,
+           last_attempted_at = NULL
+       WHERE run_id = ?`,
+    )
+      .bind(runId)
+      .run();
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return;
+    console.warn("scanner cache scan run queue attempt reset failed", error);
+    throw error;
+  }
+}
+
+async function loadScannerCacheScanRunQueueRow(env: Env, runId: string): Promise<ScannerCacheScanRunQueueRow | null> {
+  if (!hasScannerCacheStorage(env)) return null;
+  try {
+    const row = await env.SCANNER_CACHE_DB.prepare(
+      `SELECT
+         run_id as runId,
+         run_type as runType,
+         source,
+         priority,
+         enqueued_at as enqueuedAt,
+         last_attempted_at as lastAttemptedAt,
+         attempts,
+         next_attempt_at as nextAttemptAt
+       FROM scanner_cache_scan_run_queue
+       WHERE run_id = ?
+       LIMIT 1`,
+    )
+      .bind(runId)
+      .first<ScannerCacheScanRunQueueRow>();
+    return row ?? null;
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return null;
+    console.warn("scanner cache scan run queue row load failed", error);
     throw error;
   }
 }
@@ -5330,7 +5384,18 @@ export async function processVcpScanRun(
         computeCandidates.map((candidate) => candidate.ticker),
         identity.expectedTradingDate,
         identity.requiredBarCount,
+        {
+          providerBatchSize: SCAN_DAILY_BAR_REFRESH_BATCH_SIZE,
+          continueOnError: true,
+          fallbackEnabled: false,
+        },
       );
+      const afterRefreshRun = await loadVcpRun(env, leasedRun.id);
+      if (!afterRefreshRun) return null;
+      if (afterRefreshRun.status === "cancelled") {
+        await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+        return mapVcpRunRecordToJob(afterRefreshRun);
+      }
     }
 
     const barsByTicker = groupBarsByTicker(
@@ -5588,6 +5653,25 @@ export async function processManualRelativeStrengthScanRun(
         }
       }
     }
+    if (computeCandidates.length > 0) {
+      await ensureStoredDailyBarsCurrent(
+        env,
+        computeCandidates.map((candidate) => candidate.ticker),
+        identity.expectedTradingDate,
+        identity.requiredBarCount,
+        {
+          providerBatchSize: SCAN_DAILY_BAR_REFRESH_BATCH_SIZE,
+          continueOnError: true,
+          fallbackEnabled: false,
+        },
+      );
+      const afterRefreshRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+      if (!afterRefreshRun) return null;
+      if (afterRefreshRun.status === "cancelled") {
+        await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+        return mapManualRunRecordToJob(afterRefreshRun);
+      }
+    }
     const barsByTicker = groupBarsByTicker(
       computeCandidates.length > 0
         ? await loadStoredDailyBarsByCount(env, computeCandidates.map((candidate) => candidate.ticker), identity.expectedTradingDate, identity.requiredBarCount)
@@ -5767,6 +5851,18 @@ async function loadScannerCacheScanRefreshJobById(env: Env, runId: string): Prom
   return null;
 }
 
+async function warnScannerCacheScanRunNoProgress(env: Env, runId: string, warning: string): Promise<void> {
+  const vcpRun = await loadVcpRun(env, runId);
+  if (vcpRun && isActiveScanStatus(vcpRun.status)) {
+    await heartbeatVcpRun(env as Env & { SCANNER_CACHE_DB: D1Database }, runId, { warning });
+    return;
+  }
+  const manualRun = await loadManualRelativeStrengthRun(env, runId);
+  if (manualRun && isActiveScanStatus(manualRun.status)) {
+    await heartbeatManualRelativeStrengthRun(env as Env & { SCANNER_CACHE_DB: D1Database }, runId, { warning });
+  }
+}
+
 async function loadScannerCacheScanRunType(env: Env, runId: string): Promise<ScannerCacheScanRunType | null> {
   if (await loadVcpRun(env, runId)) return "vcp";
   if (await loadManualRelativeStrengthRun(env, runId)) return "relative-strength";
@@ -5789,7 +5885,7 @@ async function recoverActiveScannerCacheScanRuns(env: Env): Promise<number> {
 
 async function advanceQueuedScannerCacheScanRun(
   env: Env,
-  row: Pick<ScannerCacheScanRunQueueRow, "runId" | "runType">,
+  row: Pick<ScannerCacheScanRunQueueRow, "runId" | "runType"> & Partial<Pick<ScannerCacheScanRunQueueRow, "attempts">>,
   options?: { timeBudgetMs?: number; batchSize?: number },
 ): Promise<{ job: ScanRefreshJob | null; advanced: boolean; hasMore: boolean }> {
   const before = await loadScannerCacheScanRefreshJobById(env, row.runId);
@@ -5813,7 +5909,25 @@ async function advanceQueuedScannerCacheScanRun(
     || job.completedAt !== before.completedAt
   );
   if (isActiveScanStatus(job.status)) {
-    await enqueueScannerCacheScanRun(env, row.runId, row.runType, "continuation", advanced ? 0 : 15_000);
+    if (advanced) {
+      await enqueueScannerCacheScanRun(env, row.runId, row.runType, "continuation", 0);
+      await resetScannerCacheScanRunQueueAttempts(env, row.runId);
+    } else {
+      const attempts = Math.max(0, Math.trunc(Number(row.attempts ?? 0)));
+      if (attempts >= SCANNER_CACHE_SCAN_NO_PROGRESS_WARNING_ATTEMPTS) {
+        const warning = "Scan is retrying in the background because the last attempt did not finish a ticker batch.";
+        console.warn("scanner cache scan run made no progress", {
+          runId: row.runId,
+          runType: row.runType,
+          attempts,
+          processedCandidates: job.processedCandidates,
+          totalCandidates: job.totalCandidates,
+        });
+        await warnScannerCacheScanRunNoProgress(env, row.runId, warning);
+      }
+      const delayMs = Math.min(60_000, SCANNER_CACHE_SCAN_NO_PROGRESS_RETRY_DELAY_MS * Math.max(1, attempts));
+      await enqueueScannerCacheScanRun(env, row.runId, row.runType, "continuation", delayMs);
+    }
     return { job, advanced, hasMore: true };
   }
   await removeScannerCacheScanRunFromQueue(env, row.runId);
@@ -5844,7 +5958,8 @@ export async function advanceScannerCacheScanRuns(
     await enqueueScannerCacheScanRun(env, options.runId, runType, "manual");
     try {
       await markScannerCacheScanRunQueueAttempt(env, options.runId);
-      const result = await advanceQueuedScannerCacheScanRun(env, { runId: options.runId, runType }, options);
+      const queueRow = await loadScannerCacheScanRunQueueRow(env, options.runId);
+      const result = await advanceQueuedScannerCacheScanRun(env, queueRow ?? { runId: options.runId, runType }, options);
       if (result.job) jobs.push(result.job);
       advanced = result.advanced;
       hasMore = result.hasMore;
@@ -5863,7 +5978,8 @@ export async function advanceScannerCacheScanRuns(
   for (const row of rows) {
     try {
       await markScannerCacheScanRunQueueAttempt(env, row.runId);
-      const result = await advanceQueuedScannerCacheScanRun(env, row, options);
+      const attemptedRow = await loadScannerCacheScanRunQueueRow(env, row.runId);
+      const result = await advanceQueuedScannerCacheScanRun(env, attemptedRow ?? row, options);
       if (result.job) jobs.push(result.job);
       advanced = advanced || result.advanced;
       hasMore = hasMore || result.hasMore;
@@ -5904,6 +6020,7 @@ async function ensureStoredDailyBarsCurrent(
   tickers: string[],
   expectedTradingDate: string,
   requiredBarCount: number,
+  options: DailyBarRefreshOptions = {},
 ): Promise<void> {
   const uniqueTickers = Array.from(new Set(
     tickers
@@ -5923,7 +6040,9 @@ async function ensureStoredDailyBarsCurrent(
       tickers: staleOrMissingTickers,
       startDate,
       endDate: expectedTradingDate,
-      provider: getProvider(env),
+      provider: getProvider(env, { fallbackEnabled: options.fallbackEnabled }),
+      providerBatchSize: options.providerBatchSize,
+      continueOnError: options.continueOnError,
     });
   }
   const sparseTickers = uniqueTickers.filter((ticker) => {
@@ -5935,8 +6054,10 @@ async function ensureStoredDailyBarsCurrent(
       tickers: sparseTickers,
       startDate,
       endDate: expectedTradingDate,
-      provider: getProvider(env),
+      provider: getProvider(env, { fallbackEnabled: options.fallbackEnabled }),
       replaceExisting: true,
+      providerBatchSize: options.providerBatchSize,
+      continueOnError: options.continueOnError,
     });
   }
 }
@@ -7795,7 +7916,11 @@ async function prepareRelativeStrengthTickersForMaterialization(
       .filter((ticker) => ticker && ticker !== benchmarkTicker && ticker !== identity.benchmarkTicker),
   ));
   if (candidateTickers.length === 0) return;
-  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount);
+  await ensureStoredDailyBarsCurrent(env, candidateTickers, identity.expectedTradingDate, identity.requiredBarCount, {
+    providerBatchSize: SCAN_DAILY_BAR_REFRESH_BATCH_SIZE,
+    continueOnError: true,
+    fallbackEnabled: false,
+  });
   await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
 }
 

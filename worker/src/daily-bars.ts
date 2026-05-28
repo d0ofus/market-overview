@@ -3,6 +3,7 @@ import type { Env } from "./types";
 
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const BAR_WRITE_CHUNK_SIZE = 200;
+const DEFAULT_PROVIDER_BATCH_SIZE = 80;
 
 function addUtcDays(isoDate: string, days: number): string {
   const parsed = new Date(`${isoDate}T00:00:00Z`);
@@ -31,6 +32,15 @@ async function ensureSymbolsExist(env: Env, tickers: string[]): Promise<void> {
       .bind(ticker, ticker, "equity"),
   );
   await runStatementsInChunks(env, statements);
+}
+
+function chunkTickers(tickers: string[], chunkSize: number): string[][] {
+  const size = Math.max(1, Math.trunc(chunkSize));
+  const chunks: string[][] = [];
+  for (let index = 0; index < tickers.length; index += size) {
+    chunks.push(tickers.slice(index, index + size));
+  }
+  return chunks;
 }
 
 async function loadLatestBarDates(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
@@ -88,6 +98,33 @@ function dedupeFetchedBars(
   return Array.from(byTickerDate.values());
 }
 
+async function writeFetchedDailyBars(
+  env: Env,
+  bars: DailyBar[],
+  latestByTicker: Map<string, string | null>,
+  startDate: string,
+  endDate: string,
+  replaceExisting: boolean,
+): Promise<number> {
+  const barsToWrite = dedupeFetchedBars(bars, latestByTicker, startDate, endDate, replaceExisting);
+  if (barsToWrite.length === 0) return 0;
+  await ensureSymbolsExist(env, barsToWrite.map((bar) => bar.ticker));
+  await runStatementsInChunks(
+    env,
+    barsToWrite.map((bar) =>
+      env.DB.prepare(
+        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume ?? 0),
+    ),
+  );
+  for (const bar of barsToWrite) {
+    const ticker = bar.ticker.toUpperCase();
+    const latest = latestByTicker.get(ticker);
+    if (!latest || bar.date > latest) latestByTicker.set(ticker, bar.date);
+  }
+  return barsToWrite.length;
+}
+
 export async function refreshDailyBarsIncremental(env: Env, input: {
   tickers: string[];
   startDate: string;
@@ -95,6 +132,8 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   maxTickers?: number;
   provider?: MarketDataProvider;
   replaceExisting?: boolean;
+  providerBatchSize?: number;
+  continueOnError?: boolean;
 }): Promise<{ requestedTickers: number; fetchedRows: number; writtenRows: number; skippedCurrentTickers: number }> {
   const tickers = normalizeTickers(input.tickers, input.maxTickers);
   if (tickers.length === 0) {
@@ -109,30 +148,39 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   const skippedCurrentTickers = input.replaceExisting
     ? 0
     : tickers.length - Array.from(grouped.values()).reduce((sum, rows) => sum + rows.length, 0);
-  const fetchedBars: DailyBar[] = [];
+  let fetchedRows = 0;
+  let writtenRows = 0;
+  const providerBatchSize = Math.max(1, Math.trunc(input.providerBatchSize ?? DEFAULT_PROVIDER_BATCH_SIZE));
 
   for (const [startDate, groupTickers] of grouped) {
-    const rows = await provider.getDailyBars(groupTickers, startDate, input.endDate);
-    fetchedBars.push(...rows);
-  }
-
-  const barsToWrite = dedupeFetchedBars(fetchedBars, latestByTicker, input.startDate, input.endDate, input.replaceExisting ?? false);
-  if (barsToWrite.length > 0) {
-    await ensureSymbolsExist(env, barsToWrite.map((bar) => bar.ticker));
-    await runStatementsInChunks(
-      env,
-      barsToWrite.map((bar) =>
-        env.DB.prepare(
-          "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume ?? 0),
-      ),
-    );
+    for (const chunk of chunkTickers(groupTickers, providerBatchSize)) {
+      try {
+        const rows = await provider.getDailyBars(chunk, startDate, input.endDate);
+        fetchedRows += rows.length;
+        writtenRows += await writeFetchedDailyBars(
+          env,
+          rows,
+          latestByTicker,
+          input.startDate,
+          input.endDate,
+          input.replaceExisting ?? false,
+        );
+      } catch (error) {
+        if (!input.continueOnError) throw error;
+        console.warn("daily bars provider chunk failed", {
+          tickers: chunk,
+          startDate,
+          endDate: input.endDate,
+          error,
+        });
+      }
+    }
   }
 
   return {
     requestedTickers: tickers.length,
-    fetchedRows: fetchedBars.length,
-    writtenRows: barsToWrite.length,
+    fetchedRows,
+    writtenRows,
     skippedCurrentTickers,
   };
 }
