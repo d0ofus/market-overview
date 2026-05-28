@@ -1,8 +1,9 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Columns3, Copy, Loader2, Plus, RefreshCw, Save, Settings2, Table2, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Columns3, Copy, Loader2, Plus, RefreshCw, Save, Settings2, Square, Table2, Trash2 } from "lucide-react";
 import {
+  cancelScanRefreshJob,
   createScanPreset,
   createScanCompilePreset,
   deleteScanCompilePreset,
@@ -296,7 +297,11 @@ function formatScanRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | 
   }
   const runtime = job.status === "running" || job.status === "queued"
     ? `elapsed ${formatDurationMs(job.elapsedMs)}`
-    : `completed in ${formatDurationMs(job.durationMs ?? job.elapsedMs)}`;
+    : job.status === "cancelled"
+      ? `stopped after ${formatDurationMs(job.durationMs ?? job.elapsedMs)}`
+      : job.status === "failed"
+        ? `failed after ${formatDurationMs(job.durationMs ?? job.elapsedMs)}`
+        : `completed in ${formatDurationMs(job.durationMs ?? job.elapsedMs)}`;
   const verified = job.status === "completed" && snapshot && snapshot.status !== "error"
     ? " Latest-session output verified."
     : "";
@@ -538,6 +543,7 @@ export function ScansPageDashboard() {
   const [loading, setLoading] = useState(true);
   const [compiledLoading, setCompiledLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [stoppingRefresh, setStoppingRefresh] = useState(false);
   const [compiledRefreshing, setCompiledRefreshing] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("scan");
   const [saving, setSaving] = useState(false);
@@ -800,22 +806,44 @@ export function ScansPageDashboard() {
   useEffect(() => {
     if (!refreshJob || (refreshJob.status !== "queued" && refreshJob.status !== "running")) return;
     if (!selectedPresetId) return;
-    const timeoutId = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const response = await getLatestScanRefreshJob(selectedPresetId);
-          setRefreshJob(response.job ?? null);
-          if (response.snapshot) setSnapshot(response.snapshot);
-          if (response.job?.status === "completed" && selectedCompilePreset?.presetIds.includes(response.job.presetId)) {
-            await loadCompiled(selectedCompilePresetId);
-          }
-        } catch {
-          // Keep the current snapshot visible while the background refresh continues.
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let failureCount = 0;
+
+    const scheduleNext = (delayMs: number) => {
+      timeoutId = window.setTimeout(() => {
+        void poll();
+      }, delayMs);
+    };
+
+    const poll = async () => {
+      let shouldContinue = true;
+      try {
+        const response = await getLatestScanRefreshJob(selectedPresetId);
+        if (cancelled) return;
+        const nextJob = response.job ?? null;
+        setRefreshJob(nextJob);
+        if (response.snapshot) setSnapshot(response.snapshot);
+        if (nextJob?.status === "completed" && selectedCompilePreset?.presetIds.includes(nextJob.presetId)) {
+          await loadCompiled(selectedCompilePresetId);
         }
-      })();
-    }, 2000);
-    return () => window.clearTimeout(timeoutId);
-  }, [loadCompiled, refreshJob, selectedCompilePreset, selectedCompilePresetId, selectedPresetId]);
+        shouldContinue = nextJob?.status === "queued" || nextJob?.status === "running";
+        failureCount = 0;
+      } catch {
+        // Keep the current snapshot visible while the background refresh continues.
+        failureCount += 1;
+      }
+      if (!cancelled && shouldContinue) {
+        scheduleNext(Math.min(10_000, 2_000 * Math.max(1, failureCount + 1)));
+      }
+    };
+
+    scheduleNext(2000);
+    return () => {
+      cancelled = true;
+      if (timeoutId != null) window.clearTimeout(timeoutId);
+    };
+  }, [refreshJob?.id, refreshJob?.status, selectedCompilePreset?.presetIds, selectedCompilePresetId, selectedPresetId]);
 
   useEffect(() => {
     void loadCompiled(selectedCompilePresetId);
@@ -996,8 +1024,9 @@ export function ScansPageDashboard() {
       setExpandedTicker(null);
       setNewsByTicker({});
       if (response.async && response.job) {
+        const label = response.job.jobType === "vcp" ? "VCP" : "RS";
         setMessage(
-          `Started RS refresh for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.fullCandidateCount} checked, ${response.job.cacheHitCount ?? 0} cache reused, ${response.job.computedCount ?? 0} newly computed.`,
+          `Started ${label} refresh for ${response.job.expectedTradingDate ?? "the latest session"}: ${response.job.processedCandidates}/${response.job.fullCandidateCount} checked, ${response.job.cacheHitCount ?? 0} cache reused, ${response.job.computedCount ?? 0} newly computed.`,
         );
       } else if (response.snapshot) {
         setMessage(
@@ -1012,6 +1041,23 @@ export function ScansPageDashboard() {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh scans.");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const onStopRefresh = async () => {
+    if (!refreshJob || (refreshJob.status !== "queued" && refreshJob.status !== "running")) return;
+    setStoppingRefresh(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await cancelScanRefreshJob(refreshJob.id);
+      setRefreshJob(response.job);
+      if (response.snapshot) setSnapshot(response.snapshot);
+      setMessage(`${response.job.jobType === "vcp" ? "VCP" : "RS"} refresh stopped. Displaying the last completed snapshot.`);
+    } catch (stopError) {
+      setError(stopError instanceof Error ? stopError.message : "Failed to stop scan refresh.");
+    } finally {
+      setStoppingRefresh(false);
     }
   };
 
@@ -1162,6 +1208,8 @@ export function ScansPageDashboard() {
     );
   }
 
+  const canStopRefresh = Boolean(refreshJob && (refreshJob.status === "queued" || refreshJob.status === "running"));
+
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),26rem]">
       <section className="min-w-0 space-y-4">
@@ -1179,7 +1227,7 @@ export function ScansPageDashboard() {
                   {snapshot?.status ?? "empty"}
                 </span>
                 {refreshJob ? (
-                  <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${refreshJob.status === "failed" ? "bg-red-500/15 text-red-300" : refreshJob.status === "completed" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent/15 text-accent"}`}>
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${refreshJob.status === "failed" ? "bg-red-500/15 text-red-300" : refreshJob.status === "cancelled" ? "bg-amber-500/15 text-amber-200" : refreshJob.status === "completed" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent/15 text-accent"}`}>
                     {refreshJob.status}
                   </span>
                 ) : null}
@@ -1213,10 +1261,16 @@ export function ScansPageDashboard() {
                   Export TXT
                 </a>
               )}
-              <button className={PRIMARY_BUTTON_CLASS} disabled={!selectedPresetId || refreshing} onClick={() => void onRefresh()}>
+              <button className={PRIMARY_BUTTON_CLASS} disabled={!selectedPresetId || refreshing || stoppingRefresh} onClick={() => void onRefresh()}>
                 <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
                 {refreshing ? "Refreshing..." : "Refresh Scan"}
               </button>
+              {canStopRefresh ? (
+                <button className={DANGER_BUTTON_CLASS} disabled={stoppingRefresh} onClick={() => void onStopRefresh()}>
+                  {stoppingRefresh ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                  {stoppingRefresh ? "Stopping..." : "Stop Scan"}
+                </button>
+              ) : null}
             </div>
           </div>
 

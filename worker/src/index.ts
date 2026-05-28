@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
 import type { Env, PostCloseDailyBarRefreshJob } from "./types";
 import {
@@ -110,6 +110,8 @@ import {
   updateOverviewFocusItem,
 } from "./overview-focus-service";
 import {
+  advanceScannerCacheScanRuns,
+  cancelScanRefreshJob,
   cleanupOldScansPageData,
   deleteScanCompilePreset,
   loadCompiledScansSnapshot,
@@ -127,7 +129,6 @@ import {
   loadScanPreset,
   backfillScannerCacheRsCache,
   loadScannerCacheRsCacheStatus,
-  processScannerCacheScanRun,
   refreshActiveRelativeStrengthPresets,
   refreshScanCompilePreset,
   refreshScansSnapshot,
@@ -345,6 +346,42 @@ const isAuthed = (req: Request, env: Env): boolean => {
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
 };
+
+const scannerCachePulseSchema = z.object({
+  runId: z.string().trim().min(1).nullable().optional(),
+});
+const SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS = 25_000;
+
+function scannerCachePulseHeaders(env: Env): Headers {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (env.ADMIN_SECRET) headers.set("authorization", `Bearer ${env.ADMIN_SECRET}`);
+  return headers;
+}
+
+async function runScannerCacheScanPulse(env: Env, origin: string, runId?: string | null): Promise<void> {
+  try {
+    const result = await advanceScannerCacheScanRuns(env, {
+      runId: runId ?? null,
+      timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
+    });
+    if (!result.hasMore || !result.advanced) return;
+    const response = await fetch(`${origin}/api/internal/scans/runner/pulse`, {
+      method: "POST",
+      headers: scannerCachePulseHeaders(env),
+      body: JSON.stringify(runId ? { runId } : {}),
+    });
+    if (!response.ok) {
+      console.warn("scanner cache scan pulse continuation failed", response.status, await response.text().catch(() => ""));
+    }
+  } catch (error) {
+    console.error("scanner cache scan pulse failed", error);
+  }
+}
+
+function scheduleScannerCacheScanPulse(c: any, runId?: string | null): void {
+  const origin = new URL(c.req.url).origin;
+  c.executionCtx.waitUntil(runScannerCacheScanPulse(c.env, origin, runId ?? null));
+}
 
 function patternErrorResponse(c: any, error: unknown) {
   if (error instanceof PatternDbUnavailableError) {
@@ -3519,7 +3556,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
   try {
     const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
     if (result.async && result.job) {
-      c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, result.job.id));
+      scheduleScannerCacheScanPulse(c, result.job.id);
     }
     return c.json({ ok: true, ...result });
   } catch (error) {
@@ -3558,7 +3595,7 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
+    scheduleScannerCacheScanPulse(c, payload.job.id);
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
@@ -3568,9 +3605,38 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
+    scheduleScannerCacheScanPulse(c, payload.job.id);
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
+});
+
+app.post("/api/admin/scans/refresh-jobs/:jobId/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await cancelScanRefreshJob(c.env, c.req.param("jobId"));
+    if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
+    return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to cancel scan refresh job." }, 500);
+  }
+});
+
+app.post("/api/internal/scans/runner/pulse", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = scannerCachePulseSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await advanceScannerCacheScanRuns(c.env, {
+      runId: payload.runId ?? null,
+      timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
+    });
+    if (result.hasMore && result.advanced) {
+      scheduleScannerCacheScanPulse(c, payload.runId ?? null);
+    }
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    if (error instanceof ZodError) return c.json({ error: error.issues[0]?.message ?? "Invalid scanner cache scan pulse payload." }, 400);
+    return c.json({ error: error instanceof Error ? error.message : "Failed to advance scanner cache scan runs." }, 500);
+  }
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {
@@ -5443,6 +5509,15 @@ export default {
       console.error("scheduled etf constituent slice failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
+    try {
+      await advanceScannerCacheScanRuns(env, {
+        maxRuns: 2,
+        batchSize: workerSchedule.rsBackgroundBatchSize,
+        timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+      });
+    } catch (error) {
+      console.error("scheduled scanner-cache scan continuation failed", error);
+    }
     if (workerSchedule.rsBackgroundEnabled) {
       try {
         await refreshActiveRelativeStrengthPresets(env, {

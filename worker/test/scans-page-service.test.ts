@@ -8,6 +8,7 @@ import {
 } from "../src/relative-strength";
 import {
   buildTradingViewScanPayload,
+  cancelScanRefreshJob,
   deleteScanPreset,
   duplicateScanPreset,
   fetchTradingViewScanRows,
@@ -91,7 +92,7 @@ type MutableScanRefreshJob = {
   id: string;
   presetId: string;
   jobType: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -128,7 +129,7 @@ type MutableRelativeStrengthMaterializationRun = {
   rsMaType: "SMA" | "EMA";
   rsMaLength: number;
   newHighLookback: number;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -3319,7 +3320,7 @@ describe("scans page service", () => {
     expect(batchQueries[3]).toContain("DELETE FROM scan_presets");
   });
 
-  it("creates a manual-only SCANNER_CACHE_DB run without calling TradingView and reuses the active run", async () => {
+  it("creates a manual-only SCANNER_CACHE_DB run from prefilter rows and reuses the active run", async () => {
     const presetRow = {
       id: "preset-rs-manual",
       name: "Manual RS",
@@ -3347,7 +3348,15 @@ describe("scans page service", () => {
     let activeRun: any = null;
     let insertRunCalls = 0;
     const runCandidates: any[] = [];
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { s: "NASDAQ:AAA", d: ["AAA Inc", "Technology", "Software", 5.1, 100_000_000, 1.8, 25, 1_000_000, 25_000_000, 10, "NASDAQ", "stock"] },
+          { s: "NYSE:BBB", d: ["BBB Inc", "Industrials", "Machinery", 2.4, 80_000_000, 1.2, 40, 800_000, 32_000_000, 20, "NYSE", "stock"] },
+        ],
+      }),
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const env = {
@@ -3480,7 +3489,168 @@ describe("scans page service", () => {
     expect(second.job?.id).toBe(first.job?.id);
     expect(insertRunCalls).toBe(1);
     expect(runCandidates).toHaveLength(2);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an active manual SCANNER_CACHE_DB run and keeps the latest usable snapshot", async () => {
+    const snapshotRow = {
+      id: "snapshot-old",
+      presetId: "preset-rs-manual",
+      providerLabel: "Relative Strength",
+      generatedAt: "2026-04-24T00:00:00.000Z",
+      rowCount: 0,
+      matchedRowCount: 0,
+      status: "ok",
+      error: null,
+      presetName: "Manual RS",
+    };
+    const presetRow = {
+      id: "preset-rs-manual",
+      name: "Manual RS",
+      scanType: "relative-strength",
+      isDefault: 0,
+      isActive: 1,
+      rulesJson: "[]",
+      prefilterRulesJson: "[]",
+      benchmarkTicker: "SPY",
+      verticalOffset: 30,
+      rsMaLength: 21,
+      rsMaType: "EMA",
+      newHighLookback: 252,
+      outputMode: "all",
+      sortField: "approxRsRating",
+      sortDirection: "desc",
+      rowLimit: 100,
+      createdAt: "2026-04-24T00:00:00.000Z",
+      updatedAt: "2026-04-24T00:00:00.000Z",
+    };
+    const run = {
+      id: "run-active",
+      presetId: "preset-rs-manual",
+      presetName: "Manual RS",
+      configKey: "SPY|EMA|21|252",
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      expectedTradingDate: "2026-04-24",
+      status: "running",
+      requestedBy: "manual",
+      createdAt: "2026-04-24T01:00:00.000Z",
+      startedAt: "2026-04-24T01:01:00.000Z",
+      updatedAt: "2026-04-24T01:02:00.000Z",
+      heartbeatAt: "2026-04-24T01:02:00.000Z",
+      completedAt: null,
+      error: null,
+      warning: null,
+      totalTickers: 10,
+      processedTickers: 4,
+      matchedTickers: 2,
+      cursorOffset: 4,
+      latestSnapshotId: null,
+      leaseOwner: "worker-1",
+      leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      cacheHitTickers: 1,
+      computedTickers: 3,
+      missingBarsTickers: 0,
+      insufficientHistoryTickers: 0,
+      errorTickers: 0,
+      staleBenchmarkTickers: 0,
+      durationMs: null,
+    };
+    const queuedRunIds = new Set(["run-active"]);
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            async first() {
+              if (sql.includes("FROM scan_presets WHERE id = ?")) return presetRow;
+              if (sql.includes("FROM scan_snapshots")) return snapshotRow;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM scan_rows WHERE snapshot_id = ?")) return { results: [] };
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+      SCANNER_CACHE_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) {
+                return run.id === args[0] ? run : null;
+              }
+              return null;
+            },
+            async all() {
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("UPDATE rs_scan_runs")) {
+                run.status = "cancelled";
+                run.warning = "Cancelled by user.";
+                run.error = null;
+                run.completedAt = String(args[args.length - 1 - 1] ?? "2026-04-24T01:03:00.000Z");
+                run.leaseOwner = null;
+                run.leaseExpiresAt = null;
+              }
+              if (sql.includes("DELETE FROM scanner_cache_scan_run_queue")) {
+                queuedRunIds.delete(String(args[0] ?? ""));
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+    } as any;
+
+    const result = await cancelScanRefreshJob(env, "run-active");
+
+    expect(result?.job.status).toBe("cancelled");
+    expect(result?.job.warning).toBe("Cancelled by user.");
+    expect(result?.snapshot?.id).toBe("snapshot-old");
+    expect(run.leaseOwner).toBeNull();
+    expect(run.leaseExpiresAt).toBeNull();
+    expect(queuedRunIds.has("run-active")).toBe(false);
   });
 
   it("reuses fresh manual relative strength feature cache rows during processing", async () => {

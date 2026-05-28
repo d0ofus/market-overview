@@ -151,7 +151,7 @@ export type CompiledScansSnapshot = {
 export type ScanCompilePresetRefreshMemberResult = {
   presetId: string;
   presetName: string;
-  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed";
+  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed" | "cancelled";
   rowCount: number;
   error: string | null;
   snapshot: ScanSnapshot | null;
@@ -169,7 +169,7 @@ export type ScanCompilePresetRefreshResult = {
   memberResults: ScanCompilePresetRefreshMemberResult[];
 };
 
-export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed";
+export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type ScanRefreshJob = {
   id: string;
@@ -1001,6 +1001,7 @@ function mapManualRunRecordToJob(
   options?: { appliesToPreset?: boolean },
 ): ScanRefreshJob {
   const computedElapsedMs = elapsedMs(record.startedAt ?? record.createdAt, record.completedAt);
+  const terminal = isTerminalScanStatus(record.status);
   return {
     id: record.id,
     presetId: record.presetId,
@@ -1026,9 +1027,9 @@ function mapManualRunRecordToJob(
     lastAdvancedAt: record.heartbeatAt ?? record.updatedAt,
     deferredTickerCount: 0,
     warning: record.warning,
-    phase: record.status === "completed" || record.status === "failed" ? record.status : "manual",
-    elapsedMs: record.status === "completed" || record.status === "failed" ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
-    durationMs: record.durationMs ?? (record.status === "completed" || record.status === "failed" ? computedElapsedMs : null),
+    phase: terminal ? record.status : "manual",
+    elapsedMs: terminal ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
+    durationMs: record.durationMs ?? (terminal ? computedElapsedMs : null),
     cacheHitCount: record.cacheHitTickers,
     computedCount: record.computedTickers,
     missingBarsCount: record.missingBarsTickers,
@@ -2793,6 +2794,133 @@ function hasScannerCacheStorage(env: Env): env is Env & { SCANNER_CACHE_DB: D1Da
   return Boolean(env.SCANNER_CACHE_DB);
 }
 
+type ScannerCacheScanRunType = "relative-strength" | "vcp";
+
+type ScannerCacheScanRunQueueRow = {
+  runId: string;
+  runType: ScannerCacheScanRunType;
+  source: string | null;
+  priority: number;
+  enqueuedAt: string;
+  lastAttemptedAt: string | null;
+  attempts: number;
+  nextAttemptAt: string | null;
+};
+
+export type ScannerCacheScanRunAdvanceResult = {
+  jobs: ScanRefreshJob[];
+  hasMore: boolean;
+  advanced: boolean;
+  queuedCount: number;
+  recoveredCount: number;
+  processedCount: number;
+  errors: string[];
+};
+
+function isScannerCacheQueueMissingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const lower = message.toLowerCase();
+  return lower.includes("no such table") && lower.includes("scanner_cache_scan_run_queue");
+}
+
+function scannerCacheRunQueuePriority(source: string | null | undefined): number {
+  if (source === "manual") return 100;
+  if (source === "recovery") return 25;
+  return 50;
+}
+
+async function enqueueScannerCacheScanRun(
+  env: Env,
+  runId: string,
+  runType: ScannerCacheScanRunType,
+  source = "continuation",
+  delayMs = 0,
+): Promise<boolean> {
+  if (!hasScannerCacheStorage(env)) return false;
+  const nextAttemptAt = delayMs > 0 ? new Date(Date.now() + delayMs).toISOString() : null;
+  try {
+    await env.SCANNER_CACHE_DB.prepare(
+      `INSERT INTO scanner_cache_scan_run_queue
+        (run_id, run_type, source, priority, enqueued_at, last_attempted_at, attempts, next_attempt_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 0, ?)
+       ON CONFLICT(run_id) DO UPDATE SET
+         run_type = excluded.run_type,
+         source = excluded.source,
+         priority = excluded.priority,
+         enqueued_at = CURRENT_TIMESTAMP,
+         next_attempt_at = excluded.next_attempt_at`,
+    )
+      .bind(runId, runType, source, scannerCacheRunQueuePriority(source), nextAttemptAt)
+      .run();
+    return true;
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return false;
+    console.warn("scanner cache scan run enqueue failed", error);
+    throw error;
+  }
+}
+
+async function removeScannerCacheScanRunFromQueue(env: Env, runId: string): Promise<void> {
+  if (!hasScannerCacheStorage(env)) return;
+  try {
+    await env.SCANNER_CACHE_DB.prepare("DELETE FROM scanner_cache_scan_run_queue WHERE run_id = ?").bind(runId).run();
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return;
+    console.warn("scanner cache scan run queue removal failed", error);
+    throw error;
+  }
+}
+
+async function markScannerCacheScanRunQueueAttempt(env: Env, runId: string): Promise<void> {
+  if (!hasScannerCacheStorage(env)) return;
+  try {
+    await env.SCANNER_CACHE_DB.prepare(
+      `UPDATE scanner_cache_scan_run_queue
+       SET last_attempted_at = CURRENT_TIMESTAMP,
+           attempts = attempts + 1
+       WHERE run_id = ?`,
+    )
+      .bind(runId)
+      .run();
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return;
+    console.warn("scanner cache scan run queue attempt update failed", error);
+    throw error;
+  }
+}
+
+async function listDueScannerCacheScanRunQueueRows(
+  env: Env,
+  limit: number,
+): Promise<ScannerCacheScanRunQueueRow[]> {
+  if (!hasScannerCacheStorage(env)) return [];
+  try {
+    const rows = await env.SCANNER_CACHE_DB.prepare(
+      `SELECT
+         run_id as runId,
+         run_type as runType,
+         source,
+         priority,
+         enqueued_at as enqueuedAt,
+         last_attempted_at as lastAttemptedAt,
+         attempts,
+         next_attempt_at as nextAttemptAt
+       FROM scanner_cache_scan_run_queue
+       WHERE next_attempt_at IS NULL
+          OR datetime(next_attempt_at) <= datetime('now')
+       ORDER BY priority DESC, datetime(enqueued_at) ASC
+       LIMIT ?`,
+    )
+      .bind(Math.max(1, Math.trunc(limit)))
+      .all<ScannerCacheScanRunQueueRow>();
+    return rows.results ?? [];
+  } catch (error) {
+    if (isScannerCacheQueueMissingError(error)) return [];
+    console.warn("scanner cache scan run queue load failed", error);
+    throw error;
+  }
+}
+
 function getRsDerivedCacheDb(env: Env): D1Database {
   return env.SCANNER_CACHE_DB ?? env.DB;
 }
@@ -3193,6 +3321,10 @@ function isActiveScanStatus(status: string | null | undefined): boolean {
   return status === "queued" || status === "running";
 }
 
+function isTerminalScanStatus(status: string | null | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 function isManualRelativeStrengthRunLeaseActive(run: Pick<ManualRelativeStrengthRunRecord, "leaseOwner" | "leaseExpiresAt">): boolean {
   if (!run.leaseOwner || !run.leaseExpiresAt) return false;
   const expiresAt = toTimestampMs(run.leaseExpiresAt);
@@ -3380,10 +3512,12 @@ async function failManualRelativeStrengthRun(env: Env, runId: string, error: str
          duration_ms = CAST((julianday('now') - julianday(COALESCE(started_at, created_at))) * 86400000 AS INTEGER),
          lease_owner = NULL,
          lease_expires_at = NULL
-     WHERE id = ?`,
+     WHERE id = ?
+       AND status != 'cancelled'`,
   )
     .bind(error, runId)
     .run();
+  await removeScannerCacheScanRunFromQueue(env, runId);
 }
 
 async function loadManualRelativeStrengthUniverseCandidates(
@@ -3487,7 +3621,7 @@ async function createManualRelativeStrengthRun(
   }
 
   const identity = buildRelativeStrengthConfigIdentity(preset);
-  const candidates = await loadManualRelativeStrengthUniverseCandidates(env, identity.expectedTradingDate);
+  const candidates = (await fetchRelativeStrengthPrefilterRows(preset)).map(snapshotRowToManualRelativeStrengthCandidate);
   const runId = crypto.randomUUID();
   try {
     await env.SCANNER_CACHE_DB.prepare(
@@ -3839,7 +3973,8 @@ async function heartbeatManualRelativeStrengthRun(
   if (updates.releaseLease) {
     fields.push("lease_owner = NULL", "lease_expires_at = NULL");
   }
-  await env.SCANNER_CACHE_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
+  const where = updates.status === "cancelled" ? "WHERE id = ?" : "WHERE id = ? AND status != 'cancelled'";
+  await env.SCANNER_CACHE_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} ${where}`)
     .bind(...values, runId)
     .run();
 }
@@ -4212,6 +4347,7 @@ async function completeManualRelativeStrengthRun(
     completedAt: new Date().toISOString(),
     releaseLease: true,
   });
+  await removeScannerCacheScanRunFromQueue(env, run.id);
   return selectedSnapshot ?? loadLatestScansSnapshot(env, preset.id);
 }
 
@@ -4233,6 +4369,7 @@ function normalizeVcpRunRecord(row: VcpRunRecord): VcpRunRecord {
 
 function mapVcpRunRecordToJob(record: VcpRunRecord): ScanRefreshJob {
   const computedElapsedMs = elapsedMs(record.startedAt ?? record.createdAt);
+  const terminal = isTerminalScanStatus(record.status);
   return {
     id: record.id,
     presetId: record.presetId,
@@ -4258,9 +4395,9 @@ function mapVcpRunRecordToJob(record: VcpRunRecord): ScanRefreshJob {
     lastAdvancedAt: record.heartbeatAt ?? record.updatedAt,
     deferredTickerCount: 0,
     warning: record.warning,
-    phase: record.status === "completed" || record.status === "failed" ? record.status : "vcp",
-    elapsedMs: record.status === "completed" || record.status === "failed" ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
-    durationMs: record.durationMs ?? (record.status === "completed" || record.status === "failed" ? computedElapsedMs : null),
+    phase: terminal ? record.status : "vcp",
+    elapsedMs: terminal ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
+    durationMs: record.durationMs ?? (terminal ? computedElapsedMs : null),
     cacheHitCount: record.cacheHitTickers,
     computedCount: record.computedTickers,
     missingBarsCount: record.missingBarsTickers,
@@ -4444,6 +4581,37 @@ async function insertVcpRunCandidates(
 }
 
 function snapshotRowToVcpCandidate(row: ScanSnapshotRow, index: number): VcpCandidateRow {
+  let exchange: string | null = null;
+  let assetClass: string | null = null;
+  try {
+    const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+    exchange = typeof raw?.exchange === "string" ? raw.exchange : null;
+    assetClass = typeof raw?.type === "string" ? raw.type : null;
+  } catch {
+    exchange = null;
+  }
+  return {
+    cursorOffset: index,
+    ticker: row.ticker.toUpperCase(),
+    name: row.name ?? row.ticker.toUpperCase(),
+    sector: row.sector ?? null,
+    industry: row.industry ?? null,
+    exchange,
+    assetClass,
+    marketCap: row.marketCap ?? null,
+    relativeVolume: row.relativeVolume ?? null,
+    avgVolume: row.avgVolume ?? null,
+    priceAvgVolume: row.priceAvgVolume ?? null,
+    price: row.price ?? null,
+    change1d: row.change1d ?? null,
+    status: "queued",
+    reason: null,
+    latestTradingDate: null,
+    source: "computed",
+  };
+}
+
+function snapshotRowToManualRelativeStrengthCandidate(row: ScanSnapshotRow, index: number): ManualRelativeStrengthCandidateRow {
   let exchange: string | null = null;
   let assetClass: string | null = null;
   try {
@@ -4866,7 +5034,8 @@ async function heartbeatVcpRun(
   if (updates.releaseLease) {
     fields.push("lease_owner = NULL", "lease_expires_at = NULL");
   }
-  await env.SCANNER_CACHE_DB.prepare(`UPDATE vcp_scan_runs SET ${fields.join(", ")} WHERE id = ?`)
+  const where = updates.status === "cancelled" ? "WHERE id = ?" : "WHERE id = ? AND status != 'cancelled'";
+  await env.SCANNER_CACHE_DB.prepare(`UPDATE vcp_scan_runs SET ${fields.join(", ")} ${where}`)
     .bind(...values, runId)
     .run();
 }
@@ -4878,6 +5047,7 @@ async function failVcpRun(env: Env & { SCANNER_CACHE_DB: D1Database }, runId: st
     completedAt: new Date().toISOString(),
     releaseLease: true,
   });
+  await removeScannerCacheScanRunFromQueue(env, runId);
 }
 
 async function acquireVcpRunLease(
@@ -5090,6 +5260,7 @@ async function completeVcpRun(
     completedAt: new Date().toISOString(),
     releaseLease: true,
   });
+  await removeScannerCacheScanRunFromQueue(env, run.id);
   return snapshot;
 }
 
@@ -5103,6 +5274,11 @@ export async function processVcpScanRun(
   if (!initialRun || !isActiveScanStatus(initialRun.status)) return initialRun ? mapVcpRunRecordToJob(initialRun) : null;
   const leasedRun = await acquireVcpRunLease(env, initialRun);
   if (!leasedRun) return mapVcpRunRecordToJob(initialRun);
+  const postLeaseRun = await loadVcpRun(env, leasedRun.id);
+  if (postLeaseRun?.status === "cancelled") {
+    await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+    return mapVcpRunRecordToJob(postLeaseRun);
+  }
 
   const preset = await loadScanPreset(env, leasedRun.presetId);
   if (!preset || preset.scanType !== "vcp") {
@@ -5127,6 +5303,12 @@ export async function processVcpScanRun(
   let errorTickers = leasedRun.errorTickers;
 
   while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
+    const currentRun = await loadVcpRun(env, leasedRun.id);
+    if (!currentRun) return null;
+    if (currentRun.status === "cancelled") {
+      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+      return mapVcpRunRecordToJob(currentRun);
+    }
     const candidates = await loadVcpRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
     const tickers = candidates.map((candidate) => candidate.ticker);
@@ -5285,10 +5467,20 @@ export async function processVcpScanRun(
       insufficientHistoryTickers,
       errorTickers,
     });
+    const afterBatchRun = await loadVcpRun(env, leasedRun.id);
+    if (!afterBatchRun) return null;
+    if (afterBatchRun.status === "cancelled") {
+      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+      return mapVcpRunRecordToJob(afterBatchRun);
+    }
   }
 
   const refreshedRun = await loadVcpRun(env, leasedRun.id);
   if (!refreshedRun) return null;
+  if (refreshedRun.status === "cancelled") {
+    await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+    return mapVcpRunRecordToJob(refreshedRun);
+  }
   if (refreshedRun.cursorOffset >= refreshedRun.totalTickers) {
     const snapshot = await completeVcpRun(env, preset, refreshedRun, matchedTickers);
     const completed = await loadVcpRun(env, leasedRun.id);
@@ -5326,6 +5518,11 @@ export async function processManualRelativeStrengthScanRun(
   if (!initialRun || !isActiveScanStatus(initialRun.status)) return initialRun ? mapManualRunRecordToJob(initialRun) : null;
   const leasedRun = await acquireManualRelativeStrengthRunLease(env, initialRun);
   if (!leasedRun) return mapManualRunRecordToJob(initialRun);
+  const postLeaseRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+  if (postLeaseRun?.status === "cancelled") {
+    await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+    return mapManualRunRecordToJob(postLeaseRun);
+  }
 
   const preset = await loadScanPreset(env, leasedRun.presetId);
   if (!preset) {
@@ -5368,6 +5565,12 @@ export async function processManualRelativeStrengthScanRun(
     : null;
 
   while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
+    const currentRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    if (!currentRun) return null;
+    if (currentRun.status === "cancelled") {
+      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+      return mapManualRunRecordToJob(currentRun);
+    }
     const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
     const tickers = candidates.map((candidate) => candidate.ticker);
@@ -5531,10 +5734,20 @@ export async function processManualRelativeStrengthScanRun(
       errorTickers,
       staleBenchmarkTickers,
     });
+    const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    if (!afterBatchRun) return null;
+    if (afterBatchRun.status === "cancelled") {
+      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+      return mapManualRunRecordToJob(afterBatchRun);
+    }
   }
 
   const refreshedRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
   if (!refreshedRun) return null;
+  if (refreshedRun.status === "cancelled") {
+    await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+    return mapManualRunRecordToJob(refreshedRun);
+  }
   if (refreshedRun.cursorOffset >= refreshedRun.totalTickers) {
     const snapshot = await completeManualRelativeStrengthRun(env, preset, refreshedRun, matchedTickers);
     const completed = await loadManualRelativeStrengthRun(env, leasedRun.id);
@@ -5544,6 +5757,133 @@ export async function processManualRelativeStrengthScanRun(
   await heartbeatManualRelativeStrengthRun(env, leasedRun.id, { releaseLease: true });
   const latest = await loadManualRelativeStrengthRun(env, leasedRun.id);
   return latest ? mapManualRunRecordToJob(latest) : null;
+}
+
+async function loadScannerCacheScanRefreshJobById(env: Env, runId: string): Promise<ScanRefreshJob | null> {
+  const vcpRun = await loadVcpRun(env, runId);
+  if (vcpRun) return mapVcpRunRecordToJob(vcpRun);
+  const manualRun = await loadManualRelativeStrengthRun(env, runId);
+  if (manualRun) return mapManualRunRecordToJob(manualRun);
+  return null;
+}
+
+async function loadScannerCacheScanRunType(env: Env, runId: string): Promise<ScannerCacheScanRunType | null> {
+  if (await loadVcpRun(env, runId)) return "vcp";
+  if (await loadManualRelativeStrengthRun(env, runId)) return "relative-strength";
+  return null;
+}
+
+async function recoverActiveScannerCacheScanRuns(env: Env): Promise<number> {
+  if (!hasScannerCacheStorage(env)) return 0;
+  let recovered = 0;
+  const activeVcpRun = await loadActiveVcpRun(env);
+  if (activeVcpRun) {
+    if (await enqueueScannerCacheScanRun(env, activeVcpRun.id, "vcp", "recovery")) recovered += 1;
+  }
+  const activeManualRun = await loadActiveManualRelativeStrengthRun(env);
+  if (activeManualRun) {
+    if (await enqueueScannerCacheScanRun(env, activeManualRun.id, "relative-strength", "recovery")) recovered += 1;
+  }
+  return recovered;
+}
+
+async function advanceQueuedScannerCacheScanRun(
+  env: Env,
+  row: Pick<ScannerCacheScanRunQueueRow, "runId" | "runType">,
+  options?: { timeBudgetMs?: number; batchSize?: number },
+): Promise<{ job: ScanRefreshJob | null; advanced: boolean; hasMore: boolean }> {
+  const before = await loadScannerCacheScanRefreshJobById(env, row.runId);
+  if (!before) {
+    await removeScannerCacheScanRunFromQueue(env, row.runId);
+    return { job: null, advanced: false, hasMore: false };
+  }
+  if (!isActiveScanStatus(before.status)) {
+    await removeScannerCacheScanRunFromQueue(env, row.runId);
+    return { job: before, advanced: false, hasMore: false };
+  }
+  const job = await processScannerCacheScanRun(env, row.runId, options);
+  if (!job) {
+    await removeScannerCacheScanRunFromQueue(env, row.runId);
+    return { job: null, advanced: false, hasMore: false };
+  }
+  const advanced = (
+    job.status !== before.status
+    || job.processedCandidates > before.processedCandidates
+    || job.cursorOffset > before.cursorOffset
+    || job.completedAt !== before.completedAt
+  );
+  if (isActiveScanStatus(job.status)) {
+    await enqueueScannerCacheScanRun(env, row.runId, row.runType, "continuation", advanced ? 0 : 15_000);
+    return { job, advanced, hasMore: true };
+  }
+  await removeScannerCacheScanRunFromQueue(env, row.runId);
+  return { job, advanced: true, hasMore: false };
+}
+
+export async function advanceScannerCacheScanRuns(
+  env: Env,
+  options?: { runId?: string | null; maxRuns?: number; timeBudgetMs?: number; batchSize?: number },
+): Promise<ScannerCacheScanRunAdvanceResult> {
+  if (!hasScannerCacheStorage(env)) {
+    return { jobs: [], hasMore: false, advanced: false, queuedCount: 0, recoveredCount: 0, processedCount: 0, errors: [] };
+  }
+
+  const jobs: ScanRefreshJob[] = [];
+  const errors: string[] = [];
+  let advanced = false;
+  let hasMore = false;
+  let processedCount = 0;
+  let recoveredCount = 0;
+
+  if (options?.runId) {
+    const runType = await loadScannerCacheScanRunType(env, options.runId);
+    if (!runType) {
+      await removeScannerCacheScanRunFromQueue(env, options.runId);
+      return { jobs, hasMore: false, advanced: false, queuedCount: 0, recoveredCount: 0, processedCount: 0, errors };
+    }
+    await enqueueScannerCacheScanRun(env, options.runId, runType, "manual");
+    try {
+      await markScannerCacheScanRunQueueAttempt(env, options.runId);
+      const result = await advanceQueuedScannerCacheScanRun(env, { runId: options.runId, runType }, options);
+      if (result.job) jobs.push(result.job);
+      advanced = result.advanced;
+      hasMore = result.hasMore;
+      processedCount = 1;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Failed to advance scanner-cache scan run.");
+      await enqueueScannerCacheScanRun(env, options.runId, runType, "continuation", 30_000);
+      hasMore = true;
+    }
+    return { jobs, hasMore, advanced, queuedCount: 1, recoveredCount: 0, processedCount, errors };
+  }
+
+  recoveredCount = await recoverActiveScannerCacheScanRuns(env);
+  const maxRuns = Math.max(1, Math.trunc(options?.maxRuns ?? 2));
+  const rows = await listDueScannerCacheScanRunQueueRows(env, maxRuns);
+  for (const row of rows) {
+    try {
+      await markScannerCacheScanRunQueueAttempt(env, row.runId);
+      const result = await advanceQueuedScannerCacheScanRun(env, row, options);
+      if (result.job) jobs.push(result.job);
+      advanced = advanced || result.advanced;
+      hasMore = hasMore || result.hasMore;
+      processedCount += 1;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : `Failed to advance ${row.runType} scanner-cache scan run.`);
+      await enqueueScannerCacheScanRun(env, row.runId, row.runType, "continuation", 30_000);
+      hasMore = true;
+    }
+  }
+
+  return {
+    jobs,
+    hasMore: hasMore || rows.length >= maxRuns,
+    advanced,
+    queuedCount: rows.length,
+    recoveredCount,
+    processedCount,
+    errors,
+  };
 }
 
 async function storeDailyBars(env: Env, bars: RelativeStrengthDailyBar[]): Promise<void> {
@@ -6214,6 +6554,7 @@ async function tryAcquireRelativeStrengthMaterializationRunLease(
          phase = ?,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?
+       AND status != 'cancelled'
        AND (
          lease_owner IS NULL
          OR lease_expires_at IS NULL
@@ -6240,7 +6581,8 @@ async function heartbeatRelativeStrengthMaterializationRunLease(
          phase = ?,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?
-       AND lease_owner = ?`,
+       AND lease_owner = ?
+       AND status != 'cancelled'`,
   )
     .bind(isoDateAfterMs(RS_RUN_LEASE_DURATION_MS), new Date().toISOString(), phase, runId, leaseOwner)
     .run();
@@ -6257,7 +6599,8 @@ async function releaseRelativeStrengthMaterializationRunLease(
          lease_expires_at = NULL,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?
-       AND lease_owner = ?`,
+       AND lease_owner = ?
+       AND status != 'cancelled'`,
   )
     .bind(runId, leaseOwner)
     .run();
@@ -6881,23 +7224,12 @@ async function updateScanRefreshJobRecord(
     fields.push("phase = ?");
     values.push(updates.phase);
   }
-  if (updates.leaseOwner !== undefined) {
-    fields.push("lease_owner = ?");
-    values.push(updates.leaseOwner);
-  }
-  if (updates.leaseExpiresAt !== undefined) {
-    fields.push("lease_expires_at = ?");
-    values.push(updates.leaseExpiresAt);
-  }
-  if (updates.heartbeatAt !== undefined) {
-    fields.push("heartbeat_at = ?");
-    values.push(updates.heartbeatAt);
-  }
   if (updates.completedAt !== undefined) {
     fields.push("completed_at = ?");
     values.push(updates.completedAt);
   }
-  await env.DB.prepare(`UPDATE scan_refresh_jobs SET ${fields.join(", ")} WHERE id = ?`)
+  const where = updates.status === "cancelled" ? "WHERE id = ?" : "WHERE id = ? AND status != 'cancelled'";
+  await env.DB.prepare(`UPDATE scan_refresh_jobs SET ${fields.join(", ")} ${where}`)
     .bind(...values, jobId)
     .run();
 }
@@ -7794,7 +8126,7 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
   run: RelativeStrengthMaterializationRunRecord,
 ): Promise<void> {
   const attachedJobs = await listScanRefreshJobRecordsForSharedRun(env, run.id, {
-    activeOnly: run.status !== "completed" && run.status !== "failed",
+    activeOnly: !isTerminalScanStatus(run.status),
   });
   const nowIso = new Date().toISOString();
   for (const job of attachedJobs) {
@@ -7808,6 +8140,19 @@ async function synchronizeAttachedRelativeStrengthJobsForRun(
         warning: run.warning,
         phase: run.phase,
       });
+      continue;
+    }
+    if (run.status === "cancelled") {
+      await updateScanRefreshJobRecord(env, job.id, {
+        status: "cancelled",
+        error: null,
+        completedAt: nowIso,
+        lastAdvancedAt: run.lastAdvancedAt ?? nowIso,
+        deferredTickerCount: run.deferredTickerCount,
+        warning: run.warning ?? "Cancelled by user.",
+        phase: "cancelled",
+      });
+      await removeRelativeStrengthRefreshJobFromQueue(env, job.id);
       continue;
     }
     if (run.status === "completed") {
@@ -7853,12 +8198,13 @@ async function processRelativeStrengthMaterializationRun(
 ): Promise<RelativeStrengthMaterializationRunRecord | null> {
   const run = await loadRelativeStrengthMaterializationRun(env, runId);
   if (!run) return null;
-  if (run.status === "completed" || run.status === "failed") return run;
+  if (isTerminalScanStatus(run.status)) return run;
   const leaseOwner = options?.leaseOwner ?? crypto.randomUUID();
   const leasedRun = await tryAcquireRelativeStrengthMaterializationRunLease(env, run.id, leaseOwner, "queued");
   if (!leasedRun) {
     return loadRelativeStrengthMaterializationRun(env, run.id);
   }
+  if (leasedRun.status === "cancelled") return leasedRun;
   const identity = buildRelativeStrengthConfigIdentityFromRunRecord(leasedRun);
 
   try {
@@ -7896,6 +8242,10 @@ async function processRelativeStrengthMaterializationRun(
       phase: "running",
     });
     const currentRun = (await loadRelativeStrengthMaterializationRun(env, leasedRun.id)) ?? leasedRun;
+    if (currentRun.status === "cancelled") {
+      await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
+      return currentRun;
+    }
     const benchmarkBars = await ensureRelativeStrengthRunBenchmarkBars(env, currentRun);
     let cursorOffset = currentRun.cursorOffset;
     let matchedCandidates = currentRun.matchedCandidates;
@@ -7907,6 +8257,11 @@ async function processRelativeStrengthMaterializationRun(
     let processedBatchCount = 0;
 
     while (cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
+      const latestBeforeBatch = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
+      if (latestBeforeBatch?.status === "cancelled") {
+        await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
+        return latestBeforeBatch;
+      }
       const preparedSliceTickers = await loadRelativeStrengthRunCandidateTickers(env, currentRun.id, cursorOffset, preparedSliceSize);
       if (preparedSliceTickers.length === 0) {
         throw new Error("Relative strength materialization run has no remaining candidate rows to process.");
@@ -7955,10 +8310,19 @@ async function processRelativeStrengthMaterializationRun(
           warning: refreshedRun?.warning ?? currentRun.warning,
           phase: materializableBatchTickers.length > 0 ? "materializing" : (deferredInBatch > 0 ? "deferring" : "materializing"),
         });
+        const latestAfterBatch = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
+        if (latestAfterBatch?.status === "cancelled") {
+          await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
+          return latestAfterBatch;
+        }
       }
     }
 
     const latestRun = await loadRelativeStrengthMaterializationRun(env, currentRun.id);
+    if (latestRun?.status === "cancelled") {
+      await removeRelativeStrengthMaterializationRunFromQueue(env, currentRun.id);
+      return latestRun;
+    }
     const finalMaterializationTotal = Math.max(
       latestRun?.materializationCandidateCount ?? effectiveMaterializationTotal,
       latestRun?.fullCandidateCount ?? effectiveMaterializationTotal,
@@ -8015,7 +8379,7 @@ export async function processRelativeStrengthRefreshJob(
   if (!job) return null;
   const preset = await loadScanPreset(env, job.presetId);
   if (!preset || preset.scanType !== "relative-strength") return null;
-  if (job.status === "completed" || job.status === "failed") {
+  if (isTerminalScanStatus(job.status)) {
     return mapJobRecordToJob(job, preset);
   }
   if (job.sharedRunId) {
@@ -8064,6 +8428,11 @@ export async function processRelativeStrengthRefreshJob(
     let processedBatchCount = 0;
 
     while (cursorOffset < effectiveMaterializationTotal && Date.now() - startedAt < timeBudgetMs && processedBatchCount < maxBatches) {
+      const currentJob = await loadScanRefreshJobRecord(env, job.id);
+      if (currentJob?.status === "cancelled") {
+        await removeRelativeStrengthRefreshJobFromQueue(env, job.id);
+        return mapJobRecordToJob(currentJob, preset);
+      }
       const batchCandidates = await loadRelativeStrengthJobCandidates(env, job.id, cursorOffset, batchSize);
       if (batchCandidates.length === 0) {
         throw new Error("Relative strength refresh job has no remaining candidate rows to process.");
@@ -8085,8 +8454,18 @@ export async function processRelativeStrengthRefreshJob(
         cursorOffset,
         lastAdvancedAt,
       });
+      const afterBatchJob = await loadScanRefreshJobRecord(env, job.id);
+      if (afterBatchJob?.status === "cancelled") {
+        await removeRelativeStrengthRefreshJobFromQueue(env, job.id);
+        return mapJobRecordToJob(afterBatchJob, preset);
+      }
     }
 
+    const latestBeforeCompletion = await loadScanRefreshJobRecord(env, job.id);
+    if (latestBeforeCompletion?.status === "cancelled") {
+      await removeRelativeStrengthRefreshJobFromQueue(env, job.id);
+      return mapJobRecordToJob(latestBeforeCompletion, preset);
+    }
     if (cursorOffset >= effectiveMaterializationTotal) {
       await updateScanRefreshJobRecord(env, job.id, {
         status: "completed",
@@ -8142,6 +8521,9 @@ export async function requestScansRefresh(
       };
     }
     const run = await createVcpScanRun(env, preset, requestedBy);
+    if (isActiveScanStatus(run.status)) {
+      await enqueueScannerCacheScanRun(env, run.id, "vcp", requestedBy ?? "manual");
+    }
     return {
       async: isActiveScanStatus(run.status),
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
@@ -8165,6 +8547,9 @@ export async function requestScansRefresh(
     }
     const identity = buildRelativeStrengthConfigIdentity(preset);
     const run = await createManualRelativeStrengthRun(env, preset, requestedBy);
+    if (isActiveScanStatus(run.status)) {
+      await enqueueScannerCacheScanRun(env, run.id, "relative-strength", requestedBy ?? "manual");
+    }
     return {
       async: isActiveScanStatus(run.status),
       snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
@@ -8349,6 +8734,106 @@ export async function loadScanRefreshJob(
     job: mapJobRecordToJob(record, preset),
     snapshot,
   };
+}
+
+async function cancelManualRelativeStrengthRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  run: ManualRelativeStrengthRunRecord,
+): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null }> {
+  if (!isTerminalScanStatus(run.status)) {
+    await heartbeatManualRelativeStrengthRun(env, run.id, {
+      status: "cancelled",
+      error: null,
+      warning: "Cancelled by user.",
+      durationMs: elapsedMs(run.startedAt ?? run.createdAt) ?? undefined,
+      completedAt: new Date().toISOString(),
+      releaseLease: true,
+    });
+  }
+  await removeScannerCacheScanRunFromQueue(env, run.id);
+  const updated = await loadManualRelativeStrengthRun(env, run.id);
+  return {
+    job: mapManualRunRecordToJob(updated ?? run),
+    snapshot: await loadLatestUsableScansSnapshot(env, run.presetId),
+  };
+}
+
+async function cancelVcpScanRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  run: VcpRunRecord,
+): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null }> {
+  if (!isTerminalScanStatus(run.status)) {
+    await heartbeatVcpRun(env, run.id, {
+      status: "cancelled",
+      error: null,
+      warning: "Cancelled by user.",
+      durationMs: elapsedMs(run.startedAt ?? run.createdAt) ?? undefined,
+      completedAt: new Date().toISOString(),
+      releaseLease: true,
+    });
+  }
+  await removeScannerCacheScanRunFromQueue(env, run.id);
+  const updated = await loadVcpRun(env, run.id);
+  return {
+    job: mapVcpRunRecordToJob(updated ?? run),
+    snapshot: await loadLatestUsableScansSnapshot(env, run.presetId),
+  };
+}
+
+async function cancelLegacyRelativeStrengthRefreshJob(
+  env: Env,
+  record: ScanRefreshJobRecord,
+): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
+  const preset = await loadScanPreset(env, record.presetId);
+  if (!preset) return null;
+  if (!isTerminalScanStatus(record.status)) {
+    await updateScanRefreshJobRecord(env, record.id, {
+      status: "cancelled",
+      error: null,
+      warning: "Cancelled by user.",
+      phase: "cancelled",
+      completedAt: new Date().toISOString(),
+      lastAdvancedAt: new Date().toISOString(),
+    });
+    await removeRelativeStrengthRefreshJobFromQueue(env, record.id);
+    if (record.sharedRunId) {
+      const activeJobs = await listScanRefreshJobRecordsForSharedRun(env, record.sharedRunId, { activeOnly: true });
+      if (activeJobs.length === 0) {
+        const sharedRun = await loadRelativeStrengthMaterializationRun(env, record.sharedRunId);
+        if (sharedRun && isActiveScanStatus(sharedRun.status)) {
+          await updateRelativeStrengthMaterializationRun(env, sharedRun.id, {
+            status: "cancelled",
+            error: null,
+            warning: "Cancelled by user.",
+            phase: "cancelled",
+            completedAt: new Date().toISOString(),
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            heartbeatAt: new Date().toISOString(),
+          });
+          await removeRelativeStrengthMaterializationRunFromQueue(env, sharedRun.id);
+        }
+      }
+    }
+  }
+  const updated = await loadScanRefreshJobRecord(env, record.id);
+  return {
+    job: mapJobRecordToJob(updated ?? record, preset),
+    snapshot: await loadLatestUsableScansSnapshot(env, preset.id),
+  };
+}
+
+export async function cancelScanRefreshJob(
+  env: Env,
+  jobId: string,
+): Promise<{ job: ScanRefreshJob; snapshot: ScanSnapshot | null } | null> {
+  const manualRun = await loadManualRelativeStrengthRun(env, jobId);
+  if (manualRun && hasScannerCacheStorage(env)) return cancelManualRelativeStrengthRun(env, manualRun);
+  const vcpRun = await loadVcpRun(env, jobId);
+  if (vcpRun && hasScannerCacheStorage(env)) return cancelVcpScanRun(env, vcpRun);
+  const record = await loadScanRefreshJobRecord(env, jobId);
+  if (!record) return null;
+  return cancelLegacyRelativeStrengthRefreshJob(env, record);
 }
 
 export async function loadLatestActiveScanRefreshJob(

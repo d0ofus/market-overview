@@ -964,7 +964,7 @@ export type CompiledScansSnapshot = {
 export type ScanCompilePresetRefreshMemberResult = {
   presetId: string;
   presetName: string;
-  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed";
+  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed" | "cancelled";
   rowCount: number;
   error: string | null;
   snapshot: ScanSnapshot | null;
@@ -982,7 +982,7 @@ export type ScanCompilePresetRefreshResult = {
   memberResults: ScanCompilePresetRefreshMemberResult[];
 };
 
-export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed";
+export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type ScanRefreshJob = {
   id: string;
@@ -2658,6 +2658,13 @@ export function getLatestScanRefreshJob(presetId: string) {
 export function getScanRefreshJob(jobId: string) {
   return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob | null }>(
     `/api/admin/scans/refresh-jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+export function cancelScanRefreshJob(jobId: string) {
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob }>(
+    `/api/admin/scans/refresh-jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
   );
 }
 

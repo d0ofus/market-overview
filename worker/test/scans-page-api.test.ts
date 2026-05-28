@@ -671,6 +671,22 @@ describe("scans page API", () => {
     });
   });
 
+  it("returns 404 when cancelling an unknown scan refresh job", async () => {
+    const env = createApiScansEnv({ adminSecret: "secret" });
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/admin/scans/refresh-jobs/missing-job/cancel", {
+        method: "POST",
+        headers: { authorization: "Bearer secret" },
+      }),
+      env as never,
+    );
+    const body = await response.json() as { error: string };
+
+    expect(response.status).toBe(404);
+    expect(body.error).toBe("Scan refresh job not found.");
+  });
+
   it("backfills RS ratio cache rows into SCANNER_CACHE_DB idempotently", async () => {
     const env = createScannerCacheAdminEnv({
       adminSecret: "secret",
