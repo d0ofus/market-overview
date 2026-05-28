@@ -353,6 +353,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [editTickers, setEditTickers] = useState<string[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
+  const isSectorPopupOpen = Boolean(editingEntry || activeEtf || activeNarrativeCollection || activeChartTicker);
 
   const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
     const [entriesRes, calRes, symbolRes, focusRes, peerGroupsRes] = await Promise.allSettled([
@@ -878,7 +879,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
 
   return (
     <div className="space-y-5">
-      <FloatingSectionNav items={SECTION_NAV_ITEMS} showHeading={false} actions={navActions} />
+      {!isSectorPopupOpen ? <FloatingSectionNav items={SECTION_NAV_ITEMS} showHeading={false} actions={navActions} /> : null}
 
       <datalist id="sector-symbol-options">
         {symbolOptions.map((s) => (
