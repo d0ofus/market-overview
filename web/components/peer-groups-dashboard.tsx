@@ -24,6 +24,7 @@ import {
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
 import { TickerMultiGrid } from "./ticker-multi-grid";
+import { TradingViewWidget, type TradingViewComparePosition } from "./tradingview-widget";
 
 type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
 type MultiChartSortKey = "change1d" | "marketCap";
@@ -43,9 +44,19 @@ type PerplexityGroupDraft = {
   isActive: boolean;
 };
 type PerplexityPeerStatus = "saved" | "perplexity";
+type PerplexityCompareScaleOption = {
+  key: TradingViewComparePosition;
+  label: string;
+};
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "change1d", label: "1D % Change" },
   { key: "marketCap", label: "Market Capitalization" },
+];
+const PERPLEXITY_COMPARE_DEFAULT_COUNT = 5;
+const PERPLEXITY_COMPARE_SCALE_OPTIONS: PerplexityCompareScaleOption[] = [
+  { key: "SameScale", label: "Same % scale" },
+  { key: "NewPriceScale", label: "New price scale" },
+  { key: "NewPane", label: "New pane" },
 ];
 const CORRELATION_DEFAULT_LOOKBACK = "252D";
 const CORRELATION_DEFAULT_ROLLING_WINDOW = "60D";
@@ -127,6 +138,13 @@ function buildPerplexityGroupDraft(lookup: PerplexityFinancePeerLookup | null): 
     priority: PERPLEXITY_GROUP_DEFAULT_PRIORITY,
     isActive: true,
   };
+}
+
+function buildDefaultPerplexityCompareTickers(lookup: PerplexityFinancePeerLookup | null): string[] {
+  if (!lookup) return [];
+  return normalizeCorrelationTickers(
+    lookup.peers.slice(0, PERPLEXITY_COMPARE_DEFAULT_COUNT).map((peer) => peer.ticker),
+  );
 }
 
 function parsePriority(value: string): number {
@@ -230,6 +248,8 @@ export function PeerGroupsDashboard() {
   const [perplexityGroupOpen, setPerplexityGroupOpen] = useState(false);
   const [perplexityGroupDraft, setPerplexityGroupDraft] = useState<PerplexityGroupDraft>(() => buildPerplexityGroupDraft(null));
   const [perplexityGroupSelectedTickers, setPerplexityGroupSelectedTickers] = useState<string[]>([]);
+  const [perplexityCompareSelectedTickers, setPerplexityCompareSelectedTickers] = useState<string[]>([]);
+  const [perplexityComparePosition, setPerplexityComparePosition] = useState<TradingViewComparePosition>("SameScale");
   const [savingPerplexityGroup, setSavingPerplexityGroup] = useState(false);
   const [perplexityGroupError, setPerplexityGroupError] = useState<string | null>(null);
   const [perplexityGroupMessage, setPerplexityGroupMessage] = useState<string | null>(null);
@@ -434,6 +454,25 @@ export function PeerGroupsDashboard() {
     () => new Set(perplexityGroupSelectedTickers),
     [perplexityGroupSelectedTickers],
   );
+  const perplexityCompareSelectedTickerSet = useMemo(
+    () => new Set(perplexityCompareSelectedTickers),
+    [perplexityCompareSelectedTickers],
+  );
+  const defaultPerplexityCompareTickers = useMemo(
+    () => buildDefaultPerplexityCompareTickers(perplexityLookup),
+    [perplexityLookup, perplexityPeerTickerKey],
+  );
+  const validPerplexityCompareTickers = useMemo(() => {
+    const availableTickers = new Set(perplexityPeerRows.map((peer) => peer.ticker.toUpperCase()));
+    return perplexityCompareSelectedTickers.filter((ticker) => availableTickers.has(ticker));
+  }, [perplexityCompareSelectedTickers, perplexityPeerRows]);
+  const perplexityCompareSymbols = useMemo(
+    () => validPerplexityCompareTickers.map((ticker) => ({
+      symbol: ticker,
+      position: perplexityComparePosition,
+    })),
+    [perplexityComparePosition, validPerplexityCompareTickers],
+  );
   const savedOnlyPeerRows = useMemo(() => {
     if (!perplexityLookup || !detail || !activeGroup) return [];
     const perplexityTickers = new Set(perplexityLookup.peers.map((peer) => peer.ticker.toUpperCase()));
@@ -448,6 +487,8 @@ export function PeerGroupsDashboard() {
   );
   const allPerplexityPeersSelected = perplexityPeerRows.length > 0
     && perplexityPeerRows.every((peer) => perplexityGroupSelectedTickerSet.has(peer.ticker.toUpperCase()));
+  const allPerplexityCompareTickersSelected = perplexityPeerRows.length > 0
+    && perplexityPeerRows.every((peer) => perplexityCompareSelectedTickerSet.has(peer.ticker.toUpperCase()));
   const chartMemberRows = useMemo(() => {
     if (!detail || !activeGroup) return [];
     const ordered = [...sortedMemberRows].sort((a, b) => {
@@ -587,6 +628,7 @@ export function PeerGroupsDashboard() {
       setPerplexityGroupOpen(false);
       setPerplexityGroupDraft(buildPerplexityGroupDraft(null));
       setPerplexityGroupSelectedTickers([]);
+      setPerplexityCompareSelectedTickers([]);
       setPerplexityGroupError(null);
       setPerplexityGroupMessage(null);
       setPerplexityGroupCreatedId(null);
@@ -597,6 +639,7 @@ export function PeerGroupsDashboard() {
     setPerplexityGroupSelectedTickers(normalizeCorrelationTickers(
       perplexityLookup.peers.map((peer) => peer.ticker),
     ));
+    setPerplexityCompareSelectedTickers(buildDefaultPerplexityCompareTickers(perplexityLookup));
     setPerplexityGroupError(null);
     setPerplexityGroupMessage(null);
     setPerplexityGroupCreatedId(null);
@@ -693,6 +736,28 @@ export function PeerGroupsDashboard() {
     setPerplexityGroupSelectedTickers([]);
     setPerplexityGroupError(null);
     setPerplexityGroupMessage(null);
+  };
+
+  const togglePerplexityCompareTicker = (ticker: string) => {
+    const normalized = ticker.trim().toUpperCase();
+    if (!normalized) return;
+    setPerplexityCompareSelectedTickers((current) => (
+      current.includes(normalized)
+        ? current.filter((value) => value !== normalized)
+        : [...current, normalized]
+    ));
+  };
+
+  const selectAllPerplexityCompareTickers = () => {
+    setPerplexityCompareSelectedTickers(normalizeCorrelationTickers(perplexityPeerRows.map((peer) => peer.ticker)));
+  };
+
+  const clearPerplexityCompareTickers = () => {
+    setPerplexityCompareSelectedTickers([]);
+  };
+
+  const resetPerplexityCompareTickers = () => {
+    setPerplexityCompareSelectedTickers(defaultPerplexityCompareTickers);
   };
 
   const savePerplexityGroup = async () => {
@@ -828,17 +893,15 @@ export function PeerGroupsDashboard() {
         {directoryError && <p className="mt-2 text-sm text-red-300">{directoryError}</p>}
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),minmax(24rem,28rem)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(20rem,28rem),minmax(0,1fr)]">
         <section className="card overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
+          <div className="overflow-hidden">
+            <table className="w-full text-sm">
               <thead className="bg-slate-900/60">
                 <tr>
-                  {["Ticker", "Company", "Peer Groups", "Sector", "Industry"].map((label) => (
-                    <th key={label} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                      {label}
-                    </th>
-                  ))}
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                    Ticker Search Results
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -848,24 +911,34 @@ export function PeerGroupsDashboard() {
                     className={`cursor-pointer border-t border-borderSoft/60 ${selectedTicker === row.ticker ? "bg-accent/10" : "hover:bg-slate-900/30"}`}
                     onClick={() => void loadTicker(row.ticker, { scrollToCharts: true })}
                   >
-                    <td className="px-3 py-2 font-semibold text-accent">{row.ticker}</td>
-                    <td className="px-3 py-2 text-slate-300">{row.name ?? "-"}</td>
                     <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        {row.groups.length > 0 ? row.groups.map((group) => (
-                          <span key={`${row.ticker}-${group.id}`} className="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
-                            {group.name}
-                          </span>
-                        )) : <span className="text-slate-500">No groups</span>}
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-accent">{row.ticker}</div>
+                          <div className="mt-0.5 truncate text-xs text-slate-300">{row.name ?? "-"}</div>
+                          <div className="mt-1 truncate text-[11px] text-slate-500">
+                            {[row.sector, row.industry].filter(Boolean).join(" / ") || "Sector unavailable"}
+                          </div>
+                        </div>
+                        <div className="flex max-w-[11rem] shrink-0 flex-wrap justify-end gap-1">
+                          {row.groups.length > 0 ? row.groups.slice(0, 2).map((group) => (
+                            <span key={`${row.ticker}-${group.id}`} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+                              {group.name}
+                            </span>
+                          )) : <span className="text-[11px] text-slate-500">No groups</span>}
+                          {row.groups.length > 2 ? (
+                            <span className="rounded bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-400">
+                              +{row.groups.length - 2}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-slate-300">{row.sector ?? "-"}</td>
-                    <td className="px-3 py-2 text-slate-300">{row.industry ?? "-"}</td>
                   </tr>
                 ))}
                 {!loadingDirectory && directory.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-3 py-6 text-center text-sm text-slate-400">
+                    <td className="px-3 py-6 text-center text-sm text-slate-400">
                       No peer-group tickers matched the current search.
                     </td>
                   </tr>
@@ -1083,6 +1156,75 @@ export function PeerGroupsDashboard() {
                     </p>
                   ) : null}
 
+                  {perplexityPeerRows.length > 0 ? (
+                    <div className="rounded border border-borderSoft/70 bg-panelSoft/20 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-100">Chart Comparison</h3>
+                          <p className="mt-1 text-xs text-slate-400">
+                            Base {perplexityLookup.ticker}; comparing {validPerplexityCompareTickers.length} peer{validPerplexityCompareTickers.length === 1 ? "" : "s"}.
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                            onClick={selectAllPerplexityCompareTickers}
+                            disabled={allPerplexityCompareTickersSelected}
+                          >
+                            Select All
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                            onClick={resetPerplexityCompareTickers}
+                            disabled={defaultPerplexityCompareTickers.length === validPerplexityCompareTickers.length
+                              && defaultPerplexityCompareTickers.every((ticker) => perplexityCompareSelectedTickerSet.has(ticker))}
+                          >
+                            Reset
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:opacity-50"
+                            onClick={clearPerplexityCompareTickers}
+                            disabled={validPerplexityCompareTickers.length === 0}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                        <span className="text-slate-400">Scale</span>
+                        <div className="inline-flex rounded border border-borderSoft bg-slate-950/35 p-0.5" role="group" aria-label="Perplexity comparison scale">
+                          {PERPLEXITY_COMPARE_SCALE_OPTIONS.map((option) => (
+                            <button
+                              key={option.key}
+                              type="button"
+                              aria-pressed={perplexityComparePosition === option.key}
+                              className={`rounded px-2.5 py-1 transition ${segmentedButtonClass(perplexityComparePosition === option.key)}`}
+                              onClick={() => setPerplexityComparePosition(option.key)}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="mt-3 h-[28rem] min-h-[22rem] overflow-hidden rounded border border-borderSoft/70 bg-slate-950/20">
+                        <TradingViewWidget
+                          ticker={perplexityLookup.ticker}
+                          compareSymbols={perplexityCompareSymbols}
+                          chartStyle="2"
+                          showStatusLine
+                          fillContainer
+                          heightMode="fill"
+                          initialRange="12M"
+                          surface="plain"
+                          className="!p-0"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
                   {perplexityGroupOpen ? (
                     <div className="space-y-3 rounded border border-accent/25 bg-slate-950/35 p-3">
                       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1276,34 +1418,47 @@ export function PeerGroupsDashboard() {
                         <table className="min-w-full text-xs">
                           <thead className="bg-slate-900/60">
                             <tr>
+                              <th className="px-2 py-1.5 text-left text-slate-300">Compare</th>
                               <th className="px-2 py-1.5 text-left text-slate-300">Ticker</th>
                               <th className="px-2 py-1.5 text-left text-slate-300">Company</th>
                               <th className="px-2 py-1.5 text-left text-slate-300">Overlap</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {perplexityPeerRows.map((peer) => (
-                              <tr key={`perplexity-${peer.ticker}`} className="border-t border-borderSoft/60">
-                                <td className="px-2 py-1.5">
-                                  <button
-                                    type="button"
-                                    className="font-semibold text-accent hover:text-sky-200"
-                                    onClick={() => {
-                                      setQuery(peer.ticker);
-                                      void loadTicker(peer.ticker, { scrollToCharts: true });
-                                    }}
-                                  >
-                                    {peer.ticker}
-                                  </button>
-                                </td>
-                                <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
-                                <td className="px-2 py-1.5">
-                                  <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
-                                    {peer.status === "saved" ? "Already in current group" : "Only in Perplexity"}
-                                  </span>
-                                </td>
-                              </tr>
-                            ))}
+                            {perplexityPeerRows.map((peer) => {
+                              const ticker = peer.ticker.toUpperCase();
+                              return (
+                                <tr key={`perplexity-${peer.ticker}`} className="border-t border-borderSoft/60">
+                                  <td className="px-2 py-1.5">
+                                    <input
+                                      type="checkbox"
+                                      aria-label={`Compare ${ticker}`}
+                                      className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+                                      checked={perplexityCompareSelectedTickerSet.has(ticker)}
+                                      onChange={() => togglePerplexityCompareTicker(ticker)}
+                                    />
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    <button
+                                      type="button"
+                                      className="font-semibold text-accent hover:text-sky-200"
+                                      onClick={() => {
+                                        setQuery(peer.ticker);
+                                        void loadTicker(peer.ticker, { scrollToCharts: true });
+                                      }}
+                                    >
+                                      {peer.ticker}
+                                    </button>
+                                  </td>
+                                  <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
+                                  <td className="px-2 py-1.5">
+                                    <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
+                                      {peer.status === "saved" ? "Already in current group" : "Only in Perplexity"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>

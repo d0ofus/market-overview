@@ -7,6 +7,12 @@ const DEFAULT_CHART_STYLE = "1";
 const DEFAULT_CHART_TIMEZONE = "Etc/UTC";
 
 type WidgetTheme = "dark" | "light";
+export type TradingViewComparePosition = "SameScale" | "NewPriceScale" | "NewPane";
+export type TradingViewCompareSymbol = {
+  symbol: string;
+  position: TradingViewComparePosition;
+};
+type TradingViewChartStyle = "1" | "2" | "3";
 
 let cachedTheme: WidgetTheme = "dark";
 let themeObserver: MutationObserver | null = null;
@@ -45,6 +51,8 @@ function subscribeToTheme(listener: (theme: WidgetTheme) => void) {
 export function TradingViewWidget({
   ticker,
   compareSymbol,
+  compareSymbols,
+  chartStyle = DEFAULT_CHART_STYLE,
   compact = false,
   size = "default",
   chartOnly = false,
@@ -58,6 +66,8 @@ export function TradingViewWidget({
 }: {
   ticker: string;
   compareSymbol?: string;
+  compareSymbols?: TradingViewCompareSymbol[];
+  chartStyle?: TradingViewChartStyle;
   compact?: boolean;
   size?: "small" | "default";
   chartOnly?: boolean;
@@ -95,6 +105,14 @@ export function TradingViewWidget({
         : compact
           ? "w-full max-w-[640px] aspect-[4/3]"
           : "w-full max-w-[880px] aspect-[4/3]";
+  const resolvedCompareSymbols = [
+    ...(compareSymbol ? [{ symbol: compareSymbol, position: "SameScale" as const }] : []),
+    ...(compareSymbols ?? []),
+  ].filter((item, index, array) => (
+    item.symbol.trim()
+    && array.findIndex((candidate) => candidate.symbol === item.symbol) === index
+  ));
+  const compareSymbolsKey = JSON.stringify(resolvedCompareSymbols);
 
   useEffect(() => {
     return subscribeToTheme(setTheme);
@@ -137,7 +155,7 @@ export function TradingViewWidget({
       timeframe: initialRange,
       timezone: DEFAULT_CHART_TIMEZONE,
       theme,
-      style: DEFAULT_CHART_STYLE,
+      style: chartStyle,
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
       hide_side_toolbar: chartOnly,
@@ -155,18 +173,11 @@ export function TradingViewWidget({
       withdateranges: chartOnly ? false : true,
       calendar: showCorporateEvents,
       save_image: false,
-      compareSymbols: compareSymbol
-        ? [
-            {
-              symbol: compareSymbol,
-              position: "SameScale",
-            },
-          ]
-        : [],
+      compareSymbols: resolvedCompareSymbols,
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad, heightMode]);
+  }, [ticker, chartStyle, compareSymbolsKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad, heightMode]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"
