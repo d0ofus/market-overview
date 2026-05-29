@@ -13,6 +13,7 @@ import {
   getWatchlistCompilerUnique,
   type ScanCompiledRow,
   type ScanUniqueTickerRow,
+  type WatchlistFactorConfig,
   type WatchlistFactorResult,
   type WatchlistCompilerRunSummary,
   type WatchlistCompilerSetDetail,
@@ -93,6 +94,20 @@ function factorStatusClass(status: WatchlistFactorResult["status"]) {
   return "border-slate-500/30 bg-slate-800/70 text-slate-300";
 }
 
+function enabledFactorCount(config: WatchlistFactorConfig | null | undefined) {
+  return Object.values(config?.enabled ?? {}).filter(Boolean).length;
+}
+
+function runHasFactorTrace(run: WatchlistCompilerRunSummary | null | undefined) {
+  if (!run?.providerTraceJson) return false;
+  try {
+    const parsed = JSON.parse(run.providerTraceJson) as unknown;
+    return Array.isArray(parsed) && parsed.some((entry) => Boolean(entry && typeof entry === "object" && (entry as { sourceId?: unknown }).sourceId === "__factors__"));
+  } catch {
+    return false;
+  }
+}
+
 export function WatchlistCompilerDashboard() {
   const [sets, setSets] = useState<WatchlistCompilerSetRow[]>([]);
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
@@ -126,6 +141,9 @@ export function WatchlistCompilerDashboard() {
   const selectedResearchRunIdRef = useRef<string | null>(null);
 
   const selectedSet = useMemo(() => sets.find((row) => row.id === selectedSetId) ?? null, [sets, selectedSetId]);
+  const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? selectedSet?.latestRun ?? null, [runs, selectedRunId, selectedSet]);
+  const factorEnabledCount = enabledFactorCount(detail?.factorConfig);
+  const selectedRunHasFactors = runHasFactorTrace(selectedRun);
   const sortedCompiledRows = useMemo(() => {
     const rows = [...compiledRows];
     if (compiledSort === "factorScore") {
@@ -518,6 +536,7 @@ export function WatchlistCompilerDashboard() {
                     {(viewMode === "compiled" ? sortedCompiledRows : uniqueRows).map((row: any) => {
                       const factorResults = viewMode === "compiled" ? parseFactorResults(row.factorResultsJson) : [];
                       const factorCount = factorResults.length;
+                      const factorEmptyLabel = factorEnabledCount === 0 ? "No factors enabled" : selectedRunHasFactors ? "No factor results" : "Recompile needed";
                       const isExpanded = expandedFactorRowId === (row.id ?? row.ticker);
                       return (
                         <Fragment key={row.id ?? row.ticker}>
@@ -539,7 +558,7 @@ export function WatchlistCompilerDashboard() {
                                     >
                                       {row.factorPassCount ?? 0}/{factorCount} {row.factorUnknownCount ? `(${row.factorUnknownCount} unk)` : ""}
                                     </button>
-                                  ) : "-"}
+                                  ) : <span className="text-[11px] text-slate-500">{factorEmptyLabel}</span>}
                                 </td>
                                 <td className="px-2 py-1.5 text-slate-300">{row.factorScore == null ? "-" : fmtNumber(row.factorScore, 0)}</td>
                               </>

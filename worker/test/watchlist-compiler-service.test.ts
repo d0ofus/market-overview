@@ -9,7 +9,12 @@ import {
   tickersToSingleColumnCsv,
   tickersToTxt,
 } from "../src/watchlist-compiler-service";
-import { calculatePriorStrongMovePct, rolling10dVolumeTrendPct } from "../src/watchlist-factors";
+import {
+  calculatePriorStrongMovePct,
+  enabledWatchlistFactorKeys,
+  normalizeWatchlistFactorConfig,
+  rolling10dVolumeTrendPct,
+} from "../src/watchlist-factors";
 
 type MockStatement = {
   query: string;
@@ -175,6 +180,23 @@ describe("watchlist compiler service helpers", () => {
     expect(rows.map((row) => row.ticker)).toEqual(["AAOI"]);
   });
 
+  it("normalizes missing factor config to core defaults", () => {
+    expect(enabledWatchlistFactorKeys(normalizeWatchlistFactorConfig(null))).toEqual([
+      "priceAboveSma200",
+      "priceAbove",
+      "marketCapAbove",
+      "within52WeekHigh",
+      "priorStrongMove",
+      "avg10dDollarVolume",
+      "increasingVolumeProfile",
+      "averageTradingRangePct",
+    ]);
+  });
+
+  it("preserves an explicit disabled factor config", () => {
+    expect(enabledWatchlistFactorKeys(normalizeWatchlistFactorConfig({ enabled: {}, thresholds: {} }))).toEqual([]);
+  });
+
   it("enriches compiled watchlist rows with TradingView Screener metrics", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
       const value = String(url);
@@ -332,6 +354,41 @@ describe("watchlist compiler service helpers", () => {
       ["priceAbove", "pass"],
       ["marketCapAbove", "pass"],
     ]);
+    expect(String(runInsert?.args[9] ?? "")).toContain("__factors__");
+  });
+
+  it("stores default factor results when the set has no saved config", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (value.includes("/watchlists/111/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NASDAQ:AAPL"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value === "https://scanner.tradingview.com/america/scan") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { symbols?: { tickers?: string[] } };
+        const data = (body.symbols?.tickers ?? []).includes("NASDAQ:AAPL")
+          ? [{ s: "NASDAQ:AAPL", d: ["Apple Inc.", 180.25, 1.23, 55_000_000, 2_800_000_000_000, "NASDAQ", "stock", 150, 200, 40_000_000, 2.5] }]
+          : [];
+        return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("", { status: 404 });
+    });
+
+    const { env, getBatchStatements } = createCompileEnv([
+      compileSource({ id: "source-a", sourceName: "Ready", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
+    ]);
+
+    await compileWatchlistSet(env, "set-a");
+    const row = scanRowStatements(getBatchStatements())[0];
+    const runInsert = getBatchStatements().find((statement) => statement.query.includes("INSERT INTO scan_runs"));
+    const factorResults = JSON.parse(String(row?.args[16] ?? "[]")) as Array<{ key: string; status: string }>;
+
+    expect(row?.args[13]).toBeGreaterThan(0);
+    expect(row?.args[14]).toBeGreaterThan(0);
+    expect(factorResults).toHaveLength(8);
+    expect(factorResults.map((result) => result.key)).toContain("priceAboveSma200");
     expect(String(runInsert?.args[9] ?? "")).toContain("__factors__");
   });
 

@@ -43,7 +43,16 @@ type WatchlistSetForm = {
 };
 
 const EMPTY_FACTOR_CONFIG: WatchlistFactorConfig = {
-  enabled: {},
+  enabled: {
+    priceAboveSma200: true,
+    priceAbove: true,
+    marketCapAbove: true,
+    within52WeekHigh: true,
+    priorStrongMove: true,
+    avg10dDollarVolume: true,
+    increasingVolumeProfile: true,
+    averageTradingRangePct: true,
+  },
   thresholds: {
     priceAbove: { minPrice: 10 },
     marketCapAbove: { minMarketCapMillions: 500 },
@@ -92,8 +101,11 @@ const FACTOR_DEFINITIONS: Array<{
 ];
 
 function normalizeFactorConfig(value: WatchlistFactorConfig | null | undefined): WatchlistFactorConfig {
+  const enabled = value
+    ? Object.fromEntries(FACTOR_DEFINITIONS.map((factor) => [factor.key, value.enabled?.[factor.key] === true])) as Partial<Record<WatchlistFactorKey, boolean>>
+    : { ...EMPTY_FACTOR_CONFIG.enabled };
   return {
-    enabled: { ...EMPTY_FACTOR_CONFIG.enabled, ...(value?.enabled ?? {}) },
+    enabled,
     thresholds: {
       priceAbove: { ...EMPTY_FACTOR_CONFIG.thresholds.priceAbove, ...(value?.thresholds?.priceAbove ?? {}) },
       marketCapAbove: { ...EMPTY_FACTOR_CONFIG.thresholds.marketCapAbove, ...(value?.thresholds?.marketCapAbove ?? {}) },
@@ -107,6 +119,14 @@ function normalizeFactorConfig(value: WatchlistFactorConfig | null | undefined):
       averageTradingRangePct: { ...EMPTY_FACTOR_CONFIG.thresholds.averageTradingRangePct, ...(value?.thresholds?.averageTradingRangePct ?? {}) },
     },
   };
+}
+
+function factorConfigSignature(value: WatchlistFactorConfig | null | undefined): string {
+  return JSON.stringify(normalizeFactorConfig(value));
+}
+
+function activeSourceCount(value: WatchlistCompilerSetDetail | null): number {
+  return value?.sources.filter((source) => source.isActive).length ?? 0;
 }
 
 const EMPTY_FORM: WatchlistSetForm = {
@@ -431,9 +451,22 @@ export function WatchlistCompilerAdminPanel() {
                   setMessage(null);
                   try {
                     if (selectedSetId) {
+                      const factorConfigChanged = factorConfigSignature(form.factorConfig) !== factorConfigSignature(detail?.factorConfig);
                       await updateAdminWatchlistCompilerSet(selectedSetId, form);
-                      await load(selectedSetId);
-                      flashMessage("Watchlist set updated.");
+                      const shouldAutoCompile = factorConfigChanged && activeSourceCount(detail) > 0;
+                      if (shouldAutoCompile) {
+                        try {
+                          const result = await compileAdminWatchlistCompilerSet(selectedSetId);
+                          await load(selectedSetId);
+                          flashMessage(`Watchlist set updated and recompiled ${result.run.compiledRowCount} rows.`);
+                        } catch (compileError) {
+                          await load(selectedSetId);
+                          setMessage(compileError instanceof Error ? `Watchlist set updated, but compile failed: ${compileError.message}` : "Watchlist set updated, but compile failed.");
+                        }
+                      } else {
+                        await load(selectedSetId);
+                        flashMessage("Watchlist set updated.");
+                      }
                     } else {
                       const created = await createAdminWatchlistCompilerSet(form);
                       const addedDraftSource = await addDraftSourceToSet(created.id);

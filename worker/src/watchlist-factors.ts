@@ -152,8 +152,28 @@ export const WATCHLIST_FACTOR_KEYS: WatchlistFactorKey[] = [
   "averageTradingRangePct",
 ];
 
+export const CORE_WATCHLIST_FACTOR_KEYS: WatchlistFactorKey[] = [
+  "priceAboveSma200",
+  "priceAbove",
+  "marketCapAbove",
+  "within52WeekHigh",
+  "priorStrongMove",
+  "avg10dDollarVolume",
+  "increasingVolumeProfile",
+  "averageTradingRangePct",
+];
+
 export const DEFAULT_WATCHLIST_FACTOR_CONFIG: WatchlistFactorConfig = {
-  enabled: {},
+  enabled: {
+    priceAboveSma200: true,
+    priceAbove: true,
+    marketCapAbove: true,
+    within52WeekHigh: true,
+    priorStrongMove: true,
+    avg10dDollarVolume: true,
+    increasingVolumeProfile: true,
+    averageTradingRangePct: true,
+  },
   thresholds: {
     priceAbove: { minPrice: 10 },
     marketCapAbove: { minMarketCapMillions: 500 },
