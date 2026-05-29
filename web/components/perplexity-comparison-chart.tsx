@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { Loader2 } from "lucide-react";
 import { getTicker } from "@/lib/api";
+import type { TickerHistoryBackfillStatus, TickerSeriesTimeframe } from "@/lib/api";
 import type { TradingViewComparePosition } from "./tradingview-widget";
 
 type ComparisonItem = {
@@ -23,25 +24,30 @@ type LoadedSeries = {
   ticker: string;
   color: string;
   rows: Array<{ date: string; close: number }>;
+  historyStatus?: {
+    timeframe: TickerSeriesTimeframe;
+    requestedBars: number | null;
+    availableBars: number;
+    complete: boolean;
+    backfill: TickerHistoryBackfillStatus | null;
+  };
 };
 
 type ChartRow = Record<string, number | string | null> & { date: string };
 
 const CHART_GRID_COLOR = "rgba(148,163,184,0.12)";
 const CHART_AXIS_COLOR = "#94a3b8";
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function normalizeTicker(value: string): string {
   return value.trim().toUpperCase();
 }
 
-function formatDate(value: string): string {
+function formatDate(value: string, includeYear = false): string {
   const parsed = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "2-digit",
-    timeZone: "UTC",
-  }).format(parsed);
+  const label = `${parsed.getUTCDate()}-${MONTH_LABELS[parsed.getUTCMonth()]}`;
+  return includeYear ? `${label}-${parsed.getUTCFullYear()}` : label;
 }
 
 function formatPrice(value: number): string {
@@ -59,6 +65,22 @@ function chartValueFormatter(mode: TradingViewComparePosition) {
     if (typeof value !== "number" || !Number.isFinite(value)) return ["-", String(name)] as [string, string];
     return [mode === "SameScale" ? formatPercent(value) : formatPrice(value), String(name)] as [string, string];
   };
+}
+
+function historyStatusMessage(item: LoadedSeries): string | null {
+  const status = item.historyStatus;
+  if (!status || status.timeframe !== "2Y" || status.complete) return null;
+  const countLabel = `${status.availableBars}/${status.requestedBars ?? 500}`;
+  if (status.backfill?.status === "queued") {
+    return `${item.ticker}: 2Y history is short (${countLabel} bars); background backfill queued.`;
+  }
+  if (status.backfill?.status === "recently_requested") {
+    return `${item.ticker}: 2Y history is short (${countLabel} bars); background backfill was recently requested.`;
+  }
+  if (status.backfill?.status === "unavailable") {
+    return `${item.ticker}: 2Y history is short (${countLabel} bars); background backfill is unavailable.`;
+  }
+  return `${item.ticker}: 2Y history is short (${countLabel} bars).`;
 }
 
 function uniqueItems(items: ComparisonItem[]): ComparisonItem[] {
@@ -148,7 +170,7 @@ function MultiLineChart({
           dataKey="date"
           minTickGap={28}
           stroke={CHART_AXIS_COLOR}
-          tickFormatter={(value) => String(value).slice(5)}
+          tickFormatter={(value) => formatDate(String(value))}
         />
         {sameScale ? (
           <YAxis
@@ -163,7 +185,7 @@ function MultiLineChart({
         )}
         <Tooltip
           contentStyle={{ background: "#020617", border: "1px solid rgba(148,163,184,0.18)" }}
-          labelFormatter={(value) => formatDate(String(value))}
+          labelFormatter={(value) => formatDate(String(value), true)}
           formatter={chartValueFormatter(mode)}
         />
         {items.map((item) => (
@@ -205,7 +227,7 @@ function PaneChart({
             <YAxis hide domain={["dataMin", "dataMax"]} />
             <Tooltip
               contentStyle={{ background: "#020617", border: "1px solid rgba(148,163,184,0.18)" }}
-              labelFormatter={(value) => formatDate(String(value))}
+              labelFormatter={(value) => formatDate(String(value), true)}
               formatter={(value) => [
                 typeof value === "number" && Number.isFinite(value) ? formatPrice(value) : "-",
                 item.ticker,
@@ -230,26 +252,33 @@ function PaneChart({
 export function PerplexityComparisonChart({
   items,
   mode,
+  timeframe,
 }: {
   items: ComparisonItem[];
   mode: TradingViewComparePosition;
+  timeframe: TickerSeriesTimeframe;
 }) {
   const chartItems = useMemo(() => uniqueItems(items), [items]);
   const tickersKey = chartItems.map((item) => item.ticker).join(",");
   const [series, setSeries] = useState<LoadedSeries[]>([]);
   const [loading, setLoading] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [historyMessages, setHistoryMessages] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       setLoading(true);
+      setSeries([]);
+      setWarnings([]);
+      setHistoryMessages([]);
       const results = await Promise.all(chartItems.map(async (item) => {
         try {
-          const data = await getTicker(item.ticker);
+          const data = await getTicker(item.ticker, timeframe);
           return {
             ok: true as const,
             item,
+            historyStatus: data.historyStatus,
             rows: data.series
               .filter((row) => Number.isFinite(row.c))
               .map((row) => ({ date: row.date, close: row.c })),
@@ -270,7 +299,17 @@ export function PerplexityComparisonChart({
           ticker: result.item.ticker,
           color: result.item.color,
           rows: result.rows,
+          historyStatus: result.historyStatus,
         })));
+      setHistoryMessages(results
+        .filter((result): result is Extract<typeof result, { ok: true }> => result.ok)
+        .map((result) => historyStatusMessage({
+          ticker: result.item.ticker,
+          color: result.item.color,
+          rows: result.rows,
+          historyStatus: result.historyStatus,
+        }))
+        .filter((message): message is string => Boolean(message)));
       setWarnings(results
         .filter((result): result is Extract<typeof result, { ok: false }> => !result.ok)
         .map((result) => `${result.item.ticker}: ${result.message}`));
@@ -280,7 +319,7 @@ export function PerplexityComparisonChart({
     return () => {
       cancelled = true;
     };
-  }, [chartItems, tickersKey]);
+  }, [chartItems, tickersKey, timeframe]);
 
   const rows = useMemo(() => buildRows(series, mode), [mode, series]);
 
@@ -312,6 +351,11 @@ export function PerplexityComparisonChart({
           </div>
         )}
       </div>
+      {historyMessages.length > 0 ? (
+        <div className="border-t border-borderSoft/70 px-3 py-2 text-[11px] text-sky-100">
+          {historyMessages.slice(0, 3).join(" ")}
+        </div>
+      ) : null}
       {warnings.length > 0 ? (
         <div className="border-t border-borderSoft/70 px-3 py-2 text-[11px] text-yellow-100">
           {warnings.slice(0, 3).join(" ")}

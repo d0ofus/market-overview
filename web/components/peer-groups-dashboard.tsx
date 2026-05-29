@@ -20,6 +20,7 @@ import {
   type PeerGroupType,
   type PeerMetricRow,
   type PeerTickerDetail,
+  type TickerSeriesTimeframe,
 } from "@/lib/api";
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
@@ -49,6 +50,10 @@ type PerplexityCompareScaleOption = {
   key: TradingViewComparePosition;
   label: string;
 };
+type PerplexityCompareTimeframeOption = {
+  key: TickerSeriesTimeframe;
+  label: string;
+};
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "change1d", label: "1D % Change" },
   { key: "marketCap", label: "Market Capitalization" },
@@ -58,6 +63,14 @@ const PERPLEXITY_COMPARE_SCALE_OPTIONS: PerplexityCompareScaleOption[] = [
   { key: "SameScale", label: "Same % scale" },
   { key: "NewPriceScale", label: "New price scale" },
   { key: "NewPane", label: "New pane" },
+];
+const PERPLEXITY_COMPARE_TIMEFRAME_OPTIONS: PerplexityCompareTimeframeOption[] = [
+  { key: "1M", label: "1M" },
+  { key: "3M", label: "3M" },
+  { key: "6M", label: "6M" },
+  { key: "1Y", label: "1Y" },
+  { key: "2Y", label: "2Y" },
+  { key: "MAX", label: "Max" },
 ];
 const PERPLEXITY_COMPARE_BASE_COLOR = "#f97316";
 const PERPLEXITY_COMPARE_PALETTE = [
@@ -267,6 +280,7 @@ export function PeerGroupsDashboard() {
   const [perplexityGroupSelectedTickers, setPerplexityGroupSelectedTickers] = useState<string[]>([]);
   const [perplexityCompareSelectedTickers, setPerplexityCompareSelectedTickers] = useState<string[]>([]);
   const [perplexityComparePosition, setPerplexityComparePosition] = useState<TradingViewComparePosition>("SameScale");
+  const [perplexityCompareTimeframe, setPerplexityCompareTimeframe] = useState<TickerSeriesTimeframe>("6M");
   const [savingPerplexityGroup, setSavingPerplexityGroup] = useState(false);
   const [perplexityGroupError, setPerplexityGroupError] = useState<string | null>(null);
   const [perplexityGroupMessage, setPerplexityGroupMessage] = useState<string | null>(null);
@@ -1227,20 +1241,38 @@ export function PeerGroupsDashboard() {
                           </button>
                         </div>
                       </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                        <span className="text-slate-400">Scale</span>
-                        <div className="inline-flex rounded border border-borderSoft bg-slate-950/35 p-0.5" role="group" aria-label="Perplexity comparison scale">
-                          {PERPLEXITY_COMPARE_SCALE_OPTIONS.map((option) => (
-                            <button
-                              key={option.key}
-                              type="button"
-                              aria-pressed={perplexityComparePosition === option.key}
-                              className={`rounded px-2.5 py-1 transition ${segmentedButtonClass(perplexityComparePosition === option.key)}`}
-                              onClick={() => setPerplexityComparePosition(option.key)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
+                      <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-300">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-slate-400">Scale</span>
+                          <div className="inline-flex rounded border border-borderSoft bg-slate-950/35 p-0.5" role="group" aria-label="Perplexity comparison scale">
+                            {PERPLEXITY_COMPARE_SCALE_OPTIONS.map((option) => (
+                              <button
+                                key={option.key}
+                                type="button"
+                                aria-pressed={perplexityComparePosition === option.key}
+                                className={`rounded px-2.5 py-1 transition ${segmentedButtonClass(perplexityComparePosition === option.key)}`}
+                                onClick={() => setPerplexityComparePosition(option.key)}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-slate-400">Timeframe</span>
+                          <div className="inline-flex rounded border border-borderSoft bg-slate-950/35 p-0.5" role="group" aria-label="Perplexity comparison timeframe">
+                            {PERPLEXITY_COMPARE_TIMEFRAME_OPTIONS.map((option) => (
+                              <button
+                                key={option.key}
+                                type="button"
+                                aria-pressed={perplexityCompareTimeframe === option.key}
+                                className={`rounded px-2.5 py-1 transition ${segmentedButtonClass(perplexityCompareTimeframe === option.key)}`}
+                                onClick={() => setPerplexityCompareTimeframe(option.key)}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2" aria-label="Chart comparison colors">
@@ -1264,6 +1296,7 @@ export function PeerGroupsDashboard() {
                         <PerplexityComparisonChart
                           items={perplexityCompareLegendItems}
                           mode={perplexityComparePosition}
+                          timeframe={perplexityCompareTimeframe}
                         />
                       </div>
                     </div>

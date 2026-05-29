@@ -355,9 +355,194 @@ const scannerCachePulseSchema = z.object({
 });
 const SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS = 25_000;
 const SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS = 15_000;
+const TICKER_SERIES_TIMEFRAMES = {
+  "1M": { limit: 23 },
+  "3M": { limit: 70 },
+  "6M": { limit: 130 },
+  "1Y": { limit: 260 },
+  "2Y": { limit: 520 },
+  MAX: { limit: null },
+} as const;
+type TickerSeriesTimeframe = keyof typeof TICKER_SERIES_TIMEFRAMES;
+type TickerHistoryBackfillResponse =
+  | { status: "queued"; lastRequestedAt: string }
+  | { status: "recently_requested"; lastRequestedAt: string | null }
+  | { status: "unavailable"; message: string };
+type TickerHistoryBackfillStatusRow = {
+  status: string | null;
+  lastRequestedAt: string | null;
+  lastAttemptedAt: string | null;
+  lastCompletedAt: string | null;
+  updatedAt: string | null;
+};
+const DEFAULT_TICKER_SERIES_TIMEFRAME: TickerSeriesTimeframe = "6M";
+const TICKER_SERIES_2Y_COMPLETE_BARS = 500;
+const TICKER_SERIES_2Y_LOOKBACK_DAYS = 760;
+const TICKER_HISTORY_BACKFILL_COOLDOWN_MS = 6 * 60 * 60_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeTickerSeriesTimeframe(raw: string | null | undefined): TickerSeriesTimeframe {
+  const normalized = raw?.trim().toUpperCase();
+  if (normalized && normalized in TICKER_SERIES_TIMEFRAMES) return normalized as TickerSeriesTimeframe;
+  return DEFAULT_TICKER_SERIES_TIMEFRAME;
+}
+
+function parseStoredTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function latestBackfillTimestamp(row: TickerHistoryBackfillStatusRow): number | null {
+  return Math.max(
+    parseStoredTimestamp(row.lastRequestedAt) ?? 0,
+    parseStoredTimestamp(row.lastAttemptedAt) ?? 0,
+    parseStoredTimestamp(row.lastCompletedAt) ?? 0,
+    parseStoredTimestamp(row.updatedAt) ?? 0,
+  ) || null;
+}
+
+async function loadTickerHistoryBackfillRow(env: Env, ticker: string, timeframe: TickerSeriesTimeframe): Promise<TickerHistoryBackfillStatusRow | null> {
+  try {
+    return await env.DB.prepare(
+      `SELECT status,
+              last_requested_at as lastRequestedAt,
+              last_attempted_at as lastAttemptedAt,
+              last_completed_at as lastCompletedAt,
+              updated_at as updatedAt
+         FROM ticker_history_backfill_status
+        WHERE ticker = ? AND timeframe = ?
+        LIMIT 1`,
+    )
+      .bind(ticker, timeframe)
+      .first<TickerHistoryBackfillStatusRow>();
+  } catch (error) {
+    console.warn("ticker history backfill status load failed", { ticker, timeframe, error });
+    return null;
+  }
+}
+
+async function upsertTickerHistoryBackfillQueued(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, barCount: number, requestedAt: string): Promise<boolean> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO ticker_history_backfill_status
+        (ticker, timeframe, target_bars, bar_count, status, last_requested_at, updated_at, last_error)
+       VALUES (?, ?, ?, ?, 'queued', ?, ?, NULL)
+       ON CONFLICT(ticker, timeframe) DO UPDATE SET
+         target_bars = excluded.target_bars,
+         bar_count = excluded.bar_count,
+         status = 'queued',
+         last_requested_at = excluded.last_requested_at,
+         updated_at = excluded.updated_at,
+         last_error = NULL`,
+    )
+      .bind(ticker, timeframe, TICKER_SERIES_2Y_COMPLETE_BARS, barCount, requestedAt, requestedAt)
+      .run();
+    return true;
+  } catch (error) {
+    console.warn("ticker history backfill status queue failed", { ticker, timeframe, error });
+    return false;
+  }
+}
+
+async function updateTickerHistoryBackfillStatus(
+  env: Env,
+  ticker: string,
+  timeframe: TickerSeriesTimeframe,
+  input: {
+    status: string;
+    barCount: number;
+    now: string;
+    lastError?: string | null;
+    markAttempted?: boolean;
+    markCompleted?: boolean;
+  },
+): Promise<void> {
+  const attemptedAt = input.markAttempted ? input.now : null;
+  const completedAt = input.markCompleted ? input.now : null;
+  try {
+    await env.DB.prepare(
+      `UPDATE ticker_history_backfill_status
+          SET status = ?,
+              bar_count = ?,
+              last_attempted_at = COALESCE(?, last_attempted_at),
+              last_completed_at = COALESCE(?, last_completed_at),
+              last_error = ?,
+              updated_at = ?
+        WHERE ticker = ? AND timeframe = ?`,
+    )
+      .bind(input.status, input.barCount, attemptedAt, completedAt, input.lastError ?? null, input.now, ticker, timeframe)
+      .run();
+  } catch (error) {
+    console.warn("ticker history backfill status update failed", { ticker, timeframe, error });
+  }
+}
+
+async function countStoredTickerBars(env: Env, ticker: string): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) as barCount FROM daily_bars WHERE ticker = ?")
+    .bind(ticker)
+    .first<{ barCount: number }>();
+  return Number(row?.barCount ?? 0);
+}
+
+async function runTickerHistoryBackfill(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, currentBarCount: number): Promise<void> {
+  const startedAt = new Date().toISOString();
+  try {
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: "running",
+      barCount: currentBarCount,
+      now: startedAt,
+      markAttempted: true,
+    });
+    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true);
+    const nextBarCount = await countStoredTickerBars(env, ticker);
+    const completedAt = new Date().toISOString();
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: nextBarCount >= TICKER_SERIES_2Y_COMPLETE_BARS ? "completed" : "partial",
+      barCount: nextBarCount,
+      now: completedAt,
+      markCompleted: true,
+    });
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: "failed",
+      barCount: currentBarCount,
+      now: failedAt,
+      lastError: error instanceof Error ? error.message : "Ticker history backfill failed.",
+      markCompleted: true,
+    });
+  }
+}
+
+async function maybeQueueTickerHistoryBackfill(
+  c: { env: Env; executionCtx: ExecutionContext },
+  ticker: string,
+  timeframe: TickerSeriesTimeframe,
+  currentBarCount: number,
+): Promise<TickerHistoryBackfillResponse> {
+  const existing = await loadTickerHistoryBackfillRow(c.env, ticker, timeframe);
+  const latestTimestamp = existing ? latestBackfillTimestamp(existing) : null;
+  if (latestTimestamp && Date.now() - latestTimestamp < TICKER_HISTORY_BACKFILL_COOLDOWN_MS) {
+    return {
+      status: "recently_requested",
+      lastRequestedAt: existing?.lastRequestedAt ?? existing?.updatedAt ?? null,
+    };
+  }
+
+  const requestedAt = new Date().toISOString();
+  const queued = await upsertTickerHistoryBackfillQueued(c.env, ticker, timeframe, currentBarCount, requestedAt);
+  if (!queued) {
+    return {
+      status: "unavailable",
+      message: "History backfill status storage is unavailable.",
+    };
+  }
+  c.executionCtx.waitUntil(runTickerHistoryBackfill(c.env, ticker, timeframe, currentBarCount));
+  return { status: "queued", lastRequestedAt: requestedAt };
 }
 
 function scannerCachePulseHeaders(env: Env): Headers {
@@ -2760,18 +2945,41 @@ app.post("/api/admin/etf/:ticker/sync", async (c) => {
 
 app.get("/api/ticker/:ticker", async (c) => {
   const ticker = c.req.param("ticker").toUpperCase();
+  const timeframe = normalizeTickerSeriesTimeframe(c.req.query("timeframe"));
+  const timeframeConfig = TICKER_SERIES_TIMEFRAMES[timeframe];
   const symbol = await c.env.DB.prepare("SELECT ticker, name, exchange, asset_class as assetClass FROM symbols WHERE ticker = ?")
     .bind(ticker)
     .first();
   if (!symbol) return c.json({ error: "Ticker not found" }, 404);
 
-  const bars = await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 120")
-    .bind(ticker)
-    .all<{ date: string; c: number }>();
+  const bars = timeframeConfig.limit == null
+    ? await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC")
+      .bind(ticker)
+      .all<{ date: string; c: number }>()
+    : await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT ?")
+      .bind(ticker, timeframeConfig.limit)
+      .all<{ date: string; c: number }>();
   const asc = [...(bars.results ?? [])].reverse();
+  const historyStatus: {
+    timeframe: TickerSeriesTimeframe;
+    requestedBars: number | null;
+    availableBars: number;
+    complete: boolean;
+    backfill: TickerHistoryBackfillResponse | null;
+  } = {
+    timeframe,
+    requestedBars: timeframeConfig.limit,
+    availableBars: asc.length,
+    complete: timeframe !== "2Y" || asc.length >= TICKER_SERIES_2Y_COMPLETE_BARS,
+    backfill: null,
+  };
+  if (timeframe === "2Y" && asc.length < TICKER_SERIES_2Y_COMPLETE_BARS) {
+    historyStatus.backfill = await maybeQueueTickerHistoryBackfill(c, ticker, timeframe, asc.length);
+  }
   return c.json({
     symbol,
     series: asc,
+    historyStatus,
     tradingViewEnabled: (c.env.TRADINGVIEW_WIDGET_ENABLED ?? "true") === "true",
   });
 });

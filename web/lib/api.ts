@@ -2225,12 +2225,30 @@ export function getBreadthSummary() {
   return getJson<{ asOfDate: string | null; rows: any[]; unavailable: Array<{ id: string; name: string; reason: string }> }>("/api/breadth/summary");
 }
 
-export function getTicker(ticker: string) {
-  return getJson<{
+export type TickerSeriesTimeframe = "1M" | "3M" | "6M" | "1Y" | "2Y" | "MAX";
+
+export type TickerHistoryBackfillStatus =
+  | { status: "queued"; lastRequestedAt: string }
+  | { status: "recently_requested"; lastRequestedAt: string | null }
+  | { status: "unavailable"; message: string };
+
+export type TickerSeriesResponse = {
     symbol: { ticker: string; name: string; exchange: string };
     series: Array<{ date: string; c: number }>;
+    historyStatus?: {
+      timeframe: TickerSeriesTimeframe;
+      requestedBars: number | null;
+      availableBars: number;
+      complete: boolean;
+      backfill: TickerHistoryBackfillStatus | null;
+    };
     tradingViewEnabled: boolean;
-  }>(`/api/ticker/${ticker}`);
+  };
+
+export function getTicker(ticker: string, timeframe?: TickerSeriesTimeframe) {
+  return getJson<TickerSeriesResponse>(
+    appendQuery(`/api/ticker/${encodeURIComponent(ticker)}`, { timeframe }),
+  );
 }
 
 export function getCorrelationMatrix(params: {
