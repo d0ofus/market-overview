@@ -3,9 +3,10 @@ import { AdminLoginForm } from "./admin-login-form";
 
 type Props = {
   missing?: string[];
+  redirectTo?: string;
 };
 
-export function AdminLoginScreen({ missing = [] }: Props) {
+export function AdminLoginScreen({ missing = [], redirectTo }: Props) {
   const configurationError = missing.length > 0
     ? `Missing server environment variables: ${missing.join(", ")}.`
     : null;
@@ -28,7 +29,7 @@ export function AdminLoginScreen({ missing = [] }: Props) {
             {configurationError}
           </p>
         ) : null}
-        <AdminLoginForm disabled={Boolean(configurationError)} />
+        <AdminLoginForm disabled={Boolean(configurationError)} redirectTo={redirectTo} />
       </section>
     </div>
   );

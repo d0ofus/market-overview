@@ -11,17 +11,24 @@ const initialState: AdminLoginState = {
 
 type Props = {
   disabled?: boolean;
+  redirectTo?: string;
 };
 
-export function AdminLoginForm({ disabled = false }: Props) {
+function defaultRedirectPath(pathname: string | null): string {
+  if (pathname === "/research-lab") return pathname;
+  if (pathname === "/admin" || pathname?.startsWith("/admin/")) return pathname;
+  return "/admin";
+}
+
+export function AdminLoginForm({ disabled = false, redirectTo }: Props) {
   const pathname = usePathname();
-  const redirectTo = pathname === "/admin" || pathname?.startsWith("/admin/") ? pathname : "/admin";
+  const nextPath = redirectTo ?? defaultRedirectPath(pathname);
   const [state, formAction, pending] = useActionState(loginAdmin, initialState);
   const formDisabled = disabled || pending;
 
   return (
     <form action={formAction} className="space-y-4">
-      <input name="redirectTo" type="hidden" value={redirectTo} />
+      <input name="redirectTo" type="hidden" value={nextPath} />
       <div className="space-y-2">
         <label className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400" htmlFor="admin-password">
           Password

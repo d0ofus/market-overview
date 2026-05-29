@@ -137,6 +137,7 @@ vercel env pull web/.env.local --yes
 ```
 
 Do not use `NEXT_PUBLIC_ADMIN_SECRET` for admin authentication. `NEXT_PUBLIC_*` values are exposed to the browser bundle; rotate any admin secret that was previously deployed with that prefix.
+The 7-day HttpOnly admin session unlocks both `/admin` and `/research-lab`. `ADMIN_SECRET` is server-only in the web app and lets the web server proxy protected admin API calls to the Worker.
 
 ## D1 Schema + Seed
 

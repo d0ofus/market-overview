@@ -1,6 +1,13 @@
+import { AdminLoginScreen } from "@/components/admin/admin-login-screen";
 import { ResearchLabDashboard } from "@/components/research-lab-dashboard";
+import { getAdminSessionStatus } from "@/lib/admin-auth";
 
-export default function ResearchLabPage() {
+export default async function ResearchLabPage() {
+  const auth = await getAdminSessionStatus();
+  if (!auth.configured || !auth.authenticated) {
+    return <AdminLoginScreen missing={auth.missing} redirectTo="/research-lab" />;
+  }
+
   return (
     <div className="space-y-4">
       <div>

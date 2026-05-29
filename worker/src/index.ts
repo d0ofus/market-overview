@@ -3952,6 +3952,7 @@ app.get("/api/research-lab/runs", async (c) => {
 });
 
 app.post("/api/research-lab/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
     const payload = await c.req.json();
     const run = await startResearchLabRun(c.env, payload);
@@ -3962,12 +3963,14 @@ app.post("/api/research-lab/runs", async (c) => {
 });
 
 app.post("/api/research-lab/runs/:id/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const run = await cancelResearchLabRun(c.env, c.req.param("id"));
   if (!run) return c.json({ error: "Research lab run not found." }, 404);
   return c.json({ ok: true, run });
 });
 
 app.post("/api/research-lab/runs/:id/pump", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const runId = c.req.param("id");
   const run = await ensureResearchLabRunProgress(c.env, runId);
   if (!run) return c.json({ error: "Research lab run not found." }, 404);
