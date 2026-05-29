@@ -9,8 +9,10 @@ import {
   deleteAdminWatchlistCompilerSet,
   deleteAdminWatchlistCompilerSource,
   duplicateAdminWatchlistCompilerSet,
+  getAdminWatchlistCompilerFactorConfig,
   getAdminWatchlistCompilerSets,
   getWatchlistCompilerSet,
+  updateAdminWatchlistCompilerFactorConfig,
   updateAdminWatchlistCompilerSet,
   updateAdminWatchlistCompilerSource,
   type WatchlistFactorConfig,
@@ -39,7 +41,6 @@ type WatchlistSetForm = {
   compileDaily: boolean;
   dailyCompileTimeLocal: string;
   dailyCompileTimezone: string;
-  factorConfig: WatchlistFactorConfig;
 };
 
 const EMPTY_FACTOR_CONFIG: WatchlistFactorConfig = {
@@ -49,8 +50,13 @@ const EMPTY_FACTOR_CONFIG: WatchlistFactorConfig = {
     marketCapAbove: true,
     within52WeekHigh: true,
     priorStrongMove: true,
+    strongSector: true,
     avg10dDollarVolume: true,
     increasingVolumeProfile: true,
+    positiveRevenueGrowth: true,
+    positiveEpsGrowth: true,
+    acceleratingRevenueGrowth: true,
+    acceleratingEpsGrowth: true,
     averageTradingRangePct: true,
   },
   thresholds: {
@@ -121,14 +127,6 @@ function normalizeFactorConfig(value: WatchlistFactorConfig | null | undefined):
   };
 }
 
-function factorConfigSignature(value: WatchlistFactorConfig | null | undefined): string {
-  return JSON.stringify(normalizeFactorConfig(value));
-}
-
-function activeSourceCount(value: WatchlistCompilerSetDetail | null): number {
-  return value?.sources.filter((source) => source.isActive).length ?? 0;
-}
-
 const EMPTY_FORM: WatchlistSetForm = {
   name: "",
   slug: "",
@@ -136,7 +134,6 @@ const EMPTY_FORM: WatchlistSetForm = {
   compileDaily: false,
   dailyCompileTimeLocal: "08:15",
   dailyCompileTimezone: "Australia/Sydney",
-  factorConfig: normalizeFactorConfig(null),
 };
 
 export function WatchlistCompilerAdminPanel() {
@@ -144,11 +141,13 @@ export function WatchlistCompilerAdminPanel() {
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WatchlistCompilerSetDetail | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [factorConfig, setFactorConfig] = useState<WatchlistFactorConfig>(() => normalizeFactorConfig(null));
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [newSourceSections, setNewSourceSections] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingFactorConfig, setSavingFactorConfig] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [deleteSetOpen, setDeleteSetOpen] = useState(false);
   const [deleteSetBusy, setDeleteSetBusy] = useState(false);
@@ -166,8 +165,12 @@ export function WatchlistCompilerAdminPanel() {
   const load = async (preferredId?: string | null) => {
     setLoading(true);
     try {
-      const setsRes = await getAdminWatchlistCompilerSets();
+      const [setsRes, factorSettings] = await Promise.all([
+        getAdminWatchlistCompilerSets(),
+        getAdminWatchlistCompilerFactorConfig(),
+      ]);
       const rows = setsRes.rows ?? [];
+      setFactorConfig(normalizeFactorConfig(factorSettings.factorConfig));
       setSets(rows);
       const nextId = preferredId ?? selectedSetId ?? rows[0]?.id ?? null;
       setSelectedSetId(nextId);
@@ -181,7 +184,6 @@ export function WatchlistCompilerAdminPanel() {
           compileDaily: nextDetail.compileDaily,
           dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
           dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
-          factorConfig: normalizeFactorConfig(nextDetail.factorConfig),
         });
       } else {
         setDetail(null);
@@ -282,30 +284,24 @@ export function WatchlistCompilerAdminPanel() {
   };
 
   const setFactorEnabled = (key: WatchlistFactorKey, enabled: boolean) => {
-    setForm((current) => ({
+    setFactorConfig((current) => ({
       ...current,
-      factorConfig: {
-        ...current.factorConfig,
-        enabled: {
-          ...current.factorConfig.enabled,
-          [key]: enabled,
-        },
+      enabled: {
+        ...current.enabled,
+        [key]: enabled,
       },
     }));
   };
 
   const setFactorThreshold = (group: keyof WatchlistFactorConfig["thresholds"], field: string, value: string) => {
     const parsed = Number(value);
-    setForm((current) => ({
+    setFactorConfig((current) => ({
       ...current,
-      factorConfig: {
-        ...current.factorConfig,
-        thresholds: {
-          ...current.factorConfig.thresholds,
-          [group]: {
-            ...current.factorConfig.thresholds[group],
-            [field]: Number.isFinite(parsed) ? parsed : 0,
-          },
+      thresholds: {
+        ...current.thresholds,
+        [group]: {
+          ...current.thresholds[group],
+          [field]: Number.isFinite(parsed) ? parsed : 0,
         },
       },
     }));
@@ -383,7 +379,6 @@ export function WatchlistCompilerAdminPanel() {
                             compileDaily: nextDetail.compileDaily,
                             dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
                             dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
-                            factorConfig: normalizeFactorConfig(nextDetail.factorConfig),
                           });
                         } catch (error) {
                           setMessage(error instanceof Error ? error.message : "Failed to load selected watchlist set.");
@@ -451,22 +446,9 @@ export function WatchlistCompilerAdminPanel() {
                   setMessage(null);
                   try {
                     if (selectedSetId) {
-                      const factorConfigChanged = factorConfigSignature(form.factorConfig) !== factorConfigSignature(detail?.factorConfig);
                       await updateAdminWatchlistCompilerSet(selectedSetId, form);
-                      const shouldAutoCompile = factorConfigChanged && activeSourceCount(detail) > 0;
-                      if (shouldAutoCompile) {
-                        try {
-                          const result = await compileAdminWatchlistCompilerSet(selectedSetId);
-                          await load(selectedSetId);
-                          flashMessage(`Watchlist set updated and recompiled ${result.run.compiledRowCount} rows.`);
-                        } catch (compileError) {
-                          await load(selectedSetId);
-                          setMessage(compileError instanceof Error ? `Watchlist set updated, but compile failed: ${compileError.message}` : "Watchlist set updated, but compile failed.");
-                        }
-                      } else {
-                        await load(selectedSetId);
-                        flashMessage("Watchlist set updated.");
-                      }
+                      await load(selectedSetId);
+                      flashMessage("Watchlist set updated.");
                     } else {
                       const created = await createAdminWatchlistCompilerSet(form);
                       const addedDraftSource = await addDraftSourceToSet(created.id);
@@ -509,7 +491,7 @@ export function WatchlistCompilerAdminPanel() {
             </div>
             </AdminCard>
 
-            <AdminCard title="Factor Assessment" description="Saved with this set and applied to each new compile. Existing runs stay unchanged.">
+            <AdminCard title="Factor Assessment" description="Applied to every watchlist compiler set on future compiles. Existing runs stay unchanged.">
               <div className="grid gap-2 lg:grid-cols-2">
                 {FACTOR_DEFINITIONS.map((factor) => (
                   <div key={factor.key} className="rounded border border-borderSoft/60 bg-panelSoft/35 p-3">
@@ -517,7 +499,7 @@ export function WatchlistCompilerAdminPanel() {
                       <input
                         className="mt-1"
                         type="checkbox"
-                        checked={form.factorConfig.enabled[factor.key] === true}
+                        checked={factorConfig.enabled[factor.key] === true}
                         onChange={(event) => setFactorEnabled(factor.key, event.target.checked)}
                       />
                       <span>{factor.label}</span>
@@ -525,7 +507,7 @@ export function WatchlistCompilerAdminPanel() {
                     {factor.inputs.length > 0 ? (
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
                         {factor.inputs.map((input) => {
-                          const groupValue = form.factorConfig.thresholds[input.group] as Record<string, number>;
+                          const groupValue = factorConfig.thresholds[input.group] as Record<string, number>;
                           return (
                             <label key={`${factor.key}-${input.field}`} className="block text-[11px] text-slate-400">
                               {input.label}
@@ -547,6 +529,28 @@ export function WatchlistCompilerAdminPanel() {
                     ) : null}
                   </div>
                 ))}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  className="rounded border border-accent/40 bg-accent/15 px-3 py-1.5 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={savingFactorConfig}
+                  onClick={async () => {
+                    setSavingFactorConfig(true);
+                    setMessage(null);
+                    try {
+                      const result = await updateAdminWatchlistCompilerFactorConfig(factorConfig);
+                      setFactorConfig(normalizeFactorConfig(result.settings.factorConfig));
+                      flashMessage("Factor configuration saved. It will apply on the next compile.");
+                    } catch (error) {
+                      setMessage(error instanceof Error ? error.message : "Failed to save factor configuration.");
+                    } finally {
+                      setSavingFactorConfig(false);
+                    }
+                  }}
+                  type="button"
+                >
+                  {savingFactorConfig ? "Saving..." : "Save Factor Configuration"}
+                </button>
               </div>
             </AdminCard>
 

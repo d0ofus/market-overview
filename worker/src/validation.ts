@@ -287,6 +287,10 @@ export const watchlistSetPatchSchema = z.object({
   factorConfig: z.unknown().optional(),
 });
 
+export const watchlistFactorConfigPatchSchema = z.object({
+  factorConfig: z.unknown(),
+});
+
 export const watchlistSourceCreateSchema = z.object({
   sourceName: z.string().trim().max(120).nullable().optional(),
   sourceUrl: urlSchema,

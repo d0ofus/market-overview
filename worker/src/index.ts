@@ -45,6 +45,7 @@ import {
   patternLabelPatchSchema,
   patternProfilePatchSchema,
   patternRunCreateSchema,
+  watchlistFactorConfigPatchSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -203,6 +204,7 @@ import {
   duplicateWatchlistSet,
   listWatchlistSetRuns,
   listWatchlistSets,
+  loadWatchlistFactorSettings,
   loadWatchlistCompiledRows,
   loadWatchlistSet,
   loadWatchlistUniqueRows,
@@ -210,6 +212,7 @@ import {
   runDueWatchlistCompiles,
   tickersToSingleColumnCsv,
   tickersToTxt,
+  updateWatchlistFactorSettings,
   updateWatchlistSet,
   updateWatchlistSource,
 } from "./watchlist-compiler-service";
@@ -4167,6 +4170,20 @@ app.get("/api/admin/watchlist-compiler/sets", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const rows = await listWatchlistSets(c.env, true);
   return c.json({ rows });
+});
+
+app.get("/api/admin/watchlist-compiler/factor-config", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const settings = await loadWatchlistFactorSettings(c.env);
+  return c.json(settings);
+});
+
+app.patch("/api/admin/watchlist-compiler/factor-config", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistFactorConfigPatchSchema.parse(await c.req.json());
+  const settings = await updateWatchlistFactorSettings(c.env, payload.factorConfig);
+  await upsertAudit(c.env, "default", "WATCHLIST_FACTOR_CONFIG_PATCH", { factorConfig: settings.factorConfig });
+  return c.json({ ok: true, settings });
 });
 
 app.post("/api/admin/watchlist-compiler/sets", async (c) => {

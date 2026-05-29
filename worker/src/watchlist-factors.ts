@@ -170,8 +170,13 @@ export const DEFAULT_WATCHLIST_FACTOR_CONFIG: WatchlistFactorConfig = {
     marketCapAbove: true,
     within52WeekHigh: true,
     priorStrongMove: true,
+    strongSector: true,
     avg10dDollarVolume: true,
     increasingVolumeProfile: true,
+    positiveRevenueGrowth: true,
+    positiveEpsGrowth: true,
+    acceleratingRevenueGrowth: true,
+    acceleratingEpsGrowth: true,
     averageTradingRangePct: true,
   },
   thresholds: {

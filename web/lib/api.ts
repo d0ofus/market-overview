@@ -1337,6 +1337,13 @@ export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
   sources: WatchlistCompilerSourceRow[];
 };
 
+export type WatchlistFactorSettings = {
+  id: string;
+  factorConfig: WatchlistFactorConfig;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
 export type ResearchRefreshMode = "reuse_fresh_search_cache" | "force_fresh";
 export type ResearchRankingMode = "rank_only" | "rank_and_deep_dive";
 export type ResearchRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partial";
@@ -3136,6 +3143,17 @@ export function getWatchlistCompilerExportUrl(
 
 export function getAdminWatchlistCompilerSets() {
   return adminFetch<{ rows: WatchlistCompilerSetRow[] }>("/api/admin/watchlist-compiler/sets");
+}
+
+export function getAdminWatchlistCompilerFactorConfig() {
+  return adminFetch<WatchlistFactorSettings>("/api/admin/watchlist-compiler/factor-config");
+}
+
+export function updateAdminWatchlistCompilerFactorConfig(factorConfig: WatchlistFactorConfig) {
+  return adminFetch<{ ok: boolean; settings: WatchlistFactorSettings }>("/api/admin/watchlist-compiler/factor-config", {
+    method: "PATCH",
+    body: JSON.stringify({ factorConfig }),
+  });
 }
 
 export function createAdminWatchlistCompilerSet(payload: {

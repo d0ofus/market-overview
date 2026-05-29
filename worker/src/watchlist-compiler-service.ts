@@ -11,6 +11,7 @@ import {
 } from "./watchlist-factors";
 
 const INTERNAL_PROVIDER_KEY = "watchlist-compiler";
+const WATCHLIST_FACTOR_SETTINGS_ID = "default";
 const DEFAULT_COMPILE_TIME = "08:15";
 const DEFAULT_COMPILE_TIMEZONE = "Australia/Sydney";
 const TV_METRICS_URL = "https://scanner.tradingview.com/america/scan";
@@ -73,6 +74,13 @@ export type WatchlistSourceRecord = {
 
 export type WatchlistSetDetail = WatchlistSetRecord & {
   sources: WatchlistSourceRecord[];
+};
+
+export type WatchlistFactorSettingsRecord = {
+  id: string;
+  factorConfig: WatchlistFactorConfig;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type WatchlistCandidate = {
@@ -510,6 +518,67 @@ function parseStoredFactorConfig(value: unknown): WatchlistFactorConfig {
   }
 }
 
+function isWatchlistFactorSettingsSchemaMissing(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.toLowerCase().includes("watchlist_factor_settings");
+}
+
+async function ensureWatchlistFactorSettingsTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS watchlist_factor_settings (
+      id TEXT PRIMARY KEY,
+      factor_config_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ).run();
+}
+
+function defaultWatchlistFactorSettings(): WatchlistFactorSettingsRecord {
+  return {
+    id: WATCHLIST_FACTOR_SETTINGS_ID,
+    factorConfig: normalizeWatchlistFactorConfig(null),
+    createdAt: null,
+    updatedAt: null,
+  };
+}
+
+export async function loadWatchlistFactorSettings(env: Env): Promise<WatchlistFactorSettingsRecord> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT id, factor_config_json as factorConfigJson, created_at as createdAt, updated_at as updatedAt FROM watchlist_factor_settings WHERE id = ? LIMIT 1",
+    ).bind(WATCHLIST_FACTOR_SETTINGS_ID).first<{
+      id: string;
+      factorConfigJson: string | null;
+      createdAt: string | null;
+      updatedAt: string | null;
+    }>();
+    if (!row) return defaultWatchlistFactorSettings();
+    return {
+      id: row.id || WATCHLIST_FACTOR_SETTINGS_ID,
+      factorConfig: parseStoredFactorConfig(row.factorConfigJson),
+      createdAt: row.createdAt ?? null,
+      updatedAt: row.updatedAt ?? null,
+    };
+  } catch (error) {
+    if (isWatchlistFactorSettingsSchemaMissing(error)) return defaultWatchlistFactorSettings();
+    throw error;
+  }
+}
+
+export async function updateWatchlistFactorSettings(env: Env, input: unknown): Promise<WatchlistFactorSettingsRecord> {
+  await ensureWatchlistFactorSettingsTable(env);
+  const factorConfig = normalizeWatchlistFactorConfig(input);
+  await env.DB.prepare(
+    `INSERT INTO watchlist_factor_settings (id, factor_config_json, created_at, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(id) DO UPDATE SET
+       factor_config_json = excluded.factor_config_json,
+       updated_at = CURRENT_TIMESTAMP`,
+  ).bind(WATCHLIST_FACTOR_SETTINGS_ID, JSON.stringify(factorConfig)).run();
+  return await loadWatchlistFactorSettings(env);
+}
+
 function mapRunSummary(row: any): ScanRunSummary {
   return {
     ...row,
@@ -585,7 +654,10 @@ async function latestRunMap(env: Env): Promise<Map<string, ScanRunSummary>> {
 }
 
 export async function listWatchlistSets(env: Env, includeInactive = false): Promise<WatchlistSetRecord[]> {
-  const latestByScan = await latestRunMap(env);
+  const [latestByScan, factorSettings] = await Promise.all([
+    latestRunMap(env),
+    loadWatchlistFactorSettings(env),
+  ]);
   const rows = await env.DB.prepare(
     `SELECT
       s.id,
@@ -596,7 +668,6 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
       s.compile_daily as compileDaily,
       s.daily_compile_time_local as dailyCompileTimeLocal,
       s.daily_compile_timezone as dailyCompileTimezone,
-      s.factor_config_json as factorConfigJson,
       s.created_at as createdAt,
       s.updated_at as updatedAt,
       (SELECT COUNT(*) FROM tv_watchlist_sources src WHERE src.set_id = s.id AND src.is_active = 1) as sourceCount
@@ -608,7 +679,7 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
     ...row,
     isActive: Boolean(row.isActive),
     compileDaily: Boolean(row.compileDaily),
-    factorConfig: parseStoredFactorConfig(row.factorConfigJson),
+    factorConfig: factorSettings.factorConfig,
     sourceCount: Number(row.sourceCount ?? 0),
     latestRun: latestByScan.get(row.scanDefinitionId) ?? null,
   }));
@@ -676,18 +747,16 @@ export async function createWatchlistSet(env: Env, input: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
-  factorConfig?: unknown;
 }): Promise<{ id: string }> {
   const id = crypto.randomUUID();
   const scanDefinitionId = crypto.randomUUID();
   const slug = slugify(input.slug?.trim() || input.name);
-  const factorConfig = normalizeWatchlistFactorConfig(input.factorConfig);
   await env.DB.batch([
     env.DB.prepare(
       "INSERT INTO scan_definitions (id, name, provider_key, source_type, source_value, fallback_source_type, fallback_source_value, is_active, notes, created_at, updated_at) VALUES (?, ?, ?, 'tradingview-public-link', ?, NULL, NULL, 0, 'internal:watchlist-compiler', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(scanDefinitionId, input.name.trim(), INTERNAL_PROVIDER_KEY, `watchlist-set:${slug}`),
     env.DB.prepare(
-      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, factor_config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(
       id,
       scanDefinitionId,
@@ -697,7 +766,6 @@ export async function createWatchlistSet(env: Env, input: {
       input.compileDaily ? 1 : 0,
       input.dailyCompileTimeLocal?.trim() || null,
       input.dailyCompileTimezone?.trim() || null,
-      JSON.stringify(factorConfig),
     ),
   ]);
   return { id };
@@ -705,7 +773,7 @@ export async function createWatchlistSet(env: Env, input: {
 
 export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ id: string }> {
   const existing = await env.DB.prepare(
-    "SELECT id, scan_definition_id as scanDefinitionId, name, slug, is_active as isActive, compile_daily as compileDaily, daily_compile_time_local as dailyCompileTimeLocal, daily_compile_timezone as dailyCompileTimezone, factor_config_json as factorConfigJson FROM tv_watchlist_sets WHERE id = ? LIMIT 1",
+    "SELECT id, scan_definition_id as scanDefinitionId, name, slug, is_active as isActive, compile_daily as compileDaily, daily_compile_time_local as dailyCompileTimeLocal, daily_compile_timezone as dailyCompileTimezone FROM tv_watchlist_sets WHERE id = ? LIMIT 1",
   ).bind(setId).first<{
     id: string;
     scanDefinitionId: string;
@@ -715,7 +783,6 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
     compileDaily: number;
     dailyCompileTimeLocal: string | null;
     dailyCompileTimezone: string | null;
-    factorConfigJson: string | null;
   }>();
   if (!existing) throw new Error("Watchlist set not found.");
 
@@ -731,7 +798,7 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
       "INSERT INTO scan_definitions (id, name, provider_key, source_type, source_value, fallback_source_type, fallback_source_value, is_active, notes, created_at, updated_at) VALUES (?, ?, ?, 'tradingview-public-link', ?, NULL, NULL, 0, 'internal:watchlist-compiler', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(scanDefinitionId, name, INTERNAL_PROVIDER_KEY, `watchlist-set:${slug}`),
     env.DB.prepare(
-      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, factor_config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(
       id,
       scanDefinitionId,
@@ -741,7 +808,6 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
       existing.compileDaily ? 1 : 0,
       existing.dailyCompileTimeLocal,
       existing.dailyCompileTimezone,
-      JSON.stringify(parseStoredFactorConfig(existing.factorConfigJson)),
     ),
     ...sources.map((source) =>
       env.DB.prepare(
@@ -768,7 +834,6 @@ export async function updateWatchlistSet(env: Env, setId: string, input: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
-  factorConfig?: unknown;
 }): Promise<void> {
   const existing = await loadWatchlistSet(env, setId);
   if (!existing) throw new Error("Watchlist set not found.");
@@ -778,11 +843,10 @@ export async function updateWatchlistSet(env: Env, setId: string, input: {
   const compileDaily = input.compileDaily == null ? existing.compileDaily : input.compileDaily;
   const dailyCompileTimeLocal = input.dailyCompileTimeLocal === undefined ? existing.dailyCompileTimeLocal : (input.dailyCompileTimeLocal?.trim() || null);
   const dailyCompileTimezone = input.dailyCompileTimezone === undefined ? existing.dailyCompileTimezone : (input.dailyCompileTimezone?.trim() || null);
-  const factorConfig = input.factorConfig === undefined ? existing.factorConfig : normalizeWatchlistFactorConfig(input.factorConfig);
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE tv_watchlist_sets SET name = ?, slug = ?, is_active = ?, compile_daily = ?, daily_compile_time_local = ?, daily_compile_timezone = ?, factor_config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    ).bind(name, slug, isActive ? 1 : 0, compileDaily ? 1 : 0, dailyCompileTimeLocal, dailyCompileTimezone, JSON.stringify(factorConfig), setId),
+      "UPDATE tv_watchlist_sets SET name = ?, slug = ?, is_active = ?, compile_daily = ?, daily_compile_time_local = ?, daily_compile_timezone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).bind(name, slug, isActive ? 1 : 0, compileDaily ? 1 : 0, dailyCompileTimeLocal, dailyCompileTimezone, setId),
     env.DB.prepare(
       "UPDATE scan_definitions SET name = ?, source_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).bind(name, `watchlist-set:${slug}`, existing.scanDefinitionId),

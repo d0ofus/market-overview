@@ -3,11 +3,13 @@ import {
   compileWatchlistSet,
   duplicateWatchlistSet,
   filterWatchlistCandidatesBySections,
+  loadWatchlistFactorSettings,
   parseWatchlistSourceSections,
   resolveExportFileName,
   shouldRunScheduledWatchlistCompile,
   tickersToSingleColumnCsv,
   tickersToTxt,
+  updateWatchlistFactorSettings,
 } from "../src/watchlist-compiler-service";
 import {
   calculatePriorStrongMovePct,
@@ -37,8 +39,10 @@ type CompileSourceRow = {
   updatedAt: string;
 };
 
-function createCompileEnv(sources: CompileSourceRow[], factorConfigJson: string | null = null) {
+function createCompileEnv(sources: CompileSourceRow[], factorConfigJson: string | null = null, globalFactorConfigJson: string | null = null) {
   let batchStatements: MockStatement[] = [];
+  const runStatements: MockStatement[] = [];
+  let savedGlobalFactorConfigJson = globalFactorConfigJson;
   const setRows = [{
     id: "set-a",
     scanDefinitionId: "scan-a",
@@ -54,23 +58,35 @@ function createCompileEnv(sources: CompileSourceRow[], factorConfigJson: string 
     sourceCount: sources.filter((source) => source.isActive).length,
   }];
 
-  const makeStatement = (query: string, args: unknown[] = []): MockStatement => ({
-    query,
-    args,
-    bind: (...nextArgs: unknown[]) => makeStatement(query, nextArgs),
-    async first() {
-      return null;
-    },
-    async all() {
-      if (query.includes("JOIN (SELECT scan_id")) return { results: [] };
-      if (query.includes("FROM tv_watchlist_sets s")) return { results: setRows };
-      if (query.includes("FROM tv_watchlist_sources WHERE set_id = ?")) return { results: sources };
-      return { results: [] };
-    },
-    async run() {
-      return {};
-    },
-  });
+  const makeStatement = (query: string, args: unknown[] = []): MockStatement => {
+    const statement: MockStatement = {
+      query,
+      args,
+      bind: (...nextArgs: unknown[]) => makeStatement(query, nextArgs),
+      async first() {
+        if (query.includes("FROM watchlist_factor_settings")) {
+          return savedGlobalFactorConfigJson == null
+            ? null
+            : { id: "default", factorConfigJson: savedGlobalFactorConfigJson, createdAt: "", updatedAt: "" };
+        }
+        return null;
+      },
+      async all() {
+        if (query.includes("JOIN (SELECT scan_id")) return { results: [] };
+        if (query.includes("FROM tv_watchlist_sets s")) return { results: setRows };
+        if (query.includes("FROM tv_watchlist_sources WHERE set_id = ?")) return { results: sources };
+        return { results: [] };
+      },
+      async run() {
+        if (query.includes("INSERT INTO watchlist_factor_settings")) {
+          savedGlobalFactorConfigJson = String(args[1] ?? "");
+        }
+        runStatements.push(statement);
+        return {};
+      },
+    };
+    return statement;
+  };
 
   return {
     env: {
@@ -85,6 +101,7 @@ function createCompileEnv(sources: CompileSourceRow[], factorConfigJson: string 
       },
     } as any,
     getBatchStatements: () => batchStatements,
+    getRunStatements: () => runStatements,
   };
 }
 
@@ -180,17 +197,47 @@ describe("watchlist compiler service helpers", () => {
     expect(rows.map((row) => row.ticker)).toEqual(["AAOI"]);
   });
 
-  it("normalizes missing factor config to core defaults", () => {
+  it("normalizes missing factor config to all-factor defaults", () => {
     expect(enabledWatchlistFactorKeys(normalizeWatchlistFactorConfig(null))).toEqual([
       "priceAboveSma200",
       "priceAbove",
       "marketCapAbove",
       "within52WeekHigh",
       "priorStrongMove",
+      "strongSector",
       "avg10dDollarVolume",
       "increasingVolumeProfile",
+      "positiveRevenueGrowth",
+      "positiveEpsGrowth",
+      "acceleratingRevenueGrowth",
+      "acceleratingEpsGrowth",
       "averageTradingRangePct",
     ]);
+  });
+
+  it("loads all-factor defaults when no global factor settings are saved", async () => {
+    const { env } = createCompileEnv([]);
+    const settings = await loadWatchlistFactorSettings(env);
+
+    expect(enabledWatchlistFactorKeys(settings.factorConfig)).toHaveLength(13);
+    expect(settings.createdAt).toBeNull();
+    expect(settings.updatedAt).toBeNull();
+  });
+
+  it("persists normalized global factor settings", async () => {
+    const { env, getRunStatements } = createCompileEnv([]);
+
+    const settings = await updateWatchlistFactorSettings(env, {
+      enabled: { priceAbove: true },
+      thresholds: { priceAbove: { minPrice: 25 } },
+    });
+    const insert = getRunStatements().find((statement) => statement.query.includes("INSERT INTO watchlist_factor_settings"));
+    const savedConfig = JSON.parse(String(insert?.args[1] ?? "{}"));
+
+    expect(enabledWatchlistFactorKeys(settings.factorConfig)).toEqual(["priceAbove"]);
+    expect(settings.factorConfig.thresholds.priceAbove.minPrice).toBe(25);
+    expect(savedConfig.enabled.priceAbove).toBe(true);
+    expect(savedConfig.enabled.marketCapAbove).toBe(false);
   });
 
   it("preserves an explicit disabled factor config", () => {
@@ -312,7 +359,7 @@ describe("watchlist compiler service helpers", () => {
     ]);
   });
 
-  it("stores compile-time factor results from the watchlist set config", async () => {
+  it("stores compile-time factor results from global config and ignores legacy set config", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
       const value = String(url);
       if (value.includes("/watchlists/111/")) {
@@ -338,9 +385,13 @@ describe("watchlist compiler service helpers", () => {
         marketCapAbove: { minMarketCapMillions: 1000 },
       },
     };
+    const legacySetConfig = {
+      enabled: { averageTradingRangePct: true },
+      thresholds: { averageTradingRangePct: { minAtrPct: 99 } },
+    };
     const { env, getBatchStatements } = createCompileEnv([
       compileSource({ id: "source-a", sourceName: "Ready", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
-    ], JSON.stringify(factorConfig));
+    ], JSON.stringify(legacySetConfig), JSON.stringify(factorConfig));
 
     await compileWatchlistSet(env, "set-a");
     const row = scanRowStatements(getBatchStatements())[0];
@@ -357,7 +408,7 @@ describe("watchlist compiler service helpers", () => {
     expect(String(runInsert?.args[9] ?? "")).toContain("__factors__");
   });
 
-  it("stores default factor results when the set has no saved config", async () => {
+  it("stores default factor results when there is no saved global config", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
       const value = String(url);
       if (value.includes("/watchlists/111/")) {
@@ -387,8 +438,9 @@ describe("watchlist compiler service helpers", () => {
 
     expect(row?.args[13]).toBeGreaterThan(0);
     expect(row?.args[14]).toBeGreaterThan(0);
-    expect(factorResults).toHaveLength(8);
+    expect(factorResults).toHaveLength(13);
     expect(factorResults.map((result) => result.key)).toContain("priceAboveSma200");
+    expect(factorResults.map((result) => result.key)).toContain("positiveRevenueGrowth");
     expect(String(runInsert?.args[9] ?? "")).toContain("__factors__");
   });
 
@@ -501,7 +553,6 @@ describe("watchlist compiler service helpers", () => {
       1,
       "08:15",
       "Australia/Sydney",
-      expect.any(String),
     ]);
 
     expect(sourceInserts).toHaveLength(2);
