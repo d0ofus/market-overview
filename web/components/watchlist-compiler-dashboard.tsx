@@ -55,6 +55,19 @@ function localDateSuffix() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+function parseCompiledSource(rawJson: string | null | undefined): { sourceId: string | null; sourceUrl: string | null } {
+  if (!rawJson) return { sourceId: null, sourceUrl: null };
+  try {
+    const parsed = JSON.parse(rawJson) as { sourceId?: unknown; sourceUrl?: unknown };
+    return {
+      sourceId: typeof parsed.sourceId === "string" ? parsed.sourceId : null,
+      sourceUrl: typeof parsed.sourceUrl === "string" ? parsed.sourceUrl : null,
+    };
+  } catch {
+    return { sourceId: null, sourceUrl: null };
+  }
+}
+
 export function WatchlistCompilerDashboard() {
   const [sets, setSets] = useState<WatchlistCompilerSetRow[]>([]);
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
@@ -88,6 +101,17 @@ export function WatchlistCompilerDashboard() {
   const selectedSet = useMemo(() => sets.find((row) => row.id === selectedSetId) ?? null, [sets, selectedSetId]);
   const visibleTickers = useMemo(() => (viewMode === "compiled" ? compiledRows.map((row) => row.ticker) : uniqueRows.map((row) => row.ticker)), [compiledRows, uniqueRows, viewMode]);
   const uniqueVisibleTickers = useMemo(() => Array.from(new Set(visibleTickers)), [visibleTickers]);
+  const sourceLabels = useMemo(() => new Map(
+    (detail?.sources ?? []).map((source) => [
+      source.id,
+      source.sourceName?.trim() || source.sourceUrl,
+    ]),
+  ), [detail]);
+
+  const compiledSourceLabel = (row: ScanCompiledRow) => {
+    const source = parseCompiledSource(row.rawJson);
+    return (source.sourceId ? sourceLabels.get(source.sourceId) : null) ?? source.sourceUrl ?? "-";
+  };
 
   const loadProfiles = async () => {
     try {
@@ -444,7 +468,7 @@ export function WatchlistCompilerDashboard() {
                         <td className="px-2 py-1.5"><input type="checkbox" checked={selectedTickers.includes(row.ticker)} onChange={() => toggleTickerSelection(row.ticker)} /></td>
                         <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
                         <td className="px-2 py-1.5 text-slate-300">{row.displayName ?? "-"}</td>
-                        <td className="px-2 py-1.5 text-slate-400">{viewMode === "compiled" ? "-" : row.occurrences}</td>
+                        <td className="max-w-44 truncate px-2 py-1.5 text-slate-400" title={viewMode === "compiled" ? compiledSourceLabel(row) : undefined}>{viewMode === "compiled" ? compiledSourceLabel(row) : row.occurrences}</td>
                         <td className="px-2 py-1.5 text-slate-300">{fmtNumber(viewMode === "compiled" ? row.price : row.latestPrice)}</td>
                         <td className={`px-2 py-1.5 ${((viewMode === "compiled" ? row.change1d : row.latestChange1d) ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{fmtNumber(viewMode === "compiled" ? row.change1d : row.latestChange1d)}</td>
                       </tr>

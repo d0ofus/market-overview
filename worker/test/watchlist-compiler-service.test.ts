@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  compileWatchlistSet,
   duplicateWatchlistSet,
   filterWatchlistCandidatesBySections,
   parseWatchlistSourceSections,
@@ -9,7 +10,99 @@ import {
   tickersToTxt,
 } from "../src/watchlist-compiler-service";
 
+type MockStatement = {
+  query: string;
+  args: unknown[];
+  bind: (...args: unknown[]) => MockStatement;
+  first: () => Promise<any>;
+  all: () => Promise<{ results: any[] }>;
+  run: () => Promise<Record<string, never>>;
+};
+
+type CompileSourceRow = {
+  id: string;
+  setId: string;
+  sourceName: string | null;
+  sourceUrl: string;
+  sourceSections: string | null;
+  sortOrder: number;
+  isActive: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function createCompileEnv(sources: CompileSourceRow[]) {
+  let batchStatements: MockStatement[] = [];
+  const setRows = [{
+    id: "set-a",
+    scanDefinitionId: "scan-a",
+    name: "Momentum",
+    slug: "momentum",
+    isActive: 1,
+    compileDaily: 0,
+    dailyCompileTimeLocal: null,
+    dailyCompileTimezone: null,
+    createdAt: "",
+    updatedAt: "",
+    sourceCount: sources.filter((source) => source.isActive).length,
+  }];
+
+  const makeStatement = (query: string, args: unknown[] = []): MockStatement => ({
+    query,
+    args,
+    bind: (...nextArgs: unknown[]) => makeStatement(query, nextArgs),
+    async first() {
+      return null;
+    },
+    async all() {
+      if (query.includes("JOIN (SELECT scan_id")) return { results: [] };
+      if (query.includes("FROM tv_watchlist_sets s")) return { results: setRows };
+      if (query.includes("FROM tv_watchlist_sources WHERE set_id = ?")) return { results: sources };
+      return { results: [] };
+    },
+    async run() {
+      return {};
+    },
+  });
+
+  return {
+    env: {
+      DB: {
+        prepare(query: string) {
+          return makeStatement(query);
+        },
+        async batch(statements: MockStatement[]) {
+          batchStatements = statements;
+          return [];
+        },
+      },
+    } as any,
+    getBatchStatements: () => batchStatements,
+  };
+}
+
+function compileSource(input: Partial<CompileSourceRow> & { id: string; sourceUrl: string }): CompileSourceRow {
+  return {
+    setId: "set-a",
+    sourceName: null,
+    sourceSections: null,
+    sortOrder: 1,
+    isActive: 1,
+    createdAt: "",
+    updatedAt: "",
+    ...input,
+  };
+}
+
+function scanRowStatements(statements: MockStatement[]) {
+  return statements.filter((statement) => statement.query.includes("INSERT OR IGNORE INTO scan_run_rows"));
+}
+
 describe("watchlist compiler service helpers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders TradingView-friendly txt and csv exports", () => {
     expect(tickersToTxt(["AAPL", "MSFT", "PLTR"])).toBe("AAPL\nMSFT\nPLTR");
     expect(tickersToSingleColumnCsv(["AAPL", "MSFT"])).toBe("ticker\nAAPL\nMSFT");
@@ -80,16 +173,122 @@ describe("watchlist compiler service helpers", () => {
     expect(rows.map((row) => row.ticker)).toEqual(["AAOI"]);
   });
 
-  it("duplicates sets with fresh ids, unique copy naming, copied sources, and no run history", async () => {
-    type MockStatement = {
-      query: string;
-      args: unknown[];
-      bind: (...args: unknown[]) => MockStatement;
-      first: () => Promise<any>;
-      all: () => Promise<{ results: any[] }>;
-      run: () => Promise<Record<string, never>>;
-    };
+  it("enriches compiled watchlist rows with TradingView Screener metrics", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (value.includes("/watchlists/111/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NASDAQ:AAPL","NYSE:PLTR"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value === "https://scanner.tradingview.com/america/scan") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { symbols?: { tickers?: string[] } };
+        const data = (body.symbols?.tickers ?? [])
+          .map((symbol) => {
+            if (symbol === "NASDAQ:AAPL") return { s: symbol, d: ["Apple Inc.", 180.25, 1.23, 55_000_000, 2_800_000_000_000, "NASDAQ", "stock"] };
+            if (symbol === "NYSE:PLTR") return { s: symbol, d: ["Palantir Technologies Inc.", 22.5, -0.75, 80_000_000, 50_000_000_000, "NYSE", "stock"] };
+            return null;
+          })
+          .filter(Boolean);
+        return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error(`Unexpected fetch: ${value}`);
+    });
 
+    const { env, getBatchStatements } = createCompileEnv([
+      compileSource({ id: "source-a", sourceName: "Ready", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
+    ]);
+
+    const result = await compileWatchlistSet(env, "set-a");
+    const rowStatements = scanRowStatements(getBatchStatements());
+    const aapl = rowStatements.find((statement) => statement.args[3] === "AAPL");
+    const pltr = rowStatements.find((statement) => statement.args[3] === "PLTR");
+    const runInsert = getBatchStatements().find((statement) => statement.query.includes("INSERT INTO scan_runs"));
+
+    expect(result.run.status).toBe("ok");
+    expect(rowStatements).toHaveLength(2);
+    expect(aapl?.args.slice(3, 13)).toEqual(["AAPL", "Apple Inc.", "NASDAQ", "watchlist:0:NASDAQ:AAPL", 1, null, 180.25, 1.23, 55_000_000, 2_800_000_000_000]);
+    expect(pltr?.args.slice(3, 13)).toEqual(["PLTR", "Palantir Technologies Inc.", "NYSE", "watchlist:1:NYSE:PLTR", 2, null, 22.5, -0.75, 80_000_000, 50_000_000_000]);
+    expect(String(runInsert?.args[9] ?? "")).toContain("__metrics__");
+    expect(String(runInsert?.args[9] ?? "")).toContain("TradingView Screener");
+  });
+
+  it("stores watchlist rows when TradingView metrics enrichment fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request) => {
+      const value = String(url);
+      if (value.includes("/watchlists/111/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NASDAQ:AAPL"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value === "https://scanner.tradingview.com/america/scan") {
+        return new Response("metrics unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${value}`);
+    });
+
+    const { env, getBatchStatements } = createCompileEnv([
+      compileSource({ id: "source-a", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
+    ]);
+
+    const result = await compileWatchlistSet(env, "set-a");
+    const rowStatements = scanRowStatements(getBatchStatements());
+    const runInsert = getBatchStatements().find((statement) => statement.query.includes("INSERT INTO scan_runs"));
+
+    expect(result.run.status).toBe("ok");
+    expect(result.run.error).toBeNull();
+    expect(rowStatements).toHaveLength(1);
+    expect(rowStatements[0]?.args.slice(3, 13)).toEqual(["AAPL", null, "NASDAQ", "watchlist:0:NASDAQ:AAPL", 1, null, null, null, null, null]);
+    expect(String(runInsert?.args[9] ?? "")).toContain("TradingView metrics request failed (503)");
+  });
+
+  it("shares TradingView metrics across duplicate source occurrences while preserving each source", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (value.includes("/watchlists/111/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NASDAQ:AAPL"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value.includes("/watchlists/222/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NYSE:AAPL"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value === "https://scanner.tradingview.com/america/scan") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { symbols?: { tickers?: string[] } };
+        const data = (body.symbols?.tickers ?? []).includes("NASDAQ:AAPL")
+          ? [{ s: "NASDAQ:AAPL", d: ["Apple Inc.", 180.25, 1.23, 55_000_000, 2_800_000_000_000, "NASDAQ", "stock"] }]
+          : [];
+        return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error(`Unexpected fetch: ${value}`);
+    });
+
+    const { env, getBatchStatements } = createCompileEnv([
+      compileSource({ id: "source-a", sourceName: "Ready", sourceUrl: "https://www.tradingview.com/watchlists/111/", sortOrder: 1 }),
+      compileSource({ id: "source-b", sourceName: "Close", sourceUrl: "https://www.tradingview.com/watchlists/222/", sortOrder: 2 }),
+    ]);
+
+    await compileWatchlistSet(env, "set-a");
+    const rowStatements = scanRowStatements(getBatchStatements());
+    const rawSources = rowStatements.map((statement) => JSON.parse(String(statement.args[13])) as { sourceId: string; sourceUrl: string });
+
+    expect(rowStatements).toHaveLength(2);
+    expect(rowStatements.map((statement) => statement.args[3])).toEqual(["AAPL", "AAPL"]);
+    expect(rowStatements.map((statement) => statement.args[4])).toEqual(["Apple Inc.", "Apple Inc."]);
+    expect(rowStatements.map((statement) => statement.args[9])).toEqual([180.25, 180.25]);
+    expect(rawSources).toEqual([
+      expect.objectContaining({ sourceId: "source-a", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
+      expect.objectContaining({ sourceId: "source-b", sourceUrl: "https://www.tradingview.com/watchlists/222/" }),
+    ]);
+  });
+
+  it("duplicates sets with fresh ids, unique copy naming, copied sources, and no run history", async () => {
     const setRows = [
       {
         id: "set-a",

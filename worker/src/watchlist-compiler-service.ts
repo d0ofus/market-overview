@@ -6,6 +6,10 @@ import type { Env } from "./types";
 const INTERNAL_PROVIDER_KEY = "watchlist-compiler";
 const DEFAULT_COMPILE_TIME = "08:15";
 const DEFAULT_COMPILE_TIMEZONE = "Australia/Sydney";
+const TV_METRICS_URL = "https://scanner.tradingview.com/america/scan";
+const TV_METRICS_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
+const TV_METRICS_CHUNK_SIZE = 100;
+const COMMON_TV_PREFIXES = ["NASDAQ", "NYSE", "AMEX"] as const;
 
 export type WatchlistSetRecord = {
   id: string;
@@ -62,6 +66,22 @@ type WatchlistCompileTrace = {
   acceptedCount: number;
   durationMs: number;
   error?: string;
+  provider?: string;
+};
+
+type TradingViewMetricsRow = {
+  displayName: string | null;
+  exchange: string | null;
+  price: number | null;
+  change1d: number | null;
+  volume: number | null;
+  marketCap: number | null;
+  raw: unknown;
+};
+
+type TradingViewMetricResponseRow = {
+  s?: string;
+  d?: unknown[];
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -91,6 +111,32 @@ function normalizeTicker(raw: string | null | undefined): string | null {
   return clean;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizeExchangePrefix(exchange: string | null | undefined): string | null {
+  const value = String(exchange ?? "").trim().toUpperCase();
+  if (!value) return null;
+  if (value.includes("NASDAQ")) return "NASDAQ";
+  if (value === "NYSE" || value.includes("NEW YORK STOCK EXCHANGE")) return "NYSE";
+  if (value === "AMEX" || value.includes("NYSE AMERICAN") || value.includes("NYSE MKT") || value.includes("ARCA")) return "AMEX";
+  return /^[A-Z0-9_]{2,20}$/.test(value) ? value : null;
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 function safeText(value: unknown, max = 1000): string | null {
   const text = String(value ?? "").trim();
   return text ? text.slice(0, max) : null;
@@ -102,6 +148,157 @@ function toJson(value: unknown): string | null {
     return JSON.stringify(value);
   } catch {
     return String(value);
+  }
+}
+
+function buildTradingViewMetricSymbols(row: Pick<WatchlistCandidate, "ticker" | "exchange">): string[] {
+  const ticker = normalizeTicker(row.ticker);
+  if (!ticker) return [];
+  const preferredPrefix = normalizeExchangePrefix(row.exchange);
+  const prefixes = preferredPrefix
+    ? [preferredPrefix, ...COMMON_TV_PREFIXES.filter((prefix) => prefix !== preferredPrefix)]
+    : [...COMMON_TV_PREFIXES];
+  return prefixes.map((prefix) => `${prefix}:${ticker}`);
+}
+
+function mapTradingViewMetricRows(rows: TradingViewMetricResponseRow[] | null | undefined): Map<string, TradingViewMetricsRow> {
+  const map = new Map<string, TradingViewMetricsRow>();
+  for (const row of rows ?? []) {
+    const ticker = normalizeTicker(row.s);
+    if (!ticker || map.has(ticker)) continue;
+    const data = Array.isArray(row.d) ? row.d : [];
+    map.set(ticker, {
+      displayName: safeText(data[0], 240),
+      price: asFiniteNumber(data[1]),
+      change1d: asFiniteNumber(data[2]),
+      volume: asFiniteNumber(data[3]),
+      marketCap: asFiniteNumber(data[4]),
+      exchange: safeText(data[5], 80),
+      raw: {
+        source: TV_METRICS_PROVIDER_LABEL,
+        symbol: row.s ?? null,
+        name: data[0] ?? null,
+        close: data[1] ?? null,
+        change: data[2] ?? null,
+        volume: data[3] ?? null,
+        marketCap: data[4] ?? null,
+        exchange: data[5] ?? null,
+        type: data[6] ?? null,
+      },
+    });
+  }
+  return map;
+}
+
+async function fetchTradingViewMetricMap(rows: WatchlistCandidate[]): Promise<{
+  metrics: Map<string, TradingViewMetricsRow>;
+  requestedSymbolCount: number;
+  returnedRowCount: number;
+}> {
+  const requestedSymbols = Array.from(new Set(rows.flatMap(buildTradingViewMetricSymbols)));
+  if (requestedSymbols.length === 0) {
+    return { metrics: new Map(), requestedSymbolCount: 0, returnedRowCount: 0 };
+  }
+
+  const maps = await Promise.all(chunk(requestedSymbols, TV_METRICS_CHUNK_SIZE).map(async (symbolChunk) => {
+    const payload = {
+      markets: ["america"],
+      symbols: {
+        query: { types: [] },
+        tickers: symbolChunk,
+      },
+      options: { lang: "en" },
+      columns: ["name", "close", "change", "volume", "market_cap_basic", "exchange", "type"],
+      sort: { sortBy: "change", sortOrder: "desc" as const },
+      range: [0, symbolChunk.length],
+    };
+    const response = await fetch(TV_METRICS_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "market-command-centre/1.0",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`TradingView metrics request failed (${response.status}): ${body.slice(0, 180)}`);
+    }
+    const body = await response.json() as { data?: TradingViewMetricResponseRow[] };
+    return {
+      metrics: mapTradingViewMetricRows(body.data),
+      returnedRowCount: body.data?.length ?? 0,
+    };
+  }));
+
+  const metrics = new Map<string, TradingViewMetricsRow>();
+  let returnedRowCount = 0;
+  for (const result of maps) {
+    returnedRowCount += result.returnedRowCount;
+    for (const [ticker, metric] of result.metrics.entries()) {
+      if (!metrics.has(ticker)) metrics.set(ticker, metric);
+    }
+  }
+  return { metrics, requestedSymbolCount: requestedSymbols.length, returnedRowCount };
+}
+
+function rawWithMetric(raw: unknown, metric: TradingViewMetricsRow): unknown {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return { ...raw, metrics: metric.raw };
+  }
+  return { row: raw, metrics: metric.raw };
+}
+
+async function enrichWatchlistCandidatesWithTradingViewMetrics(rows: WatchlistCandidate[]): Promise<{
+  rows: WatchlistCandidate[];
+  trace: WatchlistCompileTrace | null;
+}> {
+  if (rows.length === 0) return { rows, trace: null };
+  const startedAt = Date.now();
+  try {
+    const result = await fetchTradingViewMetricMap(rows);
+    const enrichedRows = rows.map((row) => {
+      const metric = result.metrics.get(row.ticker);
+      if (!metric) return row;
+      return {
+        ...row,
+        displayName: metric.displayName ?? row.displayName,
+        exchange: metric.exchange ?? row.exchange,
+        price: metric.price ?? row.price,
+        change1d: metric.change1d ?? row.change1d,
+        volume: metric.volume ?? row.volume,
+        marketCap: metric.marketCap ?? row.marketCap,
+        raw: rawWithMetric(row.raw, metric),
+      };
+    });
+    return {
+      rows: enrichedRows,
+      trace: {
+        sourceId: "__metrics__",
+        sourceUrl: TV_METRICS_URL,
+        sourceSections: [],
+        status: result.metrics.size > 0 ? "ok" : "empty",
+        rawCount: result.requestedSymbolCount,
+        acceptedCount: result.metrics.size,
+        durationMs: Date.now() - startedAt,
+        provider: TV_METRICS_PROVIDER_LABEL,
+      },
+    };
+  } catch (error) {
+    return {
+      rows,
+      trace: {
+        sourceId: "__metrics__",
+        sourceUrl: TV_METRICS_URL,
+        sourceSections: [],
+        status: "error",
+        rawCount: rows.length,
+        acceptedCount: 0,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message.slice(0, 180) : "TradingView metrics fetch failed.",
+        provider: TV_METRICS_PROVIDER_LABEL,
+      },
+    };
   }
 }
 
@@ -631,7 +828,10 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
     }
   }
 
-  const dedupedRows = Array.from(new Map(normalizedRows.map((row) => [row.canonicalKey, row])).values());
+  let dedupedRows = Array.from(new Map(normalizedRows.map((row) => [row.canonicalKey, row])).values());
+  const enrichment = await enrichWatchlistCandidatesWithTradingViewMetrics(dedupedRows);
+  dedupedRows = enrichment.rows;
+  if (enrichment.trace) traces.push(enrichment.trace);
   const status = dedupedRows.length > 0 ? "ok" : traces.some((trace) => trace.status === "error") ? "error" : "empty";
   const error = status === "error"
     ? traces.filter((trace) => trace.error).map((trace) => `${trace.sourceUrl}: ${trace.error}`).join("; ").slice(0, 1000) || "Watchlist compile failed."
