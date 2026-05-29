@@ -23,8 +23,9 @@ import {
 } from "@/lib/api";
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
+import { PerplexityComparisonChart } from "./perplexity-comparison-chart";
 import { TickerMultiGrid } from "./ticker-multi-grid";
-import { TradingViewWidget, type TradingViewComparePosition } from "./tradingview-widget";
+import type { TradingViewComparePosition } from "./tradingview-widget";
 
 type PeerMemberSortKey = "ticker" | "name" | "price" | "marketCap" | "avgVolume";
 type MultiChartSortKey = "change1d" | "marketCap";
@@ -57,6 +58,22 @@ const PERPLEXITY_COMPARE_SCALE_OPTIONS: PerplexityCompareScaleOption[] = [
   { key: "SameScale", label: "Same % scale" },
   { key: "NewPriceScale", label: "New price scale" },
   { key: "NewPane", label: "New pane" },
+];
+const PERPLEXITY_COMPARE_BASE_COLOR = "#f97316";
+const PERPLEXITY_COMPARE_PALETTE = [
+  "#38bdf8",
+  "#22c55e",
+  "#facc15",
+  "#fb7185",
+  "#a78bfa",
+  "#2dd4bf",
+  "#a3e635",
+  "#f472b6",
+  "#60a5fa",
+  "#ef4444",
+  "#818cf8",
+  "#f59e0b",
+  "#10b981",
 ];
 const CORRELATION_DEFAULT_LOOKBACK = "252D";
 const CORRELATION_DEFAULT_ROLLING_WINDOW = "60D";
@@ -273,7 +290,7 @@ export function PeerGroupsDashboard() {
   const [correlationSelection, setCorrelationSelection] = useState<string[]>([]);
   const [correlationSelectionError, setCorrelationSelectionError] = useState<string | null>(null);
   const deferredQuery = useDeferredValue(query);
-  const pageSize = 50;
+  const pageSize = 12;
   const perplexityRequestIdRef = useRef(0);
 
   useEffect(() => {
@@ -466,12 +483,27 @@ export function PeerGroupsDashboard() {
     const availableTickers = new Set(perplexityPeerRows.map((peer) => peer.ticker.toUpperCase()));
     return perplexityCompareSelectedTickers.filter((ticker) => availableTickers.has(ticker));
   }, [perplexityCompareSelectedTickers, perplexityPeerRows]);
-  const perplexityCompareSymbols = useMemo(
-    () => validPerplexityCompareTickers.map((ticker) => ({
-      symbol: ticker,
-      position: perplexityComparePosition,
-    })),
-    [perplexityComparePosition, validPerplexityCompareTickers],
+  const perplexityCompareColorByTicker = useMemo(() => {
+    const colors = new Map<string, string>();
+    perplexityPeerRows.forEach((peer, index) => {
+      colors.set(peer.ticker.toUpperCase(), PERPLEXITY_COMPARE_PALETTE[index % PERPLEXITY_COMPARE_PALETTE.length]);
+    });
+    return colors;
+  }, [perplexityPeerRows]);
+  const perplexityCompareLegendItems = useMemo(
+    () => [
+      ...(perplexityLookup ? [{
+        ticker: perplexityLookup.ticker.toUpperCase(),
+        label: "Base",
+        color: PERPLEXITY_COMPARE_BASE_COLOR,
+      }] : []),
+      ...validPerplexityCompareTickers.map((ticker) => ({
+        ticker,
+        label: "Peer",
+        color: perplexityCompareColorByTicker.get(ticker) ?? PERPLEXITY_COMPARE_PALETTE[0],
+      })),
+    ],
+    [perplexityCompareColorByTicker, perplexityLookup, validPerplexityCompareTickers],
   );
   const savedOnlyPeerRows = useMemo(() => {
     if (!perplexityLookup || !detail || !activeGroup) return [];
@@ -893,7 +925,7 @@ export function PeerGroupsDashboard() {
         {directoryError && <p className="mt-2 text-sm text-red-300">{directoryError}</p>}
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(20rem,28rem),minmax(0,1fr)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(28rem,36rem),minmax(0,1fr)]">
         <section className="card overflow-hidden">
           <div className="overflow-hidden">
             <table className="w-full text-sm">
@@ -912,23 +944,25 @@ export function PeerGroupsDashboard() {
                     onClick={() => void loadTicker(row.ticker, { scrollToCharts: true })}
                   >
                     <td className="px-3 py-2">
-                      <div className="flex min-w-0 items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="font-semibold text-accent">{row.ticker}</div>
-                          <div className="mt-0.5 truncate text-xs text-slate-300">{row.name ?? "-"}</div>
-                          <div className="mt-1 truncate text-[11px] text-slate-500">
-                            {[row.sector, row.industry].filter(Boolean).join(" / ") || "Sector unavailable"}
-                          </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-accent">{row.ticker}</div>
+                        <div className="mt-0.5 truncate text-xs text-slate-300">{row.name ?? "-"}</div>
+                        <div className="mt-1 truncate text-[11px] text-slate-500">
+                          {[row.sector, row.industry].filter(Boolean).join(" / ") || "Sector unavailable"}
                         </div>
-                        <div className="flex max-w-[11rem] shrink-0 flex-wrap justify-end gap-1">
-                          {row.groups.length > 0 ? row.groups.slice(0, 2).map((group) => (
-                            <span key={`${row.ticker}-${group.id}`} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+                        <div className="mt-2 flex min-w-0 flex-wrap gap-1">
+                          {row.groups.length > 0 ? row.groups.slice(0, 3).map((group) => (
+                            <span
+                              key={`${row.ticker}-${group.id}`}
+                              className="max-w-full truncate rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300"
+                              title={group.name}
+                            >
                               {group.name}
                             </span>
                           )) : <span className="text-[11px] text-slate-500">No groups</span>}
-                          {row.groups.length > 2 ? (
+                          {row.groups.length > 3 ? (
                             <span className="rounded bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-400">
-                              +{row.groups.length - 2}
+                              +{row.groups.length - 3}
                             </span>
                           ) : null}
                         </div>
@@ -1209,17 +1243,27 @@ export function PeerGroupsDashboard() {
                           ))}
                         </div>
                       </div>
+                      <div className="mt-3 flex flex-wrap gap-2" aria-label="Chart comparison colors">
+                        {perplexityCompareLegendItems.map((item) => (
+                          <span
+                            key={`perplexity-compare-legend-${item.ticker}`}
+                            className="inline-flex max-w-[10rem] items-center gap-1.5 rounded border border-borderSoft/70 bg-slate-950/35 px-2 py-1 text-[11px] text-slate-300"
+                            title={`${item.ticker} ${item.label}`}
+                          >
+                            <span
+                              aria-hidden="true"
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: item.color, boxShadow: `0 0 0 1px ${item.color}66` }}
+                            />
+                            <span className="truncate font-semibold text-slate-100">{item.ticker}</span>
+                            <span className="text-slate-500">{item.label}</span>
+                          </span>
+                        ))}
+                      </div>
                       <div className="mt-3 h-[28rem] min-h-[22rem] overflow-hidden rounded border border-borderSoft/70 bg-slate-950/20">
-                        <TradingViewWidget
-                          ticker={perplexityLookup.ticker}
-                          compareSymbols={perplexityCompareSymbols}
-                          chartStyle="2"
-                          showStatusLine
-                          fillContainer
-                          heightMode="fill"
-                          initialRange="12M"
-                          surface="plain"
-                          className="!p-0"
+                        <PerplexityComparisonChart
+                          items={perplexityCompareLegendItems}
+                          mode={perplexityComparePosition}
                         />
                       </div>
                     </div>
@@ -1427,6 +1471,7 @@ export function PeerGroupsDashboard() {
                           <tbody>
                             {perplexityPeerRows.map((peer) => {
                               const ticker = peer.ticker.toUpperCase();
+                              const color = perplexityCompareColorByTicker.get(ticker) ?? PERPLEXITY_COMPARE_PALETTE[0];
                               return (
                                 <tr key={`perplexity-${peer.ticker}`} className="border-t border-borderSoft/60">
                                   <td className="px-2 py-1.5">
@@ -1439,16 +1484,23 @@ export function PeerGroupsDashboard() {
                                     />
                                   </td>
                                   <td className="px-2 py-1.5">
-                                    <button
-                                      type="button"
-                                      className="font-semibold text-accent hover:text-sky-200"
-                                      onClick={() => {
-                                        setQuery(peer.ticker);
-                                        void loadTicker(peer.ticker, { scrollToCharts: true });
-                                      }}
-                                    >
-                                      {peer.ticker}
-                                    </button>
+                                    <span className="inline-flex items-center gap-2">
+                                      <span
+                                        aria-hidden="true"
+                                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                                        style={{ backgroundColor: color, boxShadow: `0 0 0 1px ${color}66` }}
+                                      />
+                                      <button
+                                        type="button"
+                                        className="font-semibold text-accent hover:text-sky-200"
+                                        onClick={() => {
+                                          setQuery(peer.ticker);
+                                          void loadTicker(peer.ticker, { scrollToCharts: true });
+                                        }}
+                                      >
+                                        {ticker}
+                                      </button>
+                                    </span>
                                   </td>
                                   <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
                                   <td className="px-2 py-1.5">

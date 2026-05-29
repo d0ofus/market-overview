@@ -11,6 +11,8 @@ export type TradingViewComparePosition = "SameScale" | "NewPriceScale" | "NewPan
 export type TradingViewCompareSymbol = {
   symbol: string;
   position: TradingViewComparePosition;
+  lineColor?: string;
+  lineWidth?: number;
 };
 type TradingViewChartStyle = "1" | "2" | "3";
 
@@ -58,6 +60,8 @@ export function TradingViewWidget({
   chartOnly = false,
   showStatusLine = false,
   showCorporateEvents = false,
+  baseSeriesColor,
+  baseSeriesLineWidth,
   fillContainer = false,
   heightMode = "aspect",
   initialRange = "1M",
@@ -73,6 +77,8 @@ export function TradingViewWidget({
   chartOnly?: boolean;
   showStatusLine?: boolean;
   showCorporateEvents?: boolean;
+  baseSeriesColor?: string;
+  baseSeriesLineWidth?: number;
   fillContainer?: boolean;
   heightMode?: "aspect" | "fill";
   initialRange?: "1M" | "3M" | "6M" | "12M";
@@ -143,6 +149,34 @@ export function TradingViewWidget({
     const height = heightMode === "fill"
       ? ref.current.clientHeight || Math.round(width * 0.75)
       : Math.round(width * 0.75);
+    const overrides: Record<string, boolean | number | string> = {};
+    if (showStatusLine) {
+      Object.assign(overrides, {
+        "paneProperties.legendProperties.showSeriesOHLC": true,
+        "paneProperties.legendProperties.showBarChange": true,
+        "paneProperties.legendProperties.showVolume": true,
+        "mainSeriesProperties.statusViewStyle.showExchange": false,
+        "mainSeriesProperties.statusViewStyle.showInterval": false,
+      });
+    }
+    if (baseSeriesColor) {
+      Object.assign(overrides, {
+        "mainSeriesProperties.lineStyle.color": baseSeriesColor,
+        "mainSeriesProperties.priceLineColor": baseSeriesColor,
+      });
+    }
+    if (typeof baseSeriesLineWidth === "number" && Number.isFinite(baseSeriesLineWidth)) {
+      Object.assign(overrides, {
+        "mainSeriesProperties.lineStyle.linewidth": baseSeriesLineWidth,
+        "mainSeriesProperties.lineStyle.lineWidth": baseSeriesLineWidth,
+      });
+    }
+    const serializedCompareSymbols = resolvedCompareSymbols.map((item) => ({
+      symbol: item.symbol,
+      position: item.position,
+      ...(item.lineColor ? { lineColor: item.lineColor, color: item.lineColor } : {}),
+      ...(typeof item.lineWidth === "number" && Number.isFinite(item.lineWidth) ? { lineWidth: item.lineWidth } : {}),
+    }));
     ref.current.innerHTML = "";
     const script = document.createElement("script");
     script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
@@ -161,23 +195,15 @@ export function TradingViewWidget({
       hide_side_toolbar: chartOnly,
       hide_legend: chartOnly ? !showStatusLine : false,
       volume_force_overlay: false,
-      overrides: showStatusLine
-        ? {
-            "paneProperties.legendProperties.showSeriesOHLC": true,
-            "paneProperties.legendProperties.showBarChange": true,
-            "paneProperties.legendProperties.showVolume": true,
-            "mainSeriesProperties.statusViewStyle.showExchange": false,
-            "mainSeriesProperties.statusViewStyle.showInterval": false,
-          }
-        : undefined,
+      overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
       withdateranges: chartOnly ? false : true,
       calendar: showCorporateEvents,
       save_image: false,
-      compareSymbols: resolvedCompareSymbols,
+      compareSymbols: serializedCompareSymbols,
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, chartStyle, compareSymbolsKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad, heightMode]);
+  }, [ticker, chartStyle, compareSymbolsKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"
