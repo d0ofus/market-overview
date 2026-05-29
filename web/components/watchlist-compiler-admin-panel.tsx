@@ -13,6 +13,8 @@ import {
   getWatchlistCompilerSet,
   updateAdminWatchlistCompilerSet,
   updateAdminWatchlistCompilerSource,
+  type WatchlistFactorConfig,
+  type WatchlistFactorKey,
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
 } from "@/lib/api";
@@ -30,13 +32,91 @@ const TIMEZONE_OPTIONS = [
   "America/New_York",
 ];
 
-const EMPTY_FORM = {
+type WatchlistSetForm = {
+  name: string;
+  slug: string;
+  isActive: boolean;
+  compileDaily: boolean;
+  dailyCompileTimeLocal: string;
+  dailyCompileTimezone: string;
+  factorConfig: WatchlistFactorConfig;
+};
+
+const EMPTY_FACTOR_CONFIG: WatchlistFactorConfig = {
+  enabled: {},
+  thresholds: {
+    priceAbove: { minPrice: 10 },
+    marketCapAbove: { minMarketCapMillions: 500 },
+    within52WeekHigh: { maxDistancePct: 15 },
+    priorStrongMove: { movePct: 50, lookbackMonths: 3 },
+    strongSector: { lookbackMonths: 3 },
+    avg10dDollarVolume: { minDollarVolumeMillions: 20 },
+    increasingVolumeProfile: { lookbackMonths: 3, minTrendPct: 0 },
+    acceleratingRevenueGrowth: { minAccelerationPct: 0 },
+    acceleratingEpsGrowth: { minAccelerationPct: 0 },
+    averageTradingRangePct: { minAtrPct: 3 },
+  },
+};
+
+const FACTOR_DEFINITIONS: Array<{
+  key: WatchlistFactorKey;
+  label: string;
+  inputs: Array<{
+    group: keyof WatchlistFactorConfig["thresholds"];
+    field: string;
+    label: string;
+    suffix?: string;
+    min?: number;
+    step?: number;
+  }>;
+}> = [
+  { key: "priceAboveSma200", label: "Price > 200 SMA", inputs: [] },
+  { key: "priceAbove", label: "Price > $X", inputs: [{ group: "priceAbove", field: "minPrice", label: "Min price", suffix: "$", min: 0, step: 0.01 }] },
+  { key: "marketCapAbove", label: "Market Cap > $X Million", inputs: [{ group: "marketCapAbove", field: "minMarketCapMillions", label: "Min cap", suffix: "M", min: 0, step: 1 }] },
+  { key: "within52WeekHigh", label: "Within X% of 52-week high", inputs: [{ group: "within52WeekHigh", field: "maxDistancePct", label: "Max distance", suffix: "%", min: 0, step: 0.1 }] },
+  { key: "priorStrongMove", label: "Prior strong move", inputs: [
+    { group: "priorStrongMove", field: "movePct", label: "Move", suffix: "%", min: 0, step: 0.1 },
+    { group: "priorStrongMove", field: "lookbackMonths", label: "Lookback", suffix: "mo", min: 1, step: 1 },
+  ] },
+  { key: "strongSector", label: "In a strong sector", inputs: [{ group: "strongSector", field: "lookbackMonths", label: "Lookback", suffix: "mo", min: 1, step: 1 }] },
+  { key: "avg10dDollarVolume", label: "Average 10D dollar volume > $X Million", inputs: [{ group: "avg10dDollarVolume", field: "minDollarVolumeMillions", label: "Min value", suffix: "M", min: 0, step: 1 }] },
+  { key: "increasingVolumeProfile", label: "Increasing volume profile", inputs: [
+    { group: "increasingVolumeProfile", field: "lookbackMonths", label: "Lookback", suffix: "mo", min: 1, step: 1 },
+    { group: "increasingVolumeProfile", field: "minTrendPct", label: "Min trend", suffix: "%", step: 0.1 },
+  ] },
+  { key: "positiveRevenueGrowth", label: "Positive latest quarter revenue growth", inputs: [] },
+  { key: "positiveEpsGrowth", label: "Positive latest quarter EPS growth", inputs: [] },
+  { key: "acceleratingRevenueGrowth", label: "Accelerating revenue growth", inputs: [{ group: "acceleratingRevenueGrowth", field: "minAccelerationPct", label: "Min accel.", suffix: "pt", step: 0.1 }] },
+  { key: "acceleratingEpsGrowth", label: "Accelerating EPS growth", inputs: [{ group: "acceleratingEpsGrowth", field: "minAccelerationPct", label: "Min accel.", suffix: "pt", step: 0.1 }] },
+  { key: "averageTradingRangePct", label: "Average trading range % > X%", inputs: [{ group: "averageTradingRangePct", field: "minAtrPct", label: "Min range", suffix: "%", min: 0, step: 0.1 }] },
+];
+
+function normalizeFactorConfig(value: WatchlistFactorConfig | null | undefined): WatchlistFactorConfig {
+  return {
+    enabled: { ...EMPTY_FACTOR_CONFIG.enabled, ...(value?.enabled ?? {}) },
+    thresholds: {
+      priceAbove: { ...EMPTY_FACTOR_CONFIG.thresholds.priceAbove, ...(value?.thresholds?.priceAbove ?? {}) },
+      marketCapAbove: { ...EMPTY_FACTOR_CONFIG.thresholds.marketCapAbove, ...(value?.thresholds?.marketCapAbove ?? {}) },
+      within52WeekHigh: { ...EMPTY_FACTOR_CONFIG.thresholds.within52WeekHigh, ...(value?.thresholds?.within52WeekHigh ?? {}) },
+      priorStrongMove: { ...EMPTY_FACTOR_CONFIG.thresholds.priorStrongMove, ...(value?.thresholds?.priorStrongMove ?? {}) },
+      strongSector: { ...EMPTY_FACTOR_CONFIG.thresholds.strongSector, ...(value?.thresholds?.strongSector ?? {}) },
+      avg10dDollarVolume: { ...EMPTY_FACTOR_CONFIG.thresholds.avg10dDollarVolume, ...(value?.thresholds?.avg10dDollarVolume ?? {}) },
+      increasingVolumeProfile: { ...EMPTY_FACTOR_CONFIG.thresholds.increasingVolumeProfile, ...(value?.thresholds?.increasingVolumeProfile ?? {}) },
+      acceleratingRevenueGrowth: { ...EMPTY_FACTOR_CONFIG.thresholds.acceleratingRevenueGrowth, ...(value?.thresholds?.acceleratingRevenueGrowth ?? {}) },
+      acceleratingEpsGrowth: { ...EMPTY_FACTOR_CONFIG.thresholds.acceleratingEpsGrowth, ...(value?.thresholds?.acceleratingEpsGrowth ?? {}) },
+      averageTradingRangePct: { ...EMPTY_FACTOR_CONFIG.thresholds.averageTradingRangePct, ...(value?.thresholds?.averageTradingRangePct ?? {}) },
+    },
+  };
+}
+
+const EMPTY_FORM: WatchlistSetForm = {
   name: "",
   slug: "",
   isActive: true,
   compileDaily: false,
   dailyCompileTimeLocal: "08:15",
   dailyCompileTimezone: "Australia/Sydney",
+  factorConfig: normalizeFactorConfig(null),
 };
 
 export function WatchlistCompilerAdminPanel() {
@@ -81,6 +161,7 @@ export function WatchlistCompilerAdminPanel() {
           compileDaily: nextDetail.compileDaily,
           dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
           dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
+          factorConfig: normalizeFactorConfig(nextDetail.factorConfig),
         });
       } else {
         setDetail(null);
@@ -180,6 +261,36 @@ export function WatchlistCompilerAdminPanel() {
     }
   };
 
+  const setFactorEnabled = (key: WatchlistFactorKey, enabled: boolean) => {
+    setForm((current) => ({
+      ...current,
+      factorConfig: {
+        ...current.factorConfig,
+        enabled: {
+          ...current.factorConfig.enabled,
+          [key]: enabled,
+        },
+      },
+    }));
+  };
+
+  const setFactorThreshold = (group: keyof WatchlistFactorConfig["thresholds"], field: string, value: string) => {
+    const parsed = Number(value);
+    setForm((current) => ({
+      ...current,
+      factorConfig: {
+        ...current.factorConfig,
+        thresholds: {
+          ...current.factorConfig.thresholds,
+          [group]: {
+            ...current.factorConfig.thresholds[group],
+            [field]: Number.isFinite(parsed) ? parsed : 0,
+          },
+        },
+      },
+    }));
+  };
+
   return (
     <>
       <section className="space-y-6">
@@ -252,6 +363,7 @@ export function WatchlistCompilerAdminPanel() {
                             compileDaily: nextDetail.compileDaily,
                             dailyCompileTimeLocal: nextDetail.dailyCompileTimeLocal ?? "08:15",
                             dailyCompileTimezone: nextDetail.dailyCompileTimezone ?? "Australia/Sydney",
+                            factorConfig: normalizeFactorConfig(nextDetail.factorConfig),
                           });
                         } catch (error) {
                           setMessage(error instanceof Error ? error.message : "Failed to load selected watchlist set.");
@@ -362,6 +474,47 @@ export function WatchlistCompilerAdminPanel() {
                 </>
               )}
             </div>
+            </AdminCard>
+
+            <AdminCard title="Factor Assessment" description="Saved with this set and applied to each new compile. Existing runs stay unchanged.">
+              <div className="grid gap-2 lg:grid-cols-2">
+                {FACTOR_DEFINITIONS.map((factor) => (
+                  <div key={factor.key} className="rounded border border-borderSoft/60 bg-panelSoft/35 p-3">
+                    <label className="flex items-start gap-2 text-sm font-medium text-slate-200">
+                      <input
+                        className="mt-1"
+                        type="checkbox"
+                        checked={form.factorConfig.enabled[factor.key] === true}
+                        onChange={(event) => setFactorEnabled(factor.key, event.target.checked)}
+                      />
+                      <span>{factor.label}</span>
+                    </label>
+                    {factor.inputs.length > 0 ? (
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        {factor.inputs.map((input) => {
+                          const groupValue = form.factorConfig.thresholds[input.group] as Record<string, number>;
+                          return (
+                            <label key={`${factor.key}-${input.field}`} className="block text-[11px] text-slate-400">
+                              {input.label}
+                              <div className="mt-1 flex items-center gap-1">
+                                <input
+                                  className="min-w-0 flex-1 rounded border border-borderSoft bg-panel px-2 py-1.5 text-sm text-slate-100"
+                                  min={input.min}
+                                  step={input.step ?? 1}
+                                  type="number"
+                                  value={groupValue[input.field] ?? 0}
+                                  onChange={(event) => setFactorThreshold(input.group, input.field, event.target.value)}
+                                />
+                                {input.suffix ? <span className="w-7 text-right text-[11px] text-slate-500">{input.suffix}</span> : null}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
             </AdminCard>
 
             <AdminCard title="Source URLs" description="Add, reorder, activate, or remove TradingView source URLs for the selected set.">

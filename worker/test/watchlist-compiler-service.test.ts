@@ -9,6 +9,7 @@ import {
   tickersToSingleColumnCsv,
   tickersToTxt,
 } from "../src/watchlist-compiler-service";
+import { calculatePriorStrongMovePct, rolling10dVolumeTrendPct } from "../src/watchlist-factors";
 
 type MockStatement = {
   query: string;
@@ -31,7 +32,7 @@ type CompileSourceRow = {
   updatedAt: string;
 };
 
-function createCompileEnv(sources: CompileSourceRow[]) {
+function createCompileEnv(sources: CompileSourceRow[], factorConfigJson: string | null = null) {
   let batchStatements: MockStatement[] = [];
   const setRows = [{
     id: "set-a",
@@ -42,6 +43,7 @@ function createCompileEnv(sources: CompileSourceRow[]) {
     compileDaily: 0,
     dailyCompileTimeLocal: null,
     dailyCompileTimezone: null,
+    factorConfigJson,
     createdAt: "",
     updatedAt: "",
     sourceCount: sources.filter((source) => source.isActive).length,
@@ -276,7 +278,7 @@ describe("watchlist compiler service helpers", () => {
 
     await compileWatchlistSet(env, "set-a");
     const rowStatements = scanRowStatements(getBatchStatements());
-    const rawSources = rowStatements.map((statement) => JSON.parse(String(statement.args[13])) as { sourceId: string; sourceUrl: string });
+    const rawSources = rowStatements.map((statement) => JSON.parse(String(statement.args[17])) as { sourceId: string; sourceUrl: string });
 
     expect(rowStatements).toHaveLength(2);
     expect(rowStatements.map((statement) => statement.args[3])).toEqual(["AAPL", "AAPL"]);
@@ -286,6 +288,70 @@ describe("watchlist compiler service helpers", () => {
       expect.objectContaining({ sourceId: "source-a", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
       expect.objectContaining({ sourceId: "source-b", sourceUrl: "https://www.tradingview.com/watchlists/222/" }),
     ]);
+  });
+
+  it("stores compile-time factor results from the watchlist set config", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (value.includes("/watchlists/111/")) {
+        return new Response(
+          `<html><script>{"list":{"symbols":["NASDAQ:AAPL"]}}</script></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (value === "https://scanner.tradingview.com/america/scan") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { symbols?: { tickers?: string[] } };
+        const data = (body.symbols?.tickers ?? []).includes("NASDAQ:AAPL")
+          ? [{ s: "NASDAQ:AAPL", d: ["Apple Inc.", 180.25, 1.23, 55_000_000, 2_800_000_000_000, "NASDAQ", "stock"] }]
+          : [];
+        return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error(`Unexpected fetch: ${value}`);
+    });
+
+    const factorConfig = {
+      enabled: { priceAbove: true, marketCapAbove: true },
+      thresholds: {
+        priceAbove: { minPrice: 50 },
+        marketCapAbove: { minMarketCapMillions: 1000 },
+      },
+    };
+    const { env, getBatchStatements } = createCompileEnv([
+      compileSource({ id: "source-a", sourceName: "Ready", sourceUrl: "https://www.tradingview.com/watchlists/111/" }),
+    ], JSON.stringify(factorConfig));
+
+    await compileWatchlistSet(env, "set-a");
+    const row = scanRowStatements(getBatchStatements())[0];
+    const runInsert = getBatchStatements().find((statement) => statement.query.includes("INSERT INTO scan_runs"));
+    const factorResults = JSON.parse(String(row?.args[16] ?? "[]")) as Array<{ key: string; status: string }>;
+
+    expect(row?.args[13]).toBe(100);
+    expect(row?.args[14]).toBe(2);
+    expect(row?.args[15]).toBe(0);
+    expect(factorResults.map((result) => [result.key, result.status])).toEqual([
+      ["priceAbove", "pass"],
+      ["marketCapAbove", "pass"],
+    ]);
+    expect(String(runInsert?.args[9] ?? "")).toContain("__factors__");
+  });
+
+  it("calculates prior strong move using low-before-future-high chronology", () => {
+    const move = calculatePriorStrongMovePct([
+      { date: "2026-04-01", l: 90, h: 100 },
+      { date: "2026-04-02", l: 80, h: 85 },
+      { date: "2026-04-03", l: 95, h: 120 },
+    ], 3);
+
+    expect(move).toBe(50);
+  });
+
+  it("calculates increasing 10D average volume trend with regression", () => {
+    const bars = Array.from({ length: 24 }, (_, index) => ({
+      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      volume: 1_000_000 + (index * 50_000),
+    }));
+
+    expect(rolling10dVolumeTrendPct(bars, 1)).toBeGreaterThan(0);
   });
 
   it("duplicates sets with fresh ids, unique copy naming, copied sources, and no run history", async () => {
@@ -378,6 +444,7 @@ describe("watchlist compiler service helpers", () => {
       1,
       "08:15",
       "Australia/Sydney",
+      expect.any(String),
     ]);
 
     expect(sourceInserts).toHaveLength(2);

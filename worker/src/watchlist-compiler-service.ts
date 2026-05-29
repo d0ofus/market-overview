@@ -2,6 +2,13 @@ import { TradingViewPublicLinkProvider } from "./scanning-providers";
 import { loadRunCompiledRows, loadRunUniqueTickers } from "./scanning-service";
 import type { ScanCompiledRow, ScanRunSummary, ScanUniqueTickerRow } from "./scanning-types";
 import type { Env } from "./types";
+import {
+  assessWatchlistFactors,
+  normalizeWatchlistFactorConfig,
+  type WatchlistFactorConfig,
+  type WatchlistFactorMetrics,
+  type WatchlistFactorResult,
+} from "./watchlist-factors";
 
 const INTERNAL_PROVIDER_KEY = "watchlist-compiler";
 const DEFAULT_COMPILE_TIME = "08:15";
@@ -10,6 +17,31 @@ const TV_METRICS_URL = "https://scanner.tradingview.com/america/scan";
 const TV_METRICS_PROVIDER_LABEL = "TradingView Screener (america/stocks)";
 const TV_METRICS_CHUNK_SIZE = 100;
 const COMMON_TV_PREFIXES = ["NASDAQ", "NYSE", "AMEX"] as const;
+const TV_METRIC_COLUMNS = [
+  "name",
+  "close",
+  "change",
+  "volume",
+  "market_cap_basic",
+  "exchange",
+  "type",
+  "SMA200",
+  "price_52_week_high",
+  "average_volume_10d_calc",
+  "ATRP",
+  "total_revenue_fq",
+  "total_revenue_fq_h",
+  "total_revenue_yoy_growth_fq",
+  "total_revenue_qoq_growth_fq",
+  "net_income_fq",
+  "net_income_fq_h",
+  "net_income_yoy_growth_fq",
+  "net_income_qoq_growth_fq",
+  "earnings_per_share_diluted_fq",
+  "earnings_per_share_diluted_fq_h",
+  "earnings_per_share_diluted_yoy_growth_fq",
+  "earnings_per_share_diluted_qoq_growth_fq",
+] as const;
 
 export type WatchlistSetRecord = {
   id: string;
@@ -20,6 +52,7 @@ export type WatchlistSetRecord = {
   compileDaily: boolean;
   dailyCompileTimeLocal: string | null;
   dailyCompileTimezone: string | null;
+  factorConfig: WatchlistFactorConfig;
   createdAt: string;
   updatedAt: string;
   sourceCount: number;
@@ -53,6 +86,11 @@ type WatchlistCandidate = {
   change1d: number | null;
   volume: number | null;
   marketCap: number | null;
+  metrics: WatchlistFactorMetrics | null;
+  factorScore: number | null;
+  factorPassCount: number | null;
+  factorUnknownCount: number | null;
+  factorResults: WatchlistFactorResult[] | null;
   raw: unknown;
   canonicalKey: string;
 };
@@ -76,6 +114,7 @@ type TradingViewMetricsRow = {
   change1d: number | null;
   volume: number | null;
   marketCap: number | null;
+  metrics: WatchlistFactorMetrics;
   raw: unknown;
 };
 
@@ -118,6 +157,11 @@ function asFiniteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function asFiniteNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(asFiniteNumber).filter((item): item is number => item != null);
 }
 
 function normalizeExchangePrefix(exchange: string | null | undefined): string | null {
@@ -167,6 +211,23 @@ function mapTradingViewMetricRows(rows: TradingViewMetricResponseRow[] | null | 
     const ticker = normalizeTicker(row.s);
     if (!ticker || map.has(ticker)) continue;
     const data = Array.isArray(row.d) ? row.d : [];
+    const metrics: WatchlistFactorMetrics = {
+      sma200: asFiniteNumber(data[7]),
+      price52WeekHigh: asFiniteNumber(data[8]),
+      averageVolume10d: asFiniteNumber(data[9]),
+      atrp: asFiniteNumber(data[10]),
+      totalRevenueFq: asFiniteNumber(data[11]),
+      totalRevenueFqHistory: asFiniteNumberArray(data[12]),
+      totalRevenueYoyGrowthFq: asFiniteNumber(data[13]),
+      totalRevenueQoqGrowthFq: asFiniteNumber(data[14]),
+      netIncomeFq: asFiniteNumber(data[15]),
+      netIncomeFqHistory: asFiniteNumberArray(data[16]),
+      netIncomeYoyGrowthFq: asFiniteNumber(data[17]),
+      earningsPerShareDilutedFq: asFiniteNumber(data[19]),
+      earningsPerShareDilutedFqHistory: asFiniteNumberArray(data[20]),
+      earningsPerShareDilutedYoyGrowthFq: asFiniteNumber(data[21]),
+      earningsPerShareDilutedQoqGrowthFq: asFiniteNumber(data[22]),
+    };
     map.set(ticker, {
       displayName: safeText(data[0], 240),
       price: asFiniteNumber(data[1]),
@@ -174,6 +235,7 @@ function mapTradingViewMetricRows(rows: TradingViewMetricResponseRow[] | null | 
       volume: asFiniteNumber(data[3]),
       marketCap: asFiniteNumber(data[4]),
       exchange: safeText(data[5], 80),
+      metrics,
       raw: {
         source: TV_METRICS_PROVIDER_LABEL,
         symbol: row.s ?? null,
@@ -184,6 +246,22 @@ function mapTradingViewMetricRows(rows: TradingViewMetricResponseRow[] | null | 
         marketCap: data[4] ?? null,
         exchange: data[5] ?? null,
         type: data[6] ?? null,
+        SMA200: data[7] ?? null,
+        price_52_week_high: data[8] ?? null,
+        average_volume_10d_calc: data[9] ?? null,
+        ATRP: data[10] ?? null,
+        total_revenue_fq: data[11] ?? null,
+        total_revenue_fq_h: data[12] ?? null,
+        total_revenue_yoy_growth_fq: data[13] ?? null,
+        total_revenue_qoq_growth_fq: data[14] ?? null,
+        net_income_fq: data[15] ?? null,
+        net_income_fq_h: data[16] ?? null,
+        net_income_yoy_growth_fq: data[17] ?? null,
+        net_income_qoq_growth_fq: data[18] ?? null,
+        earnings_per_share_diluted_fq: data[19] ?? null,
+        earnings_per_share_diluted_fq_h: data[20] ?? null,
+        earnings_per_share_diluted_yoy_growth_fq: data[21] ?? null,
+        earnings_per_share_diluted_qoq_growth_fq: data[22] ?? null,
       },
     });
   }
@@ -208,7 +286,7 @@ async function fetchTradingViewMetricMap(rows: WatchlistCandidate[]): Promise<{
         tickers: symbolChunk,
       },
       options: { lang: "en" },
-      columns: ["name", "close", "change", "volume", "market_cap_basic", "exchange", "type"],
+      columns: [...TV_METRIC_COLUMNS],
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
@@ -268,6 +346,7 @@ async function enrichWatchlistCandidatesWithTradingViewMetrics(rows: WatchlistCa
         change1d: metric.change1d ?? row.change1d,
         volume: metric.volume ?? row.volume,
         marketCap: metric.marketCap ?? row.marketCap,
+        metrics: metric.metrics,
         raw: rawWithMetric(row.raw, metric),
       };
     });
@@ -412,9 +491,23 @@ function normalizeCandidate(input: {
     change1d: typeof input.candidate.change1d === "number" && Number.isFinite(input.candidate.change1d) ? input.candidate.change1d : null,
     volume: typeof input.candidate.volume === "number" && Number.isFinite(input.candidate.volume) ? input.candidate.volume : null,
     marketCap: typeof input.candidate.marketCap === "number" && Number.isFinite(input.candidate.marketCap) ? input.candidate.marketCap : null,
+    metrics: null,
+    factorScore: null,
+    factorPassCount: null,
+    factorUnknownCount: null,
+    factorResults: null,
     raw,
     canonicalKey,
   };
+}
+
+function parseStoredFactorConfig(value: unknown): WatchlistFactorConfig {
+  if (typeof value !== "string" || !value.trim()) return normalizeWatchlistFactorConfig(null);
+  try {
+    return normalizeWatchlistFactorConfig(JSON.parse(value));
+  } catch {
+    return normalizeWatchlistFactorConfig(null);
+  }
 }
 
 function mapRunSummary(row: any): ScanRunSummary {
@@ -503,6 +596,7 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
       s.compile_daily as compileDaily,
       s.daily_compile_time_local as dailyCompileTimeLocal,
       s.daily_compile_timezone as dailyCompileTimezone,
+      s.factor_config_json as factorConfigJson,
       s.created_at as createdAt,
       s.updated_at as updatedAt,
       (SELECT COUNT(*) FROM tv_watchlist_sources src WHERE src.set_id = s.id AND src.is_active = 1) as sourceCount
@@ -514,6 +608,7 @@ export async function listWatchlistSets(env: Env, includeInactive = false): Prom
     ...row,
     isActive: Boolean(row.isActive),
     compileDaily: Boolean(row.compileDaily),
+    factorConfig: parseStoredFactorConfig(row.factorConfigJson),
     sourceCount: Number(row.sourceCount ?? 0),
     latestRun: latestByScan.get(row.scanDefinitionId) ?? null,
   }));
@@ -581,16 +676,18 @@ export async function createWatchlistSet(env: Env, input: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: unknown;
 }): Promise<{ id: string }> {
   const id = crypto.randomUUID();
   const scanDefinitionId = crypto.randomUUID();
   const slug = slugify(input.slug?.trim() || input.name);
+  const factorConfig = normalizeWatchlistFactorConfig(input.factorConfig);
   await env.DB.batch([
     env.DB.prepare(
       "INSERT INTO scan_definitions (id, name, provider_key, source_type, source_value, fallback_source_type, fallback_source_value, is_active, notes, created_at, updated_at) VALUES (?, ?, ?, 'tradingview-public-link', ?, NULL, NULL, 0, 'internal:watchlist-compiler', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(scanDefinitionId, input.name.trim(), INTERNAL_PROVIDER_KEY, `watchlist-set:${slug}`),
     env.DB.prepare(
-      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, factor_config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(
       id,
       scanDefinitionId,
@@ -600,6 +697,7 @@ export async function createWatchlistSet(env: Env, input: {
       input.compileDaily ? 1 : 0,
       input.dailyCompileTimeLocal?.trim() || null,
       input.dailyCompileTimezone?.trim() || null,
+      JSON.stringify(factorConfig),
     ),
   ]);
   return { id };
@@ -607,7 +705,7 @@ export async function createWatchlistSet(env: Env, input: {
 
 export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ id: string }> {
   const existing = await env.DB.prepare(
-    "SELECT id, scan_definition_id as scanDefinitionId, name, slug, is_active as isActive, compile_daily as compileDaily, daily_compile_time_local as dailyCompileTimeLocal, daily_compile_timezone as dailyCompileTimezone FROM tv_watchlist_sets WHERE id = ? LIMIT 1",
+    "SELECT id, scan_definition_id as scanDefinitionId, name, slug, is_active as isActive, compile_daily as compileDaily, daily_compile_time_local as dailyCompileTimeLocal, daily_compile_timezone as dailyCompileTimezone, factor_config_json as factorConfigJson FROM tv_watchlist_sets WHERE id = ? LIMIT 1",
   ).bind(setId).first<{
     id: string;
     scanDefinitionId: string;
@@ -617,6 +715,7 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
     compileDaily: number;
     dailyCompileTimeLocal: string | null;
     dailyCompileTimezone: string | null;
+    factorConfigJson: string | null;
   }>();
   if (!existing) throw new Error("Watchlist set not found.");
 
@@ -632,7 +731,7 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
       "INSERT INTO scan_definitions (id, name, provider_key, source_type, source_value, fallback_source_type, fallback_source_value, is_active, notes, created_at, updated_at) VALUES (?, ?, ?, 'tradingview-public-link', ?, NULL, NULL, 0, 'internal:watchlist-compiler', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(scanDefinitionId, name, INTERNAL_PROVIDER_KEY, `watchlist-set:${slug}`),
     env.DB.prepare(
-      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "INSERT INTO tv_watchlist_sets (id, scan_definition_id, name, slug, is_active, compile_daily, daily_compile_time_local, daily_compile_timezone, factor_config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ).bind(
       id,
       scanDefinitionId,
@@ -642,6 +741,7 @@ export async function duplicateWatchlistSet(env: Env, setId: string): Promise<{ 
       existing.compileDaily ? 1 : 0,
       existing.dailyCompileTimeLocal,
       existing.dailyCompileTimezone,
+      JSON.stringify(parseStoredFactorConfig(existing.factorConfigJson)),
     ),
     ...sources.map((source) =>
       env.DB.prepare(
@@ -668,6 +768,7 @@ export async function updateWatchlistSet(env: Env, setId: string, input: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: unknown;
 }): Promise<void> {
   const existing = await loadWatchlistSet(env, setId);
   if (!existing) throw new Error("Watchlist set not found.");
@@ -677,10 +778,11 @@ export async function updateWatchlistSet(env: Env, setId: string, input: {
   const compileDaily = input.compileDaily == null ? existing.compileDaily : input.compileDaily;
   const dailyCompileTimeLocal = input.dailyCompileTimeLocal === undefined ? existing.dailyCompileTimeLocal : (input.dailyCompileTimeLocal?.trim() || null);
   const dailyCompileTimezone = input.dailyCompileTimezone === undefined ? existing.dailyCompileTimezone : (input.dailyCompileTimezone?.trim() || null);
+  const factorConfig = input.factorConfig === undefined ? existing.factorConfig : normalizeWatchlistFactorConfig(input.factorConfig);
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE tv_watchlist_sets SET name = ?, slug = ?, is_active = ?, compile_daily = ?, daily_compile_time_local = ?, daily_compile_timezone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    ).bind(name, slug, isActive ? 1 : 0, compileDaily ? 1 : 0, dailyCompileTimeLocal, dailyCompileTimezone, setId),
+      "UPDATE tv_watchlist_sets SET name = ?, slug = ?, is_active = ?, compile_daily = ?, daily_compile_time_local = ?, daily_compile_timezone = ?, factor_config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).bind(name, slug, isActive ? 1 : 0, compileDaily ? 1 : 0, dailyCompileTimeLocal, dailyCompileTimezone, JSON.stringify(factorConfig), setId),
     env.DB.prepare(
       "UPDATE scan_definitions SET name = ?, source_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).bind(name, `watchlist-set:${slug}`, existing.scanDefinitionId),
@@ -832,6 +934,9 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
   const enrichment = await enrichWatchlistCandidatesWithTradingViewMetrics(dedupedRows);
   dedupedRows = enrichment.rows;
   if (enrichment.trace) traces.push(enrichment.trace);
+  const factorAssessment = await assessWatchlistFactors(env, dedupedRows, set.factorConfig);
+  dedupedRows = factorAssessment.rows;
+  if (factorAssessment.trace) traces.push(factorAssessment.trace);
   const status = dedupedRows.length > 0 ? "ok" : traces.some((trace) => trace.status === "error") ? "error" : "empty";
   const error = status === "error"
     ? traces.filter((trace) => trace.error).map((trace) => `${trace.sourceUrl}: ${trace.error}`).join("; ").slice(0, 1000) || "Watchlist compile failed."
@@ -858,7 +963,7 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
     ),
     ...dedupedRows.map((row) =>
       env.DB.prepare(
-        "INSERT OR IGNORE INTO scan_run_rows (id, run_id, scan_id, ticker, display_name, exchange, provider_row_key, rank_value, rank_label, price, change_1d, volume, market_cap, raw_json, canonical_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO scan_run_rows (id, run_id, scan_id, ticker, display_name, exchange, provider_row_key, rank_value, rank_label, price, change_1d, volume, market_cap, factor_score, factor_pass_count, factor_unknown_count, factor_results_json, raw_json, canonical_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).bind(
         crypto.randomUUID(),
         runId,
@@ -873,6 +978,10 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
         row.change1d,
         row.volume,
         row.marketCap,
+        row.factorScore,
+        row.factorPassCount,
+        row.factorUnknownCount,
+        toJson(row.factorResults),
         toJson(row.raw),
         row.canonicalKey,
         ingestedAt,

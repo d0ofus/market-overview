@@ -37,6 +37,7 @@ export type FundamentalIssuer = Issuer;
 type MetricConfig = {
   label: string;
   tags: string[];
+  unitNames?: string[];
 };
 
 type MetricPoint = {
@@ -69,8 +70,12 @@ export type FundamentalQuarterRow = {
   revenueQoQ: number | null;
   netIncomeYoY: number | null;
   netIncomeQoQ: number | null;
+  dilutedEps: number | null;
+  dilutedEpsYoY: number | null;
+  dilutedEpsQoQ: number | null;
   revenueSourceTag: string | null;
   netIncomeSourceTag: string | null;
+  dilutedEpsSourceTag: string | null;
   derivation: string | null;
   warnings: string[];
 };
@@ -98,8 +103,10 @@ export type FundamentalTrendQuarter = {
   periodEnd: string;
   revenue: number | null;
   netIncome: number | null;
+  dilutedEps: number | null;
   revenueYoY: number | null;
   netIncomeYoY: number | null;
+  dilutedEpsYoY: number | null;
 };
 
 export type FundamentalTrendRow = {
@@ -111,6 +118,7 @@ export type FundamentalTrendRow = {
   combinedTrend: FundamentalTrendDirection;
   latestRevenueYoY: number | null;
   latestNetIncomeYoY: number | null;
+  latestDilutedEpsYoY: number | null;
   warning: string | null;
 };
 
@@ -142,7 +150,7 @@ export type FundamentalsRefreshOptions = {
   issuerOverride?: FundamentalIssuer | null;
 };
 
-const METRICS: Record<"revenue" | "netIncome", MetricConfig> = {
+const METRICS: Record<"revenue" | "netIncome" | "dilutedEps", MetricConfig> = {
   revenue: {
     label: "Revenue",
     tags: [
@@ -157,6 +165,15 @@ const METRICS: Record<"revenue" | "netIncome", MetricConfig> = {
       "NetIncomeLoss",
       "ProfitLoss",
     ],
+  },
+  dilutedEps: {
+    label: "Diluted EPS",
+    tags: [
+      "EarningsPerShareDiluted",
+      "EarningsPerShareBasicAndDiluted",
+      "EarningsPerShareBasic",
+    ],
+    unitNames: ["USD/shares", "USD / shares", "USD/share"],
   },
 };
 
@@ -250,29 +267,31 @@ function roundPct(value: number | null): number | null {
   return isFiniteNumber(value) ? Number(value.toFixed(4)) : null;
 }
 
-function allMetricTags(): string[] {
-  return Array.from(new Set(Object.values(METRICS).flatMap((metric) => metric.tags)));
-}
-
-function factsForTag(companyFactsJson: SecFactsResponse, tag: string): SecFact[] {
-  const usdFacts = companyFactsJson.facts?.["us-gaap"]?.[tag]?.units?.USD;
-  return Array.isArray(usdFacts) ? usdFacts : [];
+function factsForTag(companyFactsJson: SecFactsResponse, tag: string, unitNames: string[] = ["USD"]): SecFact[] {
+  const units = companyFactsJson.facts?.["us-gaap"]?.[tag]?.units ?? {};
+  for (const unitName of unitNames) {
+    const facts = units[unitName];
+    if (Array.isArray(facts)) return facts;
+  }
+  return [];
 }
 
 function buildFiscalCalendar(companyFactsJson: SecFactsResponse) {
   const annualEnds = new Map<string, number>();
   const quarterEnds = new Map<string, number>();
 
-  for (const tag of allMetricTags()) {
-    for (const fact of factsForTag(companyFactsJson, tag)) {
-      const end = normalizedDateText(fact.end);
-      const endTime = parseDate(end);
-      const form = normalizeForm(fact.form);
-      const fp = normalizeFp(fact.fp);
-      if (!end || endTime == null || !isFiniteNumber(fact.val)) continue;
+  for (const metric of Object.values(METRICS)) {
+    for (const tag of metric.tags) {
+      for (const fact of factsForTag(companyFactsJson, tag, metric.unitNames)) {
+        const end = normalizedDateText(fact.end);
+        const endTime = parseDate(end);
+        const form = normalizeForm(fact.form);
+        const fp = normalizeFp(fact.fp);
+        if (!end || endTime == null || !isFiniteNumber(fact.val)) continue;
 
-      if (isQuarterDuration(fact) && /^10-[QK]/.test(form)) quarterEnds.set(end, endTime);
-      if (fp === "FY" && /^10-K/.test(form) && isAnnualDuration(fact)) annualEnds.set(end, endTime);
+        if (isQuarterDuration(fact) && /^10-[QK]/.test(form)) quarterEnds.set(end, endTime);
+        if (fp === "FY" && /^10-K/.test(form) && isAnnualDuration(fact)) annualEnds.set(end, endTime);
+      }
     }
   }
 
@@ -362,7 +381,7 @@ function collectMetricPoints(companyFactsJson: SecFactsResponse, metricConfig: M
   for (const tag of metricConfig.tags) {
     const directByKey = new Map<string, SecFact>();
     const annualByYear = new Map<string, SecFact>();
-    for (const fact of factsForTag(companyFactsJson, tag)) {
+    for (const fact of factsForTag(companyFactsJson, tag, metricConfig.unitNames)) {
       const end = normalizedDateText(fact.end);
       const period = end ? fiscalCalendar.periodsByEnd.get(end) : null;
       if (!isFiniteNumber(fact.val) || !end || !period) continue;
@@ -419,16 +438,19 @@ export function parseSecCompanyFundamentals(ticker: string, issuer: Issuer, comp
   const fiscalCalendar = buildFiscalCalendar(companyFactsJson);
   const revenue = collectMetricPoints(companyFactsJson, METRICS.revenue, fiscalCalendar);
   const netIncome = collectMetricPoints(companyFactsJson, METRICS.netIncome, fiscalCalendar);
-  const allKeys = new Set([...revenue.points.keys(), ...netIncome.points.keys()]);
+  const dilutedEps = collectMetricPoints(companyFactsJson, METRICS.dilutedEps, fiscalCalendar);
+  const allKeys = new Set([...revenue.points.keys(), ...netIncome.points.keys(), ...dilutedEps.points.keys()]);
   const allRows = Array.from(allKeys).map((key) => {
     const [fiscalYearText, quarterText] = key.split("-Q");
     const fiscalYear = Number(fiscalYearText);
     const fiscalQuarter = Number(quarterText);
     const revenuePoint = revenue.points.get(key) ?? null;
     const netIncomePoint = netIncome.points.get(key) ?? null;
-    const warnings = [...(revenuePoint?.warnings ?? []), ...(netIncomePoint?.warnings ?? [])];
+    const dilutedEpsPoint = dilutedEps.points.get(key) ?? null;
+    const warnings = [...(revenuePoint?.warnings ?? []), ...(netIncomePoint?.warnings ?? []), ...(dilutedEpsPoint?.warnings ?? [])];
     if (!revenuePoint) warnings.push("Revenue missing.");
     if (!netIncomePoint) warnings.push("Net income missing.");
+    if (!dilutedEpsPoint) warnings.push("Diluted EPS missing.");
     return {
       ticker: normalizeTicker(ticker),
       cik: issuer.cik,
@@ -436,22 +458,26 @@ export function parseSecCompanyFundamentals(ticker: string, issuer: Issuer, comp
       fiscalYear,
       fiscalQuarter,
       key,
-      periodEnd: revenuePoint?.periodEnd ?? netIncomePoint?.periodEnd ?? "",
-      filedAt: revenuePoint?.filedAt ?? netIncomePoint?.filedAt ?? null,
-      form: revenuePoint?.form ?? netIncomePoint?.form ?? null,
-      accession: revenuePoint?.accession ?? netIncomePoint?.accession ?? null,
+      periodEnd: revenuePoint?.periodEnd ?? netIncomePoint?.periodEnd ?? dilutedEpsPoint?.periodEnd ?? "",
+      filedAt: revenuePoint?.filedAt ?? netIncomePoint?.filedAt ?? dilutedEpsPoint?.filedAt ?? null,
+      form: revenuePoint?.form ?? netIncomePoint?.form ?? dilutedEpsPoint?.form ?? null,
+      accession: revenuePoint?.accession ?? netIncomePoint?.accession ?? dilutedEpsPoint?.accession ?? null,
       currency: "USD",
       revenue: revenuePoint?.value ?? null,
       netIncome: netIncomePoint?.value ?? null,
+      dilutedEps: dilutedEpsPoint?.value ?? null,
       revenueYoY: null as number | null,
       revenueQoQ: null as number | null,
       netIncomeYoY: null as number | null,
       netIncomeQoQ: null as number | null,
+      dilutedEpsYoY: null as number | null,
+      dilutedEpsQoQ: null as number | null,
       revenueSourceTag: revenuePoint?.sourceTag ?? null,
       netIncomeSourceTag: netIncomePoint?.sourceTag ?? null,
-      derivation: Array.from(new Set([revenuePoint?.derivation, netIncomePoint?.derivation].filter(Boolean))).join(" | ") || null,
+      dilutedEpsSourceTag: dilutedEpsPoint?.sourceTag ?? null,
+      derivation: Array.from(new Set([revenuePoint?.derivation, netIncomePoint?.derivation, dilutedEpsPoint?.derivation].filter(Boolean))).join(" | ") || null,
       warnings,
-      _periodTime: parseDate(revenuePoint?.periodEnd ?? netIncomePoint?.periodEnd) ?? 0,
+      _periodTime: parseDate(revenuePoint?.periodEnd ?? netIncomePoint?.periodEnd ?? dilutedEpsPoint?.periodEnd) ?? 0,
     };
   });
 
@@ -463,6 +489,8 @@ export function parseSecCompanyFundamentals(ticker: string, issuer: Issuer, comp
     row.revenueQoQ = roundPct(pctChange(row.revenue, previousQuarter?.revenue ?? null));
     row.netIncomeYoY = roundPct(pctChange(row.netIncome, sameQuarterLastYear?.netIncome ?? null));
     row.netIncomeQoQ = roundPct(pctChange(row.netIncome, previousQuarter?.netIncome ?? null));
+    row.dilutedEpsYoY = roundPct(pctChange(row.dilutedEps, sameQuarterLastYear?.dilutedEps ?? null));
+    row.dilutedEpsQoQ = roundPct(pctChange(row.dilutedEps, previousQuarter?.dilutedEps ?? null));
   }
 
   const rows = allRows
@@ -473,7 +501,7 @@ export function parseSecCompanyFundamentals(ticker: string, issuer: Issuer, comp
       return right.fiscalQuarter - left.fiscalQuarter;
     });
   const completePeriodsFound = rows.filter((row) => isFiniteNumber(row.revenue) && isFiniteNumber(row.netIncome)).length;
-  const warnings = [...revenue.warnings, ...netIncome.warnings, ...rows.flatMap((row) => row.warnings)];
+  const warnings = [...revenue.warnings, ...netIncome.warnings, ...dilutedEps.warnings, ...rows.flatMap((row) => row.warnings)];
 
   return {
     rows: rows.map(({ key, _periodTime, ...row }) => row satisfies FundamentalQuarterRow),
@@ -638,12 +666,16 @@ export async function loadTickerFundamentals(env: Env, tickerInput: string, quar
       fq.currency,
       fq.revenue,
       fq.net_income as netIncome,
+      fq.diluted_eps as dilutedEps,
       fq.revenue_yoy as revenueYoY,
       fq.revenue_qoq as revenueQoQ,
       fq.net_income_yoy as netIncomeYoY,
       fq.net_income_qoq as netIncomeQoQ,
+      fq.diluted_eps_yoy as dilutedEpsYoY,
+      fq.diluted_eps_qoq as dilutedEpsQoQ,
       fq.revenue_source_tag as revenueSourceTag,
       fq.net_income_source_tag as netIncomeSourceTag,
+      fq.diluted_eps_source_tag as dilutedEpsSourceTag,
       fq.derivation,
       fq.warnings_json as warningsJson
      FROM fundamental_quarters fq
@@ -664,12 +696,16 @@ export async function loadTickerFundamentals(env: Env, tickerInput: string, quar
     currency: string;
     revenue: number | null;
     netIncome: number | null;
+    dilutedEps: number | null;
     revenueYoY: number | null;
     revenueQoQ: number | null;
     netIncomeYoY: number | null;
     netIncomeQoQ: number | null;
+    dilutedEpsYoY: number | null;
+    dilutedEpsQoQ: number | null;
     revenueSourceTag: string | null;
     netIncomeSourceTag: string | null;
+    dilutedEpsSourceTag: string | null;
     derivation: string | null;
     warningsJson: string | null;
   }>();
@@ -730,7 +766,7 @@ export async function loadFundamentalsTrends(
 
   const placeholders = tickers.map(() => "?").join(",");
   const rowsResult = await db.prepare(
-    `SELECT ticker, companyName, fiscalYear, fiscalQuarter, periodEnd, revenue, netIncome, revenueYoY, netIncomeYoY
+    `SELECT ticker, companyName, fiscalYear, fiscalQuarter, periodEnd, revenue, netIncome, dilutedEps, revenueYoY, netIncomeYoY, dilutedEpsYoY
      FROM (
        SELECT
          fq.ticker,
@@ -740,8 +776,10 @@ export async function loadFundamentalsTrends(
          fq.period_end as periodEnd,
          fq.revenue,
          fq.net_income as netIncome,
+         fq.diluted_eps as dilutedEps,
          fq.revenue_yoy as revenueYoY,
          fq.net_income_yoy as netIncomeYoY,
+         fq.diluted_eps_yoy as dilutedEpsYoY,
          ROW_NUMBER() OVER (PARTITION BY fq.ticker ORDER BY fq.period_end DESC) as rowNumber
        FROM fundamental_quarters fq
        LEFT JOIN fundamental_issuers fi ON fi.ticker = fq.ticker
@@ -757,8 +795,10 @@ export async function loadFundamentalsTrends(
     periodEnd: string;
     revenue: number | null;
     netIncome: number | null;
+    dilutedEps: number | null;
     revenueYoY: number | null;
     netIncomeYoY: number | null;
+    dilutedEpsYoY: number | null;
   }>();
 
   const rowsByTicker = new Map<string, Array<{
@@ -776,8 +816,10 @@ export async function loadFundamentalsTrends(
         periodEnd: row.periodEnd,
         revenue: row.revenue,
         netIncome: row.netIncome,
+        dilutedEps: row.dilutedEps,
         revenueYoY: row.revenueYoY,
         netIncomeYoY: row.netIncomeYoY,
+        dilutedEpsYoY: row.dilutedEpsYoY,
       },
     });
     rowsByTicker.set(ticker, current);
@@ -800,6 +842,7 @@ export async function loadFundamentalsTrends(
         combinedTrend: combineTrendDirections(revenueTrend, netIncomeTrend),
         latestRevenueYoY: latest?.revenueYoY ?? null,
         latestNetIncomeYoY: latest?.netIncomeYoY ?? null,
+        latestDilutedEpsYoY: latest?.dilutedEpsYoY ?? null,
         warning: quarters.length === 0 ? "No cached fundamentals found for this ticker." : null,
       };
     }),
@@ -890,10 +933,10 @@ export async function refreshTickerFundamentals(
       ...selectedRows.map((row) => db.prepare(
         `INSERT INTO fundamental_quarters (
           ticker, cik, fiscal_year, fiscal_quarter, period_end, filed_at, form, accession, currency,
-          revenue, net_income, revenue_yoy, revenue_qoq, net_income_yoy, net_income_qoq,
-          revenue_source_tag, net_income_source_tag, derivation, warnings_json, created_at, updated_at
+          revenue, net_income, diluted_eps, revenue_yoy, revenue_qoq, net_income_yoy, net_income_qoq, diluted_eps_yoy, diluted_eps_qoq,
+          revenue_source_tag, net_income_source_tag, diluted_eps_source_tag, derivation, warnings_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         ON CONFLICT(ticker, fiscal_year, fiscal_quarter, period_end) DO UPDATE SET
           cik = excluded.cik,
           filed_at = excluded.filed_at,
@@ -902,12 +945,16 @@ export async function refreshTickerFundamentals(
           currency = excluded.currency,
           revenue = excluded.revenue,
           net_income = excluded.net_income,
+          diluted_eps = excluded.diluted_eps,
           revenue_yoy = excluded.revenue_yoy,
           revenue_qoq = excluded.revenue_qoq,
           net_income_yoy = excluded.net_income_yoy,
           net_income_qoq = excluded.net_income_qoq,
+          diluted_eps_yoy = excluded.diluted_eps_yoy,
+          diluted_eps_qoq = excluded.diluted_eps_qoq,
           revenue_source_tag = excluded.revenue_source_tag,
           net_income_source_tag = excluded.net_income_source_tag,
+          diluted_eps_source_tag = excluded.diluted_eps_source_tag,
           derivation = excluded.derivation,
           warnings_json = excluded.warnings_json,
           updated_at = CURRENT_TIMESTAMP`,
@@ -923,12 +970,16 @@ export async function refreshTickerFundamentals(
         row.currency,
         row.revenue,
         row.netIncome,
+        row.dilutedEps,
         row.revenueYoY,
         row.revenueQoQ,
         row.netIncomeYoY,
         row.netIncomeQoQ,
+        row.dilutedEpsYoY,
+        row.dilutedEpsQoQ,
         row.revenueSourceTag,
         row.netIncomeSourceTag,
+        row.dilutedEpsSourceTag,
         row.derivation,
         JSON.stringify(row.warnings),
       )),

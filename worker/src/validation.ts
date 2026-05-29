@@ -274,6 +274,7 @@ export const watchlistSetCreateSchema = z.object({
   compileDaily: z.boolean().optional().default(false),
   dailyCompileTimeLocal: localTimeSchema.nullable().optional(),
   dailyCompileTimezone: timezoneStringSchema.nullable().optional(),
+  factorConfig: z.unknown().optional(),
 });
 
 export const watchlistSetPatchSchema = z.object({
@@ -283,6 +284,7 @@ export const watchlistSetPatchSchema = z.object({
   compileDaily: z.boolean().optional(),
   dailyCompileTimeLocal: localTimeSchema.nullable().optional(),
   dailyCompileTimezone: timezoneStringSchema.nullable().optional(),
+  factorConfig: z.unknown().optional(),
 });
 
 export const watchlistSourceCreateSchema = z.object({

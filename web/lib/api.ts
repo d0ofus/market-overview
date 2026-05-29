@@ -825,6 +825,10 @@ export type ScanCompiledRow = {
   change1d: number | null;
   volume: number | null;
   marketCap: number | null;
+  factorScore: number | null;
+  factorPassCount: number | null;
+  factorUnknownCount: number | null;
+  factorResultsJson: string | null;
   rawJson: string | null;
   canonicalKey: string;
   createdAt: string;
@@ -1258,6 +1262,49 @@ export type PatternFeatureIdeasResponse = {
 
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
+export type WatchlistFactorStatus = "pass" | "fail" | "unknown";
+
+export type WatchlistFactorKey =
+  | "priceAboveSma200"
+  | "priceAbove"
+  | "marketCapAbove"
+  | "within52WeekHigh"
+  | "priorStrongMove"
+  | "strongSector"
+  | "avg10dDollarVolume"
+  | "increasingVolumeProfile"
+  | "positiveRevenueGrowth"
+  | "positiveEpsGrowth"
+  | "acceleratingRevenueGrowth"
+  | "acceleratingEpsGrowth"
+  | "averageTradingRangePct";
+
+export type WatchlistFactorConfig = {
+  enabled: Partial<Record<WatchlistFactorKey, boolean>>;
+  thresholds: {
+    priceAbove: { minPrice: number };
+    marketCapAbove: { minMarketCapMillions: number };
+    within52WeekHigh: { maxDistancePct: number };
+    priorStrongMove: { movePct: number; lookbackMonths: number };
+    strongSector: { lookbackMonths: number };
+    avg10dDollarVolume: { minDollarVolumeMillions: number };
+    increasingVolumeProfile: { lookbackMonths: number; minTrendPct: number };
+    acceleratingRevenueGrowth: { minAccelerationPct: number };
+    acceleratingEpsGrowth: { minAccelerationPct: number };
+    averageTradingRangePct: { minAtrPct: number };
+  };
+};
+
+export type WatchlistFactorResult = {
+  key: WatchlistFactorKey;
+  label: string;
+  status: WatchlistFactorStatus;
+  value: number | string | boolean | null;
+  threshold: number | string | null;
+  source: string | null;
+  details?: Record<string, unknown>;
+};
+
 export type WatchlistCompilerSetRow = {
   id: string;
   scanDefinitionId: string;
@@ -1267,6 +1314,7 @@ export type WatchlistCompilerSetRow = {
   compileDaily: boolean;
   dailyCompileTimeLocal: string | null;
   dailyCompileTimezone: string | null;
+  factorConfig: WatchlistFactorConfig;
   createdAt: string;
   updatedAt: string;
   sourceCount: number;
@@ -3097,6 +3145,7 @@ export function createAdminWatchlistCompilerSet(payload: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: WatchlistFactorConfig;
 }) {
   return adminFetch<{ ok: boolean; id: string }>("/api/admin/watchlist-compiler/sets", {
     method: "POST",
@@ -3111,6 +3160,7 @@ export function updateAdminWatchlistCompilerSet(id: string, payload: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: WatchlistFactorConfig;
 }) {
   return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}`, {
     method: "PATCH",
