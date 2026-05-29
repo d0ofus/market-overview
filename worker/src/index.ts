@@ -3017,6 +3017,26 @@ function socialAlertsErrorResponse(c: any, error: unknown) {
   return c.json({ error: message }, status);
 }
 
+app.get("/api/social-alerts/results", async (c) => {
+  try {
+    const results = await getSocialAlertResults(c.env, {
+      runId: c.req.query("runId") ?? null,
+      ticker: c.req.query("ticker") ?? null,
+      handle: c.req.query("handle") ?? null,
+      q: c.req.query("q") ?? null,
+      startDate: c.req.query("startDate") ?? null,
+      endDate: c.req.query("endDate") ?? null,
+      lookbackDays: Number(c.req.query("lookbackDays") ?? 10),
+      limit: Number(c.req.query("limit") ?? 200),
+      offset: Number(c.req.query("offset") ?? 0),
+    });
+    const { blacklist: _blacklist, ...publicResults } = results;
+    return c.json(publicResults);
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
+
 app.get("/api/admin/social-alerts/handles", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {

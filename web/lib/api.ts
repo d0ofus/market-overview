@@ -259,17 +259,20 @@ export type SocialAlertHealthResponse = {
   scweetVersion?: string | null;
 };
 
-export type SocialAlertResultsResponse = {
+export type SocialAlertPublicResultsResponse = {
   run: SocialAlertRunSummary | null;
   metrics: SocialAlertMetrics;
   rows: SocialAlertResultRow[];
   uniqueTickers: string[];
   tickerSummaries: SocialAlertTickerSummary[];
-  blacklist: SocialAlertBlacklistedCashtagRow[];
   window: { startDate: string; endDate: string; lookbackDays: number };
   total: number;
   limit: number;
   offset: number;
+};
+
+export type SocialAlertResultsResponse = SocialAlertPublicResultsResponse & {
+  blacklist: SocialAlertBlacklistedCashtagRow[];
 };
 
 export type SocialAlertScrapeResponse = {
@@ -2392,6 +2395,32 @@ export function getSocialAlertResults(params?: {
 }) {
   return adminFetch<SocialAlertResultsResponse>(
     appendQuery("/api/admin/social-alerts/results", {
+      runId: params?.runId ?? undefined,
+      ticker: params?.ticker ?? undefined,
+      handle: params?.handle ?? undefined,
+      q: params?.q ?? undefined,
+      startDate: params?.startDate ?? undefined,
+      endDate: params?.endDate ?? undefined,
+      lookbackDays: params?.lookbackDays,
+      limit: params?.limit,
+      offset: params?.offset,
+    }),
+  );
+}
+
+export function getSocialAlertPublicResults(params?: {
+  runId?: string | null;
+  ticker?: string | null;
+  handle?: string | null;
+  q?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  lookbackDays?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  return getJson<SocialAlertPublicResultsResponse>(
+    appendQuery("/api/social-alerts/results", {
       runId: params?.runId ?? undefined,
       ticker: params?.ticker ?? undefined,
       handle: params?.handle ?? undefined,

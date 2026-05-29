@@ -1,6 +1,11 @@
 import { SocialAlertsDashboard } from "@/components/social-alerts-dashboard";
+import { getAdminSessionStatus } from "@/lib/admin-auth";
 
-export default function SocialAlertsPage() {
+export const dynamic = "force-dynamic";
+
+export default async function SocialAlertsPage() {
+  const adminAuth = await getAdminSessionStatus();
+
   return (
     <div className="space-y-5">
       <div className="card px-5 py-4">
@@ -17,7 +22,11 @@ export default function SocialAlertsPage() {
           </div>
         </div>
       </div>
-      <SocialAlertsDashboard />
+      <SocialAlertsDashboard
+        adminAuthenticated={adminAuth.authenticated}
+        adminConfigured={adminAuth.configured}
+        adminMissing={adminAuth.missing}
+      />
     </div>
   );
 }
