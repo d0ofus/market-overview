@@ -131,6 +131,11 @@ export type PostCloseDailyBarRefreshJob = {
   totalTickers: number;
   processedTickers: number;
   cursorOffset: number;
+  fetchedRows: number;
+  writtenRows: number;
+  currentDateTickers: number;
+  missingCurrentDateTickers: number;
+  currentDateCoveragePct: number;
 };
 
 export type SnapshotReadyResponse = {

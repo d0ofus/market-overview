@@ -1,7 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
-import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
+import {
+  CORE_BREADTH_UNIVERSE_IDS,
+  computeAndStoreSnapshot,
+  loadSnapshot,
+  recomputeBreadthFromStoredBars,
+  recomputeDashboardFromStoredBars,
+  refreshMissingBreadthBarsForCoverage,
+} from "./eod";
 import type { Env, PostCloseDailyBarRefreshJob } from "./types";
 import {
   configPatchSchema,
@@ -754,7 +761,7 @@ async function refreshOverviewEtfCoverageSafe(env: Env): Promise<void> {
 
 async function ensureBreadthRowsSafe(env: Env): Promise<void> {
   try {
-    await computeAndStoreSnapshot(env, undefined, "default");
+    await recomputeBreadthFromStoredBars(env);
   } catch (error) {
     console.error("on-demand breadth backfill failed", error);
   }
@@ -1199,15 +1206,21 @@ async function refreshPageScopedData(
     }
   }
   if (page === "breadth") {
-    const breadth = await refreshSp500CoreBreadth(env);
+    const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
+      maxTickers: 1600,
+      maxPasses: 2,
+    });
     const recompute = await recomputeBreadthFromStoredBars(env);
     const sp500CountRow = await env.DB.prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
       .bind("sp500-core")
       .first<{ count: number }>();
+    const lowCoverage = catchUp.diagnostics
+      .filter((diagnostic) => !diagnostic.ok)
+      .map((diagnostic) => `${diagnostic.universeId} ${diagnostic.coveragePct.toFixed(1)}%/${diagnostic.minCoveragePct}%`);
     return {
       page,
       refreshedTickers: sp500CountRow?.count ?? 0,
-      notes: `SP500 bars pulled: ${breadth.barCount}. Breadth recomputed for ${recompute.universeCount} universes.`,
+      notes: `Breadth catch-up wrote ${catchUp.writtenRows} rows from ${catchUp.attemptedTickers} attempted tickers. Stored ${recompute.universeCount}/${recompute.attemptedUniverseCount} universes.${lowCoverage.length ? ` Low coverage: ${lowCoverage.join(", ")}.` : ""}`,
     };
   }
   if (page === "sectors") {
@@ -1724,7 +1737,11 @@ const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; un
   return adv + dec + unc > 0;
 };
 
+let lastSp500BreadthFreshnessAttemptAt = 0;
+const SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS = 15 * 60 * 1000;
+
 async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
+  const expectedAsOf = latestUsSessionAsOfDate(new Date());
   let latestSnapshotAsOf: string | null = null;
   try {
     const latestSnapshot = await env.DB.prepare(
@@ -1741,7 +1758,12 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
 
   if (!latestSp500Row) {
     try {
-      await refreshSp500CoreBreadth(env);
+      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
+        universeIds: ["sp500-core"],
+        maxTickers: 500,
+        maxPasses: 2,
+      });
+      await recomputeBreadthFromStoredBars(env, expectedAsOf);
     } catch (error) {
       console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
       await ensureBreadthRowsSafe(env);
@@ -1759,9 +1781,20 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
     Boolean(latestSnapshotAsOf) &&
     Boolean(latestSp500Row.asOfDate) &&
     String(latestSp500Row.asOfDate) < String(latestSnapshotAsOf);
-  if (!usable || isStaleVsSnapshot) {
+  const isStaleVsExpected =
+    Boolean(latestSp500Row.asOfDate) &&
+    String(latestSp500Row.asOfDate) < expectedAsOf;
+  if (!usable || isStaleVsSnapshot || isStaleVsExpected) {
+    const now = Date.now();
+    if (now - lastSp500BreadthFreshnessAttemptAt < SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS) return;
+    lastSp500BreadthFreshnessAttemptAt = now;
     try {
-      await refreshSp500CoreBreadth(env);
+      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
+        universeIds: ["sp500-core"],
+        maxTickers: 500,
+        maxPasses: 2,
+      });
+      await recomputeBreadthFromStoredBars(env, expectedAsOf);
     } catch (error) {
       console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
       await ensureBreadthRowsSafe(env);
@@ -5261,8 +5294,12 @@ app.post("/api/admin/run-breadth", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
   try {
+    const catchUp = await refreshMissingBreadthBarsForCoverage(c.env, date, {
+      maxTickers: 1600,
+      maxPasses: 2,
+    });
     const result = await recomputeBreadthFromStoredBars(c.env, date);
-    return c.json({ ok: true, ...result });
+    return c.json({ ok: true, catchUp, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-breadth failed";
     console.error("admin run-breadth failed", { date, error });
@@ -5834,18 +5871,28 @@ export default {
     )
       .bind(defaultConfig?.id ?? "default")
       .first<{ asOfDate: string | null }>();
+    const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
     const trackedUniverseCount = await env.DB.prepare(
-      "SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols",
-    ).first<{ count: number | null }>();
-    const currentBreadthCount = await env.DB.prepare(
-      "SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ?",
+      `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
     )
-      .bind(expectedAsOf)
+      .bind(...CORE_BREADTH_UNIVERSE_IDS)
+      .first<{ count: number | null }>();
+    const currentBreadthCount = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
+    )
+      .bind(expectedAsOf, ...CORE_BREADTH_UNIVERSE_IDS)
       .first<{ count: number | null }>();
     const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
-    if (latestOverview?.asOfDate !== expectedAsOf || !breadthIsComplete) {
-      await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+    if (latestOverview?.asOfDate !== expectedAsOf) {
+      await recomputeDashboardFromStoredBars(env, expectedAsOf, defaultConfig?.id ?? "default");
+    }
+    if (!breadthIsComplete) {
+      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
+        maxTickers: workerSchedule.postCloseBarsBatchSize * workerSchedule.postCloseBarsMaxBatchesPerTick,
+        maxPasses: 2,
+      });
+      await recomputeBreadthFromStoredBars(env, expectedAsOf);
     }
   },
 };

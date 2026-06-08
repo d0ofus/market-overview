@@ -61,6 +61,24 @@ async function loadLatestBarDates(env: Env, tickers: string[]): Promise<Map<stri
   return latestByTicker;
 }
 
+async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
+  const tickersWithBar = new Set<string>();
+  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT ticker FROM daily_bars WHERE ticker IN (${placeholders}) AND date = ?`,
+    )
+      .bind(...chunk, date)
+      .all<{ ticker: string }>();
+    for (const row of rows.results ?? []) {
+      tickersWithBar.add(row.ticker.toUpperCase());
+    }
+  }
+  return tickersWithBar;
+}
+
 function groupTickersByRefreshStart(
   tickers: string[],
   latestByTicker: Map<string, string | null>,
@@ -134,10 +152,26 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   replaceExisting?: boolean;
   providerBatchSize?: number;
   continueOnError?: boolean;
-}): Promise<{ requestedTickers: number; fetchedRows: number; writtenRows: number; skippedCurrentTickers: number }> {
+}): Promise<{
+  requestedTickers: number;
+  fetchedRows: number;
+  writtenRows: number;
+  skippedCurrentTickers: number;
+  currentDateTickers: number;
+  missingCurrentDateTickers: number;
+  currentDateCoveragePct: number;
+}> {
   const tickers = normalizeTickers(input.tickers, input.maxTickers);
   if (tickers.length === 0) {
-    return { requestedTickers: 0, fetchedRows: 0, writtenRows: 0, skippedCurrentTickers: 0 };
+    return {
+      requestedTickers: 0,
+      fetchedRows: 0,
+      writtenRows: 0,
+      skippedCurrentTickers: 0,
+      currentDateTickers: 0,
+      missingCurrentDateTickers: 0,
+      currentDateCoveragePct: 0,
+    };
   }
 
   const provider = input.provider ?? getProvider(env);
@@ -177,10 +211,17 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
     }
   }
 
+  const tickersWithEndDateBar = await loadTickersWithBarOnDate(env, tickers, input.endDate);
+  const currentDateTickers = tickersWithEndDateBar.size;
+  const missingCurrentDateTickers = Math.max(0, tickers.length - currentDateTickers);
+
   return {
     requestedTickers: tickers.length,
     fetchedRows,
     writtenRows,
     skippedCurrentTickers,
+    currentDateTickers,
+    missingCurrentDateTickers,
+    currentDateCoveragePct: tickers.length > 0 ? (currentDateTickers / tickers.length) * 100 : 0,
   };
 }

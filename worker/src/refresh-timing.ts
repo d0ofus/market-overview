@@ -59,5 +59,5 @@ export function shouldRunScheduledEod(now: Date, timezone: string, refreshTime: 
   const target = parseLocalTime(refreshTime) ?? { hour: 8, minute: 15 };
   const local = zonedParts(now, timezone);
   const targetMinutes = target.hour * 60 + target.minute;
-  return local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;
+  return local.minutesOfDay >= targetMinutes;
 }

@@ -35,7 +35,18 @@ const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
-const MIN_BREADTH_COVERAGE_PCT = 1;
+const MIN_NON_CORE_BREADTH_COVERAGE_PCT = 1;
+const SP500_CORE_BREADTH_MIN_COVERAGE_PCT = 95;
+const CORE_BREADTH_MIN_COVERAGE_PCT = 80;
+const DEFAULT_BREADTH_CATCHUP_MAX_TICKERS = 1600;
+const DEFAULT_BREADTH_CATCHUP_MAX_PASSES = 2;
+export const CORE_BREADTH_UNIVERSE_IDS = [
+  "sp500-core",
+  "nasdaq-core",
+  NYSE_BREADTH_UNIVERSE_ID,
+  "russell2000-core",
+  OVERALL_BREADTH_UNIVERSE_ID,
+] as const;
 const OVERVIEW_RS_ENABLED_GROUPS = new Set([
   "g-crypto",
   "g-metals-energy",
@@ -70,6 +81,36 @@ type UniverseSourceStatus = {
   recordsCount: number | null;
 };
 
+type BreadthStoreResult = {
+  universeId: string;
+  asOfDate: string;
+  stored: boolean;
+  coveragePct: number;
+  minCoveragePct: number;
+  memberCount: number;
+  totalUniverseMembers: number;
+  reason?: string;
+};
+
+type BreadthCoverageDiagnostic = {
+  universeId: string;
+  memberCount: number;
+  currentDateTickers: number;
+  missingCurrentDateTickers: number;
+  coveragePct: number;
+  minCoveragePct: number;
+  ok: boolean;
+};
+
+export type BreadthCoverageRefreshResult = {
+  asOfDate: string;
+  attemptedTickers: number;
+  fetchedRows: number;
+  writtenRows: number;
+  diagnostics: BreadthCoverageDiagnostic[];
+  unavailable: Array<{ id: string; name: string; reason: string }>;
+};
+
 function isStatusStale(lastSyncedAt: string | null | undefined, maxAgeDays = 14): boolean {
   if (!lastSyncedAt) return true;
   const t = new Date(lastSyncedAt).getTime();
@@ -83,6 +124,14 @@ async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[]
     if (chunk.length === 0) continue;
     await env.DB.batch(chunk);
   }
+}
+
+function minBreadthCoveragePct(universeId: string): number {
+  if (universeId === "sp500-core") return SP500_CORE_BREADTH_MIN_COVERAGE_PCT;
+  if (CORE_BREADTH_UNIVERSE_IDS.includes(universeId as (typeof CORE_BREADTH_UNIVERSE_IDS)[number])) {
+    return CORE_BREADTH_MIN_COVERAGE_PCT;
+  }
+  return MIN_NON_CORE_BREADTH_COVERAGE_PCT;
 }
 
 function buildPlaceholders(count: number): string {
@@ -182,6 +231,53 @@ async function loadBarsForTickers(
     rows.push(...(result.results ?? []));
   }
   return rows;
+}
+
+async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  const out = new Set<string>();
+  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `SELECT DISTINCT ticker FROM daily_bars WHERE ticker IN (${placeholders}) AND date = ?`,
+    )
+      .bind(...chunk, date)
+      .all<{ ticker: string }>();
+    for (const row of result.results ?? []) {
+      out.add(row.ticker.toUpperCase());
+    }
+  }
+  return out;
+}
+
+async function buildBreadthCoverageDiagnostics(
+  env: Env,
+  breadthState: BreadthUniverseState,
+  asOfDate: string,
+  universeIds?: Set<string>,
+): Promise<BreadthCoverageDiagnostic[]> {
+  const diagnostics: BreadthCoverageDiagnostic[] = [];
+  for (const [universeId, tickers] of breadthState.universeTickers.entries()) {
+    if (universeIds && !universeIds.has(universeId)) continue;
+    const currentTickers = await loadTickersWithBarOnDate(env, tickers, asOfDate);
+    const memberCount = tickers.length;
+    const currentDateTickers = currentTickers.size;
+    const missingCurrentDateTickers = Math.max(0, memberCount - currentDateTickers);
+    const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
+    const minCoveragePct = minBreadthCoveragePct(universeId);
+    diagnostics.push({
+      universeId,
+      memberCount,
+      currentDateTickers,
+      missingCurrentDateTickers,
+      coveragePct,
+      minCoveragePct,
+      ok: memberCount > 0 && coveragePct >= minCoveragePct,
+    });
+  }
+  return diagnostics;
 }
 
 async function loadOverviewDerivedMetricsByTicker(
@@ -729,17 +825,111 @@ export async function recomputeDashboardFromStoredBars(
 export async function recomputeBreadthFromStoredBars(
   env: Env,
   asOfDateInput?: string,
-): Promise<{ asOfDate: string; universeCount: number; unavailable: Array<{ id: string; name: string; reason: string }> }> {
+): Promise<{
+  asOfDate: string;
+  universeCount: number;
+  attemptedUniverseCount: number;
+  skipped: BreadthStoreResult[];
+  unavailable: Array<{ id: string; name: string; reason: string }>;
+}> {
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const generatedAt = new Date().toISOString();
   const breadthState = await ensureBreadthUniverseMemberships(env);
   const universeIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
+  const results: BreadthStoreResult[] = [];
   for (const universeId of universeIds) {
-    await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null, generatedAt);
+    results.push(await computeAndStoreBreadth(env, asOfDate, universeId, breadthState.sourceByUniverse.get(universeId) ?? null, generatedAt));
   }
   return {
     asOfDate,
-    universeCount: universeIds.length,
+    universeCount: results.filter((result) => result.stored).length,
+    attemptedUniverseCount: universeIds.length,
+    skipped: results.filter((result) => !result.stored),
+    unavailable: breadthState.unavailable,
+  };
+}
+
+export async function refreshMissingBreadthBarsForCoverage(
+  env: Env,
+  asOfDateInput?: string,
+  options: {
+    universeIds?: string[];
+    maxTickers?: number;
+    maxPasses?: number;
+  } = {},
+): Promise<BreadthCoverageRefreshResult> {
+  const asOfDate = resolveAsOfDate(asOfDateInput);
+  const breadthState = await ensureBreadthUniverseMemberships(env);
+  const universeFilter = options.universeIds ? new Set(options.universeIds) : undefined;
+  const maxTickers = Math.max(1, Math.trunc(options.maxTickers ?? DEFAULT_BREADTH_CATCHUP_MAX_TICKERS));
+  const maxPasses = Math.max(1, Math.trunc(options.maxPasses ?? DEFAULT_BREADTH_CATCHUP_MAX_PASSES));
+  let diagnostics = await buildBreadthCoverageDiagnostics(env, breadthState, asOfDate, universeFilter);
+  let provider: ReturnType<typeof getProvider> | null = null;
+  try {
+    provider = getProvider(env);
+  } catch (error) {
+    console.error("breadth missing-bar catch-up provider unavailable", error);
+    return {
+      asOfDate,
+      attemptedTickers: 0,
+      fetchedRows: 0,
+      writtenRows: 0,
+      diagnostics,
+      unavailable: breadthState.unavailable,
+    };
+  }
+
+  const attempted = new Set<string>();
+  let fetchedRows = 0;
+  let writtenRows = 0;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const lowCoverageUniverseIds = new Set(
+      diagnostics
+        .filter((diagnostic) => !diagnostic.ok)
+        .map((diagnostic) => diagnostic.universeId),
+    );
+    if (lowCoverageUniverseIds.size === 0) break;
+
+    const candidates: string[] = [];
+    const orderedUniverses = Array.from(breadthState.universeTickers.entries())
+      .sort(([left], [right]) => {
+        const leftIndex = CORE_BREADTH_UNIVERSE_IDS.indexOf(left as (typeof CORE_BREADTH_UNIVERSE_IDS)[number]);
+        const rightIndex = CORE_BREADTH_UNIVERSE_IDS.indexOf(right as (typeof CORE_BREADTH_UNIVERSE_IDS)[number]);
+        return (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex);
+      });
+    for (const [universeId, tickers] of orderedUniverses) {
+      if (!lowCoverageUniverseIds.has(universeId)) continue;
+      const currentTickers = await loadTickersWithBarOnDate(env, tickers, asOfDate);
+      for (const ticker of tickers) {
+        const normalized = ticker.toUpperCase();
+        if (currentTickers.has(normalized) || attempted.has(normalized)) continue;
+        attempted.add(normalized);
+        candidates.push(normalized);
+        if (candidates.length >= maxTickers) break;
+      }
+      if (candidates.length >= maxTickers) break;
+    }
+    if (candidates.length === 0) break;
+
+    const refresh = await refreshDailyBarsIncremental(env, {
+      provider,
+      tickers: candidates,
+      startDate: asOfDate,
+      endDate: asOfDate,
+      replaceExisting: true,
+      continueOnError: true,
+    });
+    fetchedRows += refresh.fetchedRows;
+    writtenRows += refresh.writtenRows;
+    diagnostics = await buildBreadthCoverageDiagnostics(env, breadthState, asOfDate, universeFilter);
+  }
+
+  return {
+    asOfDate,
+    attemptedTickers: attempted.size,
+    fetchedRows,
+    writtenRows,
+    diagnostics,
     unavailable: breadthState.unavailable,
   };
 }
@@ -790,16 +980,57 @@ export async function computeAndStoreBreadth(
   universeId: string,
   dataSource: string | null = null,
   generatedAt = new Date().toISOString(),
-): Promise<void> {
+): Promise<BreadthStoreResult> {
   const members = await env.DB.prepare("SELECT ticker FROM universe_symbols WHERE universe_id = ?")
     .bind(universeId)
     .all<{ ticker: string }>();
-  const tickers = (members.results ?? []).map((r) => r.ticker);
-  if (tickers.length === 0) return;
+  const tickers = Array.from(new Set((members.results ?? []).map((r) => r.ticker.toUpperCase()).filter(Boolean)));
+  const minCoveragePct = minBreadthCoveragePct(universeId);
+  if (tickers.length === 0) {
+    return {
+      universeId,
+      asOfDate,
+      stored: false,
+      coveragePct: 0,
+      minCoveragePct,
+      memberCount: 0,
+      totalUniverseMembers: 0,
+      reason: "empty-universe",
+    };
+  }
   const allRows = await loadBarsForTickers(env, tickers, asOfDate);
+  const currentTickers = new Set(
+    allRows
+      .filter((row) => row.date === asOfDate)
+      .map((row) => row.ticker.toUpperCase()),
+  );
+  const currentCoveragePct = tickers.length > 0 ? (currentTickers.size / tickers.length) * 100 : 0;
+  const id = `${asOfDate}:${universeId}`;
+  if (currentCoveragePct < minCoveragePct) {
+    await env.DB.prepare("DELETE FROM breadth_snapshots WHERE id = ?").bind(id).run();
+    console.warn("skipping low-current-coverage breadth snapshot", {
+      universeId,
+      asOfDate,
+      coveragePct: Number(currentCoveragePct.toFixed(2)),
+      minCoveragePct,
+      currentDateTickers: currentTickers.size,
+      totalUniverseMembers: tickers.length,
+    });
+    return {
+      universeId,
+      asOfDate,
+      stored: false,
+      coveragePct: currentCoveragePct,
+      minCoveragePct,
+      memberCount: currentTickers.size,
+      totalUniverseMembers: tickers.length,
+      reason: "low-current-date-coverage",
+    };
+  }
 
   const barsByTicker = new Map<string, { closes: number[]; volumes: number[] }>();
   for (const r of allRows) {
+    if (!currentTickers.has(r.ticker.toUpperCase())) continue;
     const v = barsByTicker.get(r.ticker) ?? { closes: [], volumes: [] };
     v.closes.push(r.c);
     v.volumes.push(r.volume ?? 0);
@@ -817,21 +1048,28 @@ export async function computeAndStoreBreadth(
       ]),
     ),
   );
-  const isCoreUniverse = universeId.endsWith("-core") || universeId === OVERALL_BREADTH_UNIVERSE_ID;
-  if (isCoreUniverse && stats.totalUniverseMembers > 0 && stats.dataCoveragePct < MIN_BREADTH_COVERAGE_PCT) {
-    const id = `${asOfDate}:${universeId}`;
+  if (stats.totalUniverseMembers > 0 && stats.dataCoveragePct < minCoveragePct) {
     await env.DB.prepare("DELETE FROM breadth_snapshots WHERE id = ?").bind(id).run();
     console.warn("skipping low-coverage breadth snapshot", {
       universeId,
       asOfDate,
       coveragePct: Number(stats.dataCoveragePct.toFixed(2)),
+      minCoveragePct,
       memberCount: stats.memberCount,
       totalUniverseMembers: stats.totalUniverseMembers,
     });
-    return;
+    return {
+      universeId,
+      asOfDate,
+      stored: false,
+      coveragePct: stats.dataCoveragePct,
+      minCoveragePct,
+      memberCount: stats.memberCount,
+      totalUniverseMembers: stats.totalUniverseMembers,
+      reason: "low-computable-coverage",
+    };
   }
 
-  const id = `${asOfDate}:${universeId}`;
   await env.DB.prepare(
     "INSERT OR REPLACE INTO breadth_snapshots (id, as_of_date, universe_id, advancers, decliners, unchanged, pct_above_20ma, pct_above_50ma, pct_above_200ma, new_20d_highs, new_20d_lows, median_return_1d, median_return_5d, sentiment_json, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
@@ -858,6 +1096,15 @@ export async function computeAndStoreBreadth(
       generatedAt,
     )
     .run();
+  return {
+    universeId,
+    asOfDate,
+    stored: true,
+    coveragePct: stats.dataCoveragePct,
+    minCoveragePct,
+    memberCount: stats.memberCount,
+    totalUniverseMembers: stats.totalUniverseMembers,
+  };
 }
 
 type LoadSnapshotOptions = {

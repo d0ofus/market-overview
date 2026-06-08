@@ -293,7 +293,8 @@ export function BreadthPanels({
 }) {
   const [lookback, setLookback] = useState<Lookback>(90);
   const [metricKey, setMetricKey] = useState<MetricKey>("pctAbove20MA");
-  const [activeHistoricalMetricKey, setActiveHistoricalMetricKey] = useState<MetricKey>("pctAbove20MA");
+  const [previewHistoricalMetricKey, setPreviewHistoricalMetricKey] = useState<MetricKey | null>(null);
+  const activeHistoricalMetricKey = previewHistoricalMetricKey ?? metricKey;
 
   const historyRows = useMemo(() => rows.slice(-HISTORY_DAYS), [rows]);
   const normalizedHistoryRows = useMemo(() => {
@@ -548,7 +549,11 @@ export function BreadthPanels({
             <select
               className="rounded-xl border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
               value={metricKey}
-              onChange={(e) => setMetricKey(e.target.value as (typeof metricOptions)[number]["key"])}
+              onChange={(e) => {
+                const nextMetric = e.target.value as (typeof metricOptions)[number]["key"];
+                setMetricKey(nextMetric);
+                setPreviewHistoricalMetricKey(null);
+              }}
             >
               {metricOptions.map((opt) => (
                 <option key={opt.key} value={opt.key}>
@@ -639,17 +644,24 @@ export function BreadthPanels({
             <thead className="bg-slate-900/60">
               <tr>
                 {historicalColumns.map((column) => {
-                  const isActive = column.trendable && column.key === activeHistoricalMetricKey;
+                  const isCommitted = column.trendable && column.key === metricKey;
+                  const isPreviewed = column.trendable && column.key === previewHistoricalMetricKey;
                   return (
                     <th key={column.key} className="text-left text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
                       {column.trendable ? (
                         <button
                           type="button"
-                          className={`w-full px-3 py-2 text-left transition ${isActive ? "bg-accent/15 text-accent" : "text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"}`}
-                          onMouseEnter={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
-                          onFocus={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
-                          onClick={() => setActiveHistoricalMetricKey(column.key as MetricKey)}
-                          aria-pressed={isActive}
+                          className={`w-full px-3 py-2 text-left transition ${isCommitted ? "bg-accent/15 text-accent" : isPreviewed ? "bg-slate-800/80 text-slate-100" : "text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"}`}
+                          onMouseEnter={() => setPreviewHistoricalMetricKey(column.key as MetricKey)}
+                          onMouseLeave={() => setPreviewHistoricalMetricKey(null)}
+                          onFocus={() => setPreviewHistoricalMetricKey(column.key as MetricKey)}
+                          onBlur={() => setPreviewHistoricalMetricKey(null)}
+                          onClick={() => {
+                            const nextMetric = column.key as MetricKey;
+                            setMetricKey(nextMetric);
+                            setPreviewHistoricalMetricKey(null);
+                          }}
+                          aria-pressed={isCommitted}
                         >
                           {column.label}
                         </button>

@@ -51,6 +51,15 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
                 }) as T[],
               };
             }
+            if (sql.includes("SELECT DISTINCT ticker FROM daily_bars")) {
+              const date = String(args.at(-1));
+              return {
+                results: args.slice(0, -1).flatMap((arg) => {
+                  const ticker = String(arg).toUpperCase();
+                  return (barsByTicker.get(ticker) ?? []).some((row) => row.date === date) ? [{ ticker }] : [];
+                }) as T[],
+              };
+            }
             return { results: [] as T[] };
           },
           async run() {
@@ -129,6 +138,40 @@ describe("refreshDailyBarsIncremental", () => {
     expect(warnSpy).toHaveBeenCalledWith("daily bars provider chunk failed", expect.objectContaining({
       tickers: ["BAD"],
     }));
+  });
+
+  it("reports current-date coverage when the provider returns only partial rows", async () => {
+    const { env } = createDailyBarsEnv();
+    const provider: MarketDataProvider = {
+      label: "partial provider",
+      getDailyBars: vi.fn(async (_tickers: string[], _startDate: string, endDate: string) => [
+        {
+          ticker: "AAA",
+          date: endDate,
+          o: 10,
+          h: 11,
+          l: 9,
+          c: 10,
+          volume: 1_000,
+        },
+      ]),
+    };
+
+    const result = await refreshDailyBarsIncremental(env, {
+      tickers: ["AAA", "BBB", "CCC"],
+      startDate: "2026-06-02",
+      endDate: "2026-06-02",
+      provider,
+    });
+
+    expect(result).toMatchObject({
+      requestedTickers: 3,
+      fetchedRows: 1,
+      writtenRows: 1,
+      currentDateTickers: 1,
+      missingCurrentDateTickers: 2,
+    });
+    expect(result.currentDateCoveragePct).toBeCloseTo(33.333, 2);
   });
 });
 
