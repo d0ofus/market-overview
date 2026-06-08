@@ -25,23 +25,72 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
 
 const QUICK_RANGE_OPTIONS = [3, 5, 10, 30] as const;
 const DEFAULT_CHARTS_PER_PAGE = 12;
-const DEFAULT_ALERT_LOOKBACK_DAYS = 30;
+const DEFAULT_ALERT_LOOKBACK_TRADING_DAYS = 30;
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 const localIsoDate = (value = new Date()) =>
   `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 
-const addDays = (isoDate: string, days: number) => {
+const parseIsoDate = (isoDate: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
   const value = new Date(`${isoDate}T00:00:00Z`);
+  return Number.isNaN(value.getTime()) ? null : value;
+};
+
+const addDays = (isoDate: string, days: number) => {
+  const value = parseIsoDate(isoDate);
+  if (!value) return isoDate;
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
 };
+
+const weekdayLabel = (isoDate: string) => {
+  const value = parseIsoDate(isoDate);
+  return value ? WEEKDAY_LABELS[value.getUTCDay()] : "-";
+};
+
+const isTradingWeekday = (isoDate: string) => {
+  const value = parseIsoDate(isoDate);
+  if (!value) return false;
+  const day = value.getUTCDay();
+  return day >= 1 && day <= 5;
+};
+
+const previousTradingWeekday = (isoDate: string) => {
+  let cursor = isoDate;
+  for (let i = 0; i < 8; i += 1) {
+    cursor = addDays(cursor, -1);
+    if (isTradingWeekday(cursor)) return cursor;
+  }
+  return isoDate;
+};
+
+const tradingWeekdayOnOrBefore = (isoDate: string) => {
+  if (isTradingWeekday(isoDate)) return isoDate;
+  let cursor = isoDate;
+  for (let i = 0; i < 8; i += 1) {
+    cursor = addDays(cursor, -1);
+    if (isTradingWeekday(cursor)) return cursor;
+  }
+  return isoDate;
+};
+
 const defaultEndDate = () => localIsoDate();
 const defaultStartDate = () => {
   const end = defaultEndDate();
-  return addDays(end, -(DEFAULT_ALERT_LOOKBACK_DAYS - 1));
+  return tradingRangeStartDate(end, DEFAULT_ALERT_LOOKBACK_TRADING_DAYS);
 };
 
-const rangeStartDate = (endDate: string, days: number) => addDays(endDate, -(days - 1));
+const tradingRangeStartDate = (endDate: string, days: number) => {
+  const count = Math.max(1, Math.floor(days));
+  let cursor = tradingWeekdayOnOrBefore(endDate);
+  for (let i = 1; i < count; i += 1) {
+    cursor = previousTradingWeekday(cursor);
+  }
+  return cursor;
+};
+
+const formatTradingDayHeaderDate = (isoDate: string) => `${weekdayLabel(isoDate)} ${isoDate}`;
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
@@ -335,7 +384,7 @@ export function AlertsDashboard() {
 
   const applyQuickRange = (days: number) => {
     setChartPage(1);
-    setStartDate(rangeStartDate(endDate, days));
+    setStartDate(tradingRangeStartDate(endDate, days));
   };
 
   useEffect(() => {
@@ -343,7 +392,7 @@ export function AlertsDashboard() {
     setChartPage(totalChartPages);
   }, [chartPage, totalChartPages]);
 
-  const isQuickRangeActive = (days: number) => startDate === rangeStartDate(endDate, days);
+  const isQuickRangeActive = (days: number) => startDate === tradingRangeStartDate(endDate, days);
 
   const singleNews = selectedTickerDay?.news?.length ? selectedTickerDay.news : selectedNews;
   const activeChartDescription = activeChartRow
@@ -355,21 +404,28 @@ export function AlertsDashboard() {
       <div className="card p-3">
         <div className="grid gap-3 md:grid-cols-5">
           <label className="text-xs text-slate-300">
-            Start date
-            <input
-              type="date"
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
-              value={startDate}
-              onChange={(e) => {
-                setChartPage(1);
-                setStartDate(e.target.value);
-              }}
-            />
+            Trading day start
+            <div className="mt-1 grid grid-cols-[minmax(0,1fr),auto] gap-2">
+              <input
+                type="date"
+                className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                value={startDate}
+                onChange={(e) => {
+                  setChartPage(1);
+                  setStartDate(e.target.value);
+                }}
+              />
+              <span className="inline-flex min-w-11 items-center justify-center rounded border border-borderSoft bg-panelSoft px-2 text-xs font-semibold text-slate-300">
+                {weekdayLabel(startDate)}
+              </span>
+            </div>
             <div className="mt-2 flex flex-wrap gap-2">
               {QUICK_RANGE_OPTIONS.map((days) => (
                 <button
                   key={days}
                   type="button"
+                  aria-label={`Last ${days} trading days`}
+                  title={`Last ${days} trading days`}
                   className={`rounded px-2 py-1 text-[11px] ${
                     isQuickRangeActive(days) ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"
                   }`}
@@ -381,16 +437,21 @@ export function AlertsDashboard() {
             </div>
           </label>
           <label className="text-xs text-slate-300">
-            End date
-            <input
-              type="date"
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
-              value={endDate}
-              onChange={(e) => {
-                setChartPage(1);
-                setEndDate(e.target.value);
-              }}
-            />
+            Trading day end
+            <div className="mt-1 grid grid-cols-[minmax(0,1fr),auto] gap-2">
+              <input
+                type="date"
+                className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                value={endDate}
+                onChange={(e) => {
+                  setChartPage(1);
+                  setEndDate(e.target.value);
+                }}
+              />
+              <span className="inline-flex min-w-11 items-center justify-center rounded border border-borderSoft bg-panelSoft px-2 text-xs font-semibold text-slate-300">
+                {weekdayLabel(endDate)}
+              </span>
+            </div>
           </label>
           <label className="text-xs text-slate-300">
             Session
@@ -639,7 +700,9 @@ export function AlertsDashboard() {
         {mode === "single" && <aside className="space-y-3">
           <div className="card p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">Alerts Log ({startDate} to {endDate})</h3>
+              <h3 className="text-sm font-semibold text-slate-200">
+                Alerts Log (Trading Days {formatTradingDayHeaderDate(startDate)} to {formatTradingDayHeaderDate(endDate)})
+              </h3>
               <button
                 className={`rounded px-3 py-1.5 text-xs ${showUniqueOnly ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
                 onClick={() => setShowUniqueOnly((current) => !current)}
@@ -686,7 +749,7 @@ export function AlertsDashboard() {
                   {visibleAlerts.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-2 py-4 text-center text-slate-400">
-                        No alerts found for the selected filters.
+                        No alerts found for the selected trading-day filters.
                       </td>
                     </tr>
                   )}
