@@ -3,6 +3,7 @@ import {
   ADMIN_SESSION_COOKIE_NAME,
   ADMIN_SESSION_MAX_AGE_SECONDS,
   readCookieValue,
+  type AdminSessionVerification,
   verifyAdminSessionValue,
 } from "./admin-auth-core";
 
@@ -19,6 +20,13 @@ type AdminWorkerConfig = {
   adminSecret: string;
   missing: string[];
 };
+
+type AdminSessionFailureReason = Extract<AdminSessionVerification, { valid: false }>["reason"];
+
+type AdminRequestAuthentication =
+  | { configured: false; authenticated: false; missing: string[] }
+  | { configured: true; authenticated: true }
+  | { configured: true; authenticated: false; reason: AdminSessionFailureReason };
 
 export function getAdminAuthConfig(env: NodeJS.ProcessEnv = process.env): AdminAuthConfig {
   const password = String(env.ADMIN_PASSWORD ?? "");
@@ -80,9 +88,17 @@ export async function getAdminSessionStatus(): Promise<{
 }
 
 export function isAdminRequestAuthenticated(request: Request): boolean {
+  return verifyAdminRequestAuthentication(request).authenticated;
+}
+
+export function verifyAdminRequestAuthentication(request: Request): AdminRequestAuthentication {
   const config = getAdminAuthConfig();
-  if (!config.configured) return false;
+  if (!config.configured) {
+    return { configured: false, authenticated: false, missing: config.missing };
+  }
 
   const sessionValue = readCookieValue(request.headers.get("cookie"), ADMIN_SESSION_COOKIE_NAME);
-  return verifyAdminSessionValue(sessionValue, config.sessionSecret).valid;
+  const verification = verifyAdminSessionValue(sessionValue, config.sessionSecret);
+  if (verification.valid) return { configured: true, authenticated: true };
+  return { configured: true, authenticated: false, reason: verification.reason };
 }

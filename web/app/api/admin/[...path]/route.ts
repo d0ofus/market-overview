@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAdminWorkerConfig, isAdminRequestAuthenticated } from "@/lib/admin-auth";
+import { getAdminWorkerConfig, verifyAdminRequestAuthentication } from "@/lib/admin-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,10 +36,28 @@ function responseHeadersFromWorker(response: Response): Headers {
   return headers;
 }
 
+function adminSessionErrorMessage(reason: "missing" | "malformed" | "signature" | "expired"): string {
+  if (reason === "expired") {
+    return "Admin session expired. Open /admin and log in again from this same site.";
+  }
+  if (reason === "missing") {
+    return "Admin session cookie is missing. Open /admin and log in again from this same site.";
+  }
+  return "Admin session is invalid. Open /admin and log in again from this same site.";
+}
+
 async function proxyAdminRequest(request: Request, context: RouteContext) {
-  if (!isAdminRequestAuthenticated(request)) {
+  const auth = verifyAdminRequestAuthentication(request);
+  if (!auth.configured) {
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: `Admin auth is missing server environment variables: ${auth.missing.join(", ")}.` },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  if (!auth.authenticated) {
+    return NextResponse.json(
+      { error: adminSessionErrorMessage(auth.reason) },
       { status: 401, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -54,7 +72,8 @@ async function proxyAdminRequest(request: Request, context: RouteContext) {
 
   const { path } = await context.params;
   const requestUrl = new URL(request.url);
-  const upstreamUrl = new URL(`${workerPathFromParts(path)}${requestUrl.search}`, worker.apiBase);
+  const workerPath = workerPathFromParts(path);
+  const upstreamUrl = new URL(`${workerPath}${requestUrl.search}`, worker.apiBase);
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
 
@@ -65,6 +84,13 @@ async function proxyAdminRequest(request: Request, context: RouteContext) {
     cache: "no-store",
     redirect: "manual",
   });
+
+  if (upstream.status === 401 && workerPath.startsWith("/api/admin/")) {
+    return NextResponse.json(
+      { error: "Worker admin authentication failed. Verify the web ADMIN_SECRET matches the Worker ADMIN_SECRET." },
+      { status: 401, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   return new NextResponse(upstream.body, {
     status: upstream.status,
