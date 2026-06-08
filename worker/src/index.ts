@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 import {
   CORE_BREADTH_UNIVERSE_IDS,
+  computeAndStoreBreadth,
   computeAndStoreSnapshot,
   loadSnapshot,
   recomputeBreadthFromStoredBars,
@@ -1740,6 +1741,17 @@ const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; un
 let lastSp500BreadthFreshnessAttemptAt = 0;
 const SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS = 15 * 60 * 1000;
 
+async function recomputeSp500BreadthFromStoredBarsSafe(env: Env, asOfDate: string): Promise<void> {
+  const memberCount = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = 'sp500-core'",
+  ).first<{ count: number | null }>();
+  if ((memberCount?.count ?? 0) > 0) {
+    await computeAndStoreBreadth(env, asOfDate, "sp500-core", "Stored Daily Bars", new Date().toISOString());
+    return;
+  }
+  await ensureBreadthRowsSafe(env);
+}
+
 async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
   const expectedAsOf = latestUsSessionAsOfDate(new Date());
   let latestSnapshotAsOf: string | null = null;
@@ -1757,15 +1769,13 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
   ).first<{ asOfDate: string | null; advancers: number; decliners: number; unchanged: number; sentimentJson: string | null }>();
 
   if (!latestSp500Row) {
+    const now = Date.now();
+    if (now - lastSp500BreadthFreshnessAttemptAt < SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS) return;
+    lastSp500BreadthFreshnessAttemptAt = now;
     try {
-      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
-        universeIds: ["sp500-core"],
-        maxTickers: 500,
-        maxPasses: 2,
-      });
-      await recomputeBreadthFromStoredBars(env, expectedAsOf);
+      await recomputeSp500BreadthFromStoredBarsSafe(env, expectedAsOf);
     } catch (error) {
-      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      console.error("sp500 core stored-bar on-demand recompute failed; falling back to breadth recompute", error);
       await ensureBreadthRowsSafe(env);
     }
     return;
@@ -1789,14 +1799,9 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
     if (now - lastSp500BreadthFreshnessAttemptAt < SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS) return;
     lastSp500BreadthFreshnessAttemptAt = now;
     try {
-      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
-        universeIds: ["sp500-core"],
-        maxTickers: 500,
-        maxPasses: 2,
-      });
-      await recomputeBreadthFromStoredBars(env, expectedAsOf);
+      await recomputeSp500BreadthFromStoredBarsSafe(env, expectedAsOf);
     } catch (error) {
-      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      console.error("sp500 core stored-bar on-demand recompute failed; falling back to breadth recompute", error);
       await ensureBreadthRowsSafe(env);
     }
   }
