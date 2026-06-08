@@ -451,6 +451,20 @@ type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
 
 type ManualRelativeStrengthTickerStatus = "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
 
+type ManualRelativeStrengthBatchResult = {
+  candidate: ManualRelativeStrengthCandidateRow;
+  status: ManualRelativeStrengthTickerStatus;
+  reason: string | null;
+  latestTradingDate: string | null;
+  price: number | null;
+  change1d: number | null;
+  avgVolume: number | null;
+  relativeVolume: number | null;
+  priceAvgVolume: number | null;
+  feature: RelativeStrengthLatestCacheRecord | null;
+  source: "cache" | "computed";
+};
+
 type VcpRunRecord = {
   id: string;
   presetId: string;
@@ -554,6 +568,8 @@ const RS_JOB_RECOVERY_STALE_MS = 30000;
 const RS_INCREMENTAL_ADVANCE_MAX_BARS = 20;
 const RS_STALE_TOP_UP_LIMIT = 120;
 const MANUAL_RS_SCAN_BATCH_SIZE = 40;
+const MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE = 10;
+const MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE = 4;
 const MANUAL_RS_SCAN_TIME_BUDGET_MS = 20_000;
 const MANUAL_RS_SCAN_LEASE_DURATION_MS = 60_000;
 const MANUAL_RS_SCAN_STALE_RUN_MS = 30 * 60_000;
@@ -3854,19 +3870,7 @@ function manualRowToTradingViewRow(
 async function upsertManualRelativeStrengthBatchResults(
   env: Env & { SCANNER_CACHE_DB: D1Database },
   run: ManualRelativeStrengthRunRecord,
-  results: Array<{
-    candidate: ManualRelativeStrengthCandidateRow;
-    status: "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
-    reason: string | null;
-    latestTradingDate: string | null;
-    price: number | null;
-    change1d: number | null;
-    avgVolume: number | null;
-    relativeVolume: number | null;
-    priceAvgVolume: number | null;
-    feature: RelativeStrengthLatestCacheRecord | null;
-    source: "cache" | "computed";
-  }>,
+  results: ManualRelativeStrengthBatchResult[],
 ): Promise<number> {
   let computedCount = 0;
   for (let index = 0; index < results.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
@@ -4186,6 +4190,239 @@ function countManualRelativeStrengthBatchStatus(
     errorTickers: results.filter((result) => result.status === "error").length,
     staleBenchmarkTickers: results.filter((result) => result.status === "stale_benchmark").length,
   };
+}
+
+function manualRelativeStrengthResultFromBars(
+  candidate: ManualRelativeStrengthCandidateRow,
+  tickerBars: RelativeStrengthDailyBar[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+  identity: RelativeStrengthConfigIdentity,
+  config: RelativeStrengthConfig,
+  refreshAttempted: boolean,
+): ManualRelativeStrengthBatchResult {
+  try {
+    const latestTickerDate = latestBarDate(tickerBars);
+    const latest = tickerBars[tickerBars.length - 1] ?? null;
+    const previous = tickerBars.length > 1 ? tickerBars[tickerBars.length - 2] : null;
+    const avgVolume = averageVolume(tickerBars, 30);
+    const latestVolume = latest == null ? null : Number((latest as { volume?: number }).volume ?? 0);
+    const relativeVolume = avgVolume != null && latestVolume != null && avgVolume > 0 ? latestVolume / avgVolume : null;
+    const priceAvgVolume = latest?.c != null && avgVolume != null ? latest.c * avgVolume : null;
+    const change1d = latest && previous ? percentChange(latest.c, previous.c) : null;
+    if (tickerBars.length === 0) {
+      return {
+        candidate,
+        status: "missing_bars",
+        reason: refreshAttempted
+          ? "No stored daily bars are available for this ticker after bounded refresh."
+          : "No stored daily bars are available for this ticker.",
+        latestTradingDate: null,
+        price: null,
+        change1d: null,
+        avgVolume,
+        relativeVolume,
+        priceAvgVolume,
+        feature: null,
+        source: "computed",
+      };
+    }
+    if (latestTickerDate !== identity.expectedTradingDate) {
+      return {
+        candidate,
+        status: "missing_bars",
+        reason: refreshAttempted
+          ? `Latest stored bar is ${latestTickerDate ?? "none"}; expected ${identity.expectedTradingDate} after bounded refresh.`
+          : `Latest stored bar is ${latestTickerDate ?? "none"}; expected ${identity.expectedTradingDate}.`,
+        latestTradingDate: latestTickerDate,
+        price: latest?.c ?? null,
+        change1d,
+        avgVolume,
+        relativeVolume,
+        priceAvgVolume,
+        feature: null,
+        source: "computed",
+      };
+    }
+    if (tickerBars.length < Math.max(identity.rsMaLength, Math.min(identity.newHighLookback, identity.requiredBarCount))) {
+      return {
+        candidate,
+        status: "insufficient_history",
+        reason: `Only ${tickerBars.length} stored bars are available; ${identity.requiredBarCount} are preferred for this RS config.`,
+        latestTradingDate: latestTickerDate,
+        price: latest?.c ?? null,
+        change1d,
+        avgVolume,
+        relativeVolume,
+        priceAvgVolume,
+        feature: null,
+        source: "computed",
+      };
+    }
+    const computedRows = buildRelativeStrengthCacheRows(tickerBars, benchmarkBars, config);
+    const computed = computedRows[computedRows.length - 1] ?? null;
+    if (!computed || computed.tradingDate !== identity.expectedTradingDate) {
+      return {
+        candidate,
+        status: "missing_bars",
+        reason: refreshAttempted
+          ? "Ticker and benchmark bars could not be aligned through the expected session after bounded refresh."
+          : "Ticker and benchmark bars could not be aligned through the expected session.",
+        latestTradingDate: computed?.tradingDate ?? latestTickerDate,
+        price: latest?.c ?? null,
+        change1d,
+        avgVolume,
+        relativeVolume,
+        priceAvgVolume,
+        feature: null,
+        source: "computed",
+      };
+    }
+    return {
+      candidate,
+      status: "computed",
+      reason: null,
+      latestTradingDate: computed.tradingDate,
+      price: computed.priceClose,
+      change1d: computed.change1d,
+      avgVolume,
+      relativeVolume,
+      priceAvgVolume,
+      feature: {
+        ticker: computed.ticker,
+        benchmarkTicker: computed.benchmarkTicker,
+        rsMaType: identity.rsMaType,
+        rsMaLength: identity.rsMaLength,
+        newHighLookback: identity.newHighLookback,
+        tradingDate: computed.tradingDate,
+        priceClose: computed.priceClose,
+        change1d: computed.change1d,
+        rsRatioClose: computed.rsClose,
+        rsRatioMa: computed.rsMa,
+        rsAboveMa: computed.rsAboveMa,
+        rsNewHigh: computed.rsNewHigh,
+        rsNewHighBeforePrice: computed.rsNewHighBeforePrice,
+        bullCross: computed.bullCross,
+        approxRsRating: computed.approxRsRating,
+      },
+      source: "computed",
+    };
+  } catch (error) {
+    return {
+      candidate,
+      status: "error",
+      reason: error instanceof Error ? error.message : "Failed to compute relative strength for this ticker.",
+      latestTradingDate: null,
+      price: null,
+      change1d: null,
+      avgVolume: null,
+      relativeVolume: null,
+      priceAvgVolume: null,
+      feature: null,
+      source: "computed",
+    };
+  }
+}
+
+async function buildManualRelativeStrengthComputedResults(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  candidates: ManualRelativeStrengthCandidateRow[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+  identity: RelativeStrengthConfigIdentity,
+  config: RelativeStrengthConfig,
+  refreshAttempted: boolean,
+): Promise<ManualRelativeStrengthBatchResult[]> {
+  if (candidates.length === 0) return [];
+  const barsByTicker = groupBarsByTicker(
+    await loadStoredDailyBarsByCount(
+      env,
+      candidates.map((candidate) => candidate.ticker),
+      identity.expectedTradingDate,
+      identity.requiredBarCount,
+    ),
+  );
+  return candidates.map((candidate) =>
+    manualRelativeStrengthResultFromBars(
+      candidate,
+      barsByTicker.get(candidate.ticker) ?? [],
+      benchmarkBars,
+      identity,
+      config,
+      refreshAttempted,
+    ),
+  );
+}
+
+async function refreshManualRelativeStrengthCandidatesOnce(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  candidates: ManualRelativeStrengthCandidateRow[],
+  identity: RelativeStrengthConfigIdentity,
+): Promise<void> {
+  if (candidates.length === 0) return;
+  try {
+    await refreshDailyBarsIncremental(env, {
+      tickers: candidates.map((candidate) => candidate.ticker),
+      startDate: isoDateDaysBefore(identity.expectedTradingDate, calendarLookbackDaysForBars(identity.requiredBarCount)),
+      endDate: identity.expectedTradingDate,
+      provider: getProvider(env, { fallbackEnabled: false }),
+      providerBatchSize: MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE,
+      continueOnError: true,
+    });
+  } catch (error) {
+    console.warn("manual relative strength bounded daily-bar refresh failed", {
+      tickers: candidates.map((candidate) => candidate.ticker),
+      expectedTradingDate: identity.expectedTradingDate,
+      error,
+    });
+  }
+}
+
+async function buildManualRelativeStrengthUncachedChunkResults(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  candidates: ManualRelativeStrengthCandidateRow[],
+  benchmarkBars: RelativeStrengthDailyBar[],
+  identity: RelativeStrengthConfigIdentity,
+  config: RelativeStrengthConfig,
+): Promise<ManualRelativeStrengthBatchResult[]> {
+  if (candidates.length === 0) return [];
+  const coverageByTicker = await loadDailyBarCoverage(
+    env,
+    candidates.map((candidate) => candidate.ticker),
+    identity.expectedTradingDate,
+  );
+  const currentCandidates: ManualRelativeStrengthCandidateRow[] = [];
+  const staleCandidates: ManualRelativeStrengthCandidateRow[] = [];
+  for (const candidate of candidates) {
+    const coverage = coverageByTicker.get(candidate.ticker);
+    if (coverage?.lastDate === identity.expectedTradingDate) {
+      currentCandidates.push(candidate);
+    } else {
+      staleCandidates.push(candidate);
+    }
+  }
+
+  const results = await buildManualRelativeStrengthComputedResults(
+    env,
+    currentCandidates,
+    benchmarkBars,
+    identity,
+    config,
+    false,
+  );
+  for (let index = 0; index < staleCandidates.length; index += MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE) {
+    const chunk = staleCandidates.slice(index, index + MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE);
+    await refreshManualRelativeStrengthCandidatesOnce(env, chunk, identity);
+    results.push(
+      ...await buildManualRelativeStrengthComputedResults(
+        env,
+        chunk,
+        benchmarkBars,
+        identity,
+        config,
+        true,
+      ),
+    );
+  }
+  return results;
 }
 
 async function buildManualRelativeStrengthSnapshotResult(
@@ -5638,191 +5875,60 @@ export async function processManualRelativeStrengthScanRun(
     }
     const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
-    const tickers = candidates.map((candidate) => candidate.ticker);
-    const cachedResults: Array<ReturnType<typeof cachedManualRelativeStrengthResult>> = [];
-    let computeCandidates = candidates;
-    if (cacheReuseEnabled) {
-      const cacheRowsByTicker = await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, tickers);
-      computeCandidates = [];
-      for (const candidate of candidates) {
-        const cached = cacheRowsByTicker.get(candidate.ticker);
-        if (isReusableManualRelativeStrengthFeature(cached, identity, cacheInvalidatedAfterMs)) {
-          cachedResults.push(cachedManualRelativeStrengthResult(candidate, cached));
-        } else {
-          computeCandidates.push(candidate);
+    for (let chunkIndex = 0; chunkIndex < candidates.length && Date.now() - startedAt < timeBudgetMs; chunkIndex += MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE) {
+      const candidateChunk = candidates.slice(chunkIndex, chunkIndex + MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE);
+      const tickers = candidateChunk.map((candidate) => candidate.ticker);
+      const cachedResults: ManualRelativeStrengthBatchResult[] = [];
+      let computeCandidates = candidateChunk;
+      if (cacheReuseEnabled) {
+        const cacheRowsByTicker = await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, tickers);
+        computeCandidates = [];
+        for (const candidate of candidateChunk) {
+          const cached = cacheRowsByTicker.get(candidate.ticker);
+          if (isReusableManualRelativeStrengthFeature(cached, identity, cacheInvalidatedAfterMs)) {
+            cachedResults.push(cachedManualRelativeStrengthResult(candidate, cached));
+          } else {
+            computeCandidates.push(candidate);
+          }
         }
       }
-    }
-    if (computeCandidates.length > 0) {
-      await ensureStoredDailyBarsCurrent(
+      const computedResults = await buildManualRelativeStrengthUncachedChunkResults(
         env,
-        computeCandidates.map((candidate) => candidate.ticker),
-        identity.expectedTradingDate,
-        identity.requiredBarCount,
-        {
-          providerBatchSize: SCAN_DAILY_BAR_REFRESH_BATCH_SIZE,
-          continueOnError: true,
-          fallbackEnabled: false,
-        },
+        computeCandidates,
+        benchmarkBars,
+        identity,
+        config,
       );
-      const afterRefreshRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
-      if (!afterRefreshRun) return null;
-      if (afterRefreshRun.status === "cancelled") {
+      const batchResults = [...cachedResults, ...computedResults];
+      matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
+      const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
+      cacheHitTickers += batchCounts.cacheHitTickers;
+      computedTickers += batchCounts.computedTickers;
+      missingBarsTickers += batchCounts.missingBarsTickers;
+      insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
+      errorTickers += batchCounts.errorTickers;
+      staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
+      cursorOffset += candidateChunk.length;
+      processedTickers = cursorOffset;
+      await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
+        status: "running",
+        processedTickers,
+        matchedTickers,
+        cursorOffset,
+        cacheHitTickers,
+        computedTickers,
+        missingBarsTickers,
+        insufficientHistoryTickers,
+        errorTickers,
+        staleBenchmarkTickers,
+        warning: null,
+      });
+      const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+      if (!afterBatchRun) return null;
+      if (afterBatchRun.status === "cancelled") {
         await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
-        return mapManualRunRecordToJob(afterRefreshRun);
+        return mapManualRunRecordToJob(afterBatchRun);
       }
-    }
-    const barsByTicker = groupBarsByTicker(
-      computeCandidates.length > 0
-        ? await loadStoredDailyBarsByCount(env, computeCandidates.map((candidate) => candidate.ticker), identity.expectedTradingDate, identity.requiredBarCount)
-        : [],
-    );
-    const computedResults = computeCandidates.map((candidate) => {
-      try {
-        const tickerBars = barsByTicker.get(candidate.ticker) ?? [];
-        const latestTickerDate = latestBarDate(tickerBars);
-        const latest = tickerBars[tickerBars.length - 1] ?? null;
-        const previous = tickerBars.length > 1 ? tickerBars[tickerBars.length - 2] : null;
-        const avgVolume = averageVolume(tickerBars, 30);
-        const latestVolume = latest == null ? null : Number((latest as { volume?: number }).volume ?? 0);
-        const relativeVolume = avgVolume != null && latestVolume != null && avgVolume > 0 ? latestVolume / avgVolume : null;
-        const priceAvgVolume = latest?.c != null && avgVolume != null ? latest.c * avgVolume : null;
-        const change1d = latest && previous ? percentChange(latest.c, previous.c) : null;
-        if (tickerBars.length === 0) {
-          return {
-            candidate,
-            status: "missing_bars" as const,
-            reason: "No stored daily bars are available for this ticker.",
-            latestTradingDate: null,
-            price: null,
-            change1d: null,
-            avgVolume,
-            relativeVolume,
-            priceAvgVolume,
-            feature: null,
-            source: "computed" as const,
-          };
-        }
-        if (latestTickerDate !== identity.expectedTradingDate) {
-          return {
-            candidate,
-            status: "missing_bars" as const,
-            reason: `Latest stored bar is ${latestTickerDate ?? "none"}; expected ${identity.expectedTradingDate}.`,
-            latestTradingDate: latestTickerDate,
-            price: latest?.c ?? null,
-            change1d,
-            avgVolume,
-            relativeVolume,
-            priceAvgVolume,
-            feature: null,
-            source: "computed" as const,
-          };
-        }
-        if (tickerBars.length < Math.max(identity.rsMaLength, Math.min(identity.newHighLookback, identity.requiredBarCount))) {
-          return {
-            candidate,
-            status: "insufficient_history" as const,
-            reason: `Only ${tickerBars.length} stored bars are available; ${identity.requiredBarCount} are preferred for this RS config.`,
-            latestTradingDate: latestTickerDate,
-            price: latest?.c ?? null,
-            change1d,
-            avgVolume,
-            relativeVolume,
-            priceAvgVolume,
-            feature: null,
-            source: "computed" as const,
-          };
-        }
-        const computedRows = buildRelativeStrengthCacheRows(tickerBars, benchmarkBars, config);
-        const computed = computedRows[computedRows.length - 1] ?? null;
-        if (!computed || computed.tradingDate !== identity.expectedTradingDate) {
-          return {
-            candidate,
-            status: "missing_bars" as const,
-            reason: "Ticker and benchmark bars could not be aligned through the expected session.",
-            latestTradingDate: computed?.tradingDate ?? latestTickerDate,
-            price: latest?.c ?? null,
-            change1d,
-            avgVolume,
-            relativeVolume,
-            priceAvgVolume,
-            feature: null,
-            source: "computed" as const,
-          };
-        }
-        return {
-          candidate,
-          status: "computed" as const,
-          reason: null,
-          latestTradingDate: computed.tradingDate,
-          price: computed.priceClose,
-          change1d: computed.change1d,
-          avgVolume,
-          relativeVolume,
-          priceAvgVolume,
-          feature: {
-            ticker: computed.ticker,
-            benchmarkTicker: computed.benchmarkTicker,
-            rsMaType: identity.rsMaType,
-            rsMaLength: identity.rsMaLength,
-            newHighLookback: identity.newHighLookback,
-            tradingDate: computed.tradingDate,
-            priceClose: computed.priceClose,
-            change1d: computed.change1d,
-            rsRatioClose: computed.rsClose,
-            rsRatioMa: computed.rsMa,
-            rsAboveMa: computed.rsAboveMa,
-            rsNewHigh: computed.rsNewHigh,
-            rsNewHighBeforePrice: computed.rsNewHighBeforePrice,
-            bullCross: computed.bullCross,
-            approxRsRating: computed.approxRsRating,
-          },
-          source: "computed" as const,
-        };
-      } catch (error) {
-        return {
-          candidate,
-          status: "error" as const,
-          reason: error instanceof Error ? error.message : "Failed to compute relative strength for this ticker.",
-          latestTradingDate: null,
-          price: null,
-          change1d: null,
-          avgVolume: null,
-          relativeVolume: null,
-          priceAvgVolume: null,
-          feature: null,
-          source: "computed" as const,
-        };
-      }
-    });
-    const batchResults = [...cachedResults, ...computedResults];
-    matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
-    const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
-    cacheHitTickers += batchCounts.cacheHitTickers;
-    computedTickers += batchCounts.computedTickers;
-    missingBarsTickers += batchCounts.missingBarsTickers;
-    insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
-    errorTickers += batchCounts.errorTickers;
-    staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
-    cursorOffset += candidates.length;
-    processedTickers = cursorOffset;
-    await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
-      status: "running",
-      processedTickers,
-      matchedTickers,
-      cursorOffset,
-      cacheHitTickers,
-      computedTickers,
-      missingBarsTickers,
-      insufficientHistoryTickers,
-      errorTickers,
-      staleBenchmarkTickers,
-    });
-    const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
-    if (!afterBatchRun) return null;
-    if (afterBatchRun.status === "cancelled") {
-      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
-      return mapManualRunRecordToJob(afterBatchRun);
     }
   }
 
@@ -5869,15 +5975,32 @@ async function loadScannerCacheScanRunType(env: Env, runId: string): Promise<Sca
   return null;
 }
 
+function isScannerCacheQueueBackoffActive(row: { nextAttemptAt?: string | null } | null | undefined): boolean {
+  const nextAttemptAtMs = toTimestampMs(row?.nextAttemptAt ?? null);
+  return nextAttemptAtMs != null && nextAttemptAtMs > Date.now();
+}
+
+async function loadScannerCacheScanRunJobIfLeased(env: Env, runId: string): Promise<ScanRefreshJob | null> {
+  const vcpRun = await loadVcpRun(env, runId);
+  if (vcpRun) return isActiveScanStatus(vcpRun.status) && isVcpRunLeaseActive(vcpRun) ? mapVcpRunRecordToJob(vcpRun) : null;
+  const manualRun = await loadManualRelativeStrengthRun(env, runId);
+  if (manualRun) {
+    return isActiveScanStatus(manualRun.status) && isManualRelativeStrengthRunLeaseActive(manualRun)
+      ? mapManualRunRecordToJob(manualRun)
+      : null;
+  }
+  return null;
+}
+
 async function recoverActiveScannerCacheScanRuns(env: Env): Promise<number> {
   if (!hasScannerCacheStorage(env)) return 0;
   let recovered = 0;
   const activeVcpRun = await loadActiveVcpRun(env);
-  if (activeVcpRun) {
+  if (activeVcpRun && !(await loadScannerCacheScanRunQueueRow(env, activeVcpRun.id))) {
     if (await enqueueScannerCacheScanRun(env, activeVcpRun.id, "vcp", "recovery")) recovered += 1;
   }
   const activeManualRun = await loadActiveManualRelativeStrengthRun(env);
-  if (activeManualRun) {
+  if (activeManualRun && !(await loadScannerCacheScanRunQueueRow(env, activeManualRun.id))) {
     if (await enqueueScannerCacheScanRun(env, activeManualRun.id, "relative-strength", "recovery")) recovered += 1;
   }
   return recovered;
@@ -5885,7 +6008,7 @@ async function recoverActiveScannerCacheScanRuns(env: Env): Promise<number> {
 
 async function advanceQueuedScannerCacheScanRun(
   env: Env,
-  row: Pick<ScannerCacheScanRunQueueRow, "runId" | "runType"> & Partial<Pick<ScannerCacheScanRunQueueRow, "attempts">>,
+  row: Pick<ScannerCacheScanRunQueueRow, "runId" | "runType"> & Partial<Pick<ScannerCacheScanRunQueueRow, "attempts" | "nextAttemptAt">>,
   options?: { timeBudgetMs?: number; batchSize?: number },
 ): Promise<{ job: ScanRefreshJob | null; advanced: boolean; hasMore: boolean }> {
   const before = await loadScannerCacheScanRefreshJobById(env, row.runId);
@@ -5896,6 +6019,13 @@ async function advanceQueuedScannerCacheScanRun(
   if (!isActiveScanStatus(before.status)) {
     await removeScannerCacheScanRunFromQueue(env, row.runId);
     return { job: before, advanced: false, hasMore: false };
+  }
+  if (isScannerCacheQueueBackoffActive(row)) {
+    return { job: before, advanced: false, hasMore: false };
+  }
+  const leasedJob = await loadScannerCacheScanRunJobIfLeased(env, row.runId);
+  if (leasedJob) {
+    return { job: leasedJob, advanced: false, hasMore: false };
   }
   const job = await processScannerCacheScanRun(env, row.runId, options);
   if (!job) {
@@ -5955,11 +6085,22 @@ export async function advanceScannerCacheScanRuns(
       await removeScannerCacheScanRunFromQueue(env, options.runId);
       return { jobs, hasMore: false, advanced: false, queuedCount: 0, recoveredCount: 0, processedCount: 0, errors };
     }
-    await enqueueScannerCacheScanRun(env, options.runId, runType, "manual");
+    let queueRow = await loadScannerCacheScanRunQueueRow(env, options.runId);
+    if (!queueRow) {
+      await enqueueScannerCacheScanRun(env, options.runId, runType, "continuation");
+      queueRow = await loadScannerCacheScanRunQueueRow(env, options.runId);
+    }
+    const pendingJob = queueRow && isScannerCacheQueueBackoffActive(queueRow)
+      ? await loadScannerCacheScanRefreshJobById(env, options.runId)
+      : await loadScannerCacheScanRunJobIfLeased(env, options.runId);
+    if (pendingJob) {
+      jobs.push(pendingJob);
+      return { jobs, hasMore: false, advanced: false, queuedCount: queueRow ? 1 : 0, recoveredCount: 0, processedCount: 0, errors };
+    }
     try {
       await markScannerCacheScanRunQueueAttempt(env, options.runId);
-      const queueRow = await loadScannerCacheScanRunQueueRow(env, options.runId);
-      const result = await advanceQueuedScannerCacheScanRun(env, queueRow ?? { runId: options.runId, runType }, options);
+      const attemptedRow = await loadScannerCacheScanRunQueueRow(env, options.runId);
+      const result = await advanceQueuedScannerCacheScanRun(env, attemptedRow ?? queueRow ?? { runId: options.runId, runType }, options);
       if (result.job) jobs.push(result.job);
       advanced = result.advanced;
       hasMore = result.hasMore;
@@ -5977,6 +6118,11 @@ export async function advanceScannerCacheScanRuns(
   const rows = await listDueScannerCacheScanRunQueueRows(env, maxRuns);
   for (const row of rows) {
     try {
+      const leasedJob = await loadScannerCacheScanRunJobIfLeased(env, row.runId);
+      if (leasedJob) {
+        jobs.push(leasedJob);
+        continue;
+      }
       await markScannerCacheScanRunQueueAttempt(env, row.runId);
       const attemptedRow = await loadScannerCacheScanRunQueueRow(env, row.runId);
       const result = await advanceQueuedScannerCacheScanRun(env, attemptedRow ?? row, options);
@@ -6047,7 +6193,7 @@ async function ensureStoredDailyBarsCurrent(
   }
   const sparseTickers = uniqueTickers.filter((ticker) => {
     const coverage = coverageByTicker.get(ticker);
-    return Boolean(coverage) && coverage.lastDate === expectedTradingDate && (coverage.barCount ?? 0) < requiredBarCount;
+    return coverage != null && coverage.lastDate === expectedTradingDate && (coverage.barCount ?? 0) < requiredBarCount;
   });
   if (sparseTickers.length > 0) {
     await refreshDailyBarsIncremental(env, {

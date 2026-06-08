@@ -7,6 +7,7 @@ import {
   buildRelativeStrengthRatioRows,
 } from "../src/relative-strength";
 import {
+  advanceScannerCacheScanRuns,
   buildTradingViewScanPayload,
   cancelScanRefreshJob,
   deleteScanPreset,
@@ -3954,5 +3955,399 @@ describe("scans page service", () => {
     expect(job?.matchedCandidates).toBe(2);
     expect(tickerDailyBarLoads).toHaveLength(0);
     expect(snapshotRows.map((row) => row.ticker)).toEqual(["AAA", "BBB"]);
+  });
+
+  it("advances manual relative strength runs in chunks and marks stale bars missing after bounded refresh", async () => {
+    const expectedTradingDate = "2026-04-21";
+    const presetRow: ScanPreset = {
+      id: "rs-stuck-preset",
+      name: "Relative Strength Stuck Slice",
+      scanType: "relative-strength",
+      isDefault: false,
+      isActive: true,
+      rules: [],
+      prefilterRules: [],
+      benchmarkTicker: "SPY",
+      verticalOffset: 30,
+      rsMaLength: 2,
+      rsMaType: "EMA",
+      newHighLookback: 2,
+      outputMode: "all",
+      vcpDailyPivotLookback: 100,
+      vcpWeeklyHighLookback: 100,
+      vcpPivotAgeBars: 10,
+      vcpDailyNearPct: 7,
+      vcpWeeklyNearPct: 20,
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 100,
+      createdAt: "2026-04-21T00:00:00.000Z",
+      updatedAt: "2026-04-21T00:00:00.000Z",
+    };
+    const currentTickers = Array.from({ length: 10 }, (_, index) => `CUR${index}`);
+    const staleTickers = Array.from({ length: 10 }, (_, index) => `STL${index}`);
+    const candidates = [...currentTickers, ...staleTickers].map((ticker, index) => ({
+      cursorOffset: index,
+      ticker,
+      name: `${ticker} Inc`,
+      sector: "Technology",
+      industry: "Software",
+      exchange: "NASDAQ",
+      assetClass: "equity",
+      marketCap: null,
+      relativeVolume: null,
+      avgVolume: null,
+      priceAvgVolume: null,
+      price: null,
+      change1d: null,
+      status: "queued",
+      reason: null as string | null,
+      latestTradingDate: null as string | null,
+      source: null as string | null,
+    }));
+    const dates = ["2026-04-17", "2026-04-20", expectedTradingDate];
+    const makeBars = (ticker: string, includeExpected: boolean) =>
+      dates
+        .slice(0, includeExpected ? 3 : 2)
+        .map((date, index) => ({
+          ticker,
+          date,
+          o: 10 + index,
+          h: 11 + index,
+          l: 9 + index,
+          c: 10 + index,
+          volume: 1_000 + index,
+        }));
+    const barsByTicker = new Map<string, any[]>();
+    barsByTicker.set("SPY", makeBars("SPY", true).map((bar, index) => ({ ...bar, c: 100 + index })));
+    for (const ticker of currentTickers) barsByTicker.set(ticker, makeBars(ticker, true));
+    for (const ticker of staleTickers) barsByTicker.set(ticker, makeBars(ticker, false));
+    const providerCursorOffsets: number[] = [];
+    vi.spyOn(providerModule, "getProvider").mockImplementation(() => ({
+      label: "empty test provider",
+      async getDailyBars() {
+        providerCursorOffsets.push(run.cursorOffset);
+        return [];
+      },
+    } as any));
+    const run = {
+      id: "manual-run-stuck",
+      presetId: presetRow.id,
+      presetName: presetRow.name,
+      configKey: "SPY|EMA|2|2",
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 2,
+      newHighLookback: 2,
+      expectedTradingDate,
+      status: "queued",
+      requestedBy: "manual",
+      createdAt: "2026-04-21T22:05:00.000Z",
+      startedAt: null as string | null,
+      updatedAt: "2026-04-21T22:05:00.000Z",
+      heartbeatAt: null as string | null,
+      completedAt: null as string | null,
+      error: null as string | null,
+      warning: "Scan is retrying in the background because the last attempt did not finish a ticker batch." as string | null,
+      totalTickers: 21,
+      processedTickers: 0,
+      matchedTickers: 0,
+      cursorOffset: 0,
+      latestSnapshotId: null as string | null,
+      leaseOwner: null as string | null,
+      leaseExpiresAt: null as string | null,
+      cacheHitTickers: 0,
+      computedTickers: 0,
+      missingBarsTickers: 0,
+      insufficientHistoryTickers: 0,
+      errorTickers: 0,
+      staleBenchmarkTickers: 0,
+      durationMs: null as number | null,
+    };
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            async first() {
+              if (sql.includes("FROM scan_presets WHERE id = ?")) return presetRow;
+              if (sql.includes("FROM worker_schedule_settings")) {
+                return {
+                  id: "default",
+                  rsBackgroundEnabled: 0,
+                  rsBackgroundBatchSize: 50,
+                  rsBackgroundMaxBatchesPerTick: 20,
+                  rsBackgroundTimeBudgetMs: 15_000,
+                  rsManualCacheReuseEnabled: 0,
+                  rsSharedConfigSnapshotFanoutEnabled: 1,
+                  postCloseBarsEnabled: 1,
+                  postCloseBarsOffsetMinutes: 60,
+                  postCloseBarsBatchSize: 400,
+                  postCloseBarsMaxBatchesPerTick: 4,
+                };
+              }
+              return null;
+            },
+            async all() {
+              if (sql.includes("MAX(date) as lastDate")) {
+                const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
+                const endDate = args.map(String).find((arg) => /^\d{4}-\d{2}-\d{2}$/.test(arg));
+                return {
+                  results: tickers.map((ticker) => {
+                    const rows = (barsByTicker.get(ticker) ?? []).filter((bar) => !endDate || bar.date <= endDate);
+                    return {
+                      ticker,
+                      lastDate: rows.reduce<string | null>((latest, bar) => (!latest || bar.date > latest ? bar.date : latest), null),
+                      barCount: rows.length,
+                    };
+                  }),
+                };
+              }
+              if (sql.includes("FROM daily_bars")) {
+                const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
+                const endDate = args.map(String).find((arg) => /^\d{4}-\d{2}-\d{2}$/.test(arg)) ?? expectedTradingDate;
+                return {
+                  results: tickers.flatMap((ticker) => (barsByTicker.get(ticker) ?? []).filter((bar) => bar.date <= endDate)),
+                };
+              }
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+      SCANNER_CACHE_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) return run.id === args[0] ? run : null;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM rs_scan_run_tickers")) {
+                const limit = Number(args[1] ?? candidates.length);
+                const offset = Number(args[2] ?? 0);
+                return { results: candidates.slice(offset, offset + limit) };
+              }
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("SET status = 'running'")) {
+                run.status = "running";
+                run.startedAt = "2026-04-21T22:05:01.000Z";
+                run.leaseOwner = String(args[0]);
+                run.leaseExpiresAt = String(args[1]);
+              } else if (sql.startsWith("UPDATE rs_scan_runs SET")) {
+                let index = 0;
+                if (sql.includes("status = ?")) run.status = String(args[index++]);
+                if (sql.includes("processed_tickers = ?")) run.processedTickers = Number(args[index++]);
+                if (sql.includes("matched_tickers = ?")) run.matchedTickers = Number(args[index++]);
+                if (sql.includes("cursor_offset = ?")) run.cursorOffset = Number(args[index++]);
+                if (sql.includes("cache_hit_tickers = ?")) run.cacheHitTickers = Number(args[index++]);
+                if (sql.includes("computed_tickers = ?")) run.computedTickers = Number(args[index++]);
+                if (sql.includes("missing_bars_tickers = ?")) run.missingBarsTickers = Number(args[index++]);
+                if (sql.includes("insufficient_history_tickers = ?")) run.insufficientHistoryTickers = Number(args[index++]);
+                if (sql.includes("error_tickers = ?")) run.errorTickers = Number(args[index++]);
+                if (sql.includes("stale_benchmark_tickers = ?")) run.staleBenchmarkTickers = Number(args[index++]);
+                if (sql.includes("warning = ?")) run.warning = args[index] == null ? null : String(args[index]);
+                if (sql.includes("lease_owner = NULL")) {
+                  run.leaseOwner = null;
+                  run.leaseExpiresAt = null;
+                }
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("UPDATE rs_scan_run_tickers")) {
+              const args = statement.__args ?? [];
+              const ticker = String(args[10]);
+              const candidate = candidates.find((row) => row.ticker === ticker);
+              if (!candidate) continue;
+              candidate.status = String(args[0]);
+              candidate.reason = args[1] == null ? null : String(args[1]);
+              candidate.latestTradingDate = args[2] == null ? null : String(args[2]);
+              candidate.source = args[8] == null ? null : String(args[8]);
+            }
+          }
+          return [];
+        },
+      },
+    } as any;
+
+    const job = await processManualRelativeStrengthScanRun(env, run.id, { timeBudgetMs: 10_000, batchSize: 20 });
+
+    expect(providerCursorOffsets[0]).toBe(10);
+    expect(job?.processedCandidates).toBe(20);
+    expect(job?.computedCount).toBe(10);
+    expect(job?.missingBarsCount).toBe(10);
+    expect(run.warning).toBeNull();
+    expect(staleTickers.map((ticker) => candidates.find((row) => row.ticker === ticker)?.status)).toEqual(Array(10).fill("missing_bars"));
+    expect(candidates.find((row) => row.ticker === "STL0")?.reason).toBe(
+      `Latest stored bar is 2026-04-20; expected ${expectedTradingDate} after bounded refresh.`,
+    );
+  });
+
+  it("does not increment scanner-cache attempts while a run is leased or backed off", async () => {
+    const run = {
+      id: "manual-run-lease",
+      presetId: "preset-rs",
+      presetName: "Relative Strength",
+      configKey: "SPY|EMA|21|252",
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+      expectedTradingDate: "2026-04-21",
+      status: "running",
+      requestedBy: "manual",
+      createdAt: "2026-04-21T22:05:00.000Z",
+      startedAt: "2026-04-21T22:05:01.000Z",
+      updatedAt: "2026-04-21T22:05:01.000Z",
+      heartbeatAt: "2026-04-21T22:05:01.000Z",
+      completedAt: null,
+      error: null,
+      warning: null,
+      totalTickers: 40,
+      processedTickers: 10,
+      matchedTickers: 10,
+      cursorOffset: 10,
+      latestSnapshotId: null,
+      leaseOwner: "worker-1",
+      leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      cacheHitTickers: 0,
+      computedTickers: 10,
+      missingBarsTickers: 0,
+      insufficientHistoryTickers: 0,
+      errorTickers: 0,
+      staleBenchmarkTickers: 0,
+      durationMs: null,
+    } as any;
+    const queueRow = {
+      runId: run.id,
+      runType: "relative-strength",
+      source: "manual",
+      priority: 100,
+      enqueuedAt: "2026-04-21T22:05:00.000Z",
+      lastAttemptedAt: "2026-04-21T22:05:03.000Z",
+      attempts: 7,
+      nextAttemptAt: null as string | null,
+    };
+    const env = {
+      DB: {
+        prepare() {
+          return {
+            bind() {
+              return this;
+            },
+            async first() {
+              return null;
+            },
+            async all() {
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+      SCANNER_CACHE_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) return run.id === args[0] ? run : null;
+              if (sql.includes("FROM scanner_cache_scan_run_queue")) return queueRow.runId === args[0] ? queueRow : null;
+              return null;
+            },
+            async all() {
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("UPDATE scanner_cache_scan_run_queue") && sql.includes("attempts = attempts + 1")) {
+                queueRow.attempts += 1;
+              }
+              if (sql.includes("INSERT INTO scanner_cache_scan_run_queue")) {
+                queueRow.source = String(args[2]);
+                queueRow.priority = Number(args[3]);
+                queueRow.nextAttemptAt = args[4] == null ? null : String(args[4]);
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+    } as any;
+
+    const leased = await advanceScannerCacheScanRuns(env, { runId: run.id });
+    expect(leased.jobs[0]?.status).toBe("running");
+    expect(leased.processedCount).toBe(0);
+    expect(queueRow.attempts).toBe(7);
+    expect(queueRow.source).toBe("manual");
+
+    run.leaseOwner = null;
+    run.leaseExpiresAt = null;
+    queueRow.nextAttemptAt = "2099-01-01T00:00:00.000Z";
+    const backedOff = await advanceScannerCacheScanRuns(env, { runId: run.id });
+    expect(backedOff.jobs[0]?.status).toBe("running");
+    expect(backedOff.processedCount).toBe(0);
+    expect(queueRow.attempts).toBe(7);
+    expect(queueRow.nextAttemptAt).toBe("2099-01-01T00:00:00.000Z");
   });
 });
