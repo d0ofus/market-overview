@@ -48,7 +48,7 @@
 ## PEER GROUPS
 > Add a tradingview chart comparison tool for correlation analysis (for both returns based and different scale based)
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
-> Solve or error: TradingView did not return live metrics for 29 tickers.
+> Solve or error: TradingView did not return live metrics for 29 tickers
 > Add hover over values for revenue and net income bar charts for multi-chart view
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
