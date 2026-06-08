@@ -197,6 +197,11 @@ export type ScanRefreshJob = {
   deferredTickerCount: number;
   warning: string | null;
   phase: string | null;
+  lastProgressAt: string | null;
+  lastAttemptCursorOffset: number | null;
+  lastAttemptTicker: string | null;
+  lastAttemptStage: string | null;
+  lastAttemptElapsedMs: number | null;
   elapsedMs?: number | null;
   durationMs?: number | null;
   cacheHitCount?: number;
@@ -419,6 +424,11 @@ type ManualRelativeStrengthRunRecord = {
   errorTickers: number;
   staleBenchmarkTickers: number;
   durationMs: number | null;
+  lastProgressAt: string | null;
+  lastAttemptCursorOffset: number | null;
+  lastAttemptTicker: string | null;
+  lastAttemptStage: string | null;
+  lastAttemptElapsedMs: number | null;
 };
 
 type ManualRelativeStrengthCandidateRow = {
@@ -450,6 +460,7 @@ type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
 };
 
 type ManualRelativeStrengthTickerStatus = "computed" | "missing_bars" | "insufficient_history" | "stale_benchmark" | "error";
+type ManualRelativeStrengthAttemptStage = "cache_lookup" | "coverage" | "bar_load" | "compute" | "upsert" | "heartbeat";
 
 type ManualRelativeStrengthBatchResult = {
   candidate: ManualRelativeStrengthCandidateRow;
@@ -568,9 +579,9 @@ const RS_JOB_RECOVERY_STALE_MS = 30000;
 const RS_INCREMENTAL_ADVANCE_MAX_BARS = 20;
 const RS_STALE_TOP_UP_LIMIT = 120;
 const MANUAL_RS_SCAN_BATCH_SIZE = 40;
-const MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE = 10;
 const MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE = 4;
 const MANUAL_RS_SCAN_TIME_BUDGET_MS = 20_000;
+const MANUAL_RS_SCAN_TIME_GUARD_MS = 5_000;
 const MANUAL_RS_SCAN_LEASE_DURATION_MS = 60_000;
 const MANUAL_RS_SCAN_STALE_RUN_MS = 30 * 60_000;
 const MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE = 10_000;
@@ -995,6 +1006,11 @@ function mapJobRecordToJob(record: ScanRefreshJobRecord, preset: ScanPreset): Sc
     deferredTickerCount: record.deferredTickerCount,
     warning: record.warning,
     phase: record.phase,
+    lastProgressAt: record.lastAdvancedAt,
+    lastAttemptCursorOffset: null,
+    lastAttemptTicker: null,
+    lastAttemptStage: null,
+    lastAttemptElapsedMs: null,
     elapsedMs: elapsedMs(record.startedAt, record.completedAt),
     durationMs: elapsedMs(record.startedAt, record.completedAt),
     cacheHitCount: record.alreadyCurrentCandidateCount,
@@ -1043,10 +1059,15 @@ function mapManualRunRecordToJob(
     fullCandidateCount: record.totalTickers,
     materializationCandidateCount: record.totalTickers,
     alreadyCurrentCandidateCount: 0,
-    lastAdvancedAt: record.heartbeatAt ?? record.updatedAt,
+    lastAdvancedAt: record.lastProgressAt ?? null,
     deferredTickerCount: 0,
     warning: record.warning,
     phase: terminal ? record.status : "manual",
+    lastProgressAt: record.lastProgressAt ?? null,
+    lastAttemptCursorOffset: record.lastAttemptCursorOffset,
+    lastAttemptTicker: record.lastAttemptTicker,
+    lastAttemptStage: record.lastAttemptStage,
+    lastAttemptElapsedMs: record.lastAttemptElapsedMs,
     elapsedMs: terminal ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
     durationMs: record.durationMs ?? (terminal ? computedElapsedMs : null),
     cacheHitCount: record.cacheHitTickers,
@@ -3428,6 +3449,11 @@ function normalizeManualRunRecord(row: ManualRelativeStrengthRunRecord): ManualR
     errorTickers: Math.max(0, Math.trunc(Number(row.errorTickers ?? 0))),
     staleBenchmarkTickers: Math.max(0, Math.trunc(Number(row.staleBenchmarkTickers ?? 0))),
     durationMs: row.durationMs == null ? null : Math.max(0, Math.trunc(Number(row.durationMs) || 0)),
+    lastProgressAt: row.lastProgressAt ?? null,
+    lastAttemptCursorOffset: row.lastAttemptCursorOffset == null ? null : Math.max(0, Math.trunc(Number(row.lastAttemptCursorOffset) || 0)),
+    lastAttemptTicker: row.lastAttemptTicker ?? null,
+    lastAttemptStage: row.lastAttemptStage ?? null,
+    lastAttemptElapsedMs: row.lastAttemptElapsedMs == null ? null : Math.max(0, Math.trunc(Number(row.lastAttemptElapsedMs) || 0)),
   };
 }
 
@@ -3466,7 +3492,12 @@ async function loadManualRelativeStrengthRun(env: Env, runId: string): Promise<M
        insufficient_history_tickers as insufficientHistoryTickers,
        error_tickers as errorTickers,
        stale_benchmark_tickers as staleBenchmarkTickers,
-       duration_ms as durationMs
+       duration_ms as durationMs,
+       last_progress_at as lastProgressAt,
+       last_attempt_cursor_offset as lastAttemptCursorOffset,
+       last_attempt_ticker as lastAttemptTicker,
+       last_attempt_stage as lastAttemptStage,
+       last_attempt_elapsed_ms as lastAttemptElapsedMs
      FROM rs_scan_runs
      WHERE id = ?
      LIMIT 1`,
@@ -3511,7 +3542,12 @@ async function loadActiveManualRelativeStrengthRun(env: Env): Promise<ManualRela
        insufficient_history_tickers as insufficientHistoryTickers,
        error_tickers as errorTickers,
        stale_benchmark_tickers as staleBenchmarkTickers,
-       duration_ms as durationMs
+       duration_ms as durationMs,
+       last_progress_at as lastProgressAt,
+       last_attempt_cursor_offset as lastAttemptCursorOffset,
+       last_attempt_ticker as lastAttemptTicker,
+       last_attempt_stage as lastAttemptStage,
+       last_attempt_elapsed_ms as lastAttemptElapsedMs
      FROM rs_scan_runs
      WHERE status IN ('queued', 'running')
      ORDER BY datetime(created_at) ASC
@@ -3558,7 +3594,12 @@ async function loadLatestCompletedManualRelativeStrengthRunForConfig(
        insufficient_history_tickers as insufficientHistoryTickers,
        error_tickers as errorTickers,
        stale_benchmark_tickers as staleBenchmarkTickers,
-       duration_ms as durationMs
+       duration_ms as durationMs,
+       last_progress_at as lastProgressAt,
+       last_attempt_cursor_offset as lastAttemptCursorOffset,
+       last_attempt_ticker as lastAttemptTicker,
+       last_attempt_stage as lastAttemptStage,
+       last_attempt_elapsed_ms as lastAttemptElapsedMs
      FROM rs_scan_runs
      WHERE config_key = ?
        AND status = 'completed'
@@ -3964,7 +4005,7 @@ async function upsertManualRelativeStrengthBatchResults(
 async function heartbeatManualRelativeStrengthRun(
   env: Env & { SCANNER_CACHE_DB: D1Database },
   runId: string,
-  updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId" | "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "staleBenchmarkTickers" | "durationMs">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
+  updates: Partial<Pick<ManualRelativeStrengthRunRecord, "status" | "processedTickers" | "matchedTickers" | "cursorOffset" | "warning" | "latestSnapshotId" | "cacheHitTickers" | "computedTickers" | "missingBarsTickers" | "insufficientHistoryTickers" | "errorTickers" | "staleBenchmarkTickers" | "durationMs" | "lastProgressAt" | "lastAttemptCursorOffset" | "lastAttemptTicker" | "lastAttemptStage" | "lastAttemptElapsedMs">> & { completedAt?: string | null; error?: string | null; releaseLease?: boolean },
 ): Promise<void> {
   const fields = ["updated_at = CURRENT_TIMESTAMP", "heartbeat_at = CURRENT_TIMESTAMP"];
   const values: unknown[] = [];
@@ -4020,6 +4061,26 @@ async function heartbeatManualRelativeStrengthRun(
     fields.push("error = ?");
     values.push(updates.error);
   }
+  if (updates.lastProgressAt !== undefined) {
+    fields.push("last_progress_at = ?");
+    values.push(updates.lastProgressAt);
+  }
+  if (updates.lastAttemptCursorOffset !== undefined) {
+    fields.push("last_attempt_cursor_offset = ?");
+    values.push(updates.lastAttemptCursorOffset);
+  }
+  if (updates.lastAttemptTicker !== undefined) {
+    fields.push("last_attempt_ticker = ?");
+    values.push(updates.lastAttemptTicker);
+  }
+  if (updates.lastAttemptStage !== undefined) {
+    fields.push("last_attempt_stage = ?");
+    values.push(updates.lastAttemptStage);
+  }
+  if (updates.lastAttemptElapsedMs !== undefined) {
+    fields.push("last_attempt_elapsed_ms = ?");
+    values.push(updates.lastAttemptElapsedMs);
+  }
   if (updates.latestSnapshotId !== undefined) {
     fields.push("latest_snapshot_id = ?");
     values.push(updates.latestSnapshotId);
@@ -4035,6 +4096,21 @@ async function heartbeatManualRelativeStrengthRun(
   await env.SCANNER_CACHE_DB.prepare(`UPDATE rs_scan_runs SET ${fields.join(", ")} ${where}`)
     .bind(...values, runId)
     .run();
+}
+
+async function markManualRelativeStrengthAttemptStage(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  runId: string,
+  candidate: Pick<ManualRelativeStrengthCandidateRow, "cursorOffset" | "ticker">,
+  stage: ManualRelativeStrengthAttemptStage,
+  startedAt: number,
+): Promise<void> {
+  await heartbeatManualRelativeStrengthRun(env, runId, {
+    lastAttemptCursorOffset: candidate.cursorOffset,
+    lastAttemptTicker: candidate.ticker,
+    lastAttemptStage: stage,
+    lastAttemptElapsedMs: Date.now() - startedAt,
+  });
 }
 
 async function acquireManualRelativeStrengthRunLease(
@@ -4323,6 +4399,53 @@ function manualRelativeStrengthResultFromBars(
   }
 }
 
+function manualRelativeStrengthResultFromFeature(
+  candidate: ManualRelativeStrengthCandidateRow,
+  feature: RelativeStrengthLatestCacheRecord,
+  metricBars: RelativeStrengthDailyBar[],
+): ManualRelativeStrengthBatchResult {
+  const latest = metricBars[metricBars.length - 1] ?? null;
+  const previous = metricBars.length > 1 ? metricBars[metricBars.length - 2] : null;
+  const avgVolume = averageVolume(metricBars, 30) ?? candidate.avgVolume ?? null;
+  const latestVolume = latest == null ? null : Number((latest as { volume?: number }).volume ?? 0);
+  const relativeVolume = avgVolume != null && latestVolume != null && avgVolume > 0
+    ? latestVolume / avgVolume
+    : candidate.relativeVolume ?? null;
+  const price = feature.priceClose ?? latest?.c ?? candidate.price ?? null;
+  return {
+    candidate,
+    status: "computed",
+    reason: null,
+    latestTradingDate: feature.tradingDate,
+    price,
+    change1d: feature.change1d ?? (latest && previous ? percentChange(latest.c, previous.c) : candidate.change1d ?? null),
+    avgVolume,
+    relativeVolume,
+    priceAvgVolume: price != null && avgVolume != null ? price * avgVolume : candidate.priceAvgVolume ?? null,
+    feature,
+    source: "computed",
+  };
+}
+
+async function buildManualRelativeStrengthIncrementalResult(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  candidate: ManualRelativeStrengthCandidateRow,
+  benchmarkBars: RelativeStrengthDailyBar[],
+  identity: RelativeStrengthConfigIdentity,
+): Promise<ManualRelativeStrengthBatchResult | null> {
+  await ensureRelativeStrengthRatioCacheCurrent(env, [candidate.ticker], benchmarkBars, identity);
+  await materializeRelativeStrengthTickers(env, identity, [candidate.ticker]);
+  const feature = (await loadRelativeStrengthEffectiveLatestCacheRows(
+    env,
+    identity.configKey,
+    [candidate.ticker],
+    identity.expectedTradingDate,
+  )).get(candidate.ticker);
+  if (!feature || feature.tradingDate !== identity.expectedTradingDate) return null;
+  const metricBars = await loadStoredDailyBarsByCount(env, [candidate.ticker], identity.expectedTradingDate, 30);
+  return manualRelativeStrengthResultFromFeature(candidate, feature, metricBars);
+}
+
 async function buildManualRelativeStrengthComputedResults(
   env: Env & { SCANNER_CACHE_DB: D1Database },
   candidates: ManualRelativeStrengthCandidateRow[],
@@ -4376,53 +4499,53 @@ async function refreshManualRelativeStrengthCandidatesOnce(
   }
 }
 
-async function buildManualRelativeStrengthUncachedChunkResults(
+async function buildManualRelativeStrengthUncachedTickerResult(
   env: Env & { SCANNER_CACHE_DB: D1Database },
-  candidates: ManualRelativeStrengthCandidateRow[],
+  candidate: ManualRelativeStrengthCandidateRow,
   benchmarkBars: RelativeStrengthDailyBar[],
   identity: RelativeStrengthConfigIdentity,
   config: RelativeStrengthConfig,
-): Promise<ManualRelativeStrengthBatchResult[]> {
-  if (candidates.length === 0) return [];
-  const coverageByTicker = await loadDailyBarCoverage(
-    env,
-    candidates.map((candidate) => candidate.ticker),
-    identity.expectedTradingDate,
-  );
-  const currentCandidates: ManualRelativeStrengthCandidateRow[] = [];
-  const staleCandidates: ManualRelativeStrengthCandidateRow[] = [];
-  for (const candidate of candidates) {
-    const coverage = coverageByTicker.get(candidate.ticker);
-    if (coverage?.lastDate === identity.expectedTradingDate) {
-      currentCandidates.push(candidate);
-    } else {
-      staleCandidates.push(candidate);
+  reportStage: (stage: ManualRelativeStrengthAttemptStage) => Promise<void>,
+): Promise<ManualRelativeStrengthBatchResult> {
+  await reportStage("coverage");
+  const coverage = (await loadDailyBarCoverage(env, [candidate.ticker], identity.expectedTradingDate)).get(candidate.ticker);
+  const hasCurrentBars = coverage?.lastDate === identity.expectedTradingDate;
+  if (hasCurrentBars) {
+    await reportStage("compute");
+    try {
+      const incrementalResult = await buildManualRelativeStrengthIncrementalResult(env, candidate, benchmarkBars, identity);
+      if (incrementalResult) return incrementalResult;
+    } catch (error) {
+      console.warn("manual relative strength incremental cache fill failed; falling back to full-bar compute", {
+        ticker: candidate.ticker,
+        expectedTradingDate: identity.expectedTradingDate,
+        error,
+      });
     }
+    await reportStage("bar_load");
+    const [computed] = await buildManualRelativeStrengthComputedResults(
+      env,
+      [candidate],
+      benchmarkBars,
+      identity,
+      config,
+      false,
+    );
+    return computed ?? manualRelativeStrengthResultFromBars(candidate, [], benchmarkBars, identity, config, false);
   }
 
-  const results = await buildManualRelativeStrengthComputedResults(
+  await reportStage("compute");
+  await refreshManualRelativeStrengthCandidatesOnce(env, [candidate], identity);
+  await reportStage("bar_load");
+  const [computed] = await buildManualRelativeStrengthComputedResults(
     env,
-    currentCandidates,
+    [candidate],
     benchmarkBars,
     identity,
     config,
-    false,
+    true,
   );
-  for (let index = 0; index < staleCandidates.length; index += MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE) {
-    const chunk = staleCandidates.slice(index, index + MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE);
-    await refreshManualRelativeStrengthCandidatesOnce(env, chunk, identity);
-    results.push(
-      ...await buildManualRelativeStrengthComputedResults(
-        env,
-        chunk,
-        benchmarkBars,
-        identity,
-        config,
-        true,
-      ),
-    );
-  }
-  return results;
+  return computed ?? manualRelativeStrengthResultFromBars(candidate, [], benchmarkBars, identity, config, true);
 }
 
 async function buildManualRelativeStrengthSnapshotResult(
@@ -4687,6 +4810,11 @@ function mapVcpRunRecordToJob(record: VcpRunRecord): ScanRefreshJob {
     deferredTickerCount: 0,
     warning: record.warning,
     phase: terminal ? record.status : "vcp",
+    lastProgressAt: record.heartbeatAt ?? record.updatedAt,
+    lastAttemptCursorOffset: null,
+    lastAttemptTicker: null,
+    lastAttemptStage: null,
+    lastAttemptElapsedMs: null,
     elapsedMs: terminal ? record.durationMs ?? computedElapsedMs : computedElapsedMs,
     durationMs: record.durationMs ?? (terminal ? computedElapsedMs : null),
     cacheHitCount: record.cacheHitTickers,
@@ -5865,8 +5993,9 @@ export async function processManualRelativeStrengthScanRun(
   const cacheInvalidatedAfterMs = cacheReuseEnabled
     ? await loadLatestCompletedPostCloseDailyBarRefreshAt(env, identity.expectedTradingDate)
     : null;
+  let stoppedForTimeGuard = false;
 
-  while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs) {
+  while (cursorOffset < leasedRun.totalTickers && Date.now() - startedAt < timeBudgetMs && !stoppedForTimeGuard) {
     const currentRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
     if (!currentRun) return null;
     if (currentRun.status === "cancelled") {
@@ -5875,31 +6004,41 @@ export async function processManualRelativeStrengthScanRun(
     }
     const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
-    for (let chunkIndex = 0; chunkIndex < candidates.length && Date.now() - startedAt < timeBudgetMs; chunkIndex += MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE) {
-      const candidateChunk = candidates.slice(chunkIndex, chunkIndex + MANUAL_RS_SCAN_COMPUTE_CHUNK_SIZE);
-      const tickers = candidateChunk.map((candidate) => candidate.ticker);
-      const cachedResults: ManualRelativeStrengthBatchResult[] = [];
-      let computeCandidates = candidateChunk;
-      if (cacheReuseEnabled) {
-        const cacheRowsByTicker = await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, tickers);
-        computeCandidates = [];
-        for (const candidate of candidateChunk) {
-          const cached = cacheRowsByTicker.get(candidate.ticker);
-          if (isReusableManualRelativeStrengthFeature(cached, identity, cacheInvalidatedAfterMs)) {
-            cachedResults.push(cachedManualRelativeStrengthResult(candidate, cached));
-          } else {
-            computeCandidates.push(candidate);
-          }
-        }
+    for (const candidate of candidates) {
+      if (timeBudgetMs - (Date.now() - startedAt) < MANUAL_RS_SCAN_TIME_GUARD_MS) {
+        stoppedForTimeGuard = true;
+        break;
       }
-      const computedResults = await buildManualRelativeStrengthUncachedChunkResults(
-        env,
-        computeCandidates,
-        benchmarkBars,
-        identity,
-        config,
-      );
-      const batchResults = [...cachedResults, ...computedResults];
+
+      await markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, "cache_lookup", startedAt);
+      let batchResult: ManualRelativeStrengthBatchResult;
+      if (cacheReuseEnabled) {
+        const cached = (await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, [candidate.ticker])).get(candidate.ticker);
+        if (isReusableManualRelativeStrengthFeature(cached, identity, cacheInvalidatedAfterMs)) {
+          batchResult = cachedManualRelativeStrengthResult(candidate, cached);
+        } else {
+          batchResult = await buildManualRelativeStrengthUncachedTickerResult(
+            env,
+            candidate,
+            benchmarkBars,
+            identity,
+            config,
+            (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
+          );
+        }
+      } else {
+        batchResult = await buildManualRelativeStrengthUncachedTickerResult(
+          env,
+          candidate,
+          benchmarkBars,
+          identity,
+          config,
+          (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
+        );
+      }
+
+      await markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, "upsert", startedAt);
+      const batchResults = [batchResult];
       matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
       const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
       cacheHitTickers += batchCounts.cacheHitTickers;
@@ -5908,8 +6047,9 @@ export async function processManualRelativeStrengthScanRun(
       insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
       errorTickers += batchCounts.errorTickers;
       staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
-      cursorOffset += candidateChunk.length;
+      cursorOffset = Math.max(cursorOffset, candidate.cursorOffset + 1);
       processedTickers = cursorOffset;
+      const progressAt = new Date().toISOString();
       await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
         status: "running",
         processedTickers,
@@ -5922,6 +6062,11 @@ export async function processManualRelativeStrengthScanRun(
         errorTickers,
         staleBenchmarkTickers,
         warning: null,
+        lastProgressAt: progressAt,
+        lastAttemptCursorOffset: candidate.cursorOffset,
+        lastAttemptTicker: candidate.ticker,
+        lastAttemptStage: "heartbeat",
+        lastAttemptElapsedMs: Date.now() - startedAt,
       });
       const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
       if (!afterBatchRun) return null;
@@ -6045,13 +6190,18 @@ async function advanceQueuedScannerCacheScanRun(
     } else {
       const attempts = Math.max(0, Math.trunc(Number(row.attempts ?? 0)));
       if (attempts >= SCANNER_CACHE_SCAN_NO_PROGRESS_WARNING_ATTEMPTS) {
-        const warning = "Scan is retrying in the background because the last attempt did not finish a ticker batch.";
+        const lastStage = job.lastAttemptStage
+          ? ` Last stage: ${job.lastAttemptStage}${job.lastAttemptTicker ? ` on ${job.lastAttemptTicker}` : ""}.`
+          : "";
+        const warning = `Scan is retrying in the background because the last attempt did not finish a ticker.${lastStage}`;
         console.warn("scanner cache scan run made no progress", {
           runId: row.runId,
           runType: row.runType,
           attempts,
           processedCandidates: job.processedCandidates,
           totalCandidates: job.totalCandidates,
+          lastAttemptStage: job.lastAttemptStage,
+          lastAttemptTicker: job.lastAttemptTicker,
         });
         await warnScannerCacheScanRunNoProgress(env, row.runId, warning);
       }

@@ -1069,6 +1069,11 @@ export type ScanRefreshJob = {
   deferredTickerCount: number;
   warning: string | null;
   phase: string | null;
+  lastProgressAt: string | null;
+  lastAttemptCursorOffset: number | null;
+  lastAttemptTicker: string | null;
+  lastAttemptStage: string | null;
+  lastAttemptElapsedMs: number | null;
   elapsedMs?: number | null;
   durationMs?: number | null;
   cacheHitCount?: number;

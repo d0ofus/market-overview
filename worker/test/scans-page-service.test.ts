@@ -26,6 +26,10 @@ import {
   type ScanSnapshotRow,
 } from "../src/scans-page-service";
 
+function hasSqlAssignment(sql: string, column: string): boolean {
+  return new RegExp(`(?:^|[\\s,])${column}\\s*=\\s*\\?`).test(sql);
+}
+
 const topGainersPreset: ScanPreset = {
   id: "scan-preset-top-gainers",
   name: "Top Gainers",
@@ -3893,26 +3897,46 @@ describe("scans page service", () => {
                 run.leaseExpiresAt = String(args[1]);
               } else if (sql.startsWith("UPDATE rs_scan_runs SET")) {
                 let index = 0;
-                if (sql.includes("status = ?")) run.status = String(args[index++]);
-                if (sql.includes("processed_tickers = ?")) run.processedTickers = Number(args[index++]);
-                if (sql.includes("matched_tickers = ?")) run.matchedTickers = Number(args[index++]);
-                if (sql.includes("cursor_offset = ?")) run.cursorOffset = Number(args[index++]);
-                if (sql.includes("cache_hit_tickers = ?")) run.cacheHitTickers = Number(args[index++]);
-                if (sql.includes("computed_tickers = ?")) run.computedTickers = Number(args[index++]);
-                if (sql.includes("missing_bars_tickers = ?")) run.missingBarsTickers = Number(args[index++]);
-                if (sql.includes("insufficient_history_tickers = ?")) run.insufficientHistoryTickers = Number(args[index++]);
-                if (sql.includes("error_tickers = ?")) run.errorTickers = Number(args[index++]);
-                if (sql.includes("stale_benchmark_tickers = ?")) run.staleBenchmarkTickers = Number(args[index++]);
-                if (sql.includes("duration_ms = ?")) run.durationMs = Number(args[index++]);
-                if (sql.includes("warning = ?")) {
+                if (hasSqlAssignment(sql, "status")) run.status = String(args[index++]);
+                if (hasSqlAssignment(sql, "processed_tickers")) run.processedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "matched_tickers")) run.matchedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cursor_offset")) run.cursorOffset = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cache_hit_tickers")) run.cacheHitTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "computed_tickers")) run.computedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "missing_bars_tickers")) run.missingBarsTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "insufficient_history_tickers")) run.insufficientHistoryTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "error_tickers")) run.errorTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "stale_benchmark_tickers")) run.staleBenchmarkTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "duration_ms")) run.durationMs = Number(args[index++]);
+                if (hasSqlAssignment(sql, "warning")) {
                   run.warning = args[index] == null ? null : String(args[index]);
                   index += 1;
                 }
-                if (sql.includes("latest_snapshot_id = ?")) {
+                if (hasSqlAssignment(sql, "last_progress_at")) {
+                  run.lastProgressAt = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_cursor_offset")) {
+                  run.lastAttemptCursorOffset = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_ticker")) {
+                  run.lastAttemptTicker = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_stage")) {
+                  run.lastAttemptStage = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_elapsed_ms")) {
+                  run.lastAttemptElapsedMs = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "latest_snapshot_id")) {
                   run.latestSnapshotId = args[index] == null ? null : String(args[index]);
                   index += 1;
                 }
-                if (sql.includes("completed_at = ?")) {
+                if (hasSqlAssignment(sql, "completed_at")) {
                   run.completedAt = args[index] == null ? null : String(args[index]);
                   index += 1;
                 }
@@ -4063,6 +4087,11 @@ describe("scans page service", () => {
       errorTickers: 0,
       staleBenchmarkTickers: 0,
       durationMs: null as number | null,
+      lastProgressAt: null as string | null,
+      lastAttemptCursorOffset: null as number | null,
+      lastAttemptTicker: null as string | null,
+      lastAttemptStage: null as string | null,
+      lastAttemptElapsedMs: null as number | null,
     };
     const env = {
       DB: {
@@ -4159,17 +4188,40 @@ describe("scans page service", () => {
                 run.leaseExpiresAt = String(args[1]);
               } else if (sql.startsWith("UPDATE rs_scan_runs SET")) {
                 let index = 0;
-                if (sql.includes("status = ?")) run.status = String(args[index++]);
-                if (sql.includes("processed_tickers = ?")) run.processedTickers = Number(args[index++]);
-                if (sql.includes("matched_tickers = ?")) run.matchedTickers = Number(args[index++]);
-                if (sql.includes("cursor_offset = ?")) run.cursorOffset = Number(args[index++]);
-                if (sql.includes("cache_hit_tickers = ?")) run.cacheHitTickers = Number(args[index++]);
-                if (sql.includes("computed_tickers = ?")) run.computedTickers = Number(args[index++]);
-                if (sql.includes("missing_bars_tickers = ?")) run.missingBarsTickers = Number(args[index++]);
-                if (sql.includes("insufficient_history_tickers = ?")) run.insufficientHistoryTickers = Number(args[index++]);
-                if (sql.includes("error_tickers = ?")) run.errorTickers = Number(args[index++]);
-                if (sql.includes("stale_benchmark_tickers = ?")) run.staleBenchmarkTickers = Number(args[index++]);
-                if (sql.includes("warning = ?")) run.warning = args[index] == null ? null : String(args[index]);
+                if (hasSqlAssignment(sql, "status")) run.status = String(args[index++]);
+                if (hasSqlAssignment(sql, "processed_tickers")) run.processedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "matched_tickers")) run.matchedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cursor_offset")) run.cursorOffset = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cache_hit_tickers")) run.cacheHitTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "computed_tickers")) run.computedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "missing_bars_tickers")) run.missingBarsTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "insufficient_history_tickers")) run.insufficientHistoryTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "error_tickers")) run.errorTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "stale_benchmark_tickers")) run.staleBenchmarkTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "warning")) {
+                  run.warning = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_progress_at")) {
+                  run.lastProgressAt = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_cursor_offset")) {
+                  run.lastAttemptCursorOffset = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_ticker")) {
+                  run.lastAttemptTicker = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_stage")) {
+                  run.lastAttemptStage = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_elapsed_ms")) {
+                  run.lastAttemptElapsedMs = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
                 if (sql.includes("lease_owner = NULL")) {
                   run.leaseOwner = null;
                   run.leaseExpiresAt = null;
@@ -4222,6 +4274,287 @@ describe("scans page service", () => {
     expect(candidates.find((row) => row.ticker === "STL0")?.reason).toBe(
       `Latest stored bar is 2026-04-20; expected ${expectedTradingDate} after bounded refresh.`,
     );
+  });
+
+  it("commits one manual relative strength ticker before stopping on the time guard", async () => {
+    const expectedTradingDate = "2026-04-21";
+    const presetRow: ScanPreset = {
+      id: "rs-time-guard-preset",
+      name: "Relative Strength Time Guard",
+      scanType: "relative-strength",
+      isDefault: false,
+      isActive: true,
+      rules: [],
+      prefilterRules: [],
+      benchmarkTicker: "SPY",
+      verticalOffset: 30,
+      rsMaLength: 2,
+      rsMaType: "EMA",
+      newHighLookback: 2,
+      outputMode: "all",
+      vcpDailyPivotLookback: 100,
+      vcpWeeklyHighLookback: 100,
+      vcpPivotAgeBars: 10,
+      vcpDailyNearPct: 7,
+      vcpWeeklyNearPct: 20,
+      sortField: "rs_close",
+      sortDirection: "desc",
+      rowLimit: 100,
+      createdAt: "2026-04-21T00:00:00.000Z",
+      updatedAt: "2026-04-21T00:00:00.000Z",
+    };
+    const candidates = ["AAA", "BBB", "CCC"].map((ticker, index) => ({
+      cursorOffset: index,
+      ticker,
+      name: `${ticker} Inc`,
+      sector: "Technology",
+      industry: "Software",
+      exchange: "NASDAQ",
+      assetClass: "equity",
+      marketCap: null,
+      relativeVolume: null,
+      avgVolume: null,
+      priceAvgVolume: null,
+      price: null,
+      change1d: null,
+      status: "queued",
+      reason: null as string | null,
+      latestTradingDate: null as string | null,
+      source: null as string | null,
+    }));
+    const dates = ["2026-04-17", "2026-04-20", expectedTradingDate];
+    const barsByTicker = new Map<string, any[]>();
+    for (const ticker of ["SPY", ...candidates.map((candidate) => candidate.ticker)]) {
+      barsByTicker.set(ticker, dates.map((date, index) => ({
+        ticker,
+        date,
+        o: 10 + index,
+        h: 11 + index,
+        l: 9 + index,
+        c: ticker === "SPY" ? 100 + index : 10 + index,
+        volume: 1_000 + index,
+      })));
+    }
+    const run = {
+      id: "manual-run-time-guard",
+      presetId: presetRow.id,
+      presetName: presetRow.name,
+      configKey: "SPY|EMA|2|2",
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 2,
+      newHighLookback: 2,
+      expectedTradingDate,
+      status: "queued",
+      requestedBy: "manual",
+      createdAt: "2026-04-21T22:05:00.000Z",
+      startedAt: null as string | null,
+      updatedAt: "2026-04-21T22:05:00.000Z",
+      heartbeatAt: null as string | null,
+      completedAt: null as string | null,
+      error: null as string | null,
+      warning: null as string | null,
+      totalTickers: candidates.length,
+      processedTickers: 0,
+      matchedTickers: 0,
+      cursorOffset: 0,
+      latestSnapshotId: null as string | null,
+      leaseOwner: null as string | null,
+      leaseExpiresAt: null as string | null,
+      cacheHitTickers: 0,
+      computedTickers: 0,
+      missingBarsTickers: 0,
+      insufficientHistoryTickers: 0,
+      errorTickers: 0,
+      staleBenchmarkTickers: 0,
+      durationMs: null as number | null,
+      lastProgressAt: null as string | null,
+      lastAttemptCursorOffset: null as number | null,
+      lastAttemptTicker: null as string | null,
+      lastAttemptStage: null as string | null,
+      lastAttemptElapsedMs: null as number | null,
+    };
+    let jumped = false;
+    const advanceNearBudget = () => {
+      if (!jumped) {
+        jumped = true;
+        vi.setSystemTime(new Date("2026-04-22T12:00:06Z"));
+      }
+    };
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            async first() {
+              if (sql.includes("FROM scan_presets WHERE id = ?")) return presetRow;
+              if (sql.includes("FROM worker_schedule_settings")) {
+                return {
+                  id: "default",
+                  rsBackgroundEnabled: 0,
+                  rsBackgroundBatchSize: 50,
+                  rsBackgroundMaxBatchesPerTick: 20,
+                  rsBackgroundTimeBudgetMs: 15_000,
+                  rsManualCacheReuseEnabled: 0,
+                  rsSharedConfigSnapshotFanoutEnabled: 1,
+                  postCloseBarsEnabled: 1,
+                  postCloseBarsOffsetMinutes: 60,
+                  postCloseBarsBatchSize: 400,
+                  postCloseBarsMaxBatchesPerTick: 4,
+                };
+              }
+              return null;
+            },
+            async all() {
+              if (sql.includes("MAX(date) as lastDate")) {
+                const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
+                return {
+                  results: tickers.map((ticker) => ({
+                    ticker,
+                    lastDate: expectedTradingDate,
+                    barCount: barsByTicker.get(ticker)?.length ?? 0,
+                  })),
+                };
+              }
+              if (sql.includes("FROM daily_bars")) {
+                const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
+                return { results: tickers.flatMap((ticker) => barsByTicker.get(ticker) ?? []) };
+              }
+              return { results: [] };
+            },
+            async run() {
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch() {
+          return [];
+        },
+      },
+      SCANNER_CACHE_DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            __sql: sql,
+            __args: args,
+            async first() {
+              if (sql.includes("FROM rs_scan_runs") && sql.includes("WHERE id = ?")) return run.id === args[0] ? run : null;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM rs_scan_run_tickers")) {
+                const limit = Number(args[1] ?? candidates.length);
+                const offset = Number(args[2] ?? 0);
+                return { results: candidates.slice(offset, offset + limit) };
+              }
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("SET status = 'running'")) {
+                run.status = "running";
+                run.startedAt = "2026-04-21T22:05:01.000Z";
+                run.leaseOwner = String(args[0]);
+                run.leaseExpiresAt = String(args[1]);
+              } else if (sql.startsWith("UPDATE rs_scan_runs SET")) {
+                let index = 0;
+                if (hasSqlAssignment(sql, "status")) run.status = String(args[index++]);
+                if (hasSqlAssignment(sql, "processed_tickers")) run.processedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "matched_tickers")) run.matchedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cursor_offset")) run.cursorOffset = Number(args[index++]);
+                if (hasSqlAssignment(sql, "cache_hit_tickers")) run.cacheHitTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "computed_tickers")) run.computedTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "missing_bars_tickers")) run.missingBarsTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "insufficient_history_tickers")) run.insufficientHistoryTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "error_tickers")) run.errorTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "stale_benchmark_tickers")) run.staleBenchmarkTickers = Number(args[index++]);
+                if (hasSqlAssignment(sql, "warning")) {
+                  run.warning = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_progress_at")) {
+                  run.lastProgressAt = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_cursor_offset")) {
+                  run.lastAttemptCursorOffset = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_ticker")) {
+                  run.lastAttemptTicker = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_stage")) {
+                  run.lastAttemptStage = args[index] == null ? null : String(args[index]);
+                  index += 1;
+                }
+                if (hasSqlAssignment(sql, "last_attempt_elapsed_ms")) {
+                  run.lastAttemptElapsedMs = args[index] == null ? null : Number(args[index]);
+                  index += 1;
+                }
+                if (sql.includes("lease_owner = NULL")) {
+                  run.leaseOwner = null;
+                  run.leaseExpiresAt = null;
+                }
+              }
+              return {};
+            },
+          });
+          return {
+            bind(...args: unknown[]) {
+              return makeBound(args);
+            },
+            async first() {
+              return makeBound([]).first();
+            },
+            async all() {
+              return makeBound([]).all();
+            },
+            async run() {
+              return makeBound([]).run();
+            },
+          };
+        },
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("UPDATE rs_scan_run_tickers")) {
+              const args = statement.__args ?? [];
+              const ticker = String(args[10]);
+              const candidate = candidates.find((row) => row.ticker === ticker);
+              if (!candidate) continue;
+              candidate.status = String(args[0]);
+              candidate.latestTradingDate = args[2] == null ? null : String(args[2]);
+              candidate.source = args[8] == null ? null : String(args[8]);
+              advanceNearBudget();
+            }
+          }
+          return [];
+        },
+      },
+    } as any;
+
+    const job = await processManualRelativeStrengthScanRun(env, run.id, { timeBudgetMs: 10_000, batchSize: 10 });
+
+    expect(job?.status).toBe("running");
+    expect(job?.processedCandidates).toBe(1);
+    expect(job?.cursorOffset).toBe(1);
+    expect(job?.computedCount).toBe(1);
+    expect(candidates[0].status).toBe("computed");
+    expect(candidates[1].status).toBe("queued");
+    expect(run.leaseOwner).toBeNull();
+    expect(run.lastProgressAt).not.toBeNull();
+    expect(run.lastAttemptStage).toBe("heartbeat");
   });
 
   it("does not increment scanner-cache attempts while a run is leased or backed off", async () => {

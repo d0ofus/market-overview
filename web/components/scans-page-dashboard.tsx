@@ -290,6 +290,11 @@ function formatDurationMs(value: number | null | undefined): string {
   return `${minutes}m ${remainder}s`;
 }
 
+function formatScanAttemptStage(value: string | null | undefined): string {
+  if (!value) return "";
+  return value.replace(/_/g, " ");
+}
+
 function formatScanRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | null): string {
   const label = job.jobType === "vcp" ? "VCP" : "RS";
   if (job.appliesToPreset === false) {
@@ -313,7 +318,13 @@ function formatScanRefreshSummary(job: ScanRefreshJob, snapshot: ScanSnapshot | 
     `${job.insufficientHistoryCount ?? 0} insufficient history`,
     `${job.errorCount ?? 0} errors`,
   ];
-  return `${label} refresh ${job.status} for ${job.expectedTradingDate ?? "the latest session"} (${runtime}): ${counts.join(", ")}.${verified}${snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}`;
+  const progress = job.status === "queued" || job.status === "running"
+    ? [
+        job.lastProgressAt ? `last progress ${formatDateTime(job.lastProgressAt)}` : null,
+        job.lastAttemptStage ? `stage ${formatScanAttemptStage(job.lastAttemptStage)}${job.lastAttemptTicker ? ` on ${job.lastAttemptTicker}` : ""}` : null,
+      ].filter(Boolean).join("; ")
+    : "";
+  return `${label} refresh ${job.status} for ${job.expectedTradingDate ?? "the latest session"} (${runtime}): ${counts.join(", ")}.${progress ? ` ${progress}.` : ""}${verified}${snapshot ? ` Displaying snapshot from ${formatDateTime(snapshot.generatedAt)}.` : ""}`;
 }
 
 function formatNumber(value: number | null | undefined, digits = 2): string {
@@ -1242,7 +1253,7 @@ export function ScansPageDashboard() {
                 </div>
               </div>
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Updated</div>
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Snapshot</div>
                 <div className="mt-1 text-sm font-semibold text-slate-200">{formatDateTime(snapshot?.generatedAt)}</div>
               </div>
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
