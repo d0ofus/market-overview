@@ -1,5 +1,7 @@
 import type {
   AlertFilterInput,
+  AlertIngestionRuntimeConfig,
+  AlertIngestionStatus,
   AlertLogRow,
   AlertTickerDayRow,
   AlertsSessionFilter,
@@ -16,6 +18,7 @@ import { fetchTickerNews } from "./alerts-news";
 import { loadPeerMetrics } from "./peer-metrics-service";
 
 const DEFAULT_RETENTION_DAYS = 30;
+const DEFAULT_STALE_AFTER_HOURS = 72;
 const ALERT_TICKER_REPAIR_INTERVAL_MS = 5 * 60_000;
 const ALERT_TICKER_REPAIR_LOOKBACK_DAYS = 30;
 const ALERT_TICKER_REPAIR_SCAN_LIMIT = 150;
@@ -600,6 +603,21 @@ async function loadMetricsForAlertTickerDays(
   );
 }
 
+function parseTimestampMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function ageHours(value: string | null | undefined, now: Date): number | null {
+  const parsed = parseTimestampMs(value);
+  if (parsed == null) return null;
+  return Math.max(0, (now.getTime() - parsed) / 3_600_000);
+}
+
 async function loadIndustriesForAlertTickers(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
   const normalizedTickers = Array.from(new Set(tickers.map((ticker) => String(ticker ?? "").trim().toUpperCase()).filter(Boolean)));
   const industries = new Map<string, string | null>();
@@ -757,6 +775,72 @@ class HttpMailboxSyncAdapter implements AlertMailboxAdapter {
 function configuredAdapters(env: Env): AlertMailboxAdapter[] {
   const adapters: AlertMailboxAdapter[] = [new HttpMailboxSyncAdapter()];
   return adapters.filter((adapter) => adapter.isConfigured(env));
+}
+
+export async function queryAlertIngestionStatus(
+  env: Env,
+  runtimeConfig: AlertIngestionRuntimeConfig = {},
+  now = new Date(),
+): Promise<AlertIngestionStatus> {
+  const staleAfterHours = Math.max(1, Number(runtimeConfig.staleAfterHours ?? DEFAULT_STALE_AFTER_HOURS) || DEFAULT_STALE_AFTER_HOURS);
+  const adapters = configuredAdapters(env).map((adapter) => adapter.name);
+  const reconcileEnabled = Boolean(runtimeConfig.reconcileEnabled ?? ((env.ALERTS_RECONCILE_ENABLED ?? "false") === "true"));
+  const housekeepingEnabled = runtimeConfig.housekeepingEnabled ?? true;
+  const retentionDays = Math.max(1, Number(runtimeConfig.retentionDays ?? DEFAULT_RETENTION_DAYS) || DEFAULT_RETENTION_DAYS);
+
+  const [latestAlert, latestEmail, totals, parseStatusRows, sourceMailboxRows] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id, ticker, received_at as receivedAt, trading_day as tradingDay, market_session as marketSession, raw_email_subject as rawEmailSubject FROM tv_alerts ORDER BY datetime(received_at) DESC LIMIT 1",
+    ).first<AlertIngestionStatus["latestAlert"]>(),
+    env.DB.prepare(
+      "SELECT id, message_id as messageId, source_mailbox as sourceMailbox, parse_status as parseStatus, raw_email_subject as rawEmailSubject, raw_email_from as rawEmailFrom, raw_email_received_at as rawEmailReceivedAt, created_at as createdAt, parse_error as parseError FROM tv_alert_emails ORDER BY datetime(COALESCE(raw_email_received_at, created_at)) DESC LIMIT 1",
+    ).first<AlertIngestionStatus["latestEmail"]>(),
+    env.DB.prepare(
+      "SELECT (SELECT COUNT(*) FROM tv_alerts) as alerts, (SELECT COUNT(*) FROM tv_alert_emails) as emails",
+    ).first<{ alerts: number; emails: number }>(),
+    env.DB.prepare(
+      "SELECT parse_status as parseStatus, COUNT(*) as count, MAX(raw_email_received_at) as latestRawEmailReceivedAt, MAX(created_at) as latestCreatedAt FROM tv_alert_emails GROUP BY parse_status ORDER BY count DESC",
+    ).all<AlertIngestionStatus["parseStatuses"][number]>(),
+    env.DB.prepare(
+      "SELECT source_mailbox as sourceMailbox, COUNT(*) as count, MAX(created_at) as latestCreatedAt FROM tv_alert_emails GROUP BY source_mailbox ORDER BY count DESC LIMIT 10",
+    ).all<AlertIngestionStatus["sourceMailboxes"][number]>(),
+  ]);
+
+  const latestAlertAgeHours = ageHours(latestAlert?.receivedAt, now);
+  const latestEmailAgeHours = ageHours(latestEmail?.rawEmailReceivedAt ?? latestEmail?.createdAt, now);
+  const staleBasis = latestEmailAgeHours != null
+    ? "latest_email"
+    : latestAlertAgeHours != null
+      ? "latest_alert"
+      : "none";
+  const staleAge = latestEmailAgeHours ?? latestAlertAgeHours;
+
+  return {
+    generatedAt: now.toISOString(),
+    totals: {
+      alerts: Number(totals?.alerts ?? 0),
+      emails: Number(totals?.emails ?? 0),
+    },
+    latestAlert: latestAlert ?? null,
+    latestEmail: latestEmail ?? null,
+    parseStatuses: parseStatusRows.results ?? [],
+    sourceMailboxes: sourceMailboxRows.results ?? [],
+    config: {
+      directEmailHandlerEnabled: true,
+      mailboxSyncConfigured: adapters.length > 0,
+      mailboxSyncAdapters: adapters,
+      reconcileEnabled,
+      housekeepingEnabled,
+      retentionDays,
+      staleAfterHours,
+    },
+    stale: {
+      isStale: staleAge == null || staleAge > staleAfterHours,
+      latestAlertAgeHours,
+      latestEmailAgeHours,
+      staleBasis,
+    },
+  };
 }
 
 export async function reconcileAlertsFromMailboxAdapters(env: Env, maxEmails = 20): Promise<ReconcileAlertsResult> {

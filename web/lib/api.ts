@@ -158,6 +158,59 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
+export type AlertIngestionStatus = {
+  generatedAt: string;
+  totals: {
+    alerts: number;
+    emails: number;
+  };
+  latestAlert: {
+    id: string;
+    ticker: string;
+    receivedAt: string;
+    tradingDay: string;
+    marketSession: "premarket" | "regular" | "after-hours";
+    rawEmailSubject: string | null;
+  } | null;
+  latestEmail: {
+    id: string;
+    messageId: string;
+    sourceMailbox: string | null;
+    parseStatus: string;
+    rawEmailSubject: string | null;
+    rawEmailFrom: string | null;
+    rawEmailReceivedAt: string | null;
+    createdAt: string;
+    parseError: string | null;
+  } | null;
+  parseStatuses: Array<{
+    parseStatus: string;
+    count: number;
+    latestRawEmailReceivedAt: string | null;
+    latestCreatedAt: string | null;
+  }>;
+  sourceMailboxes: Array<{
+    sourceMailbox: string | null;
+    count: number;
+    latestCreatedAt: string | null;
+  }>;
+  config: {
+    directEmailHandlerEnabled: boolean;
+    mailboxSyncConfigured: boolean;
+    mailboxSyncAdapters: string[];
+    reconcileEnabled: boolean;
+    housekeepingEnabled: boolean;
+    retentionDays: number;
+    staleAfterHours: number;
+  };
+  stale: {
+    isStale: boolean;
+    latestAlertAgeHours: number | null;
+    latestEmailAgeHours: number | null;
+    staleBasis: "latest_email" | "latest_alert" | "none";
+  };
+};
+
 export type SocialAlertHealthStatus =
   | "missing_token"
   | "configured"
@@ -2374,6 +2427,10 @@ export function getAlertNews(ticker: string, tradingDay: string) {
   return getJson<{ ticker: string; tradingDay: string; rows: AlertNewsRow[] }>(
     appendQuery("/api/alerts/news", { ticker, tradingDay }),
   );
+}
+
+export function getAdminAlertIngestionStatus() {
+  return adminFetch<AlertIngestionStatus>("/api/admin/alerts/status");
 }
 
 export function getSocialAlertHandles() {

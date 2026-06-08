@@ -76,6 +76,7 @@ import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-sta
 import {
   cleanupOldAlertsData,
   ingestTradingViewAlertEmailsBatch,
+  queryAlertIngestionStatus,
   queryAlertsByFilters,
   queryUniqueTickerDaysByFilters,
   reconcileAlertsFromMailboxAdapters,
@@ -3217,6 +3218,20 @@ app.get("/api/alerts/news", async (c) => {
     .bind(ticker, tradingDay)
     .all();
   return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
+});
+
+app.get("/api/admin/alerts/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const cronSettings = await loadCentralCronJobSettingsMap(c.env).catch((error) => {
+    console.error("alerts status cron settings load failed; using defaults", error);
+    return new Map<string, CronJobValues>();
+  });
+  const alertsSettings = cronSettings.get("alerts-housekeeping");
+  return c.json(await queryAlertIngestionStatus(c.env, {
+    housekeepingEnabled: alertsSettings ? isCentralCronEnabled(alertsSettings) : true,
+    reconcileEnabled: booleanValue(alertsSettings ?? {}, "reconcileEnabled", false) || (c.env.ALERTS_RECONCILE_ENABLED ?? "false") === "true",
+    retentionDays: cronNumber(alertsSettings ?? {}, "retentionDays", 30),
+  }));
 });
 
 function socialAlertsErrorResponse(c: any, error: unknown) {

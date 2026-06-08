@@ -25,6 +25,7 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
 
 const QUICK_RANGE_OPTIONS = [3, 5, 10, 30] as const;
 const DEFAULT_CHARTS_PER_PAGE = 12;
+const DEFAULT_ALERT_LOOKBACK_DAYS = 30;
 
 const localIsoDate = (value = new Date()) =>
   `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
@@ -35,7 +36,10 @@ const addDays = (isoDate: string, days: number) => {
   return value.toISOString().slice(0, 10);
 };
 const defaultEndDate = () => localIsoDate();
-const defaultStartDate = () => addDays(defaultEndDate(), -1);
+const defaultStartDate = () => {
+  const end = defaultEndDate();
+  return addDays(end, -(DEFAULT_ALERT_LOOKBACK_DAYS - 1));
+};
 
 const rangeStartDate = (endDate: string, days: number) => addDays(endDate, -(days - 1));
 
@@ -635,7 +639,7 @@ export function AlertsDashboard() {
         {mode === "single" && <aside className="space-y-3">
           <div className="card p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">Alerts Log (Last 30d Window)</h3>
+              <h3 className="text-sm font-semibold text-slate-200">Alerts Log ({startDate} to {endDate})</h3>
               <button
                 className={`rounded px-3 py-1.5 text-xs ${showUniqueOnly ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
                 onClick={() => setShowUniqueOnly((current) => !current)}

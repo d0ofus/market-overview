@@ -1,0 +1,12 @@
+node_modules
+web/.next
+web/node_modules
+worker/node_modules
+worker/.wrangler
+worker/tmp
+python-scans-service/__pycache__
+python-scans-service/.pytest_cache
+.pytest_cache
+.git
+*.log
+*.tsbuildinfo
