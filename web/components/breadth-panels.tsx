@@ -391,10 +391,12 @@ export function BreadthPanels({
     <div className="space-y-4">
       {headline && (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
-          <div className="card p-3">
+          <div className="card px-3 py-2">
             <div className="text-xs text-slate-400">{headline.universeName} Members</div>
-            <div className="text-lg font-semibold">{numFmt.format(headline.metrics.memberCount)}</div>
-            <div className="text-[11px] text-slate-500">coverage {headline.metrics.dataCoveragePct.toFixed(1)}%</div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-lg font-semibold leading-tight">{numFmt.format(headline.metrics.memberCount)}</span>
+              <span className="whitespace-nowrap text-[11px] text-slate-500">coverage {headline.metrics.dataCoveragePct.toFixed(1)}%</span>
+            </div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">Adv/Dec Ratio</div>
