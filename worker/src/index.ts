@@ -2382,7 +2382,12 @@ app.post("/api/sectors/narratives", async (c) => {
 
 app.get("/api/sectors/focus-narratives", async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT f.id, f.sector_name as sectorName, f.sort_order as sortOrder, f.created_at as createdAt, f.updated_at as updatedAt
+    `SELECT f.id,
+       f.sector_name as sectorName,
+       f.sort_order as sortOrder,
+       COALESCE(f.comment_text, '') as comment,
+       f.created_at as createdAt,
+       f.updated_at as updatedAt
      FROM sector_focus_narratives f
      INNER JOIN (SELECT DISTINCT sector_name FROM sector_tracker_entries WHERE TRIM(sector_name) <> '') e
        ON e.sector_name = f.sector_name
@@ -2393,14 +2398,43 @@ app.get("/api/sectors/focus-narratives", async (c) => {
 
 app.put("/api/sectors/focus-narratives", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const body = (await c.req.json()) as { sectorNames?: unknown };
-  if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
+  const body = (await c.req.json()) as { sectorNames?: unknown; focusNarratives?: unknown };
+  const commentBySectorName = new Map<string, string>();
+  const hasFocusNarrativesPayload = body.focusNarratives !== undefined;
 
-  const requestedNames = Array.from(new Set(
-    body.sectorNames
-      .map((value) => (typeof value === "string" ? value.trim() : ""))
-      .filter(Boolean),
-  ));
+  const existingFocusRows = await c.env.DB.prepare(
+    "SELECT sector_name as sectorName, COALESCE(comment_text, '') as comment FROM sector_focus_narratives",
+  ).all<{ sectorName: string; comment: string }>();
+  for (const row of existingFocusRows.results ?? []) {
+    commentBySectorName.set(row.sectorName, row.comment ?? "");
+  }
+
+  let requestedNames: string[];
+  if (hasFocusNarrativesPayload) {
+    if (!Array.isArray(body.focusNarratives)) return c.json({ error: "focusNarratives must be an array" }, 400);
+    requestedNames = [];
+    for (const value of body.focusNarratives) {
+      if (!value || typeof value !== "object") continue;
+      const payload = value as { sectorName?: unknown; comment?: unknown };
+      const sectorName = typeof payload.sectorName === "string" ? payload.sectorName.trim() : "";
+      if (!sectorName || requestedNames.includes(sectorName)) continue;
+      requestedNames.push(sectorName);
+      const existingComment = commentBySectorName.get(sectorName) ?? "";
+      const comment = payload.comment === undefined
+        ? existingComment
+        : typeof payload.comment === "string"
+          ? payload.comment.trim()
+          : "";
+      commentBySectorName.set(sectorName, comment.slice(0, 1000));
+    }
+  } else {
+    if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
+    requestedNames = Array.from(new Set(
+      body.sectorNames
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .filter(Boolean),
+    ));
+  }
 
   const existingRows = await c.env.DB.prepare(
     "SELECT DISTINCT sector_name as sectorName FROM sector_tracker_entries WHERE TRIM(sector_name) <> '' ORDER BY sector_name ASC",
@@ -2411,13 +2445,13 @@ app.put("/api/sectors/focus-narratives", async (c) => {
   const deleteExisting = c.env.DB.prepare("DELETE FROM sector_focus_narratives");
   const insertFocusRows = sectorNames.map((sectorName, index) =>
     c.env.DB.prepare(
-      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-    ).bind(crypto.randomUUID(), sectorName, index),
+      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, comment_text, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+    ).bind(crypto.randomUUID(), sectorName, index, commentBySectorName.get(sectorName) ?? ""),
   );
   await c.env.DB.batch([deleteExisting, ...insertFocusRows]);
 
   const rows = await c.env.DB.prepare(
-    "SELECT id, sector_name as sectorName, sort_order as sortOrder, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
+    "SELECT id, sector_name as sectorName, sort_order as sortOrder, COALESCE(comment_text, '') as comment, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
   ).all();
   return c.json({ rows: rows.results ?? [] });
 });

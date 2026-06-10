@@ -2373,18 +2373,24 @@ export type SectorFocusNarrative = {
   id: string;
   sectorName: string;
   sortOrder: number;
+  comment: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SectorFocusNarrativeUpdate = {
+  sectorName: string;
+  comment?: string | null;
 };
 
 export function getSectorFocusNarratives() {
   return getJson<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives");
 }
 
-export function updateSectorFocusNarratives(sectorNames: string[]) {
+export function updateSectorFocusNarratives(focusNarratives: SectorFocusNarrativeUpdate[]) {
   return adminFetch<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives", {
     method: "PUT",
-    body: JSON.stringify({ sectorNames }),
+    body: JSON.stringify({ focusNarratives }),
   });
 }
 

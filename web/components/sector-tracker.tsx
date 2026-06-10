@@ -21,6 +21,7 @@ import {
   type PeerGroupRow,
   type PeerMetricRow,
   type SectorFocusNarrative,
+  type SectorFocusNarrativeUpdate,
 } from "@/lib/api";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -90,6 +91,7 @@ const ICON_BUTTON_CLASS =
 const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
 type FocusDropPosition = "before" | "after";
+const FOCUS_COMMENT_MAX_LENGTH = 1000;
 const reorderFocusNarrativeRows = (rows: SectorFocusNarrative[], sectorNames: string[]) => {
   const order = new Map(sectorNames.map((sectorName, index) => [sectorName, index]));
   return [...rows]
@@ -337,6 +339,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [focusNarrativeError, setFocusNarrativeError] = useState<string | null>(null);
   const [draggedFocusNarrative, setDraggedFocusNarrative] = useState<string | null>(null);
   const [focusDropTarget, setFocusDropTarget] = useState<{ sectorName: string; position: FocusDropPosition } | null>(null);
+  const [editingFocusComment, setEditingFocusComment] = useState<string | null>(null);
+  const [focusCommentDraft, setFocusCommentDraft] = useState("");
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
@@ -784,21 +788,41 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
 
   const persistFocusNarratives = async (
     sectorNames: string[],
-    options: { clearInput?: boolean; optimistic?: boolean } = { clearInput: true },
+    options: { clearInput?: boolean; optimistic?: boolean; commentOverrides?: Record<string, string> } = { clearInput: true },
   ) => {
     const previousFocusNarratives = focusNarratives;
+    const commentBySectorName = new Map(focusNarratives.map((row) => [row.sectorName, row.comment ?? ""]));
+    Object.entries(options.commentOverrides ?? {}).forEach(([sectorName, comment]) => {
+      commentBySectorName.set(sectorName, comment.slice(0, FOCUS_COMMENT_MAX_LENGTH));
+    });
+    const payload: SectorFocusNarrativeUpdate[] = sectorNames.map((sectorName) => ({
+      sectorName,
+      comment: commentBySectorName.get(sectorName) ?? "",
+    }));
+
     setFocusNarrativeSaving(true);
     setFocusNarrativeError(null);
     if (options.optimistic) {
-      setFocusNarratives(reorderFocusNarrativeRows(focusNarratives, sectorNames));
+      setFocusNarratives(
+        reorderFocusNarrativeRows(
+          focusNarratives.map((row) =>
+            commentBySectorName.has(row.sectorName)
+              ? { ...row, comment: commentBySectorName.get(row.sectorName) ?? "" }
+              : row,
+          ),
+          sectorNames,
+        ),
+      );
     }
     try {
-      const res = await updateSectorFocusNarratives(sectorNames);
+      const res = await updateSectorFocusNarratives(payload);
       setFocusNarratives(res.rows ?? []);
       if (options.clearInput ?? true) setFocusNarrativeInput("");
+      return true;
     } catch (err) {
       if (options.optimistic) setFocusNarratives(previousFocusNarratives);
       setFocusNarrativeError(err instanceof Error ? err.message : "Failed to update focus narratives.");
+      return false;
     } finally {
       setFocusNarrativeSaving(false);
     }
@@ -814,6 +838,10 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     if (focusNarrativeSaving) return;
     if (activeNarrativeCollection?.mode === "focus" && activeNarrativeCollection.sectorName === sectorName) {
       setActiveNarrativeCollection(null);
+    }
+    if (editingFocusComment === sectorName) {
+      setEditingFocusComment(null);
+      setFocusCommentDraft("");
     }
     await persistFocusNarratives(focusNarrativeNames.filter((name) => name !== sectorName));
   };
@@ -854,6 +882,28 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     const [movedName] = nextNames.splice(index, 1);
     nextNames.splice(targetIndex, 0, movedName);
     await persistFocusNarrativeOrder(nextNames);
+  };
+
+  const startEditingFocusComment = (row: SectorFocusNarrative) => {
+    if (focusNarrativeSaving) return;
+    setFocusNarrativeError(null);
+    setEditingFocusComment(row.sectorName);
+    setFocusCommentDraft((row.comment ?? "").slice(0, FOCUS_COMMENT_MAX_LENGTH));
+  };
+
+  const cancelEditingFocusComment = () => {
+    setEditingFocusComment(null);
+    setFocusCommentDraft("");
+  };
+
+  const saveFocusComment = async (sectorName: string) => {
+    if (focusNarrativeSaving) return;
+    const saved = await persistFocusNarratives(focusNarrativeNames, {
+      clearInput: false,
+      optimistic: true,
+      commentOverrides: { [sectorName]: focusCommentDraft.trim() },
+    });
+    if (saved) cancelEditingFocusComment();
   };
 
   const openFocusNarrative = (sectorName: string) => {
@@ -981,7 +1031,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                       return (
                         <div
                           key={`focus-narrative-${row.id}`}
-                          className={`inline-flex min-w-0 max-w-full overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)] transition ${
+                          className={`flex w-full max-w-full flex-col overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)] transition sm:w-[25rem] ${
                             isDragging ? "opacity-45" : ""
                           } ${isDropTarget ? "ring-2 ring-accent/50" : ""} ${
                             isDropTarget && focusDropTarget?.position === "before" ? "border-l-4 border-l-accent" : ""
@@ -989,77 +1039,132 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                           onDragOver={(event) => handleFocusDragOver(event, row.sectorName)}
                           onDrop={(event) => void handleFocusDrop(event, row.sectorName)}
                         >
-                          <span className="inline-flex w-11 shrink-0 items-center justify-center border-r border-borderSoft/60 bg-accent/10 px-2 text-xs font-semibold text-accent">
-                            #{index + 1}
-                          </span>
-                          {canReorder ? (
+                          <div className="flex min-w-0">
+                            <span className="inline-flex w-11 shrink-0 items-center justify-center border-r border-borderSoft/60 bg-accent/10 px-2 text-xs font-semibold text-accent">
+                              #{index + 1}
+                            </span>
+                            {canReorder ? (
+                              <button
+                                type="button"
+                                draggable={!focusNarrativeSaving}
+                                className="flex w-8 shrink-0 cursor-grab items-center justify-center border-r border-borderSoft/60 text-slate-500 transition hover:bg-accent/10 hover:text-slate-200 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+                                onDragStart={(event) => {
+                                  if (focusNarrativeSaving) return;
+                                  event.dataTransfer.effectAllowed = "move";
+                                  event.dataTransfer.setData("text/plain", row.sectorName);
+                                  setDraggedFocusNarrative(row.sectorName);
+                                  setFocusDropTarget(null);
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedFocusNarrative(null);
+                                  setFocusDropTarget(null);
+                                }}
+                                disabled={focusNarrativeSaving}
+                                aria-label={`Drag ${row.sectorName} to rank focus narratives`}
+                                title="Drag to reorder"
+                              >
+                                <GripVertical className="h-4 w-4" />
+                              </button>
+                            ) : null}
                             <button
                               type="button"
-                              draggable={!focusNarrativeSaving}
-                              className="flex w-8 shrink-0 cursor-grab items-center justify-center border-r border-borderSoft/60 text-slate-500 transition hover:bg-accent/10 hover:text-slate-200 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
-                              onDragStart={(event) => {
-                                if (focusNarrativeSaving) return;
-                                event.dataTransfer.effectAllowed = "move";
-                                event.dataTransfer.setData("text/plain", row.sectorName);
-                                setDraggedFocusNarrative(row.sectorName);
-                                setFocusDropTarget(null);
-                              }}
-                              onDragEnd={() => {
-                                setDraggedFocusNarrative(null);
-                                setFocusDropTarget(null);
-                              }}
-                              disabled={focusNarrativeSaving}
-                              aria-label={`Drag ${row.sectorName} to rank focus narratives`}
-                              title="Drag to reorder"
+                              className="min-w-0 flex-1 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
+                              onClick={() => openFocusNarrative(row.sectorName)}
+                              aria-label={`Open focus narrative charts for ${row.sectorName}`}
                             >
-                              <GripVertical className="h-4 w-4" />
+                              <span className="block truncate font-semibold text-slate-100">{row.sectorName}</span>
+                              <span className="mt-0.5 block text-xs text-slate-400">
+                                {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
+                              </span>
                             </button>
-                          ) : null}
-                          <button
-                            type="button"
-                            className="min-w-0 flex-1 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
-                            onClick={() => openFocusNarrative(row.sectorName)}
-                            aria-label={`Open focus narrative charts for ${row.sectorName}`}
-                          >
-                            <span className="block truncate font-semibold text-slate-100">{row.sectorName}</span>
-                            <span className="mt-0.5 block text-xs text-slate-400">
-                              {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
-                            </span>
-                          </button>
-                          {canReorder ? (
-                            <div className="flex shrink-0 border-l border-borderSoft/60">
-                              <button
-                                type="button"
-                                className="flex w-8 items-center justify-center text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
-                                onClick={() => void moveFocusNarrativeByOffset(row.sectorName, -1)}
-                                disabled={focusNarrativeSaving || index === 0}
-                                aria-label={`Move ${row.sectorName} earlier`}
-                                title="Move earlier"
-                              >
-                                <ChevronLeft className="h-4 w-4" />
-                              </button>
-                              <button
-                                type="button"
-                                className="flex w-8 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
-                                onClick={() => void moveFocusNarrativeByOffset(row.sectorName, 1)}
-                                disabled={focusNarrativeSaving || index === focusNarrativeRows.length - 1}
-                                aria-label={`Move ${row.sectorName} later`}
-                                title="Move later"
-                              >
-                                <ChevronRight className="h-4 w-4" />
-                              </button>
-                            </div>
-                          ) : null}
-                          <button
-                            type="button"
-                            className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-                            onClick={() => void removeFocusNarrative(row.sectorName)}
-                            disabled={focusNarrativeSaving}
-                            aria-label={`Remove ${row.sectorName} from focus narratives`}
-                            title="Remove"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
+                            {canReorder ? (
+                              <div className="flex shrink-0 border-l border-borderSoft/60">
+                                <button
+                                  type="button"
+                                  className="flex w-8 items-center justify-center text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                  onClick={() => void moveFocusNarrativeByOffset(row.sectorName, -1)}
+                                  disabled={focusNarrativeSaving || index === 0}
+                                  aria-label={`Move ${row.sectorName} earlier`}
+                                  title="Move earlier"
+                                >
+                                  <ChevronLeft className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex w-8 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                  onClick={() => void moveFocusNarrativeByOffset(row.sectorName, 1)}
+                                  disabled={focusNarrativeSaving || index === focusNarrativeRows.length - 1}
+                                  aria-label={`Move ${row.sectorName} later`}
+                                  title="Move later"
+                                >
+                                  <ChevronRight className="h-4 w-4" />
+                                </button>
+                              </div>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => void removeFocusNarrative(row.sectorName)}
+                              disabled={focusNarrativeSaving}
+                              aria-label={`Remove ${row.sectorName} from focus narratives`}
+                              title="Remove"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+
+                          <div className="border-t border-borderSoft/60 bg-slate-950/10 px-3 py-2">
+                            {editingFocusComment === row.sectorName ? (
+                              <div className="space-y-2">
+                                <textarea
+                                  className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
+                                  value={focusCommentDraft}
+                                  onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
+                                  placeholder="Add a comment..."
+                                  maxLength={FOCUS_COMMENT_MAX_LENGTH}
+                                  disabled={focusNarrativeSaving}
+                                  aria-label={`Comment for ${row.sectorName}`}
+                                />
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                    onClick={cancelEditingFocusComment}
+                                    disabled={focusNarrativeSaving}
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
+                                    onClick={() => void saveFocusComment(row.sectorName)}
+                                    disabled={focusNarrativeSaving}
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                    {focusNarrativeSaving ? "Saving" : "Save"}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex min-h-9 items-start justify-between gap-2">
+                                {row.comment?.trim() ? (
+                                  <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
+                                ) : (
+                                  <p className="min-w-0 text-xs leading-relaxed text-slate-500">No comment yet.</p>
+                                )}
+                                <button
+                                  type="button"
+                                  className={`${ICON_BUTTON_CLASS} shrink-0`}
+                                  onClick={() => startEditingFocusComment(row)}
+                                  disabled={focusNarrativeSaving}
+                                  aria-label={`${row.comment?.trim() ? "Edit" : "Add"} comment for ${row.sectorName}`}
+                                  title={row.comment?.trim() ? "Edit comment" : "Add comment"}
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
