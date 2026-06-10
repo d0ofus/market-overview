@@ -285,6 +285,9 @@ export function PeerGroupsDashboard() {
   const [perplexityGroupError, setPerplexityGroupError] = useState<string | null>(null);
   const [perplexityGroupMessage, setPerplexityGroupMessage] = useState<string | null>(null);
   const [perplexityGroupCreatedId, setPerplexityGroupCreatedId] = useState<string | null>(null);
+  const [addingPerplexityPeerTicker, setAddingPerplexityPeerTicker] = useState<string | null>(null);
+  const [perplexityPeerAddError, setPerplexityPeerAddError] = useState<string | null>(null);
+  const [perplexityPeerAddMessage, setPerplexityPeerAddMessage] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [trendRows, setTrendRows] = useState<FundamentalTrendRow[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
@@ -695,6 +698,9 @@ export function PeerGroupsDashboard() {
       setPerplexityGroupError(null);
       setPerplexityGroupMessage(null);
       setPerplexityGroupCreatedId(null);
+      setAddingPerplexityPeerTicker(null);
+      setPerplexityPeerAddError(null);
+      setPerplexityPeerAddMessage(null);
       return;
     }
 
@@ -707,6 +713,9 @@ export function PeerGroupsDashboard() {
     setPerplexityGroupError(null);
     setPerplexityGroupMessage(null);
     setPerplexityGroupCreatedId(null);
+    setAddingPerplexityPeerTicker(null);
+    setPerplexityPeerAddError(null);
+    setPerplexityPeerAddMessage(null);
   }, [perplexityLookup, perplexityPeerTickerKey]);
 
   useEffect(() => {
@@ -822,6 +831,31 @@ export function PeerGroupsDashboard() {
 
   const resetPerplexityCompareTickers = () => {
     setPerplexityCompareSelectedTickers(defaultPerplexityCompareTickers);
+  };
+
+  const addPerplexityPeerToCurrentGroup = async (tickerInput: string) => {
+    const ticker = tickerInput.trim().toUpperCase();
+    if (!ticker || !activeGroup || addingPerplexityPeerTicker) return;
+    const groupId = activeGroup.id;
+    const groupName = activeGroup.name;
+    const rootTicker = perplexityLookup?.ticker.trim().toUpperCase() || selectedTicker || query.trim().toUpperCase();
+
+    setAddingPerplexityPeerTicker(ticker);
+    setPerplexityPeerAddError(null);
+    setPerplexityPeerAddMessage(null);
+    try {
+      const added = await addAdminPeerGroupMember(groupId, { ticker, source: "manual", confidence: 1 });
+      const nextGroups = await getPeerGroups();
+      setGroups(nextGroups.rows ?? []);
+      if (rootTicker) {
+        await loadTicker(rootTicker, { selectGroupId: groupId });
+      }
+      setPerplexityPeerAddMessage(`Added ${added.ticker} to ${groupName}.`);
+    } catch (error) {
+      setPerplexityPeerAddError(error instanceof Error ? error.message : `Failed to add ${ticker} to ${groupName}.`);
+    } finally {
+      setAddingPerplexityPeerTicker(null);
+    }
   };
 
   const savePerplexityGroup = async () => {
@@ -1222,6 +1256,18 @@ export function PeerGroupsDashboard() {
                     </p>
                   ) : null}
 
+                  {perplexityPeerAddMessage ? (
+                    <p className="rounded border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100">
+                      {perplexityPeerAddMessage}
+                    </p>
+                  ) : null}
+
+                  {perplexityPeerAddError ? (
+                    <p className="rounded border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+                      {perplexityPeerAddError}
+                    </p>
+                  ) : null}
+
                   {perplexityPeerRows.length > 0 ? (
                     <div className="rounded border border-borderSoft/70 bg-panelSoft/20 p-3">
                       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1297,11 +1343,11 @@ export function PeerGroupsDashboard() {
                         {perplexityCompareLegendItems.map((item) => {
                           const active = item.isBase || item.selected;
                           const chipClassName = [
-                            "inline-flex max-w-[10rem] items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition",
+                            "pointer-events-auto relative z-10 inline-flex min-h-7 max-w-[11rem] select-none items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition focus:outline-none focus:ring-1 focus:ring-accent/60",
                             active
-                              ? "border-borderSoft/70 bg-slate-950/35 text-slate-300"
-                              : "border-borderSoft/40 bg-slate-950/20 text-slate-500 opacity-70 hover:border-accent/30 hover:text-slate-300",
-                            item.isBase ? "" : "cursor-pointer",
+                              ? "border-borderSoft/70 bg-slate-950/35 text-slate-300 shadow-sm"
+                              : "border-borderSoft/40 bg-slate-950/20 text-slate-500 opacity-75 hover:border-accent/40 hover:bg-slate-900/60 hover:text-slate-200",
+                            item.isBase ? "" : "cursor-pointer hover:bg-slate-900/70 active:scale-[0.98]",
                           ].filter(Boolean).join(" ");
                           const chipContent = (
                             <>
@@ -1330,7 +1376,11 @@ export function PeerGroupsDashboard() {
                               aria-label={`${item.selected ? "Remove" : "Add"} ${item.ticker} comparison`}
                               className={chipClassName}
                               title={`${item.selected ? "Remove" : "Add"} ${item.ticker} comparison`}
-                              onClick={() => togglePerplexityCompareTicker(item.ticker)}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                togglePerplexityCompareTicker(item.ticker);
+                              }}
                             >
                               {chipContent}
                             </button>
@@ -1550,6 +1600,8 @@ export function PeerGroupsDashboard() {
                             {perplexityPeerRows.map((peer) => {
                               const ticker = peer.ticker.toUpperCase();
                               const color = perplexityCompareColorByTicker.get(ticker) ?? PERPLEXITY_COMPARE_PALETTE[0];
+                              const addPending = addingPerplexityPeerTicker === ticker;
+                              const canAddToCurrentGroup = peer.status !== "saved" && Boolean(activeGroup);
                               return (
                                 <tr key={`perplexity-${peer.ticker}`} className="border-t border-borderSoft/60">
                                   <td className="px-2 py-1.5">
@@ -1582,9 +1634,23 @@ export function PeerGroupsDashboard() {
                                   </td>
                                   <td className="px-2 py-1.5 text-slate-300">{peer.name ?? peer.exchange ?? "-"}</td>
                                   <td className="px-2 py-1.5">
-                                    <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
-                                      {peer.status === "saved" ? "Already in current group" : "Only in Perplexity"}
-                                    </span>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className={`rounded px-2 py-0.5 ${peer.status === "saved" ? "bg-emerald-400/10 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>
+                                        {peer.status === "saved" ? "Already in current group" : "Only in Perplexity"}
+                                      </span>
+                                      {peer.status !== "saved" ? (
+                                        <button
+                                          type="button"
+                                          className="inline-flex min-h-6 items-center gap-1 rounded border border-accent/35 bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent transition hover:bg-accent/20 focus:outline-none focus:ring-1 focus:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-50"
+                                          onClick={() => void addPerplexityPeerToCurrentGroup(ticker)}
+                                          disabled={!canAddToCurrentGroup || Boolean(addingPerplexityPeerTicker)}
+                                          title={activeGroup ? `Add ${ticker} to ${activeGroup.name}` : "Load a current group before adding this ticker"}
+                                        >
+                                          {addPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                                          Add
+                                        </button>
+                                      ) : null}
+                                    </div>
                                   </td>
                                 </tr>
                               );
