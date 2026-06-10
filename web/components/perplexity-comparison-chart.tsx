@@ -34,6 +34,7 @@ type LoadedSeries = {
 };
 
 type ChartRow = Record<string, number | string | null> & { date: string };
+type DateRangeSelection = { start: number; end: number };
 export type PerplexityComparisonTimeframe = Exclude<TickerSeriesTimeframe, "MAX"> | "5Y";
 
 const CHART_GRID_COLOR = "rgba(148,163,184,0.12)";
@@ -150,6 +151,20 @@ function filterSeriesByTimeframe(series: LoadedSeries[], timeframe: PerplexityCo
     .map((item) => ({
       ...item,
       rows: item.rows.filter((row) => row.date >= startDate && row.date <= anchorDate),
+    }))
+    .filter((item) => item.rows.length > 0);
+}
+
+function datesForSeries(series: LoadedSeries[]): string[] {
+  return Array.from(new Set(series.flatMap((item) => item.rows.map((row) => row.date)))).sort();
+}
+
+function filterSeriesByDateRange(series: LoadedSeries[], startDate: string | null, endDate: string | null): LoadedSeries[] {
+  if (!startDate || !endDate) return series;
+  return series
+    .map((item) => ({
+      ...item,
+      rows: item.rows.filter((row) => row.date >= startDate && row.date <= endDate),
     }))
     .filter((item) => item.rows.length > 0);
 }
@@ -312,6 +327,84 @@ function PaneChart({
   );
 }
 
+function DateRangeSlider({
+  dates,
+  selection,
+  onChange,
+  onReset,
+}: {
+  dates: string[];
+  selection: DateRangeSelection;
+  onChange: (selection: DateRangeSelection) => void;
+  onReset: () => void;
+}) {
+  const maxIndex = dates.length - 1;
+  const startDate = dates[selection.start] ?? dates[0] ?? null;
+  const endDate = dates[selection.end] ?? dates[maxIndex] ?? null;
+  const fullRange = selection.start === 0 && selection.end === maxIndex;
+  const updateStart = (value: number) => {
+    onChange({
+      start: Math.max(0, Math.min(value, selection.end - 1)),
+      end: selection.end,
+    });
+  };
+  const updateEnd = (value: number) => {
+    onChange({
+      start: selection.start,
+      end: Math.min(maxIndex, Math.max(value, selection.start + 1)),
+    });
+  };
+
+  return (
+    <div className="border-b border-borderSoft/70 bg-slate-950/20 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Date Range</div>
+        <div className="flex items-center gap-2 text-[11px] text-slate-300">
+          <span className="font-medium text-slate-100">{startDate ? formatDate(startDate) : "-"}</span>
+          <span className="text-slate-500">to</span>
+          <span className="font-medium text-slate-100">{endDate ? formatDate(endDate) : "-"}</span>
+          <button
+            type="button"
+            className="ml-1 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={onReset}
+            disabled={fullRange}
+          >
+            Reset range
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 grid gap-2 md:grid-cols-2">
+        <label className="block text-[11px] text-slate-400">
+          Start
+          <input
+            type="range"
+            min={0}
+            max={maxIndex}
+            step={1}
+            value={selection.start}
+            onChange={(event) => updateStart(Number(event.target.value))}
+            className="mt-1 h-2 w-full cursor-pointer accent-sky-400"
+            aria-label="Comparison start date"
+          />
+        </label>
+        <label className="block text-[11px] text-slate-400">
+          End
+          <input
+            type="range"
+            min={0}
+            max={maxIndex}
+            step={1}
+            value={selection.end}
+            onChange={(event) => updateEnd(Number(event.target.value))}
+            className="mt-1 h-2 w-full cursor-pointer accent-sky-400"
+            aria-label="Comparison end date"
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
 export function PerplexityComparisonChart({
   items,
   mode,
@@ -327,6 +420,7 @@ export function PerplexityComparisonChart({
   const [loading, setLoading] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [historyMessages, setHistoryMessages] = useState<string[]>([]);
+  const [dateRange, setDateRange] = useState<DateRangeSelection | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -384,7 +478,19 @@ export function PerplexityComparisonChart({
     };
   }, [chartItems, tickersKey, timeframe]);
 
-  const visibleSeries = useMemo(() => filterSeriesByTimeframe(series, timeframe), [series, timeframe]);
+  const timeframeSeries = useMemo(() => filterSeriesByTimeframe(series, timeframe), [series, timeframe]);
+  const availableDates = useMemo(() => datesForSeries(timeframeSeries), [timeframeSeries]);
+
+  useEffect(() => {
+    setDateRange(availableDates.length >= 2 ? { start: 0, end: availableDates.length - 1 } : null);
+  }, [availableDates, tickersKey, timeframe]);
+
+  const selectedStartDate = dateRange ? availableDates[dateRange.start] ?? null : null;
+  const selectedEndDate = dateRange ? availableDates[dateRange.end] ?? null : null;
+  const visibleSeries = useMemo(
+    () => filterSeriesByDateRange(timeframeSeries, selectedStartDate, selectedEndDate),
+    [selectedEndDate, selectedStartDate, timeframeSeries],
+  );
   const rows = useMemo(() => buildRows(visibleSeries, mode), [mode, visibleSeries]);
 
   if (loading && series.length === 0) {
@@ -402,6 +508,14 @@ export function PerplexityComparisonChart({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {availableDates.length >= 2 && dateRange ? (
+        <DateRangeSlider
+          dates={availableDates}
+          selection={dateRange}
+          onChange={setDateRange}
+          onReset={() => setDateRange({ start: 0, end: availableDates.length - 1 })}
+        />
+      ) : null}
       <div className="min-h-0 flex-1">
         {mode === "NewPane" ? (
           <div className="h-full overflow-auto p-3">
