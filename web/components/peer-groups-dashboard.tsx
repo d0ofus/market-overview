@@ -20,11 +20,10 @@ import {
   type PeerGroupType,
   type PeerMetricRow,
   type PeerTickerDetail,
-  type TickerSeriesTimeframe,
 } from "@/lib/api";
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
-import { PerplexityComparisonChart } from "./perplexity-comparison-chart";
+import { PerplexityComparisonChart, type PerplexityComparisonTimeframe } from "./perplexity-comparison-chart";
 import { TickerMultiGrid } from "./ticker-multi-grid";
 import type { TradingViewComparePosition } from "./tradingview-widget";
 
@@ -51,7 +50,7 @@ type PerplexityCompareScaleOption = {
   label: string;
 };
 type PerplexityCompareTimeframeOption = {
-  key: TickerSeriesTimeframe;
+  key: PerplexityComparisonTimeframe;
   label: string;
 };
 const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
@@ -59,6 +58,7 @@ const MULTI_CHART_SORT_OPTIONS: { key: MultiChartSortKey; label: string }[] = [
   { key: "marketCap", label: "Market Capitalization" },
 ];
 const PERPLEXITY_COMPARE_DEFAULT_COUNT = 5;
+const PERPLEXITY_COMPARE_DEFAULT_TIMEFRAME: PerplexityComparisonTimeframe = "1Y";
 const PERPLEXITY_COMPARE_SCALE_OPTIONS: PerplexityCompareScaleOption[] = [
   { key: "SameScale", label: "Same % scale" },
   { key: "NewPriceScale", label: "New price scale" },
@@ -70,7 +70,7 @@ const PERPLEXITY_COMPARE_TIMEFRAME_OPTIONS: PerplexityCompareTimeframeOption[] =
   { key: "6M", label: "6M" },
   { key: "1Y", label: "1Y" },
   { key: "2Y", label: "2Y" },
-  { key: "MAX", label: "Max" },
+  { key: "5Y", label: "5Y" },
 ];
 const PERPLEXITY_COMPARE_BASE_COLOR = "#f97316";
 const PERPLEXITY_COMPARE_PALETTE = [
@@ -280,7 +280,7 @@ export function PeerGroupsDashboard() {
   const [perplexityGroupSelectedTickers, setPerplexityGroupSelectedTickers] = useState<string[]>([]);
   const [perplexityCompareSelectedTickers, setPerplexityCompareSelectedTickers] = useState<string[]>([]);
   const [perplexityComparePosition, setPerplexityComparePosition] = useState<TradingViewComparePosition>("SameScale");
-  const [perplexityCompareTimeframe, setPerplexityCompareTimeframe] = useState<TickerSeriesTimeframe>("6M");
+  const [perplexityCompareTimeframe, setPerplexityCompareTimeframe] = useState<PerplexityComparisonTimeframe>(PERPLEXITY_COMPARE_DEFAULT_TIMEFRAME);
   const [savingPerplexityGroup, setSavingPerplexityGroup] = useState(false);
   const [perplexityGroupError, setPerplexityGroupError] = useState<string | null>(null);
   const [perplexityGroupMessage, setPerplexityGroupMessage] = useState<string | null>(null);
@@ -510,14 +510,30 @@ export function PeerGroupsDashboard() {
         ticker: perplexityLookup.ticker.toUpperCase(),
         label: "Base",
         color: PERPLEXITY_COMPARE_BASE_COLOR,
+        selected: true,
+        isBase: true,
       }] : []),
-      ...validPerplexityCompareTickers.map((ticker) => ({
-        ticker,
-        label: "Peer",
-        color: perplexityCompareColorByTicker.get(ticker) ?? PERPLEXITY_COMPARE_PALETTE[0],
-      })),
+      ...perplexityPeerRows.map((peer) => {
+        const ticker = peer.ticker.toUpperCase();
+        return {
+          ticker,
+          label: "Peer",
+          color: perplexityCompareColorByTicker.get(ticker) ?? PERPLEXITY_COMPARE_PALETTE[0],
+          selected: perplexityCompareSelectedTickerSet.has(ticker),
+          isBase: false,
+        };
+      }),
     ],
-    [perplexityCompareColorByTicker, perplexityLookup, validPerplexityCompareTickers],
+    [perplexityCompareColorByTicker, perplexityCompareSelectedTickerSet, perplexityLookup, perplexityPeerRows],
+  );
+  const perplexityCompareChartItems = useMemo(
+    () => perplexityCompareLegendItems
+      .filter((item) => item.isBase || item.selected)
+      .map((item) => ({
+        ticker: item.ticker,
+        color: item.color,
+      })),
+    [perplexityCompareLegendItems],
   );
   const savedOnlyPeerRows = useMemo(() => {
     if (!perplexityLookup || !detail || !activeGroup) return [];
@@ -675,6 +691,7 @@ export function PeerGroupsDashboard() {
       setPerplexityGroupDraft(buildPerplexityGroupDraft(null));
       setPerplexityGroupSelectedTickers([]);
       setPerplexityCompareSelectedTickers([]);
+      setPerplexityCompareTimeframe(PERPLEXITY_COMPARE_DEFAULT_TIMEFRAME);
       setPerplexityGroupError(null);
       setPerplexityGroupMessage(null);
       setPerplexityGroupCreatedId(null);
@@ -686,6 +703,7 @@ export function PeerGroupsDashboard() {
       perplexityLookup.peers.map((peer) => peer.ticker),
     ));
     setPerplexityCompareSelectedTickers(buildDefaultPerplexityCompareTickers(perplexityLookup));
+    setPerplexityCompareTimeframe(PERPLEXITY_COMPARE_DEFAULT_TIMEFRAME);
     setPerplexityGroupError(null);
     setPerplexityGroupMessage(null);
     setPerplexityGroupCreatedId(null);
@@ -1276,25 +1294,52 @@ export function PeerGroupsDashboard() {
                         </div>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2" aria-label="Chart comparison colors">
-                        {perplexityCompareLegendItems.map((item) => (
-                          <span
-                            key={`perplexity-compare-legend-${item.ticker}`}
-                            className="inline-flex max-w-[10rem] items-center gap-1.5 rounded border border-borderSoft/70 bg-slate-950/35 px-2 py-1 text-[11px] text-slate-300"
-                            title={`${item.ticker} ${item.label}`}
-                          >
+                        {perplexityCompareLegendItems.map((item) => {
+                          const active = item.isBase || item.selected;
+                          const chipClassName = [
+                            "inline-flex max-w-[10rem] items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition",
+                            active
+                              ? "border-borderSoft/70 bg-slate-950/35 text-slate-300"
+                              : "border-borderSoft/40 bg-slate-950/20 text-slate-500 opacity-70 hover:border-accent/30 hover:text-slate-300",
+                            item.isBase ? "" : "cursor-pointer",
+                          ].filter(Boolean).join(" ");
+                          const chipContent = (
+                            <>
+                              <span
+                                aria-hidden="true"
+                                className={`h-2.5 w-2.5 shrink-0 rounded-full ${active ? "" : "opacity-40"}`}
+                                style={{ backgroundColor: item.color, boxShadow: `0 0 0 1px ${item.color}66` }}
+                              />
+                              <span className={`truncate font-semibold ${active ? "text-slate-100" : "text-slate-400"}`}>{item.ticker}</span>
+                              <span className="text-slate-500">{item.label}</span>
+                            </>
+                          );
+                          return item.isBase ? (
                             <span
-                              aria-hidden="true"
-                              className="h-2.5 w-2.5 shrink-0 rounded-full"
-                              style={{ backgroundColor: item.color, boxShadow: `0 0 0 1px ${item.color}66` }}
-                            />
-                            <span className="truncate font-semibold text-slate-100">{item.ticker}</span>
-                            <span className="text-slate-500">{item.label}</span>
-                          </span>
-                        ))}
+                              key={`perplexity-compare-legend-${item.ticker}`}
+                              className={chipClassName}
+                              title={`${item.ticker} ${item.label} always shown`}
+                            >
+                              {chipContent}
+                            </span>
+                          ) : (
+                            <button
+                              key={`perplexity-compare-legend-${item.ticker}`}
+                              type="button"
+                              aria-pressed={item.selected}
+                              aria-label={`${item.selected ? "Remove" : "Add"} ${item.ticker} comparison`}
+                              className={chipClassName}
+                              title={`${item.selected ? "Remove" : "Add"} ${item.ticker} comparison`}
+                              onClick={() => togglePerplexityCompareTicker(item.ticker)}
+                            >
+                              {chipContent}
+                            </button>
+                          );
+                        })}
                       </div>
                       <div className="mt-3 h-[28rem] min-h-[22rem] overflow-hidden rounded border border-borderSoft/70 bg-slate-950/20">
                         <PerplexityComparisonChart
-                          items={perplexityCompareLegendItems}
+                          items={perplexityCompareChartItems}
                           mode={perplexityComparePosition}
                           timeframe={perplexityCompareTimeframe}
                         />

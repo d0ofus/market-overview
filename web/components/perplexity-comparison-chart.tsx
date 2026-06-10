@@ -34,20 +34,37 @@ type LoadedSeries = {
 };
 
 type ChartRow = Record<string, number | string | null> & { date: string };
+export type PerplexityComparisonTimeframe = Exclude<TickerSeriesTimeframe, "MAX"> | "5Y";
 
 const CHART_GRID_COLOR = "rgba(148,163,184,0.12)";
 const CHART_AXIS_COLOR = "#94a3b8";
-const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  day: "2-digit",
+  month: "short",
+  year: "2-digit",
+  timeZone: "UTC",
+});
+const TIMEFRAME_MONTHS: Record<PerplexityComparisonTimeframe, number> = {
+  "1M": 1,
+  "3M": 3,
+  "6M": 6,
+  "1Y": 12,
+  "2Y": 24,
+  "5Y": 60,
+};
 
 function normalizeTicker(value: string): string {
   return value.trim().toUpperCase();
 }
 
-function formatDate(value: string, includeYear = false): string {
+function formatDate(value: string, _includeYear = false): string {
   const parsed = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return value;
-  const label = `${parsed.getUTCDate()}-${MONTH_LABELS[parsed.getUTCMonth()]}`;
-  return includeYear ? `${label}-${parsed.getUTCFullYear()}` : label;
+  const parts = DATE_FORMATTER.formatToParts(parsed);
+  const day = parts.find((part) => part.type === "day")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const year = parts.find((part) => part.type === "year")?.value;
+  return day && month && year ? `${day}-${month}-${year}` : value;
 }
 
 function formatPrice(value: number): string {
@@ -93,6 +110,52 @@ function uniqueItems(items: ComparisonItem[]): ComparisonItem[] {
     unique.push({ ticker, color: item.color });
   }
   return unique;
+}
+
+function formatIsoDate(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function latestSeriesDate(series: LoadedSeries[]): string | null {
+  let latest: string | null = null;
+  for (const item of series) {
+    for (const row of item.rows) {
+      if (!latest || row.date > latest) latest = row.date;
+    }
+  }
+  return latest;
+}
+
+function timeframeStartDate(anchorDate: string, timeframe: PerplexityComparisonTimeframe): string | null {
+  const anchor = new Date(`${anchorDate}T00:00:00Z`);
+  if (Number.isNaN(anchor.getTime())) return null;
+  const months = TIMEFRAME_MONTHS[timeframe];
+  const firstOfTargetMonth = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() - months, 1));
+  const targetYear = firstOfTargetMonth.getUTCFullYear();
+  const targetMonth = firstOfTargetMonth.getUTCMonth();
+  const lastTargetDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const targetDay = Math.min(anchor.getUTCDate(), lastTargetDay);
+  return formatIsoDate(new Date(Date.UTC(targetYear, targetMonth, targetDay)));
+}
+
+function filterSeriesByTimeframe(series: LoadedSeries[], timeframe: PerplexityComparisonTimeframe): LoadedSeries[] {
+  const anchorDate = latestSeriesDate(series);
+  if (!anchorDate) return series;
+  const startDate = timeframeStartDate(anchorDate, timeframe);
+  if (!startDate) return series;
+  return series
+    .map((item) => ({
+      ...item,
+      rows: item.rows.filter((row) => row.date >= startDate && row.date <= anchorDate),
+    }))
+    .filter((item) => item.rows.length > 0);
+}
+
+function requestTimeframe(timeframe: PerplexityComparisonTimeframe): TickerSeriesTimeframe {
+  return timeframe === "5Y" ? "MAX" : timeframe;
 }
 
 function buildRows(series: LoadedSeries[], mode: TradingViewComparePosition): ChartRow[] {
@@ -256,7 +319,7 @@ export function PerplexityComparisonChart({
 }: {
   items: ComparisonItem[];
   mode: TradingViewComparePosition;
-  timeframe: TickerSeriesTimeframe;
+  timeframe: PerplexityComparisonTimeframe;
 }) {
   const chartItems = useMemo(() => uniqueItems(items), [items]);
   const tickersKey = chartItems.map((item) => item.ticker).join(",");
@@ -274,7 +337,7 @@ export function PerplexityComparisonChart({
       setHistoryMessages([]);
       const results = await Promise.all(chartItems.map(async (item) => {
         try {
-          const data = await getTicker(item.ticker, timeframe);
+          const data = await getTicker(item.ticker, requestTimeframe(timeframe));
           return {
             ok: true as const,
             item,
@@ -321,7 +384,8 @@ export function PerplexityComparisonChart({
     };
   }, [chartItems, tickersKey, timeframe]);
 
-  const rows = useMemo(() => buildRows(series, mode), [mode, series]);
+  const visibleSeries = useMemo(() => filterSeriesByTimeframe(series, timeframe), [series, timeframe]);
+  const rows = useMemo(() => buildRows(visibleSeries, mode), [mode, visibleSeries]);
 
   if (loading && series.length === 0) {
     return (
@@ -332,7 +396,7 @@ export function PerplexityComparisonChart({
     );
   }
 
-  if (series.length === 0 || rows.length === 0) {
+  if (visibleSeries.length === 0 || rows.length === 0) {
     return <EmptyState message="No stored comparison series are available for the selected tickers." />;
   }
 
@@ -342,12 +406,12 @@ export function PerplexityComparisonChart({
         {mode === "NewPane" ? (
           <div className="h-full overflow-auto p-3">
             <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              {series.map((item) => <PaneChart key={item.ticker} item={item} />)}
+              {visibleSeries.map((item) => <PaneChart key={item.ticker} item={item} />)}
             </div>
           </div>
         ) : (
           <div className="h-full min-h-[18rem] p-2">
-            <MultiLineChart items={series} rows={rows} mode={mode} />
+            <MultiLineChart items={visibleSeries} rows={rows} mode={mode} />
           </div>
         )}
       </div>
