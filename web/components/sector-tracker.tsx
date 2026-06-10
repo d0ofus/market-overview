@@ -1028,6 +1028,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                       const isDragging = draggedFocusNarrative === row.sectorName;
                       const isDropTarget = focusDropTarget?.sectorName === row.sectorName;
                       const canReorder = focusNarrativeRows.length > 1;
+                      const hasFocusComment = Boolean(row.comment?.trim());
+                      const isEditingComment = editingFocusComment === row.sectorName;
                       return (
                         <div
                           key={`focus-narrative-${row.id}`}
@@ -1103,6 +1105,16 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                             ) : null}
                             <button
                               type="button"
+                              className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => startEditingFocusComment(row)}
+                              disabled={focusNarrativeSaving}
+                              aria-label={`${hasFocusComment ? "Edit" : "Add"} comment for ${row.sectorName}`}
+                              title={hasFocusComment ? "Edit comment" : "Add comment"}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
                               className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
                               onClick={() => void removeFocusNarrative(row.sectorName)}
                               disabled={focusNarrativeSaving}
@@ -1113,58 +1125,46 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                             </button>
                           </div>
 
-                          <div className="border-t border-borderSoft/60 bg-slate-950/10 px-3 py-2">
-                            {editingFocusComment === row.sectorName ? (
-                              <div className="space-y-2">
-                                <textarea
-                                  className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
-                                  value={focusCommentDraft}
-                                  onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
-                                  placeholder="Add a comment..."
-                                  maxLength={FOCUS_COMMENT_MAX_LENGTH}
-                                  disabled={focusNarrativeSaving}
-                                  aria-label={`Comment for ${row.sectorName}`}
-                                />
-                                <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-                                    onClick={cancelEditingFocusComment}
+                          {isEditingComment || hasFocusComment ? (
+                            <div className="border-t border-borderSoft/60 bg-slate-950/10 px-3 py-2">
+                              {isEditingComment ? (
+                                <div className="space-y-2">
+                                  <textarea
+                                    className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
+                                    value={focusCommentDraft}
+                                    onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
+                                    placeholder="Add a comment..."
+                                    maxLength={FOCUS_COMMENT_MAX_LENGTH}
                                     disabled={focusNarrativeSaving}
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
-                                    onClick={() => void saveFocusComment(row.sectorName)}
-                                    disabled={focusNarrativeSaving}
-                                  >
-                                    <Check className="h-3.5 w-3.5" />
-                                    {focusNarrativeSaving ? "Saving" : "Save"}
-                                  </button>
+                                    aria-label={`Comment for ${row.sectorName}`}
+                                  />
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={cancelEditingFocusComment}
+                                      disabled={focusNarrativeSaving}
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={() => void saveFocusComment(row.sectorName)}
+                                      disabled={focusNarrativeSaving}
+                                    >
+                                      <Check className="h-3.5 w-3.5" />
+                                      {focusNarrativeSaving ? "Saving" : "Save"}
+                                    </button>
+                                  </div>
                                 </div>
-                              </div>
-                            ) : (
-                              <div className="flex min-h-9 items-start justify-between gap-2">
-                                {row.comment?.trim() ? (
-                                  <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
-                                ) : (
-                                  <p className="min-w-0 text-xs leading-relaxed text-slate-500">No comment yet.</p>
-                                )}
-                                <button
-                                  type="button"
-                                  className={`${ICON_BUTTON_CLASS} shrink-0`}
-                                  onClick={() => startEditingFocusComment(row)}
-                                  disabled={focusNarrativeSaving}
-                                  aria-label={`${row.comment?.trim() ? "Edit" : "Add"} comment for ${row.sectorName}`}
-                                  title={row.comment?.trim() ? "Edit comment" : "Add comment"}
-                                >
-                                  <Pencil className="h-3 w-3" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                              ) : (
+                                <div className="min-h-9">
+                                  <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
