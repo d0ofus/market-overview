@@ -781,6 +781,13 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     [focusNarratives, sectorNarrativeOptions],
   );
   const focusNarrativeNames = useMemo(() => focusNarrativeRows.map((row) => row.sectorName), [focusNarrativeRows]);
+  const activeFocusNarrativeRow = useMemo(
+    () =>
+      activeNarrativeCollection?.mode === "focus"
+        ? focusNarrativeRows.find((row) => row.sectorName === activeNarrativeCollection.sectorName) ?? null
+        : null,
+    [activeNarrativeCollection?.mode, activeNarrativeCollection?.sectorName, focusNarrativeRows],
+  );
   const availableFocusNarrativeOptions = useMemo(() => {
     const focused = new Set(focusNarrativeNames);
     return sectorNarrativeOptions.filter((name) => !focused.has(name));
@@ -918,6 +925,86 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
       mode: "focus",
     });
     setNarrativePage(1);
+  };
+
+  const closeNarrativeCollection = () => {
+    if (activeNarrativeCollection?.mode === "focus" && editingFocusComment === activeNarrativeCollection.sectorName) {
+      cancelEditingFocusComment();
+    }
+    setActiveNarrativeCollection(null);
+  };
+
+  const renderFocusNarrativePopupComment = (row: SectorFocusNarrative) => {
+    const hasComment = Boolean(row.comment?.trim());
+    const isEditingComment = editingFocusComment === row.sectorName;
+
+    if (!isEditingComment && !hasComment) {
+      return (
+        <div className="flex h-full items-start justify-end md:justify-center">
+          <button
+            type="button"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-borderSoft/70 bg-panelSoft/35 text-slate-300 transition hover:bg-accent/10 hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => startEditingFocusComment(row)}
+            disabled={focusNarrativeSaving}
+            aria-label={`Add comment for ${row.sectorName}`}
+            title="Add comment"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="rounded-2xl border border-borderSoft/60 bg-panel/55 px-3 py-2">
+        {isEditingComment ? (
+          <div className="space-y-2">
+            <textarea
+              className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
+              value={focusCommentDraft}
+              onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
+              placeholder="Add a comment..."
+              maxLength={FOCUS_COMMENT_MAX_LENGTH}
+              disabled={focusNarrativeSaving}
+              aria-label={`Comment for ${row.sectorName}`}
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={cancelEditingFocusComment}
+                disabled={focusNarrativeSaving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void saveFocusComment(row.sectorName)}
+                disabled={focusNarrativeSaving}
+              >
+                <Check className="h-3.5 w-3.5" />
+                {focusNarrativeSaving ? "Saving" : "Save"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start justify-between gap-3">
+            <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-borderSoft/70 bg-panelSoft/35 text-slate-300 transition hover:bg-accent/10 hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => startEditingFocusComment(row)}
+              disabled={focusNarrativeSaving}
+              aria-label={`Edit comment for ${row.sectorName}`}
+              title="Edit comment"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const toggleSuggestedTicker = (ticker: string) => {
@@ -1877,11 +1964,12 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
+          headerMiddleSlot={activeFocusNarrativeRow ? renderFocusNarrativePopupComment(activeFocusNarrativeRow) : undefined}
           maxColumns={3}
           warning={narrativeMetricsWarning ? `Snapshot metrics warning: ${narrativeMetricsWarning}` : null}
           emptyMessage={activeNarrativeCollection.mode === "focus" ? "No prior tickers found for this narrative yet." : "No tickers are attached to this narrative entry yet."}
           onPageChange={setNarrativePage}
-          onClose={() => setActiveNarrativeCollection(null)}
+          onClose={closeNarrativeCollection}
           onExpandChart={openExpandedChart}
         />
       ) : null}
