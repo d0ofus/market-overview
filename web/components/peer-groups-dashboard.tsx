@@ -23,6 +23,7 @@ import {
 } from "@/lib/api";
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
+import { PeerGroupFilterPicker } from "./peer-groups/peer-group-filter-picker";
 import { PerplexityComparisonChart, type PerplexityComparisonTimeframe } from "./perplexity-comparison-chart";
 import { TickerMultiGrid } from "./ticker-multi-grid";
 import type { TradingViewComparePosition } from "./tradingview-widget";
@@ -927,7 +928,7 @@ export function PeerGroupsDashboard() {
   return (
     <div className="space-y-4">
       <div className="card scroll-mt-4 p-3" ref={searchPanelRef}>
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),14rem,auto]">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),18rem,auto]">
           <label className="text-xs text-slate-300">
             Search ticker or company
             <div className="mt-1 flex items-center rounded border border-borderSoft bg-panelSoft px-2">
@@ -947,24 +948,15 @@ export function PeerGroupsDashboard() {
               />
             </div>
           </label>
-          <label className="text-xs text-slate-300">
-            Filter by peer group
-            <select
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-2 text-sm"
-              value={groupFilter}
-              onChange={(event) => {
-                setGroupFilter(event.target.value);
-                setOffset(0);
-              }}
-            >
-              <option value="">All Groups</option>
-              {groups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <PeerGroupFilterPicker
+            groups={groups}
+            value={groupFilter}
+            onChange={(nextGroupId) => {
+              setGroupFilter(nextGroupId);
+              setOffset(0);
+            }}
+            disabled={loadingDirectory}
+          />
           <div className="flex flex-wrap items-end gap-2">
             <button
               className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent"
