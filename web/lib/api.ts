@@ -2076,6 +2076,7 @@ export type PeerMetricRow = {
   ticker: string;
   price: number | null;
   change1d: number | null;
+  change1w: number | null;
   marketCap: number | null;
   avgVolume: number | null;
   asOf: string;
@@ -2399,6 +2400,16 @@ export type SectorFocusNarrativeUpdate = {
   comment?: string | null;
 };
 
+export type SectorMarketLeaderRow = {
+  ticker: string;
+  name: string | null;
+  sourcePeerGroupId: string | null;
+  sourcePeerGroupName: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export function getSectorFocusNarratives() {
   return getJson<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives");
 }
@@ -2407,6 +2418,23 @@ export function updateSectorFocusNarratives(focusNarratives: SectorFocusNarrativ
   return adminFetch<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives", {
     method: "PUT",
     body: JSON.stringify({ focusNarratives }),
+  });
+}
+
+export function getSectorMarketLeaders() {
+  return getJson<{ rows: SectorMarketLeaderRow[] }>("/api/sectors/market-leaders");
+}
+
+export function addSectorMarketLeaders(payload: { tickers: string[]; sourcePeerGroupId?: string | null }) {
+  return adminFetch<{ ok: boolean; rows: SectorMarketLeaderRow[] }>("/api/sectors/market-leaders", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteSectorMarketLeader(ticker: string) {
+  return adminFetch<{ ok: boolean; ticker: string }>(`/api/sectors/market-leaders/${encodeURIComponent(ticker)}`, {
+    method: "DELETE",
   });
 }
 

@@ -779,6 +779,58 @@ function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
 }
 
+function normalizeLeaderTickers(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return Array.from(new Set(
+    values
+      .map((value) => (typeof value === "string" ? value.trim().toUpperCase() : ""))
+      .filter((ticker) => /^[A-Z0-9.\-^]{1,20}$/.test(ticker)),
+  ));
+}
+
+async function listSectorMarketLeaders(env: Env): Promise<Array<{
+  ticker: string;
+  name: string | null;
+  sourcePeerGroupId: string | null;
+  sourcePeerGroupName: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}>> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       ml.ticker,
+       s.name,
+       ml.source_peer_group_id as sourcePeerGroupId,
+       pg.name as sourcePeerGroupName,
+       ml.sort_order as sortOrder,
+       ml.created_at as createdAt,
+       ml.updated_at as updatedAt
+     FROM sector_market_leaders ml
+     LEFT JOIN symbols s ON s.ticker = ml.ticker
+     LEFT JOIN peer_groups pg ON pg.id = ml.source_peer_group_id
+     ORDER BY ml.sort_order ASC, ml.created_at ASC, ml.ticker ASC`,
+  ).all<{
+    ticker: string;
+    name: string | null;
+    sourcePeerGroupId: string | null;
+    sourcePeerGroupName: string | null;
+    sortOrder: number;
+    createdAt: string;
+    updatedAt: string;
+  }>();
+
+  return (rows.results ?? []).map((row) => ({
+    ticker: row.ticker.toUpperCase(),
+    name: row.name ?? null,
+    sourcePeerGroupId: row.sourcePeerGroupId ?? null,
+    sourcePeerGroupName: row.sourcePeerGroupName ?? null,
+    sortOrder: Number(row.sortOrder ?? 0),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }));
+}
+
 const EQUAL_WEIGHT_US_INDEX_ETFS = [
   { ticker: "RSP", instrumentName: "Invesco S&P 500 Equal Weight ETF" },
   { ticker: "QQQE", instrumentName: "Direxion NASDAQ-100 Equal Weighted Index Shares" },
@@ -2454,6 +2506,73 @@ app.put("/api/sectors/focus-narratives", async (c) => {
     "SELECT id, sector_name as sectorName, sort_order as sortOrder, COALESCE(comment_text, '') as comment, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
   ).all();
   return c.json({ rows: rows.results ?? [] });
+});
+
+app.get("/api/sectors/market-leaders", async (c) => {
+  const rows = await listSectorMarketLeaders(c.env);
+  return c.json({ rows });
+});
+
+app.post("/api/sectors/market-leaders", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as { tickers?: unknown; sourcePeerGroupId?: unknown };
+  if (!Array.isArray(body.tickers)) return c.json({ error: "tickers must be an array" }, 400);
+
+  const tickers = normalizeLeaderTickers(body.tickers);
+  if (tickers.length === 0) return c.json({ error: "At least one valid ticker is required." }, 400);
+
+  const sourcePeerGroupId = typeof body.sourcePeerGroupId === "string" && body.sourcePeerGroupId.trim()
+    ? body.sourcePeerGroupId.trim()
+    : null;
+  if (sourcePeerGroupId) {
+    const group = await c.env.DB.prepare("SELECT id FROM peer_groups WHERE id = ? LIMIT 1")
+      .bind(sourcePeerGroupId)
+      .first<{ id: string }>();
+    if (!group) return c.json({ error: "Peer group not found." }, 400);
+  }
+
+  const orderRow = await c.env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM sector_market_leaders")
+    .first<{ maxSort: number }>();
+  const nextSortOrder = Number(orderRow?.maxSort ?? 0) + 1;
+
+  const symbolUpserts = await Promise.all(
+    tickers.map(async (ticker) => {
+      const meta = await resolveTickerMeta(ticker, c.env).catch(() => null);
+      return c.env.DB.prepare(
+        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(
+        ticker,
+        meta?.name ?? ticker,
+        meta?.exchange ?? null,
+        meta?.assetClass ?? "equity",
+        null,
+        null,
+      );
+    }),
+  );
+  const leaderInserts = tickers.map((ticker, index) =>
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO sector_market_leaders (ticker, source_peer_group_id, sort_order) VALUES (?, ?, ?)",
+    ).bind(ticker, sourcePeerGroupId, nextSortOrder + index),
+  );
+  await c.env.DB.batch([...symbolUpserts, ...leaderInserts]);
+
+  const rows = await listSectorMarketLeaders(c.env);
+  return c.json({ ok: true, rows });
+});
+
+app.delete("/api/sectors/market-leaders/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = c.req.param("ticker").trim().toUpperCase();
+  if (!/^[A-Z0-9.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Invalid ticker" }, 400);
+  const existing = await c.env.DB.prepare("SELECT ticker FROM sector_market_leaders WHERE ticker = ? LIMIT 1")
+    .bind(ticker)
+    .first<{ ticker: string }>();
+  if (!existing) return c.json({ error: "Market leader not found." }, 404);
+  await c.env.DB.prepare("DELETE FROM sector_market_leaders WHERE ticker = ?")
+    .bind(ticker)
+    .run();
+  return c.json({ ok: true, ticker });
 });
 
 app.get("/api/sectors/symbol-options", async (c) => {

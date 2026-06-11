@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { buildPeerMetricRows, loadSharesOutstandingMap } from "../src/peer-metrics-service";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildPeerMetricRows, loadPeerMetrics, loadSharesOutstandingMap } from "../src/peer-metrics-service";
 
 describe("peer metrics service", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("builds market cap and average volume from Alpaca-backed inputs", () => {
     const rows = buildPeerMetricRows(
       ["AAPL", "MSFT"],
@@ -124,5 +128,33 @@ describe("peer metrics service", () => {
     expect(sharesByTicker.size).toBe(401);
     expect(sharesByTicker.get("T001")).toBe(1000);
     expect(prepareCalls.filter((sql) => sql.includes("shares_outstanding")).length).toBe(9);
+  });
+
+  it("maps TradingView weekly performance into change1w", async () => {
+    let requestedColumns: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { columns?: string[]; symbols?: { tickers?: string[] } };
+      requestedColumns = body.columns ?? [];
+      const symbol = body.symbols?.tickers?.find((ticker) => ticker.endsWith(":AAPL")) ?? "NASDAQ:AAPL";
+      return new Response(JSON.stringify({
+        data: [
+          {
+            s: symbol,
+            d: [200, 1.25, 3_000_000_000_000, 55_000_000, 4.75],
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const result = await loadPeerMetrics({} as never, [{ ticker: "AAPL", exchange: "NASDAQ" }]);
+
+    expect(requestedColumns).toContain("Perf.W");
+    expect(result.rows[0]).toMatchObject({
+      ticker: "AAPL",
+      change1w: 4.75,
+    });
   });
 });
