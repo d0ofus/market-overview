@@ -1976,6 +1976,22 @@ export type PerplexityFinancePeerLookup = {
   };
 };
 
+export type PerplexityFinanceNotableMovementLookup = {
+  ticker: string;
+  fetchedAt: string;
+  source: "perplexity_finance_page";
+  url: string;
+  notablePriceMovement: string | null;
+  status: "ready" | "blocked" | "not_found" | "parse_error" | "pending_timeout";
+  warning: string | null;
+  diagnostics: {
+    provider: "browserbase" | "local_chromium";
+    bodyState: string;
+    matchedSelector: string | null;
+    observedHeadings: string[];
+  };
+};
+
 export type PerplexityBrowserbaseVerificationSession = {
   ok: true;
   sessionId: string;
@@ -3546,6 +3562,28 @@ export async function getPerplexityFinancePeers(ticker: string, options?: { refr
     throw new Error(`Perplexity Finance lookup failed: ${res.status}${detail}`);
   }
   return (await res.json()) as PerplexityFinancePeerLookup;
+}
+
+export async function getPerplexityFinanceNotableMovement(ticker: string, options?: { refresh?: boolean }) {
+  const path = appendQuery("/api/perplexity-finance/notable-movement", {
+    ticker,
+    refresh: options?.refresh ? 1 : undefined,
+  });
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`Perplexity Finance notable movement lookup failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as PerplexityFinanceNotableMovementLookup;
 }
 
 export async function createPerplexityBrowserbaseVerificationSession() {

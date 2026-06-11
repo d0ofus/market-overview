@@ -23,6 +23,12 @@ export type PerplexityFinancePeer = {
   rawText: string;
 };
 
+export type PerplexityNotablePriceMovementParseResult = {
+  notablePriceMovement: string | null;
+  matchedSelector: string | null;
+  observedHeadings: string[];
+};
+
 const TICKER_PATTERN = /^[A-Z0-9]{1,8}(?:[.-][A-Z0-9]{1,5})?$/;
 const SECURITY_PATTERN = /Performing security verification|security service to protect|Checking your browser|Just a moment|Enable JavaScript and cookies/i;
 const NOT_FOUND_PATTERN = /404 Page Not Found|Quote not found|Profile not found|No finance page found/i;
@@ -30,6 +36,12 @@ const PENDING_PATTERN = /Analy[sz]ing list|Analy[sz]ing\.\.\.|Loading\.\.\./i;
 const BAD_PEER_CONTEXT_PATTERN = /Create Watchlist|Equity Sectors|Popular Cryptocurrencies|Fixed Income|Financial information provided by/i;
 const PRICE_OR_PERCENT_PATTERN = /(?:[$€£¥₹A-Z]{0,4}\s?\d[\d,.]*|\d+(?:\.\d+)?%)/;
 const MARKET_COMMENTARY_PATTERN = /\b(rose|fell|rallied|declined|shares|stock|price target|after-hours|at close|closed|outperforming|underperforming|session|trading)\b/i;
+const NOTABLE_MOVEMENT_HEADING_PATTERN = /^(?:notable\s+)?price\s+movement$|^notable\s+movement$/i;
+const NOTABLE_MOVEMENT_INLINE_HEADING_PATTERN = /^(?:(?:notable\s+)?price\s+movement|notable\s+movement)\s*:?\s+/i;
+const NOTABLE_MOVEMENT_STOP_PATTERN =
+  /^(?:sources?|citations?|references?|company profile|profile|about|key stats|statistics|financials?|peers?|similar stocks|related stocks|latest news|news|earnings|analyst ratings|forecast|overview|events|historical data|dividends?|sec filings?|financial information provided by)$/i;
+const NOTABLE_MOVEMENT_NOISE_PATTERN =
+  /^(?:follow|share|search|sign in|log in|create watchlist|add to watchlist|compare|copied|open|expand|show more|read more|ask follow-up)$/i;
 
 export function cleanText(value: unknown): string {
   return String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
@@ -73,6 +85,93 @@ export function parseJsonPayload(text: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function isNotableMovementHeading(line: string): boolean {
+  return NOTABLE_MOVEMENT_HEADING_PATTERN.test(cleanText(line));
+}
+
+function notableMovementInlineRemainder(line: string): string | null {
+  const clean = cleanText(line);
+  if (!NOTABLE_MOVEMENT_INLINE_HEADING_PATTERN.test(clean)) return null;
+  const remainder = clean.replace(NOTABLE_MOVEMENT_INLINE_HEADING_PATTERN, "").trim();
+  return remainder.length > 0 ? remainder : null;
+}
+
+function isSourceOrCitationLine(line: string): boolean {
+  const clean = cleanText(line);
+  return (
+    NOTABLE_MOVEMENT_STOP_PATTERN.test(clean)
+    || /^\d+\s+sources?$/i.test(clean)
+    || /^source:/i.test(clean)
+    || /^\[\d+\]/.test(clean)
+    || /^financial information provided by/i.test(clean)
+  );
+}
+
+function isObservedHeadingLine(line: string): boolean {
+  const clean = cleanText(line);
+  if (!clean || clean.length > 90) return false;
+  if (isNotableMovementHeading(clean) || NOTABLE_MOVEMENT_STOP_PATTERN.test(clean)) return true;
+  if (!/[A-Za-z]/.test(clean) || /[.!?]$/.test(clean)) return false;
+  if (PRICE_OR_PERCENT_PATTERN.test(clean) && clean.split(/\s+/).length > 3) return false;
+  return /^[A-Z0-9][A-Za-z0-9&/(),.' -]+$/.test(clean) && /[A-Z]/.test(clean.slice(1));
+}
+
+function isNotableMovementBoundary(line: string): boolean {
+  const clean = cleanText(line);
+  if (!clean) return true;
+  if (isSourceOrCitationLine(clean) || NOTABLE_MOVEMENT_NOISE_PATTERN.test(clean)) return true;
+  return isObservedHeadingLine(clean) && !MARKET_COMMENTARY_PATTERN.test(clean);
+}
+
+export function parseNotablePriceMovementFromText(bodyText: string): PerplexityNotablePriceMovementParseResult {
+  const lines = bodyText.split(/\n+/).map(cleanLine).filter(Boolean);
+  const observedHeadings = Array.from(new Set(lines.filter(isObservedHeadingLine).map(cleanText))).slice(0, 40);
+  let headingIndex = -1;
+  let inlineRemainder: string | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = cleanText(lines[index]);
+    if (isNotableMovementHeading(line)) {
+      headingIndex = index;
+      break;
+    }
+    const remainder = notableMovementInlineRemainder(line);
+    if (remainder) {
+      headingIndex = index;
+      inlineRemainder = remainder;
+      break;
+    }
+  }
+
+  if (headingIndex < 0) {
+    return {
+      notablePriceMovement: null,
+      matchedSelector: null,
+      observedHeadings,
+    };
+  }
+
+  const paragraphParts: string[] = [];
+  if (inlineRemainder && !isNotableMovementBoundary(inlineRemainder)) {
+    paragraphParts.push(inlineRemainder);
+  }
+
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    const line = cleanText(lines[index]);
+    if (!line || isNotableMovementHeading(line) || NOTABLE_MOVEMENT_NOISE_PATTERN.test(line)) continue;
+    if (isNotableMovementBoundary(line)) break;
+    paragraphParts.push(line);
+    if (cleanText(paragraphParts.join(" ")).length > 3_000) break;
+  }
+
+  const notablePriceMovement = cleanText(paragraphParts.join(" "));
+  return {
+    notablePriceMovement: notablePriceMovement || null,
+    matchedSelector: inlineRemainder ? "text:inline-notable-price-movement" : `text:${cleanText(lines[headingIndex])}`,
+    observedHeadings,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

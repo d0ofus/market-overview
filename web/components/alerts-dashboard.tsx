@@ -1,15 +1,17 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BarChart3, Loader2, Maximize2, RefreshCw } from "lucide-react";
+import { Activity, BarChart3, Loader2, Maximize2, RefreshCw } from "lucide-react";
 import {
   getAlertNews,
   getAlerts,
   getAlertTickerDays,
+  getPerplexityFinanceNotableMovement,
   type AlertLogRow,
   type AlertNewsRow,
   type AlertTickerDayRow,
   type AlertsSessionFilter,
+  type PerplexityFinanceNotableMovementLookup,
 } from "@/lib/api";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
@@ -236,6 +238,87 @@ function NewsList({
   );
 }
 
+type MovementCardState = {
+  open: boolean;
+  loading: boolean;
+  data: PerplexityFinanceNotableMovementLookup | null;
+  error: string | null;
+};
+
+function movementStatusClass(status: PerplexityFinanceNotableMovementLookup["status"] | "loading" | "empty"): string {
+  if (status === "ready") return "border-pos/40 bg-pos/10 text-pos";
+  if (status === "blocked" || status === "parse_error") return "border-red-500/40 bg-red-900/20 text-red-200";
+  if (status === "pending_timeout") return "border-yellow-600/50 bg-yellow-900/20 text-yellow-200";
+  return "border-borderSoft/70 bg-panelSoft/35 text-slate-300";
+}
+
+function MovementExpansion({
+  ticker,
+  state,
+  onRefresh,
+}: {
+  ticker: string;
+  state: MovementCardState;
+  onRefresh: () => void;
+}) {
+  const data = state.data;
+  const status = state.loading && !data ? "loading" : data?.status ?? "empty";
+  const sourceUrl = data?.url ?? `https://www.perplexity.ai/finance/${encodeURIComponent(ticker)}`;
+
+  return (
+    <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-slate-100">Notable Price Movement</h4>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            <span className={`rounded-full border px-2 py-0.5 font-medium ${movementStatusClass(status)}`}>
+              {status === "loading" ? "loading" : status}
+            </span>
+            {data?.fetchedAt ? <span>Fetched {formatDateTime(data.fetchedAt)}</span> : null}
+            {data?.diagnostics?.bodyState ? <span>Body {data.diagnostics.bodyState}</span> : null}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-200 transition hover:bg-panelSoft/55 disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={onRefresh}
+          disabled={state.loading}
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+
+      {state.loading && !data ? (
+        <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading visible Perplexity text...
+        </div>
+      ) : null}
+      {state.error ? (
+        <div className="mt-3 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
+          {state.error}
+        </div>
+      ) : null}
+      {data?.warning ? (
+        <div className="mt-3 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
+          {data.warning}
+        </div>
+      ) : null}
+      {data?.notablePriceMovement ? (
+        <p className="mt-3 text-sm leading-relaxed text-slate-200">{data.notablePriceMovement}</p>
+      ) : data && !state.loading && !state.error ? (
+        <p className="mt-3 text-sm leading-relaxed text-slate-400">No visible Notable Price Movement paragraph was found.</p>
+      ) : null}
+      <div className="mt-3 break-all text-[11px] text-slate-500">
+        <a href={sourceUrl} target="_blank" rel="noreferrer" className="hover:text-slate-300">
+          {sourceUrl}
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export function AlertsDashboard() {
   const [startDate, setStartDate] = useState(defaultStartDate());
   const [endDate, setEndDate] = useState(defaultEndDate());
@@ -252,6 +335,7 @@ export function AlertsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
   const [expandedGridNews, setExpandedGridNews] = useState<Set<string>>(new Set());
+  const [movementByKey, setMovementByKey] = useState<Record<string, MovementCardState>>({});
   const [activePeerTicker, setActivePeerTicker] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [activeChartRow, setActiveChartRow] = useState<AlertTickerDayRow | null>(null);
@@ -376,6 +460,72 @@ export function AlertsDashboard() {
       return next;
     });
   };
+
+  const loadMovement = useCallback(async (compoundKey: string, ticker: string, refresh = false) => {
+    setMovementByKey((current) => {
+      const existing = current[compoundKey];
+      return {
+        ...current,
+        [compoundKey]: {
+          open: true,
+          loading: true,
+          data: existing?.data ?? null,
+          error: null,
+        },
+      };
+    });
+    try {
+      const response = await getPerplexityFinanceNotableMovement(ticker, { refresh });
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          open: true,
+          loading: false,
+          data: response,
+          error: null,
+        },
+      }));
+    } catch (movementError) {
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        return {
+          ...current,
+          [compoundKey]: {
+            open: true,
+            loading: false,
+            data: existing?.data ?? null,
+            error: movementError instanceof Error ? movementError.message : "Failed to load notable price movement.",
+          },
+        };
+      });
+    }
+  }, []);
+
+  const toggleMovement = useCallback((row: { ticker: string; tradingDay: string }) => {
+    const compoundKey = keyFor(row.ticker, row.tradingDay);
+    const existing = movementByKey[compoundKey];
+    if (existing?.open) {
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          open: false,
+        },
+      }));
+      return;
+    }
+    if (existing?.data || existing?.loading) {
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          open: true,
+        },
+      }));
+      return;
+    }
+    void loadMovement(compoundKey, row.ticker);
+  }, [loadMovement, movementByKey]);
 
   const onSelectRow = (row: { ticker: string; tradingDay: string }) => {
     setSelectedKey(keyFor(row.ticker, row.tradingDay));
@@ -588,6 +738,8 @@ export function AlertsDashboard() {
                   const compoundKey = keyFor(row.ticker, row.tradingDay);
                   const description = alertDescriptionByTickerDay.get(compoundKey) ?? "-";
                   const gridNewsOpen = expandedGridNews.has(compoundKey);
+                  const movementState = movementByKey[compoundKey];
+                  const movementOpen = movementState?.open ?? false;
                   const isSelected = selectedKey === compoundKey;
                   return (
                     <div
@@ -661,6 +813,18 @@ export function AlertsDashboard() {
                             <BarChart3 className="h-3.5 w-3.5" />
                             Fundamentals
                           </button>
+                          <button
+                            type="button"
+                            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
+                              movementOpen
+                                ? "border-accent/45 bg-accent/15 text-accent"
+                                : "border-borderSoft/70 bg-panelSoft/35 text-slate-200 hover:bg-panelSoft/55"
+                            }`}
+                            onClick={() => toggleMovement(row)}
+                          >
+                            <Activity className="h-3.5 w-3.5" />
+                            Movement
+                          </button>
                         </div>
                         <button
                           type="button"
@@ -671,6 +835,13 @@ export function AlertsDashboard() {
                           Expand chart
                         </button>
                       </div>
+                      {movementOpen && movementState ? (
+                        <MovementExpansion
+                          ticker={row.ticker}
+                          state={movementState}
+                          onRefresh={() => void loadMovement(compoundKey, row.ticker, true)}
+                        />
+                      ) : null}
                       {gridNewsOpen ? (
                         <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
                           <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
