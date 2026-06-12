@@ -1,8 +1,9 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, BarChart3, Loader2, Maximize2, RefreshCw } from "lucide-react";
+import { Activity, BarChart3, ExternalLink, Loader2, Maximize2, RefreshCw, ShieldCheck } from "lucide-react";
 import {
+  createPerplexityBrowserbaseVerificationSession,
   getAlertNews,
   getAlerts,
   getAlertTickerDays,
@@ -243,6 +244,9 @@ type MovementCardState = {
   loading: boolean;
   data: PerplexityFinanceNotableMovementLookup | null;
   error: string | null;
+  verifying?: boolean;
+  verificationError?: string | null;
+  verificationUrl?: string | null;
 };
 
 function movementStatusClass(status: PerplexityFinanceNotableMovementLookup["status"] | "loading" | "empty"): string {
@@ -256,14 +260,17 @@ function MovementExpansion({
   ticker,
   state,
   onRefresh,
+  onVerify,
 }: {
   ticker: string;
   state: MovementCardState;
   onRefresh: () => void;
+  onVerify: () => void;
 }) {
   const data = state.data;
   const status = state.loading && !data ? "loading" : data?.status ?? "empty";
   const sourceUrl = data?.url ?? `https://www.perplexity.ai/finance/${encodeURIComponent(ticker)}`;
+  const canVerify = data?.status === "blocked" && data.diagnostics.provider === "browserbase";
 
   return (
     <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
@@ -288,11 +295,43 @@ function MovementExpansion({
           Refresh
         </button>
       </div>
+      {canVerify ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded border border-accent/40 bg-accent/15 px-2.5 py-1.5 text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={onVerify}
+            disabled={state.verifying}
+          >
+            {state.verifying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-3.5 w-3.5" />
+            )}
+            Verify session
+          </button>
+          {state.verificationUrl ? (
+            <a
+              href={state.verificationUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2.5 py-1.5 text-slate-300 transition hover:border-accent/40 hover:text-accent"
+            >
+              Live View <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
 
       {state.loading && !data ? (
         <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
           <Loader2 className="h-4 w-4 animate-spin" />
           Loading visible Perplexity text...
+        </div>
+      ) : null}
+      {state.verificationError ? (
+        <div className="mt-3 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
+          {state.verificationError}
         </div>
       ) : null}
       {state.error ? (
@@ -471,6 +510,9 @@ export function AlertsDashboard() {
           loading: true,
           data: existing?.data ?? null,
           error: null,
+          verifying: existing?.verifying ?? false,
+          verificationError: null,
+          verificationUrl: existing?.verificationUrl ?? null,
         },
       };
     });
@@ -483,6 +525,9 @@ export function AlertsDashboard() {
           loading: false,
           data: response,
           error: null,
+          verifying: current[compoundKey]?.verifying ?? false,
+          verificationError: null,
+          verificationUrl: current[compoundKey]?.verificationUrl ?? null,
         },
       }));
     } catch (movementError) {
@@ -495,6 +540,55 @@ export function AlertsDashboard() {
             loading: false,
             data: existing?.data ?? null,
             error: movementError instanceof Error ? movementError.message : "Failed to load notable price movement.",
+            verifying: existing?.verifying ?? false,
+            verificationError: existing?.verificationError ?? null,
+            verificationUrl: existing?.verificationUrl ?? null,
+          },
+        };
+      });
+    }
+  }, []);
+
+  const openMovementVerification = useCallback(async (compoundKey: string) => {
+    setMovementByKey((current) => {
+      const existing = current[compoundKey];
+      if (!existing) return current;
+      return {
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          verifying: true,
+          verificationError: null,
+        },
+      };
+    });
+    try {
+      const session = await createPerplexityBrowserbaseVerificationSession();
+      const verificationUrl = session.debuggerFullscreenUrl || session.debuggerUrl;
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        if (!existing) return current;
+        return {
+          ...current,
+          [compoundKey]: {
+            ...existing,
+            verifying: false,
+            verificationError: null,
+            verificationUrl,
+          },
+        };
+      });
+      window.open(verificationUrl, "_blank", "noopener,noreferrer");
+    } catch (verificationError) {
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        if (!existing) return current;
+        return {
+          ...current,
+          [compoundKey]: {
+            ...existing,
+            verifying: false,
+            verificationError: verificationError instanceof Error ? verificationError.message : "Failed to create Browserbase verification session.",
           },
         };
       });
@@ -840,6 +934,7 @@ export function AlertsDashboard() {
                           ticker={row.ticker}
                           state={movementState}
                           onRefresh={() => void loadMovement(compoundKey, row.ticker, true)}
+                          onVerify={() => void openMovementVerification(compoundKey)}
                         />
                       ) : null}
                       {gridNewsOpen ? (
