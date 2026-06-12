@@ -53,6 +53,10 @@ import {
   patternLabelPatchSchema,
   patternProfilePatchSchema,
   patternRunCreateSchema,
+  watchlistReviewBatchSchema,
+  watchlistReviewCandidatePatchSchema,
+  watchlistReviewExportSchema,
+  watchlistReviewRunCreateSchema,
   watchlistFactorConfigPatchSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
@@ -225,6 +229,17 @@ import {
   updateWatchlistSet,
   updateWatchlistSource,
 } from "./watchlist-compiler-service";
+import {
+  approveAllWatchlistReviewCandidates,
+  applyApprovedWatchlistReviewChanges,
+  createWatchlistReviewRun,
+  exportApprovedWatchlistReviewChanges,
+  listWatchlistReviewRuns,
+  loadWatchlistReviewRunDetail,
+  patchWatchlistReviewCandidate,
+  skipAllWatchlistReviewCandidates,
+  WatchlistReviewSchemaMissingError,
+} from "./watchlist-review-service";
 import {
   loadCorrelationMatrix,
   loadCorrelationPair,
@@ -600,6 +615,18 @@ function patternErrorResponse(c: any, error: unknown) {
   }
   const message = error instanceof Error ? error.message : "Pattern scanner request failed.";
   return c.json({ error: message }, 500);
+}
+
+function watchlistReviewErrorResponse(c: any, error: unknown) {
+  if (error instanceof WatchlistReviewSchemaMissingError) {
+    return c.json({ error: error.message, setupRequired: true }, 503);
+  }
+  if (error instanceof ZodError) {
+    return c.json({ error: error.issues[0]?.message ?? "Invalid watchlist review payload." }, 400);
+  }
+  const message = error instanceof Error ? error.message : "Watchlist review request failed.";
+  const status = /not found/i.test(message) ? 404 : /requires|blocked|provide|valid/i.test(message) ? 400 : 500;
+  return c.json({ error: message }, status);
 }
 
 function overviewFocusErrorResponse(c: any, error: unknown) {
@@ -4282,6 +4309,130 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
   c.header("Content-Type", "text/csv; charset=utf-8");
   c.header("Content-Disposition", `attachment; filename="${resolveExportFileName({ slug: payload.set.slug, setName: payload.set.name, mode, extension: "csv", dateSuffix })}"`);
   return c.body(tickersToSingleColumnCsv(tickers));
+});
+
+app.get("/api/watchlist-review/runs", async (c) => {
+  try {
+    const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+    const rows = await listWatchlistReviewRuns(c.env, limit);
+    return c.json({ rows });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/runs/:id", async (c) => {
+  try {
+    const detail = await loadWatchlistReviewRunDetail(c.env, c.req.param("id"));
+    if (!detail) return c.json({ error: "Watchlist review run not found." }, 404);
+    return c.json(detail);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewRunCreateSchema.parse(await c.req.json());
+    const detail = await createWatchlistReviewRun(c.env, payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_RUN_IMPORT", {
+      runId: detail.run.id,
+      candidateCount: detail.candidates.length,
+      watchlistSetId: detail.run.watchlistSetId,
+      watchlistRunId: detail.run.watchlistRunId,
+    });
+    return c.json({ ok: true, ...detail });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/watchlist-review/candidates/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewCandidatePatchSchema.parse(await c.req.json());
+    const candidate = await patchWatchlistReviewCandidate(c.env, c.req.param("id"), payload);
+    if (!candidate) return c.json({ error: "Watchlist review candidate not found." }, 404);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_CANDIDATE_PATCH", {
+      candidateId: candidate.id,
+      runId: candidate.runId,
+      ticker: candidate.ticker,
+      action: payload.action,
+      status: candidate.status,
+      proposedFlag: candidate.proposedFlag,
+      destructiveAction: candidate.destructiveAction,
+    });
+    return c.json({ ok: true, candidate });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/approve-all", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewBatchSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await approveAllWatchlistReviewCandidates(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_APPROVE_ALL", {
+      runId: c.req.param("id"),
+      updated: result.updated,
+      candidateIds: payload.candidateIds ?? null,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/skip-all", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewBatchSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await skipAllWatchlistReviewCandidates(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_SKIP_ALL", {
+      runId: c.req.param("id"),
+      updated: result.updated,
+      candidateIds: payload.candidateIds ?? null,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/export-approved", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewExportSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await exportApprovedWatchlistReviewChanges(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_EXPORT_APPROVED", {
+      runId: c.req.param("id"),
+      approvedCount: result.approvedCount,
+      destructiveCount: result.destructiveCount,
+      exportPath: result.exportPath,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/apply-approved", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewExportSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await applyApprovedWatchlistReviewChanges(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_APPLY_STUB", {
+      runId: c.req.param("id"),
+      approvedCount: result.approvedCount,
+      destructiveCount: result.destructiveCount,
+      exportPath: result.exportPath,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
 });
 
 app.get("/api/research/profiles", async (c) => {

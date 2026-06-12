@@ -1318,6 +1318,141 @@ export type PatternFeatureIdeasResponse = {
   mlReadiness: Record<string, string>;
 };
 
+export type WatchlistReviewFlag = "red" | "blue" | "yellow" | "orange" | "unflagged" | "unknown";
+export type WatchlistReviewProposedFlag = "red" | "blue" | "yellow" | "orange" | "keep" | "unflag" | "remove" | "manual_review";
+export type WatchlistReviewRecommendationType =
+  | "RED_TO_BLUE"
+  | "RED_TO_YELLOW"
+  | "BLUE_TO_RED"
+  | "BLUE_TO_YELLOW"
+  | "YELLOW_TO_BLUE"
+  | "YELLOW_TO_RED"
+  | "ANY_TO_UNFLAG"
+  | "KEEP_CURRENT"
+  | "MANUAL_REVIEW";
+export type WatchlistReviewRunStatus = "draft" | "ready" | "partially_approved" | "applied" | "archived";
+export type WatchlistReviewCandidateStatus = "pending" | "approved" | "skipped" | "overridden" | "applied";
+export type WatchlistReviewAnalysisSource = "data_only" | "mini_chart" | "full_chart_vision" | "manual";
+export type WatchlistReviewCandidateAction =
+  | "approve"
+  | "skip"
+  | "keep_current"
+  | "move_red"
+  | "move_blue"
+  | "move_yellow_orange"
+  | "unflag_remove"
+  | "note";
+
+export type WatchlistReviewSummaryCounts = {
+  red_to_blue: number;
+  red_to_yellow: number;
+  blue_to_red: number;
+  blue_to_yellow: number;
+  yellow_to_blue: number;
+  yellow_to_red: number;
+  unflag: number;
+  keep_current: number;
+  manual_review: number;
+};
+
+export type WatchlistReviewRun = {
+  id: string;
+  sourceWatchlistName: string | null;
+  sourceWatchlistId: string | null;
+  watchlistSetId: string | null;
+  watchlistRunId: string | null;
+  totalTickersScanned: number;
+  status: WatchlistReviewRunStatus;
+  notes: string | null;
+  summaryCounts: WatchlistReviewSummaryCounts;
+  generatedBy: "hermes" | "manual" | "import";
+  analysisVersion: string | null;
+  exportPath: string | null;
+  createdAt: string;
+  updatedAt: string;
+  candidateCount?: number;
+  pendingCount?: number;
+  approvedCount?: number;
+  skippedCount?: number;
+  destructiveCount?: number;
+};
+
+export type WatchlistReviewCandidate = {
+  id: string;
+  runId: string;
+  ticker: string;
+  companyName: string | null;
+  currentFlag: WatchlistReviewFlag;
+  proposedFlag: WatchlistReviewProposedFlag;
+  recommendationType: WatchlistReviewRecommendationType;
+  confidence: number;
+  reasons: string[];
+  metrics: Record<string, unknown>;
+  sectorContext: Record<string, unknown> | null;
+  chartImageUrl: string | null;
+  chartSnapshotPath: string | null;
+  dataFreshness: Record<string, unknown>;
+  analysisSource: WatchlistReviewAnalysisSource;
+  destructiveAction: boolean;
+  destructiveConfirmed: boolean;
+  removalReason: string | null;
+  status: WatchlistReviewCandidateStatus;
+  userOverrideFlag: WatchlistReviewProposedFlag | null;
+  userNote: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  appliedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistReviewEvent = {
+  id: string;
+  runId: string;
+  candidateId: string | null;
+  ticker: string | null;
+  eventType: string;
+  previousStatus: string | null;
+  nextStatus: string | null;
+  previousFlag: string | null;
+  nextFlag: string | null;
+  actor: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type WatchlistReviewRunDetail = {
+  run: WatchlistReviewRun;
+  candidates: WatchlistReviewCandidate[];
+  events: WatchlistReviewEvent[];
+};
+
+export type WatchlistReviewExportRow = {
+  run_id: string;
+  ticker: string;
+  current_flag: WatchlistReviewFlag;
+  proposed_flag: WatchlistReviewProposedFlag;
+  recommendation_type: WatchlistReviewRecommendationType;
+  approved_by: string;
+  approved_at: string | null;
+  reason: string;
+  destructive_action: boolean;
+  rollback_hint: string;
+};
+
+export type WatchlistReviewExportPayload = {
+  ok: true;
+  runId: string;
+  generatedAt: string;
+  approvedCount: number;
+  destructiveCount: number;
+  rows: WatchlistReviewExportRow[];
+  json: WatchlistReviewExportRow[];
+  csv: string;
+  exportPath: string;
+  message?: string;
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
 
 export type WatchlistFactorStatus = "pass" | "fail" | "unknown";
@@ -3132,6 +3267,92 @@ export function updatePatternFeature(featureKey: string, payload: { displayName?
     `/api/admin/pattern-scanner/features/${encodeURIComponent(featureKey)}`,
     {
       method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getWatchlistReviewRuns(limit = 25) {
+  return getJson<{ rows: WatchlistReviewRun[] }>(appendQuery("/api/watchlist-review/runs", { limit }));
+}
+
+export function getWatchlistReviewRun(id: string) {
+  return getJson<WatchlistReviewRunDetail>(`/api/watchlist-review/runs/${encodeURIComponent(id)}`);
+}
+
+export function createWatchlistReviewRun(payload: {
+  run?: Record<string, unknown>;
+  candidates: Array<Record<string, unknown>>;
+  watchlistSetId?: string | null;
+  watchlistRunId?: string | null;
+}) {
+  return adminFetch<{ ok: true } & WatchlistReviewRunDetail>("/api/watchlist-review/runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchWatchlistReviewCandidate(id: string, payload: {
+  action: WatchlistReviewCandidateAction;
+  userNote?: string | null;
+  removalReason?: string | null;
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; candidate: WatchlistReviewCandidate }>(`/api/watchlist-review/candidates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function approveAllWatchlistReviewCandidates(runId: string, payload: {
+  candidateIds?: string[];
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; updated: number; detail: WatchlistReviewRunDetail | null }>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/approve-all`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function skipAllWatchlistReviewCandidates(runId: string, payload: {
+  candidateIds?: string[];
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; updated: number; detail: WatchlistReviewRunDetail | null }>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/skip-all`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function exportApprovedWatchlistReviewChanges(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<WatchlistReviewExportPayload>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/export-approved`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function applyApprovedWatchlistReviewChanges(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<WatchlistReviewExportPayload>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/apply-approved`,
+    {
+      method: "POST",
       body: JSON.stringify(payload),
     },
   );

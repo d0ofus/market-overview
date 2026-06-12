@@ -183,6 +183,43 @@ export const patternFeaturePatchSchema = z.object({
   description: z.string().trim().max(500).nullable().optional(),
 });
 
+export const watchlistReviewRunCreateSchema = z.object({
+  run: z.record(z.unknown()).optional().default({}),
+  candidates: z.array(z.record(z.unknown())).max(1000).optional().default([]),
+  watchlistSetId: z.string().trim().min(1).max(160).nullable().optional(),
+  watchlistRunId: z.string().trim().min(1).max(160).nullable().optional(),
+}).refine((value) => value.candidates.length > 0, {
+  message: "Provide at least one watchlist review candidate.",
+});
+
+export const watchlistReviewCandidatePatchSchema = z.object({
+  action: z.enum([
+    "approve",
+    "skip",
+    "keep_current",
+    "move_red",
+    "move_blue",
+    "move_yellow_orange",
+    "unflag_remove",
+    "note",
+  ]),
+  userNote: z.string().trim().max(2000).nullable().optional(),
+  removalReason: z.string().trim().max(1000).nullable().optional(),
+  destructiveConfirmed: z.boolean().optional().default(false),
+  approvedBy: z.string().trim().min(1).max(120).nullable().optional(),
+});
+
+export const watchlistReviewBatchSchema = z.object({
+  candidateIds: z.array(z.string().trim().min(1).max(180)).max(500).optional(),
+  destructiveConfirmed: z.boolean().optional().default(false),
+  approvedBy: z.string().trim().min(1).max(120).nullable().optional(),
+});
+
+export const watchlistReviewExportSchema = z.object({
+  destructiveConfirmed: z.boolean().optional().default(false),
+  approvedBy: z.string().trim().min(1).max(120).nullable().optional(),
+});
+
 export const groupPatchSchema = z.object({
   title: z.string().min(1),
   rankingWindowDefault: rankingWindowSchema,
