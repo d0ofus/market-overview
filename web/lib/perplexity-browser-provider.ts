@@ -40,6 +40,7 @@ export type BrowserbaseVerificationSession = {
   expiresAt: string;
   debuggerUrl: string;
   debuggerFullscreenUrl: string;
+  targetUrl?: string;
   pages: Array<{
     id: string;
     debuggerUrl: string;
@@ -331,7 +332,30 @@ export function browserbaseConfigurationError(env: NodeJS.ProcessEnv = process.e
   return missing.length > 0 ? `Browserbase is missing ${missing.join(", ")}.` : null;
 }
 
-export async function createBrowserbaseVerificationSession(): Promise<BrowserbaseVerificationSession> {
+function normalizeVerificationTargetUrl(value: string | null | undefined): string | null {
+  const raw = cleanEnv(value ?? undefined);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null;
+    if (url.hostname !== "www.perplexity.ai" && url.hostname !== "perplexity.ai") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function navigateBrowserbaseVerificationSession(connectUrl: string, targetUrl: string): Promise<void> {
+  const { chromium } = await import("playwright-core");
+  const browser = await chromium.connectOverCDP(connectUrl);
+  const context = browser.contexts()[0] ?? await browser.newContext();
+  const page = context.pages()[0] ?? await context.newPage();
+  await context.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" }).catch(() => undefined);
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+  await page.waitForLoadState("load", { timeout: 2_000 }).catch(() => undefined);
+}
+
+export async function createBrowserbaseVerificationSession(options: { targetUrl?: string | null } = {}): Promise<BrowserbaseVerificationSession> {
   const config = browserbaseConfig();
   if (!config) {
     throw new Error(browserbaseConfigurationError() ?? "Browserbase is not configured.");
@@ -339,6 +363,10 @@ export async function createBrowserbaseVerificationSession(): Promise<Browserbas
 
   const bb = await browserbaseClient(config);
   const session = await bb.sessions.create(browserbaseSessionPayload(config, config.verificationTimeoutSeconds, true));
+  const targetUrl = normalizeVerificationTargetUrl(options.targetUrl);
+  if (targetUrl) {
+    await navigateBrowserbaseVerificationSession(session.connectUrl, targetUrl);
+  }
   const liveUrls = await bb.sessions.debug(session.id);
 
   return {
@@ -346,6 +374,7 @@ export async function createBrowserbaseVerificationSession(): Promise<Browserbas
     expiresAt: session.expiresAt,
     debuggerUrl: liveUrls.debuggerUrl,
     debuggerFullscreenUrl: liveUrls.debuggerFullscreenUrl,
+    targetUrl: targetUrl ?? undefined,
     pages: liveUrls.pages.map((page) => ({
       id: page.id,
       debuggerUrl: page.debuggerUrl,

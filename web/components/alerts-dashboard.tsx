@@ -549,7 +549,7 @@ export function AlertsDashboard() {
     }
   }, []);
 
-  const openMovementVerification = useCallback(async (compoundKey: string) => {
+  const openMovementVerification = useCallback(async (compoundKey: string, ticker: string) => {
     setMovementByKey((current) => {
       const existing = current[compoundKey];
       if (!existing) return current;
@@ -563,7 +563,9 @@ export function AlertsDashboard() {
       };
     });
     try {
-      const session = await createPerplexityBrowserbaseVerificationSession();
+      const session = await createPerplexityBrowserbaseVerificationSession({
+        targetUrl: `https://www.perplexity.ai/finance/${encodeURIComponent(ticker)}`,
+      });
       const verificationUrl = session.debuggerFullscreenUrl || session.debuggerUrl;
       setMovementByKey((current) => {
         const existing = current[compoundKey];
@@ -934,7 +936,7 @@ export function AlertsDashboard() {
                           ticker={row.ticker}
                           state={movementState}
                           onRefresh={() => void loadMovement(compoundKey, row.ticker, true)}
-                          onVerify={() => void openMovementVerification(compoundKey)}
+                          onVerify={() => void openMovementVerification(compoundKey, row.ticker)}
                         />
                       ) : null}
                       {gridNewsOpen ? (

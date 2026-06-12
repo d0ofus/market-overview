@@ -14,6 +14,15 @@ function errorMessage(error: unknown): string {
   return "Unable to create Browserbase verification session.";
 }
 
+async function targetUrlFromRequest(request: Request): Promise<string | null> {
+  try {
+    const body = await request.json() as { targetUrl?: unknown };
+    return typeof body.targetUrl === "string" ? body.targetUrl : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(request: Request) {
   if (!isAdminRequestAuthenticated(request)) {
     return NextResponse.json(
@@ -31,7 +40,9 @@ export async function POST(request: Request) {
   }
 
   try {
-    const session = await createBrowserbaseVerificationSession();
+    const session = await createBrowserbaseVerificationSession({
+      targetUrl: await targetUrlFromRequest(request),
+    });
     return NextResponse.json(
       { ok: true, ...session },
       { headers: { "Cache-Control": "no-store" } },

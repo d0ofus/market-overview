@@ -1998,6 +1998,7 @@ export type PerplexityBrowserbaseVerificationSession = {
   expiresAt: string;
   debuggerUrl: string;
   debuggerFullscreenUrl: string;
+  targetUrl?: string;
   pages: Array<{
     id: string;
     debuggerUrl: string;
@@ -3614,12 +3615,15 @@ export async function getPerplexityFinanceNotableMovement(ticker: string, option
   return (await res.json()) as PerplexityFinanceNotableMovementLookup;
 }
 
-export async function createPerplexityBrowserbaseVerificationSession() {
+export async function createPerplexityBrowserbaseVerificationSession(options?: { targetUrl?: string | null }) {
   const res = await fetch("/api/perplexity-finance/browserbase/verify-session", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      targetUrl: options?.targetUrl ?? undefined,
+    }),
     credentials: "same-origin",
     cache: "no-store",
   });
