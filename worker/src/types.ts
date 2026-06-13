@@ -45,6 +45,8 @@ export type Env = {
   BRAVE_SEARCH_API_KEY?: string;
   MARKET_COMMENTARY_RETENTION_DAYS?: string;
   SYMBOL_CATALOG_SYNC_ENABLED?: string;
+  HERMES_WATCHLIST_APPLY_WEBHOOK_URL?: string;
+  HERMES_WATCHLIST_APPLY_WEBHOOK_SECRET?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

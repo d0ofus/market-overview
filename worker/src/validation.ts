@@ -220,6 +220,29 @@ export const watchlistReviewExportSchema = z.object({
   approvedBy: z.string().trim().min(1).max(120).nullable().optional(),
 });
 
+export const watchlistReviewReadyToApplySchema = watchlistReviewExportSchema;
+
+export const watchlistReviewApplyStatusSchema = z.object({
+  runId: z.string().trim().min(1).max(180).optional(),
+  dispatchId: z.string().trim().min(1).max(180).nullable().optional(),
+  approvalRevision: z.number().int().min(0),
+  checksum: z.string().trim().min(16).max(160),
+  idempotencyKey: z.string().trim().min(16).max(400),
+  status: z.enum(["claimed", "applying", "applied", "failed", "partial_failed"]),
+  startedAt: z.string().trim().max(120).nullable().optional(),
+  completedAt: z.string().trim().max(120).nullable().optional(),
+  summary: z.record(z.unknown()).nullable().optional(),
+  results: z.array(z.object({
+    candidateId: z.string().trim().min(1).max(180).nullable().optional(),
+    ticker: z.string().trim().min(1).max(40).nullable().optional(),
+    requestedAction: z.string().trim().max(120).nullable().optional(),
+    status: z.enum(["applied", "failed", "skipped"]),
+    message: z.string().trim().max(1000).nullable().optional(),
+  })).max(1000).optional(),
+  rollbackArtifact: z.record(z.unknown()).nullable().optional(),
+  error: z.string().trim().max(1000).nullable().optional(),
+});
+
 export const groupPatchSchema = z.object({
   title: z.string().min(1),
   rankingWindowDefault: rankingWindowSchema,

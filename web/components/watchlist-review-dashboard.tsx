@@ -10,6 +10,7 @@ import {
   Flag,
   Loader2,
   RefreshCw,
+  Send,
   ShieldAlert,
   SkipForward,
   StickyNote,
@@ -20,19 +21,21 @@ import {
 import { ConfirmDialog } from "@/components/admin/confirm-dialog";
 import {
   approveAllWatchlistReviewCandidates,
-  applyApprovedWatchlistReviewChanges,
   createWatchlistReviewRun,
   exportApprovedWatchlistReviewChanges,
   getWatchlistReviewRun,
   getWatchlistReviewRuns,
   patchWatchlistReviewCandidate,
+  readyToApplyWatchlistReviewRun,
   skipAllWatchlistReviewCandidates,
   type WatchlistReviewCandidate,
   type WatchlistReviewCandidateAction,
+  type WatchlistReviewCandidateApplyStatus,
   type WatchlistReviewCandidateStatus,
   type WatchlistReviewFlag,
   type WatchlistReviewProposedFlag,
   type WatchlistReviewRecommendationType,
+  type WatchlistReviewRunApplyStatus,
   type WatchlistReviewRun,
   type WatchlistReviewRunDetail,
 } from "@/lib/api";
@@ -150,6 +153,43 @@ function statusClass(status: WatchlistReviewCandidateStatus) {
   return "border-amber-400/35 bg-amber-500/10 text-amber-200";
 }
 
+const RUN_APPLY_LABELS: Record<WatchlistReviewRunApplyStatus, string> = {
+  not_queued: "Reviewing",
+  approved_ready: "Approved ready",
+  dispatching: "Dispatching",
+  waiting_for_hermes: "Waiting for Hermes",
+  claimed: "Hermes claimed",
+  applying: "Applying in TradingView",
+  applied: "Applied",
+  partial_failed: "Partially failed",
+  apply_failed: "Apply failed",
+  cancelled: "Cancelled",
+};
+
+const CANDIDATE_APPLY_LABELS: Record<WatchlistReviewCandidateApplyStatus, string> = {
+  not_queued: "not queued",
+  queued_for_apply: "queued",
+  applying: "applying",
+  applied: "applied",
+  apply_failed: "failed",
+  skipped: "skipped",
+};
+
+function runApplyStatusClass(status: WatchlistReviewRunApplyStatus) {
+  if (status === "applied") return "border-green-500/35 bg-green-500/10 text-green-300";
+  if (status === "applying" || status === "claimed" || status === "waiting_for_hermes" || status === "dispatching") return "border-accent/35 bg-accent/10 text-accent";
+  if (status === "partial_failed" || status === "apply_failed") return "border-rose-500/35 bg-rose-500/10 text-rose-200";
+  if (status === "approved_ready") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
+  return "border-slate-600/60 bg-panelSoft/60 text-slate-300";
+}
+
+function candidateApplyStatusClass(status: WatchlistReviewCandidateApplyStatus) {
+  if (status === "applied") return "border-green-500/35 bg-green-500/10 text-green-300";
+  if (status === "applying" || status === "queued_for_apply") return "border-accent/35 bg-accent/10 text-accent";
+  if (status === "apply_failed") return "border-rose-500/35 bg-rose-500/10 text-rose-200";
+  return "border-slate-600/60 bg-panelSoft/60 text-slate-300";
+}
+
 function sourceLabel(value: string) {
   if (value === "data_only") return "data-only";
   if (value === "mini_chart") return "mini-chart";
@@ -171,6 +211,37 @@ function isStale(candidate: WatchlistReviewCandidate) {
 
 function approvedForExport(candidate: WatchlistReviewCandidate) {
   return candidate.status === "approved" || candidate.status === "overridden" || candidate.status === "applied";
+}
+
+function flagGroup(flag: WatchlistReviewFlag | WatchlistReviewProposedFlag) {
+  if (flag === "red") return "red";
+  if (flag === "blue") return "blue";
+  if (flag === "yellow" || flag === "orange") return "yellow";
+  if (flag === "unflag" || flag === "remove" || flag === "unflagged") return "unflag";
+  if (flag === "keep") return "keep";
+  if (flag === "manual_review") return "manual";
+  return "unknown";
+}
+
+function candidateFinalFlag(candidate: WatchlistReviewCandidate) {
+  return candidate.userOverrideFlag ?? candidate.proposedFlag;
+}
+
+function hasRealApplyChange(candidate: WatchlistReviewCandidate) {
+  if (!approvedForExport(candidate)) return false;
+  const proposed = candidateFinalFlag(candidate);
+  const proposedGroup = flagGroup(proposed);
+  if (proposedGroup === "keep" || proposedGroup === "manual" || proposedGroup === "unknown") return false;
+  if (proposedGroup === "unflag" && flagGroup(candidate.currentFlag) === "unflag") return false;
+  return flagGroup(candidate.currentFlag) !== proposedGroup;
+}
+
+function runDispatchStarted(run: WatchlistReviewRun | null) {
+  return Boolean(run && run.applyStatus !== "not_queued" && run.applyStatus !== "apply_failed");
+}
+
+function runApplyActive(run: WatchlistReviewRun | null) {
+  return Boolean(run && ["dispatching", "waiting_for_hermes", "claimed", "applying", "approved_ready"].includes(run.applyStatus));
 }
 
 function downloadText(filename: string, text: string, type: string) {
@@ -252,6 +323,15 @@ export function WatchlistReviewDashboard() {
     void loadDetail(selectedRunId);
   }, [selectedRunId]);
 
+  useEffect(() => {
+    if (!selectedRunId || !runApplyActive(detail?.run ?? null)) return;
+    const id = window.setInterval(() => {
+      void loadDetail(selectedRunId);
+      void loadRuns(selectedRunId);
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, [selectedRunId, detail?.run.applyStatus]);
+
   const candidates = detail?.candidates ?? [];
   const sectorOptions = useMemo(() => Array.from(new Set(candidates.flatMap(sectorTags))).sort(), [candidates]);
   const visibleCandidates = useMemo(() => {
@@ -275,6 +355,13 @@ export function WatchlistReviewDashboard() {
   const visiblePending = visibleCandidates.filter((candidate) => candidate.status === "pending");
   const visibleApprovedDestructive = visibleCandidates.filter((candidate) => approvedForExport(candidate) && candidate.destructiveAction);
   const approvedDestructive = candidates.filter((candidate) => approvedForExport(candidate) && candidate.destructiveAction);
+  const approvedApplyCandidates = candidates.filter(hasRealApplyChange);
+  const approvedApplyDestructive = approvedApplyCandidates.filter((candidate) => candidate.destructiveAction || flagGroup(candidateFinalFlag(candidate)) === "unflag");
+  const dispatchStarted = runDispatchStarted(detail?.run ?? null);
+  const canSendToHermes = Boolean(detail?.run)
+    && approvedApplyCandidates.length > 0
+    && approvedApplyDestructive.every((candidate) => candidate.destructiveConfirmed)
+    && !dispatchStarted;
 
   const refreshSelected = async () => {
     if (selectedRunId) await loadDetail(selectedRunId);
@@ -286,6 +373,10 @@ export function WatchlistReviewDashboard() {
     action: WatchlistReviewCandidateAction,
     options?: { destructiveConfirmed?: boolean; userNote?: string | null; removalReason?: string | null },
   ) => {
+    if (dispatchStarted) {
+      setMessage({ tone: "danger", text: "This run has already been sent to Hermes, so review edits are locked." });
+      return;
+    }
     setSaving(true);
     try {
       await patchWatchlistReviewCandidate(candidate.id, {
@@ -338,6 +429,10 @@ export function WatchlistReviewDashboard() {
 
   const runBatchApprove = async (destructiveConfirmed = false) => {
     if (!detail?.run) return;
+    if (dispatchStarted) {
+      setMessage({ tone: "danger", text: "This run has already been sent to Hermes, so batch review edits are locked." });
+      return;
+    }
     const ids = visiblePending.map((candidate) => candidate.id);
     if (ids.length === 0) return;
     const containsDestructive = visiblePending.some((candidate) => candidate.destructiveAction && !candidate.destructiveConfirmed);
@@ -373,6 +468,10 @@ export function WatchlistReviewDashboard() {
 
   const runBatchSkip = async () => {
     if (!detail?.run) return;
+    if (dispatchStarted) {
+      setMessage({ tone: "danger", text: "This run has already been sent to Hermes, so batch review edits are locked." });
+      return;
+    }
     const ids = visiblePending.map((candidate) => candidate.id);
     if (ids.length === 0) return;
     setSaving(true);
@@ -391,32 +490,69 @@ export function WatchlistReviewDashboard() {
     }
   };
 
-  const exportRun = async (applyStub = false, destructiveConfirmed = false) => {
+  const exportRun = async (destructiveConfirmed = false) => {
     if (!detail?.run) return;
     if (approvedDestructive.length > 0 && !destructiveConfirmed) {
       setConfirm({
         title: "Export Unflag/Remove approvals?",
         description: "Approved changes include destructive Unflag/Remove decisions. Confirm before producing the Hermes apply export.",
-        confirmLabel: applyStub ? "Export Apply Stub" : "Export Approved",
+        confirmLabel: "Export Approved",
         tone: "danger",
         onConfirm: async () => {
           setConfirm(null);
-          await exportRun(applyStub, true);
+          await exportRun(true);
         },
       });
       return;
     }
     setSaving(true);
     try {
-      const res = applyStub
-        ? await applyApprovedWatchlistReviewChanges(detail.run.id, { destructiveConfirmed, approvedBy: "authorized-user" })
-        : await exportApprovedWatchlistReviewChanges(detail.run.id, { destructiveConfirmed, approvedBy: "authorized-user" });
+      const res = await exportApprovedWatchlistReviewChanges(detail.run.id, { destructiveConfirmed, approvedBy: "authorized-user" });
       downloadText(res.exportPath, JSON.stringify(res.json, null, 2), "application/json;charset=utf-8");
       downloadText(res.exportPath.replace(/\.json$/, ".csv"), res.csv, "text/csv;charset=utf-8");
       await refreshSelected();
       setMessage({ tone: "success", text: res.message ?? `Exported ${res.approvedCount} approved decision${res.approvedCount === 1 ? "" : "s"}.` });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Export failed." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sendToHermes = async (destructiveConfirmed = false) => {
+    if (!detail?.run) return;
+    if (dispatchStarted || approvedApplyCandidates.length === 0 || (!destructiveConfirmed && approvedApplyDestructive.some((candidate) => !candidate.destructiveConfirmed))) {
+      setMessage({ tone: "danger", text: "Approve at least one real watchlist change and confirm destructive actions before sending to Hermes." });
+      return;
+    }
+    if (approvedApplyDestructive.length > 0 && !destructiveConfirmed) {
+      setConfirm({
+        title: "Send Unflag/Remove approvals to Hermes?",
+        description: "This freezes the approved set for Hermes MCP/CDP execution. Confirm all destructive Unflag/Remove candidates have support/thesis invalidation and rollback notes.",
+        confirmLabel: "Send to Hermes",
+        tone: "danger",
+        onConfirm: async () => {
+          setConfirm(null);
+          await sendToHermes(true);
+        },
+      });
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await readyToApplyWatchlistReviewRun(detail.run.id, {
+        destructiveConfirmed,
+        approvedBy: "authorized-user",
+      });
+      await refreshSelected();
+      const text = res.webhook.status === "sent"
+        ? "Sent to Hermes. Waiting for apply status."
+        : res.webhook.status === "already_pending"
+          ? "This approved set is already waiting for Hermes."
+          : "Approved set is ready. Hermes poller can pick it up.";
+      setMessage({ tone: res.webhook.status === "failed" ? "info" : "success", text });
+    } catch (error) {
+      setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to send approved changes to Hermes." });
     } finally {
       setSaving(false);
     }
@@ -470,7 +606,7 @@ export function WatchlistReviewDashboard() {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="truncate text-sm font-semibold text-accent">{run.sourceWatchlistName ?? run.id}</div>
-                    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${run.status === "ready" ? "border-accent/30 text-accent" : "border-slate-600/70 text-slate-300"}`}>{run.status}</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${runApplyStatusClass(run.applyStatus)}`}>{RUN_APPLY_LABELS[run.applyStatus]}</span>
                   </div>
                   <div className="mt-1 text-[11px] text-slate-400">
                     {run.candidateCount ?? 0} candidates / {run.approvedCount ?? 0} approved / {run.pendingCount ?? 0} pending
@@ -517,7 +653,14 @@ export function WatchlistReviewDashboard() {
         <div className="card p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">{detail?.run.sourceWatchlistName ?? detail?.run.id ?? "Watchlist Review"}</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold text-slate-200">{detail?.run.sourceWatchlistName ?? detail?.run.id ?? "Watchlist Review"}</h3>
+                {detail?.run ? (
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] ${runApplyStatusClass(detail.run.applyStatus)}`}>
+                    {RUN_APPLY_LABELS[detail.run.applyStatus]}
+                  </span>
+                ) : null}
+              </div>
               <p className="text-xs text-slate-400">
                 {detail?.run.watchlistSetId || detail?.run.watchlistRunId
                   ? `Compiler link ${detail.run.watchlistSetId ?? "-"} / ${detail.run.watchlistRunId ?? "-"}`
@@ -529,21 +672,21 @@ export function WatchlistReviewDashboard() {
                 <FileJson className="h-3.5 w-3.5" />
                 Compiler
               </Link>
-              <button className={PRIMARY_BUTTON_CLASS} disabled={saving || visiblePending.length === 0} onClick={() => void runBatchApprove()} type="button">
+              <button className={PRIMARY_BUTTON_CLASS} disabled={saving || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchApprove()} type="button">
                 <Check className="h-3.5 w-3.5" />
                 Approve all visible
               </button>
-              <button className={BUTTON_CLASS} disabled={saving || visiblePending.length === 0} onClick={() => void runBatchSkip()} type="button">
+              <button className={BUTTON_CLASS} disabled={saving || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchSkip()} type="button">
                 <SkipForward className="h-3.5 w-3.5" />
                 Skip all visible
               </button>
-              <button className={BUTTON_CLASS} disabled={saving || !detail || !candidates.some(approvedForExport)} onClick={() => void exportRun(false)} type="button">
+              <button className={BUTTON_CLASS} disabled={saving || !detail || !candidates.some(approvedForExport)} onClick={() => void exportRun()} type="button">
                 <Download className="h-3.5 w-3.5" />
                 Export approved
               </button>
-              <button className={BUTTON_CLASS} disabled={saving || !detail || !candidates.some(approvedForExport)} onClick={() => void exportRun(true)} type="button">
-                <ShieldAlert className="h-3.5 w-3.5" />
-                Apply stub
+              <button className={PRIMARY_BUTTON_CLASS} disabled={saving || !canSendToHermes} onClick={() => void sendToHermes()} type="button">
+                <Send className="h-3.5 w-3.5" />
+                Send approved changes to Hermes
               </button>
             </div>
           </div>
@@ -621,6 +764,7 @@ export function WatchlistReviewDashboard() {
                 key={candidate.id}
                 candidate={candidate}
                 saving={saving}
+                actionsDisabled={dispatchStarted}
                 onAction={(action) => {
                   if (action === "unflag_remove") {
                     confirmDestructiveCandidate(candidate);
@@ -693,22 +837,24 @@ function SummaryRow({ run, candidates }: { run: WatchlistReviewRun | null; candi
   const pending = candidates.filter((candidate) => candidate.status === "pending").length;
   const destructive = candidates.filter((candidate) => candidate.destructiveAction).length;
   return (
-    <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-8">
+    <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-9">
       <StatCard label="Scanned" value={String(run?.totalTickersScanned ?? "-")} helper="source tickers" />
       <StatCard label="Candidates" value={String(candidates.length)} helper="in run" />
       <StatCard label="Pending" value={String(pending)} helper="needs review" />
       <StatCard label="Approved" value={String(approved)} helper="export-ready" />
       <StatCard label="Skipped" value={String(skipped)} helper="no change" />
       <StatCard label="Unflag" value={String(destructive)} helper="requires confirm" />
+      <StatCard label="Hermes" value={run ? RUN_APPLY_LABELS[run.applyStatus] : "-"} helper={run?.activeApplyDispatchId ? `rev ${run.approvalRevision}` : "not sent"} />
       <StatCard label="Blue to Red" value={String(run?.summaryCounts.blue_to_red ?? 0)} helper="promotions" />
       <StatCard label="Keep" value={String(run?.summaryCounts.keep_current ?? 0)} helper="current flag" />
     </div>
   );
 }
 
-function CandidateCard({ candidate, saving, onAction, onNote }: {
+function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }: {
   candidate: WatchlistReviewCandidate;
   saving: boolean;
+  actionsDisabled: boolean;
   onAction: (action: WatchlistReviewCandidateAction) => void;
   onNote: () => void;
 }) {
@@ -723,6 +869,11 @@ function CandidateCard({ candidate, saving, onAction, onNote }: {
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-xl font-semibold text-slate-100">{candidate.ticker}</h3>
               <span className={`rounded-full border px-2 py-0.5 text-xs ${statusClass(candidate.status)}`}>{candidate.status}</span>
+              {candidate.applyStatus !== "not_queued" ? (
+                <span className={`rounded-full border px-2 py-0.5 text-xs ${candidateApplyStatusClass(candidate.applyStatus)}`}>
+                  {CANDIDATE_APPLY_LABELS[candidate.applyStatus]}
+                </span>
+              ) : null}
             </div>
             <div className="mt-1 line-clamp-2 text-xs text-slate-400">{candidate.companyName ?? "No company name"}</div>
           </div>
@@ -792,15 +943,16 @@ function CandidateCard({ candidate, saving, onAction, onNote }: {
             )}
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <button className={PRIMARY_BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("approve")} type="button"><Check className="h-3.5 w-3.5" />Approve</button>
-            <button className={BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("skip")} type="button"><SkipForward className="h-3.5 w-3.5" />Skip</button>
-            <button className={BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("keep_current")} type="button">Keep Current</button>
-            <button className={BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("move_red")} type="button">Move Red</button>
-            <button className={BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("move_blue")} type="button">Move Blue</button>
-            <button className={BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("move_yellow_orange")} type="button">Move Yellow/Orange</button>
-            <button className={DANGER_BUTTON_CLASS} disabled={saving || candidate.status === "applied"} onClick={() => onAction("unflag_remove")} type="button"><Trash2 className="h-3.5 w-3.5" />Unflag/Remove</button>
-            <button className={BUTTON_CLASS} disabled={saving} onClick={onNote} type="button"><StickyNote className="h-3.5 w-3.5" />Add Note</button>
+            <button className={PRIMARY_BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("approve")} type="button"><Check className="h-3.5 w-3.5" />Approve</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("skip")} type="button"><SkipForward className="h-3.5 w-3.5" />Skip</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("keep_current")} type="button">Keep Current</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("move_red")} type="button">Move Red</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("move_blue")} type="button">Move Blue</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("move_yellow_orange")} type="button">Move Yellow/Orange</button>
+            <button className={DANGER_BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("unflag_remove")} type="button"><Trash2 className="h-3.5 w-3.5" />Unflag/Remove</button>
+            <button className={BUTTON_CLASS} disabled={saving || actionsDisabled} onClick={onNote} type="button"><StickyNote className="h-3.5 w-3.5" />Add Note</button>
           </div>
+          {candidate.applyError ? <div className="rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">{candidate.applyError}</div> : null}
           {candidate.userNote ? <div className="rounded-lg border border-accent/20 bg-accent/10 px-3 py-2 text-xs text-slate-200">{candidate.userNote}</div> : null}
         </div>
       </div>

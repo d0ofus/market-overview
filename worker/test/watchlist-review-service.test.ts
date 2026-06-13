@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertWatchlistReviewApplySetReady,
+  buildWatchlistReviewCanonicalApplySet,
   buildWatchlistReviewExportPayload,
+  checksumWatchlistReviewApplySet,
   normalizeWatchlistReviewImport,
+  signWatchlistReviewWebhook,
   watchlistReviewExportCsv,
 } from "../src/watchlist-review-service";
 
@@ -138,5 +142,112 @@ describe("watchlist review service helpers", () => {
     expect(payload.rows[1].rollback_hint).toContain("Restore DRFT");
     expect(payload.csv).toContain("run_id,ticker,current_flag,proposed_flag");
     expect(watchlistReviewExportCsv(payload.rows)).toBe(payload.csv);
+  });
+
+  it("builds a canonical Hermes apply set from approved real changes only", () => {
+    const { run, candidates } = normalizeWatchlistReviewImport({
+      run: { id: "watchlist-review-apply-set" },
+      candidates: [
+        {
+          ticker: "DAL",
+          current_flag: "blue",
+          proposed_flag: "red",
+          status: "approved",
+          tv_symbol: "NYSE:DAL",
+          reasons: ["Near CP zone"],
+        },
+        {
+          ticker: "CTVA",
+          current_flag: "yellow",
+          proposed_flag: "orange",
+          status: "approved",
+          reasons: ["Monitor group no-op"],
+        },
+        {
+          ticker: "DLR",
+          current_flag: "blue",
+          proposed_flag: "keep",
+          status: "approved",
+        },
+        {
+          ticker: "SKIP",
+          current_flag: "blue",
+          proposed_flag: "red",
+          status: "skipped",
+        },
+      ],
+    }, NOW);
+
+    const applySet = buildWatchlistReviewCanonicalApplySet(run, candidates, "tester");
+
+    expect(applySet.changes).toHaveLength(1);
+    expect(applySet.changes[0]).toMatchObject({
+      ticker: "DAL",
+      tvSymbol: "NYSE:DAL",
+      currentFlag: "blue",
+      finalFlag: "red",
+      finalAction: "move_flag",
+      approvedBy: "tester",
+    });
+  });
+
+  it("blocks canonical apply sets with unconfirmed destructive changes", () => {
+    const { run, candidates } = normalizeWatchlistReviewImport({
+      run: { id: "watchlist-review-apply-destructive" },
+      candidates: [
+        {
+          ticker: "DRFT",
+          current_flag: "blue",
+          proposed_flag: "remove",
+          destructive_action: true,
+          status: "approved",
+        },
+      ],
+    }, NOW);
+
+    const applySet = buildWatchlistReviewCanonicalApplySet(run, candidates, "tester");
+
+    expect(() => assertWatchlistReviewApplySetReady(applySet, { approvedBy: "tester", destructiveConfirmed: true }))
+      .toThrow(/lack candidate confirmation/i);
+
+    const confirmedApplySet = {
+      ...applySet,
+      changes: applySet.changes.map((change) => ({ ...change, destructiveConfirmed: true })),
+    };
+
+    expect(() => assertWatchlistReviewApplySetReady(confirmedApplySet, { approvedBy: "tester" }))
+      .toThrow(/requires final dispatch confirmation/i);
+    expect(() => assertWatchlistReviewApplySetReady(confirmedApplySet, { approvedBy: "tester", destructiveConfirmed: true }))
+      .not.toThrow();
+  });
+
+  it("generates deterministic apply-set checksums and HMAC webhook signatures", async () => {
+    const { run, candidates } = normalizeWatchlistReviewImport({
+      run: { id: "watchlist-review-checksum" },
+      candidates: [
+        {
+          ticker: "CAT",
+          current_flag: "blue",
+          proposed_flag: "red",
+          status: "approved",
+          reasons: ["ATH pivot"],
+        },
+      ],
+    }, NOW);
+    const applySet = buildWatchlistReviewCanonicalApplySet(run, candidates, "tester");
+
+    const first = await checksumWatchlistReviewApplySet(applySet);
+    const second = await checksumWatchlistReviewApplySet({
+      ...applySet,
+      changes: [...applySet.changes],
+    });
+
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(second).toBe(first);
+
+    const signature = await signWatchlistReviewWebhook(JSON.stringify({ event: "watchlist_review.ready_to_apply" }), NOW, "secret");
+    expect(signature).toMatch(/^sha256=[a-f0-9]{64}$/);
+    await expect(signWatchlistReviewWebhook(JSON.stringify({ event: "watchlist_review.ready_to_apply" }), NOW, "secret"))
+      .resolves.toBe(signature);
   });
 });

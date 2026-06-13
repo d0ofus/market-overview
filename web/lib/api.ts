@@ -1333,6 +1333,29 @@ export type WatchlistReviewRecommendationType =
 export type WatchlistReviewRunStatus = "draft" | "ready" | "partially_approved" | "applied" | "archived";
 export type WatchlistReviewCandidateStatus = "pending" | "approved" | "skipped" | "overridden" | "applied";
 export type WatchlistReviewAnalysisSource = "data_only" | "mini_chart" | "full_chart_vision" | "manual";
+export type WatchlistReviewRunApplyStatus =
+  | "not_queued"
+  | "approved_ready"
+  | "dispatching"
+  | "waiting_for_hermes"
+  | "claimed"
+  | "applying"
+  | "applied"
+  | "partial_failed"
+  | "apply_failed"
+  | "cancelled";
+export type WatchlistReviewCandidateApplyStatus = "not_queued" | "queued_for_apply" | "applying" | "applied" | "apply_failed" | "skipped";
+export type WatchlistReviewDispatchStatus =
+  | "approved_ready"
+  | "dispatching"
+  | "waiting_for_hermes"
+  | "webhook_failed"
+  | "claimed"
+  | "applying"
+  | "applied"
+  | "partial_failed"
+  | "apply_failed"
+  | "cancelled";
 export type WatchlistReviewCandidateAction =
   | "approve"
   | "skip"
@@ -1368,6 +1391,21 @@ export type WatchlistReviewRun = {
   generatedBy: "hermes" | "manual" | "import";
   analysisVersion: string | null;
   exportPath: string | null;
+  applyStatus: WatchlistReviewRunApplyStatus;
+  approvalRevision: number;
+  approvedChecksum: string | null;
+  activeApplyDispatchId: string | null;
+  approvedApplyCount: number;
+  skippedApplyCount: number;
+  destructiveApplyCount: number;
+  readyToApplyAt: string | null;
+  dispatchRequestedAt: string | null;
+  dispatchedToHermesAt: string | null;
+  applyStartedAt: string | null;
+  applyCompletedAt: string | null;
+  applyFailedAt: string | null;
+  applyError: string | null;
+  applyResultSummary: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
   candidateCount?: number;
@@ -1391,6 +1429,7 @@ export type WatchlistReviewCandidate = {
   sectorContext: Record<string, unknown> | null;
   chartImageUrl: string | null;
   chartSnapshotPath: string | null;
+  tvSymbol: string | null;
   dataFreshness: Record<string, unknown>;
   analysisSource: WatchlistReviewAnalysisSource;
   destructiveAction: boolean;
@@ -1402,6 +1441,10 @@ export type WatchlistReviewCandidate = {
   approvedBy: string | null;
   approvedAt: string | null;
   appliedAt: string | null;
+  applyStatus: WatchlistReviewCandidateApplyStatus;
+  applyError: string | null;
+  applyUpdatedAt: string | null;
+  lastApplyDispatchId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -1451,6 +1494,32 @@ export type WatchlistReviewExportPayload = {
   csv: string;
   exportPath: string;
   message?: string;
+};
+
+export type WatchlistReviewReadyToApplyResponse = {
+  ok: true;
+  run: {
+    id: string;
+    applyStatus: WatchlistReviewRunApplyStatus;
+    approvalRevision: number;
+    approvedChecksum: string;
+  };
+  dispatch: {
+    id: string;
+    status: WatchlistReviewDispatchStatus;
+    idempotencyKey: string;
+    approvalRevision: number;
+    checksum: string;
+    approvedCount: number;
+    skippedCount: number;
+    destructiveCount: number;
+  };
+  webhook: {
+    attempted: boolean;
+    status: "sent" | "not_configured" | "failed" | "already_pending";
+    responseStatus: number | null;
+    error: string | null;
+  };
 };
 
 export type WatchlistCompilerRunSummary = ScanRunSummary;
@@ -3351,6 +3420,19 @@ export function applyApprovedWatchlistReviewChanges(runId: string, payload: {
 }) {
   return adminFetch<WatchlistReviewExportPayload>(
     `/api/watchlist-review/runs/${encodeURIComponent(runId)}/apply-approved`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function readyToApplyWatchlistReviewRun(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<WatchlistReviewReadyToApplyResponse>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/ready-to-apply`,
     {
       method: "POST",
       body: JSON.stringify(payload),
