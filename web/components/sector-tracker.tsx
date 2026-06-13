@@ -1627,7 +1627,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                     placeholder="Add tickers (comma-separated)"
                     value={marketLeaderTickerInput}
                     onChange={(event) => setMarketLeaderTickerInput(event.target.value)}
-                    list="sector-symbol-options"
+                    autoComplete="off"
                   />
                 </label>
                 <div className="flex items-end">
