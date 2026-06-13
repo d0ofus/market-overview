@@ -175,10 +175,10 @@ export const DEFAULT_MARKET_COMMENTARY_STATIC_SOURCES: MarketCommentarySourceAud
 ];
 
 export const DEFAULT_MARKET_COMMENTARY_BRAVE_QUERIES = [
-  "US stock market today S&P 500 Nasdaq Dow Russell sector performance {nyDate} Reuters CNBC MarketWatch",
-  "US economic calendar today Fed speakers Treasury auctions CPI PPI PCE GDP jobs ISM {nyDate}",
-  "CBOE VIX put call ratio market volatility today {nyDate}",
-  "US stocks earnings catalysts mega cap tech semiconductors banks energy today {nyDate}",
+  "US stock market today S&P 500 Nasdaq Dow Russell sector performance {latestCompletedSessionDate} Reuters CNBC MarketWatch",
+  "US economic calendar Fed speakers Treasury auctions CPI PPI PCE GDP jobs ISM {latestCompletedSessionDate}",
+  "CBOE VIX put call ratio market volatility today {latestCompletedSessionDate}",
+  "US stocks earnings catalysts mega cap tech semiconductors banks energy today {latestCompletedSessionDate}",
 ];
 
 export const DEFAULT_MARKET_COMMENTARY_PROMPT = `
@@ -486,14 +486,23 @@ async function loadScheduledReportForAttempt(env: Env, scheduledLocalDate: strin
 
 async function overviewSnapshotReadyForSession(env: Env, sessionDate: string): Promise<boolean> {
   try {
-    const row = await env.DB.prepare(
-      "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? AND as_of_date = ? ORDER BY generated_at DESC LIMIT 1",
-    ).bind("default", sessionDate).first<{ asOfDate: string | null }>();
-    return row?.asOfDate === sessionDate;
+    const snapshot = await loadSnapshot(env, "default", sessionDate, { allowComputeOnMissing: false });
+    return snapshot.status !== "empty" && snapshot.asOfDate === sessionDate;
   } catch (error) {
     console.error("scheduled market commentary snapshot readiness check failed", error);
     return false;
   }
+}
+
+async function assertFreshOverviewSnapshotForSession(env: Env, sessionDate: string): Promise<SnapshotResponse> {
+  const snapshot = await loadSnapshot(env, "default", sessionDate, { allowComputeOnMissing: false });
+  if (snapshot.status === "empty") {
+    throw new Error(`Overview snapshot for ${sessionDate} is not available; market commentary was not generated.`);
+  }
+  if (snapshot.freshnessStatus === "stale") {
+    throw new Error(snapshot.freshnessWarning ?? `Overview market data is stale for ${sessionDate}; market commentary was not generated.`);
+  }
+  return snapshot;
 }
 
 async function insertMarketCommentaryReport(
@@ -700,7 +709,7 @@ async function summarizeSearch(env: Env, session: UsMarketSessionContext, settin
   }
 }
 
-async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, settings: MarketCommentarySettings): Promise<MarketEvidence> {
+async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, settings: MarketCommentarySettings, snapshotOverride?: SnapshotResponse | null): Promise<MarketEvidence> {
   const sourceAudit = [...settings.staticSources];
   const dataQuality: MarketCommentaryDataQuality[] = [
     {
@@ -712,14 +721,20 @@ async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, s
 
   let snapshot: SnapshotResponse | null = null;
   try {
-    snapshot = await loadSnapshot(env);
+    snapshot = snapshotOverride ?? await loadSnapshot(env, "default", session.sessionDate, { allowComputeOnMissing: false });
     sourceAudit.push({
       sourceName: "Market Command dashboard snapshot",
       url: null,
       dataUsed: "Cached index, ETF, sector, and technical snapshot from the existing application",
       timestamp: snapshot.generatedAt,
     });
-    dataQuality.push({ metric: "Existing dashboard snapshot", status: "ok", note: `Loaded snapshot as of ${snapshot.asOfDate}.` });
+    dataQuality.push({
+      metric: "Existing dashboard snapshot",
+      status: snapshot.status === "empty" || snapshot.freshnessStatus === "stale" ? "stale" : "ok",
+      note: snapshot.status === "empty"
+        ? "Overview snapshot was unavailable."
+        : `Loaded snapshot as of ${snapshot.asOfDate}; freshness ${snapshot.freshnessStatus ?? "unknown"} (${snapshot.freshnessCurrentCount ?? 0}/${snapshot.freshnessEligibleCount ?? 0} tickers current).`,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Dashboard snapshot load failed.";
     dataQuality.push({ metric: "Existing dashboard snapshot", status: "unavailable", note: message });
@@ -930,10 +945,11 @@ export async function refreshMarketCommentary(env: Env, options?: {
 
   let evidence: MarketEvidence | null = null;
   try {
+    const overviewSnapshot = await assertFreshOverviewSnapshotForSession(env, session.sessionDate);
     if (!env.GEMINI_API_KEY?.trim()) {
       throw new Error("GEMINI_API_KEY is not configured.");
     }
-    evidence = await gatherMarketEvidence(env, session, settings);
+    evidence = await gatherMarketEvidence(env, session, settings, overviewSnapshot);
     const result = await generateWithGemini(env, buildPrompt(evidence, settings));
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,

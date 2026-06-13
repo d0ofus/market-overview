@@ -2432,6 +2432,15 @@ export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   lastUpdated: string | null;
   asOfDate: string | null;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
 }> {
   const query = page ? `?page=${page}` : "";
   return getJson(`/api/status${query}`);

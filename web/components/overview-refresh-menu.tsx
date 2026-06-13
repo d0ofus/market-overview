@@ -11,6 +11,15 @@ export type OverviewRefreshStatus = {
   timezone: string;
   autoRefreshLabel: string;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
 };
 
 type Props = {
@@ -45,6 +54,18 @@ function formatInZone(value: string | null, zone: string): string {
 function asOfToIso(asOfDate: string | null): string | null {
   if (!asOfDate) return null;
   return `${asOfDate}T00:00:00Z`;
+}
+
+function freshnessClass(status: OverviewRefreshStatus["freshnessStatus"]): string {
+  if (status === "fresh") return "border-success/30 bg-success/10 text-success";
+  if (status === "partial") return "border-warning/30 bg-warning/10 text-warning";
+  return "border-red-400/30 bg-red-500/10 text-red-300";
+}
+
+function freshnessLabel(status: OverviewRefreshStatus["freshnessStatus"]): string {
+  if (status === "fresh") return "Fresh";
+  if (status === "partial") return "Partial";
+  return "Stale";
 }
 
 export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshIdleLabel = "Update This Page" }: Props) {
@@ -108,6 +129,12 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
 
   const lastUpdatedLabel = useMemo(() => formatInZone(status.lastUpdated, selectedTz), [status.lastUpdated, selectedTz]);
   const asOfLabel = useMemo(() => formatInZone(asOfToIso(status.asOfDate), selectedTz), [status.asOfDate, selectedTz]);
+  const freshnessStatus = status.freshnessStatus ?? "stale";
+  const marketDataAsOf = status.freshnessMaxBarDate ?? status.asOfDate ?? "N/A";
+  const coverageLabel =
+    status.freshnessCoveragePct == null || status.freshnessCurrentCount == null || status.freshnessEligibleCount == null
+      ? "Coverage N/A"
+      : `${status.freshnessCoveragePct.toFixed(1)}% (${status.freshnessCurrentCount}/${status.freshnessEligibleCount})`;
 
   return (
     <div
@@ -140,14 +167,33 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
         >
           <div className="grid gap-2 text-sm">
             <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/45 px-3 py-2">
-              <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Last updated</div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Snapshot generated</div>
               <div className="mt-1 font-medium text-slate-100">{lastUpdatedLabel}</div>
+            </div>
+            <div className={`rounded-xl border px-3 py-2 ${freshnessClass(freshnessStatus)}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.14em] opacity-75">Market data status</div>
+                  <div className="mt-1 font-semibold">{freshnessLabel(freshnessStatus)}</div>
+                </div>
+                <div className="text-right text-xs">
+                  <div>{coverageLabel}</div>
+                  <div className="mt-1 opacity-75">Expected {status.expectedAsOfDate ?? "N/A"}</div>
+                </div>
+              </div>
+              {status.freshnessWarning && <div className="mt-2 text-xs leading-5 opacity-90">{status.freshnessWarning}</div>}
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">As-of</div>
+                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Snapshot as-of</div>
                 <div className="mt-1 text-slate-200">{asOfLabel}</div>
               </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Market data as-of</div>
+                <div className="mt-1 font-mono text-slate-200">{marketDataAsOf}</div>
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
                 <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Auto-refresh</div>
                 <div className="mt-1 text-slate-200">{status.autoRefreshLabel}</div>

@@ -5,9 +5,12 @@ import {
   CORE_BREADTH_UNIVERSE_IDS,
   computeAndStoreBreadth,
   computeAndStoreSnapshot,
+  computeOverviewFreshnessDiagnostics,
   loadSnapshot,
+  OverviewFreshnessError,
   recomputeBreadthFromStoredBars,
   recomputeDashboardFromStoredBars,
+  refreshAndStoreOverviewSnapshot,
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
 import type { Env, PostCloseDailyBarRefreshJob } from "./types";
@@ -1283,19 +1286,12 @@ async function refreshPageScopedData(
 ): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
   if (page === "overview") {
     const tickers = await loadOverviewTickers(env);
-    try {
-      await refreshRecentBarsForTickers(env, tickers, 1600, 21, true);
-      await recomputeDashboardFromStoredBars(env);
-      return { page, refreshedTickers: tickers.length };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Live overview refresh failed.";
-      await recomputeDashboardFromStoredBars(env);
-      return {
-        page,
-        refreshedTickers: tickers.length,
-        notes: `Live overview refresh failed (${message}). Rebuilt overview from stored bars instead.`,
-      };
-    }
+    const result = await refreshAndStoreOverviewSnapshot(env);
+    return {
+      page,
+      refreshedTickers: tickers.length,
+      notes: `Overview market data ${result.freshness.status}: ${result.freshness.currentCount}/${result.freshness.eligibleCount} tickers current for ${result.asOfDate} (${result.freshness.coveragePct.toFixed(1)}%).`,
+    };
   }
   if (page === "breadth") {
     const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
@@ -2058,11 +2054,38 @@ app.get("/api/status", async (c) => {
   }
 
   const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const overviewLatest = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-  )
-    .bind(config?.id ?? "default", latestAllowedAsOfDate)
-    .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
+  let overviewLatest:
+    | {
+        asOfDate?: string;
+        generatedAt?: string;
+        providerLabel?: string;
+        expectedAsOfDate?: string | null;
+        freshnessStatus?: "fresh" | "partial" | "stale" | string | null;
+        freshnessCoveragePct?: number | null;
+        freshnessCurrentCount?: number | null;
+        freshnessEligibleCount?: number | null;
+        freshnessCriticalMissingJson?: string | null;
+        freshnessMinBarDate?: string | null;
+        freshnessMaxBarDate?: string | null;
+        freshnessWarning?: string | null;
+        as_of_date?: string;
+        generated_at?: string;
+        provider_label?: string;
+      }
+    | null = null;
+  try {
+    overviewLatest = await c.env.DB.prepare(
+      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+    )
+      .bind(config?.id ?? "default", latestAllowedAsOfDate)
+      .first<typeof overviewLatest>();
+  } catch {
+    overviewLatest = await c.env.DB.prepare(
+      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+    )
+      .bind(config?.id ?? "default", latestAllowedAsOfDate)
+      .first<typeof overviewLatest>();
+  }
   const breadthLatest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
@@ -2073,6 +2096,52 @@ app.get("/api/status", async (c) => {
     asOfDate: overviewLatest?.asOfDate ?? overviewLatest?.as_of_date ?? null,
     providerLabel: overviewLatest?.providerLabel ?? overviewLatest?.provider_label ?? null,
   };
+  const overviewStoredExpectedAsOfDate = overviewLatest?.expectedAsOfDate ?? normalizedOverview.asOfDate ?? latestAllowedAsOfDate;
+  const overviewStoredFreshnessMatchesExpected =
+    normalizedOverview.asOfDate === latestAllowedAsOfDate && overviewStoredExpectedAsOfDate === latestAllowedAsOfDate;
+  let overviewFreshness = {
+    expectedAsOfDate: overviewStoredFreshnessMatchesExpected ? overviewStoredExpectedAsOfDate : latestAllowedAsOfDate,
+    freshnessStatus: overviewStoredFreshnessMatchesExpected && (overviewLatest?.freshnessStatus === "fresh" || overviewLatest?.freshnessStatus === "partial" || overviewLatest?.freshnessStatus === "stale")
+      ? overviewLatest.freshnessStatus
+      : null,
+    freshnessCoveragePct: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessCoveragePct ?? null : null,
+    freshnessCurrentCount: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessCurrentCount ?? null : null,
+    freshnessEligibleCount: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessEligibleCount ?? null : null,
+    freshnessCriticalMissingTickers: overviewStoredFreshnessMatchesExpected ? (() => {
+      try {
+        const parsed = JSON.parse(overviewLatest?.freshnessCriticalMissingJson ?? "[]");
+        return Array.isArray(parsed) ? parsed.map((ticker) => String(ticker)).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    })() : [],
+    freshnessMinBarDate: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessMinBarDate ?? null : null,
+    freshnessMaxBarDate: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessMaxBarDate ?? null : null,
+    freshnessWarning: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessWarning ?? null : null,
+  };
+  if (!overviewFreshness.freshnessStatus) {
+    try {
+      const computed = await computeOverviewFreshnessDiagnostics(c.env, latestAllowedAsOfDate, config?.id ?? "default");
+      overviewFreshness = {
+        expectedAsOfDate: computed.expectedAsOfDate,
+        freshnessStatus: computed.status,
+        freshnessCoveragePct: computed.coveragePct,
+        freshnessCurrentCount: computed.currentCount,
+        freshnessEligibleCount: computed.eligibleCount,
+        freshnessCriticalMissingTickers: computed.criticalMissingTickers,
+        freshnessMinBarDate: computed.minBarDate,
+        freshnessMaxBarDate: computed.maxBarDate,
+        freshnessWarning: computed.warning,
+      };
+    } catch (error) {
+      console.error("status overview freshness computation failed", error);
+      overviewFreshness = {
+        ...overviewFreshness,
+        freshnessStatus: "stale",
+        freshnessWarning: "Overview freshness could not be verified.",
+      };
+    }
+  }
   const normalizedBreadth = {
     lastUpdated: breadthLatest?.generatedAt ?? breadthLatest?.generated_at ?? null,
     asOfDate: breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null,
@@ -2095,6 +2164,7 @@ app.get("/api/status", async (c) => {
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider,
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
+    ...overviewFreshness,
   });
 });
 
@@ -5708,6 +5778,9 @@ app.post("/api/admin/refresh-page", async (c) => {
     const result = await refreshPageScopedData(c.env, page, body.ticker ?? null);
     return c.json({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof OverviewFreshnessError) {
+      return c.json({ error: error.message, freshness: error.diagnostics }, 409);
+    }
     const message = error instanceof Error ? error.message : "page refresh failed";
     console.error("admin refresh-page failed", { page, error });
     return c.json({ error: message }, 500);
@@ -6203,11 +6276,6 @@ export default {
       console.error("scheduled social alerts scrape failed", error);
     }
     try {
-      await maybeRunScheduledMarketCommentary(env, now);
-    } catch (error) {
-      console.error("scheduled market commentary failed", error);
-    }
-    try {
       await syncMonthlyEtfSlice(env, cron("etf-constituent-slice"));
     } catch (error) {
       console.error("scheduled etf constituent slice failed", error);
@@ -6255,11 +6323,20 @@ export default {
     }
     if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 
-    const latestOverview = await env.DB.prepare(
-      "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-    )
-      .bind(defaultConfig?.id ?? "default")
-      .first<{ asOfDate: string | null }>();
+    let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null } | null = null;
+    try {
+      latestOverview = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+      )
+        .bind(defaultConfig?.id ?? "default")
+        .first<{ asOfDate: string | null; freshnessStatus?: string | null }>();
+    } catch {
+      latestOverview = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+      )
+        .bind(defaultConfig?.id ?? "default")
+        .first<{ asOfDate: string | null }>();
+    }
     const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
     const trackedUniverseCount = await env.DB.prepare(
       `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
@@ -6273,8 +6350,18 @@ export default {
       .first<{ count: number | null }>();
     const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
-    if (latestOverview?.asOfDate !== expectedAsOf) {
-      await recomputeDashboardFromStoredBars(env, expectedAsOf, defaultConfig?.id ?? "default");
+    const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
+      && (latestOverview.freshnessStatus === "fresh" || latestOverview.freshnessStatus === "partial");
+    if (!overviewIsUsable) {
+      try {
+        await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+      } catch (error) {
+        if (error instanceof OverviewFreshnessError) {
+          console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);
+        } else {
+          console.error("scheduled overview refresh failed", error);
+        }
+      }
     }
     if (!breadthIsComplete) {
       await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
@@ -6282,6 +6369,11 @@ export default {
         maxPasses: 2,
       });
       await recomputeBreadthFromStoredBars(env, expectedAsOf);
+    }
+    try {
+      await maybeRunScheduledMarketCommentary(env, now);
+    } catch (error) {
+      console.error("scheduled market commentary failed", error);
     }
   },
 };

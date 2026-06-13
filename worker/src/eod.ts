@@ -35,6 +35,7 @@ const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
 const NYSE_BREADTH_UNIVERSE_ID = "nyse-core";
 const DB_BATCH_CHUNK_SIZE = 200;
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
+const DEFAULT_CONFIG_ID = "default";
 const MIN_NON_CORE_BREADTH_COVERAGE_PCT = 1;
 const SP500_CORE_BREADTH_MIN_COVERAGE_PCT = 95;
 const CORE_BREADTH_MIN_COVERAGE_PCT = 80;
@@ -60,6 +61,14 @@ const OVERVIEW_RS_ENABLED_GROUPS = new Set([
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 const OVERVIEW_SNAPSHOT_RETENTION_DAYS = 14;
 const SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE = 25;
+const OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT = 90;
+const OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES = new Set([
+  "US Index Futures",
+  "US Index Futures (Equal Weight)",
+  "Sector ETFs",
+  "Sector ETFs (Equal Weight)",
+]);
+let overviewFreshnessSchemaReady = false;
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
 const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
@@ -73,6 +82,55 @@ type BreadthUniverseState = {
   sourceByUniverse: Map<string, string>;
   unavailable: Array<{ id: string; name: string; reason: string }>;
 };
+
+export type OverviewFreshnessStatus = "fresh" | "partial" | "stale";
+
+export type OverviewFreshnessDiagnostics = {
+  expectedAsOfDate: string;
+  status: OverviewFreshnessStatus;
+  eligibleCount: number;
+  currentCount: number;
+  staleCount: number;
+  coveragePct: number;
+  criticalMissingTickers: string[];
+  minBarDate: string | null;
+  maxBarDate: string | null;
+  warning: string | null;
+};
+
+type OverviewFreshnessTicker = {
+  ticker: string;
+  groupTitle: string;
+  sectionTitle: string;
+  critical: boolean;
+  eligible: boolean;
+};
+
+type SnapshotMetaRow = {
+  id: string;
+  asOfDate: string;
+  generatedAt: string;
+  providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: OverviewFreshnessStatus | string | null;
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingJson?: string | null;
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
+};
+
+export class OverviewFreshnessError extends Error {
+  diagnostics: OverviewFreshnessDiagnostics;
+
+  constructor(diagnostics: OverviewFreshnessDiagnostics) {
+    super(diagnostics.warning ?? "Overview market data freshness validation failed.");
+    this.name = "OverviewFreshnessError";
+    this.diagnostics = diagnostics;
+  }
+}
 
 type UniverseSourceStatus = {
   lastSyncedAt: string | null;
@@ -136,6 +194,323 @@ function minBreadthCoveragePct(universeId: string): number {
 
 function buildPlaceholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.toLowerCase().includes("duplicate column name");
+}
+
+async function addColumnIfMissing(env: Env, sql: string): Promise<void> {
+  try {
+    await env.DB.prepare(sql).run();
+  } catch (error) {
+    if (!isDuplicateColumnError(error)) throw error;
+  }
+}
+
+export async function ensureOverviewFreshnessSchema(env: Env): Promise<void> {
+  if (overviewFreshnessSchemaReady) return;
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN expected_as_of_date TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_status TEXT NOT NULL DEFAULT 'stale'");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_current_count INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_eligible_count INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_coverage_pct REAL NOT NULL DEFAULT 0");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_critical_missing_json TEXT NOT NULL DEFAULT '[]'");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_min_bar_date TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_max_bar_date TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_warning TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshot_rows ADD COLUMN bar_date TEXT");
+  overviewFreshnessSchemaReady = true;
+}
+
+function isOverviewFreshnessEligibleTicker(ticker: string, groupTitle: string): boolean {
+  const normalized = ticker.trim().toUpperCase();
+  const title = groupTitle.trim().toLowerCase();
+  if (!normalized) return false;
+  if (title.includes("crypto")) return false;
+  if (normalized.includes("!") || normalized.includes("=")) return false;
+  if (normalized.startsWith("^")) return false;
+  return true;
+}
+
+function overviewFreshnessTickersFromConfig(config: Awaited<ReturnType<typeof loadConfig>>): OverviewFreshnessTicker[] {
+  const byTicker = new Map<string, OverviewFreshnessTicker>();
+  for (const section of config.sections) {
+    if (!section.title.includes("Macro") && !section.title.includes("Equities")) continue;
+    for (const group of section.groups) {
+      const criticalGroup = OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES.has(group.title);
+      for (const item of group.items) {
+        if (!item.enabled) continue;
+        const ticker = item.ticker.trim().toUpperCase();
+        const eligible = isOverviewFreshnessEligibleTicker(ticker, group.title);
+        const existing = byTicker.get(ticker);
+        byTicker.set(ticker, {
+          ticker,
+          groupTitle: existing?.groupTitle ?? group.title,
+          sectionTitle: existing?.sectionTitle ?? section.title,
+          eligible: existing?.eligible ?? eligible,
+          critical: Boolean(existing?.critical || (criticalGroup && eligible)),
+        });
+      }
+    }
+  }
+  return Array.from(byTicker.values()).sort((left, right) => left.ticker.localeCompare(right.ticker));
+}
+
+function parseCriticalMissingTickers(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((value) => String(value)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildFreshnessWarning(diagnostics: Omit<OverviewFreshnessDiagnostics, "warning">, staleExamples: Array<{ ticker: string; lastDate: string | null }>): string | null {
+  if (diagnostics.status === "fresh") return null;
+  const expected = diagnostics.expectedAsOfDate;
+  const missing = diagnostics.criticalMissingTickers.slice(0, 8);
+  if (missing.length > 0) {
+    const details = staleExamples
+      .filter((row) => missing.includes(row.ticker))
+      .map((row) => `${row.ticker} last updated ${row.lastDate ?? "N/A"}`)
+      .join(", ");
+    return `Stale: critical overview tickers are not current for ${expected}${details ? ` (${details})` : ""}.`;
+  }
+  return `Partial: overview market data coverage is ${diagnostics.coveragePct.toFixed(1)}% (${diagnostics.currentCount}/${diagnostics.eligibleCount}) for ${expected}.`;
+}
+
+function normalizeFreshnessDiagnostics(input: Partial<OverviewFreshnessDiagnostics> & { expectedAsOfDate: string }): OverviewFreshnessDiagnostics {
+  const eligibleCount = Math.max(0, Number(input.eligibleCount ?? 0));
+  const currentCount = Math.max(0, Number(input.currentCount ?? 0));
+  const coveragePct = eligibleCount > 0 ? (currentCount / eligibleCount) * 100 : 0;
+  const criticalMissingTickers = Array.from(new Set((input.criticalMissingTickers ?? []).map((ticker) => ticker.toUpperCase()))).sort();
+  const base = {
+    expectedAsOfDate: input.expectedAsOfDate,
+    status: input.status ?? "stale",
+    eligibleCount,
+    currentCount,
+    staleCount: Math.max(0, Number(input.staleCount ?? eligibleCount - currentCount)),
+    coveragePct: Number.isFinite(Number(input.coveragePct)) ? Number(input.coveragePct) : coveragePct,
+    criticalMissingTickers,
+    minBarDate: input.minBarDate ?? null,
+    maxBarDate: input.maxBarDate ?? null,
+    warning: input.warning ?? null,
+  };
+  return base;
+}
+
+export async function computeOverviewFreshnessDiagnostics(
+  env: Env,
+  expectedAsOfDate: string,
+  configId = DEFAULT_CONFIG_ID,
+): Promise<OverviewFreshnessDiagnostics> {
+  const config = await loadConfig(env, configId);
+  return await computeOverviewFreshnessDiagnosticsForConfig(env, config, expectedAsOfDate);
+}
+
+async function computeOverviewFreshnessDiagnosticsForConfig(
+  env: Env,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  expectedAsOfDate: string,
+): Promise<OverviewFreshnessDiagnostics> {
+  const candidates = overviewFreshnessTickersFromConfig(config).filter((row) => row.eligible);
+  if (candidates.length === 0) {
+    return {
+      expectedAsOfDate,
+      status: "stale",
+      eligibleCount: 0,
+      currentCount: 0,
+      staleCount: 0,
+      coveragePct: 0,
+      criticalMissingTickers: [],
+      minBarDate: null,
+      maxBarDate: null,
+      warning: `Stale: no eligible overview tickers were available to validate for ${expectedAsOfDate}.`,
+    };
+  }
+
+  const latestByTicker = new Map<string, string | null>();
+  const tickers = candidates.map((row) => row.ticker);
+  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
+    const placeholders = buildPlaceholders(chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ticker, MAX(date) as lastDate
+       FROM daily_bars
+       WHERE ticker IN (${placeholders})
+         AND date <= ?
+       GROUP BY ticker`,
+    )
+      .bind(...chunk, expectedAsOfDate)
+      .all<{ ticker: string; lastDate: string | null }>();
+    for (const row of rows.results ?? []) {
+      latestByTicker.set(row.ticker.toUpperCase(), row.lastDate ?? null);
+    }
+  }
+
+  let currentCount = 0;
+  let minBarDate: string | null = null;
+  let maxBarDate: string | null = null;
+  const criticalMissingTickers: string[] = [];
+  const staleExamples: Array<{ ticker: string; lastDate: string | null }> = [];
+
+  for (const candidate of candidates) {
+    const lastDate = latestByTicker.get(candidate.ticker) ?? null;
+    if (lastDate) {
+      if (!minBarDate || lastDate < minBarDate) minBarDate = lastDate;
+      if (!maxBarDate || lastDate > maxBarDate) maxBarDate = lastDate;
+    }
+    if (lastDate === expectedAsOfDate) {
+      currentCount += 1;
+      continue;
+    }
+    staleExamples.push({ ticker: candidate.ticker, lastDate });
+    if (candidate.critical) criticalMissingTickers.push(candidate.ticker);
+  }
+
+  const eligibleCount = candidates.length;
+  const coveragePct = eligibleCount > 0 ? (currentCount / eligibleCount) * 100 : 0;
+  const staleCount = Math.max(0, eligibleCount - currentCount);
+  const status: OverviewFreshnessStatus = criticalMissingTickers.length > 0 || coveragePct < OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT
+    ? "stale"
+    : staleCount > 0
+      ? "partial"
+      : "fresh";
+  const base = {
+    expectedAsOfDate,
+    status,
+    eligibleCount,
+    currentCount,
+    staleCount,
+    coveragePct,
+    criticalMissingTickers: Array.from(new Set(criticalMissingTickers)).sort(),
+    minBarDate,
+    maxBarDate,
+  };
+
+  return {
+    ...base,
+    warning: buildFreshnessWarning(base, staleExamples),
+  };
+}
+
+async function loadOverviewFreshnessMissingTickers(
+  env: Env,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  expectedAsOfDate: string,
+): Promise<string[]> {
+  const candidates = overviewFreshnessTickersFromConfig(config).filter((row) => row.eligible);
+  const tickers = candidates.map((row) => row.ticker);
+  if (tickers.length === 0) return [];
+  const current = new Set<string>();
+  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
+    const placeholders = buildPlaceholders(chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT ticker
+       FROM daily_bars
+       WHERE ticker IN (${placeholders})
+         AND date = ?`,
+    )
+      .bind(...chunk, expectedAsOfDate)
+      .all<{ ticker: string }>();
+    for (const row of rows.results ?? []) current.add(row.ticker.toUpperCase());
+  }
+  return tickers.filter((ticker) => !current.has(ticker.toUpperCase()));
+}
+
+function overviewConfigTickers(config: Awaited<ReturnType<typeof loadConfig>>): string[] {
+  return Array.from(new Set(
+    config.sections
+      .filter((section) => section.title.includes("Macro") || section.title.includes("Equities"))
+      .flatMap((section) => section.groups)
+      .flatMap((group) => group.items)
+      .filter((item) => item.enabled)
+      .map((item) => item.ticker.trim().toUpperCase())
+      .filter(Boolean),
+  ));
+}
+
+export async function refreshAndStoreOverviewSnapshot(
+  env: Env,
+  asOfDateInput?: string,
+  configId = DEFAULT_CONFIG_ID,
+): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics; fetchedRows: number; writtenRows: number }> {
+  const asOfDate = resolveAsOfDate(asOfDateInput);
+  const config = await loadConfig(env, configId);
+  const tickers = overviewConfigTickers(config);
+  const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 21 * 86400_000));
+  let fetchedRows = 0;
+  let writtenRows = 0;
+  try {
+    const provider = getProvider(env, { yahooPreferredTickers: tickers });
+    const refresh = await refreshDailyBarsIncremental(env, {
+      provider,
+      tickers,
+      startDate,
+      endDate: asOfDate,
+      replaceExisting: true,
+      continueOnError: true,
+    });
+    fetchedRows += refresh.fetchedRows;
+    writtenRows += refresh.writtenRows;
+  } catch (error) {
+    console.error("overview strict refresh provider pull failed", error);
+  }
+
+  let freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+  if (freshness.status === "stale") {
+    const retryTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate);
+    if (retryTickers.length > 0) {
+      try {
+        const provider = getProvider(env, { yahooPreferredTickers: retryTickers, fallbackEnabled: true });
+        const retry = await refreshDailyBarsIncremental(env, {
+          provider,
+          tickers: retryTickers,
+          startDate,
+          endDate: asOfDate,
+          replaceExisting: true,
+          continueOnError: true,
+        });
+        fetchedRows += retry.fetchedRows;
+        writtenRows += retry.writtenRows;
+        freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+      } catch (error) {
+        console.error("overview strict retry refresh failed", { retryTickers: retryTickers.length, error });
+      }
+    }
+  }
+
+  const result = await computeAndStoreSnapshot(env, asOfDate, configId, {
+    includeBreadth: false,
+    pullProviderBars: false,
+    requireFreshness: true,
+    freshnessDiagnostics: freshness,
+  });
+  return { ...result, fetchedRows, writtenRows };
+}
+
+export function freshnessDiagnosticsFromSnapshotMeta(meta: SnapshotMetaRow | null | undefined, fallbackExpectedAsOfDate: string): OverviewFreshnessDiagnostics | null {
+  if (!meta) return null;
+  const expectedAsOfDate = meta.expectedAsOfDate ?? meta.asOfDate ?? fallbackExpectedAsOfDate;
+  const eligibleCount = Number(meta.freshnessEligibleCount ?? 0);
+  const currentCount = Number(meta.freshnessCurrentCount ?? 0);
+  const coveragePct = Number(meta.freshnessCoveragePct ?? (eligibleCount > 0 ? (currentCount / eligibleCount) * 100 : 0));
+  return normalizeFreshnessDiagnostics({
+    expectedAsOfDate,
+    status: meta.freshnessStatus === "fresh" || meta.freshnessStatus === "partial" || meta.freshnessStatus === "stale" ? meta.freshnessStatus : "stale",
+    eligibleCount,
+    currentCount,
+    staleCount: Math.max(0, eligibleCount - currentCount),
+    coveragePct,
+    criticalMissingTickers: parseCriticalMissingTickers(meta.freshnessCriticalMissingJson),
+    minBarDate: meta.freshnessMinBarDate ?? null,
+    maxBarDate: meta.freshnessMaxBarDate ?? null,
+    warning: meta.freshnessWarning ?? null,
+  });
 }
 
 export async function cleanupOldOverviewSnapshots(
@@ -637,6 +1012,8 @@ type SnapshotComputeOptions = {
   includeBreadth?: boolean;
   pullProviderBars?: boolean;
   providerTickers?: string[] | null;
+  requireFreshness?: boolean;
+  freshnessDiagnostics?: OverviewFreshnessDiagnostics | null;
 };
 
 export async function computeAndStoreSnapshot(
@@ -644,11 +1021,12 @@ export async function computeAndStoreSnapshot(
   asOfDateInput?: string,
   configId = "default",
   options: SnapshotComputeOptions = {},
-): Promise<{ snapshotId: string; asOfDate: string }> {
+): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics }> {
   const includeBreadth = options.includeBreadth ?? true;
   const pullProviderBars = options.pullProviderBars ?? true;
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const generatedAt = new Date().toISOString();
+  await ensureOverviewFreshnessSchema(env);
   const config = await loadConfig(env, configId);
   let providerLabel = "Stored Daily Bars";
   const provider = pullProviderBars
@@ -705,6 +1083,11 @@ export async function computeAndStoreSnapshot(
     }
   }
 
+  const freshness = options.freshnessDiagnostics ?? await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+  if (options.requireFreshness && freshness.status === "stale") {
+    throw new OverviewFreshnessError(freshness);
+  }
+
   const barRows = await env.DB.prepare(
     "SELECT ticker, date, c FROM daily_bars WHERE ticker IN (SELECT ticker FROM dashboard_items) AND date <= ? ORDER BY ticker, date",
   )
@@ -741,10 +1124,12 @@ export async function computeAndStoreSnapshot(
         .map((item) => {
           const bars = barsByTicker.get(item.ticker);
           const metrics = computeMetrics(bars?.dates ?? [], bars?.closes ?? []);
+          const cleaned = sanitizeBarSeries(bars?.dates ?? [], bars?.closes ?? []);
           return {
             ticker: item.ticker,
             displayName: item.displayName ?? symbolNameMap.get(item.ticker) ?? item.ticker,
             holdings: item.holdings,
+            barDate: cleaned.dates.at(-1) ?? null,
             ...metrics,
             rankKey: rankValue(metrics, group.rankingWindowDefault),
           };
@@ -754,7 +1139,7 @@ export async function computeAndStoreSnapshot(
       for (const row of rows) {
         rowInserts.push(
           env.DB.prepare(
-            "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json, bar_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           ).bind(
             snapshotId,
             section.id,
@@ -771,6 +1156,7 @@ export async function computeAndStoreSnapshot(
             JSON.stringify(row.sparkline),
             row.rankKey,
             row.holdings ? JSON.stringify(row.holdings) : null,
+            row.barDate,
           ),
         );
       }
@@ -778,14 +1164,53 @@ export async function computeAndStoreSnapshot(
   }
   if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
   await env.DB.prepare(
-    `INSERT INTO snapshots_meta (id, config_id, as_of_date, generated_at, provider_label)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO snapshots_meta (
+       id,
+       config_id,
+       as_of_date,
+       generated_at,
+       provider_label,
+       expected_as_of_date,
+       freshness_status,
+       freshness_current_count,
+       freshness_eligible_count,
+       freshness_coverage_pct,
+       freshness_critical_missing_json,
+       freshness_min_bar_date,
+       freshness_max_bar_date,
+       freshness_warning
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(config_id, as_of_date) DO UPDATE SET
        id = excluded.id,
        generated_at = excluded.generated_at,
-       provider_label = excluded.provider_label`,
+       provider_label = excluded.provider_label,
+       expected_as_of_date = excluded.expected_as_of_date,
+       freshness_status = excluded.freshness_status,
+       freshness_current_count = excluded.freshness_current_count,
+       freshness_eligible_count = excluded.freshness_eligible_count,
+       freshness_coverage_pct = excluded.freshness_coverage_pct,
+       freshness_critical_missing_json = excluded.freshness_critical_missing_json,
+       freshness_min_bar_date = excluded.freshness_min_bar_date,
+       freshness_max_bar_date = excluded.freshness_max_bar_date,
+       freshness_warning = excluded.freshness_warning`,
   )
-    .bind(snapshotId, configId, asOfDate, generatedAt, providerLabel)
+    .bind(
+      snapshotId,
+      configId,
+      asOfDate,
+      generatedAt,
+      providerLabel,
+      freshness.expectedAsOfDate,
+      freshness.status,
+      freshness.currentCount,
+      freshness.eligibleCount,
+      freshness.coveragePct,
+      JSON.stringify(freshness.criticalMissingTickers),
+      freshness.minBarDate,
+      freshness.maxBarDate,
+      freshness.warning,
+    )
     .run();
   if (previousSnapshot?.id && previousSnapshot.id !== snapshotId) {
     await env.DB.prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ?")
@@ -808,14 +1233,14 @@ export async function computeAndStoreSnapshot(
   if (postCleanup.deletedSnapshots > 0 || postCleanup.deletedRows > 0) {
     console.log("overview snapshot cleanup removed old rows after refresh", postCleanup);
   }
-  return { snapshotId, asOfDate };
+  return { snapshotId, asOfDate, freshness };
 }
 
 export async function recomputeDashboardFromStoredBars(
   env: Env,
   asOfDateInput?: string,
   configId = "default",
-): Promise<{ snapshotId: string; asOfDate: string }> {
+): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics }> {
   return computeAndStoreSnapshot(env, asOfDateInput, configId, {
     includeBreadth: false,
     pullProviderBars: false,
@@ -1118,9 +1543,45 @@ export function emptySnapshotResponse(warning = "No stored overview snapshot is 
     asOfDate: null,
     generatedAt: null,
     providerLabel: null,
+    expectedAsOfDate: latestUsSessionAsOfDate(new Date()),
+    freshnessStatus: "stale",
+    freshnessCoveragePct: 0,
+    freshnessCurrentCount: 0,
+    freshnessEligibleCount: 0,
+    freshnessCriticalMissingTickers: [],
+    freshnessMinBarDate: null,
+    freshnessMaxBarDate: null,
+    freshnessWarning: warning,
     config: null,
     sections: [],
   };
+}
+
+async function loadSnapshotMeta(
+  env: Env,
+  configId: string,
+  latestAllowedAsOfDate: string,
+  requestedDate?: string,
+): Promise<SnapshotMetaRow | null> {
+  const selectWithFreshness =
+    "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_coverage_pct as freshnessCoveragePct, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning FROM snapshots_meta";
+  const selectLegacy =
+    "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta";
+  const where = requestedDate
+    ? " WHERE config_id = ? AND as_of_date = ?"
+    : " WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1";
+
+  try {
+    return await env.DB.prepare(`${selectWithFreshness}${where}`)
+      .bind(configId, requestedDate ?? latestAllowedAsOfDate)
+      .first<SnapshotMetaRow>();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message.toLowerCase().includes("freshness_") && !message.toLowerCase().includes("expected_as_of_date")) throw error;
+    return await env.DB.prepare(`${selectLegacy}${where}`)
+      .bind(configId, requestedDate ?? latestAllowedAsOfDate)
+      .first<SnapshotMetaRow>();
+  }
 }
 
 export async function loadSnapshot(
@@ -1144,17 +1605,7 @@ export async function loadSnapshot(
   const config = await loadConfig(env, configId);
   const allowComputeOnMissing = options.allowComputeOnMissing ?? true;
   const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const meta = requestedDate
-    ? await env.DB.prepare(
-        "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date = ?",
-      )
-        .bind(configId, requestedDate)
-        .first<{ id: string; asOfDate: string; generatedAt: string; providerLabel: string }>()
-    : await env.DB.prepare(
-        "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-      )
-        .bind(configId, latestAllowedAsOfDate)
-        .first<{ id: string; asOfDate: string; generatedAt: string; providerLabel: string }>();
+  const meta = await loadSnapshotMeta(env, configId, latestAllowedAsOfDate, requestedDate);
 
   if (!meta && !allowComputeOnMissing) {
     return emptySnapshotResponse();
@@ -1165,11 +1616,13 @@ export async function loadSnapshot(
     return loadSnapshot(env, configId, computed.asOfDate);
   }
 
-  const rows = await env.DB.prepare(
-    "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
-  )
-    .bind(meta.id)
-    .all<{
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson, bar_date as barDate FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
+    )
+      .bind(meta.id)
+      .all<{
       sectionId: string;
       groupId: string;
       ticker: string;
@@ -1184,7 +1637,33 @@ export async function loadSnapshot(
       sparklineJson: string;
       rankKey: number;
       holdingsJson: string | null;
+      barDate: string | null;
     }>();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message.toLowerCase().includes("bar_date")) throw error;
+    rows = await env.DB.prepare(
+      "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
+    )
+      .bind(meta.id)
+      .all<{
+        sectionId: string;
+        groupId: string;
+        ticker: string;
+        displayName: string | null;
+        price: number;
+        change1d: number;
+        change1w: number;
+        change5d: number;
+        change21d: number;
+        ytd: number;
+        pctFrom52wHigh: number;
+        sparklineJson: string;
+        rankKey: number;
+        holdingsJson: string | null;
+        barDate?: string | null;
+      }>();
+  }
 
   const tableRows = rows.results ?? [];
   const derivedMetrics = await loadOverviewDerivedMetricsByTicker(
@@ -1197,10 +1676,20 @@ export async function loadSnapshot(
     tableRows.map((row) => ({ groupId: row.groupId, ticker: row.ticker })),
     meta.asOfDate,
   );
+  const freshness = freshnessDiagnosticsFromSnapshotMeta(meta, latestAllowedAsOfDate);
   return {
     asOfDate: meta.asOfDate,
     generatedAt: meta.generatedAt,
     providerLabel: meta.providerLabel,
+    expectedAsOfDate: freshness?.expectedAsOfDate ?? meta.asOfDate,
+    freshnessStatus: freshness?.status ?? "stale",
+    freshnessCoveragePct: freshness?.coveragePct ?? 0,
+    freshnessCurrentCount: freshness?.currentCount ?? 0,
+    freshnessEligibleCount: freshness?.eligibleCount ?? 0,
+    freshnessCriticalMissingTickers: freshness?.criticalMissingTickers ?? [],
+    freshnessMinBarDate: freshness?.minBarDate ?? null,
+    freshnessMaxBarDate: freshness?.maxBarDate ?? null,
+    freshnessWarning: freshness?.warning ?? null,
     config,
     sections: config.sections.map((sec) => ({
       id: sec.id,
@@ -1235,6 +1724,7 @@ export async function loadSnapshot(
             pctFrom52wHigh: r.pctFrom52wHigh,
             sparkline: JSON.parse(r.sparklineJson) as number[],
             relativeStrength30dVsSpy: relativeStrengthByTicker.get(r.ticker.toUpperCase()) ?? null,
+            barDate: r.barDate ?? null,
             rankKey: r.rankKey,
             holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
           })),

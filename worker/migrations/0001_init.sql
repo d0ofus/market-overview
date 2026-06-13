@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS snapshots_meta (
   as_of_date TEXT NOT NULL,
   generated_at TEXT NOT NULL,
   provider_label TEXT NOT NULL,
+  expected_as_of_date TEXT,
+  freshness_status TEXT NOT NULL DEFAULT 'stale',
+  freshness_current_count INTEGER NOT NULL DEFAULT 0,
+  freshness_eligible_count INTEGER NOT NULL DEFAULT 0,
+  freshness_coverage_pct REAL NOT NULL DEFAULT 0,
+  freshness_critical_missing_json TEXT NOT NULL DEFAULT '[]',
+  freshness_min_bar_date TEXT,
+  freshness_max_bar_date TEXT,
+  freshness_warning TEXT,
   UNIQUE(config_id, as_of_date)
 );
 
@@ -110,6 +119,7 @@ CREATE TABLE IF NOT EXISTS snapshot_rows (
   sparkline_json TEXT,
   rank_key REAL,
   holdings_json TEXT,
+  bar_date TEXT,
   PRIMARY KEY (snapshot_id, group_id, ticker)
 );
 
