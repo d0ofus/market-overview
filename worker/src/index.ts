@@ -2099,15 +2099,21 @@ app.get("/api/status", async (c) => {
   const overviewStoredExpectedAsOfDate = overviewLatest?.expectedAsOfDate ?? normalizedOverview.asOfDate ?? latestAllowedAsOfDate;
   const overviewStoredFreshnessMatchesExpected =
     normalizedOverview.asOfDate === latestAllowedAsOfDate && overviewStoredExpectedAsOfDate === latestAllowedAsOfDate;
+  const overviewStoredFreshnessHasDiagnostics =
+    overviewStoredFreshnessMatchesExpected && Number(overviewLatest?.freshnessEligibleCount ?? 0) > 0;
+  const overviewStoredFreshnessUnknownWarning =
+    "Snapshot freshness diagnostics are unavailable for the displayed data; refresh this page to rebuild row-level bar dates.";
   let overviewFreshness = {
     expectedAsOfDate: overviewStoredFreshnessMatchesExpected ? overviewStoredExpectedAsOfDate : latestAllowedAsOfDate,
-    freshnessStatus: overviewStoredFreshnessMatchesExpected && (overviewLatest?.freshnessStatus === "fresh" || overviewLatest?.freshnessStatus === "partial" || overviewLatest?.freshnessStatus === "stale")
+    freshnessStatus: overviewStoredFreshnessHasDiagnostics && (overviewLatest?.freshnessStatus === "fresh" || overviewLatest?.freshnessStatus === "partial" || overviewLatest?.freshnessStatus === "stale")
       ? overviewLatest.freshnessStatus
-      : null,
-    freshnessCoveragePct: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessCoveragePct ?? null : null,
-    freshnessCurrentCount: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessCurrentCount ?? null : null,
-    freshnessEligibleCount: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessEligibleCount ?? null : null,
-    freshnessCriticalMissingTickers: overviewStoredFreshnessMatchesExpected ? (() => {
+      : overviewStoredFreshnessMatchesExpected
+        ? "stale"
+        : null,
+    freshnessCoveragePct: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCoveragePct ?? null : null,
+    freshnessCurrentCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCurrentCount ?? null : null,
+    freshnessEligibleCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessEligibleCount ?? null : null,
+    freshnessCriticalMissingTickers: overviewStoredFreshnessHasDiagnostics ? (() => {
       try {
         const parsed = JSON.parse(overviewLatest?.freshnessCriticalMissingJson ?? "[]");
         return Array.isArray(parsed) ? parsed.map((ticker) => String(ticker)).filter(Boolean) : [];
@@ -2115,9 +2121,13 @@ app.get("/api/status", async (c) => {
         return [];
       }
     })() : [],
-    freshnessMinBarDate: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessMinBarDate ?? null : null,
-    freshnessMaxBarDate: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessMaxBarDate ?? null : null,
-    freshnessWarning: overviewStoredFreshnessMatchesExpected ? overviewLatest?.freshnessWarning ?? null : null,
+    freshnessMinBarDate: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessMinBarDate ?? null : null,
+    freshnessMaxBarDate: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessMaxBarDate ?? null : null,
+    freshnessWarning: overviewStoredFreshnessHasDiagnostics
+      ? overviewLatest?.freshnessWarning ?? null
+      : overviewStoredFreshnessMatchesExpected
+        ? overviewStoredFreshnessUnknownWarning
+        : null,
   };
   if (!overviewFreshness.freshnessStatus) {
     try {

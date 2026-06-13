@@ -68,6 +68,15 @@ const OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES = new Set([
   "Sector ETFs",
   "Sector ETFs (Equal Weight)",
 ]);
+const OVERVIEW_FRESHNESS_UNSUPPORTED_TICKERS = new Set([
+  "BKX",
+  "INSR",
+  "OSX",
+  "XAU",
+  "XNG",
+]);
+const UNKNOWN_OVERVIEW_SNAPSHOT_FRESHNESS_WARNING =
+  "Snapshot freshness diagnostics are unavailable for the displayed data; refresh this page to rebuild row-level bar dates.";
 let overviewFreshnessSchemaReady = false;
 
 const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
@@ -231,6 +240,7 @@ function isOverviewFreshnessEligibleTicker(ticker: string, groupTitle: string): 
   if (title.includes("crypto")) return false;
   if (normalized.includes("!") || normalized.includes("=")) return false;
   if (normalized.startsWith("^")) return false;
+  if (OVERVIEW_FRESHNESS_UNSUPPORTED_TICKERS.has(normalized)) return false;
   return true;
 }
 
@@ -268,18 +278,22 @@ function parseCriticalMissingTickers(raw: string | null | undefined): string[] {
   }
 }
 
-function buildFreshnessWarning(diagnostics: Omit<OverviewFreshnessDiagnostics, "warning">, staleExamples: Array<{ ticker: string; lastDate: string | null }>): string | null {
+function buildFreshnessWarning(diagnostics: Omit<OverviewFreshnessDiagnostics, "warning">, staleExamples: Array<{ ticker: string; groupTitle: string; lastDate: string | null }>): string | null {
   if (diagnostics.status === "fresh") return null;
   const expected = diagnostics.expectedAsOfDate;
   const missing = diagnostics.criticalMissingTickers.slice(0, 8);
   if (missing.length > 0) {
     const details = staleExamples
       .filter((row) => missing.includes(row.ticker))
-      .map((row) => `${row.ticker} last updated ${row.lastDate ?? "N/A"}`)
+      .map((row) => `${row.ticker} (${row.groupTitle}) last updated ${row.lastDate ?? "N/A"}`)
       .join(", ");
     return `Stale: critical overview tickers are not current for ${expected}${details ? ` (${details})` : ""}.`;
   }
-  return `Partial: overview market data coverage is ${diagnostics.coveragePct.toFixed(1)}% (${diagnostics.currentCount}/${diagnostics.eligibleCount}) for ${expected}.`;
+  const examples = staleExamples
+    .slice(0, 8)
+    .map((row) => `${row.ticker} (${row.groupTitle}) last updated ${row.lastDate ?? "N/A"}`)
+    .join(", ");
+  return `Partial: overview market data coverage is ${diagnostics.coveragePct.toFixed(1)}% (${diagnostics.currentCount}/${diagnostics.eligibleCount}) for ${expected}${examples ? ` (${examples})` : ""}.`;
 }
 
 function normalizeFreshnessDiagnostics(input: Partial<OverviewFreshnessDiagnostics> & { expectedAsOfDate: string }): OverviewFreshnessDiagnostics {
@@ -355,7 +369,7 @@ async function computeOverviewFreshnessDiagnosticsForConfig(
   let minBarDate: string | null = null;
   let maxBarDate: string | null = null;
   const criticalMissingTickers: string[] = [];
-  const staleExamples: Array<{ ticker: string; lastDate: string | null }> = [];
+  const staleExamples: Array<{ ticker: string; groupTitle: string; lastDate: string | null }> = [];
 
   for (const candidate of candidates) {
     const lastDate = latestByTicker.get(candidate.ticker) ?? null;
@@ -367,14 +381,14 @@ async function computeOverviewFreshnessDiagnosticsForConfig(
       currentCount += 1;
       continue;
     }
-    staleExamples.push({ ticker: candidate.ticker, lastDate });
+    staleExamples.push({ ticker: candidate.ticker, groupTitle: candidate.groupTitle, lastDate });
     if (candidate.critical) criticalMissingTickers.push(candidate.ticker);
   }
 
   const eligibleCount = candidates.length;
   const coveragePct = eligibleCount > 0 ? (currentCount / eligibleCount) * 100 : 0;
   const staleCount = Math.max(0, eligibleCount - currentCount);
-  const status: OverviewFreshnessStatus = criticalMissingTickers.length > 0 || coveragePct < OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT
+  const status: OverviewFreshnessStatus = criticalMissingTickers.length > 0
     ? "stale"
     : staleCount > 0
       ? "partial"
@@ -401,8 +415,10 @@ async function loadOverviewFreshnessMissingTickers(
   env: Env,
   config: Awaited<ReturnType<typeof loadConfig>>,
   expectedAsOfDate: string,
+  options: { criticalOnly?: boolean } = {},
 ): Promise<string[]> {
-  const candidates = overviewFreshnessTickersFromConfig(config).filter((row) => row.eligible);
+  const candidates = overviewFreshnessTickersFromConfig(config)
+    .filter((row) => row.eligible && (!options.criticalOnly || row.critical));
   const tickers = candidates.map((row) => row.ticker);
   if (tickers.length === 0) return [];
   const current = new Set<string>();
@@ -434,6 +450,12 @@ function overviewConfigTickers(config: Awaited<ReturnType<typeof loadConfig>>): 
   ));
 }
 
+function overviewCriticalFreshnessTickers(config: Awaited<ReturnType<typeof loadConfig>>): string[] {
+  return overviewFreshnessTickersFromConfig(config)
+    .filter((row) => row.eligible && row.critical)
+    .map((row) => row.ticker);
+}
+
 export async function refreshAndStoreOverviewSnapshot(
   env: Env,
   asOfDateInput?: string,
@@ -442,45 +464,51 @@ export async function refreshAndStoreOverviewSnapshot(
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
   const tickers = overviewConfigTickers(config);
+  const criticalTickers = Array.from(new Set(overviewCriticalFreshnessTickers(config).map((ticker) => ticker.toUpperCase())));
+  const criticalTickerSet = new Set(criticalTickers);
+  const nonCriticalTickers = tickers.filter((ticker) => !criticalTickerSet.has(ticker.toUpperCase()));
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 21 * 86400_000));
   let fetchedRows = 0;
   let writtenRows = 0;
-  try {
-    const provider = getProvider(env, { yahooPreferredTickers: tickers });
-    const refresh = await refreshDailyBarsIncremental(env, {
-      provider,
-      tickers,
-      startDate,
-      endDate: asOfDate,
-      replaceExisting: true,
-      continueOnError: true,
-    });
-    fetchedRows += refresh.fetchedRows;
-    writtenRows += refresh.writtenRows;
-  } catch (error) {
-    console.error("overview strict refresh provider pull failed", error);
-  }
+  const refreshTickers = async (refreshTickersInput: string[], label: string, providerBatchSize = 80) => {
+    if (refreshTickersInput.length === 0) return;
+    try {
+      const provider = getProvider(env, { yahooPreferredTickers: refreshTickersInput, fallbackEnabled: true });
+      const refresh = await refreshDailyBarsIncremental(env, {
+        provider,
+        tickers: refreshTickersInput,
+        startDate,
+        endDate: asOfDate,
+        replaceExisting: true,
+        continueOnError: true,
+        providerBatchSize,
+      });
+      fetchedRows += refresh.fetchedRows;
+      writtenRows += refresh.writtenRows;
+    } catch (error) {
+      console.error(`overview ${label} refresh failed`, { tickers: refreshTickersInput.length, error });
+    }
+  };
+
+  await refreshTickers(criticalTickers, "critical", 20);
 
   let freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
   if (freshness.status === "stale") {
-    const retryTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate);
+    const retryTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate, { criticalOnly: true });
     if (retryTickers.length > 0) {
-      try {
-        const provider = getProvider(env, { yahooPreferredTickers: retryTickers, fallbackEnabled: true });
-        const retry = await refreshDailyBarsIncremental(env, {
-          provider,
-          tickers: retryTickers,
-          startDate,
-          endDate: asOfDate,
-          replaceExisting: true,
-          continueOnError: true,
-        });
-        fetchedRows += retry.fetchedRows;
-        writtenRows += retry.writtenRows;
-        freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
-      } catch (error) {
-        console.error("overview strict retry refresh failed", { retryTickers: retryTickers.length, error });
-      }
+      await refreshTickers(retryTickers, "critical retry", 10);
+      freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+    }
+  }
+
+  if (freshness.status !== "stale") {
+    await refreshTickers(nonCriticalTickers, "representative", 20);
+    freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+    if (freshness.status === "partial") {
+      const retryTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate);
+      const nonCriticalRetryTickers = retryTickers.filter((ticker) => !criticalTickerSet.has(ticker.toUpperCase()));
+      await refreshTickers(nonCriticalRetryTickers, "representative retry", 10);
+      freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
     }
   }
 
@@ -499,6 +527,20 @@ export function freshnessDiagnosticsFromSnapshotMeta(meta: SnapshotMetaRow | nul
   const eligibleCount = Number(meta.freshnessEligibleCount ?? 0);
   const currentCount = Number(meta.freshnessCurrentCount ?? 0);
   const coveragePct = Number(meta.freshnessCoveragePct ?? (eligibleCount > 0 ? (currentCount / eligibleCount) * 100 : 0));
+  if (eligibleCount <= 0) {
+    return normalizeFreshnessDiagnostics({
+      expectedAsOfDate,
+      status: "stale",
+      eligibleCount: 0,
+      currentCount: 0,
+      staleCount: 0,
+      coveragePct: 0,
+      criticalMissingTickers: [],
+      minBarDate: null,
+      maxBarDate: null,
+      warning: meta.freshnessWarning ?? UNKNOWN_OVERVIEW_SNAPSHOT_FRESHNESS_WARNING,
+    });
+  }
   return normalizeFreshnessDiagnostics({
     expectedAsOfDate,
     status: meta.freshnessStatus === "fresh" || meta.freshnessStatus === "partial" || meta.freshnessStatus === "stale" ? meta.freshnessStatus : "stale",

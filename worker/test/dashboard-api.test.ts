@@ -206,4 +206,73 @@ describe("dashboard API", () => {
     expect(body.freshnessMaxBarDate).toBe("2026-06-05");
     expect(eodMocks.computeOverviewFreshnessDiagnostics).toHaveBeenCalledWith(env, "2026-06-12", "default");
   });
+
+  it("reports matching legacy overview snapshots with 0/0 diagnostics as stale unknown displayed data", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T12:00:00.000Z"));
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => {
+            if (sql.includes("FROM dashboard_configs WHERE is_default = 1")) {
+              return {
+                id: "default",
+                name: "Default Swing Dashboard",
+                timezone: "Australia/Melbourne",
+                eodRunLocalTime: "08:15",
+                eodRunTimeLabel: "08:15 Australia/Melbourne (prev US close)",
+              } as T;
+            }
+            if (sql.includes("FROM snapshots_meta")) {
+              return {
+                asOfDate: "2026-06-12",
+                generatedAt: "2026-06-12T22:16:17.521Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: null,
+                freshnessStatus: "stale",
+                freshnessCoveragePct: 0,
+                freshnessCurrentCount: 0,
+                freshnessEligibleCount: 0,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: null,
+                freshnessMaxBarDate: null,
+                freshnessWarning: null,
+              } as T;
+            }
+            if (sql.includes("FROM breadth_snapshots")) return null as T;
+            return null as T;
+          },
+        };
+        return statement;
+      }),
+    };
+
+    const env = {
+      ...createEnv(),
+      DB: db,
+    } as unknown as Env;
+    const response = await worker.fetch(new Request("https://example.com/api/status?page=overview"), env, createContext());
+    const body = await response.json() as {
+      expectedAsOfDate: string;
+      freshnessStatus: string;
+      freshnessCoveragePct: number | null;
+      freshnessCurrentCount: number | null;
+      freshnessEligibleCount: number | null;
+      freshnessMinBarDate: string | null;
+      freshnessMaxBarDate: string | null;
+      freshnessWarning: string | null;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.expectedAsOfDate).toBe("2026-06-12");
+    expect(body.freshnessStatus).toBe("stale");
+    expect(body.freshnessCoveragePct).toBeNull();
+    expect(body.freshnessCurrentCount).toBeNull();
+    expect(body.freshnessEligibleCount).toBeNull();
+    expect(body.freshnessMinBarDate).toBeNull();
+    expect(body.freshnessMaxBarDate).toBeNull();
+    expect(body.freshnessWarning).toContain("Snapshot freshness diagnostics are unavailable");
+    expect(eodMocks.computeOverviewFreshnessDiagnostics).not.toHaveBeenCalled();
+  });
 });

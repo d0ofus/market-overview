@@ -11,6 +11,7 @@ type DailyBarSeed = Record<string, string[]>;
 class OverviewFreshnessDb {
   snapshotWrites = 0;
   snapshotRowWrites = 0;
+  snapshotRowBarDates: Array<string | null> = [];
   readonly dailyBars: DailyBarSeed;
 
   private readonly config = {
@@ -115,6 +116,19 @@ class OverviewFreshnessDb {
   }
 
   rowsForSql<T>(sql: string, args: unknown[]): T[] {
+    if (sql.includes("SELECT ticker, date, c FROM daily_bars")) {
+      const cutoff = String(args[0]);
+      return this.items.flatMap((item, itemIndex) =>
+        (this.dailyBars[item.ticker.toUpperCase()] ?? [])
+          .filter((date) => date <= cutoff)
+          .sort()
+          .map((date, dateIndex) => ({
+            ticker: item.ticker,
+            date,
+            c: 100 + itemIndex * 10 + dateIndex,
+          })),
+      ) as T[];
+    }
     if (sql.includes("dashboard_groups")) return this.groups as T[];
     if (sql.includes("FROM dashboard_sections WHERE config_id = ?")) return this.sections as T[];
     if (sql.includes("dashboard_items")) return this.items as T[];
@@ -152,9 +166,12 @@ class OverviewFreshnessDb {
     return null;
   }
 
-  runSql(sql: string) {
+  runSql(sql: string, args: unknown[]) {
     if (sql.includes("INSERT INTO snapshots_meta")) this.snapshotWrites += 1;
-    if (sql.includes("INSERT OR REPLACE INTO snapshot_rows")) this.snapshotRowWrites += 1;
+    if (sql.includes("INSERT OR REPLACE INTO snapshot_rows")) {
+      this.snapshotRowWrites += 1;
+      this.snapshotRowBarDates.push(args.at(-1) == null ? null : String(args.at(-1)));
+    }
     return { meta: { rows_written: 1 } };
   }
 }
@@ -168,7 +185,7 @@ function boundStatement(sql: string, args: unknown[], db: OverviewFreshnessDb) {
       return { results: db.rowsForSql<T>(sql, args) };
     },
     async run() {
-      return db.runSql(sql);
+      return db.runSql(sql, args);
     },
   };
 }
@@ -213,29 +230,54 @@ describe("overview freshness refresh", () => {
       maxBarDate: "2026-06-05",
     });
     expect((caught as OverviewFreshnessError).diagnostics.criticalMissingTickers).toEqual(["DIA", "IWM", "QQQ", "SPY", "XLF"]);
-    expect((caught as OverviewFreshnessError).diagnostics.warning).toContain("SPY last updated 2026-06-05");
+    expect((caught as OverviewFreshnessError).diagnostics.warning).toContain("SPY (US Index Futures) last updated 2026-06-05");
     expect(db.snapshotWrites).toBe(0);
     expect(db.snapshotRowWrites).toBe(0);
   });
 
-  it("marks representative freshness partial when critical tickers are current and coverage meets the threshold", async () => {
+  it("marks representative freshness partial when critical tickers are current and broad coverage is below the warning threshold", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-12"],
       QQQ: ["2026-06-12"],
       DIA: ["2026-06-12"],
       IWM: ["2026-06-12"],
       XLF: ["2026-06-12"],
-      XLK: ["2026-06-12"],
+      XLK: ["2026-06-05"],
       XBI: ["2026-06-05"],
-      SMH: ["2026-06-12"],
-      IBIT: ["2026-06-12"],
-      ARKK: ["2026-06-12"],
+      SMH: ["2026-06-05"],
+      IBIT: ["2026-06-05"],
+      ARKK: ["2026-06-05"],
     });
 
     const diagnostics = await computeOverviewFreshnessDiagnostics(createEnv(db), "2026-06-12");
 
     expect(diagnostics.status).toBe("partial");
-    expect(diagnostics.coveragePct).toBe(90);
+    expect(diagnostics.coveragePct).toBe(50);
     expect(diagnostics.criticalMissingTickers).toEqual([]);
+  });
+
+  it("writes a partial snapshot when critical tickers are fresh and non-critical overview rows are stale", async () => {
+    const db = new OverviewFreshnessDb({
+      SPY: ["2026-06-05", "2026-06-12"],
+      QQQ: ["2026-06-05", "2026-06-12"],
+      DIA: ["2026-06-05", "2026-06-12"],
+      IWM: ["2026-06-05", "2026-06-12"],
+      XLF: ["2026-06-05", "2026-06-12"],
+      XLK: ["2026-06-05"],
+      XBI: ["2026-06-05"],
+      SMH: ["2026-06-05"],
+      IBIT: ["2026-06-05"],
+      ARKK: ["2026-06-05"],
+    });
+
+    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12");
+
+    expect(result.freshness.status).toBe("partial");
+    expect(result.freshness.currentCount).toBe(5);
+    expect(result.freshness.eligibleCount).toBe(10);
+    expect(db.snapshotWrites).toBe(1);
+    expect(db.snapshotRowWrites).toBe(10);
+    expect(db.snapshotRowBarDates).toContain("2026-06-12");
+    expect(db.snapshotRowBarDates).toContain("2026-06-05");
   });
 });

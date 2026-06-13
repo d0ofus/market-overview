@@ -130,11 +130,24 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
   const lastUpdatedLabel = useMemo(() => formatInZone(status.lastUpdated, selectedTz), [status.lastUpdated, selectedTz]);
   const asOfLabel = useMemo(() => formatInZone(asOfToIso(status.asOfDate), selectedTz), [status.asOfDate, selectedTz]);
   const freshnessStatus = status.freshnessStatus ?? "stale";
-  const marketDataAsOf = status.freshnessMaxBarDate ?? status.asOfDate ?? "N/A";
+  const marketDataAsOf =
+    status.freshnessMinBarDate && status.freshnessMaxBarDate
+      ? status.freshnessMinBarDate === status.freshnessMaxBarDate
+        ? status.freshnessMaxBarDate
+        : `${status.freshnessMinBarDate} to ${status.freshnessMaxBarDate}`
+      : status.freshnessMaxBarDate
+        ? status.freshnessMaxBarDate
+        : "Unknown";
+  const freshnessCoveragePct = status.freshnessCoveragePct;
+  const freshnessCurrentCount = status.freshnessCurrentCount;
+  const freshnessEligibleCount = status.freshnessEligibleCount;
   const coverageLabel =
-    status.freshnessCoveragePct == null || status.freshnessCurrentCount == null || status.freshnessEligibleCount == null
-      ? "Coverage N/A"
-      : `${status.freshnessCoveragePct.toFixed(1)}% (${status.freshnessCurrentCount}/${status.freshnessEligibleCount})`;
+    typeof freshnessEligibleCount === "number"
+    && freshnessEligibleCount > 0
+    && typeof freshnessCurrentCount === "number"
+    && typeof freshnessCoveragePct === "number"
+      ? `${freshnessCoveragePct.toFixed(1)}% (${freshnessCurrentCount}/${freshnessEligibleCount})`
+      : "Coverage unknown";
 
   return (
     <div
@@ -173,7 +186,7 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
             <div className={`rounded-xl border px-3 py-2 ${freshnessClass(freshnessStatus)}`}>
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] opacity-75">Market data status</div>
+                  <div className="text-[11px] uppercase tracking-[0.14em] opacity-75">Displayed data status</div>
                   <div className="mt-1 font-semibold">{freshnessLabel(freshnessStatus)}</div>
                 </div>
                 <div className="text-right text-xs">
@@ -189,8 +202,8 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
                 <div className="mt-1 text-slate-200">{asOfLabel}</div>
               </div>
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Market data as-of</div>
-                <div className="mt-1 font-mono text-slate-200">{marketDataAsOf}</div>
+                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Displayed data as-of</div>
+                <div className="mt-1 break-words font-mono text-slate-200">{marketDataAsOf}</div>
               </div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
