@@ -4324,6 +4324,7 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
 });
 
 app.get("/api/watchlist-review/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
     const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
     const rows = await listWatchlistReviewRuns(c.env, limit);
@@ -4352,6 +4353,7 @@ app.get("/api/watchlist-review/runs/approved-ready", async (c) => {
 });
 
 app.get("/api/watchlist-review/runs/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
     const detail = await loadWatchlistReviewRunDetail(c.env, c.req.param("id"));
     if (!detail) return c.json({ error: "Watchlist review run not found." }, 404);

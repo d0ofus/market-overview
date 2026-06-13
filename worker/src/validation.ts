@@ -220,7 +220,9 @@ export const watchlistReviewExportSchema = z.object({
   approvedBy: z.string().trim().min(1).max(120).nullable().optional(),
 });
 
-export const watchlistReviewReadyToApplySchema = watchlistReviewExportSchema;
+export const watchlistReviewReadyToApplySchema = watchlistReviewExportSchema.extend({
+  retryWebhook: z.boolean().optional().default(false),
+});
 
 export const watchlistReviewApplyStatusSchema = z.object({
   runId: z.string().trim().min(1).max(180).optional(),

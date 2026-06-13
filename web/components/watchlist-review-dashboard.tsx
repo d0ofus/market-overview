@@ -240,6 +240,10 @@ function runDispatchStarted(run: WatchlistReviewRun | null) {
   return Boolean(run && run.applyStatus !== "not_queued" && run.applyStatus !== "apply_failed");
 }
 
+function runCanRetryWebhook(run: WatchlistReviewRun | null) {
+  return Boolean(run && run.applyStatus === "approved_ready");
+}
+
 function runApplyActive(run: WatchlistReviewRun | null) {
   return Boolean(run && ["dispatching", "waiting_for_hermes", "claimed", "applying", "approved_ready"].includes(run.applyStatus));
 }
@@ -358,6 +362,7 @@ export function WatchlistReviewDashboard() {
   const approvedApplyCandidates = candidates.filter(hasRealApplyChange);
   const approvedApplyDestructive = approvedApplyCandidates.filter((candidate) => candidate.destructiveAction || flagGroup(candidateFinalFlag(candidate)) === "unflag");
   const dispatchStarted = runDispatchStarted(detail?.run ?? null);
+  const canRetryWebhook = runCanRetryWebhook(detail?.run ?? null);
   const canSendToHermes = Boolean(detail?.run)
     && approvedApplyCandidates.length > 0
     && approvedApplyDestructive.every((candidate) => candidate.destructiveConfirmed)
@@ -519,13 +524,13 @@ export function WatchlistReviewDashboard() {
     }
   };
 
-  const sendToHermes = async (destructiveConfirmed = false) => {
+  const sendToHermes = async (destructiveConfirmed = false, retryWebhook = false) => {
     if (!detail?.run) return;
-    if (dispatchStarted || approvedApplyCandidates.length === 0 || (!destructiveConfirmed && approvedApplyDestructive.some((candidate) => !candidate.destructiveConfirmed))) {
+    if (!retryWebhook && (dispatchStarted || approvedApplyCandidates.length === 0 || (!destructiveConfirmed && approvedApplyDestructive.some((candidate) => !candidate.destructiveConfirmed)))) {
       setMessage({ tone: "danger", text: "Approve at least one real watchlist change and confirm destructive actions before sending to Hermes." });
       return;
     }
-    if (approvedApplyDestructive.length > 0 && !destructiveConfirmed) {
+    if (!retryWebhook && approvedApplyDestructive.length > 0 && !destructiveConfirmed) {
       setConfirm({
         title: "Send Unflag/Remove approvals to Hermes?",
         description: "This freezes the approved set for Hermes MCP/CDP execution. Confirm all destructive Unflag/Remove candidates have support/thesis invalidation and rollback notes.",
@@ -543,6 +548,7 @@ export function WatchlistReviewDashboard() {
       const res = await readyToApplyWatchlistReviewRun(detail.run.id, {
         destructiveConfirmed,
         approvedBy: "authorized-user",
+        retryWebhook,
       });
       await refreshSelected();
       const text = res.webhook.status === "sent"
@@ -688,6 +694,12 @@ export function WatchlistReviewDashboard() {
                 <Send className="h-3.5 w-3.5" />
                 Send approved changes to Hermes
               </button>
+              {canRetryWebhook ? (
+                <button className={BUTTON_CLASS} disabled={saving} onClick={() => void sendToHermes(false, true)} type="button">
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Retry Hermes webhook
+                </button>
+              ) : null}
             </div>
           </div>
           {message ? (

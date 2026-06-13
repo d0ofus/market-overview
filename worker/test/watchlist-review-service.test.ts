@@ -5,6 +5,8 @@ import {
   buildWatchlistReviewExportPayload,
   checksumWatchlistReviewApplySet,
   normalizeWatchlistReviewImport,
+  resolveWatchlistReviewCandidateApplyOutcomes,
+  signHermesGenericWebhook,
   signWatchlistReviewWebhook,
   watchlistReviewExportCsv,
 } from "../src/watchlist-review-service";
@@ -249,5 +251,35 @@ describe("watchlist review service helpers", () => {
     expect(signature).toMatch(/^sha256=[a-f0-9]{64}$/);
     await expect(signWatchlistReviewWebhook(JSON.stringify({ event: "watchlist_review.ready_to_apply" }), NOW, "secret"))
       .resolves.toBe(signature);
+
+    const hermesSignature = await signHermesGenericWebhook(JSON.stringify({ event: "watchlist_review.ready_to_apply" }), "secret");
+    expect(hermesSignature).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("maps partial apply results conservatively by candidateId and ticker fallback", () => {
+    const { run, candidates } = normalizeWatchlistReviewImport({
+      run: { id: "watchlist-review-partial" },
+      candidates: [
+        { ticker: "AAA", current_flag: "blue", proposed_flag: "red", status: "approved" },
+        { ticker: "BBB", current_flag: "blue", proposed_flag: "red", status: "approved" },
+        { ticker: "CCC", current_flag: "blue", proposed_flag: "red", status: "approved" },
+      ],
+    }, NOW);
+    const applySet = buildWatchlistReviewCanonicalApplySet(run, candidates, "tester");
+
+    const outcomes = resolveWatchlistReviewCandidateApplyOutcomes(applySet.changes, {
+      approvalRevision: 1,
+      checksum: "a".repeat(64),
+      idempotencyKey: "watchlist-review:watchlist-review-partial:1:checksum",
+      status: "partial_failed",
+      results: [
+        { candidateId: applySet.changes[0].candidateId, status: "applied", message: "ok" },
+        { ticker: "BBB", status: "failed", message: "TV flag menu not found" },
+      ],
+    });
+
+    expect(outcomes.get(applySet.changes[0].candidateId)).toMatchObject({ status: "applied", message: "ok" });
+    expect(outcomes.get(applySet.changes[1].candidateId)).toMatchObject({ status: "failed", message: "TV flag menu not found" });
+    expect(outcomes.get(applySet.changes[2].candidateId)).toMatchObject({ status: "failed" });
   });
 });

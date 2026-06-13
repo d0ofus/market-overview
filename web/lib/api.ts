@@ -3342,11 +3342,11 @@ export function updatePatternFeature(featureKey: string, payload: { displayName?
 }
 
 export function getWatchlistReviewRuns(limit = 25) {
-  return getJson<{ rows: WatchlistReviewRun[] }>(appendQuery("/api/watchlist-review/runs", { limit }));
+  return adminFetch<{ rows: WatchlistReviewRun[] }>(appendQuery("/api/watchlist-review/runs", { limit }));
 }
 
 export function getWatchlistReviewRun(id: string) {
-  return getJson<WatchlistReviewRunDetail>(`/api/watchlist-review/runs/${encodeURIComponent(id)}`);
+  return adminFetch<WatchlistReviewRunDetail>(`/api/watchlist-review/runs/${encodeURIComponent(id)}`);
 }
 
 export function createWatchlistReviewRun(payload: {
@@ -3430,6 +3430,7 @@ export function applyApprovedWatchlistReviewChanges(runId: string, payload: {
 export function readyToApplyWatchlistReviewRun(runId: string, payload: {
   destructiveConfirmed?: boolean;
   approvedBy?: string | null;
+  retryWebhook?: boolean;
 }) {
   return adminFetch<WatchlistReviewReadyToApplyResponse>(
     `/api/watchlist-review/runs/${encodeURIComponent(runId)}/ready-to-apply`,

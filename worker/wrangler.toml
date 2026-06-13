@@ -14,6 +14,7 @@ IBKR_NEWS_ENABLED = "false"
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_SEARCH_GROUNDING_ENABLED = "false"
 MARKET_COMMENTARY_RETENTION_DAYS = "30"
+MARKET_OVERVIEW_PUBLIC_URL = "https://market-overview-nu.vercel.app"
 
 [[d1_databases]]
 binding = "DB"

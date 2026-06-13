@@ -47,6 +47,7 @@ export type Env = {
   SYMBOL_CATALOG_SYNC_ENABLED?: string;
   HERMES_WATCHLIST_APPLY_WEBHOOK_URL?: string;
   HERMES_WATCHLIST_APPLY_WEBHOOK_SECRET?: string;
+  MARKET_OVERVIEW_PUBLIC_URL?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

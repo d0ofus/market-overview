@@ -261,6 +261,7 @@ export type WatchlistReviewApplyDispatch = {
 export type WatchlistReviewReadyToApplyInput = {
   destructiveConfirmed?: boolean;
   approvedBy?: string | null;
+  retryWebhook?: boolean;
 };
 
 export type WatchlistReviewWebhookResult = {
@@ -1654,7 +1655,7 @@ export async function checksumWatchlistReviewApplySet(applySet: WatchlistReviewA
   return hex(digest);
 }
 
-export async function signWatchlistReviewWebhook(rawBody: string, timestamp: string, secret: string): Promise<string> {
+async function hmacSha256Hex(message: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -1662,8 +1663,16 @@ export async function signWatchlistReviewWebhook(rawBody: string, timestamp: str
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${rawBody}`));
-  return `sha256=${hex(signature)}`;
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return hex(signature);
+}
+
+export async function signWatchlistReviewWebhook(rawBody: string, timestamp: string, secret: string): Promise<string> {
+  return `sha256=${await hmacSha256Hex(`${timestamp}.${rawBody}`, secret)}`;
+}
+
+export async function signHermesGenericWebhook(rawBody: string, secret: string): Promise<string> {
+  return await hmacSha256Hex(rawBody, secret);
 }
 
 function idempotencyKey(runId: string, approvalRevision: number, checksum: string): string {
@@ -1782,6 +1791,7 @@ async function sendHermesWebhook(
     if (backoffs[index] > 0) await delay(backoffs[index]);
     const timestamp = new Date().toISOString();
     const signature = await signWatchlistReviewWebhook(rawBody, timestamp, secret);
+    const hermesSignature = await signHermesGenericWebhook(rawBody, secret);
     try {
       const response = await fetch(url, {
         method: "POST",
@@ -1789,6 +1799,8 @@ async function sendHermesWebhook(
           "content-type": "application/json",
           "x-market-overview-timestamp": timestamp,
           "x-market-overview-signature": signature,
+          // Hermes webhook adapter validates this generic HMAC header over the raw body.
+          "x-webhook-signature": hermesSignature,
         },
         body: rawBody,
         signal: timeoutSignal(5000),
@@ -1964,6 +1976,51 @@ export async function readyWatchlistReviewRunToApply(
 
     const existingDispatch = await loadActiveApplyDispatch(env, runId);
     if (existingDispatch) {
+      if (input.retryWebhook && ["approved_ready", "webhook_failed"].includes(existingDispatch.status)) {
+        const retryWebhook = await sendHermesWebhook(env, existingDispatch.payloadPreview);
+        const retriedAt = new Date().toISOString();
+        const retryDispatchStatus: WatchlistReviewDispatchStatus = retryWebhook.status === "sent"
+          ? "waiting_for_hermes"
+          : retryWebhook.status === "failed"
+            ? "webhook_failed"
+            : existingDispatch.status;
+        const retryRunStatus = applyStatusFromDispatchStatus(retryDispatchStatus);
+        await env.DB.prepare(
+          `UPDATE watchlist_review_apply_dispatches
+              SET status = ?,
+                  webhook_sent_at = ?,
+                  webhook_failed_at = ?,
+                  webhook_response_status = ?,
+                  error = ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        ).bind(
+          retryDispatchStatus,
+          retryWebhook.status === "sent" ? retriedAt : existingDispatch.webhookSentAt,
+          retryWebhook.status === "failed" ? retriedAt : existingDispatch.webhookFailedAt,
+          retryWebhook.responseStatus,
+          retryWebhook.error,
+          retriedAt,
+          existingDispatch.id,
+        ).run();
+        await env.DB.prepare(
+          `UPDATE watchlist_review_runs
+              SET apply_status = ?,
+                  dispatched_to_hermes_at = ?,
+                  apply_error = ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        ).bind(
+          retryRunStatus,
+          retryWebhook.status === "sent" ? retriedAt : null,
+          retryWebhook.error,
+          retriedAt,
+          runId,
+        ).run();
+        const [run, dispatch] = await Promise.all([loadRun(env, runId), loadApplyDispatch(env, existingDispatch.id)]);
+        if (!run || !dispatch) throw new Error("Watchlist review dispatch retry state was not persisted.");
+        return readyToApplyResult(run, dispatch, retryWebhook);
+      }
       return readyToApplyResult(
         detail.run,
         existingDispatch,
@@ -1983,10 +2040,12 @@ export async function readyWatchlistReviewRunToApply(
     const dispatchId = crypto.randomUUID();
     const key = idempotencyKey(runId, approvalRevision, checksum);
     const now = new Date().toISOString();
-    const origin = options.origin ?? "https://market-overview-nu.vercel.app";
+    const configuredOrigin = cleanText(env.MARKET_OVERVIEW_PUBLIC_URL, 1000);
+    const origin = configuredOrigin || options.origin || "https://market-overview-nu.vercel.app";
     const url = approvedSetUrl(origin, runId, dispatchId);
     const preview = {
       event: "watchlist_review.ready_to_apply",
+      event_type: "watchlist_review.ready_to_apply",
       runId,
       dispatchId,
       approvalRevision,
@@ -2225,14 +2284,46 @@ function mapCallbackStatus(status: WatchlistReviewApplyCallbackStatus): Watchlis
   return status;
 }
 
-function resultStatusByCandidate(input: WatchlistReviewApplyStatusInput): Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }> {
-  const map = new Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }>();
+export function resolveWatchlistReviewCandidateApplyOutcomes(
+  changes: WatchlistReviewCanonicalApplyChange[],
+  input: WatchlistReviewApplyStatusInput,
+): Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }> {
+  const byCandidateId = new Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }>();
+  const byTicker = new Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }>();
   for (const result of input.results ?? []) {
+    const normalized = { status: result.status, message: cleanText(result.message, 1000) };
     const id = cleanText(result.candidateId, 180);
-    if (!id) continue;
-    map.set(id, { status: result.status, message: cleanText(result.message, 1000) });
+    if (id) byCandidateId.set(id, normalized);
+    const ticker = (cleanText(result.ticker, 40) ?? "").toUpperCase();
+    if (ticker) byTicker.set(ticker, normalized);
   }
-  return map;
+
+  const outcomes = new Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }>();
+  for (const change of changes) {
+    const explicit = byCandidateId.get(change.candidateId) ?? byTicker.get(change.ticker.toUpperCase());
+    if (explicit) {
+      outcomes.set(change.candidateId, explicit);
+      continue;
+    }
+    if (input.status === "applied") {
+      outcomes.set(change.candidateId, { status: "applied", message: null });
+    } else {
+      outcomes.set(change.candidateId, {
+        status: "failed",
+        message: input.status === "partial_failed"
+          ? "Hermes reported a partial apply result but did not include this candidate. Treating as unverified failure."
+          : input.error ?? "Hermes apply failed for this candidate.",
+      });
+    }
+  }
+  return outcomes;
+}
+
+function resultStatusByCandidate(
+  changes: WatchlistReviewCanonicalApplyChange[],
+  input: WatchlistReviewApplyStatusInput,
+): Map<string, { status: "applied" | "failed" | "skipped"; message: string | null }> {
+  return resolveWatchlistReviewCandidateApplyOutcomes(changes, input);
 }
 
 export async function updateWatchlistReviewApplyStatus(
@@ -2244,10 +2335,19 @@ export async function updateWatchlistReviewApplyStatus(
     const dispatch = input.dispatchId ? await loadApplyDispatch(env, input.dispatchId) : await loadActiveApplyDispatch(env, runId);
     if (!dispatch || dispatch.runId !== runId) throw new Error("Watchlist review apply dispatch not found.");
     validateApplyCallback(dispatch, runId, input);
-    if (TERMINAL_DISPATCH_STATUSES.has(dispatch.status) && (input.status === "applied" || input.status === "failed" || input.status === "partial_failed")) {
+    if (TERMINAL_DISPATCH_STATUSES.has(dispatch.status)) {
       const run = await loadRun(env, runId);
       if (!run) throw new Error("Watchlist review run not found.");
-      return { ok: true, run, dispatch };
+      if (input.status === "applied" || input.status === "failed" || input.status === "partial_failed") {
+        return { ok: true, run, dispatch };
+      }
+      throw new Error("Apply status dispatch is already terminal.");
+    }
+    if (input.status === "claimed") {
+      const claimLive = dispatch.claimExpiresAt && Date.parse(dispatch.claimExpiresAt) > Date.now();
+      if ((dispatch.status === "claimed" || dispatch.status === "applying") && claimLive) {
+        throw new Error("Watchlist review apply dispatch is already claimed.");
+      }
     }
 
     const now = new Date().toISOString();
@@ -2312,7 +2412,7 @@ export async function updateWatchlistReviewApplyStatus(
     }
 
     if (input.status === "applied" || input.status === "partial_failed" || input.status === "failed") {
-      const results = resultStatusByCandidate(input);
+      const results = resultStatusByCandidate(dispatch.approvedSet.changes, input);
       for (const change of dispatch.approvedSet.changes) {
         const result = results.get(change.candidateId);
         const status = result?.status ?? (input.status === "failed" ? "failed" : "applied");
