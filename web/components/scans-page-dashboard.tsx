@@ -268,15 +268,29 @@ const emptyDraftCompilePreset = (): ScanCompilePresetDetail => ({
   members: [],
 });
 
+const SCANS_DISPLAY_TIME_ZONE = "Australia/Melbourne";
+const OFFSETLESS_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const TIME_ZONE_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+function parseApiDateTime(value: string): Date {
+  const trimmed = value.trim();
+  const normalized = OFFSETLESS_DATE_TIME_PATTERN.test(trimmed) && !TIME_ZONE_OFFSET_PATTERN.test(trimmed)
+    ? `${trimmed.replace(" ", "T")}Z`
+    : trimmed;
+  return new Date(normalized);
+}
+
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
-  const parsed = new Date(value);
+  const parsed = parseApiDateTime(value);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("en-AU", {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: SCANS_DISPLAY_TIME_ZONE,
+    timeZoneName: "short",
   }).format(parsed);
 }
 
