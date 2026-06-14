@@ -186,6 +186,7 @@ export const patternFeaturePatchSchema = z.object({
 export const watchlistReviewRunCreateSchema = z.object({
   run: z.record(z.unknown()).optional().default({}),
   candidates: z.array(z.record(z.unknown())).max(1000).optional().default([]),
+  prepId: z.string().trim().min(1).max(160).nullable().optional(),
   watchlistSetId: z.string().trim().min(1).max(160).nullable().optional(),
   watchlistRunId: z.string().trim().min(1).max(160).nullable().optional(),
 }).refine((value) => value.candidates.length > 0, {
@@ -227,6 +228,7 @@ export const watchlistReviewReadyToApplySchema = watchlistReviewExportSchema.ext
 export const watchlistReviewApplyStatusSchema = z.object({
   runId: z.string().trim().min(1).max(180).optional(),
   dispatchId: z.string().trim().min(1).max(180).nullable().optional(),
+  claimOwner: z.string().trim().min(1).max(180).nullable().optional(),
   approvalRevision: z.number().int().min(0),
   checksum: z.string().trim().min(16).max(160),
   idempotencyKey: z.string().trim().min(16).max(400),
@@ -243,6 +245,39 @@ export const watchlistReviewApplyStatusSchema = z.object({
   })).max(1000).optional(),
   rollbackArtifact: z.record(z.unknown()).nullable().optional(),
   error: z.string().trim().max(1000).nullable().optional(),
+});
+
+const watchlistReviewPrepSymbolSchema = z.string()
+  .trim()
+  .min(1)
+  .max(40)
+  .transform((value) => value.toUpperCase());
+
+export const watchlistReviewPrepCreateSchema = z.object({
+  source: z.string().trim().min(1).max(80).default("watchlist-compiler"),
+  sourceSetId: z.string().trim().min(1).max(160).nullable().optional(),
+  sourceSetName: z.string().trim().min(1).max(240).nullable().optional(),
+  watchlistName: z.string().trim().min(1).max(240).nullable().optional(),
+  watchlistRunId: z.string().trim().min(1).max(160).nullable().optional(),
+  symbols: z.array(watchlistReviewPrepSymbolSchema).min(1).max(1000),
+  lookbackBars: z.number().int().min(60).max(520).optional().default(260),
+  refreshIfStale: z.boolean().optional().default(true),
+  providerPreference: z.literal("app-default").optional(),
+});
+
+export const watchlistReviewDispatchClaimSchema = z.object({
+  claimOwner: z.string().trim().min(1).max(180),
+  leaseSeconds: z.number().int().min(60).max(3600).optional().default(600),
+  approvalRevision: z.number().int().min(0),
+  checksum: z.string().trim().min(16).max(160),
+  idempotencyKey: z.string().trim().min(16).max(400),
+});
+
+export const watchlistReviewDispatchConfirmationRequestedSchema = z.object({
+  claimOwner: z.string().trim().min(1).max(180),
+  leaseSeconds: z.number().int().min(60).max(3600).optional().default(600),
+  channel: z.literal("telegram").optional().default("telegram"),
+  summary: z.record(z.unknown()).optional().default({}),
 });
 
 export const groupPatchSchema = z.object({
