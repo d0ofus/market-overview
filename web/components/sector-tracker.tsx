@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { CalendarDays, Check, ChevronDown, List, Maximize2, Pencil, Plus, Star, Trash2, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, GripVertical, List, Maximize2, Pencil, Plus, Star, Trash2, X } from "lucide-react";
 import {
+  addSectorMarketLeaders,
   adminFetch,
   deleteSectorEntry,
+  deleteSectorMarketLeader,
   getEtfConstituents,
   getIndustryEtfs,
   getPeerDirectory,
@@ -14,6 +16,7 @@ import {
   getSectorEntries,
   getSectorEtfs,
   getSectorFocusNarratives,
+  getSectorMarketLeaders,
   getSectorSymbolOptions,
   getSectorTickerMetrics,
   updateSectorFocusNarratives,
@@ -21,6 +24,8 @@ import {
   type PeerGroupRow,
   type PeerMetricRow,
   type SectorFocusNarrative,
+  type SectorFocusNarrativeUpdate,
+  type SectorMarketLeaderRow,
 } from "@/lib/api";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -89,9 +94,38 @@ const ICON_BUTTON_CLASS =
   "inline-flex h-7 w-7 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-300 transition hover:bg-panelSoft/55";
 const TICKER_CHIP_CLASS =
   "rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent transition hover:bg-accent/20";
+type FocusDropPosition = "before" | "after";
+type MarketLeaderSortKey = "ticker" | "name" | "marketCap" | "price" | "change1d" | "change1w" | "avgVolume" | "avgDollarVolume";
+type SortDirection = "asc" | "desc";
+const FOCUS_COMMENT_MAX_LENGTH = 1000;
+const reorderFocusNarrativeRows = (rows: SectorFocusNarrative[], sectorNames: string[]) => {
+  const order = new Map(sectorNames.map((sectorName, index) => [sectorName, index]));
+  return [...rows]
+    .filter((row) => order.has(row.sectorName))
+    .sort((left, right) => (order.get(left.sectorName) ?? 0) - (order.get(right.sectorName) ?? 0))
+    .map((row, index) => ({ ...row, sortOrder: index }));
+};
+const moveFocusNameRelative = (sectorNames: string[], sourceName: string, targetName: string, position: FocusDropPosition) => {
+  if (sourceName === targetName || !sectorNames.includes(sourceName) || !sectorNames.includes(targetName)) return sectorNames;
+  const nextNames = sectorNames.filter((name) => name !== sourceName);
+  const targetIndex = nextNames.indexOf(targetName);
+  if (targetIndex < 0) return sectorNames;
+  nextNames.splice(position === "after" ? targetIndex + 1 : targetIndex, 0, sourceName);
+  return nextNames;
+};
 const CHARTS_PER_PAGE = 20;
 const CALENDAR_COLLAPSED_ITEM_COUNT = 3;
 const PEER_GROUP_MEMBER_PAGE_SIZE = 100;
+const MARKET_LEADER_COLUMNS: Array<{ key: MarketLeaderSortKey; label: string; align?: "left" | "right" }> = [
+  { key: "ticker", label: "Ticker" },
+  { key: "name", label: "Name" },
+  { key: "marketCap", label: "Market Cap", align: "right" },
+  { key: "price", label: "Price", align: "right" },
+  { key: "change1d", label: "1D%", align: "right" },
+  { key: "change1w", label: "1W%", align: "right" },
+  { key: "avgVolume", label: "Avg Vol", align: "right" },
+  { key: "avgDollarVolume", label: "Avg $ Vol", align: "right" },
+];
 
 type EntrySymbol = { ticker: string; name: string | null };
 type SectorEntry = {
@@ -302,7 +336,11 @@ function EtfTile({
   );
 }
 
-export function SectorTracker() {
+type SectorTrackerProps = {
+  navActions?: ReactNode;
+};
+
+export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [view, setView] = useState<"list" | "calendar">("calendar");
   const [month, setMonth] = useState(formatLocalMonthKey());
   const [entries, setEntries] = useState<SectorEntry[]>([]);
@@ -311,10 +349,30 @@ export function SectorTracker() {
   const [sectorEtfs, setSectorEtfs] = useState<WatchlistEtf[]>([]);
   const [industryEtfs, setIndustryEtfs] = useState<WatchlistEtf[]>([]);
   const [focusNarratives, setFocusNarratives] = useState<SectorFocusNarrative[]>([]);
+  const [marketLeaders, setMarketLeaders] = useState<SectorMarketLeaderRow[]>([]);
   const [peerGroups, setPeerGroups] = useState<PeerGroupRow[]>([]);
   const [focusNarrativeInput, setFocusNarrativeInput] = useState("");
   const [focusNarrativeSaving, setFocusNarrativeSaving] = useState(false);
   const [focusNarrativeError, setFocusNarrativeError] = useState<string | null>(null);
+  const [draggedFocusNarrative, setDraggedFocusNarrative] = useState<string | null>(null);
+  const [focusDropTarget, setFocusDropTarget] = useState<{ sectorName: string; position: FocusDropPosition } | null>(null);
+  const [editingFocusComment, setEditingFocusComment] = useState<string | null>(null);
+  const [focusCommentDraft, setFocusCommentDraft] = useState("");
+  const [marketLeaderTickerInput, setMarketLeaderTickerInput] = useState("");
+  const [marketLeaderPeerGroupId, setMarketLeaderPeerGroupId] = useState("");
+  const [marketLeaderPeerGroupSuggestions, setMarketLeaderPeerGroupSuggestions] = useState<NarrativeTickerSuggestion[]>([]);
+  const [marketLeaderSelectedTickers, setMarketLeaderSelectedTickers] = useState<string[]>([]);
+  const [marketLeaderPeerGroupLoading, setMarketLeaderPeerGroupLoading] = useState(false);
+  const [marketLeaderPeerGroupError, setMarketLeaderPeerGroupError] = useState<string | null>(null);
+  const [marketLeaderSaving, setMarketLeaderSaving] = useState(false);
+  const [marketLeaderError, setMarketLeaderError] = useState<string | null>(null);
+  const [marketLeaderMetrics, setMarketLeaderMetrics] = useState<Record<string, PeerMetricRow>>({});
+  const [marketLeaderMetricsWarning, setMarketLeaderMetricsWarning] = useState<string | null>(null);
+  const [marketLeaderMetricsLoading, setMarketLeaderMetricsLoading] = useState(false);
+  const [marketLeaderSortKey, setMarketLeaderSortKey] = useState<MarketLeaderSortKey>("marketCap");
+  const [marketLeaderSortDir, setMarketLeaderSortDir] = useState<SortDirection>("desc");
+  const [marketLeaderChartOpen, setMarketLeaderChartOpen] = useState(false);
+  const [marketLeaderPage, setMarketLeaderPage] = useState(1);
 
   const [sectorNarrativeExisting, setSectorNarrativeExisting] = useState("");
   const [sectorNarrativeNew, setSectorNarrativeNew] = useState("");
@@ -349,13 +407,15 @@ export function SectorTracker() {
   const [editTickers, setEditTickers] = useState<string[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
+  const isSectorPopupOpen = Boolean(editingEntry || activeEtf || activeNarrativeCollection || marketLeaderChartOpen || activeChartTicker);
 
   const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
-    const [entriesRes, calRes, symbolRes, focusRes, peerGroupsRes] = await Promise.allSettled([
+    const [entriesRes, calRes, symbolRes, focusRes, marketLeadersRes, peerGroupsRes] = await Promise.allSettled([
       getSectorEntries(),
       getSectorCalendar(targetMonth),
       getSectorSymbolOptions(),
       getSectorFocusNarratives(),
+      getSectorMarketLeaders(),
       getPeerGroups(true),
     ]);
     if (isStale()) return;
@@ -364,12 +424,14 @@ export function SectorTracker() {
     const calRows = calRes.status === "fulfilled" ? calRes.value.rows ?? [] : [];
     const symbolRows = symbolRes.status === "fulfilled" ? symbolRes.value.rows ?? [] : [];
     const focusRows = focusRes.status === "fulfilled" ? focusRes.value.rows ?? [] : [];
+    const marketLeaderRows = marketLeadersRes.status === "fulfilled" ? marketLeadersRes.value.rows ?? [] : [];
     const peerGroupRows = peerGroupsRes.status === "fulfilled" ? peerGroupsRes.value.rows ?? [] : [];
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
     setSymbolOptions(symbolRows);
     setFocusNarratives(focusRows);
+    setMarketLeaders(marketLeaderRows);
     setPeerGroups(peerGroupRows);
   }, []);
 
@@ -467,6 +529,71 @@ export function SectorTracker() {
     };
   }, [sectorPeerGroupId]);
 
+  useEffect(() => {
+    if (!marketLeaderPeerGroupId) {
+      setMarketLeaderPeerGroupSuggestions([]);
+      setMarketLeaderSelectedTickers([]);
+      setMarketLeaderPeerGroupLoading(false);
+      setMarketLeaderPeerGroupError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setMarketLeaderPeerGroupSuggestions([]);
+    setMarketLeaderSelectedTickers([]);
+    setMarketLeaderPeerGroupLoading(true);
+    setMarketLeaderPeerGroupError(null);
+
+    const loadPeerGroupTickers = async () => {
+      const suggestions: NarrativeTickerSuggestion[] = [];
+      const seen = new Set<string>();
+      let offset = 0;
+      let total = 0;
+
+      do {
+        const response = await getPeerDirectory({
+          groupId: marketLeaderPeerGroupId,
+          limit: PEER_GROUP_MEMBER_PAGE_SIZE,
+          offset,
+        });
+        if (cancelled) return;
+
+        const rows = response.rows ?? [];
+        for (const row of rows) {
+          const ticker = row.ticker.trim().toUpperCase();
+          if (!ticker || seen.has(ticker)) continue;
+          seen.add(ticker);
+          suggestions.push({ ticker, name: row.name ?? null });
+        }
+
+        const responseLimit = Math.max(1, Number(response.limit ?? PEER_GROUP_MEMBER_PAGE_SIZE));
+        total = Number(response.total ?? 0);
+        offset += responseLimit;
+        if (rows.length === 0) break;
+      } while (offset < total);
+
+      suggestions.sort((a, b) => a.ticker.localeCompare(b.ticker));
+      if (!cancelled) {
+        setMarketLeaderPeerGroupSuggestions(suggestions);
+        setMarketLeaderSelectedTickers(suggestions.map((item) => item.ticker));
+      }
+    };
+
+    void loadPeerGroupTickers()
+      .catch((error) => {
+        if (!cancelled) {
+          setMarketLeaderPeerGroupError(error instanceof Error ? error.message : "Failed to load peer group tickers.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMarketLeaderPeerGroupLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [marketLeaderPeerGroupId]);
+
   const openEtfPopup = async (ticker: string, fundName?: string | null) => {
     hoverChart.clearPreview();
     setActiveEtf({ ticker, fundName: fundName ?? null });
@@ -508,6 +635,79 @@ export function SectorTracker() {
     if (parsed.length === 0) return;
     setSelectedTickers((prev) => Array.from(new Set([...prev, ...parsed])));
   };
+
+  const parseMarketLeaderTickerInput = (inputRaw: string) =>
+    inputRaw
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+      .filter((s) => /^[A-Z0-9.\-^]{1,20}$/.test(s));
+
+  const saveMarketLeaderTickers = async (tickers: string[], sourcePeerGroupId?: string | null) => {
+    const unique = Array.from(new Set(
+      tickers
+        .map((ticker) => ticker.trim().toUpperCase())
+        .filter((ticker) => /^[A-Z0-9.\-^]{1,20}$/.test(ticker)),
+    ));
+    if (unique.length === 0 || marketLeaderSaving) return;
+    setMarketLeaderSaving(true);
+    setMarketLeaderError(null);
+    try {
+      const response = await addSectorMarketLeaders({ tickers: unique, sourcePeerGroupId: sourcePeerGroupId ?? null });
+      setMarketLeaders(response.rows ?? []);
+      setMarketLeaderTickerInput("");
+      if (sourcePeerGroupId) {
+        setMarketLeaderPeerGroupId("");
+        setMarketLeaderSelectedTickers([]);
+        setMarketLeaderPeerGroupSuggestions([]);
+      }
+    } catch (error) {
+      setMarketLeaderError(error instanceof Error ? error.message : "Failed to save market leaders.");
+    } finally {
+      setMarketLeaderSaving(false);
+    }
+  };
+
+  const removeMarketLeader = async (ticker: string) => {
+    if (marketLeaderSaving) return;
+    setMarketLeaderSaving(true);
+    setMarketLeaderError(null);
+    try {
+      await deleteSectorMarketLeader(ticker);
+      setMarketLeaders((prev) => prev.filter((row) => row.ticker.toUpperCase() !== ticker.toUpperCase()));
+    } catch (error) {
+      setMarketLeaderError(error instanceof Error ? error.message : "Failed to remove market leader.");
+    } finally {
+      setMarketLeaderSaving(false);
+    }
+  };
+
+  const toggleMarketLeaderPeerTicker = (ticker: string) => {
+    setMarketLeaderSelectedTickers((prev) => {
+      if (prev.includes(ticker)) return prev.filter((value) => value !== ticker);
+      return [...prev, ticker];
+    });
+  };
+
+  const selectAllMarketLeaderPeerTickers = () => {
+    setMarketLeaderSelectedTickers(marketLeaderPeerGroupSuggestions.map((item) => item.ticker));
+  };
+
+  const clearMarketLeaderPeerTickers = () => {
+    setMarketLeaderSelectedTickers([]);
+  };
+
+  const handleMarketLeaderSort = (key: MarketLeaderSortKey) => {
+    if (marketLeaderSortKey === key) {
+      setMarketLeaderSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setMarketLeaderSortKey(key);
+    setMarketLeaderSortDir(key === "ticker" || key === "name" ? "asc" : "desc");
+  };
+
+  const marketLeaderSortGlyph = (key: MarketLeaderSortKey) =>
+    marketLeaderSortKey === key ? (marketLeaderSortDir === "asc" ? " ^" : " v") : "";
 
   const addEditTicker = (inputRaw: string) => {
     const parsed = inputRaw
@@ -688,6 +888,82 @@ export function SectorTracker() {
     [activeNarrativeCollection?.id, narrativeMetrics, pagedNarrativeSymbols],
   );
 
+  const marketLeaderTableRows = useMemo(() => {
+    const rows = marketLeaders.map((leader) => {
+      const metric = marketLeaderMetrics[leader.ticker.toUpperCase()];
+      const avgDollarVolume = typeof metric?.price === "number" && typeof metric.avgVolume === "number"
+        ? metric.price * metric.avgVolume
+        : null;
+      return { leader, metric, avgDollarVolume };
+    });
+
+    const stringValueFor = (row: typeof rows[number], key: MarketLeaderSortKey): string | null => {
+      if (key === "ticker") return row.leader.ticker;
+      if (key === "name") return row.leader.name ?? row.leader.ticker;
+      return null;
+    };
+    const numberValueFor = (row: typeof rows[number], key: MarketLeaderSortKey): number | null => {
+      if (key === "marketCap") return row.metric?.marketCap ?? null;
+      if (key === "price") return row.metric?.price ?? null;
+      if (key === "change1d") return row.metric?.change1d ?? null;
+      if (key === "change1w") return row.metric?.change1w ?? null;
+      if (key === "avgVolume") return row.metric?.avgVolume ?? null;
+      if (key === "avgDollarVolume") return row.avgDollarVolume;
+      return null;
+    };
+
+    return [...rows].sort((left, right) => {
+      const leftString = stringValueFor(left, marketLeaderSortKey);
+      const rightString = stringValueFor(right, marketLeaderSortKey);
+      if (leftString != null || rightString != null) {
+        const cmp = String(leftString ?? "").localeCompare(String(rightString ?? ""));
+        return marketLeaderSortDir === "asc" ? cmp : -cmp;
+      }
+      const leftNumber = numberValueFor(left, marketLeaderSortKey);
+      const rightNumber = numberValueFor(right, marketLeaderSortKey);
+      if (leftNumber == null && rightNumber == null) return 0;
+      if (leftNumber == null) return 1;
+      if (rightNumber == null) return -1;
+      const cmp = leftNumber - rightNumber;
+      return marketLeaderSortDir === "asc" ? cmp : -cmp;
+    });
+  }, [marketLeaderMetrics, marketLeaderSortDir, marketLeaderSortKey, marketLeaders]);
+
+  const pagedMarketLeaderRows = useMemo(
+    () => marketLeaderTableRows.slice((marketLeaderPage - 1) * CHARTS_PER_PAGE, marketLeaderPage * CHARTS_PER_PAGE),
+    [marketLeaderPage, marketLeaderTableRows],
+  );
+
+  const marketLeaderModalItems = useMemo<TickerCollectionModalItem[]>(
+    () =>
+      pagedMarketLeaderRows.map(({ leader, metric, avgDollarVolume }) => ({
+        key: `market-leader-${leader.ticker}`,
+        ticker: leader.ticker,
+        name: leader.name ?? leader.ticker,
+        stats: (
+          <>
+            <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+              <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">Mkt Cap</span>
+              <span className="font-semibold text-slate-100">{formatCompact(metric?.marketCap)}</span>
+            </span>
+            <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+              <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">Avg $</span>
+              <span className="font-semibold text-slate-100">{formatCompact(avgDollarVolume)}</span>
+            </span>
+            <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+              <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">1D %</span>
+              <span className={`font-semibold ${metricChangeClass(metric?.change1d)}`}>{formatMetricPct(metric?.change1d)}</span>
+            </span>
+            <span className="min-w-0 rounded-full border border-borderSoft/60 bg-panelSoft/30 px-2.5 py-1.5 text-center text-[11px] leading-none text-slate-200">
+              <span className="mr-1 uppercase tracking-[0.08em] text-slate-500">1W %</span>
+              <span className={`font-semibold ${metricChangeClass(metric?.change1w)}`}>{formatMetricPct(metric?.change1w)}</span>
+            </span>
+          </>
+        ),
+      })),
+    [pagedMarketLeaderRows],
+  );
+
   const sectorNarrativeOptions = useMemo(() => {
     const options = new Set<string>();
     for (const row of entries) {
@@ -730,6 +1006,12 @@ export function SectorTracker() {
     () => peerGroups.find((group) => group.id === sectorPeerGroupId) ?? null,
     [peerGroups, sectorPeerGroupId],
   );
+  const selectedMarketLeaderPeerGroup = useMemo(
+    () => peerGroups.find((group) => group.id === marketLeaderPeerGroupId) ?? null,
+    [marketLeaderPeerGroupId, peerGroups],
+  );
+  const marketLeaderTickerSet = useMemo(() => new Set(marketLeaders.map((row) => row.ticker.toUpperCase())), [marketLeaders]);
+  const marketLeaderSelectedTickerSet = useMemo(() => new Set(marketLeaderSelectedTickers), [marketLeaderSelectedTickers]);
   const hasExistingNarrative = sectorNarrativeExisting.trim().length > 0;
   const hasNewNarrative = sectorNarrativeNew.trim().length > 0;
   const hasPeerGroup = sectorPeerGroupId.trim().length > 0;
@@ -754,20 +1036,55 @@ export function SectorTracker() {
     [focusNarratives, sectorNarrativeOptions],
   );
   const focusNarrativeNames = useMemo(() => focusNarrativeRows.map((row) => row.sectorName), [focusNarrativeRows]);
+  const activeFocusNarrativeRow = useMemo(
+    () =>
+      activeNarrativeCollection?.mode === "focus"
+        ? focusNarrativeRows.find((row) => row.sectorName === activeNarrativeCollection.sectorName) ?? null
+        : null,
+    [activeNarrativeCollection?.mode, activeNarrativeCollection?.sectorName, focusNarrativeRows],
+  );
   const availableFocusNarrativeOptions = useMemo(() => {
     const focused = new Set(focusNarrativeNames);
     return sectorNarrativeOptions.filter((name) => !focused.has(name));
   }, [focusNarrativeNames, sectorNarrativeOptions]);
 
-  const persistFocusNarratives = async (sectorNames: string[]) => {
+  const persistFocusNarratives = async (
+    sectorNames: string[],
+    options: { clearInput?: boolean; optimistic?: boolean; commentOverrides?: Record<string, string> } = { clearInput: true },
+  ) => {
+    const previousFocusNarratives = focusNarratives;
+    const commentBySectorName = new Map(focusNarratives.map((row) => [row.sectorName, row.comment ?? ""]));
+    Object.entries(options.commentOverrides ?? {}).forEach(([sectorName, comment]) => {
+      commentBySectorName.set(sectorName, comment.slice(0, FOCUS_COMMENT_MAX_LENGTH));
+    });
+    const payload: SectorFocusNarrativeUpdate[] = sectorNames.map((sectorName) => ({
+      sectorName,
+      comment: commentBySectorName.get(sectorName) ?? "",
+    }));
+
     setFocusNarrativeSaving(true);
     setFocusNarrativeError(null);
+    if (options.optimistic) {
+      setFocusNarratives(
+        reorderFocusNarrativeRows(
+          focusNarratives.map((row) =>
+            commentBySectorName.has(row.sectorName)
+              ? { ...row, comment: commentBySectorName.get(row.sectorName) ?? "" }
+              : row,
+          ),
+          sectorNames,
+        ),
+      );
+    }
     try {
-      const res = await updateSectorFocusNarratives(sectorNames);
+      const res = await updateSectorFocusNarratives(payload);
       setFocusNarratives(res.rows ?? []);
-      setFocusNarrativeInput("");
+      if (options.clearInput ?? true) setFocusNarrativeInput("");
+      return true;
     } catch (err) {
+      if (options.optimistic) setFocusNarratives(previousFocusNarratives);
       setFocusNarrativeError(err instanceof Error ? err.message : "Failed to update focus narratives.");
+      return false;
     } finally {
       setFocusNarrativeSaving(false);
     }
@@ -784,7 +1101,71 @@ export function SectorTracker() {
     if (activeNarrativeCollection?.mode === "focus" && activeNarrativeCollection.sectorName === sectorName) {
       setActiveNarrativeCollection(null);
     }
+    if (editingFocusComment === sectorName) {
+      setEditingFocusComment(null);
+      setFocusCommentDraft("");
+    }
     await persistFocusNarratives(focusNarrativeNames.filter((name) => name !== sectorName));
+  };
+
+  const persistFocusNarrativeOrder = async (sectorNames: string[]) => {
+    if (focusNarrativeSaving || sectorNames.join("\u0000") === focusNarrativeNames.join("\u0000")) return;
+    await persistFocusNarratives(sectorNames, { clearInput: false, optimistic: true });
+  };
+
+  const getFocusDropPosition = (event: ReactDragEvent<HTMLElement>): FocusDropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+  };
+
+  const handleFocusDragOver = (event: ReactDragEvent<HTMLDivElement>, sectorName: string) => {
+    if (!draggedFocusNarrative || focusNarrativeSaving) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setFocusDropTarget({ sectorName, position: getFocusDropPosition(event) });
+  };
+
+  const handleFocusDrop = async (event: ReactDragEvent<HTMLDivElement>, targetName: string) => {
+    event.preventDefault();
+    const sourceName = event.dataTransfer.getData("text/plain") || draggedFocusNarrative;
+    setDraggedFocusNarrative(null);
+    setFocusDropTarget(null);
+    if (!sourceName || focusNarrativeSaving) return;
+    const nextNames = moveFocusNameRelative(focusNarrativeNames, sourceName, targetName, getFocusDropPosition(event));
+    await persistFocusNarrativeOrder(nextNames);
+  };
+
+  const moveFocusNarrativeByOffset = async (sectorName: string, offset: number) => {
+    if (focusNarrativeSaving) return;
+    const index = focusNarrativeNames.indexOf(sectorName);
+    const targetIndex = index + offset;
+    if (index < 0 || targetIndex < 0 || targetIndex >= focusNarrativeNames.length) return;
+    const nextNames = [...focusNarrativeNames];
+    const [movedName] = nextNames.splice(index, 1);
+    nextNames.splice(targetIndex, 0, movedName);
+    await persistFocusNarrativeOrder(nextNames);
+  };
+
+  const startEditingFocusComment = (row: SectorFocusNarrative) => {
+    if (focusNarrativeSaving) return;
+    setFocusNarrativeError(null);
+    setEditingFocusComment(row.sectorName);
+    setFocusCommentDraft((row.comment ?? "").slice(0, FOCUS_COMMENT_MAX_LENGTH));
+  };
+
+  const cancelEditingFocusComment = () => {
+    setEditingFocusComment(null);
+    setFocusCommentDraft("");
+  };
+
+  const saveFocusComment = async (sectorName: string) => {
+    if (focusNarrativeSaving) return;
+    const saved = await persistFocusNarratives(focusNarrativeNames, {
+      clearInput: false,
+      optimistic: true,
+      commentOverrides: { [sectorName]: focusCommentDraft.trim() },
+    });
+    if (saved) cancelEditingFocusComment();
   };
 
   const openFocusNarrative = (sectorName: string) => {
@@ -799,6 +1180,86 @@ export function SectorTracker() {
       mode: "focus",
     });
     setNarrativePage(1);
+  };
+
+  const closeNarrativeCollection = () => {
+    if (activeNarrativeCollection?.mode === "focus" && editingFocusComment === activeNarrativeCollection.sectorName) {
+      cancelEditingFocusComment();
+    }
+    setActiveNarrativeCollection(null);
+  };
+
+  const renderFocusNarrativePopupComment = (row: SectorFocusNarrative) => {
+    const hasComment = Boolean(row.comment?.trim());
+    const isEditingComment = editingFocusComment === row.sectorName;
+
+    if (!isEditingComment && !hasComment) {
+      return (
+        <div className="flex h-full items-start justify-end md:justify-center">
+          <button
+            type="button"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-borderSoft/70 bg-panelSoft/35 text-slate-300 transition hover:bg-accent/10 hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => startEditingFocusComment(row)}
+            disabled={focusNarrativeSaving}
+            aria-label={`Add comment for ${row.sectorName}`}
+            title="Add comment"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="rounded-2xl border border-borderSoft/60 bg-panel/55 px-3 py-2">
+        {isEditingComment ? (
+          <div className="space-y-2">
+            <textarea
+              className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
+              value={focusCommentDraft}
+              onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
+              placeholder="Add a comment..."
+              maxLength={FOCUS_COMMENT_MAX_LENGTH}
+              disabled={focusNarrativeSaving}
+              aria-label={`Comment for ${row.sectorName}`}
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={cancelEditingFocusComment}
+                disabled={focusNarrativeSaving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void saveFocusComment(row.sectorName)}
+                disabled={focusNarrativeSaving}
+              >
+                <Check className="h-3.5 w-3.5" />
+                {focusNarrativeSaving ? "Saving" : "Save"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start justify-between gap-3">
+            <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-borderSoft/70 bg-panelSoft/35 text-slate-300 transition hover:bg-accent/10 hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => startEditingFocusComment(row)}
+              disabled={focusNarrativeSaving}
+              aria-label={`Edit comment for ${row.sectorName}`}
+              title="Edit comment"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const toggleSuggestedTicker = (ticker: string) => {
@@ -839,6 +1300,42 @@ export function SectorTracker() {
   }, [activeNarrativeCollection?.id, activeNarrativeCollection?.symbols.length]);
 
   useEffect(() => {
+    if (marketLeaderPage <= Math.max(1, Math.ceil(marketLeaderTableRows.length / CHARTS_PER_PAGE))) return;
+    setMarketLeaderPage(1);
+  }, [marketLeaderPage, marketLeaderTableRows.length]);
+
+  useEffect(() => {
+    if (marketLeaders.length === 0) {
+      setMarketLeaderMetrics({});
+      setMarketLeaderMetricsWarning(null);
+      setMarketLeaderMetricsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setMarketLeaderMetricsLoading(true);
+    setMarketLeaderMetricsWarning(null);
+    void getSectorTickerMetrics(marketLeaders.map((leader) => leader.ticker))
+      .then((response) => {
+        if (cancelled) return;
+        setMarketLeaderMetrics(Object.fromEntries((response.rows ?? []).map((row) => [row.ticker.toUpperCase(), row])));
+        setMarketLeaderMetricsWarning(response.error ?? null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setMarketLeaderMetrics({});
+        setMarketLeaderMetricsWarning(error instanceof Error ? error.message : "Failed to load market leader metrics.");
+      })
+      .finally(() => {
+        if (!cancelled) setMarketLeaderMetricsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [marketLeaders]);
+
+  useEffect(() => {
     if (!activeNarrativeCollection) {
       setNarrativeMetrics({});
       setNarrativeMetricsWarning(null);
@@ -874,7 +1371,7 @@ export function SectorTracker() {
 
   return (
     <div className="space-y-5">
-      <FloatingSectionNav items={SECTION_NAV_ITEMS} />
+      {!isSectorPopupOpen ? <FloatingSectionNav items={SECTION_NAV_ITEMS} showHeading={false} actions={navActions} /> : null}
 
       <datalist id="sector-symbol-options">
         {symbolOptions.map((s) => (
@@ -904,34 +1401,148 @@ export function SectorTracker() {
                   </div>
 
                   <div className="mt-4 flex flex-wrap gap-2">
-                    {focusNarrativeRows.map((row) => {
+                    {focusNarrativeRows.map((row, index) => {
                       const tickerCount = narrativeTickerSuggestionsByName.get(row.sectorName)?.length ?? 0;
+                      const isDragging = draggedFocusNarrative === row.sectorName;
+                      const isDropTarget = focusDropTarget?.sectorName === row.sectorName;
+                      const canReorder = focusNarrativeRows.length > 1;
+                      const hasFocusComment = Boolean(row.comment?.trim());
+                      const isEditingComment = editingFocusComment === row.sectorName;
                       return (
                         <div
                           key={`focus-narrative-${row.id}`}
-                          className="inline-flex max-w-full overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)]"
+                          className={`flex w-full max-w-full flex-col overflow-hidden rounded-2xl border border-accent/30 bg-panel/70 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.18)] transition sm:w-[25rem] ${
+                            isDragging ? "opacity-45" : ""
+                          } ${isDropTarget ? "ring-2 ring-accent/50" : ""} ${
+                            isDropTarget && focusDropTarget?.position === "before" ? "border-l-4 border-l-accent" : ""
+                          } ${isDropTarget && focusDropTarget?.position === "after" ? "border-r-4 border-r-accent" : ""}`}
+                          onDragOver={(event) => handleFocusDragOver(event, row.sectorName)}
+                          onDrop={(event) => void handleFocusDrop(event, row.sectorName)}
                         >
-                          <button
-                            type="button"
-                            className="min-w-0 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
-                            onClick={() => openFocusNarrative(row.sectorName)}
-                            aria-label={`Open focus narrative charts for ${row.sectorName}`}
-                          >
-                            <span className="block truncate font-semibold text-slate-100">{row.sectorName}</span>
-                            <span className="mt-0.5 block text-xs text-slate-400">
-                              {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
+                          <div className="flex min-w-0">
+                            <span className="inline-flex w-11 shrink-0 items-center justify-center border-r border-borderSoft/60 bg-accent/10 px-2 text-xs font-semibold text-accent">
+                              #{index + 1}
                             </span>
-                          </button>
-                          <button
-                            type="button"
-                            className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-                            onClick={() => void removeFocusNarrative(row.sectorName)}
-                            disabled={focusNarrativeSaving}
-                            aria-label={`Remove ${row.sectorName} from focus narratives`}
-                            title="Remove"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
+                            {canReorder ? (
+                              <button
+                                type="button"
+                                draggable={!focusNarrativeSaving}
+                                className="flex w-8 shrink-0 cursor-grab items-center justify-center border-r border-borderSoft/60 text-slate-500 transition hover:bg-accent/10 hover:text-slate-200 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+                                onDragStart={(event) => {
+                                  if (focusNarrativeSaving) return;
+                                  event.dataTransfer.effectAllowed = "move";
+                                  event.dataTransfer.setData("text/plain", row.sectorName);
+                                  setDraggedFocusNarrative(row.sectorName);
+                                  setFocusDropTarget(null);
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedFocusNarrative(null);
+                                  setFocusDropTarget(null);
+                                }}
+                                disabled={focusNarrativeSaving}
+                                aria-label={`Drag ${row.sectorName} to rank focus narratives`}
+                                title="Drag to reorder"
+                              >
+                                <GripVertical className="h-4 w-4" />
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="min-w-0 flex-1 px-3 py-2 text-left transition hover:bg-accent/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30"
+                              onClick={() => openFocusNarrative(row.sectorName)}
+                              aria-label={`Open focus narrative charts for ${row.sectorName}`}
+                            >
+                              <span className="block truncate font-semibold text-slate-100">{row.sectorName}</span>
+                              <span className="mt-0.5 block text-xs text-slate-400">
+                                {tickerCount} ticker{tickerCount === 1 ? "" : "s"}
+                              </span>
+                            </button>
+                            {canReorder ? (
+                              <div className="flex shrink-0 border-l border-borderSoft/60">
+                                <button
+                                  type="button"
+                                  className="flex w-8 items-center justify-center text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                  onClick={() => void moveFocusNarrativeByOffset(row.sectorName, -1)}
+                                  disabled={focusNarrativeSaving || index === 0}
+                                  aria-label={`Move ${row.sectorName} earlier`}
+                                  title="Move earlier"
+                                >
+                                  <ChevronLeft className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex w-8 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                  onClick={() => void moveFocusNarrativeByOffset(row.sectorName, 1)}
+                                  disabled={focusNarrativeSaving || index === focusNarrativeRows.length - 1}
+                                  aria-label={`Move ${row.sectorName} later`}
+                                  title="Move later"
+                                >
+                                  <ChevronRight className="h-4 w-4" />
+                                </button>
+                              </div>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-accent/10 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => startEditingFocusComment(row)}
+                              disabled={focusNarrativeSaving}
+                              aria-label={`${hasFocusComment ? "Edit" : "Add"} comment for ${row.sectorName}`}
+                              title={hasFocusComment ? "Edit comment" : "Add comment"}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => void removeFocusNarrative(row.sectorName)}
+                              disabled={focusNarrativeSaving}
+                              aria-label={`Remove ${row.sectorName} from focus narratives`}
+                              title="Remove"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+
+                          {isEditingComment || hasFocusComment ? (
+                            <div className="border-t border-borderSoft/60 bg-slate-950/10 px-3 py-2">
+                              {isEditingComment ? (
+                                <div className="space-y-2">
+                                  <textarea
+                                    className={`${INPUT_CLASS} min-h-20 resize-y text-xs leading-relaxed`}
+                                    value={focusCommentDraft}
+                                    onChange={(event) => setFocusCommentDraft(event.target.value.slice(0, FOCUS_COMMENT_MAX_LENGTH))}
+                                    placeholder="Add a comment..."
+                                    maxLength={FOCUS_COMMENT_MAX_LENGTH}
+                                    disabled={focusNarrativeSaving}
+                                    aria-label={`Comment for ${row.sectorName}`}
+                                  />
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      className="rounded-xl px-3 py-1.5 text-xs text-slate-400 transition hover:bg-panelSoft/45 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={cancelEditingFocusComment}
+                                      disabled={focusNarrativeSaving}
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent/18 px-3 py-1.5 text-xs font-medium text-accent transition hover:bg-accent/24 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={() => void saveFocusComment(row.sectorName)}
+                                      disabled={focusNarrativeSaving}
+                                    >
+                                      <Check className="h-3.5 w-3.5" />
+                                      {focusNarrativeSaving ? "Saving" : "Save"}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="min-h-9">
+                                  <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">{row.comment}</p>
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -973,6 +1584,216 @@ export function SectorTracker() {
                   {focusNarrativeError ? <p className="text-sm text-red-300">{focusNarrativeError}</p> : null}
                 </div>
               </div>
+            </div>
+
+            <div className="rounded-[24px] border border-borderSoft/60 bg-panel/35 p-4">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-borderSoft/70 bg-panelSoft/45 text-slate-300">
+                      <Maximize2 className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Market Leaders</p>
+                      <h3 className="text-base font-semibold text-slate-100">Leader watchlist</h3>
+                    </div>
+                    <span className="rounded-full bg-accent/12 px-2.5 py-1 text-xs font-medium text-accent">
+                      {marketLeaders.length} ticker{marketLeaders.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  {marketLeaderMetricsWarning ? (
+                    <p className="mt-2 text-sm text-yellow-200">Metrics warning: {marketLeaderMetricsWarning}</p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className={`${SECONDARY_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-50`}
+                  onClick={() => {
+                    setMarketLeaderPage(1);
+                    setMarketLeaderChartOpen(true);
+                  }}
+                  disabled={marketLeaders.length === 0}
+                >
+                  <Maximize2 className="h-4 w-4" />
+                  Open multi-chart
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 lg:grid-cols-5">
+                <label className="space-y-1 lg:col-span-2">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Tickers</span>
+                  <input
+                    className={INPUT_CLASS}
+                    placeholder="Add tickers (comma-separated)"
+                    value={marketLeaderTickerInput}
+                    onChange={(event) => setMarketLeaderTickerInput(event.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    className={`${SECONDARY_BUTTON_CLASS} w-full disabled:cursor-not-allowed disabled:opacity-50`}
+                    onClick={() => void saveMarketLeaderTickers(parseMarketLeaderTickerInput(marketLeaderTickerInput))}
+                    disabled={marketLeaderSaving || parseMarketLeaderTickerInput(marketLeaderTickerInput).length === 0}
+                  >
+                    <Plus className="h-4 w-4" />
+                    {marketLeaderSaving ? "Saving" : "Add"}
+                  </button>
+                </div>
+                <label className="space-y-1 lg:col-span-2">
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Peer Group</span>
+                  <select
+                    className={INPUT_CLASS}
+                    value={marketLeaderPeerGroupId}
+                    onChange={(event) => setMarketLeaderPeerGroupId(event.target.value)}
+                    disabled={marketLeaderSaving}
+                  >
+                    <option value="">{peerGroups.length === 0 ? "No peer groups saved" : "Select saved peer group..."}</option>
+                    {peerGroups.map((group) => (
+                      <option key={`market-leader-peer-group-${group.id}`} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {marketLeaderPeerGroupId ? (
+                <div className="mt-4 rounded-2xl border border-borderSoft/60 bg-panel/35 p-3">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Peer group constituents</p>
+                      <p className="mt-1 text-sm text-slate-400">
+                        {marketLeaderPeerGroupLoading
+                          ? `Loading tickers from ${selectedMarketLeaderPeerGroup?.name ?? "selected peer group"}...`
+                          : marketLeaderPeerGroupError
+                            ? marketLeaderPeerGroupError
+                            : `${marketLeaderSelectedTickers.length} of ${marketLeaderPeerGroupSuggestions.length} selected from ${selectedMarketLeaderPeerGroup?.name ?? "selected peer group"}.`}
+                      </p>
+                    </div>
+                    {!marketLeaderPeerGroupLoading && marketLeaderPeerGroupSuggestions.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className={SECONDARY_BUTTON_CLASS}
+                          onClick={selectAllMarketLeaderPeerTickers}
+                          disabled={marketLeaderSelectedTickers.length === marketLeaderPeerGroupSuggestions.length}
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
+                          className={SECONDARY_BUTTON_CLASS}
+                          onClick={clearMarketLeaderPeerTickers}
+                          disabled={marketLeaderSelectedTickers.length === 0}
+                        >
+                          Clear selected
+                        </button>
+                        <button
+                          type="button"
+                          className={`${SECONDARY_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-50`}
+                          onClick={() => void saveMarketLeaderTickers(marketLeaderSelectedTickers, marketLeaderPeerGroupId)}
+                          disabled={marketLeaderSaving || marketLeaderSelectedTickers.length === 0}
+                        >
+                          <Plus className="h-4 w-4" />
+                          {marketLeaderSaving ? "Saving" : "Add selected"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  {!marketLeaderPeerGroupLoading && marketLeaderPeerGroupSuggestions.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {marketLeaderPeerGroupSuggestions.map((item) => {
+                        const selected = marketLeaderSelectedTickerSet.has(item.ticker);
+                        const saved = marketLeaderTickerSet.has(item.ticker);
+                        return (
+                          <button
+                            key={`market-leader-peer-ticker-${marketLeaderPeerGroupId}-${item.ticker}`}
+                            type="button"
+                            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                              selected
+                                ? "border-accent/45 bg-accent/14 text-accent"
+                                : "border-borderSoft/60 bg-panelSoft/35 text-slate-300 hover:bg-panelSoft/55"
+                            }`}
+                            onClick={() => toggleMarketLeaderPeerTicker(item.ticker)}
+                            aria-pressed={selected}
+                            title={item.name ?? item.ticker}
+                          >
+                            <span
+                              className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${
+                                selected ? "border-accent bg-accent text-slate-950" : "border-slate-500/70"
+                              }`}
+                            >
+                              {selected ? <Check className="h-3 w-3" /> : null}
+                            </span>
+                            {item.ticker}
+                            {saved ? <span className="text-[10px] uppercase tracking-[0.12em] text-slate-500">Saved</span> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {marketLeaderError ? <p className="mt-3 text-sm text-red-300">{marketLeaderError}</p> : null}
+
+              <div className="mt-4 overflow-hidden bg-panel/30">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-900/60">
+                      <tr>
+                        {MARKET_LEADER_COLUMNS.map((column) => (
+                          <th key={`market-leader-head-${column.key}`} className={`px-4 py-3 ${column.align === "right" ? "text-right" : "text-left"} text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300`}>
+                            <button
+                              type="button"
+                              className={`inline-flex w-full items-center gap-1 ${column.align === "right" ? "justify-end" : "justify-start"} transition hover:text-accent`}
+                              onClick={() => handleMarketLeaderSort(column.key)}
+                            >
+                              {column.label}{marketLeaderSortGlyph(column.key)}
+                            </button>
+                          </th>
+                        ))}
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {marketLeaderTableRows.map(({ leader, metric, avgDollarVolume }) => (
+                        <tr key={`market-leader-row-${leader.ticker}`} className="border-t border-borderSoft/60 align-middle transition hover:bg-panelSoft/25">
+                          <td className="px-4 py-3 font-semibold text-accent">{leader.ticker}</td>
+                          <td className="max-w-64 truncate px-4 py-3 text-slate-300">{leader.name ?? leader.ticker}</td>
+                          <td className="px-4 py-3 text-right text-slate-100">{formatCompact(metric?.marketCap)}</td>
+                          <td className="px-4 py-3 text-right text-slate-100">{formatFundPrice(metric?.price ?? Number.NaN)}</td>
+                          <td className={`px-4 py-3 text-right ${metricChangeClass(metric?.change1d)}`}>{formatMetricPct(metric?.change1d)}</td>
+                          <td className={`px-4 py-3 text-right ${metricChangeClass(metric?.change1w)}`}>{formatMetricPct(metric?.change1w)}</td>
+                          <td className="px-4 py-3 text-right text-slate-100">{formatCompact(metric?.avgVolume)}</td>
+                          <td className="px-4 py-3 text-right text-slate-100">{formatCompact(avgDollarVolume)}</td>
+                          <td className="px-4 py-3">
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/35 bg-red-500/8 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/14 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => void removeMarketLeader(leader.ticker)}
+                              disabled={marketLeaderSaving}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {marketLeaders.length === 0 ? (
+                        <tr>
+                          <td colSpan={MARKET_LEADER_COLUMNS.length + 1} className="px-4 py-8 text-center text-sm text-slate-400">
+                            No market leaders saved yet.
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              {marketLeaderMetricsLoading ? <p className="mt-2 text-xs text-slate-500">Loading market leader metrics...</p> : null}
             </div>
 
             <div className={`border border-borderSoft/60 bg-panelSoft/20 ${addFormOpen ? "p-4" : "px-3 py-2"}`}>
@@ -1189,7 +2010,6 @@ export function SectorTracker() {
             <div className="bg-panel/20 p-4 md:p-5">
               <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div className="space-y-1">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Data View</p>
                   <h3 className="text-base font-semibold text-slate-100">
                     {view === "list" ? "Narrative list" : "Sector / narrative calendar"}
                   </h3>
@@ -1624,6 +2444,27 @@ export function SectorTracker() {
         />
       ) : null}
 
+      {marketLeaderChartOpen ? (
+        <TickerCollectionModal
+          eyebrow="Market Leaders"
+          title="Leader watchlist"
+          description={<p>{marketLeaderTableRows.length} ticker{marketLeaderTableRows.length === 1 ? "" : "s"}</p>}
+          items={marketLeaderModalItems}
+          totalItems={marketLeaderTableRows.length}
+          page={marketLeaderPage}
+          pageSize={CHARTS_PER_PAGE}
+          itemLabel="tickers"
+          maxColumns={3}
+          warning={marketLeaderMetricsWarning ? `Snapshot metrics warning: ${marketLeaderMetricsWarning}` : null}
+          loading={marketLeaderMetricsLoading}
+          loadingLabel="Loading market leader metrics..."
+          emptyMessage="No market leaders saved yet."
+          onPageChange={setMarketLeaderPage}
+          onClose={() => setMarketLeaderChartOpen(false)}
+          onExpandChart={openExpandedChart}
+        />
+      ) : null}
+
       {activeNarrativeCollection ? (
         <TickerCollectionModal
           eyebrow={activeNarrativeCollection.mode === "focus" ? "Focus Narrative" : "Sector / Narrative"}
@@ -1645,11 +2486,12 @@ export function SectorTracker() {
           page={narrativePage}
           pageSize={CHARTS_PER_PAGE}
           itemLabel="tickers"
+          headerMiddleSlot={activeFocusNarrativeRow ? renderFocusNarrativePopupComment(activeFocusNarrativeRow) : undefined}
           maxColumns={3}
           warning={narrativeMetricsWarning ? `Snapshot metrics warning: ${narrativeMetricsWarning}` : null}
           emptyMessage={activeNarrativeCollection.mode === "focus" ? "No prior tickers found for this narrative yet." : "No tickers are attached to this narrative entry yet."}
           onPageChange={setNarrativePage}
-          onClose={() => setActiveNarrativeCollection(null)}
+          onClose={closeNarrativeCollection}
           onExpandChart={openExpandedChart}
         />
       ) : null}

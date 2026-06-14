@@ -7,6 +7,14 @@ const DEFAULT_CHART_STYLE = "1";
 const DEFAULT_CHART_TIMEZONE = "Etc/UTC";
 
 type WidgetTheme = "dark" | "light";
+export type TradingViewComparePosition = "SameScale" | "NewPriceScale" | "NewPane";
+export type TradingViewCompareSymbol = {
+  symbol: string;
+  position: TradingViewComparePosition;
+  lineColor?: string;
+  lineWidth?: number;
+};
+type TradingViewChartStyle = "1" | "2" | "3";
 
 let cachedTheme: WidgetTheme = "dark";
 let themeObserver: MutationObserver | null = null;
@@ -45,11 +53,15 @@ function subscribeToTheme(listener: (theme: WidgetTheme) => void) {
 export function TradingViewWidget({
   ticker,
   compareSymbol,
+  compareSymbols,
+  chartStyle = DEFAULT_CHART_STYLE,
   compact = false,
   size = "default",
   chartOnly = false,
   showStatusLine = false,
   showCorporateEvents = false,
+  baseSeriesColor,
+  baseSeriesLineWidth,
   fillContainer = false,
   heightMode = "aspect",
   initialRange = "1M",
@@ -58,11 +70,15 @@ export function TradingViewWidget({
 }: {
   ticker: string;
   compareSymbol?: string;
+  compareSymbols?: TradingViewCompareSymbol[];
+  chartStyle?: TradingViewChartStyle;
   compact?: boolean;
   size?: "small" | "default";
   chartOnly?: boolean;
   showStatusLine?: boolean;
   showCorporateEvents?: boolean;
+  baseSeriesColor?: string;
+  baseSeriesLineWidth?: number;
   fillContainer?: boolean;
   heightMode?: "aspect" | "fill";
   initialRange?: "1M" | "3M" | "6M" | "12M";
@@ -95,6 +111,14 @@ export function TradingViewWidget({
         : compact
           ? "w-full max-w-[640px] aspect-[4/3]"
           : "w-full max-w-[880px] aspect-[4/3]";
+  const resolvedCompareSymbols = [
+    ...(compareSymbol ? [{ symbol: compareSymbol, position: "SameScale" as const }] : []),
+    ...(compareSymbols ?? []),
+  ].filter((item, index, array) => (
+    item.symbol.trim()
+    && array.findIndex((candidate) => candidate.symbol === item.symbol) === index
+  ));
+  const compareSymbolsKey = JSON.stringify(resolvedCompareSymbols);
 
   useEffect(() => {
     return subscribeToTheme(setTheme);
@@ -125,6 +149,34 @@ export function TradingViewWidget({
     const height = heightMode === "fill"
       ? ref.current.clientHeight || Math.round(width * 0.75)
       : Math.round(width * 0.75);
+    const overrides: Record<string, boolean | number | string> = {};
+    if (showStatusLine) {
+      Object.assign(overrides, {
+        "paneProperties.legendProperties.showSeriesOHLC": true,
+        "paneProperties.legendProperties.showBarChange": true,
+        "paneProperties.legendProperties.showVolume": true,
+        "mainSeriesProperties.statusViewStyle.showExchange": false,
+        "mainSeriesProperties.statusViewStyle.showInterval": false,
+      });
+    }
+    if (baseSeriesColor) {
+      Object.assign(overrides, {
+        "mainSeriesProperties.lineStyle.color": baseSeriesColor,
+        "mainSeriesProperties.priceLineColor": baseSeriesColor,
+      });
+    }
+    if (typeof baseSeriesLineWidth === "number" && Number.isFinite(baseSeriesLineWidth)) {
+      Object.assign(overrides, {
+        "mainSeriesProperties.lineStyle.linewidth": baseSeriesLineWidth,
+        "mainSeriesProperties.lineStyle.lineWidth": baseSeriesLineWidth,
+      });
+    }
+    const serializedCompareSymbols = resolvedCompareSymbols.map((item) => ({
+      symbol: item.symbol,
+      position: item.position,
+      ...(item.lineColor ? { lineColor: item.lineColor, color: item.lineColor } : {}),
+      ...(typeof item.lineWidth === "number" && Number.isFinite(item.lineWidth) ? { lineWidth: item.lineWidth } : {}),
+    }));
     ref.current.innerHTML = "";
     const script = document.createElement("script");
     script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
@@ -137,36 +189,21 @@ export function TradingViewWidget({
       timeframe: initialRange,
       timezone: DEFAULT_CHART_TIMEZONE,
       theme,
-      style: DEFAULT_CHART_STYLE,
+      style: chartStyle,
       allow_symbol_change: chartOnly ? false : !chartOnly,
       hide_top_toolbar: chartOnly,
       hide_side_toolbar: chartOnly,
       hide_legend: chartOnly ? !showStatusLine : false,
       volume_force_overlay: false,
-      overrides: showStatusLine
-        ? {
-            "paneProperties.legendProperties.showSeriesOHLC": true,
-            "paneProperties.legendProperties.showBarChange": true,
-            "paneProperties.legendProperties.showVolume": true,
-            "mainSeriesProperties.statusViewStyle.showExchange": false,
-            "mainSeriesProperties.statusViewStyle.showInterval": false,
-          }
-        : undefined,
+      overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
       withdateranges: chartOnly ? false : true,
       calendar: showCorporateEvents,
       save_image: false,
-      compareSymbols: compareSymbol
-        ? [
-            {
-              symbol: compareSymbol,
-              position: "SameScale",
-            },
-          ]
-        : [],
+      compareSymbols: serializedCompareSymbols,
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, compareSymbol, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, initialRange, theme, shouldLoad, heightMode]);
+  }, [ticker, chartStyle, compareSymbolsKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"

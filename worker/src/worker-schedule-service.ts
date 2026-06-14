@@ -45,6 +45,11 @@ type PostCloseDailyBarRefreshJobRecord = {
   totalTickers: number;
   processedTickers: number;
   cursorOffset: number;
+  fetchedRows: number;
+  writtenRows: number;
+  currentDateTickers: number;
+  missingCurrentDateTickers: number;
+  currentDateCoveragePct: number;
 };
 
 function asBooleanFlag(value: number | null | undefined, fallback: boolean): boolean {
@@ -200,6 +205,11 @@ function mapPostCloseDailyBarRefreshJobRecord(
     totalTickers: record.totalTickers,
     processedTickers: record.processedTickers,
     cursorOffset: record.cursorOffset,
+    fetchedRows: Number(record.fetchedRows ?? 0),
+    writtenRows: Number(record.writtenRows ?? 0),
+    currentDateTickers: Number(record.currentDateTickers ?? 0),
+    missingCurrentDateTickers: Number(record.missingCurrentDateTickers ?? 0),
+    currentDateCoveragePct: Number(record.currentDateCoveragePct ?? 0),
   };
 }
 
@@ -216,10 +226,15 @@ async function loadPostCloseDailyBarRefreshJobRecord(
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
-       error,
-       total_tickers as totalTickers,
-       processed_tickers as processedTickers,
-       cursor_offset as cursorOffset
+        error,
+        total_tickers as totalTickers,
+        processed_tickers as processedTickers,
+        cursor_offset as cursorOffset,
+        fetched_rows as fetchedRows,
+        written_rows as writtenRows,
+        current_date_tickers as currentDateTickers,
+        missing_current_date_tickers as missingCurrentDateTickers,
+        current_date_coverage_pct as currentDateCoveragePct
      FROM post_close_daily_bar_refresh_jobs
      WHERE id = ?
      LIMIT 1`,
@@ -241,10 +256,15 @@ async function loadLatestPostCloseDailyBarRefreshJobRecordForDate(
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
-       error,
-       total_tickers as totalTickers,
-       processed_tickers as processedTickers,
-       cursor_offset as cursorOffset
+        error,
+        total_tickers as totalTickers,
+        processed_tickers as processedTickers,
+        cursor_offset as cursorOffset,
+        fetched_rows as fetchedRows,
+        written_rows as writtenRows,
+        current_date_tickers as currentDateTickers,
+        missing_current_date_tickers as missingCurrentDateTickers,
+        current_date_coverage_pct as currentDateCoveragePct
      FROM post_close_daily_bar_refresh_jobs
      WHERE scope = ?
        AND trading_date = ?
@@ -264,6 +284,11 @@ async function updatePostCloseDailyBarRefreshJobRecord(
     cursorOffset: number;
     completedAt: string | null;
     error: string | null;
+    fetchedRows: number;
+    writtenRows: number;
+    currentDateTickers: number;
+    missingCurrentDateTickers: number;
+    currentDateCoveragePct: number;
   }>,
 ): Promise<void> {
   const assignments: string[] = ["updated_at = CURRENT_TIMESTAMP"];
@@ -287,6 +312,26 @@ async function updatePostCloseDailyBarRefreshJobRecord(
   if (input.error !== undefined) {
     assignments.push("error = ?");
     values.push(input.error);
+  }
+  if (typeof input.fetchedRows === "number") {
+    assignments.push("fetched_rows = ?");
+    values.push(input.fetchedRows);
+  }
+  if (typeof input.writtenRows === "number") {
+    assignments.push("written_rows = ?");
+    values.push(input.writtenRows);
+  }
+  if (typeof input.currentDateTickers === "number") {
+    assignments.push("current_date_tickers = ?");
+    values.push(input.currentDateTickers);
+  }
+  if (typeof input.missingCurrentDateTickers === "number") {
+    assignments.push("missing_current_date_tickers = ?");
+    values.push(input.missingCurrentDateTickers);
+  }
+  if (typeof input.currentDateCoveragePct === "number") {
+    assignments.push("current_date_coverage_pct = ?");
+    values.push(input.currentDateCoveragePct);
   }
   await env.DB.prepare(
     `UPDATE post_close_daily_bar_refresh_jobs
@@ -342,6 +387,11 @@ async function ensurePostCloseDailyBarRefreshJob(
         status: "queued",
         error: null,
         completedAt: null,
+        fetchedRows: 0,
+        writtenRows: 0,
+        currentDateTickers: 0,
+        missingCurrentDateTickers: existing.totalTickers,
+        currentDateCoveragePct: 0,
       });
       const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
       if (reset) return reset;
@@ -353,10 +403,10 @@ async function ensurePostCloseDailyBarRefreshJob(
   const totalTickers = await loadPostCloseDailyBarUniverseCount(env);
   await env.DB.prepare(
     `INSERT INTO post_close_daily_bar_refresh_jobs
-      (id, trading_date, scope, status, started_at, updated_at, completed_at, error, total_tickers, processed_tickers, cursor_offset)
-     VALUES (?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0)`,
+      (id, trading_date, scope, status, started_at, updated_at, completed_at, error, total_tickers, processed_tickers, cursor_offset, missing_current_date_tickers)
+     VALUES (?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, ?)`,
   )
-    .bind(id, tradingDate, POST_CLOSE_SCOPE, totalTickers)
+    .bind(id, tradingDate, POST_CLOSE_SCOPE, totalTickers, totalTickers)
     .run();
   const created = await loadPostCloseDailyBarRefreshJobRecord(env, id);
   if (!created) throw new Error("Failed to create post-close daily bar refresh job.");
@@ -377,6 +427,11 @@ export async function processPostCloseDailyBarRefreshJob(
   try {
     await updatePostCloseDailyBarRefreshJobRecord(env, job.id, { status: "running", error: null });
     let cursorOffset = job.cursorOffset;
+    let fetchedRows = Number(job.fetchedRows ?? 0);
+    let writtenRows = Number(job.writtenRows ?? 0);
+    let currentDateTickers = Number(job.currentDateTickers ?? 0);
+    let missingCurrentDateTickers = Number(job.missingCurrentDateTickers ?? Math.max(0, job.totalTickers - currentDateTickers));
+    let currentDateCoveragePct = Number(job.currentDateCoveragePct ?? 0);
     const batchSize = Math.max(1, options?.batchSize ?? DEFAULT_POST_CLOSE_BARS_BATCH_SIZE);
     const maxBatches = Math.max(1, options?.maxBatches ?? DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK);
     let processedBatchCount = 0;
@@ -384,17 +439,27 @@ export async function processPostCloseDailyBarRefreshJob(
     while (cursorOffset < job.totalTickers && processedBatchCount < maxBatches) {
       const tickers = await loadPostCloseDailyBarUniverseBatch(env, cursorOffset, batchSize);
       if (tickers.length === 0) break;
-      await refreshDailyBarsIncremental(env, {
+      const refresh = await refreshDailyBarsIncremental(env, {
         tickers,
         startDate: job.tradingDate,
         endDate: job.tradingDate,
       });
       cursorOffset += tickers.length;
+      fetchedRows += refresh.fetchedRows;
+      writtenRows += refresh.writtenRows;
+      currentDateTickers += refresh.currentDateTickers;
+      missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
+      currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
       processedBatchCount += 1;
       await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
         status: "running",
         processedTickers: cursorOffset,
         cursorOffset,
+        fetchedRows,
+        writtenRows,
+        currentDateTickers,
+        missingCurrentDateTickers,
+        currentDateCoveragePct,
       });
     }
 
@@ -404,6 +469,11 @@ export async function processPostCloseDailyBarRefreshJob(
         processedTickers: cursorOffset,
         cursorOffset,
         completedAt: new Date().toISOString(),
+        fetchedRows,
+        writtenRows,
+        currentDateTickers,
+        missingCurrentDateTickers,
+        currentDateCoveragePct,
       });
     }
   } catch (error) {

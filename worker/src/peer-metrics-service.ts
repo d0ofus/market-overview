@@ -11,6 +11,7 @@ export type PeerMetricRow = {
   ticker: string;
   price: number | null;
   change1d: number | null;
+  change1w: number | null;
   marketCap: number | null;
   avgVolume: number | null;
   asOf: string;
@@ -104,6 +105,7 @@ function mapTradingViewRows(
       change1d: asFiniteNumber(data[1]),
       marketCap: asFiniteNumber(data[2]),
       avgVolume: asFiniteNumber(data[3]),
+      change1w: asFiniteNumber(data[4]),
       asOf,
       source: TV_PROVIDER_LABEL,
     });
@@ -139,6 +141,7 @@ export function buildPeerMetricRows(
     const closes = (closesByTicker.get(ticker) ?? []).filter((value) => Number.isFinite(value) && value > 0);
     const fallbackPrice = closes.at(-1);
     const fallbackPrevClose = closes.length >= 2 ? closes.at(-2) ?? null : null;
+    const fallbackPrevWeekClose = closes.length >= 6 ? closes.at(-6) ?? null : null;
     const price = typeof latestSnapshot?.price === "number"
       ? latestSnapshot.price
       : typeof fallbackPrice === "number"
@@ -151,6 +154,9 @@ export function buildPeerMetricRows(
         : null;
     const change1d = typeof price === "number" && typeof prevClose === "number" && prevClose > 0
       ? ((price - prevClose) / prevClose) * 100
+      : null;
+    const change1w = typeof price === "number" && typeof fallbackPrevWeekClose === "number" && fallbackPrevWeekClose > 0
+      ? ((price - fallbackPrevWeekClose) / fallbackPrevWeekClose) * 100
       : null;
     const sharesOutstanding = sharesByTicker.get(ticker);
     const avgVolumeFromBars = mean(
@@ -173,6 +179,7 @@ export function buildPeerMetricRows(
       ticker,
       price,
       change1d,
+      change1w,
       marketCap,
       avgVolume,
       asOf,
@@ -217,7 +224,7 @@ async function fetchTradingViewPeerMetricMap(inputs: PeerMetricInput[], asOf: st
         tickers: symbolChunk,
       },
       options: { lang: "en" },
-      columns: ["close", "change", "market_cap_basic", "average_volume_30d_calc"],
+      columns: ["close", "change", "market_cap_basic", "average_volume_30d_calc", "Perf.W"],
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
@@ -266,13 +273,14 @@ export async function loadPeerMetrics(
   const asOf = new Date().toISOString();
   try {
     const rowsByTicker = await fetchTradingViewPeerMetricMap(dedupedInputs, asOf);
-    const rows = dedupedInputs.map(({ ticker }) => rowsByTicker.get(ticker) ?? {
-      ticker,
-      price: null,
-      change1d: null,
-      marketCap: null,
-      avgVolume: null,
-      asOf,
+      const rows = dedupedInputs.map(({ ticker }) => rowsByTicker.get(ticker) ?? {
+        ticker,
+        price: null,
+        change1d: null,
+        change1w: null,
+        marketCap: null,
+        avgVolume: null,
+        asOf,
       source: TV_PROVIDER_LABEL,
     });
     const missingTickers = rows.filter((row) => row.price == null && row.change1d == null && row.marketCap == null && row.avgVolume == null);

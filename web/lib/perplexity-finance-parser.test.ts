@@ -4,6 +4,7 @@ import {
   analyzePerplexityBodyText,
   mergeCompany,
   parseCompanyFromText,
+  parseNotablePriceMovementFromText,
   parsePeersFromText,
   parsePeersPresetPayload,
   parseProfileDescriptionPayload,
@@ -97,4 +98,57 @@ test("DOM profile fallback prefers company description over price movement comme
   assert.equal(company.name, "Guardant Health, Inc.");
   assert.equal(company.exchange, "NASDAQ Global Select");
   assert.equal(company.description?.startsWith("Guardant Health, Inc. (NASDAQ: GH) is"), true);
+});
+
+test("extracts the visible Notable Price Movement paragraph from rendered finance text", () => {
+  const expected = "Murphy USA surged roughly 10%, closing near its 52-week high after stronger-than-expected quarterly results and upbeat commentary lifted investor confidence in the fuel retailer's margins and merchandise sales.";
+  const result = parseNotablePriceMovementFromText(`
+    Murphy USA Inc.
+    MUSA
+    Key Stats
+    Notable Price Movement
+    ${expected}
+    Sources
+    3 sources
+    Company Profile
+    Murphy USA operates retail fuel stores.
+  `);
+
+  assert.equal(result.notablePriceMovement, expected);
+  assert.equal(result.matchedSelector, "text:Notable Price Movement");
+  assert.ok(result.observedHeadings.includes("Notable Price Movement"));
+});
+
+test("stops notable price movement extraction before the next section heading", () => {
+  const result = parseNotablePriceMovementFromText(`
+    Notable Price Movement
+    Murphy USA surged roughly 10%, closing near its 52-week high.
+    Company Profile
+    Murphy USA Inc. operates convenience stores and fuel stations.
+  `);
+
+  assert.equal(result.notablePriceMovement, "Murphy USA surged roughly 10%, closing near its 52-week high.");
+});
+
+test("supports close notable movement heading variants and inline text", () => {
+  const result = parseNotablePriceMovementFromText(`
+    Price Movement: Shares rose 6.2% after analysts raised price targets following earnings.
+    Financials
+    Revenue
+  `);
+
+  assert.equal(result.notablePriceMovement, "Shares rose 6.2% after analysts raised price targets following earnings.");
+  assert.equal(result.matchedSelector, "text:inline-notable-price-movement");
+});
+
+test("returns no notable price movement when the rendered section is absent", () => {
+  const result = parseNotablePriceMovementFromText(`
+    Murphy USA Inc.
+    Key Stats
+    Company Profile
+    Murphy USA operates retail fuel stores.
+  `);
+
+  assert.equal(result.notablePriceMovement, null);
+  assert.equal(result.matchedSelector, null);
 });

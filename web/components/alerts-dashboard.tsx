@@ -1,15 +1,18 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BarChart3, Loader2, Maximize2, RefreshCw } from "lucide-react";
+import { Activity, BarChart3, ExternalLink, Loader2, Maximize2, RefreshCw, ShieldCheck } from "lucide-react";
 import {
+  createPerplexityBrowserbaseVerificationSession,
   getAlertNews,
   getAlerts,
   getAlertTickerDays,
+  getPerplexityFinanceNotableMovement,
   type AlertLogRow,
   type AlertNewsRow,
   type AlertTickerDayRow,
   type AlertsSessionFilter,
+  type PerplexityFinanceNotableMovementLookup,
 } from "@/lib/api";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
@@ -25,19 +28,72 @@ const SESSION_OPTIONS: Array<{ value: AlertsSessionFilter; label: string }> = [
 
 const QUICK_RANGE_OPTIONS = [3, 5, 10, 30] as const;
 const DEFAULT_CHARTS_PER_PAGE = 12;
+const DEFAULT_ALERT_LOOKBACK_TRADING_DAYS = 30;
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 const localIsoDate = (value = new Date()) =>
   `${String(value.getFullYear()).padStart(4, "0")}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 
-const addDays = (isoDate: string, days: number) => {
+const parseIsoDate = (isoDate: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
   const value = new Date(`${isoDate}T00:00:00Z`);
+  return Number.isNaN(value.getTime()) ? null : value;
+};
+
+const addDays = (isoDate: string, days: number) => {
+  const value = parseIsoDate(isoDate);
+  if (!value) return isoDate;
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
 };
-const defaultEndDate = () => localIsoDate();
-const defaultStartDate = () => addDays(defaultEndDate(), -1);
 
-const rangeStartDate = (endDate: string, days: number) => addDays(endDate, -(days - 1));
+const weekdayLabel = (isoDate: string) => {
+  const value = parseIsoDate(isoDate);
+  return value ? WEEKDAY_LABELS[value.getUTCDay()] : "-";
+};
+
+const isTradingWeekday = (isoDate: string) => {
+  const value = parseIsoDate(isoDate);
+  if (!value) return false;
+  const day = value.getUTCDay();
+  return day >= 1 && day <= 5;
+};
+
+const previousTradingWeekday = (isoDate: string) => {
+  let cursor = isoDate;
+  for (let i = 0; i < 8; i += 1) {
+    cursor = addDays(cursor, -1);
+    if (isTradingWeekday(cursor)) return cursor;
+  }
+  return isoDate;
+};
+
+const tradingWeekdayOnOrBefore = (isoDate: string) => {
+  if (isTradingWeekday(isoDate)) return isoDate;
+  let cursor = isoDate;
+  for (let i = 0; i < 8; i += 1) {
+    cursor = addDays(cursor, -1);
+    if (isTradingWeekday(cursor)) return cursor;
+  }
+  return isoDate;
+};
+
+const defaultEndDate = () => localIsoDate();
+const defaultStartDate = () => {
+  const end = defaultEndDate();
+  return tradingRangeStartDate(end, DEFAULT_ALERT_LOOKBACK_TRADING_DAYS);
+};
+
+const tradingRangeStartDate = (endDate: string, days: number) => {
+  const count = Math.max(1, Math.floor(days));
+  let cursor = tradingWeekdayOnOrBefore(endDate);
+  for (let i = 1; i < count; i += 1) {
+    cursor = previousTradingWeekday(cursor);
+  }
+  return cursor;
+};
+
+const formatTradingDayHeaderDate = (isoDate: string) => `${weekdayLabel(isoDate)} ${isoDate}`;
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
@@ -183,6 +239,125 @@ function NewsList({
   );
 }
 
+type MovementCardState = {
+  open: boolean;
+  loading: boolean;
+  data: PerplexityFinanceNotableMovementLookup | null;
+  error: string | null;
+  verifying?: boolean;
+  verificationError?: string | null;
+  verificationUrl?: string | null;
+};
+
+function movementStatusClass(status: PerplexityFinanceNotableMovementLookup["status"] | "loading" | "empty"): string {
+  if (status === "ready") return "border-pos/40 bg-pos/10 text-pos";
+  if (status === "blocked" || status === "parse_error") return "border-red-500/40 bg-red-900/20 text-red-200";
+  if (status === "pending_timeout") return "border-yellow-600/50 bg-yellow-900/20 text-yellow-200";
+  return "border-borderSoft/70 bg-panelSoft/35 text-slate-300";
+}
+
+function MovementExpansion({
+  ticker,
+  state,
+  onRefresh,
+  onVerify,
+}: {
+  ticker: string;
+  state: MovementCardState;
+  onRefresh: () => void;
+  onVerify: () => void;
+}) {
+  const data = state.data;
+  const status = state.loading && !data ? "loading" : data?.status ?? "empty";
+  const sourceUrl = data?.url ?? `https://www.perplexity.ai/finance/${encodeURIComponent(ticker)}`;
+  const canVerify = data?.status === "blocked" && data.diagnostics.provider === "browserbase";
+
+  return (
+    <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-slate-100">Notable Price Movement</h4>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            <span className={`rounded-full border px-2 py-0.5 font-medium ${movementStatusClass(status)}`}>
+              {status === "loading" ? "loading" : status}
+            </span>
+            {data?.fetchedAt ? <span>Fetched {formatDateTime(data.fetchedAt)}</span> : null}
+            {data?.diagnostics?.bodyState ? <span>Body {data.diagnostics.bodyState}</span> : null}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-200 transition hover:bg-panelSoft/55 disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={onRefresh}
+          disabled={state.loading}
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+      {canVerify ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded border border-accent/40 bg-accent/15 px-2.5 py-1.5 text-accent transition hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={onVerify}
+            disabled={state.verifying}
+          >
+            {state.verifying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-3.5 w-3.5" />
+            )}
+            Verify session
+          </button>
+          {state.verificationUrl ? (
+            <a
+              href={state.verificationUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded border border-borderSoft px-2.5 py-1.5 text-slate-300 transition hover:border-accent/40 hover:text-accent"
+            >
+              Live View <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+
+      {state.loading && !data ? (
+        <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading visible Perplexity text...
+        </div>
+      ) : null}
+      {state.verificationError ? (
+        <div className="mt-3 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
+          {state.verificationError}
+        </div>
+      ) : null}
+      {state.error ? (
+        <div className="mt-3 rounded border border-red-500/40 bg-red-900/20 px-3 py-2 text-xs text-red-200">
+          {state.error}
+        </div>
+      ) : null}
+      {data?.warning ? (
+        <div className="mt-3 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
+          {data.warning}
+        </div>
+      ) : null}
+      {data?.notablePriceMovement ? (
+        <p className="mt-3 text-sm leading-relaxed text-slate-200">{data.notablePriceMovement}</p>
+      ) : data && !state.loading && !state.error ? (
+        <p className="mt-3 text-sm leading-relaxed text-slate-400">No visible Notable Price Movement paragraph was found.</p>
+      ) : null}
+      <div className="mt-3 break-all text-[11px] text-slate-500">
+        <a href={sourceUrl} target="_blank" rel="noreferrer" className="hover:text-slate-300">
+          {sourceUrl}
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export function AlertsDashboard() {
   const [startDate, setStartDate] = useState(defaultStartDate());
   const [endDate, setEndDate] = useState(defaultEndDate());
@@ -199,6 +374,7 @@ export function AlertsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [expandedNews, setExpandedNews] = useState<Set<string>>(new Set());
   const [expandedGridNews, setExpandedGridNews] = useState<Set<string>>(new Set());
+  const [movementByKey, setMovementByKey] = useState<Record<string, MovementCardState>>({});
   const [activePeerTicker, setActivePeerTicker] = useState<string | null>(null);
   const [activeFundamentalsTicker, setActiveFundamentalsTicker] = useState<string | null>(null);
   const [activeChartRow, setActiveChartRow] = useState<AlertTickerDayRow | null>(null);
@@ -324,6 +500,129 @@ export function AlertsDashboard() {
     });
   };
 
+  const loadMovement = useCallback(async (compoundKey: string, ticker: string, refresh = false) => {
+    setMovementByKey((current) => {
+      const existing = current[compoundKey];
+      return {
+        ...current,
+        [compoundKey]: {
+          open: true,
+          loading: true,
+          data: existing?.data ?? null,
+          error: null,
+          verifying: existing?.verifying ?? false,
+          verificationError: null,
+          verificationUrl: existing?.verificationUrl ?? null,
+        },
+      };
+    });
+    try {
+      const response = await getPerplexityFinanceNotableMovement(ticker, { refresh });
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          open: true,
+          loading: false,
+          data: response,
+          error: null,
+          verifying: current[compoundKey]?.verifying ?? false,
+          verificationError: null,
+          verificationUrl: current[compoundKey]?.verificationUrl ?? null,
+        },
+      }));
+    } catch (movementError) {
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        return {
+          ...current,
+          [compoundKey]: {
+            open: true,
+            loading: false,
+            data: existing?.data ?? null,
+            error: movementError instanceof Error ? movementError.message : "Failed to load notable price movement.",
+            verifying: existing?.verifying ?? false,
+            verificationError: existing?.verificationError ?? null,
+            verificationUrl: existing?.verificationUrl ?? null,
+          },
+        };
+      });
+    }
+  }, []);
+
+  const openMovementVerification = useCallback(async (compoundKey: string, ticker: string) => {
+    setMovementByKey((current) => {
+      const existing = current[compoundKey];
+      if (!existing) return current;
+      return {
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          verifying: true,
+          verificationError: null,
+        },
+      };
+    });
+    try {
+      const session = await createPerplexityBrowserbaseVerificationSession({
+        targetUrl: `https://www.perplexity.ai/finance/${encodeURIComponent(ticker)}`,
+      });
+      const verificationUrl = session.debuggerFullscreenUrl || session.debuggerUrl;
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        if (!existing) return current;
+        return {
+          ...current,
+          [compoundKey]: {
+            ...existing,
+            verifying: false,
+            verificationError: null,
+            verificationUrl,
+          },
+        };
+      });
+      window.open(verificationUrl, "_blank", "noopener,noreferrer");
+    } catch (verificationError) {
+      setMovementByKey((current) => {
+        const existing = current[compoundKey];
+        if (!existing) return current;
+        return {
+          ...current,
+          [compoundKey]: {
+            ...existing,
+            verifying: false,
+            verificationError: verificationError instanceof Error ? verificationError.message : "Failed to create Browserbase verification session.",
+          },
+        };
+      });
+    }
+  }, []);
+
+  const toggleMovement = useCallback((row: { ticker: string; tradingDay: string }) => {
+    const compoundKey = keyFor(row.ticker, row.tradingDay);
+    const existing = movementByKey[compoundKey];
+    if (existing?.open) {
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          open: false,
+        },
+      }));
+      return;
+    }
+    if (existing?.data || existing?.loading) {
+      setMovementByKey((current) => ({
+        ...current,
+        [compoundKey]: {
+          ...existing,
+          open: true,
+        },
+      }));
+      return;
+    }
+    void loadMovement(compoundKey, row.ticker);
+  }, [loadMovement, movementByKey]);
+
   const onSelectRow = (row: { ticker: string; tradingDay: string }) => {
     setSelectedKey(keyFor(row.ticker, row.tradingDay));
     setMode("single");
@@ -331,7 +630,7 @@ export function AlertsDashboard() {
 
   const applyQuickRange = (days: number) => {
     setChartPage(1);
-    setStartDate(rangeStartDate(endDate, days));
+    setStartDate(tradingRangeStartDate(endDate, days));
   };
 
   useEffect(() => {
@@ -339,7 +638,7 @@ export function AlertsDashboard() {
     setChartPage(totalChartPages);
   }, [chartPage, totalChartPages]);
 
-  const isQuickRangeActive = (days: number) => startDate === rangeStartDate(endDate, days);
+  const isQuickRangeActive = (days: number) => startDate === tradingRangeStartDate(endDate, days);
 
   const singleNews = selectedTickerDay?.news?.length ? selectedTickerDay.news : selectedNews;
   const activeChartDescription = activeChartRow
@@ -351,21 +650,28 @@ export function AlertsDashboard() {
       <div className="card p-3">
         <div className="grid gap-3 md:grid-cols-5">
           <label className="text-xs text-slate-300">
-            Start date
-            <input
-              type="date"
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
-              value={startDate}
-              onChange={(e) => {
-                setChartPage(1);
-                setStartDate(e.target.value);
-              }}
-            />
+            Trading day start
+            <div className="mt-1 grid grid-cols-[minmax(0,1fr),auto] gap-2">
+              <input
+                type="date"
+                className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                value={startDate}
+                onChange={(e) => {
+                  setChartPage(1);
+                  setStartDate(e.target.value);
+                }}
+              />
+              <span className="inline-flex min-w-11 items-center justify-center rounded border border-borderSoft bg-panelSoft px-2 text-xs font-semibold text-slate-300">
+                {weekdayLabel(startDate)}
+              </span>
+            </div>
             <div className="mt-2 flex flex-wrap gap-2">
               {QUICK_RANGE_OPTIONS.map((days) => (
                 <button
                   key={days}
                   type="button"
+                  aria-label={`Last ${days} trading days`}
+                  title={`Last ${days} trading days`}
                   className={`rounded px-2 py-1 text-[11px] ${
                     isQuickRangeActive(days) ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"
                   }`}
@@ -377,16 +683,21 @@ export function AlertsDashboard() {
             </div>
           </label>
           <label className="text-xs text-slate-300">
-            End date
-            <input
-              type="date"
-              className="mt-1 w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
-              value={endDate}
-              onChange={(e) => {
-                setChartPage(1);
-                setEndDate(e.target.value);
-              }}
-            />
+            Trading day end
+            <div className="mt-1 grid grid-cols-[minmax(0,1fr),auto] gap-2">
+              <input
+                type="date"
+                className="w-full rounded border border-borderSoft bg-panelSoft px-2 py-1 text-sm"
+                value={endDate}
+                onChange={(e) => {
+                  setChartPage(1);
+                  setEndDate(e.target.value);
+                }}
+              />
+              <span className="inline-flex min-w-11 items-center justify-center rounded border border-borderSoft bg-panelSoft px-2 text-xs font-semibold text-slate-300">
+                {weekdayLabel(endDate)}
+              </span>
+            </div>
           </label>
           <label className="text-xs text-slate-300">
             Session
@@ -523,6 +834,8 @@ export function AlertsDashboard() {
                   const compoundKey = keyFor(row.ticker, row.tradingDay);
                   const description = alertDescriptionByTickerDay.get(compoundKey) ?? "-";
                   const gridNewsOpen = expandedGridNews.has(compoundKey);
+                  const movementState = movementByKey[compoundKey];
+                  const movementOpen = movementState?.open ?? false;
                   const isSelected = selectedKey === compoundKey;
                   return (
                     <div
@@ -596,6 +909,18 @@ export function AlertsDashboard() {
                             <BarChart3 className="h-3.5 w-3.5" />
                             Fundamentals
                           </button>
+                          <button
+                            type="button"
+                            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
+                              movementOpen
+                                ? "border-accent/45 bg-accent/15 text-accent"
+                                : "border-borderSoft/70 bg-panelSoft/35 text-slate-200 hover:bg-panelSoft/55"
+                            }`}
+                            onClick={() => toggleMovement(row)}
+                          >
+                            <Activity className="h-3.5 w-3.5" />
+                            Movement
+                          </button>
                         </div>
                         <button
                           type="button"
@@ -606,6 +931,14 @@ export function AlertsDashboard() {
                           Expand chart
                         </button>
                       </div>
+                      {movementOpen && movementState ? (
+                        <MovementExpansion
+                          ticker={row.ticker}
+                          state={movementState}
+                          onRefresh={() => void loadMovement(compoundKey, row.ticker, true)}
+                          onVerify={() => void openMovementVerification(compoundKey, row.ticker)}
+                        />
+                      ) : null}
                       {gridNewsOpen ? (
                         <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
                           <h4 className="mb-2 text-sm font-semibold text-slate-100">Latest News</h4>
@@ -635,7 +968,9 @@ export function AlertsDashboard() {
         {mode === "single" && <aside className="space-y-3">
           <div className="card p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">Alerts Log (Last 30d Window)</h3>
+              <h3 className="text-sm font-semibold text-slate-200">
+                Alerts Log (Trading Days {formatTradingDayHeaderDate(startDate)} to {formatTradingDayHeaderDate(endDate)})
+              </h3>
               <button
                 className={`rounded px-3 py-1.5 text-xs ${showUniqueOnly ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`}
                 onClick={() => setShowUniqueOnly((current) => !current)}
@@ -682,7 +1017,7 @@ export function AlertsDashboard() {
                   {visibleAlerts.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-2 py-4 text-center text-slate-400">
-                        No alerts found for the selected filters.
+                        No alerts found for the selected trading-day filters.
                       </td>
                     </tr>
                   )}

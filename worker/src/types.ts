@@ -3,6 +3,7 @@ export type Env = {
   FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
   PATTERN_DB?: D1Database;
+  PERPLEXITY_CACHE_DB?: D1Database;
   ADMIN_SECRET?: string;
   DATA_PROVIDER?: string;
   ALPACA_API_KEY?: string;
@@ -44,6 +45,9 @@ export type Env = {
   BRAVE_SEARCH_API_KEY?: string;
   MARKET_COMMENTARY_RETENTION_DAYS?: string;
   SYMBOL_CATALOG_SYNC_ENABLED?: string;
+  HERMES_WATCHLIST_APPLY_WEBHOOK_URL?: string;
+  HERMES_WATCHLIST_APPLY_WEBHOOK_SECRET?: string;
+  MARKET_OVERVIEW_PUBLIC_URL?: string;
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
@@ -130,6 +134,11 @@ export type PostCloseDailyBarRefreshJob = {
   totalTickers: number;
   processedTickers: number;
   cursorOffset: number;
+  fetchedRows: number;
+  writtenRows: number;
+  currentDateTickers: number;
+  missingCurrentDateTickers: number;
+  currentDateCoveragePct: number;
 };
 
 export type SnapshotReadyResponse = {
@@ -138,6 +147,15 @@ export type SnapshotReadyResponse = {
   asOfDate: string;
   generatedAt: string;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
   config: DashboardConfigPayload;
   sections: Array<{
     id: string;
@@ -168,6 +186,7 @@ export type SnapshotReadyResponse = {
         above20Sma: boolean | null;
         above50Sma: boolean | null;
         above200Sma: boolean | null;
+        barDate?: string | null;
         rankKey: number;
         holdings: string[] | null;
       }>;
@@ -181,6 +200,15 @@ export type SnapshotEmptyResponse = {
   asOfDate: null;
   generatedAt: null;
   providerLabel: null;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
   config: null;
   sections: [];
 };

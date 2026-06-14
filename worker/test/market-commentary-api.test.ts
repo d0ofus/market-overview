@@ -28,6 +28,11 @@ type StoredReport = {
 class FakeMarketCommentaryDb {
   rows: StoredReport[] = [];
   settings: MarketCommentarySettings | null = null;
+  snapshotAvailable: boolean;
+
+  constructor(options: { snapshotAvailable?: boolean } = {}) {
+    this.snapshotAvailable = options.snapshotAvailable ?? false;
+  }
 
   prepare(sql: string) {
     const db = this;
@@ -40,6 +45,26 @@ class FakeMarketCommentaryDb {
       async first<T>() {
         if (sql.includes("FROM market_commentary_settings")) {
           return (db.settings ? settingsToRow(db.settings) : null) as T;
+        }
+        if (sql.includes("FROM snapshots_meta")) {
+          const asOfDate = String(bound[1] ?? "2026-06-12");
+          return (db.snapshotAvailable
+            ? {
+                id: `snapshot-${asOfDate}`,
+                asOfDate,
+                generatedAt: `${asOfDate}T22:00:00.000Z`,
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: asOfDate,
+                freshnessStatus: "fresh",
+                freshnessCurrentCount: 4,
+                freshnessEligibleCount: 4,
+                freshnessCoveragePct: 100,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: asOfDate,
+                freshnessMaxBarDate: asOfDate,
+                freshnessWarning: null,
+              }
+            : null) as T;
         }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("WHERE session_date = ?")) {
           return (db.rows.filter((row) => row.sessionDate === String(bound[0])).sort(sortLatest)[0] ?? null) as T;
@@ -199,7 +224,7 @@ describe("market commentary API", () => {
   });
 
   it("stores and returns an isolated failed report when provider config is missing", async () => {
-    const db = new FakeMarketCommentaryDb();
+    const db = new FakeMarketCommentaryDb({ snapshotAvailable: true });
     const response = await worker.fetch(
       new Request("https://example.com/api/admin/market-commentary/refresh", {
         method: "POST",

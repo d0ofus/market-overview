@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { Ban, CheckCircle2, ChevronDown, ChevronUp, Clock, KeyRound, Loader2, Maximize2, Plus, RefreshCw, Search, Trash2, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, ChevronDown, ChevronUp, Clock, KeyRound, Loader2, LockKeyhole, Maximize2, Plus, RefreshCw, Search, Trash2, XCircle } from "lucide-react";
 import {
   createSocialAlertBlacklistEntry,
   createSocialAlertHandle,
   deleteSocialAlertBlacklistEntry,
   deleteSocialAlertCredential,
+  getSocialAlertBlacklist,
   getSocialAlertHandles,
   getSocialAlertHealth,
-  getSocialAlertResults,
+  getSocialAlertPublicResults,
   getSocialAlertSettings,
   runSocialAlertScrape,
   saveSocialAlertCredential,
@@ -18,11 +19,12 @@ import {
   type SocialAlertHealthResponse,
   type SocialAlertMention,
   type SocialAlertMetrics,
-  type SocialAlertResultsResponse,
+  type SocialAlertPublicResultsResponse,
   type SocialAlertSettings,
   type SocialAlertSourceRow,
   type SocialAlertTickerSummary,
 } from "@/lib/api";
+import { AdminLoginForm } from "./admin/admin-login-form";
 import { ChartGridPager } from "./chart-grid-pager";
 import { TradingViewWidget } from "./tradingview-widget";
 
@@ -161,14 +163,50 @@ function MentionList({ mentions, ticker, compact = false }: { mentions: SocialAl
   );
 }
 
-export function SocialAlertsDashboard() {
+function ProtectedControlsPrompt({ configured, missing }: { configured: boolean; missing: string[] }) {
+  const configurationError = !configured
+    ? `Missing server environment variables: ${missing.join(", ")}.`
+    : null;
+
+  return (
+    <section className="card p-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr),minmax(18rem,24rem)]">
+        <div className="flex items-start gap-3">
+          <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-accent/25 bg-accent/15 text-accent">
+            <LockKeyhole className="h-4 w-4" aria-hidden="true" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">Admin access required</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Unlock Scweet Access, Source Handles, Cashtag Blacklist, Scheduled Scweet Scrape, and manual scrape runs.
+            </p>
+            {configurationError ? (
+              <p className="mt-3 rounded-2xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning">
+                {configurationError}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <AdminLoginForm disabled={!configured} redirectTo="/social-alerts" />
+      </div>
+    </section>
+  );
+}
+
+type SocialAlertsDashboardProps = {
+  adminAuthenticated: boolean;
+  adminConfigured: boolean;
+  adminMissing: string[];
+};
+
+export function SocialAlertsDashboard({ adminAuthenticated, adminConfigured, adminMissing }: SocialAlertsDashboardProps) {
   const [handles, setHandles] = useState<SocialAlertSourceRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [newHandle, setNewHandle] = useState("");
   const [authToken, setAuthToken] = useState("");
   const [health, setHealth] = useState<SocialAlertHealthResponse | null>(null);
   const [settings, setSettings] = useState<SocialAlertSettings>(DEFAULT_SETTINGS);
-  const [results, setResults] = useState<SocialAlertResultsResponse | null>(null);
+  const [results, setResults] = useState<SocialAlertPublicResultsResponse | null>(null);
   const [blacklist, setBlacklist] = useState<SocialAlertBlacklistedCashtagRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingToken, setSavingToken] = useState(false);
@@ -191,6 +229,7 @@ export function SocialAlertsDashboard() {
   const [activeChartSummary, setActiveChartSummary] = useState<SocialAlertTickerSummary | null>(null);
   const [blacklistTicker, setBlacklistTicker] = useState("");
   const [blacklistReason, setBlacklistReason] = useState("");
+  const canUseAdminControls = adminConfigured && adminAuthenticated;
 
   const logStartDate = useMemo(() => rangeStartDate(logEndDate, logLookbackDays), [logEndDate, logLookbackDays]);
 
@@ -203,7 +242,7 @@ export function SocialAlertsDashboard() {
       endDate: overrides?.endDate ?? logEndDate,
       lookbackDays: overrides?.lookbackDays ?? logLookbackDays,
     };
-    const next = await getSocialAlertResults({
+    const next = await getSocialAlertPublicResults({
       ticker: nextFilters.ticker.trim() || undefined,
       handle: nextFilters.handle.trim() || undefined,
       q: nextFilters.text.trim() || undefined,
@@ -214,24 +253,36 @@ export function SocialAlertsDashboard() {
       offset: 0,
     });
     setResults(next);
-    setBlacklist(next.blacklist ?? []);
     setChartPage(1);
   }, [handleFilter, logEndDate, logLookbackDays, logStartDate, textFilter, tickerFilter]);
 
   const load = useCallback(async (options?: { probe?: boolean; silent?: boolean }) => {
     if (!options?.silent) setLoading(true);
     try {
-      const [handlesRes, healthRes, settingsRes, resultsRes] = await Promise.all([
+      const resultsPromise = getSocialAlertPublicResults({ startDate: logStartDate, endDate: logEndDate, lookbackDays: logLookbackDays, limit: 500, offset: 0 });
+      if (!canUseAdminControls) {
+        const resultsRes = await resultsPromise;
+        setResults(resultsRes);
+        setHandles([]);
+        setHealth(null);
+        setSettings(DEFAULT_SETTINGS);
+        setBlacklist([]);
+        setSelectedIds(new Set());
+        return;
+      }
+
+      const [handlesRes, healthRes, settingsRes, blacklistRes, resultsRes] = await Promise.all([
         getSocialAlertHandles(),
         getSocialAlertHealth({ probe: options?.probe }),
         getSocialAlertSettings(),
-        getSocialAlertResults({ startDate: logStartDate, endDate: logEndDate, lookbackDays: logLookbackDays, limit: 500, offset: 0 }),
+        getSocialAlertBlacklist(),
+        resultsPromise,
       ]);
+      setResults(resultsRes);
       setHandles(handlesRes.rows);
       setHealth(healthRes);
       setSettings(settingsRes);
-      setResults(resultsRes);
-      setBlacklist(resultsRes.blacklist ?? []);
+      setBlacklist(blacklistRes.rows);
       setSelectedIds((current) => {
         const activeIds = handlesRes.rows.filter((row) => row.isActive).map((row) => row.id);
         if (current.size > 0) return new Set(Array.from(current).filter((id) => activeIds.includes(id)));
@@ -242,7 +293,7 @@ export function SocialAlertsDashboard() {
     } finally {
       if (!options?.silent) setLoading(false);
     }
-  }, [logEndDate, logLookbackDays, logStartDate]);
+  }, [canUseAdminControls, logEndDate, logLookbackDays, logStartDate]);
 
   useEffect(() => {
     void load();
@@ -448,8 +499,10 @@ export function SocialAlertsDashboard() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr),minmax(22rem,0.9fr)]">
-        <section className="card p-4">
+      {canUseAdminControls ? (
+        <>
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr),minmax(22rem,0.9fr)]">
+            <section className="card p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-slate-100">Scweet Access</h3>
@@ -493,9 +546,9 @@ export function SocialAlertsDashboard() {
             <span>Function: {health?.functionReachable ? "reachable" : "not ready"}</span>
             {health?.message ? <span className="text-warning">{health.message}</span> : null}
           </div>
-        </section>
+            </section>
 
-        <section className="card p-4">
+            <section className="card p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-slate-100">Source Handles</h3>
@@ -545,11 +598,11 @@ export function SocialAlertsDashboard() {
               <div className="rounded-lg border border-borderSoft/60 bg-panelSoft/25 p-3 text-sm text-slate-400">No saved handles yet.</div>
             ) : null}
           </div>
-        </section>
-      </div>
+            </section>
+          </div>
 
-      <section className="card p-4">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),minmax(22rem,0.8fr)]">
+          <section className="card p-4">
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr),minmax(22rem,0.8fr)]">
           <div>
             <div className="flex items-center gap-2">
               <Ban className="h-4 w-4 text-accent" />
@@ -596,11 +649,11 @@ export function SocialAlertsDashboard() {
               </div>
             </div>
           </div>
-        </div>
-      </section>
+            </div>
+          </section>
 
-      <section className="card p-4">
-        <div className="grid gap-3 lg:grid-cols-[minmax(12rem,0.8fr),minmax(10rem,0.6fr),minmax(0,1fr),auto]">
+          <section className="card p-4">
+            <div className="grid gap-3 lg:grid-cols-[minmax(12rem,0.8fr),minmax(10rem,0.6fr),minmax(0,1fr),auto]">
           <label className="text-xs text-slate-300">
             Start date
             <input className={INPUT_CLASS} type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
@@ -637,11 +690,15 @@ export function SocialAlertsDashboard() {
               {running ? "Scraping..." : "Run Scweet Scrape"}
             </button>
           </div>
-        </div>
-        <div className="mt-3 text-xs text-slate-400">
-          Selected {selectedHandles.length} handle{selectedHandles.length === 1 ? "" : "s"}. Manual scrapes run on demand.
-        </div>
-      </section>
+            </div>
+            <div className="mt-3 text-xs text-slate-400">
+              Selected {selectedHandles.length} handle{selectedHandles.length === 1 ? "" : "s"}. Manual scrapes run on demand.
+            </div>
+          </section>
+        </>
+      ) : (
+        <ProtectedControlsPrompt configured={adminConfigured} missing={adminMissing} />
+      )}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {metricItems(metrics).map(([label, value]) => (

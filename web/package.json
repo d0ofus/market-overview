@@ -6,9 +6,13 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "test:perplexity-parser": "tsx --test lib/perplexity-finance-parser.test.ts"
+    "test": "npm run test:perplexity && npm run test:admin-auth",
+    "test:admin-auth": "tsx --test lib/admin-auth-core.test.ts",
+    "test:perplexity": "tsx --test lib/perplexity-finance-parser.test.ts lib/perplexity-browser-provider.test.ts",
+    "test:perplexity-parser": "npm run test:perplexity"
   },
   "dependencies": {
+    "@browserbasehq/sdk": "^2.12.0",
     "@radix-ui/react-collapsible": "^1.1.2",
     "@radix-ui/react-select": "^2.1.4",
     "@sparticuz/chromium": "^133.0.0",

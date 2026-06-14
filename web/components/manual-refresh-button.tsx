@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { refreshPageData } from "@/lib/api";
 
+export type ManualRefreshPage = "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "ticker" | "alerts" | "scans" | "watchlist-compiler" | "gappers";
+
 type Props = {
-  page: "overview" | "breadth" | "sectors" | "thirteenf" | "admin" | "ticker" | "alerts" | "scans" | "watchlist-compiler" | "gappers";
+  page: ManualRefreshPage;
   ticker?: string | null;
   className?: string;
   idleLabel?: string;

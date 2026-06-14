@@ -56,6 +56,15 @@ export default async function HomePage() {
       lastUpdated: null,
       asOfDate: null,
       providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+      expectedAsOfDate: null,
+      freshnessStatus: "stale" as const,
+      freshnessCoveragePct: 0,
+      freshnessCurrentCount: 0,
+      freshnessEligibleCount: 0,
+      freshnessCriticalMissingTickers: [],
+      freshnessMinBarDate: null,
+      freshnessMaxBarDate: null,
+      freshnessWarning: "Overview freshness could not be loaded.",
     })),
     getFedWatch().catch(() => ({
       status: "unavailable",
@@ -97,6 +106,15 @@ export default async function HomePage() {
               timezone: statusValue.timezone,
               autoRefreshLabel: statusValue.autoRefreshLabel,
               providerLabel: statusValue.providerLabel,
+              expectedAsOfDate: statusValue.expectedAsOfDate,
+              freshnessStatus: statusValue.freshnessStatus,
+              freshnessCoveragePct: statusValue.freshnessCoveragePct,
+              freshnessCurrentCount: statusValue.freshnessCurrentCount,
+              freshnessEligibleCount: statusValue.freshnessEligibleCount,
+              freshnessCriticalMissingTickers: statusValue.freshnessCriticalMissingTickers,
+              freshnessMinBarDate: statusValue.freshnessMinBarDate,
+              freshnessMaxBarDate: statusValue.freshnessMaxBarDate,
+              freshnessWarning: statusValue.freshnessWarning,
             }}
           />
         )}

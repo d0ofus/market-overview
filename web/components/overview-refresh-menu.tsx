@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ChevronDown, Clock3, Database } from "lucide-react";
-import { ManualRefreshButton } from "./manual-refresh-button";
+import { ManualRefreshButton, type ManualRefreshPage } from "./manual-refresh-button";
 
 export type OverviewRefreshStatus = {
   asOfDate: string | null;
@@ -11,10 +11,21 @@ export type OverviewRefreshStatus = {
   timezone: string;
   autoRefreshLabel: string;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
 };
 
 type Props = {
   status: OverviewRefreshStatus;
+  refreshPage?: ManualRefreshPage;
+  refreshIdleLabel?: string;
 };
 
 const TZ_OPTIONS = [
@@ -45,7 +56,19 @@ function asOfToIso(asOfDate: string | null): string | null {
   return `${asOfDate}T00:00:00Z`;
 }
 
-export function OverviewRefreshMenu({ status }: Props) {
+function freshnessClass(status: OverviewRefreshStatus["freshnessStatus"]): string {
+  if (status === "fresh") return "border-success/30 bg-success/10 text-success";
+  if (status === "partial") return "border-warning/30 bg-warning/10 text-warning";
+  return "border-red-400/30 bg-red-500/10 text-red-300";
+}
+
+function freshnessLabel(status: OverviewRefreshStatus["freshnessStatus"]): string {
+  if (status === "fresh") return "Fresh";
+  if (status === "partial") return "Partial";
+  return "Stale";
+}
+
+export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshIdleLabel = "Update This Page" }: Props) {
   const [selectedTz, setSelectedTz] = useState("Australia/Melbourne");
   const [hoverOpen, setHoverOpen] = useState(false);
   const [pinnedOpen, setPinnedOpen] = useState(false);
@@ -106,6 +129,25 @@ export function OverviewRefreshMenu({ status }: Props) {
 
   const lastUpdatedLabel = useMemo(() => formatInZone(status.lastUpdated, selectedTz), [status.lastUpdated, selectedTz]);
   const asOfLabel = useMemo(() => formatInZone(asOfToIso(status.asOfDate), selectedTz), [status.asOfDate, selectedTz]);
+  const freshnessStatus = status.freshnessStatus ?? "stale";
+  const marketDataAsOf =
+    status.freshnessMinBarDate && status.freshnessMaxBarDate
+      ? status.freshnessMinBarDate === status.freshnessMaxBarDate
+        ? status.freshnessMaxBarDate
+        : `${status.freshnessMinBarDate} to ${status.freshnessMaxBarDate}`
+      : status.freshnessMaxBarDate
+        ? status.freshnessMaxBarDate
+        : "Unknown";
+  const freshnessCoveragePct = status.freshnessCoveragePct;
+  const freshnessCurrentCount = status.freshnessCurrentCount;
+  const freshnessEligibleCount = status.freshnessEligibleCount;
+  const coverageLabel =
+    typeof freshnessEligibleCount === "number"
+    && freshnessEligibleCount > 0
+    && typeof freshnessCurrentCount === "number"
+    && typeof freshnessCoveragePct === "number"
+      ? `${freshnessCoveragePct.toFixed(1)}% (${freshnessCurrentCount}/${freshnessEligibleCount})`
+      : "Coverage unknown";
 
   return (
     <div
@@ -138,14 +180,33 @@ export function OverviewRefreshMenu({ status }: Props) {
         >
           <div className="grid gap-2 text-sm">
             <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/45 px-3 py-2">
-              <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Last updated</div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Snapshot generated</div>
               <div className="mt-1 font-medium text-slate-100">{lastUpdatedLabel}</div>
+            </div>
+            <div className={`rounded-xl border px-3 py-2 ${freshnessClass(freshnessStatus)}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.14em] opacity-75">Displayed data status</div>
+                  <div className="mt-1 font-semibold">{freshnessLabel(freshnessStatus)}</div>
+                </div>
+                <div className="text-right text-xs">
+                  <div>{coverageLabel}</div>
+                  <div className="mt-1 opacity-75">Expected {status.expectedAsOfDate ?? "N/A"}</div>
+                </div>
+              </div>
+              {status.freshnessWarning && <div className="mt-2 text-xs leading-5 opacity-90">{status.freshnessWarning}</div>}
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">As-of</div>
+                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Snapshot as-of</div>
                 <div className="mt-1 text-slate-200">{asOfLabel}</div>
               </div>
+              <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Displayed data as-of</div>
+                <div className="mt-1 break-words font-mono text-slate-200">{marketDataAsOf}</div>
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">
                 <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Auto-refresh</div>
                 <div className="mt-1 text-slate-200">{status.autoRefreshLabel}</div>
@@ -178,7 +239,7 @@ export function OverviewRefreshMenu({ status }: Props) {
                 <div className="mt-1 text-sm font-medium">{status.providerLabel}</div>
               </div>
             </div>
-            <ManualRefreshButton page="overview" idleLabel="Update This Page" />
+            <ManualRefreshButton page={refreshPage} idleLabel={refreshIdleLabel} />
           </div>
         </div>
       )}

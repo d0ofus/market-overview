@@ -28,6 +28,7 @@ export function TickerCollectionModal({
   pageSize,
   itemLabel,
   controls,
+  headerMiddleSlot,
   warning,
   loading = false,
   loadingLabel = "Loading charts...",
@@ -46,6 +47,7 @@ export function TickerCollectionModal({
   pageSize: number;
   itemLabel: string;
   controls?: ReactNode;
+  headerMiddleSlot?: ReactNode;
   warning?: string | null;
   loading?: boolean;
   loadingLabel?: string;
@@ -66,11 +68,12 @@ export function TickerCollectionModal({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
-          <div>
+          <div className="min-w-0">
             <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{eyebrow}</p>
             <h4 className="mt-1 text-base font-semibold text-slate-100">{title}</h4>
             {description ? <div className="mt-2 text-sm text-slate-400">{description}</div> : null}
           </div>
+          {headerMiddleSlot ? <div className="min-w-[16rem] flex-1 md:max-w-3xl">{headerMiddleSlot}</div> : null}
           <button data-modal-close="true" className={SECONDARY_BUTTON_CLASS} onClick={onClose}>
             Close
           </button>

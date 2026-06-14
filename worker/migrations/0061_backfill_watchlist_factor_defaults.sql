@@ -1,0 +1,3 @@
+UPDATE tv_watchlist_sets
+SET factor_config_json = '{"enabled":{"priceAboveSma200":true,"priceAbove":true,"marketCapAbove":true,"within52WeekHigh":true,"priorStrongMove":true,"avg10dDollarVolume":true,"increasingVolumeProfile":true,"averageTradingRangePct":true},"thresholds":{"priceAbove":{"minPrice":10},"marketCapAbove":{"minMarketCapMillions":500},"within52WeekHigh":{"maxDistancePct":15},"priorStrongMove":{"movePct":50,"lookbackMonths":3},"strongSector":{"lookbackMonths":3},"avg10dDollarVolume":{"minDollarVolumeMillions":20},"increasingVolumeProfile":{"lookbackMonths":3,"minTrendPct":0},"acceleratingRevenueGrowth":{"minAccelerationPct":0},"acceleratingEpsGrowth":{"minAccelerationPct":0},"averageTradingRangePct":{"minAtrPct":3}}}'
+WHERE factor_config_json IS NULL;

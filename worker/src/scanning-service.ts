@@ -108,6 +108,9 @@ export function compiledRowsToCsv(rows: ScanCompiledRow[]): string {
     "change_1d",
     "volume",
     "market_cap",
+    "factor_score",
+    "factor_pass_count",
+    "factor_unknown_count",
   ];
   const lines = [header.join(",")];
   for (const row of rows) {
@@ -122,6 +125,9 @@ export function compiledRowsToCsv(rows: ScanCompiledRow[]): string {
       row.change1d ?? "",
       row.volume ?? "",
       row.marketCap ?? "",
+      row.factorScore ?? "",
+      row.factorPassCount ?? "",
+      row.factorUnknownCount ?? "",
     ].map(csvEscape).join(","));
   }
   return lines.join("\n");
@@ -361,10 +367,23 @@ export async function listScanRuns(env: Env, scanId: string, limit = 25): Promis
 }
 
 export async function loadRunCompiledRows(env: Env, scanId: string, runId: string): Promise<ScanCompiledRow[]> {
-  const rows = await env.DB.prepare(
-    "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? AND run_id = ? ORDER BY ticker ASC, rank_value DESC, created_at DESC",
-  ).bind(scanId, runId).all<ScanCompiledRow>();
-  return rows.results ?? [];
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, factor_score as factorScore, factor_pass_count as factorPassCount, factor_unknown_count as factorUnknownCount, factor_results_json as factorResultsJson, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? AND run_id = ? ORDER BY ticker ASC, rank_value DESC, created_at DESC",
+    ).bind(scanId, runId).all<ScanCompiledRow>();
+    return rows.results ?? [];
+  } catch {
+    const rows = await env.DB.prepare(
+      "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? AND run_id = ? ORDER BY ticker ASC, rank_value DESC, created_at DESC",
+    ).bind(scanId, runId).all<ScanCompiledRow>();
+    return (rows.results ?? []).map((row) => ({
+      ...row,
+      factorScore: null,
+      factorPassCount: null,
+      factorUnknownCount: null,
+      factorResultsJson: null,
+    }));
+  }
 }
 
 export async function loadRunUniqueTickers(env: Env, scanId: string, runId: string): Promise<ScanUniqueTickerRow[]> {
@@ -372,10 +391,23 @@ export async function loadRunUniqueTickers(env: Env, scanId: string, runId: stri
 }
 
 export async function loadScanCompiledRows(env: Env, scanId: string): Promise<ScanCompiledRow[]> {
-  const rows = await env.DB.prepare(
-    "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? ORDER BY datetime(created_at) DESC, ticker ASC",
-  ).bind(scanId).all<ScanCompiledRow>();
-  return rows.results ?? [];
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, factor_score as factorScore, factor_pass_count as factorPassCount, factor_unknown_count as factorUnknownCount, factor_results_json as factorResultsJson, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? ORDER BY datetime(created_at) DESC, ticker ASC",
+    ).bind(scanId).all<ScanCompiledRow>();
+    return rows.results ?? [];
+  } catch {
+    const rows = await env.DB.prepare(
+      "SELECT id, run_id as runId, scan_id as scanId, ticker, display_name as displayName, exchange, provider_row_key as providerRowKey, rank_value as rankValue, rank_label as rankLabel, price, change_1d as change1d, volume, market_cap as marketCap, raw_json as rawJson, canonical_key as canonicalKey, created_at as createdAt FROM scan_run_rows WHERE scan_id = ? ORDER BY datetime(created_at) DESC, ticker ASC",
+    ).bind(scanId).all<ScanCompiledRow>();
+    return (rows.results ?? []).map((row) => ({
+      ...row,
+      factorScore: null,
+      factorPassCount: null,
+      factorUnknownCount: null,
+      factorResultsJson: null,
+    }));
+  }
 }
 
 export async function loadScanUniqueTickers(env: Env, scanId: string): Promise<ScanUniqueTickerRow[]> {

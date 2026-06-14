@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Loader2, RefreshCw } from "lucide-react";
 import {
   apiUrl,
@@ -13,6 +13,8 @@ import {
   getWatchlistCompilerUnique,
   type ScanCompiledRow,
   type ScanUniqueTickerRow,
+  type WatchlistFactorConfig,
+  type WatchlistFactorResult,
   type WatchlistCompilerRunSummary,
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
@@ -38,6 +40,7 @@ import { TradingViewWidget } from "./tradingview-widget";
 import { WatchlistResearchPanel } from "./watchlist-research-panel";
 
 type ViewMode = "compiled" | "unique";
+type CompiledSortMode = "ticker" | "factorScore" | "factorPassCount";
 
 function formatTime(value: string | null | undefined) {
   if (!value) return "-";
@@ -55,6 +58,56 @@ function localDateSuffix() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+function parseCompiledSource(rawJson: string | null | undefined): { sourceId: string | null; sourceUrl: string | null } {
+  if (!rawJson) return { sourceId: null, sourceUrl: null };
+  try {
+    const parsed = JSON.parse(rawJson) as { sourceId?: unknown; sourceUrl?: unknown };
+    return {
+      sourceId: typeof parsed.sourceId === "string" ? parsed.sourceId : null,
+      sourceUrl: typeof parsed.sourceUrl === "string" ? parsed.sourceUrl : null,
+    };
+  } catch {
+    return { sourceId: null, sourceUrl: null };
+  }
+}
+
+function parseFactorResults(rawJson: string | null | undefined): WatchlistFactorResult[] {
+  if (!rawJson) return [];
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is WatchlistFactorResult => Boolean(item && typeof item === "object" && "key" in item)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function formatFactorValue(value: WatchlistFactorResult["value"] | WatchlistFactorResult["threshold"]) {
+  if (value == null || value === "") return "-";
+  if (typeof value === "number") return Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function factorStatusClass(status: WatchlistFactorResult["status"]) {
+  if (status === "pass") return "border-pos/30 bg-pos/10 text-pos";
+  if (status === "fail") return "border-neg/30 bg-neg/10 text-neg";
+  return "border-slate-500/30 bg-slate-800/70 text-slate-300";
+}
+
+function enabledFactorCount(config: WatchlistFactorConfig | null | undefined) {
+  return Object.values(config?.enabled ?? {}).filter(Boolean).length;
+}
+
+function runHasFactorTrace(run: WatchlistCompilerRunSummary | null | undefined) {
+  if (!run?.providerTraceJson) return false;
+  try {
+    const parsed = JSON.parse(run.providerTraceJson) as unknown;
+    return Array.isArray(parsed) && parsed.some((entry) => Boolean(entry && typeof entry === "object" && (entry as { sourceId?: unknown }).sourceId === "__factors__"));
+  } catch {
+    return false;
+  }
+}
+
 export function WatchlistCompilerDashboard() {
   const [sets, setSets] = useState<WatchlistCompilerSetRow[]>([]);
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
@@ -62,6 +115,8 @@ export function WatchlistCompilerDashboard() {
   const [runs, setRuns] = useState<WatchlistCompilerRunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("compiled");
+  const [compiledSort, setCompiledSort] = useState<CompiledSortMode>("ticker");
+  const [expandedFactorRowId, setExpandedFactorRowId] = useState<string | null>(null);
   const [compiledRows, setCompiledRows] = useState<ScanCompiledRow[]>([]);
   const [uniqueRows, setUniqueRows] = useState<ScanUniqueTickerRow[]>([]);
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
@@ -86,8 +141,32 @@ export function WatchlistCompilerDashboard() {
   const selectedResearchRunIdRef = useRef<string | null>(null);
 
   const selectedSet = useMemo(() => sets.find((row) => row.id === selectedSetId) ?? null, [sets, selectedSetId]);
-  const visibleTickers = useMemo(() => (viewMode === "compiled" ? compiledRows.map((row) => row.ticker) : uniqueRows.map((row) => row.ticker)), [compiledRows, uniqueRows, viewMode]);
+  const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? selectedSet?.latestRun ?? null, [runs, selectedRunId, selectedSet]);
+  const factorEnabledCount = enabledFactorCount(detail?.factorConfig);
+  const selectedRunHasFactors = runHasFactorTrace(selectedRun);
+  const sortedCompiledRows = useMemo(() => {
+    const rows = [...compiledRows];
+    if (compiledSort === "factorScore") {
+      return rows.sort((left, right) => ((right.factorScore ?? -1) - (left.factorScore ?? -1)) || left.ticker.localeCompare(right.ticker));
+    }
+    if (compiledSort === "factorPassCount") {
+      return rows.sort((left, right) => ((right.factorPassCount ?? -1) - (left.factorPassCount ?? -1)) || ((right.factorScore ?? -1) - (left.factorScore ?? -1)) || left.ticker.localeCompare(right.ticker));
+    }
+    return rows.sort((left, right) => left.ticker.localeCompare(right.ticker));
+  }, [compiledRows, compiledSort]);
+  const visibleTickers = useMemo(() => (viewMode === "compiled" ? sortedCompiledRows.map((row) => row.ticker) : uniqueRows.map((row) => row.ticker)), [sortedCompiledRows, uniqueRows, viewMode]);
   const uniqueVisibleTickers = useMemo(() => Array.from(new Set(visibleTickers)), [visibleTickers]);
+  const sourceLabels = useMemo(() => new Map(
+    (detail?.sources ?? []).map((source) => [
+      source.id,
+      source.sourceName?.trim() || source.sourceUrl,
+    ]),
+  ), [detail]);
+
+  const compiledSourceLabel = (row: ScanCompiledRow) => {
+    const source = parseCompiledSource(row.rawJson);
+    return (source.sourceId ? sourceLabels.get(source.sourceId) : null) ?? source.sourceUrl ?? "-";
+  };
 
   const loadProfiles = async () => {
     try {
@@ -179,6 +258,7 @@ export function WatchlistCompilerDashboard() {
       if (viewMode === "compiled") setCompiledRows((rowsRes as { rows: ScanCompiledRow[] }).rows ?? []);
       else setUniqueRows((rowsRes as { rows: ScanUniqueTickerRow[] }).rows ?? []);
       setSelectedTickers([]);
+      setExpandedFactorRowId(null);
       await loadResearchRuns(setId);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to load watchlist compiler detail.");
@@ -413,6 +493,17 @@ export function WatchlistCompilerDashboard() {
                 <button className={`rounded px-3 py-1.5 text-xs ${viewMode === "unique" ? "bg-accent/20 text-accent" : "bg-slate-800 text-slate-300"}`} onClick={() => setViewMode("unique")}>Unique Only</button>
               </div>
               <div className="flex items-center gap-3">
+                {viewMode === "compiled" ? (
+                  <select
+                    className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs"
+                    value={compiledSort}
+                    onChange={(event) => setCompiledSort(event.target.value as CompiledSortMode)}
+                  >
+                    <option value="ticker">Ticker</option>
+                    <option value="factorScore">Factor Score</option>
+                    <option value="factorPassCount">Pass Count</option>
+                  </select>
+                ) : null}
                 <select
                   className="rounded border border-borderSoft bg-panelSoft px-2 py-1 text-xs"
                   value={selectedRunId ?? ""}
@@ -436,19 +527,66 @@ export function WatchlistCompilerDashboard() {
               <div className="max-h-[36rem] overflow-auto">
                 <table className="min-w-full text-xs">
                   <thead className="bg-slate-900/60">
-                    <tr>{["", "Ticker", "Company", viewMode === "compiled" ? "Source" : "Occurrences", "Price", "1D"].map((label) => <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>)}</tr>
+                    <tr>{(viewMode === "compiled"
+                      ? ["", "Ticker", "Company", "Source", "Price", "1D", "Factors", "Score"]
+                      : ["", "Ticker", "Company", "Occurrences", "Price", "1D"]
+                    ).map((label) => <th key={label} className="px-2 py-1.5 text-left text-slate-300">{label}</th>)}</tr>
                   </thead>
                   <tbody>
-                    {(viewMode === "compiled" ? compiledRows : uniqueRows).map((row: any) => (
-                      <tr key={row.id ?? row.ticker} className="border-t border-borderSoft/60 hover:bg-slate-900/30">
-                        <td className="px-2 py-1.5"><input type="checkbox" checked={selectedTickers.includes(row.ticker)} onChange={() => toggleTickerSelection(row.ticker)} /></td>
-                        <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
-                        <td className="px-2 py-1.5 text-slate-300">{row.displayName ?? "-"}</td>
-                        <td className="px-2 py-1.5 text-slate-400">{viewMode === "compiled" ? "-" : row.occurrences}</td>
-                        <td className="px-2 py-1.5 text-slate-300">{fmtNumber(viewMode === "compiled" ? row.price : row.latestPrice)}</td>
-                        <td className={`px-2 py-1.5 ${((viewMode === "compiled" ? row.change1d : row.latestChange1d) ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{fmtNumber(viewMode === "compiled" ? row.change1d : row.latestChange1d)}</td>
-                      </tr>
-                    ))}
+                    {(viewMode === "compiled" ? sortedCompiledRows : uniqueRows).map((row: any) => {
+                      const factorResults = viewMode === "compiled" ? parseFactorResults(row.factorResultsJson) : [];
+                      const factorCount = factorResults.length;
+                      const factorEmptyLabel = factorEnabledCount === 0 ? "No factors enabled" : selectedRunHasFactors ? "No factor results" : "Recompile needed";
+                      const isExpanded = expandedFactorRowId === (row.id ?? row.ticker);
+                      return (
+                        <Fragment key={row.id ?? row.ticker}>
+                          <tr className="border-t border-borderSoft/60 hover:bg-slate-900/30">
+                            <td className="px-2 py-1.5"><input type="checkbox" checked={selectedTickers.includes(row.ticker)} onChange={() => toggleTickerSelection(row.ticker)} /></td>
+                            <td className="px-2 py-1.5 font-semibold text-accent">{row.ticker}</td>
+                            <td className="px-2 py-1.5 text-slate-300">{row.displayName ?? "-"}</td>
+                            <td className="max-w-44 truncate px-2 py-1.5 text-slate-400" title={viewMode === "compiled" ? compiledSourceLabel(row) : undefined}>{viewMode === "compiled" ? compiledSourceLabel(row) : row.occurrences}</td>
+                            <td className="px-2 py-1.5 text-slate-300">{fmtNumber(viewMode === "compiled" ? row.price : row.latestPrice)}</td>
+                            <td className={`px-2 py-1.5 ${((viewMode === "compiled" ? row.change1d : row.latestChange1d) ?? 0) >= 0 ? "text-pos" : "text-neg"}`}>{fmtNumber(viewMode === "compiled" ? row.change1d : row.latestChange1d)}</td>
+                            {viewMode === "compiled" ? (
+                              <>
+                                <td className="px-2 py-1.5">
+                                  {factorCount > 0 ? (
+                                    <button
+                                      className="rounded border border-borderSoft/70 bg-panelSoft px-2 py-1 text-[11px] text-slate-200 hover:border-accent/40 hover:text-accent"
+                                      onClick={() => setExpandedFactorRowId((current) => current === (row.id ?? row.ticker) ? null : (row.id ?? row.ticker))}
+                                      type="button"
+                                    >
+                                      {row.factorPassCount ?? 0}/{factorCount} {row.factorUnknownCount ? `(${row.factorUnknownCount} unk)` : ""}
+                                    </button>
+                                  ) : <span className="text-[11px] text-slate-500">{factorEmptyLabel}</span>}
+                                </td>
+                                <td className="px-2 py-1.5 text-slate-300">{row.factorScore == null ? "-" : fmtNumber(row.factorScore, 0)}</td>
+                              </>
+                            ) : null}
+                          </tr>
+                          {viewMode === "compiled" && isExpanded ? (
+                            <tr className="border-t border-borderSoft/40 bg-slate-950/30">
+                              <td colSpan={8} className="px-2 py-3">
+                                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                                  {factorResults.map((factor) => (
+                                    <div key={factor.key} className={`rounded border px-3 py-2 ${factorStatusClass(factor.status)}`}>
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="font-semibold">{factor.label}</div>
+                                        <div className="uppercase">{factor.status}</div>
+                                      </div>
+                                      <div className="mt-1 text-[11px] opacity-90">
+                                        Value {formatFactorValue(factor.value)} | Threshold {formatFactorValue(factor.threshold)}
+                                      </div>
+                                      <div className="mt-1 truncate text-[11px] opacity-75" title={factor.source ?? undefined}>{factor.source ?? "No source"}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

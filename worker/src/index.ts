@@ -1,7 +1,18 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { ZodError } from "zod";
-import { computeAndStoreSnapshot, loadSnapshot, recomputeBreadthFromStoredBars, recomputeDashboardFromStoredBars, refreshSp500CoreBreadth } from "./eod";
+import { z, ZodError } from "zod";
+import {
+  CORE_BREADTH_UNIVERSE_IDS,
+  computeAndStoreBreadth,
+  computeAndStoreSnapshot,
+  computeOverviewFreshnessDiagnostics,
+  loadSnapshot,
+  OverviewFreshnessError,
+  recomputeBreadthFromStoredBars,
+  recomputeDashboardFromStoredBars,
+  refreshAndStoreOverviewSnapshot,
+  refreshMissingBreadthBarsForCoverage,
+} from "./eod";
 import type { Env, PostCloseDailyBarRefreshJob } from "./types";
 import {
   configPatchSchema,
@@ -45,6 +56,13 @@ import {
   patternLabelPatchSchema,
   patternProfilePatchSchema,
   patternRunCreateSchema,
+  watchlistReviewBatchSchema,
+  watchlistReviewApplyStatusSchema,
+  watchlistReviewCandidatePatchSchema,
+  watchlistReviewExportSchema,
+  watchlistReviewReadyToApplySchema,
+  watchlistReviewRunCreateSchema,
+  watchlistFactorConfigPatchSchema,
   watchlistSetCreateSchema,
   watchlistSetPatchSchema,
   watchlistSourceCreateSchema,
@@ -75,6 +93,7 @@ import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-sta
 import {
   cleanupOldAlertsData,
   ingestTradingViewAlertEmailsBatch,
+  queryAlertIngestionStatus,
   queryAlertsByFilters,
   queryUniqueTickerDaysByFilters,
   reconcileAlertsFromMailboxAdapters,
@@ -110,6 +129,8 @@ import {
   updateOverviewFocusItem,
 } from "./overview-focus-service";
 import {
+  advanceScannerCacheScanRuns,
+  cancelScanRefreshJob,
   cleanupOldScansPageData,
   deleteScanCompilePreset,
   loadCompiledScansSnapshot,
@@ -127,7 +148,6 @@ import {
   loadScanPreset,
   backfillScannerCacheRsCache,
   loadScannerCacheRsCacheStatus,
-  processScannerCacheScanRun,
   refreshActiveRelativeStrengthPresets,
   refreshScanCompilePreset,
   refreshScansSnapshot,
@@ -202,6 +222,7 @@ import {
   duplicateWatchlistSet,
   listWatchlistSetRuns,
   listWatchlistSets,
+  loadWatchlistFactorSettings,
   loadWatchlistCompiledRows,
   loadWatchlistSet,
   loadWatchlistUniqueRows,
@@ -209,9 +230,25 @@ import {
   runDueWatchlistCompiles,
   tickersToSingleColumnCsv,
   tickersToTxt,
+  updateWatchlistFactorSettings,
   updateWatchlistSet,
   updateWatchlistSource,
 } from "./watchlist-compiler-service";
+import {
+  approveAllWatchlistReviewCandidates,
+  applyApprovedWatchlistReviewChanges,
+  createWatchlistReviewRun,
+  exportApprovedWatchlistReviewChanges,
+  listWatchlistReviewApprovedReadyRuns,
+  loadWatchlistReviewApprovedApplySet,
+  listWatchlistReviewRuns,
+  loadWatchlistReviewRunDetail,
+  patchWatchlistReviewCandidate,
+  readyWatchlistReviewRunToApply,
+  skipAllWatchlistReviewCandidates,
+  updateWatchlistReviewApplyStatus,
+  WatchlistReviewSchemaMissingError,
+} from "./watchlist-review-service";
 import {
   loadCorrelationMatrix,
   loadCorrelationPair,
@@ -310,6 +347,12 @@ import {
   saveSocialAlertCredential,
   updateSocialAlertSettings,
 } from "./social-alerts-service";
+import {
+  loadPerplexityFinanceCache,
+  PerplexityFinanceCacheInputError,
+  PerplexityFinanceCacheUnavailableError,
+  upsertPerplexityFinanceCache,
+} from "./perplexity-finance-cache-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -340,6 +383,238 @@ const isAuthed = (req: Request, env: Env): boolean => {
   return auth.slice(7) === secret;
 };
 
+const scannerCachePulseSchema = z.object({
+  runId: z.string().trim().min(1).nullable().optional(),
+});
+const SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS = 25_000;
+const SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS = 15_000;
+const TICKER_SERIES_TIMEFRAMES = {
+  "1M": { limit: 23 },
+  "3M": { limit: 70 },
+  "6M": { limit: 130 },
+  "1Y": { limit: 260 },
+  "2Y": { limit: 520 },
+  MAX: { limit: null },
+} as const;
+type TickerSeriesTimeframe = keyof typeof TICKER_SERIES_TIMEFRAMES;
+type TickerHistoryBackfillResponse =
+  | { status: "queued"; lastRequestedAt: string }
+  | { status: "recently_requested"; lastRequestedAt: string | null }
+  | { status: "unavailable"; message: string };
+type TickerHistoryBackfillStatusRow = {
+  status: string | null;
+  lastRequestedAt: string | null;
+  lastAttemptedAt: string | null;
+  lastCompletedAt: string | null;
+  updatedAt: string | null;
+};
+const DEFAULT_TICKER_SERIES_TIMEFRAME: TickerSeriesTimeframe = "6M";
+const TICKER_SERIES_2Y_COMPLETE_BARS = 500;
+const TICKER_SERIES_2Y_LOOKBACK_DAYS = 760;
+const TICKER_HISTORY_BACKFILL_COOLDOWN_MS = 6 * 60 * 60_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeTickerSeriesTimeframe(raw: string | null | undefined): TickerSeriesTimeframe {
+  const normalized = raw?.trim().toUpperCase();
+  if (normalized && normalized in TICKER_SERIES_TIMEFRAMES) return normalized as TickerSeriesTimeframe;
+  return DEFAULT_TICKER_SERIES_TIMEFRAME;
+}
+
+function parseStoredTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function latestBackfillTimestamp(row: TickerHistoryBackfillStatusRow): number | null {
+  return Math.max(
+    parseStoredTimestamp(row.lastRequestedAt) ?? 0,
+    parseStoredTimestamp(row.lastAttemptedAt) ?? 0,
+    parseStoredTimestamp(row.lastCompletedAt) ?? 0,
+    parseStoredTimestamp(row.updatedAt) ?? 0,
+  ) || null;
+}
+
+async function loadTickerHistoryBackfillRow(env: Env, ticker: string, timeframe: TickerSeriesTimeframe): Promise<TickerHistoryBackfillStatusRow | null> {
+  try {
+    return await env.DB.prepare(
+      `SELECT status,
+              last_requested_at as lastRequestedAt,
+              last_attempted_at as lastAttemptedAt,
+              last_completed_at as lastCompletedAt,
+              updated_at as updatedAt
+         FROM ticker_history_backfill_status
+        WHERE ticker = ? AND timeframe = ?
+        LIMIT 1`,
+    )
+      .bind(ticker, timeframe)
+      .first<TickerHistoryBackfillStatusRow>();
+  } catch (error) {
+    console.warn("ticker history backfill status load failed", { ticker, timeframe, error });
+    return null;
+  }
+}
+
+async function upsertTickerHistoryBackfillQueued(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, barCount: number, requestedAt: string): Promise<boolean> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO ticker_history_backfill_status
+        (ticker, timeframe, target_bars, bar_count, status, last_requested_at, updated_at, last_error)
+       VALUES (?, ?, ?, ?, 'queued', ?, ?, NULL)
+       ON CONFLICT(ticker, timeframe) DO UPDATE SET
+         target_bars = excluded.target_bars,
+         bar_count = excluded.bar_count,
+         status = 'queued',
+         last_requested_at = excluded.last_requested_at,
+         updated_at = excluded.updated_at,
+         last_error = NULL`,
+    )
+      .bind(ticker, timeframe, TICKER_SERIES_2Y_COMPLETE_BARS, barCount, requestedAt, requestedAt)
+      .run();
+    return true;
+  } catch (error) {
+    console.warn("ticker history backfill status queue failed", { ticker, timeframe, error });
+    return false;
+  }
+}
+
+async function updateTickerHistoryBackfillStatus(
+  env: Env,
+  ticker: string,
+  timeframe: TickerSeriesTimeframe,
+  input: {
+    status: string;
+    barCount: number;
+    now: string;
+    lastError?: string | null;
+    markAttempted?: boolean;
+    markCompleted?: boolean;
+  },
+): Promise<void> {
+  const attemptedAt = input.markAttempted ? input.now : null;
+  const completedAt = input.markCompleted ? input.now : null;
+  try {
+    await env.DB.prepare(
+      `UPDATE ticker_history_backfill_status
+          SET status = ?,
+              bar_count = ?,
+              last_attempted_at = COALESCE(?, last_attempted_at),
+              last_completed_at = COALESCE(?, last_completed_at),
+              last_error = ?,
+              updated_at = ?
+        WHERE ticker = ? AND timeframe = ?`,
+    )
+      .bind(input.status, input.barCount, attemptedAt, completedAt, input.lastError ?? null, input.now, ticker, timeframe)
+      .run();
+  } catch (error) {
+    console.warn("ticker history backfill status update failed", { ticker, timeframe, error });
+  }
+}
+
+async function countStoredTickerBars(env: Env, ticker: string): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) as barCount FROM daily_bars WHERE ticker = ?")
+    .bind(ticker)
+    .first<{ barCount: number }>();
+  return Number(row?.barCount ?? 0);
+}
+
+async function runTickerHistoryBackfill(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, currentBarCount: number): Promise<void> {
+  const startedAt = new Date().toISOString();
+  try {
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: "running",
+      barCount: currentBarCount,
+      now: startedAt,
+      markAttempted: true,
+    });
+    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true);
+    const nextBarCount = await countStoredTickerBars(env, ticker);
+    const completedAt = new Date().toISOString();
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: nextBarCount >= TICKER_SERIES_2Y_COMPLETE_BARS ? "completed" : "partial",
+      barCount: nextBarCount,
+      now: completedAt,
+      markCompleted: true,
+    });
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
+      status: "failed",
+      barCount: currentBarCount,
+      now: failedAt,
+      lastError: error instanceof Error ? error.message : "Ticker history backfill failed.",
+      markCompleted: true,
+    });
+  }
+}
+
+async function maybeQueueTickerHistoryBackfill(
+  c: { env: Env; executionCtx: ExecutionContext },
+  ticker: string,
+  timeframe: TickerSeriesTimeframe,
+  currentBarCount: number,
+): Promise<TickerHistoryBackfillResponse> {
+  const existing = await loadTickerHistoryBackfillRow(c.env, ticker, timeframe);
+  const latestTimestamp = existing ? latestBackfillTimestamp(existing) : null;
+  if (latestTimestamp && Date.now() - latestTimestamp < TICKER_HISTORY_BACKFILL_COOLDOWN_MS) {
+    return {
+      status: "recently_requested",
+      lastRequestedAt: existing?.lastRequestedAt ?? existing?.updatedAt ?? null,
+    };
+  }
+
+  const requestedAt = new Date().toISOString();
+  const queued = await upsertTickerHistoryBackfillQueued(c.env, ticker, timeframe, currentBarCount, requestedAt);
+  if (!queued) {
+    return {
+      status: "unavailable",
+      message: "History backfill status storage is unavailable.",
+    };
+  }
+  c.executionCtx.waitUntil(runTickerHistoryBackfill(c.env, ticker, timeframe, currentBarCount));
+  return { status: "queued", lastRequestedAt: requestedAt };
+}
+
+function scannerCachePulseHeaders(env: Env): Headers {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (env.ADMIN_SECRET) headers.set("authorization", `Bearer ${env.ADMIN_SECRET}`);
+  return headers;
+}
+
+async function runScannerCacheScanPulse(env: Env, origin: string, runId?: string | null, initialDelayMs = 0): Promise<void> {
+  try {
+    if (initialDelayMs > 0) {
+      await delay(initialDelayMs);
+    }
+    const result = await advanceScannerCacheScanRuns(env, {
+      runId: runId ?? null,
+      timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
+    });
+    if (!result.hasMore) return;
+    if (!result.advanced) {
+      await delay(SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS);
+    }
+    const response = await fetch(`${origin}/api/internal/scans/runner/pulse`, {
+      method: "POST",
+      headers: scannerCachePulseHeaders(env),
+      body: JSON.stringify(runId ? { runId } : {}),
+    });
+    if (!response.ok) {
+      console.warn("scanner cache scan pulse continuation failed", response.status, await response.text().catch(() => ""));
+    }
+  } catch (error) {
+    console.error("scanner cache scan pulse failed", error);
+  }
+}
+
+function scheduleScannerCacheScanPulse(c: any, runId?: string | null, initialDelayMs = 0): void {
+  const origin = new URL(c.req.url).origin;
+  c.executionCtx.waitUntil(runScannerCacheScanPulse(c.env, origin, runId ?? null, initialDelayMs));
+}
+
 function patternErrorResponse(c: any, error: unknown) {
   if (error instanceof PatternDbUnavailableError) {
     return c.json({ error: error.message, setupRequired: true }, 503);
@@ -349,6 +624,24 @@ function patternErrorResponse(c: any, error: unknown) {
   }
   const message = error instanceof Error ? error.message : "Pattern scanner request failed.";
   return c.json({ error: message }, 500);
+}
+
+function watchlistReviewErrorResponse(c: any, error: unknown) {
+  if (error instanceof WatchlistReviewSchemaMissingError) {
+    return c.json({ error: error.message, setupRequired: true }, 503);
+  }
+  if (error instanceof ZodError) {
+    return c.json({ error: error.issues[0]?.message ?? "Invalid watchlist review payload." }, 400);
+  }
+  const message = error instanceof Error ? error.message : "Watchlist review request failed.";
+  const status = /stale|idempotency|checksum|revision/i.test(message)
+    ? 409
+    : /not found/i.test(message)
+      ? 404
+      : /requires|blocked|provide|valid|does not match/i.test(message)
+        ? 400
+        : 500;
+  return c.json({ error: message }, status);
 }
 
 function overviewFocusErrorResponse(c: any, error: unknown) {
@@ -511,7 +804,7 @@ async function refreshOverviewEtfCoverageSafe(env: Env): Promise<void> {
 
 async function ensureBreadthRowsSafe(env: Env): Promise<void> {
   try {
-    await computeAndStoreSnapshot(env, undefined, "default");
+    await recomputeBreadthFromStoredBars(env);
   } catch (error) {
     console.error("on-demand breadth backfill failed", error);
   }
@@ -526,6 +819,58 @@ const isStaleDate = (iso: string | null | undefined, maxAgeDays = 30): boolean =
 
 function uniqueTickers(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.toUpperCase()).filter(Boolean)));
+}
+
+function normalizeLeaderTickers(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return Array.from(new Set(
+    values
+      .map((value) => (typeof value === "string" ? value.trim().toUpperCase() : ""))
+      .filter((ticker) => /^[A-Z0-9.\-^]{1,20}$/.test(ticker)),
+  ));
+}
+
+async function listSectorMarketLeaders(env: Env): Promise<Array<{
+  ticker: string;
+  name: string | null;
+  sourcePeerGroupId: string | null;
+  sourcePeerGroupName: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}>> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       ml.ticker,
+       s.name,
+       ml.source_peer_group_id as sourcePeerGroupId,
+       pg.name as sourcePeerGroupName,
+       ml.sort_order as sortOrder,
+       ml.created_at as createdAt,
+       ml.updated_at as updatedAt
+     FROM sector_market_leaders ml
+     LEFT JOIN symbols s ON s.ticker = ml.ticker
+     LEFT JOIN peer_groups pg ON pg.id = ml.source_peer_group_id
+     ORDER BY ml.sort_order ASC, ml.created_at ASC, ml.ticker ASC`,
+  ).all<{
+    ticker: string;
+    name: string | null;
+    sourcePeerGroupId: string | null;
+    sourcePeerGroupName: string | null;
+    sortOrder: number;
+    createdAt: string;
+    updatedAt: string;
+  }>();
+
+  return (rows.results ?? []).map((row) => ({
+    ticker: row.ticker.toUpperCase(),
+    name: row.name ?? null,
+    sourcePeerGroupId: row.sourcePeerGroupId ?? null,
+    sourcePeerGroupName: row.sourcePeerGroupName ?? null,
+    sortOrder: Number(row.sortOrder ?? 0),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }));
 }
 
 const EQUAL_WEIGHT_US_INDEX_ETFS = [
@@ -941,30 +1286,29 @@ async function refreshPageScopedData(
 ): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
   if (page === "overview") {
     const tickers = await loadOverviewTickers(env);
-    try {
-      await refreshRecentBarsForTickers(env, tickers, 1600, 21, true);
-      await recomputeDashboardFromStoredBars(env);
-      return { page, refreshedTickers: tickers.length };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Live overview refresh failed.";
-      await recomputeDashboardFromStoredBars(env);
-      return {
-        page,
-        refreshedTickers: tickers.length,
-        notes: `Live overview refresh failed (${message}). Rebuilt overview from stored bars instead.`,
-      };
-    }
+    const result = await refreshAndStoreOverviewSnapshot(env);
+    return {
+      page,
+      refreshedTickers: tickers.length,
+      notes: `Overview market data ${result.freshness.status}: ${result.freshness.currentCount}/${result.freshness.eligibleCount} tickers current for ${result.asOfDate} (${result.freshness.coveragePct.toFixed(1)}%).`,
+    };
   }
   if (page === "breadth") {
-    const breadth = await refreshSp500CoreBreadth(env);
+    const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
+      maxTickers: 1600,
+      maxPasses: 2,
+    });
     const recompute = await recomputeBreadthFromStoredBars(env);
     const sp500CountRow = await env.DB.prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
       .bind("sp500-core")
       .first<{ count: number }>();
+    const lowCoverage = catchUp.diagnostics
+      .filter((diagnostic) => !diagnostic.ok)
+      .map((diagnostic) => `${diagnostic.universeId} ${diagnostic.coveragePct.toFixed(1)}%/${diagnostic.minCoveragePct}%`);
     return {
       page,
       refreshedTickers: sp500CountRow?.count ?? 0,
-      notes: `SP500 bars pulled: ${breadth.barCount}. Breadth recomputed for ${recompute.universeCount} universes.`,
+      notes: `Breadth catch-up wrote ${catchUp.writtenRows} rows from ${catchUp.attemptedTickers} attempted tickers. Stored ${recompute.universeCount}/${recompute.attemptedUniverseCount} universes.${lowCoverage.length ? ` Low coverage: ${lowCoverage.join(", ")}.` : ""}`,
     };
   }
   if (page === "sectors") {
@@ -1481,7 +1825,22 @@ const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; un
   return adv + dec + unc > 0;
 };
 
+let lastSp500BreadthFreshnessAttemptAt = 0;
+const SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS = 15 * 60 * 1000;
+
+async function recomputeSp500BreadthFromStoredBarsSafe(env: Env, asOfDate: string): Promise<void> {
+  const memberCount = await env.DB.prepare(
+    "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = 'sp500-core'",
+  ).first<{ count: number | null }>();
+  if ((memberCount?.count ?? 0) > 0) {
+    await computeAndStoreBreadth(env, asOfDate, "sp500-core", "Stored Daily Bars", new Date().toISOString());
+    return;
+  }
+  await ensureBreadthRowsSafe(env);
+}
+
 async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
+  const expectedAsOf = latestUsSessionAsOfDate(new Date());
   let latestSnapshotAsOf: string | null = null;
   try {
     const latestSnapshot = await env.DB.prepare(
@@ -1497,10 +1856,13 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
   ).first<{ asOfDate: string | null; advancers: number; decliners: number; unchanged: number; sentimentJson: string | null }>();
 
   if (!latestSp500Row) {
+    const now = Date.now();
+    if (now - lastSp500BreadthFreshnessAttemptAt < SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS) return;
+    lastSp500BreadthFreshnessAttemptAt = now;
     try {
-      await refreshSp500CoreBreadth(env);
+      await recomputeSp500BreadthFromStoredBarsSafe(env, expectedAsOf);
     } catch (error) {
-      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      console.error("sp500 core stored-bar on-demand recompute failed; falling back to breadth recompute", error);
       await ensureBreadthRowsSafe(env);
     }
     return;
@@ -1516,11 +1878,17 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
     Boolean(latestSnapshotAsOf) &&
     Boolean(latestSp500Row.asOfDate) &&
     String(latestSp500Row.asOfDate) < String(latestSnapshotAsOf);
-  if (!usable || isStaleVsSnapshot) {
+  const isStaleVsExpected =
+    Boolean(latestSp500Row.asOfDate) &&
+    String(latestSp500Row.asOfDate) < expectedAsOf;
+  if (!usable || isStaleVsSnapshot || isStaleVsExpected) {
+    const now = Date.now();
+    if (now - lastSp500BreadthFreshnessAttemptAt < SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS) return;
+    lastSp500BreadthFreshnessAttemptAt = now;
     try {
-      await refreshSp500CoreBreadth(env);
+      await recomputeSp500BreadthFromStoredBarsSafe(env, expectedAsOf);
     } catch (error) {
-      console.error("sp500 core on-demand refresh failed; falling back to full snapshot refresh", error);
+      console.error("sp500 core stored-bar on-demand recompute failed; falling back to breadth recompute", error);
       await ensureBreadthRowsSafe(env);
     }
   }
@@ -1686,11 +2054,38 @@ app.get("/api/status", async (c) => {
   }
 
   const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const overviewLatest = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-  )
-    .bind(config?.id ?? "default", latestAllowedAsOfDate)
-    .first<{ asOfDate?: string; generatedAt?: string; providerLabel?: string; as_of_date?: string; generated_at?: string; provider_label?: string }>();
+  let overviewLatest:
+    | {
+        asOfDate?: string;
+        generatedAt?: string;
+        providerLabel?: string;
+        expectedAsOfDate?: string | null;
+        freshnessStatus?: "fresh" | "partial" | "stale" | string | null;
+        freshnessCoveragePct?: number | null;
+        freshnessCurrentCount?: number | null;
+        freshnessEligibleCount?: number | null;
+        freshnessCriticalMissingJson?: string | null;
+        freshnessMinBarDate?: string | null;
+        freshnessMaxBarDate?: string | null;
+        freshnessWarning?: string | null;
+        as_of_date?: string;
+        generated_at?: string;
+        provider_label?: string;
+      }
+    | null = null;
+  try {
+    overviewLatest = await c.env.DB.prepare(
+      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+    )
+      .bind(config?.id ?? "default", latestAllowedAsOfDate)
+      .first<typeof overviewLatest>();
+  } catch {
+    overviewLatest = await c.env.DB.prepare(
+      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+    )
+      .bind(config?.id ?? "default", latestAllowedAsOfDate)
+      .first<typeof overviewLatest>();
+  }
   const breadthLatest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
@@ -1701,6 +2096,62 @@ app.get("/api/status", async (c) => {
     asOfDate: overviewLatest?.asOfDate ?? overviewLatest?.as_of_date ?? null,
     providerLabel: overviewLatest?.providerLabel ?? overviewLatest?.provider_label ?? null,
   };
+  const overviewStoredExpectedAsOfDate = overviewLatest?.expectedAsOfDate ?? normalizedOverview.asOfDate ?? latestAllowedAsOfDate;
+  const overviewStoredFreshnessMatchesExpected =
+    normalizedOverview.asOfDate === latestAllowedAsOfDate && overviewStoredExpectedAsOfDate === latestAllowedAsOfDate;
+  const overviewStoredFreshnessHasDiagnostics =
+    overviewStoredFreshnessMatchesExpected && Number(overviewLatest?.freshnessEligibleCount ?? 0) > 0;
+  const overviewStoredFreshnessUnknownWarning =
+    "Snapshot freshness diagnostics are unavailable for the displayed data; refresh this page to rebuild row-level bar dates.";
+  let overviewFreshness = {
+    expectedAsOfDate: overviewStoredFreshnessMatchesExpected ? overviewStoredExpectedAsOfDate : latestAllowedAsOfDate,
+    freshnessStatus: overviewStoredFreshnessHasDiagnostics && (overviewLatest?.freshnessStatus === "fresh" || overviewLatest?.freshnessStatus === "partial" || overviewLatest?.freshnessStatus === "stale")
+      ? overviewLatest.freshnessStatus
+      : overviewStoredFreshnessMatchesExpected
+        ? "stale"
+        : null,
+    freshnessCoveragePct: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCoveragePct ?? null : null,
+    freshnessCurrentCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCurrentCount ?? null : null,
+    freshnessEligibleCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessEligibleCount ?? null : null,
+    freshnessCriticalMissingTickers: overviewStoredFreshnessHasDiagnostics ? (() => {
+      try {
+        const parsed = JSON.parse(overviewLatest?.freshnessCriticalMissingJson ?? "[]");
+        return Array.isArray(parsed) ? parsed.map((ticker) => String(ticker)).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    })() : [],
+    freshnessMinBarDate: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessMinBarDate ?? null : null,
+    freshnessMaxBarDate: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessMaxBarDate ?? null : null,
+    freshnessWarning: overviewStoredFreshnessHasDiagnostics
+      ? overviewLatest?.freshnessWarning ?? null
+      : overviewStoredFreshnessMatchesExpected
+        ? overviewStoredFreshnessUnknownWarning
+        : null,
+  };
+  if (!overviewFreshness.freshnessStatus) {
+    try {
+      const computed = await computeOverviewFreshnessDiagnostics(c.env, latestAllowedAsOfDate, config?.id ?? "default");
+      overviewFreshness = {
+        expectedAsOfDate: computed.expectedAsOfDate,
+        freshnessStatus: computed.status,
+        freshnessCoveragePct: computed.coveragePct,
+        freshnessCurrentCount: computed.currentCount,
+        freshnessEligibleCount: computed.eligibleCount,
+        freshnessCriticalMissingTickers: computed.criticalMissingTickers,
+        freshnessMinBarDate: computed.minBarDate,
+        freshnessMaxBarDate: computed.maxBarDate,
+        freshnessWarning: computed.warning,
+      };
+    } catch (error) {
+      console.error("status overview freshness computation failed", error);
+      overviewFreshness = {
+        ...overviewFreshness,
+        freshnessStatus: "stale",
+        freshnessWarning: "Overview freshness could not be verified.",
+      };
+    }
+  }
   const normalizedBreadth = {
     lastUpdated: breadthLatest?.generatedAt ?? breadthLatest?.generated_at ?? null,
     asOfDate: breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null,
@@ -1723,6 +2174,7 @@ app.get("/api/status", async (c) => {
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider,
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
+    ...overviewFreshness,
   });
 });
 
@@ -2101,7 +2553,12 @@ app.post("/api/sectors/narratives", async (c) => {
 
 app.get("/api/sectors/focus-narratives", async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT f.id, f.sector_name as sectorName, f.sort_order as sortOrder, f.created_at as createdAt, f.updated_at as updatedAt
+    `SELECT f.id,
+       f.sector_name as sectorName,
+       f.sort_order as sortOrder,
+       COALESCE(f.comment_text, '') as comment,
+       f.created_at as createdAt,
+       f.updated_at as updatedAt
      FROM sector_focus_narratives f
      INNER JOIN (SELECT DISTINCT sector_name FROM sector_tracker_entries WHERE TRIM(sector_name) <> '') e
        ON e.sector_name = f.sector_name
@@ -2112,14 +2569,43 @@ app.get("/api/sectors/focus-narratives", async (c) => {
 
 app.put("/api/sectors/focus-narratives", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const body = (await c.req.json()) as { sectorNames?: unknown };
-  if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
+  const body = (await c.req.json()) as { sectorNames?: unknown; focusNarratives?: unknown };
+  const commentBySectorName = new Map<string, string>();
+  const hasFocusNarrativesPayload = body.focusNarratives !== undefined;
 
-  const requestedNames = Array.from(new Set(
-    body.sectorNames
-      .map((value) => (typeof value === "string" ? value.trim() : ""))
-      .filter(Boolean),
-  ));
+  const existingFocusRows = await c.env.DB.prepare(
+    "SELECT sector_name as sectorName, COALESCE(comment_text, '') as comment FROM sector_focus_narratives",
+  ).all<{ sectorName: string; comment: string }>();
+  for (const row of existingFocusRows.results ?? []) {
+    commentBySectorName.set(row.sectorName, row.comment ?? "");
+  }
+
+  let requestedNames: string[];
+  if (hasFocusNarrativesPayload) {
+    if (!Array.isArray(body.focusNarratives)) return c.json({ error: "focusNarratives must be an array" }, 400);
+    requestedNames = [];
+    for (const value of body.focusNarratives) {
+      if (!value || typeof value !== "object") continue;
+      const payload = value as { sectorName?: unknown; comment?: unknown };
+      const sectorName = typeof payload.sectorName === "string" ? payload.sectorName.trim() : "";
+      if (!sectorName || requestedNames.includes(sectorName)) continue;
+      requestedNames.push(sectorName);
+      const existingComment = commentBySectorName.get(sectorName) ?? "";
+      const comment = payload.comment === undefined
+        ? existingComment
+        : typeof payload.comment === "string"
+          ? payload.comment.trim()
+          : "";
+      commentBySectorName.set(sectorName, comment.slice(0, 1000));
+    }
+  } else {
+    if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
+    requestedNames = Array.from(new Set(
+      body.sectorNames
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .filter(Boolean),
+    ));
+  }
 
   const existingRows = await c.env.DB.prepare(
     "SELECT DISTINCT sector_name as sectorName FROM sector_tracker_entries WHERE TRIM(sector_name) <> '' ORDER BY sector_name ASC",
@@ -2130,15 +2616,82 @@ app.put("/api/sectors/focus-narratives", async (c) => {
   const deleteExisting = c.env.DB.prepare("DELETE FROM sector_focus_narratives");
   const insertFocusRows = sectorNames.map((sectorName, index) =>
     c.env.DB.prepare(
-      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-    ).bind(crypto.randomUUID(), sectorName, index),
+      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, comment_text, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+    ).bind(crypto.randomUUID(), sectorName, index, commentBySectorName.get(sectorName) ?? ""),
   );
   await c.env.DB.batch([deleteExisting, ...insertFocusRows]);
 
   const rows = await c.env.DB.prepare(
-    "SELECT id, sector_name as sectorName, sort_order as sortOrder, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
+    "SELECT id, sector_name as sectorName, sort_order as sortOrder, COALESCE(comment_text, '') as comment, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
   ).all();
   return c.json({ rows: rows.results ?? [] });
+});
+
+app.get("/api/sectors/market-leaders", async (c) => {
+  const rows = await listSectorMarketLeaders(c.env);
+  return c.json({ rows });
+});
+
+app.post("/api/sectors/market-leaders", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json()) as { tickers?: unknown; sourcePeerGroupId?: unknown };
+  if (!Array.isArray(body.tickers)) return c.json({ error: "tickers must be an array" }, 400);
+
+  const tickers = normalizeLeaderTickers(body.tickers);
+  if (tickers.length === 0) return c.json({ error: "At least one valid ticker is required." }, 400);
+
+  const sourcePeerGroupId = typeof body.sourcePeerGroupId === "string" && body.sourcePeerGroupId.trim()
+    ? body.sourcePeerGroupId.trim()
+    : null;
+  if (sourcePeerGroupId) {
+    const group = await c.env.DB.prepare("SELECT id FROM peer_groups WHERE id = ? LIMIT 1")
+      .bind(sourcePeerGroupId)
+      .first<{ id: string }>();
+    if (!group) return c.json({ error: "Peer group not found." }, 400);
+  }
+
+  const orderRow = await c.env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) as maxSort FROM sector_market_leaders")
+    .first<{ maxSort: number }>();
+  const nextSortOrder = Number(orderRow?.maxSort ?? 0) + 1;
+
+  const symbolUpserts = await Promise.all(
+    tickers.map(async (ticker) => {
+      const meta = await resolveTickerMeta(ticker, c.env).catch(() => null);
+      return c.env.DB.prepare(
+        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class, sector, industry) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(
+        ticker,
+        meta?.name ?? ticker,
+        meta?.exchange ?? null,
+        meta?.assetClass ?? "equity",
+        null,
+        null,
+      );
+    }),
+  );
+  const leaderInserts = tickers.map((ticker, index) =>
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO sector_market_leaders (ticker, source_peer_group_id, sort_order) VALUES (?, ?, ?)",
+    ).bind(ticker, sourcePeerGroupId, nextSortOrder + index),
+  );
+  await c.env.DB.batch([...symbolUpserts, ...leaderInserts]);
+
+  const rows = await listSectorMarketLeaders(c.env);
+  return c.json({ ok: true, rows });
+});
+
+app.delete("/api/sectors/market-leaders/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const ticker = c.req.param("ticker").trim().toUpperCase();
+  if (!/^[A-Z0-9.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Invalid ticker" }, 400);
+  const existing = await c.env.DB.prepare("SELECT ticker FROM sector_market_leaders WHERE ticker = ? LIMIT 1")
+    .bind(ticker)
+    .first<{ ticker: string }>();
+  if (!existing) return c.json({ error: "Market leader not found." }, 404);
+  await c.env.DB.prepare("DELETE FROM sector_market_leaders WHERE ticker = ?")
+    .bind(ticker)
+    .run();
+  return c.json({ ok: true, ticker });
 });
 
 app.get("/api/sectors/symbol-options", async (c) => {
@@ -2703,18 +3256,41 @@ app.post("/api/admin/etf/:ticker/sync", async (c) => {
 
 app.get("/api/ticker/:ticker", async (c) => {
   const ticker = c.req.param("ticker").toUpperCase();
+  const timeframe = normalizeTickerSeriesTimeframe(c.req.query("timeframe"));
+  const timeframeConfig = TICKER_SERIES_TIMEFRAMES[timeframe];
   const symbol = await c.env.DB.prepare("SELECT ticker, name, exchange, asset_class as assetClass FROM symbols WHERE ticker = ?")
     .bind(ticker)
     .first();
   if (!symbol) return c.json({ error: "Ticker not found" }, 404);
 
-  const bars = await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 120")
-    .bind(ticker)
-    .all<{ date: string; c: number }>();
+  const bars = timeframeConfig.limit == null
+    ? await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC")
+      .bind(ticker)
+      .all<{ date: string; c: number }>()
+    : await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT ?")
+      .bind(ticker, timeframeConfig.limit)
+      .all<{ date: string; c: number }>();
   const asc = [...(bars.results ?? [])].reverse();
+  const historyStatus: {
+    timeframe: TickerSeriesTimeframe;
+    requestedBars: number | null;
+    availableBars: number;
+    complete: boolean;
+    backfill: TickerHistoryBackfillResponse | null;
+  } = {
+    timeframe,
+    requestedBars: timeframeConfig.limit,
+    availableBars: asc.length,
+    complete: timeframe !== "2Y" || asc.length >= TICKER_SERIES_2Y_COMPLETE_BARS,
+    backfill: null,
+  };
+  if (timeframe === "2Y" && asc.length < TICKER_SERIES_2Y_COMPLETE_BARS) {
+    historyStatus.backfill = await maybeQueueTickerHistoryBackfill(c, ticker, timeframe, asc.length);
+  }
   return c.json({
     symbol,
     series: asc,
+    historyStatus,
     tradingViewEnabled: (c.env.TRADINGVIEW_WIDGET_ENABLED ?? "true") === "true",
   });
 });
@@ -2886,6 +3462,18 @@ app.get("/api/peer-groups/ticker/:ticker/metrics", async (c) => {
   });
 });
 
+app.get("/api/perplexity-finance/cache/:ticker", async (c) => {
+  try {
+    return c.json(await loadPerplexityFinanceCache(c.env, c.req.param("ticker")));
+  } catch (error) {
+    if (error instanceof PerplexityFinanceCacheInputError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    const message = error instanceof Error ? error.message : "Failed to load Perplexity Finance cache.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/fundamentals/ticker/:ticker", async (c) => {
   const quarters = c.req.query("quarters") ? Number(c.req.query("quarters")) : 8;
   const payload = await loadTickerFundamentals(c.env, c.req.param("ticker"), quarters);
@@ -2942,6 +3530,20 @@ app.get("/api/alerts/news", async (c) => {
   return c.json({ ticker, tradingDay, rows: rows.results ?? [] });
 });
 
+app.get("/api/admin/alerts/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const cronSettings = await loadCentralCronJobSettingsMap(c.env).catch((error) => {
+    console.error("alerts status cron settings load failed; using defaults", error);
+    return new Map<string, CronJobValues>();
+  });
+  const alertsSettings = cronSettings.get("alerts-housekeeping");
+  return c.json(await queryAlertIngestionStatus(c.env, {
+    housekeepingEnabled: alertsSettings ? isCentralCronEnabled(alertsSettings) : true,
+    reconcileEnabled: booleanValue(alertsSettings ?? {}, "reconcileEnabled", false) || (c.env.ALERTS_RECONCILE_ENABLED ?? "false") === "true",
+    retentionDays: cronNumber(alertsSettings ?? {}, "retentionDays", 30),
+  }));
+});
+
 function socialAlertsErrorResponse(c: any, error: unknown) {
   if (error instanceof ZodError) {
     return c.json({ error: error.issues[0]?.message ?? "Invalid social alerts payload." }, 400);
@@ -2950,6 +3552,26 @@ function socialAlertsErrorResponse(c: any, error: unknown) {
   const status = message.toLowerCase().includes("not configured") ? 503 : 500;
   return c.json({ error: message }, status);
 }
+
+app.get("/api/social-alerts/results", async (c) => {
+  try {
+    const results = await getSocialAlertResults(c.env, {
+      runId: c.req.query("runId") ?? null,
+      ticker: c.req.query("ticker") ?? null,
+      handle: c.req.query("handle") ?? null,
+      q: c.req.query("q") ?? null,
+      startDate: c.req.query("startDate") ?? null,
+      endDate: c.req.query("endDate") ?? null,
+      lookbackDays: Number(c.req.query("lookbackDays") ?? 10),
+      limit: Number(c.req.query("limit") ?? 200),
+      offset: Number(c.req.query("offset") ?? 0),
+    });
+    const { blacklist: _blacklist, ...publicResults } = results;
+    return c.json(publicResults);
+  } catch (error) {
+    return socialAlertsErrorResponse(c, error);
+  }
+});
 
 app.get("/api/admin/social-alerts/handles", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
@@ -3501,7 +4123,7 @@ app.post("/api/admin/scans/refresh", async (c) => {
   try {
     const result = await requestScansRefresh(c.env, payload.presetId ?? null, "manual");
     if (result.async && result.job) {
-      c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, result.job.id));
+      scheduleScannerCacheScanPulse(c, result.job.id);
     }
     return c.json({ ok: true, ...result });
   } catch (error) {
@@ -3540,7 +4162,7 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
   if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
+    scheduleScannerCacheScanPulse(c, payload.job.id);
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
 });
@@ -3550,9 +4172,42 @@ app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
   const payload = await loadScanRefreshJob(c.env, c.req.param("jobId"));
   if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
   if (payload.job.status === "queued" || payload.job.status === "running") {
-    c.executionCtx.waitUntil(processScannerCacheScanRun(c.env, payload.job.id));
+    scheduleScannerCacheScanPulse(c, payload.job.id);
   }
   return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
+});
+
+app.post("/api/admin/scans/refresh-jobs/:jobId/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await cancelScanRefreshJob(c.env, c.req.param("jobId"));
+    if (!payload) return c.json({ error: "Scan refresh job not found." }, 404);
+    return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to cancel scan refresh job." }, 500);
+  }
+});
+
+app.post("/api/internal/scans/runner/pulse", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = scannerCachePulseSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await advanceScannerCacheScanRuns(c.env, {
+      runId: payload.runId ?? null,
+      timeBudgetMs: SCANNER_CACHE_SCAN_PULSE_TIME_BUDGET_MS,
+    });
+    if (result.hasMore) {
+      scheduleScannerCacheScanPulse(
+        c,
+        payload.runId ?? null,
+        result.advanced ? 0 : SCANNER_CACHE_SCAN_NO_PROGRESS_PULSE_DELAY_MS,
+      );
+    }
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    if (error instanceof ZodError) return c.json({ error: error.issues[0]?.message ?? "Invalid scanner cache scan pulse payload." }, 400);
+    return c.json({ error: error instanceof Error ? error.message : "Failed to advance scanner cache scan runs." }, 500);
+  }
 });
 
 app.post("/api/admin/scans/compile-presets/:compilePresetId/refresh", async (c) => {
@@ -3748,6 +4403,198 @@ app.get("/api/watchlist-compiler/sets/:id/export.csv", async (c) => {
   return c.body(tickersToSingleColumnCsv(tickers));
 });
 
+app.get("/api/watchlist-review/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
+    const rows = await listWatchlistReviewRuns(c.env, limit);
+    return c.json({ rows });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/runs/approved-ready", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(50, Number(c.req.query("limit") ?? 10)));
+    const olderThanSeconds = Math.max(0, Number(c.req.query("olderThanSeconds") ?? 0));
+    const includeFailedWebhook = c.req.query("includeFailedWebhook") !== "false";
+    const rows = await listWatchlistReviewApprovedReadyRuns(c.env, {
+      limit,
+      olderThanSeconds,
+      includeFailedWebhook,
+      origin: new URL(c.req.url).origin,
+    });
+    return c.json(rows);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/runs/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const detail = await loadWatchlistReviewRunDetail(c.env, c.req.param("id"));
+    if (!detail) return c.json({ error: "Watchlist review run not found." }, 404);
+    return c.json(detail);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/runs/:id/approved-apply-set", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await loadWatchlistReviewApprovedApplySet(c.env, c.req.param("id"), c.req.query("dispatchId") ?? null);
+    if (!payload) return c.json({ error: "Approved apply set not found." }, 404);
+    return c.json(payload);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewRunCreateSchema.parse(await c.req.json());
+    const detail = await createWatchlistReviewRun(c.env, payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_RUN_IMPORT", {
+      runId: detail.run.id,
+      candidateCount: detail.candidates.length,
+      watchlistSetId: detail.run.watchlistSetId,
+      watchlistRunId: detail.run.watchlistRunId,
+    });
+    return c.json({ ok: true, ...detail });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/ready-to-apply", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewReadyToApplySchema.parse(await c.req.json().catch(() => ({})));
+    const result = await readyWatchlistReviewRunToApply(c.env, c.req.param("id"), payload, { origin: new URL(c.req.url).origin });
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_READY_TO_APPLY", {
+      runId: c.req.param("id"),
+      dispatchId: result.dispatch.id,
+      approvalRevision: result.dispatch.approvalRevision,
+      checksum: result.dispatch.checksum,
+      webhookStatus: result.webhook.status,
+      approvedCount: result.dispatch.approvedCount,
+      destructiveCount: result.dispatch.destructiveCount,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/apply-status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewApplyStatusSchema.parse(await c.req.json());
+    const result = await updateWatchlistReviewApplyStatus(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_APPLY_STATUS", {
+      runId: c.req.param("id"),
+      dispatchId: result.dispatch.id,
+      approvalRevision: result.dispatch.approvalRevision,
+      status: result.dispatch.status,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.patch("/api/watchlist-review/candidates/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewCandidatePatchSchema.parse(await c.req.json());
+    const candidate = await patchWatchlistReviewCandidate(c.env, c.req.param("id"), payload);
+    if (!candidate) return c.json({ error: "Watchlist review candidate not found." }, 404);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_CANDIDATE_PATCH", {
+      candidateId: candidate.id,
+      runId: candidate.runId,
+      ticker: candidate.ticker,
+      action: payload.action,
+      status: candidate.status,
+      proposedFlag: candidate.proposedFlag,
+      destructiveAction: candidate.destructiveAction,
+    });
+    return c.json({ ok: true, candidate });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/approve-all", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewBatchSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await approveAllWatchlistReviewCandidates(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_APPROVE_ALL", {
+      runId: c.req.param("id"),
+      updated: result.updated,
+      candidateIds: payload.candidateIds ?? null,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/skip-all", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewBatchSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await skipAllWatchlistReviewCandidates(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_SKIP_ALL", {
+      runId: c.req.param("id"),
+      updated: result.updated,
+      candidateIds: payload.candidateIds ?? null,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/export-approved", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewExportSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await exportApprovedWatchlistReviewChanges(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_EXPORT_APPROVED", {
+      runId: c.req.param("id"),
+      approvedCount: result.approvedCount,
+      destructiveCount: result.destructiveCount,
+      exportPath: result.exportPath,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/runs/:id/apply-approved", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewExportSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await applyApprovedWatchlistReviewChanges(c.env, c.req.param("id"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_APPLY_STUB", {
+      runId: c.req.param("id"),
+      approvedCount: result.approvedCount,
+      destructiveCount: result.destructiveCount,
+      exportPath: result.exportPath,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
 app.get("/api/research/profiles", async (c) => {
   const profiles = await listResearchProfiles(c.env);
   return c.json({
@@ -3853,6 +4700,7 @@ app.get("/api/research-lab/runs", async (c) => {
 });
 
 app.post("/api/research-lab/runs", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
     const payload = await c.req.json();
     const run = await startResearchLabRun(c.env, payload);
@@ -3863,12 +4711,14 @@ app.post("/api/research-lab/runs", async (c) => {
 });
 
 app.post("/api/research-lab/runs/:id/cancel", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const run = await cancelResearchLabRun(c.env, c.req.param("id"));
   if (!run) return c.json({ error: "Research lab run not found." }, 404);
   return c.json({ ok: true, run });
 });
 
 app.post("/api/research-lab/runs/:id/pump", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const runId = c.req.param("id");
   const run = await ensureResearchLabRunProgress(c.env, runId);
   if (!run) return c.json({ error: "Research lab run not found." }, 404);
@@ -4045,6 +4895,20 @@ app.get("/api/admin/watchlist-compiler/sets", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const rows = await listWatchlistSets(c.env, true);
   return c.json({ rows });
+});
+
+app.get("/api/admin/watchlist-compiler/factor-config", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const settings = await loadWatchlistFactorSettings(c.env);
+  return c.json(settings);
+});
+
+app.patch("/api/admin/watchlist-compiler/factor-config", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const payload = watchlistFactorConfigPatchSchema.parse(await c.req.json());
+  const settings = await updateWatchlistFactorSettings(c.env, payload.factorConfig);
+  await upsertAudit(c.env, "default", "WATCHLIST_FACTOR_CONFIG_PATCH", { factorConfig: settings.factorConfig });
+  return c.json({ ok: true, settings });
 });
 
 app.post("/api/admin/watchlist-compiler/sets", async (c) => {
@@ -4266,6 +5130,20 @@ app.post("/api/admin/research/search-template-versions", async (c) => {
     return c.json({ ok: true, id: created.id });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to create search template version." }, 400);
+  }
+});
+
+app.put("/api/admin/perplexity-finance/cache/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json();
+    return c.json(await upsertPerplexityFinanceCache(c.env, c.req.param("ticker"), payload));
+  } catch (error) {
+    if (error instanceof PerplexityFinanceCacheInputError || error instanceof PerplexityFinanceCacheUnavailableError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    const message = error instanceof Error ? error.message : "Failed to update Perplexity Finance cache.";
+    return c.json({ error: message }, 500);
   }
 });
 
@@ -4885,8 +5763,12 @@ app.post("/api/admin/run-breadth", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
   try {
+    const catchUp = await refreshMissingBreadthBarsForCoverage(c.env, date, {
+      maxTickers: 1600,
+      maxPasses: 2,
+    });
     const result = await recomputeBreadthFromStoredBars(c.env, date);
-    return c.json({ ok: true, ...result });
+    return c.json({ ok: true, catchUp, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-breadth failed";
     console.error("admin run-breadth failed", { date, error });
@@ -4906,6 +5788,9 @@ app.post("/api/admin/refresh-page", async (c) => {
     const result = await refreshPageScopedData(c.env, page, body.ticker ?? null);
     return c.json({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof OverviewFreshnessError) {
+      return c.json({ error: error.message, freshness: error.diagnostics }, 409);
+    }
     const message = error instanceof Error ? error.message : "page refresh failed";
     console.error("admin refresh-page failed", { page, error });
     return c.json({ error: message }, 500);
@@ -5401,16 +6286,20 @@ export default {
       console.error("scheduled social alerts scrape failed", error);
     }
     try {
-      await maybeRunScheduledMarketCommentary(env, now);
-    } catch (error) {
-      console.error("scheduled market commentary failed", error);
-    }
-    try {
       await syncMonthlyEtfSlice(env, cron("etf-constituent-slice"));
     } catch (error) {
       console.error("scheduled etf constituent slice failed", error);
     }
     const workerSchedule = await loadWorkerScheduleSettings(env);
+    try {
+      await advanceScannerCacheScanRuns(env, {
+        maxRuns: 2,
+        batchSize: workerSchedule.rsBackgroundBatchSize,
+        timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
+      });
+    } catch (error) {
+      console.error("scheduled scanner-cache scan continuation failed", error);
+    }
     if (workerSchedule.rsBackgroundEnabled) {
       try {
         await refreshActiveRelativeStrengthPresets(env, {
@@ -5444,23 +6333,57 @@ export default {
     }
     if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 
-    const latestOverview = await env.DB.prepare(
-      "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-    )
-      .bind(defaultConfig?.id ?? "default")
-      .first<{ asOfDate: string | null }>();
+    let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null } | null = null;
+    try {
+      latestOverview = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+      )
+        .bind(defaultConfig?.id ?? "default")
+        .first<{ asOfDate: string | null; freshnessStatus?: string | null }>();
+    } catch {
+      latestOverview = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+      )
+        .bind(defaultConfig?.id ?? "default")
+        .first<{ asOfDate: string | null }>();
+    }
+    const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
     const trackedUniverseCount = await env.DB.prepare(
-      "SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols",
-    ).first<{ count: number | null }>();
-    const currentBreadthCount = await env.DB.prepare(
-      "SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ?",
+      `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
     )
-      .bind(expectedAsOf)
+      .bind(...CORE_BREADTH_UNIVERSE_IDS)
+      .first<{ count: number | null }>();
+    const currentBreadthCount = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
+    )
+      .bind(expectedAsOf, ...CORE_BREADTH_UNIVERSE_IDS)
       .first<{ count: number | null }>();
     const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
-    if (latestOverview?.asOfDate !== expectedAsOf || !breadthIsComplete) {
-      await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+    const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
+      && (latestOverview.freshnessStatus === "fresh" || latestOverview.freshnessStatus === "partial");
+    if (!overviewIsUsable) {
+      try {
+        await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+      } catch (error) {
+        if (error instanceof OverviewFreshnessError) {
+          console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);
+        } else {
+          console.error("scheduled overview refresh failed", error);
+        }
+      }
+    }
+    if (!breadthIsComplete) {
+      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
+        maxTickers: workerSchedule.postCloseBarsBatchSize * workerSchedule.postCloseBarsMaxBatchesPerTick,
+        maxPasses: 2,
+      });
+      await recomputeBreadthFromStoredBars(env, expectedAsOf);
+    }
+    try {
+      await maybeRunScheduledMarketCommentary(env, now);
+    } catch (error) {
+      console.error("scheduled market commentary failed", error);
     }
   },
 };

@@ -339,23 +339,20 @@ export function createResearchLabRun(payload: {
   promptConfigId?: string | null;
   evidenceProfileId?: string | null;
 }) {
-  return getJson<{ ok: true; run: ResearchLabRunRecord }>("/api/research-lab/runs", {
+  return adminFetch<{ ok: true; run: ResearchLabRunRecord }>("/api/research-lab/runs", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
     body: JSON.stringify(payload),
   });
 }
 
 export function cancelResearchLabRun(id: string) {
-  return getJson<{ ok: true; run: ResearchLabRunRecord }>(`/api/research-lab/runs/${encodeURIComponent(id)}/cancel`, {
+  return adminFetch<{ ok: true; run: ResearchLabRunRecord }>(`/api/research-lab/runs/${encodeURIComponent(id)}/cancel`, {
     method: "POST",
   });
 }
 
 export function pumpResearchLabRun(id: string) {
-  return getJson<{ ok: true; runId: string }>(`/api/research-lab/runs/${encodeURIComponent(id)}/pump`, {
+  return adminFetch<{ ok: true; runId: string }>(`/api/research-lab/runs/${encodeURIComponent(id)}/pump`, {
     method: "POST",
   });
 }

@@ -158,6 +158,59 @@ export type AlertTickerDayRow = {
   news: AlertNewsRow[];
 };
 
+export type AlertIngestionStatus = {
+  generatedAt: string;
+  totals: {
+    alerts: number;
+    emails: number;
+  };
+  latestAlert: {
+    id: string;
+    ticker: string;
+    receivedAt: string;
+    tradingDay: string;
+    marketSession: "premarket" | "regular" | "after-hours";
+    rawEmailSubject: string | null;
+  } | null;
+  latestEmail: {
+    id: string;
+    messageId: string;
+    sourceMailbox: string | null;
+    parseStatus: string;
+    rawEmailSubject: string | null;
+    rawEmailFrom: string | null;
+    rawEmailReceivedAt: string | null;
+    createdAt: string;
+    parseError: string | null;
+  } | null;
+  parseStatuses: Array<{
+    parseStatus: string;
+    count: number;
+    latestRawEmailReceivedAt: string | null;
+    latestCreatedAt: string | null;
+  }>;
+  sourceMailboxes: Array<{
+    sourceMailbox: string | null;
+    count: number;
+    latestCreatedAt: string | null;
+  }>;
+  config: {
+    directEmailHandlerEnabled: boolean;
+    mailboxSyncConfigured: boolean;
+    mailboxSyncAdapters: string[];
+    reconcileEnabled: boolean;
+    housekeepingEnabled: boolean;
+    retentionDays: number;
+    staleAfterHours: number;
+  };
+  stale: {
+    isStale: boolean;
+    latestAlertAgeHours: number | null;
+    latestEmailAgeHours: number | null;
+    staleBasis: "latest_email" | "latest_alert" | "none";
+  };
+};
+
 export type SocialAlertHealthStatus =
   | "missing_token"
   | "configured"
@@ -259,17 +312,20 @@ export type SocialAlertHealthResponse = {
   scweetVersion?: string | null;
 };
 
-export type SocialAlertResultsResponse = {
+export type SocialAlertPublicResultsResponse = {
   run: SocialAlertRunSummary | null;
   metrics: SocialAlertMetrics;
   rows: SocialAlertResultRow[];
   uniqueTickers: string[];
   tickerSummaries: SocialAlertTickerSummary[];
-  blacklist: SocialAlertBlacklistedCashtagRow[];
   window: { startDate: string; endDate: string; lookbackDays: number };
   total: number;
   limit: number;
   offset: number;
+};
+
+export type SocialAlertResultsResponse = SocialAlertPublicResultsResponse & {
+  blacklist: SocialAlertBlacklistedCashtagRow[];
 };
 
 export type SocialAlertScrapeResponse = {
@@ -822,6 +878,10 @@ export type ScanCompiledRow = {
   change1d: number | null;
   volume: number | null;
   marketCap: number | null;
+  factorScore: number | null;
+  factorPassCount: number | null;
+  factorUnknownCount: number | null;
+  factorResultsJson: string | null;
   rawJson: string | null;
   canonicalKey: string;
   createdAt: string;
@@ -964,7 +1024,7 @@ export type CompiledScansSnapshot = {
 export type ScanCompilePresetRefreshMemberResult = {
   presetId: string;
   presetName: string;
-  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed";
+  status: "ok" | "warning" | "error" | "empty" | "queued" | "running" | "completed" | "failed" | "cancelled";
   rowCount: number;
   error: string | null;
   snapshot: ScanSnapshot | null;
@@ -982,7 +1042,7 @@ export type ScanCompilePresetRefreshResult = {
   memberResults: ScanCompilePresetRefreshMemberResult[];
 };
 
-export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed";
+export type ScanRefreshJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type ScanRefreshJob = {
   id: string;
@@ -1009,6 +1069,11 @@ export type ScanRefreshJob = {
   deferredTickerCount: number;
   warning: string | null;
   phase: string | null;
+  lastProgressAt: string | null;
+  lastAttemptCursorOffset: number | null;
+  lastAttemptTicker: string | null;
+  lastAttemptStage: string | null;
+  lastAttemptElapsedMs: number | null;
   elapsedMs?: number | null;
   durationMs?: number | null;
   cacheHitCount?: number;
@@ -1253,7 +1318,254 @@ export type PatternFeatureIdeasResponse = {
   mlReadiness: Record<string, string>;
 };
 
+export type WatchlistReviewFlag = "red" | "blue" | "yellow" | "orange" | "unflagged" | "unknown";
+export type WatchlistReviewProposedFlag = "red" | "blue" | "yellow" | "orange" | "keep" | "unflag" | "remove" | "manual_review";
+export type WatchlistReviewRecommendationType =
+  | "RED_TO_BLUE"
+  | "RED_TO_YELLOW"
+  | "BLUE_TO_RED"
+  | "BLUE_TO_YELLOW"
+  | "YELLOW_TO_BLUE"
+  | "YELLOW_TO_RED"
+  | "ANY_TO_UNFLAG"
+  | "KEEP_CURRENT"
+  | "MANUAL_REVIEW";
+export type WatchlistReviewRunStatus = "draft" | "ready" | "partially_approved" | "applied" | "archived";
+export type WatchlistReviewCandidateStatus = "pending" | "approved" | "skipped" | "overridden" | "applied";
+export type WatchlistReviewAnalysisSource = "data_only" | "mini_chart" | "full_chart_vision" | "manual";
+export type WatchlistReviewRunApplyStatus =
+  | "not_queued"
+  | "approved_ready"
+  | "dispatching"
+  | "waiting_for_hermes"
+  | "claimed"
+  | "applying"
+  | "applied"
+  | "partial_failed"
+  | "apply_failed"
+  | "cancelled";
+export type WatchlistReviewCandidateApplyStatus = "not_queued" | "queued_for_apply" | "applying" | "applied" | "apply_failed" | "skipped";
+export type WatchlistReviewDispatchStatus =
+  | "approved_ready"
+  | "dispatching"
+  | "waiting_for_hermes"
+  | "webhook_failed"
+  | "claimed"
+  | "applying"
+  | "applied"
+  | "partial_failed"
+  | "apply_failed"
+  | "cancelled";
+export type WatchlistReviewCandidateAction =
+  | "approve"
+  | "skip"
+  | "keep_current"
+  | "move_red"
+  | "move_blue"
+  | "move_yellow_orange"
+  | "unflag_remove"
+  | "note";
+
+export type WatchlistReviewSummaryCounts = {
+  red_to_blue: number;
+  red_to_yellow: number;
+  blue_to_red: number;
+  blue_to_yellow: number;
+  yellow_to_blue: number;
+  yellow_to_red: number;
+  unflag: number;
+  keep_current: number;
+  manual_review: number;
+};
+
+export type WatchlistReviewRun = {
+  id: string;
+  sourceWatchlistName: string | null;
+  sourceWatchlistId: string | null;
+  watchlistSetId: string | null;
+  watchlistRunId: string | null;
+  totalTickersScanned: number;
+  status: WatchlistReviewRunStatus;
+  notes: string | null;
+  summaryCounts: WatchlistReviewSummaryCounts;
+  generatedBy: "hermes" | "manual" | "import";
+  analysisVersion: string | null;
+  exportPath: string | null;
+  applyStatus: WatchlistReviewRunApplyStatus;
+  approvalRevision: number;
+  approvedChecksum: string | null;
+  activeApplyDispatchId: string | null;
+  approvedApplyCount: number;
+  skippedApplyCount: number;
+  destructiveApplyCount: number;
+  readyToApplyAt: string | null;
+  dispatchRequestedAt: string | null;
+  dispatchedToHermesAt: string | null;
+  applyStartedAt: string | null;
+  applyCompletedAt: string | null;
+  applyFailedAt: string | null;
+  applyError: string | null;
+  applyResultSummary: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  candidateCount?: number;
+  pendingCount?: number;
+  approvedCount?: number;
+  skippedCount?: number;
+  destructiveCount?: number;
+};
+
+export type WatchlistReviewCandidate = {
+  id: string;
+  runId: string;
+  ticker: string;
+  companyName: string | null;
+  currentFlag: WatchlistReviewFlag;
+  proposedFlag: WatchlistReviewProposedFlag;
+  recommendationType: WatchlistReviewRecommendationType;
+  confidence: number;
+  reasons: string[];
+  metrics: Record<string, unknown>;
+  sectorContext: Record<string, unknown> | null;
+  chartImageUrl: string | null;
+  chartSnapshotPath: string | null;
+  tvSymbol: string | null;
+  dataFreshness: Record<string, unknown>;
+  analysisSource: WatchlistReviewAnalysisSource;
+  destructiveAction: boolean;
+  destructiveConfirmed: boolean;
+  removalReason: string | null;
+  status: WatchlistReviewCandidateStatus;
+  userOverrideFlag: WatchlistReviewProposedFlag | null;
+  userNote: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  appliedAt: string | null;
+  applyStatus: WatchlistReviewCandidateApplyStatus;
+  applyError: string | null;
+  applyUpdatedAt: string | null;
+  lastApplyDispatchId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistReviewEvent = {
+  id: string;
+  runId: string;
+  candidateId: string | null;
+  ticker: string | null;
+  eventType: string;
+  previousStatus: string | null;
+  nextStatus: string | null;
+  previousFlag: string | null;
+  nextFlag: string | null;
+  actor: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type WatchlistReviewRunDetail = {
+  run: WatchlistReviewRun;
+  candidates: WatchlistReviewCandidate[];
+  events: WatchlistReviewEvent[];
+};
+
+export type WatchlistReviewExportRow = {
+  run_id: string;
+  ticker: string;
+  current_flag: WatchlistReviewFlag;
+  proposed_flag: WatchlistReviewProposedFlag;
+  recommendation_type: WatchlistReviewRecommendationType;
+  approved_by: string;
+  approved_at: string | null;
+  reason: string;
+  destructive_action: boolean;
+  rollback_hint: string;
+};
+
+export type WatchlistReviewExportPayload = {
+  ok: true;
+  runId: string;
+  generatedAt: string;
+  approvedCount: number;
+  destructiveCount: number;
+  rows: WatchlistReviewExportRow[];
+  json: WatchlistReviewExportRow[];
+  csv: string;
+  exportPath: string;
+  message?: string;
+};
+
+export type WatchlistReviewReadyToApplyResponse = {
+  ok: true;
+  run: {
+    id: string;
+    applyStatus: WatchlistReviewRunApplyStatus;
+    approvalRevision: number;
+    approvedChecksum: string;
+  };
+  dispatch: {
+    id: string;
+    status: WatchlistReviewDispatchStatus;
+    idempotencyKey: string;
+    approvalRevision: number;
+    checksum: string;
+    approvedCount: number;
+    skippedCount: number;
+    destructiveCount: number;
+  };
+  webhook: {
+    attempted: boolean;
+    status: "sent" | "not_configured" | "failed" | "already_pending";
+    responseStatus: number | null;
+    error: string | null;
+  };
+};
+
 export type WatchlistCompilerRunSummary = ScanRunSummary;
+
+export type WatchlistFactorStatus = "pass" | "fail" | "unknown";
+
+export type WatchlistFactorKey =
+  | "priceAboveSma200"
+  | "priceAbove"
+  | "marketCapAbove"
+  | "within52WeekHigh"
+  | "priorStrongMove"
+  | "strongSector"
+  | "avg10dDollarVolume"
+  | "increasingVolumeProfile"
+  | "positiveRevenueGrowth"
+  | "positiveEpsGrowth"
+  | "acceleratingRevenueGrowth"
+  | "acceleratingEpsGrowth"
+  | "averageTradingRangePct";
+
+export type WatchlistFactorConfig = {
+  enabled: Partial<Record<WatchlistFactorKey, boolean>>;
+  thresholds: {
+    priceAbove: { minPrice: number };
+    marketCapAbove: { minMarketCapMillions: number };
+    within52WeekHigh: { maxDistancePct: number };
+    priorStrongMove: { movePct: number; lookbackMonths: number };
+    strongSector: { lookbackMonths: number };
+    avg10dDollarVolume: { minDollarVolumeMillions: number };
+    increasingVolumeProfile: { lookbackMonths: number; minTrendPct: number };
+    acceleratingRevenueGrowth: { minAccelerationPct: number };
+    acceleratingEpsGrowth: { minAccelerationPct: number };
+    averageTradingRangePct: { minAtrPct: number };
+  };
+};
+
+export type WatchlistFactorResult = {
+  key: WatchlistFactorKey;
+  label: string;
+  status: WatchlistFactorStatus;
+  value: number | string | boolean | null;
+  threshold: number | string | null;
+  source: string | null;
+  details?: Record<string, unknown>;
+};
 
 export type WatchlistCompilerSetRow = {
   id: string;
@@ -1264,6 +1576,7 @@ export type WatchlistCompilerSetRow = {
   compileDaily: boolean;
   dailyCompileTimeLocal: string | null;
   dailyCompileTimezone: string | null;
+  factorConfig: WatchlistFactorConfig;
   createdAt: string;
   updatedAt: string;
   sourceCount: number;
@@ -1284,6 +1597,13 @@ export type WatchlistCompilerSourceRow = {
 
 export type WatchlistCompilerSetDetail = WatchlistCompilerSetRow & {
   sources: WatchlistCompilerSourceRow[];
+};
+
+export type WatchlistFactorSettings = {
+  id: string;
+  factorConfig: WatchlistFactorConfig;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 export type ResearchRefreshMode = "reuse_fresh_search_cache" | "force_fresh";
@@ -1817,6 +2137,10 @@ export type PerplexityFinancePeerLookup = {
   ticker: string;
   fetchedAt: string;
   source: "perplexity_finance_dashboard";
+  provider?: "browserbase" | "local_chromium";
+  browserbaseConfigured?: boolean;
+  browserbaseSessionId?: string;
+  browserbaseSessionUrl?: string;
   peersUrl: string;
   profileUrl: string;
   company: {
@@ -1836,6 +2160,11 @@ export type PerplexityFinancePeerLookup = {
   status?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
   profileStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
   peersStatus?: "ready" | "partial" | "pending_timeout" | "blocked" | "not_found" | "parse_error";
+  cache?: {
+    mode: "hit" | "miss" | "refresh" | "stale_on_error";
+    storedAt: string | null;
+    ageSeconds: number | null;
+  };
   diagnostics?: {
     profileSource: string | null;
     peersSource: string | null;
@@ -1847,7 +2176,40 @@ export type PerplexityFinancePeerLookup = {
     peersTimedOut: boolean;
     observedEndpoints: string[];
     blockedEndpoints: string[];
+    providerWarning?: string | null;
   };
+};
+
+export type PerplexityFinanceNotableMovementLookup = {
+  ticker: string;
+  fetchedAt: string;
+  source: "perplexity_finance_page";
+  url: string;
+  notablePriceMovement: string | null;
+  status: "ready" | "blocked" | "not_found" | "parse_error" | "pending_timeout";
+  warning: string | null;
+  diagnostics: {
+    provider: "browserbase" | "local_chromium";
+    bodyState: string;
+    matchedSelector: string | null;
+    observedHeadings: string[];
+  };
+};
+
+export type PerplexityBrowserbaseVerificationSession = {
+  ok: true;
+  sessionId: string;
+  expiresAt: string;
+  debuggerUrl: string;
+  debuggerFullscreenUrl: string;
+  targetUrl?: string;
+  pages: Array<{
+    id: string;
+    debuggerUrl: string;
+    debuggerFullscreenUrl: string;
+    title: string;
+    url: string;
+  }>;
 };
 
 export type SymbolCatalogStatus = {
@@ -1919,6 +2281,7 @@ export type PeerMetricRow = {
   ticker: string;
   price: number | null;
   change1d: number | null;
+  change1w: number | null;
   marketCap: number | null;
   avgVolume: number | null;
   asOf: string;
@@ -2052,17 +2415,32 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+function adminProxyPath(path: string): string {
+  if (path.startsWith("/api/admin")) return path;
+  if (path.startsWith("/api/")) return `/api/admin/proxy${path}`;
+  return path;
+}
+
 export function getDashboard(date?: string): Promise<SnapshotResponse> {
   return getJson(`/api/dashboard${date ? `?date=${date}` : ""}`);
 }
 
-export function getStatus(page?: "overview" | "breadth"): Promise<{
+export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   timezone: string;
   autoRefreshLabel: string;
   autoRefreshLocalTime?: string;
   lastUpdated: string | null;
   asOfDate: string | null;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
 }> {
   const query = page ? `?page=${page}` : "";
   return getJson(`/api/status${query}`);
@@ -2136,12 +2514,30 @@ export function getBreadthSummary() {
   return getJson<{ asOfDate: string | null; rows: any[]; unavailable: Array<{ id: string; name: string; reason: string }> }>("/api/breadth/summary");
 }
 
-export function getTicker(ticker: string) {
-  return getJson<{
+export type TickerSeriesTimeframe = "1M" | "3M" | "6M" | "1Y" | "2Y" | "MAX";
+
+export type TickerHistoryBackfillStatus =
+  | { status: "queued"; lastRequestedAt: string }
+  | { status: "recently_requested"; lastRequestedAt: string | null }
+  | { status: "unavailable"; message: string };
+
+export type TickerSeriesResponse = {
     symbol: { ticker: string; name: string; exchange: string };
     series: Array<{ date: string; c: number }>;
+    historyStatus?: {
+      timeframe: TickerSeriesTimeframe;
+      requestedBars: number | null;
+      availableBars: number;
+      complete: boolean;
+      backfill: TickerHistoryBackfillStatus | null;
+    };
     tradingViewEnabled: boolean;
-  }>(`/api/ticker/${ticker}`);
+  };
+
+export function getTicker(ticker: string, timeframe?: TickerSeriesTimeframe) {
+  return getJson<TickerSeriesResponse>(
+    appendQuery(`/api/ticker/${encodeURIComponent(ticker)}`, { timeframe }),
+  );
 }
 
 export function getCorrelationMatrix(params: {
@@ -2208,6 +2604,22 @@ export type SectorFocusNarrative = {
   id: string;
   sectorName: string;
   sortOrder: number;
+  comment: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SectorFocusNarrativeUpdate = {
+  sectorName: string;
+  comment?: string | null;
+};
+
+export type SectorMarketLeaderRow = {
+  ticker: string;
+  name: string | null;
+  sourcePeerGroupId: string | null;
+  sourcePeerGroupName: string | null;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -2216,10 +2628,27 @@ export function getSectorFocusNarratives() {
   return getJson<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives");
 }
 
-export function updateSectorFocusNarratives(sectorNames: string[]) {
+export function updateSectorFocusNarratives(focusNarratives: SectorFocusNarrativeUpdate[]) {
   return adminFetch<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives", {
     method: "PUT",
-    body: JSON.stringify({ sectorNames }),
+    body: JSON.stringify({ focusNarratives }),
+  });
+}
+
+export function getSectorMarketLeaders() {
+  return getJson<{ rows: SectorMarketLeaderRow[] }>("/api/sectors/market-leaders");
+}
+
+export function addSectorMarketLeaders(payload: { tickers: string[]; sourcePeerGroupId?: string | null }) {
+  return adminFetch<{ ok: boolean; rows: SectorMarketLeaderRow[] }>("/api/sectors/market-leaders", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteSectorMarketLeader(ticker: string) {
+  return adminFetch<{ ok: boolean; ticker: string }>(`/api/sectors/market-leaders/${encodeURIComponent(ticker)}`, {
+    method: "DELETE",
   });
 }
 
@@ -2267,6 +2696,10 @@ export function getAlertNews(ticker: string, tradingDay: string) {
   return getJson<{ ticker: string; tradingDay: string; rows: AlertNewsRow[] }>(
     appendQuery("/api/alerts/news", { ticker, tradingDay }),
   );
+}
+
+export function getAdminAlertIngestionStatus() {
+  return adminFetch<AlertIngestionStatus>("/api/admin/alerts/status");
 }
 
 export function getSocialAlertHandles() {
@@ -2361,6 +2794,32 @@ export function getSocialAlertResults(params?: {
 }) {
   return adminFetch<SocialAlertResultsResponse>(
     appendQuery("/api/admin/social-alerts/results", {
+      runId: params?.runId ?? undefined,
+      ticker: params?.ticker ?? undefined,
+      handle: params?.handle ?? undefined,
+      q: params?.q ?? undefined,
+      startDate: params?.startDate ?? undefined,
+      endDate: params?.endDate ?? undefined,
+      lookbackDays: params?.lookbackDays,
+      limit: params?.limit,
+      offset: params?.offset,
+    }),
+  );
+}
+
+export function getSocialAlertPublicResults(params?: {
+  runId?: string | null;
+  ticker?: string | null;
+  handle?: string | null;
+  q?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  lookbackDays?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  return getJson<SocialAlertPublicResultsResponse>(
+    appendQuery("/api/social-alerts/results", {
       runId: params?.runId ?? undefined,
       ticker: params?.ticker ?? undefined,
       handle: params?.handle ?? undefined,
@@ -2636,6 +3095,13 @@ export function getScanRefreshJob(jobId: string) {
   );
 }
 
+export function cancelScanRefreshJob(jobId: string) {
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob }>(
+    `/api/admin/scans/refresh-jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+}
+
 export function refreshScanCompilePreset(id: string) {
   return adminFetch<{ ok: boolean } & ScanCompilePresetRefreshResult>(
     `/api/admin/scans/compile-presets/${encodeURIComponent(id)}/refresh`,
@@ -2884,6 +3350,106 @@ export function updatePatternFeature(featureKey: string, payload: { displayName?
   );
 }
 
+export function getWatchlistReviewRuns(limit = 25) {
+  return adminFetch<{ rows: WatchlistReviewRun[] }>(appendQuery("/api/watchlist-review/runs", { limit }));
+}
+
+export function getWatchlistReviewRun(id: string) {
+  return adminFetch<WatchlistReviewRunDetail>(`/api/watchlist-review/runs/${encodeURIComponent(id)}`);
+}
+
+export function createWatchlistReviewRun(payload: {
+  run?: Record<string, unknown>;
+  candidates: Array<Record<string, unknown>>;
+  watchlistSetId?: string | null;
+  watchlistRunId?: string | null;
+}) {
+  return adminFetch<{ ok: true } & WatchlistReviewRunDetail>("/api/watchlist-review/runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchWatchlistReviewCandidate(id: string, payload: {
+  action: WatchlistReviewCandidateAction;
+  userNote?: string | null;
+  removalReason?: string | null;
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; candidate: WatchlistReviewCandidate }>(`/api/watchlist-review/candidates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function approveAllWatchlistReviewCandidates(runId: string, payload: {
+  candidateIds?: string[];
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; updated: number; detail: WatchlistReviewRunDetail | null }>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/approve-all`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function skipAllWatchlistReviewCandidates(runId: string, payload: {
+  candidateIds?: string[];
+  approvedBy?: string | null;
+}) {
+  return adminFetch<{ ok: true; updated: number; detail: WatchlistReviewRunDetail | null }>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/skip-all`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function exportApprovedWatchlistReviewChanges(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<WatchlistReviewExportPayload>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/export-approved`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function applyApprovedWatchlistReviewChanges(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+}) {
+  return adminFetch<WatchlistReviewExportPayload>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/apply-approved`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function readyToApplyWatchlistReviewRun(runId: string, payload: {
+  destructiveConfirmed?: boolean;
+  approvedBy?: string | null;
+  retryWebhook?: boolean;
+}) {
+  return adminFetch<WatchlistReviewReadyToApplyResponse>(
+    `/api/watchlist-review/runs/${encodeURIComponent(runId)}/ready-to-apply`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export function createScanPreset(payload: {
   name: string;
   scanType?: ScanPresetType;
@@ -3023,6 +3589,17 @@ export function getAdminWatchlistCompilerSets() {
   return adminFetch<{ rows: WatchlistCompilerSetRow[] }>("/api/admin/watchlist-compiler/sets");
 }
 
+export function getAdminWatchlistCompilerFactorConfig() {
+  return adminFetch<WatchlistFactorSettings>("/api/admin/watchlist-compiler/factor-config");
+}
+
+export function updateAdminWatchlistCompilerFactorConfig(factorConfig: WatchlistFactorConfig) {
+  return adminFetch<{ ok: boolean; settings: WatchlistFactorSettings }>("/api/admin/watchlist-compiler/factor-config", {
+    method: "PATCH",
+    body: JSON.stringify({ factorConfig }),
+  });
+}
+
 export function createAdminWatchlistCompilerSet(payload: {
   name: string;
   slug?: string | null;
@@ -3030,6 +3607,7 @@ export function createAdminWatchlistCompilerSet(payload: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: WatchlistFactorConfig;
 }) {
   return adminFetch<{ ok: boolean; id: string }>("/api/admin/watchlist-compiler/sets", {
     method: "POST",
@@ -3044,6 +3622,7 @@ export function updateAdminWatchlistCompilerSet(id: string, payload: {
   compileDaily?: boolean;
   dailyCompileTimeLocal?: string | null;
   dailyCompileTimezone?: string | null;
+  factorConfig?: WatchlistFactorConfig;
 }) {
   return adminFetch<{ ok: boolean; id: string }>(`/api/admin/watchlist-compiler/sets/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -3327,6 +3906,53 @@ export async function getPerplexityFinancePeers(ticker: string, options?: { refr
   return (await res.json()) as PerplexityFinancePeerLookup;
 }
 
+export async function getPerplexityFinanceNotableMovement(ticker: string, options?: { refresh?: boolean }) {
+  const path = appendQuery("/api/perplexity-finance/notable-movement", {
+    ticker,
+    refresh: options?.refresh ? 1 : undefined,
+  });
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`Perplexity Finance notable movement lookup failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as PerplexityFinanceNotableMovementLookup;
+}
+
+export async function createPerplexityBrowserbaseVerificationSession(options?: { targetUrl?: string | null }) {
+  const res = await fetch("/api/perplexity-finance/browserbase/verify-session", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      targetUrl: options?.targetUrl ?? undefined,
+    }),
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`Browserbase verification session failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as PerplexityBrowserbaseVerificationSession;
+}
+
 export function getAdminPeerGroups() {
   return adminFetch<{ rows: PeerGroupRow[] }>("/api/admin/peer-groups");
 }
@@ -3495,13 +4121,25 @@ export function bootstrapAdminPeerGroups(payload?: {
 }
 
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? "";
-  const headers: Record<string, string> = {};
-  if (secret) headers.Authorization = `Bearer ${secret}`;
-  return getJson<T>(path, {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const res = await fetch(adminProxyPath(path), {
     ...init,
-    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
+    headers,
+    cache: "no-store",
+    credentials: "same-origin",
   });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) detail = ` - ${body.error}`;
+    } catch {
+      // no-op
+    }
+    throw new Error(`API ${path} failed: ${res.status}${detail}`);
+  }
+  return (await res.json()) as T;
 }
 
 export function refreshPageData(page: string, ticker?: string | null) {

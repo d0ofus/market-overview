@@ -3,15 +3,13 @@
 - No time to research on peers + individual company by the time watchlist is sorted
 
 ## GENERAL
-> Check out whether there is any password login required and how to safeguard the repo/deployment since it is now a good app with many features
+>> Come up with a good prompt to analyse stock with its peers, including where it is in the cycle, leader/laggard etc.
 > Do a general cleanup of github repo and mark code properly for easy reference by LLMs
 - See what other features in google sheets dashboard that are good
 > For fundamental tabs, for foreign companies, search for 20-F = annual report or 6-K = foreign issuer reports, often used for quarterly earnings releases/results
 
 ## OVERVIEW
 > Add pre-market analysis
-> Overview taking too long to load - check i it's because o the market commentary
-> Add a current focus bullet point form in /overview -> E.g. Focus on retracements, focus on earnings gappers etc. 
 > Check why macro rates not showing other timelines (1M, 3M, 6M ago)
 > In ETF pop ups, highlight the 1D% change figure.
 > Add macro stuff like 10Y yields and yield curve chart
@@ -24,6 +22,7 @@
 - Add proper tickers for global indices like KOSPI, and use data fallback from FMPm, yfinance, or EODHD 
 
 ## BREADTH
+> Check where the +4% and -4% data are coming from, doesn't look accurate referencing the stockbee page
 - Add volume traded on majors as a breadth metric
 - Add charts of hi/lo, new highs together with the EW charts
 - Scoring for market breadth for overall 
@@ -47,8 +46,10 @@
 > Add scheduler for 12-hourly scrapes
 
 ## PEER GROUPS
-> Auto search for peers using perplexity headless browser and populate in /admin with a button
+> Add a tradingview chart comparison tool for correlation analysis (for both returns based and different scale based)
 > Add earnings trend/quality ranker for any group. Sort by increasing rev/NI trend, then by accelerating/decelerating, and by beat/miss
+> Solve or error: TradingView did not return live metrics for 29 tickers
+> Add hover over values for revenue and net income bar charts for multi-chart view
 - Remove OTC names like ABBNY, ABLZF etc.
 - Remove XYZ._ tickers
 - Learn how to add/remove tickers from peer groups

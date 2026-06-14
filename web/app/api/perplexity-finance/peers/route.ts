@@ -1,7 +1,11 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { NextResponse } from "next/server";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "playwright-core";
+import {
+  browserbaseConfigured,
+  launchPerplexityBrowser,
+  selectPerplexityBrowserProvider,
+  type PerplexityBrowserProvider,
+} from "@/lib/perplexity-browser-provider";
 import {
   analyzePerplexityBodyText,
   emptyCompany,
@@ -24,10 +28,62 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 45;
 
-const CACHE_CONTROL = "public, s-maxage=21600, stale-while-revalidate=86400";
 const DEFAULT_TIMEOUT_MS = 24_000;
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const CACHE_API_TIMEOUT_MS = 2_000;
+const WORKER_API_BASE = process.env.PERPLEXITY_CACHE_API_BASE ?? process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
+const WORKER_ADMIN_SECRET = process.env.PERPLEXITY_CACHE_ADMIN_SECRET ?? process.env.ADMIN_SECRET ?? "";
+
+type CacheMode = "hit" | "miss" | "refresh" | "stale_on_error";
+
+type CacheMetadata = {
+  mode: CacheMode;
+  storedAt: string | null;
+  ageSeconds: number | null;
+};
+
+type PerplexityFinanceResponsePayload = {
+  ticker: string;
+  fetchedAt: string;
+  source: "perplexity_finance_dashboard";
+  provider?: PerplexityBrowserProvider;
+  browserbaseConfigured?: boolean;
+  browserbaseSessionId?: string;
+  browserbaseSessionUrl?: string;
+  peersUrl: string;
+  profileUrl: string;
+  company: PerplexityFinanceCompany;
+  peers: PerplexityFinancePeer[];
+  warning: string | null;
+  status: PerplexityFinanceLookupStatus;
+  profileStatus: PerplexityFinanceLookupStatus;
+  peersStatus: PerplexityFinanceLookupStatus;
+  cache?: CacheMetadata;
+  diagnostics?: {
+    profileSource: string | null;
+    peersSource: string | null;
+    profileHttpStatus: number | null;
+    peersHttpStatus: number | null;
+    profileBodyState: string | null;
+    peersBodyState: string | null;
+    profileTimedOut: boolean;
+    peersTimedOut: boolean;
+    observedEndpoints: string[];
+    blockedEndpoints: string[];
+    providerWarning?: string | null;
+  };
+};
+
+type WorkerCacheReadResult =
+  | {
+    hit: true;
+    lookup: PerplexityFinanceResponsePayload;
+    storedAt: string;
+    ageSeconds: number | null;
+  }
+  | {
+    hit: false;
+    warning?: string;
+  };
 
 type CapturedJson = {
   payload: unknown;
@@ -46,6 +102,7 @@ type FinanceJsonCollector = {
   stop: () => void;
   setProfile: (capture: CapturedJson) => void;
   setProfileDescription: (capture: CapturedJson) => void;
+  setPeers: (capture: CapturedJson) => void;
 };
 
 type WaitResult = {
@@ -92,105 +149,6 @@ function buildPerplexityUrls(ticker: string) {
 function timeoutMs(): number {
   const parsed = Number(process.env.PERPLEXITY_FINANCE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
   return Number.isFinite(parsed) ? Math.max(8_000, Math.min(35_000, parsed)) : DEFAULT_TIMEOUT_MS;
-}
-
-function localChromiumCandidates(): string[] {
-  const candidates = [
-    process.env.PERPLEXITY_CHROMIUM_EXECUTABLE_PATH,
-    process.env.CHROME_EXECUTABLE_PATH,
-    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  ];
-
-  if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA;
-    const programFiles = process.env.ProgramFiles;
-    const programFilesX86 = process.env["PROGRAMFILES(X86)"];
-    candidates.push(
-      localAppData ? join(localAppData, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFiles ? join(programFiles, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFilesX86 ? join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      programFiles ? join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-      programFilesX86 ? join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-    );
-  } else if (process.platform === "darwin") {
-    candidates.push(
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    );
-  } else {
-    candidates.push(
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/chromium",
-    );
-  }
-
-  return candidates.filter((candidate): candidate is string => Boolean(candidate));
-}
-
-async function loadServerlessChromium(): Promise<{
-  args: string[];
-  defaultViewport: { width: number; height: number };
-  executablePath: () => Promise<string>;
-} | null> {
-  try {
-    const mod = await import("@sparticuz/chromium");
-    const chromium = (mod.default ?? mod) as {
-      args: string[];
-      defaultViewport: { width: number; height: number };
-      executablePath: () => Promise<string>;
-    };
-    return chromium;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveChromiumExecutablePath(serverlessChromium: Awaited<ReturnType<typeof loadServerlessChromium>>): Promise<string | null> {
-  const localCandidate = localChromiumCandidates().find((candidate) => existsSync(candidate));
-  if (localCandidate) return localCandidate;
-
-  if (!serverlessChromium) return null;
-  try {
-    return await serverlessChromium.executablePath();
-  } catch {
-    return null;
-  }
-}
-
-async function launchBrowser(): Promise<{ browser: Browser; context: BrowserContext }> {
-  const [{ chromium }, serverlessChromium] = await Promise.all([
-    import("playwright-core"),
-    loadServerlessChromium(),
-  ]);
-  const executablePath = await resolveChromiumExecutablePath(serverlessChromium);
-  if (!executablePath) {
-    throw new Error("No Chromium executable was available for Perplexity Finance extraction.");
-  }
-
-  const args = Array.from(new Set([
-    ...(serverlessChromium?.args ?? []),
-    "--disable-blink-features=AutomationControlled",
-    "--disable-dev-shm-usage",
-    "--disable-setuid-sandbox",
-    "--no-sandbox",
-  ]));
-  const browser = await chromium.launch({
-    executablePath,
-    headless: true,
-    args,
-  });
-  const context = await browser.newContext({
-    userAgent: USER_AGENT,
-    viewport: serverlessChromium?.defaultViewport ?? { width: 1280, height: 900 },
-    locale: "en-US",
-    extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  return { browser, context };
 }
 
 function relevantEndpointLabel(responseUrl: URL, status: number): string | null {
@@ -324,19 +282,28 @@ function createFinanceJsonCollector(page: Page, ticker: string): FinanceJsonColl
     setProfileDescription(capture: CapturedJson) {
       collector.profileDescription = capture;
     },
+    setPeers(capture: CapturedJson) {
+      collector.peers = capture;
+    },
   };
 }
 
 async function clickCookieChoice(page: Page): Promise<void> {
-  await page.getByText("Only necessary", { exact: true }).click({ timeout: 1_500 }).catch(() => undefined);
-  await page.getByText("Necessary only", { exact: true }).click({ timeout: 1_500 }).catch(() => undefined);
-  await page.getByText("Allow all", { exact: true }).click({ timeout: 1_000 }).catch(() => undefined);
+  const clickVisibleChoice = () => page.evaluate(() => {
+    const labels = new Set(["Only necessary", "Necessary only", "Allow all"]);
+    const candidates = Array.from(document.querySelectorAll("button"));
+    const button = candidates.find((candidate) => labels.has(candidate.textContent?.trim() ?? ""));
+    button?.click();
+  }).catch(() => undefined);
+  await clickVisibleChoice();
+  await page.waitForTimeout(250).catch(() => undefined);
+  await clickVisibleChoice();
 }
 
 async function gotoAndPrime(page: Page, url: string, timeout: number): Promise<void> {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout });
   await clickCookieChoice(page);
-  await page.waitForLoadState("networkidle", { timeout: Math.min(4_000, timeout) }).catch(() => undefined);
+  await page.waitForLoadState("load", { timeout: Math.min(1_000, timeout) }).catch(() => undefined);
 }
 
 async function readBodyText(page: Page): Promise<string> {
@@ -420,11 +387,14 @@ async function extractCompany(context: BrowserContext, ticker: string, profileUr
     const timeout = Math.min(9_000, timeoutMs());
     await gotoAndPrime(page, profileUrl, timeout);
 
-    const descriptionCapture = await fetchSameOriginJson(page, `/rest/finance/profile/${encodeURIComponent(ticker)}/description`);
+    const [descriptionCapture, profileCapture, peersCapture] = await Promise.all([
+      fetchSameOriginJson(page, `/rest/finance/profile/${encodeURIComponent(ticker)}/description`),
+      fetchSameOriginJson(page, `/rest/finance/profile/${encodeURIComponent(ticker)}`),
+      fetchSameOriginJson(page, `/rest/finance/peers/${encodeURIComponent(ticker)}`),
+    ]);
     if (descriptionCapture) collector.setProfileDescription(descriptionCapture);
-
-    const profileCapture = await fetchSameOriginJson(page, `/rest/finance/profile/${encodeURIComponent(ticker)}`);
     if (profileCapture) collector.setProfile(profileCapture);
+    if (peersCapture) collector.setPeers(peersCapture);
 
     const wait = await waitForSignals(page, collector, ticker, "profile", timeout);
     const description = parseProfileDescriptionPayload(collector.profileDescription?.payload);
@@ -515,10 +485,17 @@ function warningFor(
   peerStatus: PerplexityFinanceLookupStatus,
   company: PerplexityFinanceCompany,
   peers: PerplexityFinancePeer[],
+  provider: PerplexityBrowserProvider,
+  hasBrowserbaseConfig: boolean,
 ): string | null {
   const warnings: string[] = [];
   if (status === "blocked" || profileStatus === "blocked" || peerStatus === "blocked") {
     warnings.push("Perplexity blocked the browser session before all finance data could be read.");
+    if (provider === "browserbase" && hasBrowserbaseConfig) {
+      warnings.push("Open a Browserbase verification session, complete any Perplexity check, then Refresh.");
+    } else if (!hasBrowserbaseConfig) {
+      warnings.push("Browserbase is not configured, so the lookup used local Chromium without a persistent verification context.");
+    }
   }
   if (peerStatus === "pending_timeout") {
     warnings.push("Perplexity was still generating the peers list when the lookup timed out. Try Refresh.");
@@ -535,53 +512,131 @@ function warningFor(
   return uniqueWarnings.length > 0 ? uniqueWarnings.join(" ") : null;
 }
 
+function combineWarnings(...warnings: Array<string | null | undefined>): string | null {
+  const pieces = warnings
+    .flatMap((warning) => warning ? warning.split(/(?<=\.)\s+/) : [])
+    .map((warning) => warning.trim())
+    .filter(Boolean);
+  const uniqueWarnings = Array.from(new Set(pieces));
+  return uniqueWarnings.length > 0 ? uniqueWarnings.join(" ") : null;
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return "Perplexity Finance extraction failed.";
 }
 
-function cacheControlFor(status: PerplexityFinanceLookupStatus, warning: string | null, refresh: boolean): string {
-  if (refresh) return "no-store";
-  return status === "ready" && !warning ? CACHE_CONTROL : "no-store";
+function appendWarning(existing: string | null, next: string): string {
+  return [existing, next].filter(Boolean).join(" ");
 }
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const ticker = normalizeTicker(url.searchParams.get("ticker"));
-  const refresh = url.searchParams.get("refresh") === "1";
-  if (!ticker) {
-    return NextResponse.json(
-      { error: "Provide a valid ticker using letters, numbers, dot, or hyphen." },
-      { status: 400, headers: { "Cache-Control": "no-store" } },
-    );
-  }
+function cacheControlFor(): string {
+  return "no-store";
+}
 
+function ageSeconds(storedAt: string | null): number | null {
+  if (!storedAt) return null;
+  const parsed = Date.parse(storedAt);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+}
+
+function withCache(payload: PerplexityFinanceResponsePayload, cache: CacheMetadata): PerplexityFinanceResponsePayload {
+  return {
+    ...payload,
+    cache,
+  };
+}
+
+async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeout = CACHE_API_TIMEOUT_MS): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers as Record<string, string> | undefined),
+      },
+    });
+    if (!response.ok) return null;
+    return await response.json() as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function loadCachedLookup(ticker: string): Promise<WorkerCacheReadResult | null> {
+  return fetchJsonWithTimeout<WorkerCacheReadResult>(
+    `${WORKER_API_BASE}/api/perplexity-finance/cache/${encodeURIComponent(ticker)}`,
+  );
+}
+
+async function storeCachedLookup(ticker: string, payload: PerplexityFinanceResponsePayload): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (WORKER_ADMIN_SECRET) headers.Authorization = `Bearer ${WORKER_ADMIN_SECRET}`;
+  await fetchJsonWithTimeout(
+    `${WORKER_API_BASE}/api/admin/perplexity-finance/cache/${encodeURIComponent(ticker)}`,
+    {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+async function runLiveLookup(ticker: string): Promise<PerplexityFinanceResponsePayload> {
   const { peersUrl, profileUrl } = buildPerplexityUrls(ticker);
   const fetchedAt = new Date().toISOString();
   let browser: Browser | null = null;
+  let context: BrowserContext | null = null;
   try {
-    const launched = await launchBrowser();
+    const launched = await launchPerplexityBrowser();
     browser = launched.browser;
+    context = launched.context;
+    const companyResult = await extractCompany(context, ticker, profileUrl);
+    const peersResult = companyResult.peersHint.length > 0
+      ? null
+      : await extractPeers(context, ticker, peersUrl);
 
-    const companyResult = await extractCompany(launched.context, ticker, profileUrl);
-    const peersResult = await extractPeers(launched.context, ticker, peersUrl);
-    await launched.context.close().catch(() => undefined);
-
-    const peers = peersResult.peers.length > 0 ? peersResult.peers : companyResult.peersHint;
-    const effectivePeersStatus: PerplexityFinanceLookupStatus = peersResult.peers.length > 0
-      ? peersResult.status
-      : companyResult.peersHint.length > 0
-        ? "ready"
-        : peersResult.status;
-    const peersSource = peersResult.peers.length > 0 ? peersResult.source : companyResult.peersHintSource ?? peersResult.source;
-    const peersHttpStatus = peersResult.peers.length > 0 ? peersResult.httpStatus : companyResult.peersHintHttpStatus ?? peersResult.httpStatus;
+    const peers = companyResult.peersHint.length > 0 ? companyResult.peersHint : peersResult?.peers ?? [];
+    const effectivePeersStatus: PerplexityFinanceLookupStatus = companyResult.peersHint.length > 0
+      ? "ready"
+      : peersResult && peersResult.peers.length > 0
+        ? peersResult.status
+        : peersResult?.status ?? "parse_error";
+    const peersSource = companyResult.peersHint.length > 0
+      ? companyResult.peersHintSource
+      : peersResult?.source ?? null;
+    const peersHttpStatus = companyResult.peersHint.length > 0
+      ? companyResult.peersHintHttpStatus
+      : peersResult?.httpStatus ?? null;
     const status = overallStatus(companyResult.company, peers, companyResult.status, effectivePeersStatus);
-    const warning = warningFor(status, companyResult.status, effectivePeersStatus, companyResult.company, peers);
+    const warning = combineWarnings(
+      launched.providerWarning,
+      warningFor(
+        status,
+        companyResult.status,
+        effectivePeersStatus,
+        companyResult.company,
+        peers,
+        launched.provider,
+        launched.browserbaseConfigured,
+      ),
+    );
 
-    return NextResponse.json({
+    return {
       ticker,
       fetchedAt,
       source: "perplexity_finance_dashboard",
+      provider: launched.provider,
+      browserbaseConfigured: launched.browserbaseConfigured,
+      browserbaseSessionId: launched.browserbaseSessionId,
+      browserbaseSessionUrl: launched.browserbaseSessionUrl,
       peersUrl,
       profileUrl,
       company: companyResult.company,
@@ -596,20 +651,92 @@ export async function GET(request: Request) {
         profileHttpStatus: companyResult.httpStatus,
         peersHttpStatus,
         profileBodyState: companyResult.bodyState,
-        peersBodyState: peersResult.bodyState,
+        peersBodyState: peersResult?.bodyState ?? (peers.length > 0 ? "ready" : "unknown"),
         profileTimedOut: companyResult.timedOut,
-        peersTimedOut: peersResult.timedOut,
-        observedEndpoints: Array.from(new Set([...companyResult.observedEndpoints, ...peersResult.observedEndpoints])),
-        blockedEndpoints: Array.from(new Set([...companyResult.blockedEndpoints, ...peersResult.blockedEndpoints])),
+        peersTimedOut: peersResult?.timedOut ?? false,
+        observedEndpoints: Array.from(new Set([
+          ...companyResult.observedEndpoints,
+          ...(peersResult?.observedEndpoints ?? []),
+        ])),
+        blockedEndpoints: Array.from(new Set([
+          ...companyResult.blockedEndpoints,
+          ...(peersResult?.blockedEndpoints ?? []),
+        ])),
+        providerWarning: launched.providerWarning,
       },
-    }, {
-      headers: { "Cache-Control": cacheControlFor(status, warning, refresh) },
+    };
+  } finally {
+    await context?.close().catch(() => undefined);
+    await browser?.close().catch(() => undefined);
+  }
+}
+
+const liveLookupPromises = new Map<string, Promise<PerplexityFinanceResponsePayload>>();
+
+function getLiveLookup(ticker: string): Promise<PerplexityFinanceResponsePayload> {
+  const existing = liveLookupPromises.get(ticker);
+  if (existing) return existing;
+  const promise = runLiveLookup(ticker).finally(() => liveLookupPromises.delete(ticker));
+  liveLookupPromises.set(ticker, promise);
+  return promise;
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const ticker = normalizeTicker(url.searchParams.get("ticker"));
+  const refresh = url.searchParams.get("refresh") === "1";
+  if (!ticker) {
+    return NextResponse.json(
+      { error: "Provide a valid ticker using letters, numbers, dot, or hyphen." },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const { peersUrl, profileUrl } = buildPerplexityUrls(ticker);
+  const providerDecision = selectPerplexityBrowserProvider();
+  const cached = await loadCachedLookup(ticker);
+  if (!refresh && cached?.hit) {
+    return NextResponse.json(withCache(cached.lookup, {
+      mode: "hit",
+      storedAt: cached.storedAt,
+      ageSeconds: cached.ageSeconds,
+    }), {
+      headers: { "Cache-Control": cacheControlFor() },
+    });
+  }
+
+  try {
+    const live = await getLiveLookup(ticker);
+    await storeCachedLookup(ticker, live).catch((error) => {
+      console.warn("Perplexity Finance cache upsert failed", error);
+    });
+    return NextResponse.json(withCache(live, {
+      mode: refresh ? "refresh" : "miss",
+      storedAt: null,
+      ageSeconds: null,
+    }), {
+      headers: { "Cache-Control": cacheControlFor() },
     });
   } catch (error) {
+    if (refresh && cached?.hit) {
+      return NextResponse.json(withCache({
+        ...cached.lookup,
+        warning: appendWarning(cached.lookup.warning, `Live refresh failed: ${errorMessage(error)}`),
+      }, {
+        mode: "stale_on_error",
+        storedAt: cached.storedAt,
+        ageSeconds: cached.ageSeconds ?? ageSeconds(cached.storedAt),
+      }), {
+        headers: { "Cache-Control": cacheControlFor() },
+      });
+    }
+    const fetchedAt = new Date().toISOString();
     return NextResponse.json({
       ticker,
       fetchedAt,
       source: "perplexity_finance_dashboard",
+      provider: providerDecision.provider,
+      browserbaseConfigured: browserbaseConfigured(),
       peersUrl,
       profileUrl,
       company: emptyCompany(),
@@ -629,11 +756,15 @@ export async function GET(request: Request) {
         peersTimedOut: false,
         observedEndpoints: [],
         blockedEndpoints: [],
+        providerWarning: providerDecision.reason,
+      },
+      cache: {
+        mode: refresh ? "refresh" : "miss",
+        storedAt: null,
+        ageSeconds: null,
       },
     }, {
       headers: { "Cache-Control": "no-store" },
     });
-  } finally {
-    await browser?.close().catch(() => undefined);
   }
 }

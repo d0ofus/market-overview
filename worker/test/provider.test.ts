@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { extractPremarketSnapshotFromAlpacaSnapshot } from "../src/provider";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { extractPremarketSnapshotFromAlpacaSnapshot, getProvider } from "../src/provider";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("extractPremarketSnapshotFromAlpacaSnapshot", () => {
   it("prefers minute bar data for premarket price and volume", () => {
@@ -40,5 +44,29 @@ describe("extractPremarketSnapshotFromAlpacaSnapshot", () => {
     });
 
     expect(snapshot).toBeNull();
+  });
+});
+
+describe("provider fallback control", () => {
+  it("does not chase fallback providers when fallbackEnabled is false", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      "Date,Open,High,Low,Close,Volume\n2026-05-26,10,11,9,10,1000\n",
+      { status: 200 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({ DB: {} as D1Database, DATA_PROVIDER: "stooq" }, { fallbackEnabled: false });
+    const bars = await provider.getDailyBars(["AAA"], "2026-05-25", "2026-05-27");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bars).toEqual([{
+      ticker: "AAA",
+      date: "2026-05-26",
+      o: 10,
+      h: 11,
+      l: 9,
+      c: 10,
+      volume: 1000,
+    }]);
   });
 });

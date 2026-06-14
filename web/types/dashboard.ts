@@ -6,6 +6,15 @@ export type SnapshotReadyResponse = {
   asOfDate: string;
   generatedAt: string;
   providerLabel: string;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
   config: {
     id: string;
     name: string;
@@ -72,6 +81,7 @@ export type SnapshotReadyResponse = {
         above20Sma: boolean | null;
         above50Sma: boolean | null;
         above200Sma: boolean | null;
+        barDate?: string | null;
         rankKey: number;
         holdings: string[] | null;
       }>;
@@ -85,6 +95,15 @@ export type SnapshotEmptyResponse = {
   asOfDate: null;
   generatedAt: null;
   providerLabel: null;
+  expectedAsOfDate?: string | null;
+  freshnessStatus?: "fresh" | "partial" | "stale";
+  freshnessCoveragePct?: number | null;
+  freshnessCurrentCount?: number | null;
+  freshnessEligibleCount?: number | null;
+  freshnessCriticalMissingTickers?: string[];
+  freshnessMinBarDate?: string | null;
+  freshnessMaxBarDate?: string | null;
+  freshnessWarning?: string | null;
   config: null;
   sections: [];
 };

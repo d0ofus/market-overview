@@ -26,15 +26,47 @@ type StoredReport = Omit<MarketCommentaryReport, "sourceAudit" | "dataQuality" |
   updatedAt: string;
 };
 
+function freshSnapshotRow(
+  asOfDate: string,
+  options: {
+    freshnessStatus?: "fresh" | "partial" | "stale";
+    freshnessCurrentCount?: number;
+    freshnessEligibleCount?: number;
+    freshnessCoveragePct?: number;
+    freshnessWarning?: string | null;
+  } = {},
+) {
+  const freshnessStatus = options.freshnessStatus ?? "fresh";
+  const freshnessCurrentCount = options.freshnessCurrentCount ?? 4;
+  const freshnessEligibleCount = options.freshnessEligibleCount ?? 4;
+  return {
+    id: `snapshot-${asOfDate}`,
+    asOfDate,
+    generatedAt: `${asOfDate}T22:00:00.000Z`,
+    providerLabel: "Stored Daily Bars",
+    expectedAsOfDate: asOfDate,
+    freshnessStatus,
+    freshnessCurrentCount,
+    freshnessEligibleCount,
+    freshnessCoveragePct: options.freshnessCoveragePct ?? (freshnessEligibleCount > 0 ? (freshnessCurrentCount / freshnessEligibleCount) * 100 : 0),
+    freshnessCriticalMissingJson: "[]",
+    freshnessMinBarDate: asOfDate,
+    freshnessMaxBarDate: asOfDate,
+    freshnessWarning: options.freshnessWarning ?? null,
+  };
+}
+
 class FakeMarketCommentaryDb {
   rows: StoredReport[];
   settings: MarketCommentarySettings | null;
   snapshotAsOfDate: string | null;
+  snapshotFreshness: Parameters<typeof freshSnapshotRow>[1];
 
-  constructor(rows: StoredReport[] = [], options: { snapshotAsOfDate?: string | null } = {}) {
+  constructor(rows: StoredReport[] = [], options: { snapshotAsOfDate?: string | null; snapshotFreshness?: Parameters<typeof freshSnapshotRow>[1] } = {}) {
     this.rows = [...rows];
     this.settings = null;
     this.snapshotAsOfDate = options.snapshotAsOfDate ?? null;
+    this.snapshotFreshness = options.snapshotFreshness ?? {};
   }
 
   prepare(sql: string) {
@@ -51,7 +83,7 @@ class FakeMarketCommentaryDb {
         }
         if (sql.includes("FROM snapshots_meta")) {
           const requestedAsOfDate = String(bound[1] ?? "");
-          return (db.snapshotAsOfDate === requestedAsOfDate ? { asOfDate: db.snapshotAsOfDate } : null) as T;
+          return (db.snapshotAsOfDate === requestedAsOfDate ? freshSnapshotRow(db.snapshotAsOfDate, db.snapshotFreshness) : null) as T;
         }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("generation_trigger = 'scheduled'")) {
           const scheduledLocalDate = String(bound[0]);
@@ -198,7 +230,7 @@ describe("market commentary service", () => {
     expect(settings.scheduleTimezone).toBe("Australia/Melbourne");
     expect(settings.scheduleLocalTime).toBe("09:00");
     expect(settings.scheduleDays).toEqual(["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
-    expect(settings.braveQueries[0]).toContain("{nyDate}");
+    expect(settings.braveQueries[0]).toContain("{latestCompletedSessionDate}");
   });
 
   it("persists configurable prompt, sources, queries, and schedule settings", async () => {
@@ -320,6 +352,26 @@ describe("market commentary service", () => {
     expect(db.rows).toHaveLength(1);
   });
 
+  it("allows a partial overview snapshot through the commentary freshness gate", async () => {
+    const db = new FakeMarketCommentaryDb([], {
+      snapshotAsOfDate: "2026-06-01",
+      snapshotFreshness: {
+        freshnessStatus: "partial",
+        freshnessCurrentCount: 80,
+        freshnessEligibleCount: 224,
+        freshnessCoveragePct: 35.7,
+        freshnessWarning: "Partial: critical fresh; broad overview coverage is incomplete.",
+      },
+    });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
+
+    expect(response?.status).toBe("failed");
+    expect(response?.report?.sessionDate).toBe("2026-06-01");
+    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(response?.report?.error).not.toContain("stale");
+    expect(db.rows).toHaveLength(1);
+  });
+
   it("does not let an older holiday report for the same session block a fresh scheduled day", async () => {
     const db = new FakeMarketCommentaryDb([
       createReport("memorial-day", "2026-05-22", "2026-05-25T04:48:27.877Z"),
@@ -360,7 +412,7 @@ describe("market commentary service", () => {
   });
 
   it("stores an isolated failed report when Gemini is not configured", async () => {
-    const db = new FakeMarketCommentaryDb();
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-22" });
     const response = await refreshMarketCommentary(createEnv(db), {
       now: new Date("2026-05-25T15:00:00.000Z"),
       force: true,

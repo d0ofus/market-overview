@@ -57,6 +57,10 @@ export type ScanCompiledRow = {
   change1d: number | null;
   volume: number | null;
   marketCap: number | null;
+  factorScore: number | null;
+  factorPassCount: number | null;
+  factorUnknownCount: number | null;
+  factorResultsJson: string | null;
   rawJson: string | null;
   canonicalKey: string;
   createdAt: string;

@@ -2,6 +2,8 @@
 
 import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
+import { LogOut } from "lucide-react";
+import { logoutAdmin } from "@/app/admin/actions";
 import { AdminSubnav } from "./admin-subnav";
 import { getAdminRouteMeta } from "./admin-nav";
 
@@ -24,9 +26,17 @@ export function AdminShell({ children }: Props) {
               <p className="max-w-3xl text-sm text-slate-400 sm:text-base">{current.description}</p>
             </div>
           </div>
-          <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/50 px-4 py-3 text-xs text-slate-400">
-            Operational tooling for Market Command Centre.
-          </div>
+          <form action={logoutAdmin}>
+            <button
+              aria-label="Log out of admin"
+              className="inline-flex h-11 items-center gap-2 rounded-2xl border border-borderSoft/70 bg-panelSoft/50 px-4 text-xs font-semibold text-slate-300 transition hover:border-danger/40 hover:bg-danger/10 hover:text-danger"
+              title="Log out"
+              type="submit"
+            >
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+              Logout
+            </button>
+          </form>
         </div>
       </section>
       <AdminSubnav />
