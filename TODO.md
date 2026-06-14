@@ -75,6 +75,10 @@
 ## WATCHLIST COMPILER
 > Make a function to rank by factors (e.g. price contraction, volume expansion, price > SMA200, increasing rev/NI trend etc.)
 
+## WATCHLIST REVIEW
+> Add charts for candidates
+> Add delete button for Review Runs to allow for cleanup of messy list
+
 ## GAPPERS
 - Add avg traded volume column in table
 - Change title to pre-market scan
