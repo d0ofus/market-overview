@@ -268,15 +268,19 @@ const emptyDraftCompilePreset = (): ScanCompilePresetDetail => ({
   members: [],
 });
 
+const SCANS_DISPLAY_TIME_ZONE = "Australia/Melbourne";
+
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("en-AU", {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: SCANS_DISPLAY_TIME_ZONE,
+    timeZoneName: "short",
   }).format(parsed);
 }
 
