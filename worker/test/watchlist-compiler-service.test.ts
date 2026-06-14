@@ -455,10 +455,18 @@ describe("watchlist compiler service helpers", () => {
   });
 
   it("calculates increasing 10D average volume trend with regression", () => {
-    const bars = Array.from({ length: 24 }, (_, index) => ({
-      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
-      volume: 1_000_000 + (index * 50_000),
-    }));
+    const today = new Date();
+    const bars = Array.from({ length: 24 }, (_, index) => {
+      const date = new Date(Date.UTC(
+        today.getUTCFullYear(),
+        today.getUTCMonth(),
+        today.getUTCDate() - (23 - index),
+      ));
+      return {
+        date: date.toISOString().slice(0, 10),
+        volume: 1_000_000 + (index * 50_000),
+      };
+    });
 
     expect(rolling10dVolumeTrendPct(bars, 1)).toBeGreaterThan(0);
   });

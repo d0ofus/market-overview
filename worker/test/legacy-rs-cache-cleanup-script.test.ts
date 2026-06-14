@@ -7,9 +7,9 @@ import {
   parseCliArgs,
   runBackfill,
   runPurge,
-} from "../scripts/cleanup-legacy-rs-cache.mjs";
+} from "../scripts/cleanup-legacy-rs-cache-lib.mjs";
 
-const tempRoots = [];
+const tempRoots: string[] = [];
 const quietLogger = { log() {}, error() {} };
 
 async function makeStateFile() {
