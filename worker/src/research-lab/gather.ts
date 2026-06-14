@@ -136,7 +136,7 @@ export async function gatherResearchLabEvidence(env: Env, input: {
       sourceKind: family.sourceKind,
       forceFresh: forceFreshSearch,
       maxAgeDays: family.maxAgeDays,
-      requirePublishedAt: family.requirePublishedAt,
+      requirePublishedAt: family.requirePublishedAt === true,
     });
 
     if (result.raw && typeof result.raw === "object") {

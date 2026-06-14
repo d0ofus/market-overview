@@ -86,6 +86,49 @@ export type MarketCommentaryRefreshResponse = MarketCommentaryResponse & {
   ok: boolean;
 };
 
+export type WeeklyMarketReviewGenerationProvider = "hermes_gpt" | "gemini_fallback";
+export type WeeklyMarketReviewGenerationMode = "external_publish" | "scheduled_fallback" | "manual_retry";
+
+export type WeeklyMarketReviewKeyTicker = {
+  ticker: string;
+  companyName?: string | null;
+  theme?: string | null;
+  impact?: string | null;
+  watch?: string | null;
+};
+
+export type WeeklyMarketReviewReport = {
+  id: string;
+  weekStart: string;
+  weekEnd: string;
+  generatedAt: string;
+  asOf: string;
+  provider: string;
+  model: string;
+  generationProvider: WeeklyMarketReviewGenerationProvider;
+  generationMode: WeeklyMarketReviewGenerationMode;
+  status: "ready" | "failed";
+  title: string;
+  marketTone: string | null;
+  reviewMarkdown: string;
+  sections: Record<string, unknown>;
+  keyTickers: WeeklyMarketReviewKeyTicker[];
+  sourceAudit: MarketCommentarySourceAudit[];
+  dataQuality: MarketCommentaryDataQuality[];
+  sourceSnapshot: Record<string, unknown>;
+  error: string | null;
+};
+
+export type WeeklyMarketReviewResponse = {
+  status: "empty" | "ready" | "failed";
+  warning: string | null;
+  report: WeeklyMarketReviewReport | null;
+};
+
+export type WeeklyMarketReviewGenerateResponse = WeeklyMarketReviewResponse & {
+  ok: boolean;
+};
+
 export type MarketCommentarySettings = {
   id: string;
   enabled: boolean;
@@ -2524,6 +2567,10 @@ export function getMarketCommentary(init?: RequestInit) {
   return getJson<MarketCommentaryResponse>("/api/market-commentary", init);
 }
 
+export function getWeeklyMarketReview(init?: RequestInit) {
+  return getJson<WeeklyMarketReviewResponse>("/api/weekly-market-review/latest", init);
+}
+
 export function getOverviewFocusItems(configId = "default") {
   return getJson<{ rows: OverviewFocusItem[] }>(appendQuery("/api/overview/focus", { configId }));
 }
@@ -2557,6 +2604,13 @@ export function refreshMarketCommentary(force = false) {
     appendQuery("/api/admin/market-commentary/refresh", { force: force ? 1 : undefined }),
     { method: "POST" },
   );
+}
+
+export function generateWeeklyMarketReview(force = false) {
+  return adminFetch<WeeklyMarketReviewGenerateResponse>("/api/admin/weekly-market-review/generate", {
+    method: "POST",
+    body: JSON.stringify({ force, mode: "manual_retry" }),
+  });
 }
 
 export function getAdminMarketCommentarySettings() {

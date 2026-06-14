@@ -100,10 +100,13 @@ describe("research lab gather", () => {
     ];
 
     const provider = await import("../src/research-lab/providers");
-    vi.mocked(provider.runResearchLabPerplexityQuery).mockResolvedValueOnce({
+    vi.mocked(provider.runResearchLabPerplexityQuery).mockImplementationOnce(async (_env: unknown, query: any) => {
+      harness.queryCalls.push(query);
+      return {
       items: staleItems,
       usage: { total_tokens: 10 },
       raw: { model: "sonar-pro" },
+      };
     });
 
     const result = await gatherResearchLabEvidence({ PERPLEXITY_MODEL: "sonar-pro" } as any, {
@@ -155,8 +158,10 @@ describe("research lab gather", () => {
   it("keeps undated evidence when freshness caps are enabled without requiring publishedAt", async () => {
     harness.queryCalls.length = 0;
     const provider = await import("../src/research-lab/providers");
-    vi.mocked(provider.runResearchLabPerplexityQuery).mockResolvedValueOnce({
-      items: [
+    vi.mocked(provider.runResearchLabPerplexityQuery).mockImplementationOnce(async (_env: unknown, query: any) => {
+      harness.queryCalls.push(query);
+      return {
+        items: [
         {
           title: "Fresh undated catalyst",
           url: "https://example.com/news/fresh-undated",
@@ -178,6 +183,7 @@ describe("research lab gather", () => {
       ],
       usage: { total_tokens: 10 },
       raw: { model: "sonar-pro" },
+      };
     });
 
     const result = await gatherResearchLabEvidence({ PERPLEXITY_MODEL: "sonar-pro" } as any, {

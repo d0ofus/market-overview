@@ -70,7 +70,13 @@ export const marketCommentarySourceSchema = z.object({
   dataUsed: z.string().trim().min(1).max(500),
   timestamp: z.string().trim().max(120).nullable().optional(),
   note: z.string().trim().max(500).nullable().optional(),
-});
+}).transform((value) => ({
+  sourceName: value.sourceName,
+  url: value.url ?? null,
+  dataUsed: value.dataUsed,
+  timestamp: value.timestamp ?? null,
+  note: value.note ?? null,
+}));
 
 export const marketCommentarySettingsPatchSchema = z.object({
   id: z.string().trim().min(1).default("default"),
@@ -82,6 +88,50 @@ export const marketCommentarySettingsPatchSchema = z.object({
   scheduleTimezone: z.string().trim().min(1).max(80).refine(isSupportedTimezone, "Unsupported schedule timezone."),
   scheduleLocalTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
   scheduleDays: z.array(marketCommentaryWeekdaySchema).min(1).max(7),
+});
+
+const weeklyMarketReviewIsoDateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+export const weeklyMarketReviewKeyTickerSchema = z.object({
+  ticker: z.string().trim().min(1).max(20).transform((value) => value.toUpperCase()),
+  companyName: z.string().trim().max(160).nullable().optional(),
+  theme: z.string().trim().max(240).nullable().optional(),
+  impact: z.string().trim().max(500).nullable().optional(),
+  watch: z.string().trim().max(500).nullable().optional(),
+});
+
+export const weeklyMarketReviewPublishSchema = z.object({
+  id: z.string().trim().min(1).max(240),
+  weekStart: weeklyMarketReviewIsoDateSchema,
+  weekEnd: weeklyMarketReviewIsoDateSchema,
+  generatedAt: z.string().trim().min(1).max(120),
+  asOf: z.string().trim().min(1).max(120),
+  provider: z.string().trim().min(1).max(120),
+  model: z.string().trim().min(1).max(120),
+  generationProvider: z.literal("hermes_gpt"),
+  generationMode: z.literal("external_publish"),
+  status: z.enum(["ready", "failed"]).optional().default("ready"),
+  title: z.string().trim().min(1).max(240),
+  marketTone: z.string().trim().max(500).nullable().optional(),
+  reviewMarkdown: z.string().trim().min(20).max(200_000),
+  sections: z.record(z.unknown()).optional().default({}),
+  keyTickers: z.array(weeklyMarketReviewKeyTickerSchema).max(250).optional().default([]),
+  sourceAudit: z.array(marketCommentarySourceSchema).max(100).optional().default([]),
+  dataQuality: z.array(z.object({
+    metric: z.string().trim().min(1).max(160),
+    status: z.enum(["ok", "stale", "unavailable", "not_configured"]),
+    note: z.string().trim().min(1).max(1000),
+  })).max(100).optional().default([]),
+  sourceSnapshot: z.record(z.unknown()).optional().default({}),
+  error: z.string().trim().max(2000).nullable().optional(),
+}).refine((value) => value.weekStart <= value.weekEnd, {
+  path: ["weekEnd"],
+  message: "weekEnd must be on or after weekStart.",
+});
+
+export const weeklyMarketReviewGenerateSchema = z.object({
+  force: z.boolean().optional().default(false),
+  mode: z.enum(["scheduled_fallback", "manual_retry"]).optional().default("scheduled_fallback"),
 });
 
 const patternLabelValueSchema = z.enum(["approved", "rejected", "skipped"]);

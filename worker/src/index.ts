@@ -49,6 +49,7 @@ import {
   adminSymbolCatalogScheduleSchema,
   adminWorkerSchedulePatchSchema,
   marketCommentarySettingsPatchSchema,
+  weeklyMarketReviewGenerateSchema,
   patternFeaturePatchSchema,
   patternCandidatesQuerySchema,
   patternLabelBulkSchema,
@@ -123,6 +124,14 @@ import {
   resetMarketCommentarySettings,
   updateMarketCommentarySettings,
 } from "./market-commentary-service";
+import {
+  generateWeeklyMarketReview,
+  listWeeklyMarketReviews,
+  loadLatestWeeklyMarketReview,
+  loadWeeklyMarketReviewById,
+  maybeRunScheduledWeeklyMarketReview,
+  publishWeeklyMarketReview,
+} from "./weekly-market-review-service";
 import {
   createOverviewFocusItem,
   deleteOverviewFocusItem,
@@ -387,6 +396,14 @@ app.use("/api/*", cors());
 
 const isAuthed = (req: Request, env: Env): boolean => {
   const secret = env.ADMIN_SECRET;
+  if (!secret) return true;
+  const auth = req.headers.get("authorization");
+  if (!auth?.startsWith("Bearer ")) return false;
+  return auth.slice(7) === secret;
+};
+
+const isWeeklyMarketReviewPublishAuthed = (req: Request, env: Env): boolean => {
+  const secret = env.HERMES_WEEKLY_MARKET_REVIEW_SECRET?.trim() || env.ADMIN_SECRET;
   if (!secret) return true;
   const auth = req.headers.get("authorization");
   if (!auth?.startsWith("Bearer ")) return false;
@@ -2224,6 +2241,44 @@ app.get("/api/market-commentary", async (c) => {
     const message = error instanceof Error ? error.message : "Failed to load market commentary.";
     console.error("market commentary load failed", error);
     return c.json({ status: "empty", warning: message, report: null }, 200);
+  }
+});
+
+app.get("/api/weekly-market-review/latest", async (c) => {
+  try {
+    const snapshot = await loadLatestWeeklyMarketReview(c.env);
+    c.header("Cache-Control", "no-store");
+    return c.json(snapshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load weekly market review.";
+    console.error("weekly market review load failed", error);
+    return c.json({ status: "empty", warning: message, report: null }, 200);
+  }
+});
+
+app.get("/api/weekly-market-review", async (c) => {
+  try {
+    const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 20)));
+    const rows = await listWeeklyMarketReviews(c.env, limit);
+    c.header("Cache-Control", "no-store");
+    return c.json({ rows });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to list weekly market reviews.";
+    console.error("weekly market review list failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/weekly-market-review/:id", async (c) => {
+  try {
+    const report = await loadWeeklyMarketReviewById(c.env, c.req.param("id"));
+    if (!report) return c.json({ error: "Weekly market review not found." }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.json({ report });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load weekly market review.";
+    console.error("weekly market review detail failed", error);
+    return c.json({ error: message }, 500);
   }
 });
 
@@ -5521,6 +5576,41 @@ app.post("/api/admin/market-commentary/refresh", async (c) => {
   }
 });
 
+app.post("/api/admin/weekly-market-review/publish", async (c) => {
+  if (!isWeeklyMarketReviewPublishAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json();
+    const report = await publishWeeklyMarketReview(c.env, payload);
+    return c.json({ ok: report.status === "ready", status: report.status, warning: report.error, report });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid weekly market review publish payload." }, 400);
+    }
+    const message = error instanceof Error ? error.message : "weekly market review publish failed";
+    console.error("admin weekly market review publish failed", error);
+    return c.json({ ok: false, status: "failed", warning: message, report: null }, 200);
+  }
+});
+
+app.post("/api/admin/weekly-market-review/generate", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = weeklyMarketReviewGenerateSchema.parse(await c.req.json().catch(() => ({})));
+    const result = await generateWeeklyMarketReview(c.env, {
+      force: payload.force,
+      mode: payload.mode,
+    });
+    return c.json(result);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return c.json({ error: error.issues[0]?.message ?? "Invalid weekly market review generate payload." }, 400);
+    }
+    const message = error instanceof Error ? error.message : "weekly market review generation failed";
+    console.error("admin weekly market review generation failed", error);
+    return c.json({ ok: false, status: "failed", warning: message, report: null }, 200);
+  }
+});
+
 app.get("/api/admin/provider-check", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const ticker = (c.req.query("ticker") ?? "SPY").toUpperCase();
@@ -6480,6 +6570,11 @@ export default {
       await maybeRunScheduledMarketCommentary(env, now);
     } catch (error) {
       console.error("scheduled market commentary failed", error);
+    }
+    try {
+      await maybeRunScheduledWeeklyMarketReview(env, now);
+    } catch (error) {
+      console.error("scheduled weekly market review failed", error);
     }
   },
 };

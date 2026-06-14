@@ -1,5 +1,15 @@
 import { loadSnapshot } from "./eod";
 import { getFedWatchSnapshot } from "./fedwatch-service";
+import {
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_PROVIDER,
+  braveSearch,
+  generateMarkdownWithGemini,
+  normalizeSourceAuditRows,
+  parseJsonArray,
+  type MarketReportDataQuality,
+  type MarketReportSourceAudit,
+} from "./market-report-common";
 import { getUsMarketSessionContext, type UsMarketSessionContext } from "./market-calendar";
 import { parseLocalTime, zonedParts } from "./refresh-timing";
 import type { Env, SnapshotResponse } from "./types";
@@ -7,19 +17,8 @@ import type { Env, SnapshotResponse } from "./types";
 export type MarketCommentaryStatus = "ready" | "failed";
 type MarketCommentaryGenerationTrigger = "manual" | "scheduled";
 
-export type MarketCommentarySourceAudit = {
-  sourceName: string;
-  url: string | null;
-  dataUsed: string;
-  timestamp: string | null;
-  note?: string | null;
-};
-
-export type MarketCommentaryDataQuality = {
-  metric: string;
-  status: "ok" | "stale" | "unavailable" | "not_configured";
-  note: string;
-};
+export type MarketCommentarySourceAudit = MarketReportSourceAudit;
+export type MarketCommentaryDataQuality = MarketReportDataQuality;
 
 export type MarketCommentaryReport = {
   id: string;
@@ -69,14 +68,6 @@ type MarketCommentaryScheduleDecision = {
   localTime: string;
 };
 
-type BraveSearchResult = {
-  title: string;
-  url: string;
-  description: string | null;
-  source: string | null;
-  publishedAt: string | null;
-};
-
 type MarketEvidence = {
   session: UsMarketSessionContext;
   dashboardSummary: string;
@@ -116,8 +107,6 @@ type MarketCommentarySettingsRow = {
 
 export type MarketCommentarySettingsPatch = Omit<MarketCommentarySettings, "createdAt" | "updatedAt">;
 
-const GEMINI_PROVIDER = "gemini";
-const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
 const DEFAULT_RETENTION_DAYS = 30;
 const REFRESH_GUARD_MS = 10 * 60_000;
 const DEFAULT_SETTINGS_ID = "default";
@@ -247,16 +236,6 @@ function parseRetentionDays(env: Env): number {
   return Math.max(1, Math.min(365, Math.floor(raw)));
 }
 
-function parseJsonArray<T>(value: string | null | undefined): T[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed as T[] : [];
-  } catch {
-    return [];
-  }
-}
-
 function boolFromDb(value: number | null | undefined, fallback: boolean): boolean {
   if (value == null) return fallback;
   return Number(value) === 1;
@@ -302,18 +281,6 @@ async function ensureMarketCommentaryReportScheduleSchema(env: Env): Promise<voi
     "CREATE INDEX IF NOT EXISTS idx_market_commentary_scheduled_attempt ON market_commentary_reports (generation_trigger, scheduled_local_date, session_date, created_at DESC)",
   ).run();
   marketCommentaryReportScheduleSchemaReady = true;
-}
-
-function normalizeSourceAuditRows(rows: MarketCommentarySourceAudit[]): MarketCommentarySourceAudit[] {
-  return rows
-    .map((row) => ({
-      sourceName: String(row.sourceName ?? "").trim(),
-      url: row.url == null || String(row.url).trim() === "" ? null : String(row.url).trim(),
-      dataUsed: String(row.dataUsed ?? "").trim(),
-      timestamp: row.timestamp == null || String(row.timestamp).trim() === "" ? null : String(row.timestamp).trim(),
-      note: row.note == null || String(row.note).trim() === "" ? null : String(row.note).trim(),
-    }))
-    .filter((row) => row.sourceName && row.dataUsed);
 }
 
 function normalizeBraveQueries(rows: string[]): string[] {
@@ -637,44 +604,6 @@ function searchQueriesFor(session: UsMarketSessionContext, settings: MarketComme
   return settings.braveQueries.map((query) => renderMarketCommentaryQueryTemplate(query, session));
 }
 
-async function braveSearch(apiKey: string, query: string): Promise<BraveSearchResult[]> {
-  const url = new URL("https://api.search.brave.com/res/v1/web/search");
-  url.searchParams.set("q", query);
-  url.searchParams.set("count", "5");
-  url.searchParams.set("country", "us");
-  url.searchParams.set("search_lang", "en");
-  url.searchParams.set("freshness", "pd");
-  const response = await fetch(url.toString(), {
-    headers: {
-      Accept: "application/json",
-      "X-Subscription-Token": apiKey,
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Brave Search failed with HTTP ${response.status}`);
-  }
-  const payload = await response.json() as {
-    web?: {
-      results?: Array<{
-        title?: string;
-        url?: string;
-        description?: string;
-        profile?: { name?: string };
-        age?: string;
-      }>;
-    };
-  };
-  return (payload.web?.results ?? [])
-    .filter((result) => result.url && result.title)
-    .map((result) => ({
-      title: String(result.title),
-      url: String(result.url),
-      description: result.description ? String(result.description).replace(/<[^>]+>/g, "") : null,
-      source: result.profile?.name ? String(result.profile.name) : null,
-      publishedAt: result.age ? String(result.age) : null,
-    }));
-}
-
 async function summarizeSearch(env: Env, session: UsMarketSessionContext, settings: MarketCommentarySettings, dataQuality: MarketCommentaryDataQuality[], sourceAudit: MarketCommentarySourceAudit[]): Promise<string> {
   const apiKey = env.BRAVE_SEARCH_API_KEY?.trim();
   if (!apiKey) {
@@ -687,7 +616,7 @@ async function summarizeSearch(env: Env, session: UsMarketSessionContext, settin
   }
 
   try {
-    const batches = await Promise.all(searchQueriesFor(session, settings).map(async (query) => ({ query, results: await braveSearch(apiKey, query) })));
+    const batches = await Promise.all(searchQueriesFor(session, settings).map(async (query) => ({ query, results: await braveSearch(apiKey, query, { freshness: "pd" }) })));
     const lines: string[] = [];
     let resultCount = 0;
     for (const batch of batches) {
@@ -801,63 +730,6 @@ function buildPrompt(evidence: MarketEvidence, settings: MarketCommentarySetting
   ].join("\n");
 }
 
-async function generateWithGemini(env: Env, prompt: string): Promise<{ text: string; sources: MarketCommentarySourceAudit[] }> {
-  const apiKey = env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
-
-  const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
-  const groundingEnabled = env.GEMINI_SEARCH_GROUNDING_ENABLED?.trim().toLowerCase() === "true";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      ...(groundingEnabled ? { tools: [{ google_search: {} }] } : {}),
-      generationConfig: {
-        temperature: 0.2,
-        topP: 0.9,
-        maxOutputTokens: 24000,
-      },
-    }),
-  });
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`Gemini request failed with HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
-  }
-
-  const payload = await response.json() as {
-    candidates?: Array<{
-      content?: { parts?: Array<{ text?: string }> };
-      groundingMetadata?: {
-        groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
-      };
-    }>;
-  };
-  const candidate = payload.candidates?.[0];
-  const text = candidate?.content?.parts?.map((part) => part.text ?? "").join("").trim() ?? "";
-  if (!text) throw new Error("Gemini returned an empty report.");
-
-  const sources = (candidate?.groundingMetadata?.groundingChunks ?? [])
-    .map((chunk): MarketCommentarySourceAudit | null => {
-      const uri = chunk.web?.uri;
-      if (!uri) return null;
-      return {
-        sourceName: chunk.web?.title ?? "Gemini Google Search grounding",
-        url: uri,
-        dataUsed: "Gemini grounding citation",
-        timestamp: null,
-      };
-    })
-    .filter((source): source is MarketCommentarySourceAudit => Boolean(source));
-
-  return { text, sources };
-}
-
 function fallbackReport(session: UsMarketSessionContext, message: string): string {
   return [
     `# US Market State of Play - ${session.nyDate}`,
@@ -964,7 +836,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
       throw new Error("GEMINI_API_KEY is not configured.");
     }
     evidence = await gatherMarketEvidence(env, session, settings, overviewSnapshot);
-    const result = await generateWithGemini(env, buildPrompt(evidence, settings));
+    const result = await generateMarkdownWithGemini(env, buildPrompt(evidence, settings));
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,
       asOf: session.nowIso,

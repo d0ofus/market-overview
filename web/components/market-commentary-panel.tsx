@@ -7,9 +7,17 @@ import { AlertTriangle, CheckCircle2, ChevronDown, Database, ExternalLink, FileT
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getMarketCommentary, refreshMarketCommentary, type MarketCommentaryResponse } from "@/lib/api";
+import {
+  generateWeeklyMarketReview,
+  getMarketCommentary,
+  getWeeklyMarketReview,
+  refreshMarketCommentary,
+  type MarketCommentaryResponse,
+  type WeeklyMarketReviewResponse,
+} from "@/lib/api";
 
 type TabKey = "report" | "sources" | "quality";
+type ReportMode = "daily" | "weekly";
 
 type Props = {
   initial?: MarketCommentaryResponse | null;
@@ -18,6 +26,12 @@ type Props = {
 const COMMENTARY_LOAD_TIMEOUT_MS = 10_000;
 
 const EMPTY_COMMENTARY: MarketCommentaryResponse = {
+  status: "empty",
+  warning: null,
+  report: null,
+};
+
+const EMPTY_WEEKLY_REVIEW: WeeklyMarketReviewResponse = {
   status: "empty",
   warning: null,
   report: null,
@@ -53,6 +67,11 @@ function sessionLabel(value: string | undefined): string {
   if (value === "pre_market") return "Pre-market";
   if (value === "closed") return "Market closed";
   return "No report";
+}
+
+function weeklyProviderLabel(report: WeeklyMarketReviewResponse["report"]): string {
+  if (!report) return "Not generated";
+  return report.generationProvider === "hermes_gpt" ? "Hermes / GPT-5.5" : "Gemini fallback";
 }
 
 const markdownComponents: Components = {
@@ -137,38 +156,61 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
 
 export function MarketCommentaryPanel({ initial }: Props) {
   const [open, setOpen] = useState(true);
+  const [mode, setMode] = useState<ReportMode>("daily");
   const [tab, setTab] = useState<TabKey>("report");
   const [commentary, setCommentary] = useState<MarketCommentaryResponse>(() => initial ?? EMPTY_COMMENTARY);
+  const [weeklyReview, setWeeklyReview] = useState<WeeklyMarketReviewResponse>(EMPTY_WEEKLY_REVIEW);
   const [cachedLoading, setCachedLoading] = useState(() => !initial);
   const [loading, setLoading] = useState(false);
+  const [weeklyCachedLoading, setWeeklyCachedLoading] = useState(false);
+  const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const messageTimerRef = useRef<number | null>(null);
   const cachedLoadControllerRef = useRef<AbortController | null>(null);
   const cachedLoadRequestRef = useRef(0);
-  const report = commentary.report;
-  const sources = report?.sourceAudit ?? [];
-  const dataQuality = report?.dataQuality ?? [];
+  const weeklyLoadControllerRef = useRef<AbortController | null>(null);
+  const weeklyLoadRequestRef = useRef(0);
+  const dailyReport = commentary.report;
+  const weeklyReport = weeklyReview.report;
+  const activeStatus = mode === "daily" ? commentary.status : weeklyReview.status;
+  const activeWarning = mode === "daily" ? commentary.warning : weeklyReview.warning;
+  const activeLoading = mode === "daily" ? cachedLoading : weeklyCachedLoading;
+  const report = mode === "daily" ? dailyReport : weeklyReport;
+  const sources = mode === "daily" ? dailyReport?.sourceAudit ?? [] : weeklyReport?.sourceAudit ?? [];
+  const dataQuality = mode === "daily" ? dailyReport?.dataQuality ?? [] : weeklyReport?.dataQuality ?? [];
   const hasReport = Boolean(report);
+  const activeMarkdown = mode === "daily" ? dailyReport?.reportMarkdown : weeklyReport?.reviewMarkdown;
   const statusLabel =
-    cachedLoading && !hasReport
+    activeLoading && !hasReport
       ? "Loading"
-      : commentary.status === "ready"
+      : activeStatus === "ready"
         ? "Ready"
-        : commentary.status === "failed"
+        : activeStatus === "failed"
           ? "Needs attention"
           : "Not generated";
-  const summaryText = report
-    ? `${report.marketSessionLabel} - generated ${formatDateTime(report.generatedAt)}`
-    : cachedLoading
-      ? "Loading cached market commentary..."
-      : commentary.warning ?? "Generate the first report when ready.";
-  const emptyText = cachedLoading
-    ? "Loading market commentary. The rest of Overview is already available."
-    : commentary.warning ?? "No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow.";
+  const summaryText = mode === "daily"
+    ? dailyReport
+      ? `${dailyReport.marketSessionLabel} - generated ${formatDateTime(dailyReport.generatedAt)}`
+      : cachedLoading
+        ? "Loading cached market commentary..."
+        : commentary.warning ?? "Generate the first report when ready."
+    : weeklyReport
+      ? `${weeklyReport.weekStart} to ${weeklyReport.weekEnd} - generated ${formatDateTime(weeklyReport.generatedAt)}`
+      : weeklyCachedLoading
+        ? "Loading weekly market review..."
+        : weeklyReview.warning ?? "Weekly review has not been generated yet.";
+  const emptyText = mode === "daily"
+    ? cachedLoading
+      ? "Loading market commentary. The rest of Overview is already available."
+      : commentary.warning ?? "No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow."
+    : weeklyCachedLoading
+      ? "Loading weekly market review. Daily commentary is still available."
+      : weeklyReview.warning ?? "No weekly market review has been generated for the latest completed week yet. It should appear automatically after the weekly schedule. If it is missing, use Generate Weekly Review to run the Gemini fallback.";
 
   useEffect(() => {
     return () => {
       if (messageTimerRef.current != null) window.clearTimeout(messageTimerRef.current);
+      weeklyLoadControllerRef.current?.abort();
     };
   }, []);
 
@@ -216,6 +258,46 @@ export function MarketCommentaryPanel({ initial }: Props) {
     };
   }, [initial]);
 
+  useEffect(() => {
+    if (mode !== "weekly" || weeklyReview.report || weeklyReview.warning) return;
+
+    const requestId = weeklyLoadRequestRef.current + 1;
+    weeklyLoadRequestRef.current = requestId;
+    const controller = new AbortController();
+    let cancelled = false;
+    weeklyLoadControllerRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), COMMENTARY_LOAD_TIMEOUT_MS);
+
+    setWeeklyCachedLoading(true);
+    getWeeklyMarketReview({ signal: controller.signal })
+      .then((snapshot) => {
+        if (cancelled || weeklyLoadRequestRef.current !== requestId) return;
+        setWeeklyReview(snapshot);
+      })
+      .catch((error) => {
+        if (cancelled || weeklyLoadRequestRef.current !== requestId) return;
+        const timeoutWarning =
+          isAbortError(error)
+            ? "Weekly market review is taking too long to load. Daily commentary is still available."
+            : error instanceof Error
+              ? error.message
+              : "Weekly market review could not be loaded.";
+        setWeeklyReview({ status: "empty", warning: timeoutWarning, report: null });
+      })
+      .finally(() => {
+        if (!cancelled && weeklyLoadRequestRef.current === requestId) setWeeklyCachedLoading(false);
+        if (weeklyLoadControllerRef.current === controller) weeklyLoadControllerRef.current = null;
+        window.clearTimeout(timeout);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (weeklyLoadControllerRef.current === controller) weeklyLoadControllerRef.current = null;
+      window.clearTimeout(timeout);
+    };
+  }, [mode, weeklyReview.report, weeklyReview.warning]);
+
   function showMessage(value: string) {
     setMessage(value);
     if (messageTimerRef.current != null) window.clearTimeout(messageTimerRef.current);
@@ -231,11 +313,11 @@ export function MarketCommentaryPanel({ initial }: Props) {
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-base font-semibold text-text">US Market State of Play</h2>
-                <span className={`rounded-full border px-2 py-0.5 text-xs ${statusClass(commentary.status)}`}>
+                <span className={`rounded-full border px-2 py-0.5 text-xs ${statusClass(activeStatus)}`}>
                   {statusLabel}
                 </span>
                 <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">
-                  {sessionLabel(report?.marketSession)}
+                  {mode === "daily" ? sessionLabel(dailyReport?.marketSession) : weeklyProviderLabel(weeklyReport)}
                 </span>
               </div>
               <p className="mt-1 truncate text-xs text-text/60">
@@ -244,32 +326,82 @@ export function MarketCommentaryPanel({ initial }: Props) {
             </div>
           </Collapsible.Trigger>
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
-              disabled={loading}
-              onClick={async () => {
-                cachedLoadRequestRef.current += 1;
-                cachedLoadControllerRef.current?.abort();
-                setCachedLoading(false);
-                setLoading(true);
-                setMessage(null);
-                try {
-                  const refreshed = await refreshMarketCommentary();
-                  setCommentary(refreshed);
-                  setOpen(true);
-                  setTab("report");
-                  showMessage(refreshed.warning ?? (refreshed.ok ? "Market commentary refreshed." : "Commentary refresh completed with warnings."));
-                } catch (error) {
-                  showMessage(error instanceof Error ? error.message : "Commentary refresh failed.");
-                } finally {
-                  setLoading(false);
-                }
-              }}
-            >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-              {loading ? "Refreshing..." : "Refresh Commentary"}
-            </button>
+            <div className="inline-flex rounded-xl border border-borderSoft bg-panelSoft/70 p-1">
+              {(["daily", "weekly"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={mode === value}
+                  onClick={() => {
+                    setMode(value);
+                    setTab("report");
+                    setMessage(null);
+                  }}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                    mode === value
+                      ? "bg-accent/15 text-accent"
+                      : "text-text/65 hover:bg-panelSoft hover:text-text"
+                  }`}
+                >
+                  {value === "daily" ? "Daily" : "Weekly"}
+                </button>
+              ))}
+            </div>
+            {mode === "daily" ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
+                disabled={loading}
+                onClick={async () => {
+                  cachedLoadRequestRef.current += 1;
+                  cachedLoadControllerRef.current?.abort();
+                  setCachedLoading(false);
+                  setLoading(true);
+                  setMessage(null);
+                  try {
+                    const refreshed = await refreshMarketCommentary();
+                    setCommentary(refreshed);
+                    setOpen(true);
+                    setTab("report");
+                    showMessage(refreshed.warning ?? (refreshed.ok ? "Market commentary refreshed." : "Commentary refresh completed with warnings."));
+                  } catch (error) {
+                    showMessage(error instanceof Error ? error.message : "Commentary refresh failed.");
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                {loading ? "Refreshing..." : "Refresh Commentary"}
+              </button>
+            ) : weeklyReview.status !== "ready" ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
+                disabled={weeklyLoading || weeklyCachedLoading}
+                onClick={async () => {
+                  weeklyLoadRequestRef.current += 1;
+                  weeklyLoadControllerRef.current?.abort();
+                  setWeeklyCachedLoading(false);
+                  setWeeklyLoading(true);
+                  setMessage(null);
+                  try {
+                    const generated = await generateWeeklyMarketReview(false);
+                    setWeeklyReview(generated);
+                    setOpen(true);
+                    setTab("report");
+                    showMessage(generated.warning ?? (generated.ok ? "Weekly market review loaded." : "Weekly review generation completed with warnings."));
+                  } catch (error) {
+                    showMessage(error instanceof Error ? error.message : "Weekly review generation failed.");
+                  } finally {
+                    setWeeklyLoading(false);
+                  }
+                }}
+              >
+                <RefreshCw className={`h-4 w-4 ${weeklyLoading ? "animate-spin" : ""}`} />
+                {weeklyLoading ? "Generating..." : "Generate Weekly Review"}
+              </button>
+            ) : null}
           </div>
         </div>
         {message && <p className="mt-2 text-xs text-text/60">{message}</p>}
@@ -277,10 +409,10 @@ export function MarketCommentaryPanel({ initial }: Props) {
 
       <Collapsible.Content>
         <div className="space-y-4 p-4">
-          {commentary.status === "failed" && (
+          {activeStatus === "failed" && (
             <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{commentary.warning ?? report?.error ?? "Commentary generation failed."}</span>
+              <span>{activeWarning ?? report?.error ?? (mode === "daily" ? "Commentary generation failed." : "Weekly review generation failed.")}</span>
             </div>
           )}
 
@@ -292,20 +424,49 @@ export function MarketCommentaryPanel({ initial }: Props) {
 
           {report && (
             <>
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
-                  <div className="text-xs uppercase text-text/55">Session date</div>
-                  <div className="mt-1 font-mono text-sm text-text">{report.sessionDate}</div>
+              {mode === "daily" && dailyReport ? (
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Session date</div>
+                    <div className="mt-1 font-mono text-sm text-text">{dailyReport.sessionDate}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">As of</div>
+                    <div className="mt-1 text-sm text-text">{formatDateTime(dailyReport.asOf)}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Model</div>
+                    <div className="mt-1 font-mono text-sm text-text">{dailyReport.model}</div>
+                  </div>
                 </div>
-                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
-                  <div className="text-xs uppercase text-text/55">As of</div>
-                  <div className="mt-1 text-sm text-text">{formatDateTime(report.asOf)}</div>
+              ) : weeklyReport ? (
+                <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Week</div>
+                    <div className="mt-1 font-mono text-sm text-text">{weeklyReport.weekStart} to {weeklyReport.weekEnd}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Generated</div>
+                    <div className="mt-1 text-sm text-text">{formatDateTime(weeklyReport.generatedAt)}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">As of</div>
+                    <div className="mt-1 text-sm text-text">{formatDateTime(weeklyReport.asOf)}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Source</div>
+                    <div className="mt-1 text-sm text-text">{weeklyProviderLabel(weeklyReport)}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Model</div>
+                    <div className="mt-1 font-mono text-sm text-text">{weeklyReport.model}</div>
+                  </div>
+                  <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
+                    <div className="text-xs uppercase text-text/55">Market tone</div>
+                    <div className="mt-1 text-sm text-text">{weeklyReport.marketTone ?? "N/A"}</div>
+                  </div>
                 </div>
-                <div className="rounded border border-borderSoft/70 bg-panelSoft/55 p-3">
-                  <div className="text-xs uppercase text-text/55">Model</div>
-                  <div className="mt-1 font-mono text-sm text-text">{report.model}</div>
-                </div>
-              </div>
+              ) : null}
 
               <div className="flex flex-wrap gap-2">
                 <TabButton active={tab === "report"} onClick={() => setTab("report")} icon={<FileText className="h-4 w-4" />}>Report</TabButton>
@@ -315,7 +476,7 @@ export function MarketCommentaryPanel({ initial }: Props) {
 
               {tab === "report" && (
                 <div className="max-h-[760px] overflow-auto rounded border border-borderSoft/70 bg-panel p-4 shadow-sm">
-                  <MarkdownReport markdown={report.reportMarkdown} />
+                  <MarkdownReport markdown={activeMarkdown ?? ""} />
                 </div>
               )}
 
