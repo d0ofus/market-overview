@@ -671,6 +671,7 @@ export function WatchlistReviewDashboard() {
                 {detail?.run.watchlistSetId || detail?.run.watchlistRunId
                   ? `Compiler link ${detail.run.watchlistSetId ?? "-"} / ${detail.run.watchlistRunId ?? "-"}`
                   : "Hermes/TradingView MCP approval workspace"}
+                {detail?.run.prepId ? ` | Prep ${detail.run.prepId}` : ""}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">

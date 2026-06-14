@@ -545,8 +545,12 @@ function avg10dDollarVolume(bars: DailyBar[] | undefined): number | null {
   return total / recent.length;
 }
 
-export function rolling10dVolumeTrendPct(bars: Array<{ date: string; volume: number }>, lookbackMonths: number): number | null {
-  const cutoff = addUtcDays(new Date().toISOString().slice(0, 10), -monthsToCalendarDays(lookbackMonths));
+export function rolling10dVolumeTrendPct(
+  bars: Array<{ date: string; volume: number }>,
+  lookbackMonths: number,
+  asOfDate = new Date(),
+): number | null {
+  const cutoff = addUtcDays(asOfDate.toISOString().slice(0, 10), -monthsToCalendarDays(lookbackMonths));
   const recent = bars.filter((bar) => bar.date >= cutoff && Number.isFinite(bar.volume));
   if (recent.length < 20) return null;
   const rolling: number[] = [];

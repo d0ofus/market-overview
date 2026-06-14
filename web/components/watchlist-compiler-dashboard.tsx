@@ -5,6 +5,7 @@ import { Copy, Loader2, RefreshCw } from "lucide-react";
 import {
   apiUrl,
   compileAdminWatchlistCompilerSet,
+  createWatchlistReviewPrep,
   getWatchlistCompilerCompiled,
   getWatchlistCompilerExportUrl,
   getWatchlistCompilerRuns,
@@ -15,6 +16,7 @@ import {
   type ScanUniqueTickerRow,
   type WatchlistFactorConfig,
   type WatchlistFactorResult,
+  type WatchlistReviewPrepSummary,
   type WatchlistCompilerRunSummary,
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
@@ -123,6 +125,8 @@ export function WatchlistCompilerDashboard() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [compiling, setCompiling] = useState(false);
+  const [preparingReview, setPreparingReview] = useState(false);
+  const [reviewPrep, setReviewPrep] = useState<WatchlistReviewPrepSummary | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const [profiles, setProfiles] = useState<ResearchLabProfileDetail[]>([]);
@@ -258,6 +262,7 @@ export function WatchlistCompilerDashboard() {
       if (viewMode === "compiled") setCompiledRows((rowsRes as { rows: ScanCompiledRow[] }).rows ?? []);
       else setUniqueRows((rowsRes as { rows: ScanUniqueTickerRow[] }).rows ?? []);
       setSelectedTickers([]);
+      setReviewPrep(null);
       setExpandedFactorRowId(null);
       await loadResearchRuns(setId);
     } catch (error) {
@@ -319,6 +324,36 @@ export function WatchlistCompilerDashboard() {
 
   const toggleTickerSelection = (ticker: string) => {
     setSelectedTickers((current) => current.includes(ticker) ? current.filter((value) => value !== ticker) : [...current, ticker]);
+  };
+
+  const prepareWatchlistReview = async () => {
+    if (!selectedSetId || !selectedSet) return;
+    const symbols = selectedTickers.length > 0 ? selectedTickers : uniqueVisibleTickers;
+    if (symbols.length === 0) {
+      setMessage("No tickers available to prepare.");
+      return;
+    }
+    setPreparingReview(true);
+    setReviewPrep(null);
+    try {
+      const prep = await createWatchlistReviewPrep({
+        source: "watchlist-compiler",
+        sourceSetId: selectedSetId,
+        sourceSetName: selectedSet.name,
+        watchlistName: selectedSet.name,
+        watchlistRunId: selectedRunId,
+        symbols,
+        lookbackBars: 260,
+        refreshIfStale: true,
+        providerPreference: "app-default",
+      });
+      setReviewPrep(prep);
+      setMessage(`Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to prepare watchlist review.");
+    } finally {
+      setPreparingReview(false);
+    }
   };
 
   const openHistory = async (ticker: string) => {
@@ -401,6 +436,10 @@ export function WatchlistCompilerDashboard() {
               </button>
               {exportCsvUrl ? <a className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60" href={exportCsvUrl} target="_blank" rel="noreferrer">Export CSV</a> : null}
               {exportTxtUrl ? <a className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60" href={exportTxtUrl} target="_blank" rel="noreferrer">Export TXT</a> : null}
+              <button className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50 hover:bg-accent/15" disabled={!selectedSetId || uniqueVisibleTickers.length === 0 || preparingReview} onClick={() => void prepareWatchlistReview()} type="button">
+                {preparingReview ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {preparingReview ? "Preparing..." : "Prepare Watchlist Review"}
+              </button>
               <button className="inline-flex items-center gap-2 rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 disabled:opacity-50 hover:bg-slate-800/60" disabled={visibleTickers.length === 0} onClick={async () => { await navigator.clipboard.writeText(visibleTickers.join("\n")); setMessage("Tickers copied."); }}>
                 <Copy className="h-4 w-4" />
                 Copy View
@@ -408,6 +447,37 @@ export function WatchlistCompilerDashboard() {
             </div>
           </div>
           {message ? <p className="mt-2 text-xs text-slate-400">{message}</p> : null}
+          {reviewPrep ? (
+            <div className={`mt-3 rounded border px-3 py-2 text-xs ${reviewPrep.status === "blocked" ? "border-neg/40 bg-neg/10 text-neg" : "border-accent/30 bg-accent/10 text-slate-200"}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-slate-100">Prepared watchlist review bundle</div>
+                  <div className="mt-1 text-slate-400">
+                    Prep ID: <span className="font-mono text-slate-200">{reviewPrep.prepId}</span>
+                  </div>
+                </div>
+                <button
+                  className="inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(reviewPrep.hermesNext.command);
+                    setMessage("Hermes command copied.");
+                  }}
+                  type="button"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy Command
+                </button>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <div>Symbols: <span className="font-semibold">{reviewPrep.symbolCount}</span></div>
+                <div>Fresh: <span className="font-semibold text-pos">{reviewPrep.coverage.complete}</span> / Stale: <span className="font-semibold text-yellow-300">{reviewPrep.coverage.stale}</span> / Missing: <span className="font-semibold text-neg">{reviewPrep.coverage.missing}</span></div>
+                <div>Provider: <span className="font-semibold">{reviewPrep.provider.primary.toUpperCase()}{reviewPrep.provider.feed ? ` ${reviewPrep.provider.feed.toUpperCase()}` : ""}</span></div>
+                <div>As of: <span className="font-semibold">{reviewPrep.expectedAsOfDate}</span> | {reviewPrep.timing.totalMs}ms</div>
+              </div>
+              <div className="mt-2 break-all font-mono text-[11px] text-accent">{reviewPrep.hermesNext.command}</div>
+              {reviewPrep.warnings.length > 0 ? <div className="mt-2 text-[11px] text-yellow-200">{reviewPrep.warnings.join(" ")}</div> : null}
+            </div>
+          ) : null}
         </div>
 
         {selectedSetId ? (

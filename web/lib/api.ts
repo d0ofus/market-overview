@@ -1380,6 +1380,7 @@ export type WatchlistReviewSummaryCounts = {
 
 export type WatchlistReviewRun = {
   id: string;
+  prepId: string | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId: string | null;
@@ -1520,6 +1521,71 @@ export type WatchlistReviewReadyToApplyResponse = {
     responseStatus: number | null;
     error: string | null;
   };
+};
+
+export type WatchlistReviewPrepProvider = {
+  primary: string;
+  feed: string | null;
+  adjustment?: string;
+  fallbackEnabled: boolean;
+  fallbacks?: string[];
+};
+
+export type WatchlistReviewPrepCoverage = {
+  complete: number;
+  stale: number;
+  missing: number;
+  coveragePct: number;
+};
+
+export type WatchlistReviewPrepSummary = {
+  ok?: boolean;
+  prepId: string;
+  source: string;
+  sourceSetId: string | null;
+  sourceSetName: string | null;
+  watchlistName: string | null;
+  watchlistRunId: string | null;
+  symbolCount: number;
+  lookbackBars: number;
+  expectedAsOfDate: string;
+  provider: WatchlistReviewPrepProvider;
+  coverage: WatchlistReviewPrepCoverage;
+  status: "ready" | "ready_with_warnings" | "blocked";
+  warnings: string[];
+  timing: {
+    refreshMs: number;
+    dbReadMs: number;
+    totalMs: number;
+    requestedSymbols: number;
+    refreshedSymbols: number;
+    skippedFreshSymbols: number;
+  };
+  hermesNext: { command: string };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistReviewPrepBarsResponse = WatchlistReviewPrepSummary & {
+  ok: boolean;
+  symbols: Array<{
+    ticker: string;
+    tvSymbol: string | null;
+    name: string | null;
+    exchange: string | null;
+    sector: string | null;
+    industry: string | null;
+    latestDate: string | null;
+    availableBars: number;
+    freshness: {
+      latestDate: string | null;
+      expectedAsOfDate: string;
+      status: "fresh" | "stale" | "missing";
+    };
+    bars: Array<{ date: string; o: number; h: number; l: number; c: number; volume: number }>;
+  }>;
+  missing: string[];
+  stale: string[];
 };
 
 export type WatchlistCompilerRunSummary = ScanRunSummary;
@@ -3361,6 +3427,7 @@ export function getWatchlistReviewRun(id: string) {
 export function createWatchlistReviewRun(payload: {
   run?: Record<string, unknown>;
   candidates: Array<Record<string, unknown>>;
+  prepId?: string | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }) {
@@ -3368,6 +3435,37 @@ export function createWatchlistReviewRun(payload: {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function createWatchlistReviewPrep(payload: {
+  source: string;
+  sourceSetId?: string | null;
+  sourceSetName?: string | null;
+  watchlistName?: string | null;
+  watchlistRunId?: string | null;
+  symbols: string[];
+  lookbackBars?: number;
+  refreshIfStale?: boolean;
+  providerPreference?: "app-default";
+}) {
+  return adminFetch<WatchlistReviewPrepSummary & { ok: true }>("/api/watchlist-review/preps", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getWatchlistReviewPrep(prepId: string) {
+  return adminFetch<WatchlistReviewPrepSummary & { ok: true }>(`/api/watchlist-review/preps/${encodeURIComponent(prepId)}`);
+}
+
+export function getWatchlistReviewPrepBars(prepId: string, options?: { offset?: number; limit?: number; symbols?: string[] }) {
+  return adminFetch<WatchlistReviewPrepBarsResponse>(
+    appendQuery(`/api/watchlist-review/preps/${encodeURIComponent(prepId)}/bars`, {
+      offset: options?.offset,
+      limit: options?.limit,
+      symbols: options?.symbols?.join(","),
+    }),
+  );
 }
 
 export function patchWatchlistReviewCandidate(id: string, payload: {

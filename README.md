@@ -226,6 +226,22 @@ wrangler deploy --config worker/wrangler.toml
 - Set `NEXT_PUBLIC_API_BASE` to the Worker URL
 - Set `ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET`, and `ADMIN_SECRET` as Sensitive Environment Variables
 
+## Watchlist Review Prep Workflow
+
+`/watchlist-compiler` can prepare an app-side OHLCV bundle for Hermes review analysis:
+
+1. Compile or open a saved watchlist compiler run.
+2. Select a small subset for testing, or leave rows unselected to use the unique visible tickers.
+3. Click `Prepare Watchlist Review`.
+4. Copy the returned Hermes command:
+```text
+/run-watchlist-review from-prep <prepId>
+```
+
+Hermes should fetch the prep bundle, read current TradingView flags from TradingView DOM, analyze app-provided OHLCV locally, and import only review candidates into `/watchlist-review`. Turtle approves, overrides, or skips there. The app freezes approved apply dispatches, Hermes must claim a dispatch before mutation, send the exact change list over Telegram, and only execute TradingView MCP/CDP changes after Turtle confirms externally.
+
+The app stores prep metadata and serves OHLCV from `daily_bars`; it does not implement Hermes chart rendering, Telegram sending, or TradingView mutation logic.
+
 ## Tests
 
 Worker tests:

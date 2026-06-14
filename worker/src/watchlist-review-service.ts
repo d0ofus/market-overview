@@ -56,6 +56,7 @@ export type WatchlistReviewSummaryCounts = {
 
 export type WatchlistReviewRun = {
   id: string;
+  prepId: string | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId: string | null;
@@ -220,6 +221,7 @@ export type WatchlistReviewCanonicalApplyChange = {
 
 export type WatchlistReviewApprovedApplySet = {
   runId: string;
+  prepId: string | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId: string | null;
@@ -247,6 +249,7 @@ export type WatchlistReviewApplyDispatch = {
   webhookSentAt: string | null;
   webhookFailedAt: string | null;
   webhookResponseStatus: number | null;
+  claimOwner: string | null;
   claimedAt: string | null;
   heartbeatAt: string | null;
   claimExpiresAt: string | null;
@@ -295,6 +298,7 @@ export type WatchlistReviewReadyToApplyResult = {
 export type WatchlistReviewApprovedApplySetResponse = {
   run: {
     id: string;
+    prepId: string | null;
     status: WatchlistReviewRunStatus;
     applyStatus: WatchlistReviewRunApplyStatus;
     approvalRevision: number;
@@ -315,6 +319,7 @@ export type WatchlistReviewApprovedApplySetResponse = {
 export type WatchlistReviewApplyStatusInput = {
   runId?: string;
   dispatchId?: string | null;
+  claimOwner?: string | null;
   approvalRevision: number;
   checksum: string;
   idempotencyKey: string;
@@ -352,8 +357,36 @@ export type WatchlistReviewApprovedReadyRow = {
   approvedSetUrl: string;
 };
 
+export type WatchlistReviewDispatchClaimInput = {
+  claimOwner: string;
+  leaseSeconds?: number;
+  approvalRevision: number;
+  checksum: string;
+  idempotencyKey: string;
+};
+
+export type WatchlistReviewDispatchClaimResult = {
+  ok: true;
+  claimed: boolean;
+  dispatchId: string;
+  runId: string | null;
+  status: WatchlistReviewDispatchStatus | "not_found" | "checksum_mismatch" | "already_claimed" | "already_applying" | "terminal";
+  claimOwner: string | null;
+  claimExpiresAt: string | null;
+  dispatch: WatchlistReviewApplyDispatch | null;
+  approvedApplySet: WatchlistReviewApprovedApplySet | null;
+};
+
+export type WatchlistReviewConfirmationRequestedInput = {
+  claimOwner: string;
+  leaseSeconds?: number;
+  channel?: "telegram";
+  summary?: Record<string, unknown>;
+};
+
 type WatchlistReviewRunRow = {
   id: string;
+  prepId?: string | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId?: string | null;
@@ -455,6 +488,7 @@ type WatchlistReviewApplyDispatchRow = {
   webhookSentAt: string | null;
   webhookFailedAt: string | null;
   webhookResponseStatus: number | string | null;
+  claimOwner?: string | null;
   claimedAt: string | null;
   heartbeatAt: string | null;
   claimExpiresAt: string | null;
@@ -468,7 +502,7 @@ type WatchlistReviewApplyDispatchRow = {
 
 export class WatchlistReviewSchemaMissingError extends Error {
   constructor() {
-    super("Watchlist review schema is missing. Apply worker/migrations/0067_watchlist_review.sql and worker/migrations/0068_watchlist_review_apply_dispatch.sql.");
+    super("Watchlist review schema is missing. Apply worker/migrations/0067_watchlist_review.sql, worker/migrations/0068_watchlist_review_apply_dispatch.sql, and worker/migrations/0070_watchlist_review_preps.sql.");
   }
 }
 
@@ -501,7 +535,7 @@ const CLAIM_TTL_MS = 15 * 60_000;
 
 function isSchemaMissingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /watchlist_review_|apply_status|approval_revision|approved_set_json/i.test(message)
+  return /watchlist_review_|apply_status|approval_revision|approved_set_json|prep_id|claim_owner/i.test(message)
     && /no such table|no such column|not found|missing/i.test(message);
 }
 
@@ -736,6 +770,7 @@ function isDestructive(proposedFlag: WatchlistReviewProposedFlag, explicit: unkn
 export function normalizeWatchlistReviewImport(input: {
   run?: Record<string, unknown>;
   candidates?: unknown[];
+  prepId?: string | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }, now = new Date().toISOString()): {
@@ -791,6 +826,7 @@ export function normalizeWatchlistReviewImport(input: {
   return {
     run: {
       id: runId,
+      prepId: cleanText(runInput.prep_id ?? runInput.prepId ?? input.prepId, 160),
       sourceWatchlistName: cleanText(runInput.source_watchlist_name ?? runInput.sourceWatchlistName, 240),
       sourceWatchlistId: cleanText(runInput.source_watchlist_id ?? runInput.sourceWatchlistId, 160),
       watchlistSetId: cleanText(runInput.watchlist_set_id ?? runInput.watchlistSetId ?? input.watchlistSetId, 160),
@@ -827,6 +863,7 @@ export function normalizeWatchlistReviewImport(input: {
 function mapRunRow(row: WatchlistReviewRunRow): WatchlistReviewRun {
   return {
     id: row.id,
+    prepId: row.prepId ?? null,
     sourceWatchlistName: row.sourceWatchlistName ?? null,
     sourceWatchlistId: row.sourceWatchlistId ?? null,
     watchlistSetId: row.watchlistSetId ?? null,
@@ -912,6 +949,7 @@ function mapDispatchRow(row: WatchlistReviewApplyDispatchRow): WatchlistReviewAp
     destructiveCount: Math.max(0, Math.trunc(numberOr(row.destructiveCount, 0))),
     approvedSet: parseJson<WatchlistReviewApprovedApplySet>(row.approvedSetJson, {
       runId: row.runId,
+      prepId: null,
       sourceWatchlistName: null,
       sourceWatchlistId: null,
       watchlistSetId: null,
@@ -927,6 +965,7 @@ function mapDispatchRow(row: WatchlistReviewApplyDispatchRow): WatchlistReviewAp
     webhookSentAt: row.webhookSentAt ?? null,
     webhookFailedAt: row.webhookFailedAt ?? null,
     webhookResponseStatus: row.webhookResponseStatus == null ? null : Math.trunc(numberOr(row.webhookResponseStatus, 0)),
+    claimOwner: row.claimOwner ?? null,
     claimedAt: row.claimedAt ?? null,
     heartbeatAt: row.heartbeatAt ?? null,
     claimExpiresAt: row.claimExpiresAt ?? null,
@@ -1006,6 +1045,7 @@ async function assertRunReviewEditable(env: Env, runId: string): Promise<void> {
 export async function createWatchlistReviewRun(env: Env, input: {
   run?: Record<string, unknown>;
   candidates?: unknown[];
+  prepId?: string | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }): Promise<WatchlistReviewRunDetail> {
@@ -1015,9 +1055,10 @@ export async function createWatchlistReviewRun(env: Env, input: {
     await assertRunReviewEditable(env, normalized.run.id);
     await env.DB.prepare(
       `INSERT INTO watchlist_review_runs
-        (id, source_watchlist_name, source_watchlist_id, watchlist_set_id, watchlist_run_id, total_tickers_scanned, status, notes, summary_counts_json, generated_by, analysis_version, export_path, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        (id, prep_id, source_watchlist_name, source_watchlist_id, watchlist_set_id, watchlist_run_id, total_tickers_scanned, status, notes, summary_counts_json, generated_by, analysis_version, export_path, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
+         prep_id = excluded.prep_id,
          source_watchlist_name = excluded.source_watchlist_name,
          source_watchlist_id = excluded.source_watchlist_id,
          watchlist_set_id = excluded.watchlist_set_id,
@@ -1031,6 +1072,7 @@ export async function createWatchlistReviewRun(env: Env, input: {
          updated_at = excluded.updated_at`,
     ).bind(
       normalized.run.id,
+      normalized.run.prepId,
       normalized.run.sourceWatchlistName,
       normalized.run.sourceWatchlistId,
       normalized.run.watchlistSetId,
@@ -1110,6 +1152,7 @@ export async function createWatchlistReviewRun(env: Env, input: {
       actor: "authorized-user",
       payload: {
         candidateCount: normalized.candidates.length,
+        prepId: normalized.run.prepId,
         sourceWatchlistName: normalized.run.sourceWatchlistName,
         watchlistSetId: normalized.run.watchlistSetId,
         watchlistRunId: normalized.run.watchlistRunId,
@@ -1130,6 +1173,7 @@ export async function listWatchlistReviewRuns(env: Env, limit = 25): Promise<Wat
     const rows = await env.DB.prepare(
       `SELECT
          id,
+         prep_id as prepId,
          source_watchlist_name as sourceWatchlistName,
          source_watchlist_id as sourceWatchlistId,
          watchlist_set_id as watchlistSetId,
@@ -1176,8 +1220,9 @@ export async function listWatchlistReviewRuns(env: Env, limit = 25): Promise<Wat
 
 async function loadRun(env: Env, runId: string): Promise<WatchlistReviewRun | null> {
   const row = await env.DB.prepare(
-    `SELECT
+      `SELECT
        id,
+       prep_id as prepId,
        source_watchlist_name as sourceWatchlistName,
        source_watchlist_id as sourceWatchlistId,
        watchlist_set_id as watchlistSetId,
@@ -1685,8 +1730,8 @@ function applyStatusFromDispatchStatus(status: WatchlistReviewDispatchStatus): W
   return status;
 }
 
-function claimExpiresAt(nowIso: string): string {
-  return new Date(Date.parse(nowIso) + CLAIM_TTL_MS).toISOString();
+function claimExpiresAt(nowIso: string, leaseSeconds = CLAIM_TTL_MS / 1000): string {
+  return new Date(Date.parse(nowIso) + Math.max(60, Math.trunc(leaseSeconds)) * 1000).toISOString();
 }
 
 function redactedWebhookError(error: unknown): string {
@@ -1739,6 +1784,7 @@ export function buildWatchlistReviewCanonicalApplySet(
 
   return {
     runId: run.id,
+    prepId: run.prepId,
     sourceWatchlistName: run.sourceWatchlistName,
     sourceWatchlistId: run.sourceWatchlistId,
     watchlistSetId: run.watchlistSetId,
@@ -1909,6 +1955,7 @@ const DISPATCH_SELECT = `
     webhook_sent_at as webhookSentAt,
     webhook_failed_at as webhookFailedAt,
     webhook_response_status as webhookResponseStatus,
+    claim_owner as claimOwner,
     claimed_at as claimedAt,
     heartbeat_at as heartbeatAt,
     claim_expires_at as claimExpiresAt,
@@ -2047,6 +2094,7 @@ export async function readyWatchlistReviewRunToApply(
       event: "watchlist_review.ready_to_apply",
       event_type: "watchlist_review.ready_to_apply",
       runId,
+      prepId: applySet.prepId,
       dispatchId,
       approvalRevision,
       approvedCount: applySet.changes.length,
@@ -2204,6 +2252,7 @@ export async function loadWatchlistReviewApprovedApplySet(
     return {
       run: {
         id: run.id,
+        prepId: run.prepId,
         status: run.status,
         applyStatus: run.applyStatus,
         approvalRevision: dispatch.approvalRevision,
@@ -2271,11 +2320,166 @@ export async function listWatchlistReviewApprovedReadyRuns(
   }
 }
 
+function claimResult(
+  dispatch: WatchlistReviewApplyDispatch | null,
+  status: WatchlistReviewDispatchClaimResult["status"],
+): WatchlistReviewDispatchClaimResult {
+  return {
+    ok: true,
+    claimed: false,
+    dispatchId: dispatch?.id ?? "",
+    runId: dispatch?.runId ?? null,
+    status,
+    claimOwner: dispatch?.claimOwner ?? null,
+    claimExpiresAt: dispatch?.claimExpiresAt ?? null,
+    dispatch,
+    approvedApplySet: null,
+  };
+}
+
+export async function claimWatchlistReviewApplyDispatch(
+  env: Env,
+  dispatchId: string,
+  input: WatchlistReviewDispatchClaimInput,
+): Promise<WatchlistReviewDispatchClaimResult> {
+  try {
+    const dispatch = await loadApplyDispatch(env, dispatchId);
+    if (!dispatch) return { ...claimResult(null, "not_found"), dispatchId };
+    if (
+      input.approvalRevision !== dispatch.approvalRevision
+      || input.checksum !== dispatch.checksum
+      || input.idempotencyKey !== dispatch.idempotencyKey
+    ) {
+      return { ...claimResult(dispatch, "checksum_mismatch"), dispatchId: dispatch.id };
+    }
+    if (TERMINAL_DISPATCH_STATUSES.has(dispatch.status)) return { ...claimResult(dispatch, "terminal"), dispatchId: dispatch.id };
+    if (dispatch.status === "applying") return { ...claimResult(dispatch, "already_applying"), dispatchId: dispatch.id };
+    const now = new Date().toISOString();
+    const liveClaim = dispatch.status === "claimed" && dispatch.claimExpiresAt && Date.parse(dispatch.claimExpiresAt) > Date.parse(now);
+    if (liveClaim) return { ...claimResult(dispatch, "already_claimed"), dispatchId: dispatch.id };
+
+    const nextClaimExpiresAt = claimExpiresAt(now, input.leaseSeconds ?? 600);
+    const result = await env.DB.prepare(
+      `UPDATE watchlist_review_apply_dispatches
+          SET status = 'claimed',
+              claim_owner = ?,
+              claimed_at = ?,
+              heartbeat_at = ?,
+              claim_expires_at = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND approval_revision = ?
+          AND checksum = ?
+          AND idempotency_key = ?
+          AND (
+            status IN ('approved_ready', 'dispatching', 'waiting_for_hermes', 'webhook_failed')
+            OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND datetime(claim_expires_at) <= datetime(?))
+          )`,
+    ).bind(
+      input.claimOwner,
+      now,
+      now,
+      nextClaimExpiresAt,
+      now,
+      dispatch.id,
+      dispatch.approvalRevision,
+      dispatch.checksum,
+      dispatch.idempotencyKey,
+      now,
+    ).run();
+    const changed = Number(result.meta?.changes ?? 0) > 0;
+    const nextDispatch = await loadApplyDispatch(env, dispatch.id);
+    if (!changed || !nextDispatch) return { ...claimResult(nextDispatch ?? dispatch, "already_claimed"), dispatchId: dispatch.id };
+
+    await env.DB.prepare(
+      `UPDATE watchlist_review_runs
+          SET apply_status = 'claimed',
+              active_apply_dispatch_id = ?,
+              apply_error = NULL,
+              updated_at = ?
+        WHERE id = ?`,
+    ).bind(dispatch.id, now, dispatch.runId).run();
+    await insertEvent(env, {
+      runId: dispatch.runId,
+      eventType: "hermes_dispatch_claimed",
+      actor: input.claimOwner,
+      payload: {
+        dispatchId: dispatch.id,
+        claimOwner: input.claimOwner,
+        claimExpiresAt: nextClaimExpiresAt,
+        approvalRevision: dispatch.approvalRevision,
+        checksum: dispatch.checksum,
+      },
+    });
+    return {
+      ok: true,
+      claimed: true,
+      dispatchId: nextDispatch.id,
+      runId: nextDispatch.runId,
+      status: nextDispatch.status,
+      claimOwner: nextDispatch.claimOwner,
+      claimExpiresAt: nextDispatch.claimExpiresAt,
+      dispatch: nextDispatch,
+      approvedApplySet: nextDispatch.approvedSet,
+    };
+  } catch (error) {
+    if (isSchemaMissingError(error)) throw new WatchlistReviewSchemaMissingError();
+    throw error;
+  }
+}
+
+export async function recordWatchlistReviewTelegramConfirmationRequested(
+  env: Env,
+  dispatchId: string,
+  input: WatchlistReviewConfirmationRequestedInput,
+): Promise<{ ok: true; dispatch: WatchlistReviewApplyDispatch }> {
+  try {
+    const dispatch = await loadApplyDispatch(env, dispatchId);
+    if (!dispatch) throw new Error("Watchlist review apply dispatch not found.");
+    if (dispatch.claimOwner && input.claimOwner !== dispatch.claimOwner) {
+      throw new Error("Confirmation request claimOwner does not match the active dispatch claim.");
+    }
+    if (TERMINAL_DISPATCH_STATUSES.has(dispatch.status)) {
+      throw new Error("Cannot request external confirmation for a terminal dispatch.");
+    }
+    const now = new Date().toISOString();
+    const nextClaimExpiresAt = claimExpiresAt(now, input.leaseSeconds ?? 600);
+    await env.DB.prepare(
+      `UPDATE watchlist_review_apply_dispatches
+          SET heartbeat_at = ?,
+              claim_expires_at = CASE WHEN status IN ('claimed', 'applying') THEN ? ELSE claim_expires_at END,
+              updated_at = ?
+        WHERE id = ?`,
+    ).bind(now, nextClaimExpiresAt, now, dispatch.id).run();
+    await insertEvent(env, {
+      runId: dispatch.runId,
+      eventType: "telegram_confirmation_requested",
+      actor: input.claimOwner,
+      payload: {
+        dispatchId: dispatch.id,
+        claimOwner: input.claimOwner,
+        channel: input.channel ?? "telegram",
+        summary: input.summary ?? {},
+      },
+    });
+    const nextDispatch = await loadApplyDispatch(env, dispatch.id);
+    if (!nextDispatch) throw new Error("Watchlist review apply dispatch not found after confirmation event.");
+    return { ok: true, dispatch: nextDispatch };
+  } catch (error) {
+    if (isSchemaMissingError(error)) throw new WatchlistReviewSchemaMissingError();
+    throw error;
+  }
+}
+
 function validateApplyCallback(dispatch: WatchlistReviewApplyDispatch, runId: string, input: WatchlistReviewApplyStatusInput): void {
   if (input.runId && input.runId !== runId) throw new Error("Apply status runId does not match request path.");
   if (input.dispatchId && input.dispatchId !== dispatch.id) throw new Error("Apply status dispatchId does not match active dispatch.");
   if (input.approvalRevision !== dispatch.approvalRevision || input.checksum !== dispatch.checksum || input.idempotencyKey !== dispatch.idempotencyKey) {
     throw new Error("Apply status revision, checksum, or idempotency key is stale.");
+  }
+  if (dispatch.claimOwner && input.status !== "claimed" && input.claimOwner !== dispatch.claimOwner) {
+    throw new Error("Apply status claimOwner does not match the active dispatch claim.");
   }
 }
 
@@ -2367,6 +2571,7 @@ export async function updateWatchlistReviewApplyStatus(
     await env.DB.prepare(
       `UPDATE watchlist_review_apply_dispatches
           SET status = ?,
+              claim_owner = CASE WHEN ? = 'claimed' AND ? IS NOT NULL THEN COALESCE(claim_owner, ?) ELSE claim_owner END,
               claimed_at = CASE WHEN ? = 'claimed' THEN COALESCE(claimed_at, ?) ELSE claimed_at END,
               heartbeat_at = CASE WHEN ? IN ('claimed', 'applying') THEN ? ELSE heartbeat_at END,
               claim_expires_at = CASE WHEN ? IN ('claimed', 'applying') THEN ? ELSE claim_expires_at END,
@@ -2379,6 +2584,9 @@ export async function updateWatchlistReviewApplyStatus(
         WHERE id = ?`,
     ).bind(
       nextDispatchStatus,
+      input.status,
+      input.claimOwner ?? null,
+      input.claimOwner ?? null,
       input.status,
       now,
       input.status,
@@ -2469,8 +2677,8 @@ export async function updateWatchlistReviewApplyStatus(
     await insertEvent(env, {
       runId,
       eventType: `hermes_apply_${input.status}`,
-      actor: "hermes",
-      payload: { dispatchId: dispatch.id, status: input.status, summary: input.summary ?? null, error: input.error ?? null },
+      actor: input.claimOwner ?? "hermes",
+      payload: { dispatchId: dispatch.id, claimOwner: input.claimOwner ?? dispatch.claimOwner, status: input.status, summary: input.summary ?? null, error: input.error ?? null },
     });
 
     const [run, nextDispatch] = await Promise.all([

@@ -455,7 +455,7 @@ describe("watchlist compiler service helpers", () => {
   });
 
   it("calculates increasing 10D average volume trend with regression", () => {
-    const today = new Date();
+    const today = new Date("2026-06-12T00:00:00.000Z");
     const bars = Array.from({ length: 24 }, (_, index) => {
       const date = new Date(Date.UTC(
         today.getUTCFullYear(),
@@ -468,7 +468,7 @@ describe("watchlist compiler service helpers", () => {
       };
     });
 
-    expect(rolling10dVolumeTrendPct(bars, 1)).toBeGreaterThan(0);
+    expect(rolling10dVolumeTrendPct(bars, 1, today)).toBeGreaterThan(0);
   });
 
   it("duplicates sets with fresh ids, unique copy naming, copied sources, and no run history", async () => {
