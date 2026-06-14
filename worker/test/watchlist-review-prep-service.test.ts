@@ -154,7 +154,7 @@ describe("watchlist review prep service", () => {
     expect(JSON.stringify(prep.provider)).not.toContain("do-not-leak");
 
     const loaded = await loadWatchlistReviewPrep(env, prep.prepId);
-    expect(loaded?.hermesNext.command).toBe(`/run-watchlist-review from-prep ${prep.prepId}`);
+    expect(loaded?.prepId).toBe(prep.prepId);
   });
 
   it("returns OHLCV bars rather than close-only data", async () => {

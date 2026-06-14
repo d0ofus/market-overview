@@ -148,6 +148,8 @@ describe("watchlist review service helpers", () => {
   it("normalizes Hermes review-run imports and preserves compiler linkage", () => {
     const normalized = normalizeWatchlistReviewImport({
       prepId: "prep-1",
+      analysisDispatchId: "analysis-dispatch-1",
+      analysisMetadata: { provider: "alpaca", feed: "iex", expectedAsOfDate: "2026-06-12" },
       watchlistSetId: "compiler-set-1",
       watchlistRunId: "compile-run-1",
       run: {
@@ -186,6 +188,8 @@ describe("watchlist review service helpers", () => {
 
     expect(normalized.run.id).toBe("watchlist-review-2026-06-12");
     expect(normalized.run.prepId).toBe("prep-1");
+    expect(normalized.run.analysisDispatchId).toBe("analysis-dispatch-1");
+    expect(normalized.run.analysisMetadata).toMatchObject({ provider: "alpaca", feed: "iex" });
     expect(normalized.run.watchlistSetId).toBe("compiler-set-1");
     expect(normalized.run.watchlistRunId).toBe("compile-run-1");
     expect(normalized.run.totalTickersScanned).toBe(222);

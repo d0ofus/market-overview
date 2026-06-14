@@ -57,6 +57,8 @@ export type WatchlistReviewSummaryCounts = {
 export type WatchlistReviewRun = {
   id: string;
   prepId: string | null;
+  analysisDispatchId: string | null;
+  analysisMetadata: Record<string, unknown> | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId: string | null;
@@ -387,6 +389,8 @@ export type WatchlistReviewConfirmationRequestedInput = {
 type WatchlistReviewRunRow = {
   id: string;
   prepId?: string | null;
+  analysisDispatchId?: string | null;
+  analysisMetadataJson?: string | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId?: string | null;
@@ -502,7 +506,7 @@ type WatchlistReviewApplyDispatchRow = {
 
 export class WatchlistReviewSchemaMissingError extends Error {
   constructor() {
-    super("Watchlist review schema is missing. Apply worker/migrations/0067_watchlist_review.sql, worker/migrations/0068_watchlist_review_apply_dispatch.sql, and worker/migrations/0070_watchlist_review_preps.sql.");
+    super("Watchlist review schema is missing. Apply worker/migrations/0067_watchlist_review.sql, worker/migrations/0068_watchlist_review_apply_dispatch.sql, worker/migrations/0070_watchlist_review_preps.sql, and worker/migrations/0072_watchlist_review_analysis_dispatches.sql.");
   }
 }
 
@@ -535,7 +539,7 @@ const CLAIM_TTL_MS = 15 * 60_000;
 
 function isSchemaMissingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /watchlist_review_|apply_status|approval_revision|approved_set_json|prep_id|claim_owner/i.test(message)
+  return /watchlist_review_|apply_status|approval_revision|approved_set_json|prep_id|claim_owner|analysis_dispatch_id|analysis_metadata_json/i.test(message)
     && /no such table|no such column|not found|missing/i.test(message);
 }
 
@@ -629,6 +633,7 @@ function normalizeProposedFlag(value: unknown): WatchlistReviewProposedFlag {
 }
 
 function normalizeAnalysisSource(value: unknown): WatchlistReviewAnalysisSource {
+  if (value === "app_ohlcv_local_chart_vision") return "full_chart_vision";
   if (value === "mini_chart" || value === "full_chart_vision" || value === "manual" || value === "data_only") return value;
   return "data_only";
 }
@@ -771,6 +776,8 @@ export function normalizeWatchlistReviewImport(input: {
   run?: Record<string, unknown>;
   candidates?: unknown[];
   prepId?: string | null;
+  analysisDispatchId?: string | null;
+  analysisMetadata?: Record<string, unknown> | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }, now = new Date().toISOString()): {
@@ -827,6 +834,8 @@ export function normalizeWatchlistReviewImport(input: {
     run: {
       id: runId,
       prepId: cleanText(runInput.prep_id ?? runInput.prepId ?? input.prepId, 160),
+      analysisDispatchId: cleanText(runInput.analysis_dispatch_id ?? runInput.analysisDispatchId ?? input.analysisDispatchId, 180),
+      analysisMetadata: normalizeOptionalRecord(runInput.analysis_metadata ?? runInput.analysisMetadata ?? input.analysisMetadata),
       sourceWatchlistName: cleanText(runInput.source_watchlist_name ?? runInput.sourceWatchlistName, 240),
       sourceWatchlistId: cleanText(runInput.source_watchlist_id ?? runInput.sourceWatchlistId, 160),
       watchlistSetId: cleanText(runInput.watchlist_set_id ?? runInput.watchlistSetId ?? input.watchlistSetId, 160),
@@ -864,6 +873,8 @@ function mapRunRow(row: WatchlistReviewRunRow): WatchlistReviewRun {
   return {
     id: row.id,
     prepId: row.prepId ?? null,
+    analysisDispatchId: row.analysisDispatchId ?? null,
+    analysisMetadata: parseJson<Record<string, unknown> | null>(row.analysisMetadataJson, null),
     sourceWatchlistName: row.sourceWatchlistName ?? null,
     sourceWatchlistId: row.sourceWatchlistId ?? null,
     watchlistSetId: row.watchlistSetId ?? null,
@@ -1046,6 +1057,8 @@ export async function createWatchlistReviewRun(env: Env, input: {
   run?: Record<string, unknown>;
   candidates?: unknown[];
   prepId?: string | null;
+  analysisDispatchId?: string | null;
+  analysisMetadata?: Record<string, unknown> | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }): Promise<WatchlistReviewRunDetail> {
@@ -1055,10 +1068,12 @@ export async function createWatchlistReviewRun(env: Env, input: {
     await assertRunReviewEditable(env, normalized.run.id);
     await env.DB.prepare(
       `INSERT INTO watchlist_review_runs
-        (id, prep_id, source_watchlist_name, source_watchlist_id, watchlist_set_id, watchlist_run_id, total_tickers_scanned, status, notes, summary_counts_json, generated_by, analysis_version, export_path, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        (id, prep_id, analysis_dispatch_id, analysis_metadata_json, source_watchlist_name, source_watchlist_id, watchlist_set_id, watchlist_run_id, total_tickers_scanned, status, notes, summary_counts_json, generated_by, analysis_version, export_path, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          prep_id = excluded.prep_id,
+         analysis_dispatch_id = excluded.analysis_dispatch_id,
+         analysis_metadata_json = excluded.analysis_metadata_json,
          source_watchlist_name = excluded.source_watchlist_name,
          source_watchlist_id = excluded.source_watchlist_id,
          watchlist_set_id = excluded.watchlist_set_id,
@@ -1073,6 +1088,8 @@ export async function createWatchlistReviewRun(env: Env, input: {
     ).bind(
       normalized.run.id,
       normalized.run.prepId,
+      normalized.run.analysisDispatchId,
+      normalized.run.analysisMetadata ? JSON.stringify(normalized.run.analysisMetadata) : null,
       normalized.run.sourceWatchlistName,
       normalized.run.sourceWatchlistId,
       normalized.run.watchlistSetId,
@@ -1153,6 +1170,8 @@ export async function createWatchlistReviewRun(env: Env, input: {
       payload: {
         candidateCount: normalized.candidates.length,
         prepId: normalized.run.prepId,
+        analysisDispatchId: normalized.run.analysisDispatchId,
+        analysisMetadata: normalized.run.analysisMetadata,
         sourceWatchlistName: normalized.run.sourceWatchlistName,
         watchlistSetId: normalized.run.watchlistSetId,
         watchlistRunId: normalized.run.watchlistRunId,
@@ -1174,6 +1193,8 @@ export async function listWatchlistReviewRuns(env: Env, limit = 25): Promise<Wat
       `SELECT
          id,
          prep_id as prepId,
+         analysis_dispatch_id as analysisDispatchId,
+         analysis_metadata_json as analysisMetadataJson,
          source_watchlist_name as sourceWatchlistName,
          source_watchlist_id as sourceWatchlistId,
          watchlist_set_id as watchlistSetId,
@@ -1223,6 +1244,8 @@ async function loadRun(env: Env, runId: string): Promise<WatchlistReviewRun | nu
       `SELECT
        id,
        prep_id as prepId,
+       analysis_dispatch_id as analysisDispatchId,
+       analysis_metadata_json as analysisMetadataJson,
        source_watchlist_name as sourceWatchlistName,
        source_watchlist_id as sourceWatchlistId,
        watchlist_set_id as watchlistSetId,

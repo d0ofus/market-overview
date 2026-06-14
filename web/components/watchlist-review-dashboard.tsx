@@ -265,6 +265,7 @@ function firstRunId(rows: WatchlistReviewRun[]) {
 }
 
 export function WatchlistReviewDashboard() {
+  const [initialRunId] = useState(() => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("runId")));
   const [runs, setRuns] = useState<WatchlistReviewRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WatchlistReviewRunDetail | null>(null);
@@ -316,7 +317,7 @@ export function WatchlistReviewDashboard() {
   };
 
   useEffect(() => {
-    void loadRuns();
+    void loadRuns(initialRunId);
   }, []);
 
   useEffect(() => {
@@ -672,6 +673,7 @@ export function WatchlistReviewDashboard() {
                   ? `Compiler link ${detail.run.watchlistSetId ?? "-"} / ${detail.run.watchlistRunId ?? "-"}`
                   : "Hermes/TradingView MCP approval workspace"}
                 {detail?.run.prepId ? ` | Prep ${detail.run.prepId}` : ""}
+                {detail?.run.analysisDispatchId ? ` | Analysis ${detail.run.analysisDispatchId}` : ""}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">

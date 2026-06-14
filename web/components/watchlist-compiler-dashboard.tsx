@@ -6,6 +6,7 @@ import {
   apiUrl,
   compileAdminWatchlistCompilerSet,
   createWatchlistReviewPrep,
+  getWatchlistReviewAnalysisDispatch,
   getWatchlistCompilerCompiled,
   getWatchlistCompilerExportUrl,
   getWatchlistCompilerRuns,
@@ -16,7 +17,9 @@ import {
   type ScanUniqueTickerRow,
   type WatchlistFactorConfig,
   type WatchlistFactorResult,
-  type WatchlistReviewPrepSummary,
+  type WatchlistReviewAnalysisDispatchStatus,
+  type WatchlistReviewAnalysisWebhookStatus,
+  type WatchlistReviewPrepCreateResponse,
   type WatchlistCompilerRunSummary,
   type WatchlistCompilerSetDetail,
   type WatchlistCompilerSetRow,
@@ -96,6 +99,36 @@ function factorStatusClass(status: WatchlistFactorResult["status"]) {
   return "border-slate-500/30 bg-slate-800/70 text-slate-300";
 }
 
+function analysisStatusLabel(status: WatchlistReviewAnalysisDispatchStatus) {
+  const labels: Record<WatchlistReviewAnalysisDispatchStatus, string> = {
+    queued: "Queued",
+    dispatching: "Dispatching",
+    waiting_for_hermes: "Waiting for Hermes",
+    webhook_failed: "Webhook failed",
+    claimed: "Claimed",
+    running: "Running",
+    completed: "Completed",
+    partial_failed: "Partially failed",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  };
+  return labels[status];
+}
+
+function analysisStatusClass(status: WatchlistReviewAnalysisDispatchStatus) {
+  if (status === "completed") return "border-pos/40 bg-pos/10 text-pos";
+  if (status === "failed" || status === "partial_failed" || status === "cancelled") return "border-neg/40 bg-neg/10 text-neg";
+  if (status === "webhook_failed") return "border-yellow-400/40 bg-yellow-500/10 text-yellow-200";
+  return "border-accent/40 bg-accent/10 text-accent";
+}
+
+function webhookStatusLabel(status: WatchlistReviewAnalysisWebhookStatus) {
+  if (status === "sent") return "Webhook sent, poller fallback enabled";
+  if (status === "failed") return "Webhook failed, poller fallback enabled";
+  if (status === "already_pending") return "Already queued for Hermes";
+  return "Queued for Hermes poller";
+}
+
 function enabledFactorCount(config: WatchlistFactorConfig | null | undefined) {
   return Object.values(config?.enabled ?? {}).filter(Boolean).length;
 }
@@ -126,7 +159,8 @@ export function WatchlistCompilerDashboard() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [compiling, setCompiling] = useState(false);
   const [preparingReview, setPreparingReview] = useState(false);
-  const [reviewPrep, setReviewPrep] = useState<WatchlistReviewPrepSummary | null>(null);
+  const [reviewPrep, setReviewPrep] = useState<WatchlistReviewPrepCreateResponse | null>(null);
+  const [refreshingReviewDispatch, setRefreshingReviewDispatch] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const [profiles, setProfiles] = useState<ResearchLabProfileDetail[]>([]);
@@ -346,13 +380,31 @@ export function WatchlistCompilerDashboard() {
         lookbackBars: 260,
         refreshIfStale: true,
         providerPreference: "app-default",
+        enqueueHermesAnalysis: true,
       });
       setReviewPrep(prep);
-      setMessage(`Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
+      setMessage(prep.analysisDispatch
+        ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} and queued Hermes analysis.`
+        : `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to prepare watchlist review.");
     } finally {
       setPreparingReview(false);
+    }
+  };
+
+  const refreshReviewDispatch = async () => {
+    const dispatchId = reviewPrep?.analysisDispatch?.dispatchId;
+    if (!dispatchId || !reviewPrep) return;
+    setRefreshingReviewDispatch(true);
+    try {
+      const res = await getWatchlistReviewAnalysisDispatch(dispatchId);
+      setReviewPrep({ ...reviewPrep, analysisDispatch: res.summary });
+      setMessage(`Hermes analysis status: ${analysisStatusLabel(res.summary.status)}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to refresh Hermes analysis status.");
+    } finally {
+      setRefreshingReviewDispatch(false);
     }
   };
 
@@ -456,17 +508,17 @@ export function WatchlistCompilerDashboard() {
                     Prep ID: <span className="font-mono text-slate-200">{reviewPrep.prepId}</span>
                   </div>
                 </div>
-                <button
-                  className="inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60"
-                  onClick={async () => {
-                    await navigator.clipboard.writeText(reviewPrep.hermesNext.command);
-                    setMessage("Hermes command copied.");
-                  }}
-                  type="button"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  Copy Command
-                </button>
+                {reviewPrep.analysisDispatch ? (
+                  <button
+                    className="inline-flex items-center gap-2 rounded border border-borderSoft px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800/60 disabled:opacity-50"
+                    disabled={refreshingReviewDispatch}
+                    onClick={() => void refreshReviewDispatch()}
+                    type="button"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${refreshingReviewDispatch ? "animate-spin" : ""}`} />
+                    Refresh Hermes Status
+                  </button>
+                ) : null}
               </div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <div>Symbols: <span className="font-semibold">{reviewPrep.symbolCount}</span></div>
@@ -474,7 +526,32 @@ export function WatchlistCompilerDashboard() {
                 <div>Provider: <span className="font-semibold">{reviewPrep.provider.primary.toUpperCase()}{reviewPrep.provider.feed ? ` ${reviewPrep.provider.feed.toUpperCase()}` : ""}</span></div>
                 <div>As of: <span className="font-semibold">{reviewPrep.expectedAsOfDate}</span> | {reviewPrep.timing.totalMs}ms</div>
               </div>
-              <div className="mt-2 break-all font-mono text-[11px] text-accent">{reviewPrep.hermesNext.command}</div>
+              {reviewPrep.analysisDispatch ? (
+                <div className="mt-3 rounded border border-borderSoft/60 bg-slate-950/30 p-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${analysisStatusClass(reviewPrep.analysisDispatch.status)}`}>
+                      {analysisStatusLabel(reviewPrep.analysisDispatch.status)}
+                    </span>
+                    <span className="text-slate-400">{webhookStatusLabel(reviewPrep.analysisDispatch.webhookStatus)}</span>
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    <div>Analysis Dispatch: <span className="font-mono text-slate-200">{reviewPrep.analysisDispatch.dispatchId}</span></div>
+                    <div>Updated: <span className="font-semibold">{formatTime(reviewPrep.analysisDispatch.updatedAt)}</span></div>
+                    <div>Claim: <span className="font-semibold">{reviewPrep.analysisDispatch.claimOwner ?? "-"}</span></div>
+                    <div>Review Run: <span className="font-semibold">{reviewPrep.analysisDispatch.createdReviewRunId ?? "-"}</span></div>
+                  </div>
+                  {reviewPrep.analysisDispatch.createdReviewRunId ? (
+                    <a className="mt-2 inline-flex rounded border border-accent/40 px-2 py-1 text-[11px] text-accent hover:bg-accent/10" href={`/watchlist-review?runId=${encodeURIComponent(reviewPrep.analysisDispatch.createdReviewRunId)}`}>
+                      Open Watchlist Review
+                    </a>
+                  ) : null}
+                  {reviewPrep.analysisDispatch.error ? <div className="mt-2 text-[11px] text-yellow-200">{reviewPrep.analysisDispatch.error}</div> : null}
+                </div>
+              ) : (
+                <div className="mt-2 text-[11px] text-yellow-200">
+                  {reviewPrep.status === "blocked" ? "Hermes analysis was not queued because this prep has no usable OHLCV bars." : "Hermes analysis was not queued."}
+                </div>
+              )}
               {reviewPrep.warnings.length > 0 ? <div className="mt-2 text-[11px] text-yellow-200">{reviewPrep.warnings.join(" ")}</div> : null}
             </div>
           ) : null}

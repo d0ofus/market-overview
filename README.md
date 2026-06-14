@@ -103,6 +103,10 @@ Worker (`worker/wrangler.toml` vars and secrets):
 - `IBKR_NEWS_ENABLED` (`true`/`false`; adapter-ready interface, default `false`)
 - `IBKR_NEWS_ENDPOINT` (optional phase-2 IBKR adapter endpoint)
 - `IBKR_NEWS_TOKEN` (optional phase-2 IBKR adapter token)
+- `HERMES_WATCHLIST_APPLY_WEBHOOK_URL` (optional Hermes apply webhook; apply dispatches remain poller-visible if omitted)
+- `HERMES_WATCHLIST_APPLY_WEBHOOK_SECRET` (secret; signs Hermes apply webhook payloads)
+- `HERMES_WATCHLIST_ANALYSIS_WEBHOOK_URL` (optional override for Hermes analysis webhook; defaults to the apply webhook URL)
+- `HERMES_WATCHLIST_ANALYSIS_WEBHOOK_SECRET` (optional override for analysis webhook signing; defaults to the apply webhook secret)
 
 Worker secrets for Alpaca:
 - `ALPACA_API_KEY`
@@ -228,19 +232,16 @@ wrangler deploy --config worker/wrangler.toml
 
 ## Watchlist Review Prep Workflow
 
-`/watchlist-compiler` can prepare an app-side OHLCV bundle for Hermes review analysis:
+`/watchlist-compiler` can prepare an app-side OHLCV bundle and enqueue a non-destructive Hermes review-analysis dispatch:
 
 1. Compile or open a saved watchlist compiler run.
 2. Select a small subset for testing, or leave rows unselected to use the unique visible tickers.
 3. Click `Prepare Watchlist Review`.
-4. Copy the returned Hermes command:
-```text
-/run-watchlist-review from-prep <prepId>
-```
+4. Watch the Hermes analysis dispatch status panel. Webhook delivery is the fast path; the poller-ready queue is the fallback.
 
-Hermes should fetch the prep bundle, read current TradingView flags from TradingView DOM, analyze app-provided OHLCV locally, and import only review candidates into `/watchlist-review`. Turtle approves, overrides, or skips there. The app freezes approved apply dispatches, Hermes must claim a dispatch before mutation, send the exact change list over Telegram, and only execute TradingView MCP/CDP changes after Turtle confirms externally.
+Hermes should claim the analysis dispatch, fetch the prep bundle, read current TradingView flags from TradingView DOM, analyze app-provided OHLCV locally, and import only review candidates into `/watchlist-review`. Turtle approves, overrides, or skips there. The app freezes approved apply dispatches, Hermes must claim a separate apply dispatch before mutation, send the exact change list over Telegram, and only execute TradingView MCP/CDP changes after Turtle confirms externally.
 
-The app stores prep metadata and serves OHLCV from `daily_bars`; it does not implement Hermes chart rendering, Telegram sending, or TradingView mutation logic.
+The app stores prep metadata, serves OHLCV from `daily_bars`, and tracks Hermes analysis/apply dispatch status; it does not implement Hermes chart rendering, Telegram sending, or TradingView mutation logic.
 
 ## Tests
 

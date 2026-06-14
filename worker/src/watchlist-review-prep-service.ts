@@ -59,9 +59,6 @@ export type WatchlistReviewPrepSummary = {
     refreshedSymbols: number;
     skippedFreshSymbols: number;
   };
-  hermesNext: {
-    command: string;
-  };
   createdAt: string;
   updatedAt: string;
 };
@@ -353,9 +350,6 @@ function mapPrepRow(row: WatchlistReviewPrepRow, timingOverride?: WatchlistRevie
     status: row.status,
     warnings: parseJson<string[]>(row.warningsJson, []),
     timing: timingOverride ?? { refreshMs: 0, dbReadMs: 0, totalMs: 0, requestedSymbols: 0, refreshedSymbols: 0, skippedFreshSymbols: 0 },
-    hermesNext: {
-      command: `/run-watchlist-review from-prep ${prepId}`,
-    },
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

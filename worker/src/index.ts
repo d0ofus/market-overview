@@ -58,6 +58,8 @@ import {
   patternProfilePatchSchema,
   patternRunCreateSchema,
   watchlistReviewBatchSchema,
+  watchlistReviewAnalysisDispatchClaimSchema,
+  watchlistReviewAnalysisDispatchStatusSchema,
   watchlistReviewApplyStatusSchema,
   watchlistReviewCandidatePatchSchema,
   watchlistReviewDispatchClaimSchema,
@@ -268,6 +270,14 @@ import {
   loadWatchlistReviewPrep,
   loadWatchlistReviewPrepBars,
 } from "./watchlist-review-prep-service";
+import {
+  claimWatchlistReviewAnalysisDispatch,
+  createWatchlistReviewPrepWithOptionalAnalysisDispatch,
+  listWatchlistReviewAnalysisReadyDispatches,
+  loadWatchlistReviewAnalysisDispatch,
+  summarizeWatchlistReviewAnalysisDispatch,
+  updateWatchlistReviewAnalysisDispatchStatus,
+} from "./watchlist-review-analysis-dispatch-service";
 import {
   loadCorrelationMatrix,
   loadCorrelationPair,
@@ -4502,6 +4512,7 @@ app.post("/api/watchlist-review/preps", async (c) => {
   try {
     const payload = watchlistReviewPrepCreateSchema.parse(await c.req.json());
     const prep = await createWatchlistReviewPrep(c.env, payload);
+    const dispatchResult = await createWatchlistReviewPrepWithOptionalAnalysisDispatch(c.env, prep, payload, { origin: new URL(c.req.url).origin });
     await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_PREP_CREATE", {
       prepId: prep.prepId,
       source: prep.source,
@@ -4510,8 +4521,11 @@ app.post("/api/watchlist-review/preps", async (c) => {
       symbolCount: prep.symbolCount,
       status: prep.status,
       coverage: prep.coverage,
+      analysisDispatchId: dispatchResult.analysisDispatch?.dispatchId ?? null,
+      analysisDispatchStatus: dispatchResult.analysisDispatch?.status ?? null,
+      analysisWebhookStatus: dispatchResult.analysisDispatch?.webhookStatus ?? null,
     });
-    return c.json({ ok: true, ...prep });
+    return c.json({ ok: true, ...prep, analysisDispatch: dispatchResult.analysisDispatch });
   } catch (error) {
     return watchlistReviewErrorResponse(c, error);
   }
@@ -4542,6 +4556,69 @@ app.get("/api/watchlist-review/preps/:prepId/bars", async (c) => {
     });
     if (!payload) return c.json({ error: "Watchlist review prep not found." }, 404);
     return c.json({ ok: true, ...payload });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/analysis-dispatches/ready", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const limit = Math.max(1, Math.min(50, Number(c.req.query("limit") ?? 10)));
+    const olderThanSeconds = Math.max(0, Number(c.req.query("olderThanSeconds") ?? 0));
+    const rows = await listWatchlistReviewAnalysisReadyDispatches(c.env, {
+      limit,
+      olderThanSeconds,
+      origin: new URL(c.req.url).origin,
+    });
+    return c.json(rows);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.get("/api/watchlist-review/analysis-dispatches/:dispatchId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const dispatch = await loadWatchlistReviewAnalysisDispatch(c.env, c.req.param("dispatchId"));
+    if (!dispatch) return c.json({ error: "Watchlist review analysis dispatch not found." }, 404);
+    return c.json({ ok: true, dispatch, summary: summarizeWatchlistReviewAnalysisDispatch(dispatch) });
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/analysis-dispatches/:dispatchId/claim", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewAnalysisDispatchClaimSchema.parse(await c.req.json());
+    const result = await claimWatchlistReviewAnalysisDispatch(c.env, c.req.param("dispatchId"), payload, { origin: new URL(c.req.url).origin });
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_ANALYSIS_DISPATCH_CLAIM", {
+      dispatchId: c.req.param("dispatchId"),
+      prepId: result.prepId,
+      claimed: result.claimed,
+      status: result.status,
+      claimOwner: result.claimOwner,
+    });
+    return c.json(result);
+  } catch (error) {
+    return watchlistReviewErrorResponse(c, error);
+  }
+});
+
+app.post("/api/watchlist-review/analysis-dispatches/:dispatchId/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = watchlistReviewAnalysisDispatchStatusSchema.parse(await c.req.json());
+    const result = await updateWatchlistReviewAnalysisDispatchStatus(c.env, c.req.param("dispatchId"), payload);
+    await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_ANALYSIS_DISPATCH_STATUS", {
+      dispatchId: c.req.param("dispatchId"),
+      prepId: result.dispatch.prepId,
+      status: result.dispatch.status,
+      claimOwner: payload.claimOwner,
+      createdReviewRunId: result.dispatch.createdReviewRunId,
+    });
+    return c.json(result);
   } catch (error) {
     return watchlistReviewErrorResponse(c, error);
   }
@@ -4612,6 +4689,7 @@ app.post("/api/watchlist-review/runs", async (c) => {
     await upsertAudit(c.env, "default", "WATCHLIST_REVIEW_RUN_IMPORT", {
       runId: detail.run.id,
       prepId: detail.run.prepId,
+      analysisDispatchId: detail.run.analysisDispatchId,
       candidateCount: detail.candidates.length,
       watchlistSetId: detail.run.watchlistSetId,
       watchlistRunId: detail.run.watchlistRunId,

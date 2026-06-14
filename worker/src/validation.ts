@@ -237,6 +237,8 @@ export const watchlistReviewRunCreateSchema = z.object({
   run: z.record(z.unknown()).optional().default({}),
   candidates: z.array(z.record(z.unknown())).max(1000).optional().default([]),
   prepId: z.string().trim().min(1).max(160).nullable().optional(),
+  analysisDispatchId: z.string().trim().min(1).max(180).nullable().optional(),
+  analysisMetadata: z.record(z.unknown()).nullable().optional(),
   watchlistSetId: z.string().trim().min(1).max(160).nullable().optional(),
   watchlistRunId: z.string().trim().min(1).max(160).nullable().optional(),
 }).refine((value) => value.candidates.length > 0, {
@@ -313,6 +315,7 @@ export const watchlistReviewPrepCreateSchema = z.object({
   lookbackBars: z.number().int().min(60).max(520).optional().default(260),
   refreshIfStale: z.boolean().optional().default(true),
   providerPreference: z.literal("app-default").optional(),
+  enqueueHermesAnalysis: z.boolean().optional().default(false),
 });
 
 export const watchlistReviewDispatchClaimSchema = z.object({
@@ -328,6 +331,24 @@ export const watchlistReviewDispatchConfirmationRequestedSchema = z.object({
   leaseSeconds: z.number().int().min(60).max(3600).optional().default(600),
   channel: z.literal("telegram").optional().default("telegram"),
   summary: z.record(z.unknown()).optional().default({}),
+});
+
+export const watchlistReviewAnalysisDispatchClaimSchema = z.object({
+  claimOwner: z.string().trim().min(1).max(180),
+  leaseSeconds: z.number().int().min(60).max(3600).optional().default(900),
+  idempotencyKey: z.string().trim().min(16).max(400),
+  payloadChecksum: z.string().trim().min(16).max(160),
+});
+
+export const watchlistReviewAnalysisDispatchStatusSchema = z.object({
+  claimOwner: z.string().trim().min(1).max(180),
+  leaseSeconds: z.number().int().min(60).max(3600).optional().default(900),
+  idempotencyKey: z.string().trim().min(16).max(400),
+  payloadChecksum: z.string().trim().min(16).max(160),
+  status: z.enum(["running", "completed", "partial_failed", "failed", "cancelled"]),
+  createdReviewRunId: z.string().trim().min(1).max(180).nullable().optional(),
+  result: z.record(z.unknown()).nullable().optional(),
+  error: z.string().trim().max(1000).nullable().optional(),
 });
 
 export const groupPatchSchema = z.object({

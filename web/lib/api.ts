@@ -1424,6 +1424,8 @@ export type WatchlistReviewSummaryCounts = {
 export type WatchlistReviewRun = {
   id: string;
   prepId: string | null;
+  analysisDispatchId: string | null;
+  analysisMetadata: Record<string, unknown> | null;
   sourceWatchlistName: string | null;
   sourceWatchlistId: string | null;
   watchlistSetId: string | null;
@@ -1604,9 +1606,72 @@ export type WatchlistReviewPrepSummary = {
     refreshedSymbols: number;
     skippedFreshSymbols: number;
   };
-  hermesNext: { command: string };
   createdAt: string;
   updatedAt: string;
+};
+
+export type WatchlistReviewAnalysisDispatchStatus =
+  | "queued"
+  | "dispatching"
+  | "waiting_for_hermes"
+  | "webhook_failed"
+  | "claimed"
+  | "running"
+  | "completed"
+  | "partial_failed"
+  | "failed"
+  | "cancelled";
+
+export type WatchlistReviewAnalysisWebhookStatus = "sent" | "not_configured" | "failed" | "already_pending";
+
+export type WatchlistReviewAnalysisDispatchSummary = {
+  dispatchId: string;
+  prepId: string;
+  status: WatchlistReviewAnalysisDispatchStatus;
+  webhookStatus: WatchlistReviewAnalysisWebhookStatus;
+  idempotencyKey: string;
+  payloadChecksum: string;
+  claimOwner: string | null;
+  claimExpiresAt: string | null;
+  createdReviewRunId: string | null;
+  requestedAt: string;
+  updatedAt: string;
+  error: string | null;
+};
+
+export type WatchlistReviewAnalysisDispatch = {
+  id: string;
+  prepId: string;
+  source: string;
+  sourceSetId: string | null;
+  sourceSetName: string | null;
+  watchlistName: string | null;
+  watchlistRunId: string | null;
+  status: WatchlistReviewAnalysisDispatchStatus;
+  idempotencyKey: string;
+  payloadChecksum: string;
+  payloadPreview: Record<string, unknown>;
+  claimOwner: string | null;
+  claimedAt: string | null;
+  claimExpiresAt: string | null;
+  heartbeatAt: string | null;
+  requestedAt: string;
+  webhookSentAt: string | null;
+  webhookFailedAt: string | null;
+  webhookResponseStatus: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  error: string | null;
+  result: Record<string, unknown> | null;
+  createdReviewRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistReviewPrepCreateResponse = WatchlistReviewPrepSummary & {
+  ok: true;
+  analysisDispatch: WatchlistReviewAnalysisDispatchSummary | null;
 };
 
 export type WatchlistReviewPrepBarsResponse = WatchlistReviewPrepSummary & {
@@ -3482,6 +3547,8 @@ export function createWatchlistReviewRun(payload: {
   run?: Record<string, unknown>;
   candidates: Array<Record<string, unknown>>;
   prepId?: string | null;
+  analysisDispatchId?: string | null;
+  analysisMetadata?: Record<string, unknown> | null;
   watchlistSetId?: string | null;
   watchlistRunId?: string | null;
 }) {
@@ -3501,8 +3568,9 @@ export function createWatchlistReviewPrep(payload: {
   lookbackBars?: number;
   refreshIfStale?: boolean;
   providerPreference?: "app-default";
+  enqueueHermesAnalysis?: boolean;
 }) {
-  return adminFetch<WatchlistReviewPrepSummary & { ok: true }>("/api/watchlist-review/preps", {
+  return adminFetch<WatchlistReviewPrepCreateResponse>("/api/watchlist-review/preps", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -3510,6 +3578,14 @@ export function createWatchlistReviewPrep(payload: {
 
 export function getWatchlistReviewPrep(prepId: string) {
   return adminFetch<WatchlistReviewPrepSummary & { ok: true }>(`/api/watchlist-review/preps/${encodeURIComponent(prepId)}`);
+}
+
+export function getWatchlistReviewAnalysisDispatch(dispatchId: string) {
+  return adminFetch<{
+    ok: true;
+    dispatch: WatchlistReviewAnalysisDispatch;
+    summary: WatchlistReviewAnalysisDispatchSummary;
+  }>(`/api/watchlist-review/analysis-dispatches/${encodeURIComponent(dispatchId)}`);
 }
 
 export function getWatchlistReviewPrepBars(prepId: string, options?: { offset?: number; limit?: number; symbols?: string[] }) {
