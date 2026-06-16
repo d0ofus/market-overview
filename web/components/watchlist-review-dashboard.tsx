@@ -49,24 +49,6 @@ const WATCHLIST_REVIEW_CHART_STUDIES: TradingViewStudy[] = [10, 20, 50, 200].map
   id: "MASimple@tv-basicstudies",
   inputs: { length },
 }));
-const WATCHLIST_REVIEW_CHART_STUDIES_OVERRIDES = {
-  "moving average.ma.color": "#38BDF8",
-  "moving average.ma.linewidth": 2,
-  "moving average.plot.color": "#38BDF8",
-  "moving average.plot.linewidth": 2,
-  "moving average_1.ma.color": "#FACC15",
-  "moving average_1.ma.linewidth": 2,
-  "moving average_1.plot.color": "#FACC15",
-  "moving average_1.plot.linewidth": 2,
-  "moving average_2.ma.color": "#A78BFA",
-  "moving average_2.ma.linewidth": 2,
-  "moving average_2.plot.color": "#A78BFA",
-  "moving average_2.plot.linewidth": 2,
-  "moving average_3.ma.color": "#F8FAFC",
-  "moving average_3.ma.linewidth": 2,
-  "moving average_3.plot.color": "#F8FAFC",
-  "moving average_3.plot.linewidth": 2,
-};
 
 type FilterState = {
   q: string;
@@ -956,7 +938,6 @@ function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }:
               initialRange="3M"
               surface="plain"
               studies={WATCHLIST_REVIEW_CHART_STUDIES}
-              studiesOverrides={WATCHLIST_REVIEW_CHART_STUDIES_OVERRIDES}
               className="!border-0 !bg-transparent !p-0 !shadow-none"
             />
           </div>
