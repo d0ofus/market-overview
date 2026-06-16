@@ -7,7 +7,6 @@ import {
   Check,
   Download,
   FileJson,
-  Flag,
   Loader2,
   RefreshCw,
   Send,
@@ -19,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/admin/confirm-dialog";
+import { TradingViewWidget, type TradingViewStudy } from "@/components/tradingview-widget";
 import {
   approveAllWatchlistReviewCandidates,
   createWatchlistReviewRun,
@@ -45,6 +45,10 @@ const PRIMARY_BUTTON_CLASS = "inline-flex items-center justify-center gap-1.5 ro
 const DANGER_BUTTON_CLASS = "inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-500/10 px-2.5 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-50";
 const INPUT_CLASS = "w-full rounded-lg border border-borderSoft/80 bg-panelSoft/80 px-2.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
 const SELECT_CLASS = "w-full rounded-lg border border-borderSoft/80 bg-panelSoft/80 px-2.5 py-2 text-sm text-slate-100 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
+const WATCHLIST_REVIEW_CHART_STUDIES: TradingViewStudy[] = [10, 20, 50, 200].map((length) => ({
+  id: "MASimple@tv-basicstudies",
+  inputs: { length },
+}));
 
 type FilterState = {
   q: string;
@@ -876,9 +880,10 @@ function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }:
   const tags = sectorTags(candidate);
   const latestBar = typeof candidate.dataFreshness.latest_bar_date === "string" ? candidate.dataFreshness.latest_bar_date : null;
   const expectedBar = typeof candidate.dataFreshness.expected_latest_session === "string" ? candidate.dataFreshness.expected_latest_session : null;
+  const chartSymbol = candidate.tvSymbol ?? candidate.ticker;
   return (
     <article className={`card p-3 ${candidate.destructiveAction ? "border-rose-500/35" : ""}`}>
-      <div className="grid gap-3 2xl:grid-cols-[11rem,minmax(0,1fr),18rem]">
+      <div className="grid gap-3 lg:grid-cols-[11rem,minmax(0,1fr)] 2xl:grid-cols-[11rem,minmax(0,1fr),18rem]">
         <div className="space-y-3">
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -923,40 +928,54 @@ function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }:
             ) : null}
           </div>
 
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {METRIC_LABELS.map((metric) => (
-              <Metric key={metric.key} label={metric.label} value={metricValue(candidate.metrics, metric.key, metric)} />
-            ))}
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),15rem]">
-            <div className="space-y-1.5">
-              {candidate.reasons.length === 0 ? (
-                <div className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-500">No reason bullets supplied.</div>
-              ) : candidate.reasons.map((reason) => (
-                <div key={reason} className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{reason}</div>
-              ))}
+          <div className="grid gap-3 2xl:grid-cols-[minmax(0,1fr),17rem]">
+            <div className="min-w-0 space-y-3">
+              <div className="h-[20rem] min-h-0 overflow-hidden rounded-lg border border-borderSoft/70 bg-slate-950/50 p-2 sm:h-[23rem] 2xl:h-[26rem]">
+                <TradingViewWidget
+                  ticker={chartSymbol}
+                  chartOnly
+                  showStatusLine
+                  fillContainer
+                  heightMode="fill"
+                  initialRange="3M"
+                  surface="plain"
+                  studies={WATCHLIST_REVIEW_CHART_STUDIES}
+                  className="!border-0 !bg-transparent !p-0 !shadow-none"
+                />
+              </div>
+              <div className="space-y-1.5">
+                {candidate.reasons.length === 0 ? (
+                  <div className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-500">No reason bullets supplied.</div>
+                ) : candidate.reasons.map((reason) => (
+                  <div key={reason} className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{reason}</div>
+                ))}
+              </div>
             </div>
-            <div className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-400">
-              <div className="font-semibold text-slate-200">Context</div>
-              <div className="mt-1">{tags.length ? tags.join(" / ") : "-"}</div>
-              <div className="mt-2">Latest bar: <span className="font-mono text-slate-200">{latestBar ?? "-"}</span></div>
-              <div>Source: <span className="font-mono text-slate-200">{typeof candidate.dataFreshness.source === "string" ? candidate.dataFreshness.source : "-"}</span></div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                {METRIC_LABELS.map((metric) => {
+                  const wideMetric = metric.key === "cp_notes" || metric.key === "data_source";
+                  return (
+                    <Metric
+                      key={metric.key}
+                      label={metric.label}
+                      value={metricValue(candidate.metrics, metric.key, metric)}
+                      className={wideMetric ? "col-span-2" : ""}
+                    />
+                  );
+                })}
+              </div>
+              <div className="rounded-lg border border-borderSoft/60 bg-panelSoft/35 px-3 py-2 text-xs text-slate-400">
+                <div className="font-semibold text-slate-200">Context</div>
+                <div className="mt-1">{tags.length ? tags.join(" / ") : "-"}</div>
+                <div className="mt-2">Latest bar: <span className="font-mono text-slate-200">{latestBar ?? "-"}</span></div>
+                <div>Source: <span className="font-mono text-slate-200">{typeof candidate.dataFreshness.source === "string" ? candidate.dataFreshness.source : "-"}</span></div>
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="space-y-3">
-          <div className="aspect-[16/10] overflow-hidden rounded-lg border border-borderSoft/70 bg-slate-950/50">
-            {candidate.chartImageUrl ? (
-              <img className="h-full w-full object-cover" src={candidate.chartImageUrl} alt={`${candidate.ticker} chart snapshot`} />
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
-                <Flag className="h-5 w-5 text-slate-500" />
-                Chart snapshot placeholder
-              </div>
-            )}
-          </div>
+        <div className="space-y-3 lg:col-span-2 2xl:col-span-1">
           <div className="grid grid-cols-2 gap-2">
             <button className={PRIMARY_BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("approve")} type="button"><Check className="h-3.5 w-3.5" />Approve</button>
             <button className={BUTTON_CLASS} disabled={saving || actionsDisabled || candidate.status === "applied"} onClick={() => onAction("skip")} type="button"><SkipForward className="h-3.5 w-3.5" />Skip</button>
@@ -975,9 +994,9 @@ function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }:
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, className = "" }: { label: string; value: string; className?: string }) {
   return (
-    <div className="rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-2.5 py-2">
+    <div className={`rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-2.5 py-2 ${className}`.trim()}>
       <div className="text-[10px] uppercase tracking-[0.12em] text-slate-500">{label}</div>
       <div className="mt-1 truncate font-mono text-xs text-slate-100" title={value}>{value}</div>
     </div>

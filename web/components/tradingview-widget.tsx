@@ -14,6 +14,10 @@ export type TradingViewCompareSymbol = {
   lineColor?: string;
   lineWidth?: number;
 };
+export type TradingViewStudy = string | {
+  id: string;
+  inputs?: Record<string, boolean | number | string>;
+};
 type TradingViewChartStyle = "1" | "2" | "3";
 
 let cachedTheme: WidgetTheme = "dark";
@@ -65,6 +69,8 @@ export function TradingViewWidget({
   fillContainer = false,
   heightMode = "aspect",
   initialRange = "1M",
+  studies,
+  studiesOverrides,
   surface = "card",
   className = "",
 }: {
@@ -82,6 +88,8 @@ export function TradingViewWidget({
   fillContainer?: boolean;
   heightMode?: "aspect" | "fill";
   initialRange?: "1M" | "3M" | "6M" | "12M";
+  studies?: TradingViewStudy[];
+  studiesOverrides?: Record<string, boolean | number | string>;
   surface?: "card" | "plain";
   className?: string;
 }) {
@@ -119,6 +127,8 @@ export function TradingViewWidget({
     && array.findIndex((candidate) => candidate.symbol === item.symbol) === index
   ));
   const compareSymbolsKey = JSON.stringify(resolvedCompareSymbols);
+  const studiesKey = JSON.stringify(studies ?? []);
+  const studiesOverridesKey = JSON.stringify(studiesOverrides ?? {});
 
   useEffect(() => {
     return subscribeToTheme(setTheme);
@@ -144,7 +154,7 @@ export function TradingViewWidget({
 
   useEffect(() => {
     if (!ref.current || !shouldLoad) return;
-    const minWidth = size === "small" ? 280 : 360;
+    const minWidth = fillContainer ? 1 : size === "small" ? 280 : 360;
     const width = Math.max(minWidth, Math.min(ref.current.clientWidth, maxWidth));
     const height = heightMode === "fill"
       ? ref.current.clientHeight || Math.round(width * 0.75)
@@ -199,11 +209,13 @@ export function TradingViewWidget({
       withdateranges: chartOnly ? false : true,
       calendar: showCorporateEvents,
       save_image: false,
+      studies: studies && studies.length > 0 ? studies : undefined,
+      studies_overrides: studiesOverrides && Object.keys(studiesOverrides).length > 0 ? studiesOverrides : undefined,
       compareSymbols: serializedCompareSymbols,
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, chartStyle, compareSymbolsKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
+  }, [ticker, chartStyle, compareSymbolsKey, studiesKey, studiesOverridesKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"
