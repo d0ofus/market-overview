@@ -345,6 +345,7 @@ export function WatchlistReviewDashboard() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WatchlistReviewRunDetail | null>(null);
   const [locallyHiddenCandidateIds, setLocallyHiddenCandidateIds] = useState<Set<string>>(() => new Set());
+  const [pendingCandidateIds, setPendingCandidateIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -386,6 +387,7 @@ export function WatchlistReviewDashboard() {
       const res = await getWatchlistReviewRun(runId);
       setDetail(res);
       setLocallyHiddenCandidateIds(new Set());
+      setPendingCandidateIds(new Set());
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load review run." });
     } finally {
@@ -401,6 +403,7 @@ export function WatchlistReviewDashboard() {
     if (!selectedRunId) {
       setDetail(null);
       setLocallyHiddenCandidateIds(new Set());
+      setPendingCandidateIds(new Set());
       return;
     }
     void loadDetail(selectedRunId);
@@ -414,6 +417,26 @@ export function WatchlistReviewDashboard() {
     }, 10_000);
     return () => window.clearInterval(id);
   }, [selectedRunId, detail?.run.applyStatus]);
+
+  useEffect(() => {
+    if (!detail?.run) return;
+    const detailRun = detail.run;
+    setRuns((current) => current.map((run) => (
+      run.id === detailRun.id
+        ? {
+            ...run,
+            candidateCount: detailRun.candidateCount,
+            pendingCount: detailRun.pendingCount,
+            approvedCount: detailRun.approvedCount,
+            skippedCount: detailRun.skippedCount,
+            destructiveCount: detailRun.destructiveCount,
+            status: detailRun.status,
+            summaryCounts: detailRun.summaryCounts,
+            updatedAt: detailRun.updatedAt,
+          }
+        : run
+    )));
+  }, [detail?.run]);
 
   const candidates = detail?.candidates ?? [];
   const sectorOptions = useMemo(() => Array.from(new Set(candidates.flatMap(sectorTags))).sort(), [candidates]);
@@ -447,6 +470,8 @@ export function WatchlistReviewDashboard() {
     && approvedApplyCandidates.length > 0
     && approvedApplyDestructive.every((candidate) => candidate.destructiveConfirmed)
     && !dispatchStarted;
+  const hasPendingCandidateSave = pendingCandidateIds.size > 0;
+  const globalActionDisabled = saving || hasPendingCandidateSave;
 
   const refreshSelected = async () => {
     if (selectedRunId) await loadDetail(selectedRunId);
@@ -462,7 +487,21 @@ export function WatchlistReviewDashboard() {
       setMessage({ tone: "danger", text: "This run has already been sent to Hermes, so review edits are locked." });
       return false;
     }
-    setSaving(true);
+    const shouldOptimisticallyHide = action !== "note";
+    if (shouldOptimisticallyHide) {
+      setPendingCandidateIds((current) => {
+        const next = new Set(current);
+        next.add(candidate.id);
+        return next;
+      });
+      setLocallyHiddenCandidateIds((current) => {
+        const next = new Set(current);
+        next.add(candidate.id);
+        return next;
+      });
+    } else {
+      setSaving(true);
+    }
     try {
       const res = await patchWatchlistReviewCandidate(candidate.id, {
         action,
@@ -471,39 +510,31 @@ export function WatchlistReviewDashboard() {
         userNote: options?.userNote,
         removalReason: options?.removalReason,
       });
-      const nextDetail = detail ? applyCandidatePatchToDetail(detail, res.candidate) : null;
-      if (nextDetail) {
-        setDetail(nextDetail);
-        setRuns((current) => current.map((run) => (
-          run.id === nextDetail.run.id
-            ? {
-                ...run,
-                candidateCount: nextDetail.run.candidateCount,
-                pendingCount: nextDetail.run.pendingCount,
-                approvedCount: nextDetail.run.approvedCount,
-                skippedCount: nextDetail.run.skippedCount,
-                destructiveCount: nextDetail.run.destructiveCount,
-                status: nextDetail.run.status,
-                summaryCounts: nextDetail.run.summaryCounts,
-                updatedAt: nextDetail.run.updatedAt,
-              }
-            : run
-        )));
-      }
-      if (action !== "note") {
-        setLocallyHiddenCandidateIds((current) => {
-          const next = new Set(current);
-          next.add(res.candidate.id);
-          return next;
-        });
-      }
+      setDetail((currentDetail) => (
+        currentDetail ? applyCandidatePatchToDetail(currentDetail, res.candidate) : currentDetail
+      ));
       setMessage({ tone: "success", text: `${candidate.ticker} updated.` });
       return true;
     } catch (error) {
+      if (shouldOptimisticallyHide) {
+        setLocallyHiddenCandidateIds((current) => {
+          const next = new Set(current);
+          next.delete(candidate.id);
+          return next;
+        });
+      }
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to update candidate." });
       return false;
     } finally {
-      setSaving(false);
+      if (shouldOptimisticallyHide) {
+        setPendingCandidateIds((current) => {
+          const next = new Set(current);
+          next.delete(candidate.id);
+          return next;
+        });
+      } else {
+        setSaving(false);
+      }
     }
   };
 
@@ -692,6 +723,7 @@ export function WatchlistReviewDashboard() {
       setSelectedRunId(res.run.id);
       setDetail({ run: res.run, candidates: res.candidates, events: res.events });
       setLocallyHiddenCandidateIds(new Set());
+      setPendingCandidateIds(new Set());
       setMessage({ tone: "success", text: `Imported ${res.candidates.length} review candidates.` });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Import failed." });
@@ -751,7 +783,7 @@ export function WatchlistReviewDashboard() {
                 value={importText}
                 onChange={(event) => setImportText(event.target.value)}
               />
-              <button className={`${PRIMARY_BUTTON_CLASS} w-full`} disabled={saving || !importText.trim()} onClick={() => void submitImport()} type="button">
+              <button className={`${PRIMARY_BUTTON_CLASS} w-full`} disabled={globalActionDisabled || !importText.trim()} onClick={() => void submitImport()} type="button">
                 <FileJson className="h-3.5 w-3.5" />
                 Load Review Run
               </button>
@@ -794,24 +826,24 @@ export function WatchlistReviewDashboard() {
                 <FileJson className="h-3.5 w-3.5" />
                 Compiler
               </Link>
-              <button className={PRIMARY_BUTTON_CLASS} disabled={saving || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchApprove()} type="button">
+              <button className={PRIMARY_BUTTON_CLASS} disabled={globalActionDisabled || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchApprove()} type="button">
                 <Check className="h-3.5 w-3.5" />
                 Approve all visible
               </button>
-              <button className={BUTTON_CLASS} disabled={saving || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchSkip()} type="button">
+              <button className={BUTTON_CLASS} disabled={globalActionDisabled || dispatchStarted || visiblePending.length === 0} onClick={() => void runBatchSkip()} type="button">
                 <SkipForward className="h-3.5 w-3.5" />
                 Skip all visible
               </button>
-              <button className={BUTTON_CLASS} disabled={saving || !detail || !candidates.some(approvedForExport)} onClick={() => void exportRun()} type="button">
+              <button className={BUTTON_CLASS} disabled={globalActionDisabled || !detail || !candidates.some(approvedForExport)} onClick={() => void exportRun()} type="button">
                 <Download className="h-3.5 w-3.5" />
                 Export approved
               </button>
-              <button className={PRIMARY_BUTTON_CLASS} disabled={saving || !canSendToHermes} onClick={() => void sendToHermes()} type="button">
+              <button className={PRIMARY_BUTTON_CLASS} disabled={globalActionDisabled || !canSendToHermes} onClick={() => void sendToHermes()} type="button">
                 <Send className="h-3.5 w-3.5" />
                 Send approved changes to Hermes
               </button>
               {canRetryWebhook ? (
-                <button className={BUTTON_CLASS} disabled={saving} onClick={() => void sendToHermes(false, true)} type="button">
+                <button className={BUTTON_CLASS} disabled={globalActionDisabled} onClick={() => void sendToHermes(false, true)} type="button">
                   <RefreshCw className="h-3.5 w-3.5" />
                   Retry Hermes webhook
                 </button>
@@ -891,7 +923,7 @@ export function WatchlistReviewDashboard() {
               <CandidateCard
                 key={candidate.id}
                 candidate={candidate}
-                saving={saving}
+                saving={saving || pendingCandidateIds.has(candidate.id)}
                 actionsDisabled={dispatchStarted}
                 onAction={(action) => {
                   if (action === "unflag_remove") {
