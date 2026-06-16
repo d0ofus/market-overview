@@ -38,6 +38,7 @@ import {
   type WatchlistReviewRunApplyStatus,
   type WatchlistReviewRun,
   type WatchlistReviewRunDetail,
+  type WatchlistReviewSummaryCounts,
 } from "@/lib/api";
 
 const BUTTON_CLASS = "inline-flex items-center justify-center gap-1.5 rounded-lg border border-borderSoft/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-50";
@@ -268,6 +269,76 @@ function firstRunId(rows: WatchlistReviewRun[]) {
   return rows[0]?.id ?? null;
 }
 
+const EMPTY_SUMMARY_COUNTS: WatchlistReviewSummaryCounts = {
+  red_to_blue: 0,
+  red_to_yellow: 0,
+  blue_to_red: 0,
+  blue_to_yellow: 0,
+  yellow_to_blue: 0,
+  yellow_to_red: 0,
+  unflag: 0,
+  keep_current: 0,
+  manual_review: 0,
+};
+
+function summaryKey(type: WatchlistReviewRecommendationType): keyof WatchlistReviewSummaryCounts {
+  if (type === "RED_TO_BLUE") return "red_to_blue";
+  if (type === "RED_TO_YELLOW") return "red_to_yellow";
+  if (type === "BLUE_TO_RED") return "blue_to_red";
+  if (type === "BLUE_TO_YELLOW") return "blue_to_yellow";
+  if (type === "YELLOW_TO_BLUE") return "yellow_to_blue";
+  if (type === "YELLOW_TO_RED") return "yellow_to_red";
+  if (type === "ANY_TO_UNFLAG") return "unflag";
+  if (type === "KEEP_CURRENT") return "keep_current";
+  return "manual_review";
+}
+
+function computeSummaryCounts(candidates: WatchlistReviewCandidate[]): WatchlistReviewSummaryCounts {
+  const counts = { ...EMPTY_SUMMARY_COUNTS };
+  for (const candidate of candidates) counts[summaryKey(candidate.recommendationType)] += 1;
+  return counts;
+}
+
+function countCandidates(candidates: WatchlistReviewCandidate[]) {
+  return {
+    candidateCount: candidates.length,
+    pendingCount: candidates.filter((candidate) => candidate.status === "pending").length,
+    approvedCount: candidates.filter(approvedForExport).length,
+    skippedCount: candidates.filter((candidate) => candidate.status === "skipped").length,
+    destructiveCount: candidates.filter((candidate) => candidate.destructiveAction).length,
+  };
+}
+
+function runStatusForCandidates(candidates: WatchlistReviewCandidate[]): WatchlistReviewRun["status"] {
+  const decisionCount = candidates.filter((candidate) => candidate.status !== "pending").length;
+  const appliedCount = candidates.filter((candidate) => candidate.status === "applied").length;
+  if (candidates.length > 0 && appliedCount === candidates.length) return "applied";
+  return decisionCount > 0 ? "partially_approved" : "ready";
+}
+
+function applyCandidatePatchToDetail(detail: WatchlistReviewRunDetail, updatedCandidate: WatchlistReviewCandidate): WatchlistReviewRunDetail {
+  if (detail.run.id !== updatedCandidate.runId) return detail;
+  let replaced = false;
+  const candidates = detail.candidates.map((candidate) => {
+    if (candidate.id !== updatedCandidate.id) return candidate;
+    replaced = true;
+    return updatedCandidate;
+  });
+  if (!replaced) return detail;
+  const updatedAt = updatedCandidate.updatedAt || detail.run.updatedAt;
+  return {
+    ...detail,
+    run: {
+      ...detail.run,
+      ...countCandidates(candidates),
+      status: runStatusForCandidates(candidates),
+      summaryCounts: computeSummaryCounts(candidates),
+      updatedAt,
+    },
+    candidates,
+  };
+}
+
 export function WatchlistReviewDashboard() {
   const [initialRunId] = useState(() => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("runId")));
   const [runs, setRuns] = useState<WatchlistReviewRun[]>([]);
@@ -385,21 +456,41 @@ export function WatchlistReviewDashboard() {
   ) => {
     if (dispatchStarted) {
       setMessage({ tone: "danger", text: "This run has already been sent to Hermes, so review edits are locked." });
-      return;
+      return false;
     }
     setSaving(true);
     try {
-      await patchWatchlistReviewCandidate(candidate.id, {
+      const res = await patchWatchlistReviewCandidate(candidate.id, {
         action,
         approvedBy: "authorized-user",
         destructiveConfirmed: options?.destructiveConfirmed,
         userNote: options?.userNote,
         removalReason: options?.removalReason,
       });
-      await refreshSelected();
+      const nextDetail = detail ? applyCandidatePatchToDetail(detail, res.candidate) : null;
+      if (nextDetail) {
+        setDetail(nextDetail);
+        setRuns((current) => current.map((run) => (
+          run.id === nextDetail.run.id
+            ? {
+                ...run,
+                candidateCount: nextDetail.run.candidateCount,
+                pendingCount: nextDetail.run.pendingCount,
+                approvedCount: nextDetail.run.approvedCount,
+                skippedCount: nextDetail.run.skippedCount,
+                destructiveCount: nextDetail.run.destructiveCount,
+                status: nextDetail.run.status,
+                summaryCounts: nextDetail.run.summaryCounts,
+                updatedAt: nextDetail.run.updatedAt,
+              }
+            : run
+        )));
+      }
       setMessage({ tone: "success", text: `${candidate.ticker} updated.` });
+      return true;
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to update candidate." });
+      return false;
     } finally {
       setSaving(false);
     }
@@ -806,25 +897,27 @@ export function WatchlistReviewDashboard() {
       </section>
 
       {noteCandidate ? (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" onClick={() => setNoteCandidate(null)}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" onClick={() => {
+          if (!saving) setNoteCandidate(null);
+        }}>
           <div className="card w-full max-w-xl p-4" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold text-slate-100">Note for {noteCandidate.ticker}</h3>
                 <p className="text-xs text-slate-400">Stored with the candidate and included in approved exports.</p>
               </div>
-              <button className={BUTTON_CLASS} onClick={() => setNoteCandidate(null)} type="button"><X className="h-3.5 w-3.5" /></button>
+              <button className={BUTTON_CLASS} disabled={saving} onClick={() => setNoteCandidate(null)} type="button"><X className="h-3.5 w-3.5" /></button>
             </div>
-            <textarea className={`${INPUT_CLASS} mt-4 min-h-36`} value={noteText} onChange={(event) => setNoteText(event.target.value)} />
+            <textarea className={`${INPUT_CLASS} mt-4 min-h-36`} disabled={saving} value={noteText} onChange={(event) => setNoteText(event.target.value)} />
             <div className="mt-3 flex justify-end gap-2">
-              <button className={BUTTON_CLASS} onClick={() => setNoteCandidate(null)} type="button">Cancel</button>
+              <button className={BUTTON_CLASS} disabled={saving} onClick={() => setNoteCandidate(null)} type="button">Cancel</button>
               <button
                 className={PRIMARY_BUTTON_CLASS}
                 disabled={saving}
                 onClick={async () => {
                   const candidate = noteCandidate;
-                  setNoteCandidate(null);
-                  await mutateCandidate(candidate, "note", { userNote: noteText });
+                  const saved = await mutateCandidate(candidate, "note", { userNote: noteText });
+                  if (saved) setNoteCandidate(null);
                 }}
                 type="button"
               >
