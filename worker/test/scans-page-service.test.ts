@@ -15,6 +15,7 @@ import {
   fetchTradingViewScanRows,
   loadCompiledScansSnapshot,
   loadCompiledScansSnapshotForCompilePreset,
+  loadScanCompilePresetByName,
   normalizeScanRows,
   processManualRelativeStrengthScanRun,
   processRelativeStrengthRefreshJob,
@@ -1533,6 +1534,22 @@ describe("scans page service", () => {
     expect(payload.range).toEqual([0, 1000]);
   });
 
+  it("builds Daily - Above 200 SMA payload with close above SMA200 comparison", () => {
+    const payload = buildTradingViewScanPayload({
+      ...topGainersPreset,
+      name: "Daily - Above 200 SMA",
+      rules: [
+        { id: "close-above-sma200", field: "close", operator: "gt", value: { type: "field", field: "SMA200" } },
+        { id: "type", field: "type", operator: "in", value: ["stock", "dr"] },
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ", "NYSE", "AMEX"] },
+      ],
+    });
+
+    expect(payload.filter).toContainEqual({ left: "close", operation: "greater", right: "SMA200" });
+    expect(payload.columns).toContain("close");
+    expect(payload.columns).toContain("SMA200");
+  });
+
   it("applies string post-filters after the TradingView response is parsed", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -3023,6 +3040,30 @@ describe("scans page service", () => {
     expect(result.benchmarkTicker).toBe("SPY");
     expect(result.outputMode).toBe("rs_new_high_only");
     expect(result.rules).toEqual(topGainersPreset.rules);
+  });
+
+  it("loads a scan compile preset by name", async () => {
+    const compilePresetRows = [
+      { id: "compile-a", name: "Daily - Above 200 SMA", createdAt: "", updatedAt: "", scanPresetId: "preset-a", scanPresetName: "Above 200", sortOrder: 1 },
+      { id: "compile-b", name: "Other", createdAt: "", updatedAt: "", scanPresetId: "preset-b", scanPresetName: "Other Scan", sortOrder: 1 },
+    ];
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            async all() {
+              if (query.includes("FROM scan_compile_presets cp")) return { results: compilePresetRows };
+              return { results: [] };
+            },
+          };
+        },
+      },
+    } as any;
+
+    const result = await loadScanCompilePresetByName(env, "daily - above 200 sma");
+
+    expect(result?.id).toBe("compile-a");
+    expect(result?.members.map((member) => member.scanPresetId)).toEqual(["preset-a"]);
   });
 
   it("loads compiled rows from a saved compile preset", async () => {

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MARKET_COMMENTARY_SETTINGS,
+  DEFAULT_MARKET_COMMENTARY_PROMPT,
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
   maybeRunScheduledMarketCommentary,
   pruneMarketCommentaryReports,
   renderMarketCommentaryQueryTemplate,
+  summarizeDailyAbove200SmaScanEvidence,
   refreshMarketCommentary,
   shouldRunScheduledMarketCommentary,
   updateMarketCommentarySettings,
@@ -267,6 +269,40 @@ describe("market commentary service", () => {
       },
     );
     expect(rendered).toBe("market 2026-05-25 2026-05-25 2026-05-25 after_hours");
+  });
+
+  it("summarizes Daily - Above 200 SMA scan evidence as notable mover and theme input", () => {
+    const summary = summarizeDailyAbove200SmaScanEvidence({
+      compilePresetId: "compile-above-200",
+      compilePresetName: "Daily - Above 200 SMA",
+      refreshedCount: 2,
+      failedCount: 0,
+      snapshot: {
+        compilePresetId: "compile-above-200",
+        compilePresetName: "Daily - Above 200 SMA",
+        presetIds: ["preset-a", "preset-b"],
+        presetNames: ["Leaders", "Breakouts"],
+        generatedAt: "2026-06-15T22:15:00.000Z",
+        rows: [
+          { ticker: "NVDA", name: "NVIDIA", sector: "Technology", industry: "Semiconductors", occurrences: 2, presetIds: ["preset-a", "preset-b"], presetNames: ["Leaders", "Breakouts"], latestPrice: 130, latestChange1d: 6.4, latestMarketCap: 3_000_000_000_000, latestRelativeVolume: 2.1 },
+          { ticker: "ANET", name: "Arista Networks", sector: "Technology", industry: "Computer Communications", occurrences: 1, presetIds: ["preset-a"], presetNames: ["Leaders"], latestPrice: 90, latestChange1d: 4.1, latestMarketCap: 120_000_000_000, latestRelativeVolume: 1.6 },
+          { ticker: "VRT", name: "Vertiv", sector: "Industrials", industry: "Electrical Products", occurrences: 1, presetIds: ["preset-b"], presetNames: ["Breakouts"], latestPrice: 105, latestChange1d: 3.8, latestMarketCap: 40_000_000_000, latestRelativeVolume: 1.9 },
+        ],
+      },
+      memberResults: [],
+    });
+
+    expect(summary).toContain("Daily - Above 200 SMA");
+    expect(summary).toContain("Notable individual movers");
+    expect(summary).toContain("NVDA (NVIDIA): 1D 6.40%");
+    expect(summary).toContain("Technology / Semiconductors");
+    expect(summary).toContain("Use this as trader-attention evidence");
+    expect(summary).toContain("Do not infer catalysts from scan membership alone");
+  });
+
+  it("instructs final LLM synthesis to omit low-importance report content", () => {
+    expect(DEFAULT_MARKET_COMMENTARY_PROMPT).toContain("omit it rather than reporting for completeness");
+    expect(DEFAULT_MARKET_COMMENTARY_PROMPT).toContain("Do not include sections or source summaries just because data exists");
   });
 
   it("runs the configured Melbourne schedule at or after the target time on configured days", () => {

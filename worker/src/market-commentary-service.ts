@@ -12,6 +12,14 @@ import {
 } from "./market-report-common";
 import { getUsMarketSessionContext, type UsMarketSessionContext } from "./market-calendar";
 import { parseLocalTime, zonedParts } from "./refresh-timing";
+import {
+  loadCompiledScansSnapshotForCompilePreset,
+  loadScanCompilePresetByName,
+  refreshScanCompilePreset,
+  type CompiledScansSnapshot,
+  type CompiledScanUniqueTickerRow,
+  type ScanCompilePresetRefreshResult,
+} from "./scans-page-service";
 import type { Env, SnapshotResponse } from "./types";
 
 export type MarketCommentaryStatus = "ready" | "failed";
@@ -73,6 +81,7 @@ type MarketEvidence = {
   dashboardSummary: string;
   fedWatchSummary: string;
   searchSummary: string;
+  compiledScanSummary: string;
   sourceAudit: MarketCommentarySourceAudit[];
   dataQuality: MarketCommentaryDataQuality[];
 };
@@ -184,6 +193,8 @@ Hard rules:
 - Do not provide personalized financial advice. Frame output as market commentary and risk analysis.
 - Use exact dates and state whether the report is closing-data, intraday, pre-market, or closed-market based.
 - If US cash equities are closed for a holiday/weekend, clearly say so and use the most recent completed trading session for closing data.
+- Synthesize the evidence packet instead of enumerating every source. If a source, section, or scan row is not important to the session, omit it rather than reporting for completeness.
+- Do not include sections or source summaries just because data exists. Focus the report on what changed, what matters, and what traders are likely paying attention to.
 
 Report title:
 "US Market State of Play - [DATE]"
@@ -645,6 +656,137 @@ async function summarizeSearch(env: Env, session: UsMarketSessionContext, settin
   }
 }
 
+const DAILY_ABOVE_200_SMA_SCAN_NAME = "Daily - Above 200 SMA";
+
+function formatMaybePercent(value: number | null): string {
+  return value == null || !Number.isFinite(value) ? "N/A" : `${value.toFixed(2)}%`;
+}
+
+function formatScanMover(row: CompiledScanUniqueTickerRow): string {
+  const industry = [row.sector, row.industry].filter(Boolean).join(" / ") || "sector/industry N/A";
+  const presets = row.presetNames.length > 0 ? row.presetNames.join(", ") : "preset N/A";
+  const relativeVolume = row.latestRelativeVolume == null ? "rel vol N/A" : `rel vol ${row.latestRelativeVolume.toFixed(2)}x`;
+  return `${row.ticker} (${row.name ?? row.ticker}): 1D ${formatMaybePercent(row.latestChange1d)}, ${industry}, occurrences ${row.occurrences}, ${relativeVolume}, presets ${presets}`;
+}
+
+function summarizeScanClusters(rows: CompiledScanUniqueTickerRow[]): string[] {
+  const clusters = new Map<string, CompiledScanUniqueTickerRow[]>();
+  for (const row of rows) {
+    const key = [row.sector, row.industry].filter(Boolean).join(" / ") || "Unclassified";
+    clusters.set(key, [...(clusters.get(key) ?? []), row]);
+  }
+  return Array.from(clusters.entries())
+    .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+    .slice(0, 8)
+    .map(([label, clusterRows]) => {
+      const tickers = clusterRows
+        .sort((left, right) => (right.latestChange1d ?? Number.NEGATIVE_INFINITY) - (left.latestChange1d ?? Number.NEGATIVE_INFINITY))
+        .slice(0, 8)
+        .map((row) => `${row.ticker}${row.latestChange1d == null ? "" : ` ${row.latestChange1d.toFixed(2)}%`}`)
+        .join(", ");
+      return `${label}: ${clusterRows.length} row${clusterRows.length === 1 ? "" : "s"} (${tickers})`;
+    });
+}
+
+export function summarizeDailyAbove200SmaScanEvidence(
+  result: Pick<ScanCompilePresetRefreshResult, "compilePresetId" | "compilePresetName" | "refreshedCount" | "failedCount" | "snapshot" | "memberResults">,
+  options?: { usedFallback?: boolean; warning?: string | null },
+): string {
+  const rows = [...result.snapshot.rows].sort((left, right) => {
+    if (right.occurrences !== left.occurrences) return right.occurrences - left.occurrences;
+    return (right.latestChange1d ?? Number.NEGATIVE_INFINITY) - (left.latestChange1d ?? Number.NEGATIVE_INFINITY);
+  });
+  const notableMovers = rows.slice(0, 12).map(formatScanMover);
+  const clusters = summarizeScanClusters(rows);
+  const failedMembers = result.memberResults
+    .filter((member) => member.status === "error" || member.status === "failed" || member.usedFallback)
+    .map((member) => `${member.presetName}: ${member.status}${member.usedFallback ? " using fallback" : ""}${member.error ? ` (${member.error})` : ""}`);
+
+  return [
+    `Compiled scan: ${result.compilePresetName} (${result.compilePresetId}); generated ${result.snapshot.generatedAt}; rows ${result.snapshot.rows.length}; refreshed members ${result.refreshedCount}; failed members ${result.failedCount}.${options?.usedFallback ? " Used latest usable fallback snapshot." : ""}`,
+    options?.warning ? `Refresh warning: ${options.warning}` : null,
+    "Use this as trader-attention evidence: notable names in this scan may show which stocks/themes traders are focusing on this session.",
+    "Do not infer catalysts from scan membership alone; link movers to broader market themes only when alerts/news/search/dashboard evidence supports it.",
+    notableMovers.length > 0 ? `Notable individual movers: ${notableMovers.join("; ")}` : "Notable individual movers: N/A.",
+    clusters.length > 0 ? `Sector/industry clusters: ${clusters.join("; ")}` : "Sector/industry clusters: N/A.",
+    failedMembers.length > 0 ? `Member warnings: ${failedMembers.join("; ")}` : null,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+async function summarizeDailyAbove200SmaScan(env: Env, dataQuality: MarketCommentaryDataQuality[], sourceAudit: MarketCommentarySourceAudit[]): Promise<string> {
+  let compilePresetId: string | null = null;
+  try {
+    const compilePreset = await loadScanCompilePresetByName(env, DAILY_ABOVE_200_SMA_SCAN_NAME);
+    if (!compilePreset) {
+      dataQuality.push({
+        metric: DAILY_ABOVE_200_SMA_SCAN_NAME,
+        status: "not_configured",
+        note: `Compiled scan preset named "${DAILY_ABOVE_200_SMA_SCAN_NAME}" was not found; scan evidence omitted.`,
+      });
+      return `${DAILY_ABOVE_200_SMA_SCAN_NAME}: N/A. Compile preset not found.`;
+    }
+    compilePresetId = compilePreset.id;
+    const result = await refreshScanCompilePreset(env, compilePreset.id);
+    sourceAudit.push({
+      sourceName: `/scans compiled preset: ${result.compilePresetName}`,
+      url: null,
+      dataUsed: "Refreshed compiled scan rows for breadth, leadership, and notable trader-attention movers",
+      timestamp: result.snapshot.generatedAt,
+      note: `Rows ${result.snapshot.rows.length}; refreshed members ${result.refreshedCount}; failed members ${result.failedCount}.`,
+    });
+    dataQuality.push({
+      metric: DAILY_ABOVE_200_SMA_SCAN_NAME,
+      status: result.failedCount > 0 ? "stale" : "ok",
+      note: result.failedCount > 0
+        ? `Refreshed with ${result.failedCount} member failure(s); latest usable fallback rows may be included.`
+        : `Refreshed compiled scan successfully with ${result.snapshot.rows.length} unique rows.`,
+    });
+    return summarizeDailyAbove200SmaScanEvidence(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Compiled scan refresh failed.";
+    if (compilePresetId) {
+      try {
+        const snapshot = await loadCompiledScansSnapshotForCompilePreset(env, compilePresetId);
+        const fallbackResult: Pick<ScanCompilePresetRefreshResult, "compilePresetId" | "compilePresetName" | "refreshedCount" | "failedCount" | "snapshot" | "memberResults"> = {
+          compilePresetId,
+          compilePresetName: snapshot.compilePresetName ?? DAILY_ABOVE_200_SMA_SCAN_NAME,
+          refreshedCount: 0,
+          failedCount: snapshot.presetIds.length,
+          snapshot: snapshot as CompiledScansSnapshot,
+          memberResults: [],
+        };
+        sourceAudit.push({
+          sourceName: `/scans compiled preset: ${fallbackResult.compilePresetName}`,
+          url: null,
+          dataUsed: "Fallback latest usable compiled scan rows after refresh failure",
+          timestamp: snapshot.generatedAt,
+          note: message,
+        });
+        dataQuality.push({
+          metric: DAILY_ABOVE_200_SMA_SCAN_NAME,
+          status: "stale",
+          note: `Refresh failed; used latest usable compiled scan snapshot. ${message}`,
+        });
+        return summarizeDailyAbove200SmaScanEvidence(fallbackResult, { usedFallback: true, warning: message });
+      } catch (fallbackError) {
+        const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : "No fallback compiled scan snapshot available.";
+        dataQuality.push({
+          metric: DAILY_ABOVE_200_SMA_SCAN_NAME,
+          status: "unavailable",
+          note: `Refresh failed and fallback snapshot unavailable. ${message}; ${fallbackMessage}`,
+        });
+        return `${DAILY_ABOVE_200_SMA_SCAN_NAME}: N/A. ${message}; ${fallbackMessage}`;
+      }
+    }
+    dataQuality.push({
+      metric: DAILY_ABOVE_200_SMA_SCAN_NAME,
+      status: "unavailable",
+      note: message,
+    });
+    return `${DAILY_ABOVE_200_SMA_SCAN_NAME}: N/A. ${message}`;
+  }
+}
+
 async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, settings: MarketCommentarySettings, snapshotOverride?: SnapshotResponse | null): Promise<MarketEvidence> {
   const sourceAudit = [...settings.staticSources];
   const dataQuality: MarketCommentaryDataQuality[] = [
@@ -685,12 +827,14 @@ async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, s
 
   const fedWatchSummary = await summarizeFedWatch(env, dataQuality, sourceAudit);
   const searchSummary = await summarizeSearch(env, session, settings, dataQuality, sourceAudit);
+  const compiledScanSummary = await summarizeDailyAbove200SmaScan(env, dataQuality, sourceAudit);
 
   return {
     session,
     dashboardSummary: summarizeDashboard(snapshot, session),
     fedWatchSummary,
     searchSummary,
+    compiledScanSummary,
     sourceAudit,
     dataQuality,
   };
@@ -721,6 +865,10 @@ function buildPrompt(evidence: MarketEvidence, settings: MarketCommentarySetting
     "",
     "FRESH WEB / NEWS SEARCH RESULTS",
     evidence.searchSummary,
+    "",
+    "COMPILED SCAN EVIDENCE — DAILY ABOVE 200 SMA",
+    "Use this as breadth/leadership evidence and as a source of notable individual movers attracting trader attention. Mention scan-derived individual tickers only when they are materially notable, and link them to market themes only when another evidence source supports the link. Omit low-importance scan facts.",
+    evidence.compiledScanSummary,
     "",
     "DATA QUALITY NOTES",
     JSON.stringify(evidence.dataQuality, null, 2),

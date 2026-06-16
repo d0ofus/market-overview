@@ -1421,6 +1421,12 @@ export async function loadScanCompilePreset(env: Env, compilePresetId: string): 
   return (await queryScanCompilePresets(env, compilePresetId))[0] ?? null;
 }
 
+export async function loadScanCompilePresetByName(env: Env, name: string): Promise<ScanCompilePresetDetail | null> {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return null;
+  return (await queryScanCompilePresets(env)).find((preset) => preset.name.trim().toLowerCase() === normalized) ?? null;
+}
+
 async function resolveCompilePresetMemberIds(env: Env, scanPresetIds: string[]): Promise<string[]> {
   const normalized = Array.from(new Set(
     scanPresetIds
