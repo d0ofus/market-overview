@@ -344,6 +344,7 @@ export function WatchlistReviewDashboard() {
   const [runs, setRuns] = useState<WatchlistReviewRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WatchlistReviewRunDetail | null>(null);
+  const [locallyHiddenCandidateIds, setLocallyHiddenCandidateIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -384,6 +385,7 @@ export function WatchlistReviewDashboard() {
     try {
       const res = await getWatchlistReviewRun(runId);
       setDetail(res);
+      setLocallyHiddenCandidateIds(new Set());
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load review run." });
     } finally {
@@ -398,6 +400,7 @@ export function WatchlistReviewDashboard() {
   useEffect(() => {
     if (!selectedRunId) {
       setDetail(null);
+      setLocallyHiddenCandidateIds(new Set());
       return;
     }
     void loadDetail(selectedRunId);
@@ -418,6 +421,7 @@ export function WatchlistReviewDashboard() {
     const minConfidence = Number(filters.confidence) || 0;
     const q = filters.q.trim().toUpperCase();
     return candidates.filter((candidate) => {
+      if (locallyHiddenCandidateIds.has(candidate.id)) return false;
       if (q && !candidate.ticker.includes(q) && !(candidate.companyName ?? "").toUpperCase().includes(q)) return false;
       if (filters.movement !== "all" && candidate.recommendationType !== filters.movement) return false;
       if (filters.currentFlag !== "all" && candidate.currentFlag !== filters.currentFlag) return false;
@@ -430,7 +434,7 @@ export function WatchlistReviewDashboard() {
       if (filters.destructive === "non_destructive" && candidate.destructiveAction) return false;
       return true;
     });
-  }, [candidates, filters]);
+  }, [candidates, filters, locallyHiddenCandidateIds]);
 
   const visiblePending = visibleCandidates.filter((candidate) => candidate.status === "pending");
   const visibleApprovedDestructive = visibleCandidates.filter((candidate) => approvedForExport(candidate) && candidate.destructiveAction);
@@ -485,6 +489,13 @@ export function WatchlistReviewDashboard() {
               }
             : run
         )));
+      }
+      if (action !== "note") {
+        setLocallyHiddenCandidateIds((current) => {
+          const next = new Set(current);
+          next.add(res.candidate.id);
+          return next;
+        });
       }
       setMessage({ tone: "success", text: `${candidate.ticker} updated.` });
       return true;
@@ -557,7 +568,10 @@ export function WatchlistReviewDashboard() {
         destructiveConfirmed,
         approvedBy: "authorized-user",
       });
-      if (res.detail) setDetail(res.detail);
+      if (res.detail) {
+        setDetail(res.detail);
+        setLocallyHiddenCandidateIds(new Set());
+      }
       await loadRuns(detail.run.id);
       setMessage({ tone: "success", text: `Approved ${res.updated} visible candidate${res.updated === 1 ? "" : "s"}.` });
     } catch (error) {
@@ -581,7 +595,10 @@ export function WatchlistReviewDashboard() {
         candidateIds: ids,
         approvedBy: "authorized-user",
       });
-      if (res.detail) setDetail(res.detail);
+      if (res.detail) {
+        setDetail(res.detail);
+        setLocallyHiddenCandidateIds(new Set());
+      }
       await loadRuns(detail.run.id);
       setMessage({ tone: "success", text: `Skipped ${res.updated} visible candidate${res.updated === 1 ? "" : "s"}.` });
     } catch (error) {
@@ -674,6 +691,7 @@ export function WatchlistReviewDashboard() {
       await loadRuns(res.run.id);
       setSelectedRunId(res.run.id);
       setDetail({ run: res.run, candidates: res.candidates, events: res.events });
+      setLocallyHiddenCandidateIds(new Set());
       setMessage({ tone: "success", text: `Imported ${res.candidates.length} review candidates.` });
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Import failed." });
