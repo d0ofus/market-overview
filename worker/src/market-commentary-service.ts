@@ -462,6 +462,10 @@ async function loadScheduledReportForAttempt(env: Env, scheduledLocalDate: strin
   return row ? normalizeRow(row) : null;
 }
 
+function overviewSnapshotDateForSession(session: UsMarketSessionContext): string {
+  return session.dataBasis === "pre_market" ? session.latestCompletedSessionDate : session.sessionDate;
+}
+
 async function overviewSnapshotReadyForSession(env: Env, sessionDate: string): Promise<boolean> {
   try {
     const snapshot = await loadSnapshot(env, "default", sessionDate, { allowComputeOnMissing: false });
@@ -967,7 +971,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
   }
 
   const recent = await loadRecentReportForSession(env, session.sessionDate);
-  if (!options?.force && recent && Date.parse(nowIso) - Date.parse(recent.generatedAt) < REFRESH_GUARD_MS) {
+  if (!options?.force && recent && recent.status === "ready" && Date.parse(nowIso) - Date.parse(recent.generatedAt) < REFRESH_GUARD_MS) {
     return {
       status: recent.status,
       warning: `Using the latest commentary generated at ${recent.generatedAt}; refresh is guarded for 10 minutes to control LLM/search usage.`,
@@ -979,7 +983,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
 
   let evidence: MarketEvidence | null = null;
   try {
-    const overviewSnapshot = await assertFreshOverviewSnapshotForSession(env, session.sessionDate);
+    const overviewSnapshot = await assertFreshOverviewSnapshotForSession(env, overviewSnapshotDateForSession(session));
     if (!env.GEMINI_API_KEY?.trim()) {
       throw new Error("GEMINI_API_KEY is not configured.");
     }

@@ -447,6 +447,39 @@ describe("market commentary service", () => {
     expect(db.rows.map((row) => row.id)).toEqual(["kept"]);
   });
 
+  it("uses the latest completed overview snapshot for pre-market manual refreshes", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-15" });
+    const response = await refreshMarketCommentary(createEnv(db), {
+      now: new Date("2026-06-16T08:01:00.000Z"),
+      force: true,
+    });
+
+    expect(response.status).toBe("failed");
+    expect(response.report?.sessionDate).toBe("2026-06-16");
+    expect(response.report?.marketSession).toBe("pre_market");
+    expect(response.report?.error).toContain("GEMINI_API_KEY");
+    expect(response.report?.error).not.toContain("Overview snapshot for 2026-06-16");
+    expect(db.rows).toHaveLength(1);
+  });
+
+  it("manual refresh retries instead of reusing a recent failed commentary report", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("recent-failed", "2026-06-16", "2026-06-16T08:00:00.000Z", {
+        status: "failed",
+        errorMessage: "old transient failure",
+      }),
+    ], { snapshotAsOfDate: "2026-06-15" });
+    const response = await refreshMarketCommentary(createEnv(db), {
+      now: new Date("2026-06-16T08:01:00.000Z"),
+    });
+
+    expect(response.status).toBe("failed");
+    expect(response.warning).toContain("GEMINI_API_KEY");
+    expect(response.report?.id).not.toBe("recent-failed");
+    expect(response.report?.error).toContain("GEMINI_API_KEY");
+    expect(db.rows).toHaveLength(2);
+  });
+
   it("stores an isolated failed report when Gemini is not configured", async () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-22" });
     const response = await refreshMarketCommentary(createEnv(db), {
