@@ -154,4 +154,15 @@ describe("FOMC commentary service helpers", () => {
       sourceMode: "official",
     })).toBe(true);
   });
+
+  it("can build an official-source extractive fallback when Gemini is unavailable", () => {
+    const fallback = testExports.buildExtractiveFomcSummary({
+      eventType: "minutes",
+      meetingDate: "2026-04-29",
+      officialText: "The Committee decided to maintain the target range for the federal funds rate. Inflation remains somewhat elevated and the Committee remains attentive to inflation risks. Labor market conditions remained solid with low unemployment. The economic outlook is uncertain and risks are balanced.",
+    });
+    expect(fallback.highlights.length).toBeGreaterThan(0);
+    expect(fallback.summaryMarkdown).toContain("Policy signal");
+    expect(fallback.tradingReadThrough).toContain("extractive fallback");
+  });
 });

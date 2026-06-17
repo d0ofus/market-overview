@@ -424,7 +424,60 @@ function buildFomcPrompt(input: {
   ].join("\n\n");
 }
 
-export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar, normalizeSourceTextForHash };
+
+function truncateSentence(value: string, limit = 160): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= limit) return compact;
+  return `${compact.slice(0, limit - 1).trim()}…`;
+}
+
+function extractSentences(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+(?=[A-Z])/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= 40 && sentence.length <= 320);
+}
+
+function firstMatchingSentence(sentences: string[], pattern: RegExp): string | null {
+  return sentences.find((sentence) => pattern.test(sentence)) ?? null;
+}
+
+function buildExtractiveFomcSummary(input: { eventType: FomcCommentaryEventType; meetingDate: string; officialText: string }): FomcSummaryJson {
+  const sentences = extractSentences(input.officialText);
+  const policy = firstMatchingSentence(sentences, /federal funds rate|target range|monetary policy|policy stance|restrictive/i);
+  const inflation = firstMatchingSentence(sentences, /inflation|price|prices|disinflation/i);
+  const labor = firstMatchingSentence(sentences, /labor|employment|unemployment|job gains|wage/i);
+  const risks = firstMatchingSentence(sentences, /risk|uncertain|uncertainty|outlook|balance of risks/i);
+  const balanceSheet = firstMatchingSentence(sentences, /balance sheet|securities holdings|treasury securities|agency debt|mortgage-backed/i);
+  const selected = [policy, inflation, labor, risks, balanceSheet]
+    .filter((sentence): sentence is string => Boolean(sentence))
+    .filter((sentence, index, array) => array.indexOf(sentence) === index);
+  const highlights = selected.length ? selected.slice(0, 5).map((sentence) => truncateSentence(sentence)) : [
+    `${input.eventType === "minutes" ? "FOMC minutes" : "Fed press conference"} official text is available for ${input.meetingDate}.`,
+    "Gemini synthesis was unavailable, so this is an extractive official-source fallback.",
+  ];
+  const policyLine = policy ? truncateSentence(policy, 500) : "No concise policy sentence was extracted from the official text.";
+  const inflationLine = inflation || labor ? [inflation, labor].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ") : "No concise inflation/labor sentence was extracted from the official text.";
+  const marketLine = risks || balanceSheet ? [risks, balanceSheet].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ") : "Use the official source link for full context; model synthesis was unavailable.";
+  return {
+    highlights,
+    tradingReadThrough: "Official-source extractive fallback: review the cited Fed text directly; Gemini synthesis was unavailable for this refresh.",
+    summaryMarkdown: [
+      "## Policy signal",
+      policyLine,
+      "",
+      "## Inflation/labor",
+      inflationLine,
+      "",
+      "## Market read-through",
+      marketLine,
+    ].join("\n"),
+    usedCitationUrls: [],
+  };
+}
+
+export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar, normalizeSourceTextForHash, buildExtractiveFomcSummary };
 
 export function parseGeminiFomcJson(text: string): FomcSummaryJson {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
@@ -696,6 +749,20 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
         status: "ready",
         error: error instanceof Error ? `Latest refresh failed; serving previous summary. ${error.message}` : "Latest refresh failed; serving previous summary.",
         generatedAt: existing.generatedAt,
+      };
+    } else if (hasOfficialText) {
+      const fallback = buildExtractiveFomcSummary({ eventType, meetingDate, officialText: synthesisText });
+      stored = {
+        ...stored,
+        citationSources: [],
+        summaryMarkdown: fallback.summaryMarkdown,
+        highlights: fallback.highlights,
+        tradingReadThrough: fallback.tradingReadThrough,
+        provider: "extractive_fallback",
+        model: "official-fed-text",
+        status: "ready",
+        error: error instanceof Error ? `Gemini refresh failed; serving official-source extractive fallback. ${error.message}` : "Gemini refresh failed; serving official-source extractive fallback.",
+        generatedAt: nowIso,
       };
     } else {
       stored = {
