@@ -684,11 +684,26 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
       generatedAt: nowIso,
     };
   } catch (error) {
-    stored = {
-      ...stored,
-      status: "failed",
-      error: error instanceof Error ? error.message : "FOMC commentary Gemini synthesis failed.",
-    };
+    if (existing?.status === "ready") {
+      stored = {
+        ...stored,
+        citationSources: parseJsonArray<FomcCommentaryCitationSource>(existing.citationSourcesJson),
+        summaryMarkdown: existing.summaryMarkdown,
+        highlights: parseJsonArray<string>(existing.highlightsJson),
+        tradingReadThrough: existing.tradingReadThrough,
+        provider: existing.provider,
+        model: existing.model,
+        status: "ready",
+        error: error instanceof Error ? `Latest refresh failed; serving previous summary. ${error.message}` : "Latest refresh failed; serving previous summary.",
+        generatedAt: existing.generatedAt,
+      };
+    } else {
+      stored = {
+        ...stored,
+        status: "failed",
+        error: error instanceof Error ? error.message : "FOMC commentary Gemini synthesis failed.",
+      };
+    }
   }
 
   await upsertFomcCommentaryItem(env, stored);
