@@ -404,17 +404,28 @@ let lastScansPageHousekeepingAt = 0;
 
 app.use("/api/*", cors());
 
-const isAuthed = (req: Request, env: Env): boolean => {
+function envFlagEnabled(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+export const isAdminRequestAuthorized = (req: Request, env: Env): boolean => {
   const secret = env.ADMIN_SECRET;
-  if (!secret) return true;
+  if (!secret) return !envFlagEnabled(env.ADMIN_AUTH_FAIL_CLOSED);
   const auth = req.headers.get("authorization");
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
 };
 
+const isAuthed = isAdminRequestAuthorized;
+
+export const shouldAllowFedWatchForceRefresh = (req: Request, env: Env): boolean => {
+  if (envFlagEnabled(env.FEDWATCH_PUBLIC_FORCE_REFRESH)) return true;
+  return Boolean(env.ADMIN_SECRET) && isAdminRequestAuthorized(req, env);
+};
+
 const isWeeklyMarketReviewPublishAuthed = (req: Request, env: Env): boolean => {
   const secret = env.HERMES_WEEKLY_MARKET_REVIEW_SECRET?.trim() || env.ADMIN_SECRET;
-  if (!secret) return true;
+  if (!secret) return !envFlagEnabled(env.ADMIN_AUTH_FAIL_CLOSED);
   const auth = req.headers.get("authorization");
   if (!auth?.startsWith("Bearer ")) return false;
   return auth.slice(7) === secret;
@@ -2232,8 +2243,9 @@ app.get("/api/dashboard", async (c) => {
 
 app.get("/api/fedwatch", async (c) => {
   try {
+    const forceRequested = c.req.query("force") === "1";
     const snapshot = await getFedWatchSnapshot(c.env, {
-      force: c.req.query("force") === "1",
+      force: forceRequested && shouldAllowFedWatchForceRefresh(c.req.raw, c.env),
     });
     c.header("Cache-Control", "public, max-age=300");
     return c.json(snapshot);

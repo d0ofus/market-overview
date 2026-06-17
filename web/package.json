@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "test": "npm run test:perplexity && npm run test:admin-auth",
-    "test:admin-auth": "tsx --test lib/admin-auth-core.test.ts",
+    "test:admin-auth": "tsx --test lib/admin-auth-core.test.ts lib/admin-auth.test.ts",
     "test:perplexity": "tsx --test lib/perplexity-finance-parser.test.ts lib/perplexity-browser-provider.test.ts",
     "test:perplexity-parser": "npm run test:perplexity"
   },

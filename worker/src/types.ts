@@ -5,6 +5,7 @@ export type Env = {
   PATTERN_DB?: D1Database;
   PERPLEXITY_CACHE_DB?: D1Database;
   ADMIN_SECRET?: string;
+  ADMIN_AUTH_FAIL_CLOSED?: string;
   DATA_PROVIDER?: string;
   ALPACA_API_KEY?: string;
   ALPACA_API_SECRET?: string;
@@ -43,6 +44,10 @@ export type Env = {
   GEMINI_MODEL?: string;
   GEMINI_SEARCH_GROUNDING_ENABLED?: string;
   BRAVE_SEARCH_API_KEY?: string;
+  BRAVE_SEARCH_TIMEOUT_MS?: string;
+  GEMINI_TIMEOUT_MS?: string;
+  FEDWATCH_TIMEOUT_MS?: string;
+  FEDWATCH_PUBLIC_FORCE_REFRESH?: string;
   MARKET_COMMENTARY_RETENTION_DAYS?: string;
   SYMBOL_CATALOG_SYNC_ENABLED?: string;
   HERMES_WATCHLIST_APPLY_WEBHOOK_URL?: string;

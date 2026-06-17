@@ -407,6 +407,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [editTickers, setEditTickers] = useState<string[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [expandedCalendarDates, setExpandedCalendarDates] = useState<string[]>([]);
+  const [fallbackWarnings, setFallbackWarnings] = useState<string[]>([]);
   const isSectorPopupOpen = Boolean(editingEntry || activeEtf || activeNarrativeCollection || marketLeaderChartOpen || activeChartTicker);
 
   const loadKeyMoverData = useCallback(async (targetMonth: string, isStale: StaleCheck = () => false) => {
@@ -426,6 +427,10 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     const focusRows = focusRes.status === "fulfilled" ? focusRes.value.rows ?? [] : [];
     const marketLeaderRows = marketLeadersRes.status === "fulfilled" ? marketLeadersRes.value.rows ?? [] : [];
     const peerGroupRows = peerGroupsRes.status === "fulfilled" ? peerGroupsRes.value.rows ?? [] : [];
+    const warnings = [
+      entriesRows.length === 0 ? "Key mover entries are showing fallback sample rows because live sector entries are unavailable." : null,
+      calRows.length === 0 ? "Sector calendar is showing fallback sample rows because live calendar entries are unavailable." : null,
+    ].filter((value): value is string => Boolean(value));
 
     setEntries(entriesRows.length > 0 ? entriesRows : FALLBACK_KEY_MOVERS);
     setCalendarRows(calRows.length > 0 ? calRows : FALLBACK_KEY_MOVERS);
@@ -433,6 +438,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     setFocusNarratives(focusRows);
     setMarketLeaders(marketLeaderRows);
     setPeerGroups(peerGroupRows);
+    setFallbackWarnings((current) => [...current.filter((warning) => !warning.startsWith("Key mover") && !warning.startsWith("Sector calendar")), ...warnings]);
   }, []);
 
   const loadEtfData = useCallback(async (isStale: StaleCheck = () => false) => {
@@ -444,9 +450,14 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
 
     const sectorRows = sectorEtfRes.status === "fulfilled" ? sectorEtfRes.value.rows ?? [] : [];
     const industryRows = industryEtfRes.status === "fulfilled" ? industryEtfRes.value.rows ?? [] : [];
+    const warnings = [
+      sectorRows.length === 0 ? "Sector ETF tables are showing fallback ETF definitions because live ETF data is unavailable." : null,
+      industryRows.length === 0 ? "Industry ETF tables are showing fallback ETF definitions because live ETF data is unavailable." : null,
+    ].filter((value): value is string => Boolean(value));
 
     setSectorEtfs((sectorRows.length > 0 ? sectorRows : FALLBACK_SECTOR_ETFS) as WatchlistEtf[]);
     setIndustryEtfs((industryRows.length > 0 ? industryRows : FALLBACK_INDUSTRY_ETFS) as WatchlistEtf[]);
+    setFallbackWarnings((current) => [...current.filter((warning) => !warning.startsWith("Sector ETF") && !warning.startsWith("Industry ETF")), ...warnings]);
   }, []);
 
   useEffect(() => {
@@ -1380,6 +1391,15 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
           </option>
         ))}
       </datalist>
+
+      {fallbackWarnings.length > 0 ? (
+        <div className="rounded-2xl border border-amber-400/35 bg-amber-500/10 p-3 text-sm text-amber-100">
+          <p className="font-semibold">Some sector tracker data is fallback/sample data.</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-100/85">
+            {fallbackWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        </div>
+      ) : null}
 
       <div id="key-movers-tracker" className="scroll-mt-28 md:scroll-mt-32">
         <CollapsibleSection

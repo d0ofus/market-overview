@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
 
 export type MarketReportSourceAudit = {
   sourceName: string;
@@ -57,19 +58,20 @@ export function normalizeSourceAuditRows(rows: MarketReportSourceAudit[]): Marke
     .filter((row) => row.sourceName && row.dataUsed);
 }
 
-export async function braveSearch(apiKey: string, query: string, options?: { freshness?: string; count?: number }): Promise<BraveSearchResult[]> {
+export async function braveSearch(apiKey: string, query: string, options?: { freshness?: string; count?: number; timeoutMs?: string | number }): Promise<BraveSearchResult[]> {
   const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", query);
   url.searchParams.set("count", String(Math.max(1, Math.min(10, options?.count ?? 5))));
   url.searchParams.set("country", "us");
   url.searchParams.set("search_lang", "en");
   url.searchParams.set("freshness", options?.freshness ?? "pd");
-  const response = await fetch(url.toString(), {
+  const timeoutMs = resolveFetchTimeoutMs(options?.timeoutMs, 15_000);
+  const response = await fetchWithTimeout(url.toString(), {
     headers: {
       Accept: "application/json",
       "X-Subscription-Token": apiKey,
     },
-  });
+  }, timeoutMs);
   if (!response.ok) {
     throw new Error(`Brave Search failed with HTTP ${response.status}`);
   }
@@ -117,7 +119,7 @@ export async function summarizeBraveSearch(
     const uniqueQueries = Array.from(new Set(queries.map((query) => query.trim()).filter(Boolean))).slice(0, 12);
     const batches = await Promise.all(uniqueQueries.map(async (query) => ({
       query,
-      results: await braveSearch(apiKey, query, { freshness: options?.freshness ?? "pw" }),
+      results: await braveSearch(apiKey, query, { freshness: options?.freshness ?? "pw", timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS }),
     })));
     const lines: string[] = [];
     let resultCount = 0;
@@ -158,7 +160,8 @@ export async function generateMarkdownWithGemini(
   const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const groundingEnabled = env.GEMINI_SEARCH_GROUNDING_ENABLED?.trim().toLowerCase() === "true";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const response = await fetch(url, {
+  const timeoutMs = resolveFetchTimeoutMs(env.GEMINI_TIMEOUT_MS, 90_000);
+  const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -173,7 +176,7 @@ export async function generateMarkdownWithGemini(
         maxOutputTokens: options?.maxOutputTokens ?? 24000,
       },
     }),
-  });
+  }, timeoutMs);
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");

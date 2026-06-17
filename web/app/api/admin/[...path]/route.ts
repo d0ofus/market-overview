@@ -77,13 +77,22 @@ async function proxyAdminRequest(request: Request, context: RouteContext) {
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
 
-  const upstream = await fetch(upstreamUrl, {
-    method,
-    headers: requestHeadersForWorker(request, worker.adminSecret),
-    body,
-    cache: "no-store",
-    redirect: "manual",
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(upstreamUrl, {
+      method,
+      headers: requestHeadersForWorker(request, worker.adminSecret),
+      body,
+      cache: "no-store",
+      redirect: "manual",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Worker admin proxy request failed.";
+    return NextResponse.json(
+      { error: `Worker admin proxy request failed: ${message}` },
+      { status: 502, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   if (upstream.status === 401 && workerPath.startsWith("/api/admin/")) {
     return NextResponse.json(

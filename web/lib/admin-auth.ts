@@ -45,9 +45,13 @@ export function getAdminAuthConfig(env: NodeJS.ProcessEnv = process.env): AdminA
 }
 
 export function getAdminWorkerConfig(env: NodeJS.ProcessEnv = process.env): AdminWorkerConfig {
-  const apiBase = String(env.WORKER_API_BASE ?? env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787");
+  const explicitApiBase = String(env.WORKER_API_BASE ?? env.NEXT_PUBLIC_API_BASE ?? "").trim();
+  const apiBase = explicitApiBase || (env.NODE_ENV === "production" ? "" : "http://127.0.0.1:8787");
   const adminSecret = String(env.ADMIN_SECRET ?? "");
-  const missing = adminSecret ? [] : ["ADMIN_SECRET"];
+  const missing = [
+    adminSecret ? null : "ADMIN_SECRET",
+    isValidHttpUrl(apiBase) ? null : "WORKER_API_BASE",
+  ].filter((value): value is string => Boolean(value));
 
   return {
     configured: missing.length === 0,
@@ -55,6 +59,15 @@ export function getAdminWorkerConfig(env: NodeJS.ProcessEnv = process.env): Admi
     adminSecret,
     missing,
   };
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function adminSessionCookieOptions(maxAge = ADMIN_SESSION_MAX_AGE_SECONDS) {

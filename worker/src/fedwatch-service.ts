@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
 
 const RATE_PROBABILITY_API_URL = "https://rateprobability.com/api/latest";
 const RATE_PROBABILITY_SOURCE_URL = "https://rateprobability.com/fed";
@@ -177,13 +178,14 @@ export function normalizeRateProbabilityPayload(
   };
 }
 
-async function fetchLiveFedFundsData(): Promise<FedWatchData> {
-  const response = await fetch(RATE_PROBABILITY_API_URL, {
+async function fetchLiveFedFundsData(env: Env): Promise<FedWatchData> {
+  const timeoutMs = resolveFetchTimeoutMs(env.FEDWATCH_TIMEOUT_MS, 15_000);
+  const response = await fetchWithTimeout(RATE_PROBABILITY_API_URL, {
     headers: {
       "User-Agent": "market-command-centre/1.0",
       "Accept": "application/json",
     },
-  });
+  }, timeoutMs);
   if (!response.ok) {
     throw new Error(`RateProbability request failed (${response.status})`);
   }
@@ -251,7 +253,7 @@ export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean 
   }
 
   try {
-    const live = await fetchLiveFedFundsData();
+    const live = await fetchLiveFedFundsData(env);
     await persistSnapshot(env, live);
     await cleanupOldSnapshots(env, SNAPSHOT_RETENTION_DAYS);
     return { status: "ok", warning: null, data: live };
