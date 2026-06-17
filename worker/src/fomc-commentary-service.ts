@@ -564,7 +564,7 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
 
   try {
     const prompt = buildFomcPrompt({ eventType, meetingDate, sourceMode, officialText: synthesisText, citations: citationsForPrompt });
-    const generated = await generateMarkdownWithGemini(env, prompt, { temperature: 0.15, maxOutputTokens: 2500 });
+    const generated = await generateMarkdownWithGemini(env, prompt, { temperature: 0.15, maxOutputTokens: 2500, responseMimeType: "application/json" });
     const parsed = parseGeminiFomcJson(generated.text);
     const usedUrls = new Set(parsed.usedCitationUrls.map(canonicalUrl));
     const citationSources = citationsForPrompt.filter((source) => usedUrls.has(canonicalUrl(source.url)));

@@ -185,7 +185,7 @@ export async function summarizeBraveSearch(
 export async function generateMarkdownWithGemini(
   env: Env,
   prompt: string,
-  options?: { maxOutputTokens?: number; temperature?: number; topP?: number },
+  options?: { maxOutputTokens?: number; temperature?: number; topP?: number; responseMimeType?: string },
 ): Promise<{ text: string; sources: MarketReportSourceAudit[]; model: string; provider: string }> {
   const apiKey = env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
@@ -207,6 +207,7 @@ export async function generateMarkdownWithGemini(
         temperature: options?.temperature ?? 0.2,
         topP: options?.topP ?? 0.9,
         maxOutputTokens: options?.maxOutputTokens ?? 24000,
+        ...(options?.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
       },
     }),
   }, timeoutMs);
