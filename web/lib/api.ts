@@ -27,6 +27,37 @@ export type FedFundsComparisonSeries = {
   }>;
 };
 
+export type FomcCommentaryEventType = "press_conference" | "minutes";
+
+export type FomcCommentarySourceMode = "official" | "official_plus_brave" | "fallback_context";
+
+export type FomcCommentaryCitationSource = {
+  sourceName: string;
+  url: string;
+  title: string | null;
+  snippet: string | null;
+  usedFor: "discovery" | "context" | "fallback" | "official";
+};
+
+export type FomcCommentaryItem = {
+  id: string;
+  eventType: FomcCommentaryEventType;
+  meetingDate: string;
+  releaseDate: string | null;
+  sourceUrl: string;
+  sourceTitle: string | null;
+  sourceMode?: FomcCommentarySourceMode;
+  status: "pending_source" | "ready" | "failed";
+  summaryMarkdown: string | null;
+  highlights: string[];
+  tradingReadThrough: string | null;
+  citationSources?: FomcCommentaryCitationSource[];
+  generatedAt: string | null;
+  provider: string | null;
+  model: string | null;
+  error: string | null;
+};
+
 export type FedWatchData = {
   generatedAt: string;
   sourceUrl: string;
@@ -37,6 +68,7 @@ export type FedWatchData = {
   assumedMoveBps: number | null;
   rows: FedFundsPathRow[];
   comparisons: FedFundsComparisonSeries[];
+  fomcCommentary?: FomcCommentaryItem[];
 };
 
 export type FedWatchResponse = {

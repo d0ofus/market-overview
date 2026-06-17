@@ -66,6 +66,7 @@ describe("fed funds rate service helpers", () => {
     expect(normalized?.comparisons).toHaveLength(2);
     expect(normalized?.comparisons[0]?.key).toBe("ago_1w");
     expect(normalized?.comparisons[0]?.rows[1]?.implied).toBe(3.625);
+    expect(normalized?.fomcCommentary).toEqual([]);
   });
 
   it("returns null when required current rows are missing", () => {

@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
+import { loadLatestFomcCommentary, type FomcCommentaryItem } from "./fomc-commentary-service";
 
 const RATE_PROBABILITY_API_URL = "https://rateprobability.com/api/latest";
 const RATE_PROBABILITY_SOURCE_URL = "https://rateprobability.com/fed";
@@ -86,7 +87,15 @@ export type FedWatchData = {
   assumedMoveBps: number | null;
   rows: FedFundsPathRow[];
   comparisons: FedFundsComparisonSeries[];
+  fomcCommentary: FomcCommentaryItem[];
 };
+
+export type {
+  FomcCommentaryCitationSource,
+  FomcCommentaryEventType,
+  FomcCommentaryItem,
+  FomcCommentarySourceMode,
+} from "./fomc-commentary-service";
 
 export type FedWatchResponse = {
   status: "ok" | "stale" | "unavailable";
@@ -175,6 +184,7 @@ export function normalizeRateProbabilityPayload(
     assumedMoveBps: asNumber(today?.assumed_move_bps),
     rows,
     comparisons,
+    fomcCommentary: [],
   };
 }
 
@@ -199,8 +209,10 @@ async function fetchLiveFedFundsData(env: Env): Promise<FedWatchData> {
 
 function parseStoredData(raw: string): FedWatchData | null {
   try {
-    const parsed = JSON.parse(raw) as FedWatchData | null;
-    return parsed?.rows?.length ? parsed : null;
+    const parsed = JSON.parse(raw) as Partial<FedWatchData> | null;
+    return parsed?.rows?.length
+      ? { ...parsed, fomcCommentary: Array.isArray(parsed.fomcCommentary) ? parsed.fomcCommentary : [] } as FedWatchData
+      : null;
   } catch {
     return null;
   }
@@ -246,14 +258,20 @@ async function cleanupOldSnapshots(env: Env, retentionDays = SNAPSHOT_RETENTION_
     .run();
 }
 
+async function withFomcCommentary(env: Env, data: FedWatchData): Promise<FedWatchData> {
+  const fomcCommentary = await loadLatestFomcCommentary(env, 4).catch(() => []);
+  return { ...data, fomcCommentary };
+}
+
 export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean }): Promise<FedWatchResponse> {
-  const cached = await loadLatestStoredSnapshot(env);
+  const cachedSnapshot = await loadLatestStoredSnapshot(env);
+  const cached = cachedSnapshot ? await withFomcCommentary(env, cachedSnapshot) : null;
   if (!options?.force && cached && isSnapshotFresh(cached.generatedAt)) {
     return { status: "ok", warning: null, data: cached };
   }
 
   try {
-    const live = await fetchLiveFedFundsData(env);
+    const live = await withFomcCommentary(env, await fetchLiveFedFundsData(env));
     await persistSnapshot(env, live);
     await cleanupOldSnapshots(env, SNAPSHOT_RETENTION_DAYS);
     return { status: "ok", warning: null, data: live };

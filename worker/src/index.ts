@@ -118,6 +118,7 @@ import {
 import {
   getFedWatchSnapshot,
 } from "./fedwatch-service";
+import { loadLatestFomcCommentary, refreshFomcCommentary } from "./fomc-commentary-service";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -2251,6 +2252,44 @@ app.get("/api/fedwatch", async (c) => {
     return c.json(snapshot);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Failed to load FedWatch." }, 500);
+  }
+});
+
+app.get("/api/fomc-commentary", async (c) => {
+  try {
+    const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 4)));
+    const items = await loadLatestFomcCommentary(c.env, limit);
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({ items });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load FOMC commentary.";
+    return c.json({ items: [], warning: message }, 200);
+  }
+});
+
+app.post("/api/fomc-commentary/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const body = await c.req.json().catch(() => ({})) as {
+      eventType?: "press_conference" | "minutes";
+      meetingDate?: string;
+      sourceUrl?: string;
+      force?: boolean;
+    };
+    if (body.eventType && body.eventType !== "press_conference" && body.eventType !== "minutes") {
+      return c.json({ error: "eventType must be press_conference or minutes." }, 400);
+    }
+    const result = await refreshFomcCommentary(c.env, {
+      eventType: body.eventType,
+      meetingDate: body.meetingDate,
+      sourceUrl: body.sourceUrl,
+      force: body.force === true,
+    });
+    return c.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FOMC commentary refresh failed.";
+    console.error("fomc commentary refresh failed", error);
+    return c.json({ ok: false, items: [], warning: message }, 200);
   }
 });
 

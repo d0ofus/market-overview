@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse } from "@/lib/api";
+import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse, FomcCommentaryItem } from "@/lib/api";
 
 const DECISION_TZ = "America/New_York";
 const DECISION_HOUR = 14;
@@ -135,6 +135,8 @@ function meetingDecisionLabel(iso: string | null | undefined, fallback: string):
   }).format(decision)}`;
 }
 
+
+
 function buildChartData(
   currentMidpoint: number | null,
   currentRows: FedFundsPathRow[],
@@ -165,6 +167,113 @@ function buildChartData(
       ago_10w: seriesMaps.get("ago_10w")?.get(row.meetingIso) ?? null,
     })),
   ];
+}
+
+
+function fomcEventLabel(eventType: FomcCommentaryItem["eventType"]): string {
+  return eventType === "minutes" ? "Minutes" : "Press Conference";
+}
+
+function fomcStatusLabel(status: FomcCommentaryItem["status"]): string {
+  if (status === "ready") return "Ready";
+  if (status === "pending_source") return "Pending official source";
+  return "Gemini failed";
+}
+
+function fomcStatusClass(status: FomcCommentaryItem["status"]): string {
+  if (status === "ready") return "border-emerald-400/30 bg-emerald-500/10 text-emerald-300";
+  if (status === "pending_source") return "border-amber-400/30 bg-amber-500/10 text-amber-200";
+  return "border-red-400/30 bg-red-500/10 text-red-200";
+}
+
+function formatIsoDate(value: string | null | undefined): string {
+  if (!value) return "N/A";
+  const parsed = new Date(value.length === 10 ? `${value}T00:00:00Z` : value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(parsed);
+}
+
+function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
+  const visibleItems = items.slice(0, 4);
+  return (
+    <div className="rounded-3xl border border-borderSoft/70 bg-panelSoft/75 p-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">FOMC Commentary</div>
+          <div className="text-sm text-slate-400">Official Fed text first; Brave context only when cited.</div>
+        </div>
+      </div>
+      {visibleItems.length === 0 ? (
+        <p className="rounded-2xl border border-borderSoft/60 bg-panel/60 px-4 py-3 text-sm text-slate-400">
+          No official FOMC transcript/minutes summary cached yet.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {visibleItems.map((item) => {
+            const citations = item.citationSources ?? [];
+            const sourceMode = item.sourceMode ?? "official";
+            return (
+              <article key={item.id} className="rounded-2xl border border-borderSoft/60 bg-panel/60 p-4">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-1 font-semibold uppercase tracking-[0.12em] text-accent">
+                    {fomcEventLabel(item.eventType)}
+                  </span>
+                  <span className={`rounded-full border px-2 py-1 font-semibold ${fomcStatusClass(item.status)}`}>
+                    {fomcStatusLabel(item.status)}
+                  </span>
+                  {sourceMode === "official_plus_brave" && (
+                    <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 font-semibold text-sky-200">Includes Brave sources</span>
+                  )}
+                  {sourceMode === "fallback_context" && (
+                    <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-semibold text-amber-200">Secondary-source fallback</span>
+                  )}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                  <span>Meeting: <span className="text-slate-200">{formatIsoDate(item.meetingDate)}</span></span>
+                  <span>Release: <span className="text-slate-200">{formatIsoDate(item.releaseDate)}</span></span>
+                  {item.generatedAt && <span>Generated: <span className="text-slate-200">{formatGeneratedAt(item.generatedAt)}</span></span>}
+                </div>
+                {item.highlights.length > 0 && (
+                  <ul className="mt-3 space-y-2 text-sm text-slate-200">
+                    {item.highlights.map((highlight, index) => (
+                      <li key={`${item.id}-${index}`} className="flex gap-2">
+                        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                        <span>{highlight}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {item.tradingReadThrough && (
+                  <p className="mt-3 rounded-xl border border-borderSoft/50 bg-panelSoft/70 px-3 py-2 text-sm text-slate-300">
+                    <span className="font-semibold text-text">Trading read-through: </span>{item.tradingReadThrough}
+                  </p>
+                )}
+                {item.status !== "ready" && item.error && (
+                  <p className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">{item.error}</p>
+                )}
+                <div className="mt-3 flex flex-wrap gap-3 text-xs">
+                  <a className="text-accent hover:underline" href={item.sourceUrl} target="_blank" rel="noreferrer">
+                    {item.sourceTitle || "Federal Reserve source"}
+                  </a>
+                  {citations.map((source) => (
+                    <a key={source.url} className="text-sky-300 hover:underline" href={source.url} target="_blank" rel="noreferrer">
+                      {source.sourceName}: {source.title || source.usedFor}
+                    </a>
+                  ))}
+                </div>
+                {item.summaryMarkdown && (
+                  <details className="mt-3 text-sm text-slate-400">
+                    <summary className="cursor-pointer text-slate-300 hover:text-text">Full compact summary</summary>
+                    <div className="mt-2 whitespace-pre-wrap rounded-xl border border-borderSoft/50 bg-panelSoft/70 p-3">{item.summaryMarkdown}</div>
+                  </details>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) {
@@ -374,6 +483,8 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
               </div>
             </div>
           </div>
+
+          <FomcCommentarySection items={snapshot.data.fomcCommentary ?? []} />
         </div>
       )}
     </section>
