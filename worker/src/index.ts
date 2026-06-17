@@ -118,7 +118,7 @@ import {
 import {
   getFedWatchSnapshot,
 } from "./fedwatch-service";
-import { loadLatestFomcCommentary, refreshFomcCommentary } from "./fomc-commentary-service";
+import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary } from "./fomc-commentary-service";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -2258,7 +2258,7 @@ app.get("/api/fedwatch", async (c) => {
 app.get("/api/fomc-commentary", async (c) => {
   try {
     const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 4)));
-    const items = await loadLatestFomcCommentary(c.env, limit);
+    const items = await loadOrRefreshLatestFomcCommentary(c.env, limit);
     c.header("Cache-Control", "public, max-age=300");
     return c.json({ items });
   } catch (error) {
@@ -6521,6 +6521,11 @@ export default {
     });
     const cron = (key: string) => cronSettings.get(key);
     const now = new Date(event.scheduledTime || Date.now());
+    try {
+      await refreshLatestFomcCommentary(env, { now });
+    } catch (error) {
+      console.error("scheduled FOMC commentary refresh failed", error);
+    }
     try {
       await maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping"));
     } catch (error) {

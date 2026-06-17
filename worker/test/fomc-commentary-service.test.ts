@@ -95,4 +95,17 @@ describe("FOMC commentary service helpers", () => {
     expect(prompt).toContain("must be cited");
     expect(prompt).toContain("https://www.reuters.com/markets/us/fed-minutes");
   });
+
+  it("finds the latest official press conference and minutes links from the Fed calendar", () => {
+    const sources = testExports.extractOfficialFomcSourcesFromCalendar(`
+      <a href="/monetarypolicy/fomcpresconf20260429.htm">Press Conference</a>
+      <a href="/monetarypolicy/fomcminutes20260429.htm">HTML</a>
+      <a href="/monetarypolicy/fomcpresconf20260617.htm">Future Press Conference</a>
+      <a href="/monetarypolicy/fomcminutes20260617.htm">Future Minutes</a>
+    `, new Date("2026-05-01T00:00:00.000Z"));
+    expect(sources).toEqual([
+      { eventType: "press_conference", meetingDate: "2026-04-29", sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomcpresconf20260429.htm" },
+      { eventType: "minutes", meetingDate: "2026-04-29", sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomcminutes20260429.htm" },
+    ]);
+  });
 });

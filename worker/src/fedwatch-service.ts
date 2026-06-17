@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
-import { loadLatestFomcCommentary, type FomcCommentaryItem } from "./fomc-commentary-service";
+import { loadOrRefreshLatestFomcCommentary, type FomcCommentaryItem } from "./fomc-commentary-service";
 
 const RATE_PROBABILITY_API_URL = "https://rateprobability.com/api/latest";
 const RATE_PROBABILITY_SOURCE_URL = "https://rateprobability.com/fed";
@@ -259,7 +259,7 @@ async function cleanupOldSnapshots(env: Env, retentionDays = SNAPSHOT_RETENTION_
 }
 
 async function withFomcCommentary(env: Env, data: FedWatchData): Promise<FedWatchData> {
-  const fomcCommentary = await loadLatestFomcCommentary(env, 4).catch(() => []);
+  const fomcCommentary = await loadOrRefreshLatestFomcCommentary(env, 4).catch(() => []);
   return { ...data, fomcCommentary };
 }
 

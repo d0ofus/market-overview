@@ -7,6 +7,7 @@ const FED_HOST_SUFFIX = "federalreserve.gov";
 const DEFAULT_SOURCE_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm";
 const MIN_OFFICIAL_TEXT_CHARS = 1_000;
 const MAX_SOURCE_TEXT_CHARS = 80_000;
+const FOMC_AUTO_REFRESH_LIMIT = 4;
 const ALLOWED_BRAVE_DOMAINS = [
   "federalreserve.gov",
   "reuters.com",
@@ -266,6 +267,57 @@ export function normalizeBraveFomcSources(
   return out;
 }
 
+
+type OfficialFomcSource = {
+  eventType: FomcCommentaryEventType;
+  meetingDate: string;
+  sourceUrl: string;
+};
+
+function toAbsoluteFedUrl(rawUrl: string): string {
+  try {
+    return new URL(rawUrl, "https://www.federalreserve.gov").toString();
+  } catch {
+    return rawUrl.trim();
+  }
+}
+
+export function extractOfficialFomcSourcesFromCalendar(html: string, now = new Date()): OfficialFomcSource[] {
+  const today = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const candidates: OfficialFomcSource[] = [];
+  const linkPattern = /href=["']([^"']*(?:fomcpresconf|fomcminutes)(\d{8})\.htm)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = linkPattern.exec(html)) !== null) {
+    const rawUrl = match[1] ?? "";
+    const compactDate = match[2] ?? "";
+    if (!compactDate || compactDate > today) continue;
+    const eventType: FomcCommentaryEventType = rawUrl.includes("fomcpresconf") ? "press_conference" : "minutes";
+    candidates.push({
+      eventType,
+      meetingDate: `${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}`,
+      sourceUrl: canonicalUrl(toAbsoluteFedUrl(rawUrl)),
+    });
+  }
+
+  const latestByType = new Map<FomcCommentaryEventType, OfficialFomcSource>();
+  for (const source of candidates.sort((a, b) => b.meetingDate.localeCompare(a.meetingDate))) {
+    if (!latestByType.has(source.eventType)) latestByType.set(source.eventType, source);
+  }
+  return [latestByType.get("press_conference"), latestByType.get("minutes")].filter(Boolean) as OfficialFomcSource[];
+}
+
+async function discoverLatestOfficialFomcSources(env: Env, now = new Date()): Promise<OfficialFomcSource[]> {
+  const timeoutMs = resolveFetchTimeoutMs(env.FOMC_COMMENTARY_TIMEOUT_MS, 20_000);
+  const response = await fetchWithTimeout(DEFAULT_SOURCE_URL, {
+    headers: {
+      "Accept": "text/html,*/*;q=0.8",
+      "User-Agent": "market-command-centre/1.0",
+    },
+  }, timeoutMs);
+  if (!response.ok) throw new Error(`Federal Reserve calendar fetch failed with HTTP ${response.status}`);
+  return extractOfficialFomcSourcesFromCalendar(await response.text(), now);
+}
+
 async function collectBraveFomcSources(env: Env, eventType: FomcCommentaryEventType, meetingDate: string): Promise<FomcCommentaryCitationSource[]> {
   const apiKey = env.BRAVE_SEARCH_API_KEY?.trim();
   if (!apiKey) return [];
@@ -319,7 +371,7 @@ function buildFomcPrompt(input: {
   ].join("\n\n");
 }
 
-export const testExports = { buildFomcPrompt };
+export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar };
 
 export function parseGeminiFomcJson(text: string): FomcSummaryJson {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
@@ -541,4 +593,46 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   await upsertFomcCommentaryItem(env, stored);
   const items = await loadLatestFomcCommentary(env, 4);
   return { ok: stored.status === "ready", warning: stored.error, items };
+}
+
+
+export async function refreshLatestFomcCommentary(env: Env, options: { force?: boolean; now?: Date } = {}): Promise<{ ok: boolean; items: FomcCommentaryItem[]; warning: string | null }> {
+  const warnings: string[] = [];
+  const sources = await discoverLatestOfficialFomcSources(env, options.now).catch((error) => {
+    warnings.push(error instanceof Error ? error.message : "Federal Reserve calendar discovery failed.");
+    return [] as OfficialFomcSource[];
+  });
+
+  if (sources.length === 0) {
+    const existing = await loadLatestFomcCommentary(env, FOMC_AUTO_REFRESH_LIMIT);
+    return { ok: existing.some((item) => item.status === "ready"), items: existing, warning: warnings[0] ?? "No official FOMC press conference/minutes links found." };
+  }
+
+  const refreshed: FomcCommentaryItem[] = [];
+  for (const source of sources) {
+    const result = await refreshFomcCommentary(env, {
+      eventType: source.eventType,
+      meetingDate: source.meetingDate,
+      sourceUrl: source.sourceUrl,
+      force: options.force,
+      now: options.now,
+    }).catch((error) => ({ ok: false, warning: error instanceof Error ? error.message : "FOMC commentary refresh failed.", items: [] as FomcCommentaryItem[] }));
+    if (result.warning) warnings.push(`${source.eventType}: ${result.warning}`);
+    refreshed.push(...result.items.filter((item) => item.eventType === source.eventType && item.meetingDate === source.meetingDate));
+  }
+
+  const items = await loadLatestFomcCommentary(env, FOMC_AUTO_REFRESH_LIMIT);
+  return {
+    ok: items.some((item) => item.status === "ready"),
+    items: items.length ? items : refreshed,
+    warning: warnings.length ? warnings.join("; ") : null,
+  };
+}
+
+export async function loadOrRefreshLatestFomcCommentary(env: Env, limit = FOMC_AUTO_REFRESH_LIMIT): Promise<FomcCommentaryItem[]> {
+  const existing = await loadLatestFomcCommentary(env, limit);
+  const readyTypes = new Set(existing.filter((item) => item.status === "ready").map((item) => item.eventType));
+  if (readyTypes.has("press_conference") && readyTypes.has("minutes")) return existing;
+  const refreshed = await refreshLatestFomcCommentary(env).catch(() => null);
+  return refreshed?.items?.length ? refreshed.items.slice(0, Math.max(1, Math.min(10, limit))) : existing;
 }
