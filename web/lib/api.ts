@@ -56,6 +56,12 @@ export type FomcCommentaryItem = {
   provider: string | null;
   model: string | null;
   error: string | null;
+  sourceFetchedAt?: string | null;
+  sourceTextHash?: string | null;
+  lastCheckedAt?: string | null;
+  lastUnchangedAt?: string | null;
+  lastRefreshAttemptAt?: string | null;
+  refreshAttemptCount?: number;
 };
 
 export type FedWatchData = {

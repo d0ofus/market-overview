@@ -232,6 +232,9 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
                   <span>Meeting: <span className="text-slate-200">{formatIsoDate(item.meetingDate)}</span></span>
                   <span>Release: <span className="text-slate-200">{formatIsoDate(item.releaseDate)}</span></span>
                   {item.generatedAt && <span>Generated: <span className="text-slate-200">{formatGeneratedAt(item.generatedAt)}</span></span>}
+                  {item.sourceFetchedAt && <span>Source fetched: <span className="text-slate-200">{formatGeneratedAt(item.sourceFetchedAt)}</span></span>}
+                  {item.lastCheckedAt && <span>Last checked: <span className="text-slate-200">{formatGeneratedAt(item.lastCheckedAt)}</span></span>}
+                  {item.status !== "ready" && item.refreshAttemptCount ? <span>Attempts: <span className="text-slate-200">{item.refreshAttemptCount}</span></span> : null}
                 </div>
                 {item.highlights.length > 0 && (
                   <ul className="mt-3 space-y-2 text-sm text-slate-200">
