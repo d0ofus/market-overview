@@ -38,7 +38,7 @@ function createEnv() {
     {
       id: "g-crypto",
       sectionId: "sec-macro",
-      title: "Crypto Proxies",
+      title: "ETF Proxies",
       sort_order: 1,
       dataType: "macro",
       rankingWindowDefault: "1W",
@@ -49,6 +49,7 @@ function createEnv() {
   const items = [
     { id: "item-bito", groupId: "g-crypto", sort_order: 1, ticker: "BITO", displayName: "ProShares Bitcoin Strategy ETF", enabled: 1, tagsJson: "[]", holdingsJson: null },
     { id: "item-ibit", groupId: "g-crypto", sort_order: 2, ticker: "IBIT", displayName: "iShares Bitcoin Trust", enabled: 1, tagsJson: "[]", holdingsJson: null },
+    { id: "item-missing", groupId: "g-crypto", sort_order: 3, ticker: "MISSING", displayName: "Missing Quote ETF", enabled: 1, tagsJson: "[]", holdingsJson: null },
   ];
   const columns = [
     { groupId: "g-crypto", columnsJson: JSON.stringify(["ticker", "name", "price", "sparkline"]) },
@@ -56,6 +57,7 @@ function createEnv() {
   const symbolRows = [
     { ticker: "BITO", name: "ProShares Bitcoin Strategy ETF" },
     { ticker: "IBIT", name: "iShares Bitcoin Trust" },
+    { ticker: "MISSING", name: "Missing Quote ETF" },
     { ticker: "SPY", name: "SPDR S&P 500 ETF" },
   ];
   const snapshotMeta = {
@@ -63,6 +65,15 @@ function createEnv() {
     asOfDate,
     generatedAt: "2025-01-08T00:00:00.000Z",
     providerLabel: "Stored Daily Bars",
+    expectedAsOfDate: asOfDate,
+    freshnessStatus: "partial",
+    freshnessCoveragePct: 50,
+    freshnessCurrentCount: 1,
+    freshnessEligibleCount: 2,
+    freshnessCriticalMissingJson: "[]",
+    freshnessMinBarDate: isoDateAt(218),
+    freshnessMaxBarDate: asOfDate,
+    freshnessWarning: "Partial fixture freshness.",
   };
   const snapshotRows = [
     {
@@ -80,6 +91,7 @@ function createEnv() {
       sparklineJson: JSON.stringify([100, 100, 100, 120]),
       rankKey: 20,
       holdingsJson: null,
+      barDate: asOfDate,
     },
     {
       sectionId: "sec-macro",
@@ -96,6 +108,24 @@ function createEnv() {
       sparklineJson: JSON.stringify([100, 100, 100, 80]),
       rankKey: -20,
       holdingsJson: null,
+      barDate: isoDateAt(218),
+    },
+    {
+      sectionId: "sec-macro",
+      groupId: "g-crypto",
+      ticker: "MISSING",
+      displayName: "Missing Quote ETF",
+      price: 0,
+      change1d: 0,
+      change1w: 0,
+      change5d: 0,
+      change21d: 0,
+      ytd: 0,
+      pctFrom52wHigh: 0,
+      sparklineJson: JSON.stringify([]),
+      rankKey: 0,
+      holdingsJson: null,
+      barDate: null,
     },
   ];
 
@@ -158,6 +188,7 @@ describe("loadSnapshot SMA status pilot", () => {
     const cryptoGroup = snapshot.sections[0]?.groups.find((group) => group.id === "g-crypto");
     const bitoRow = cryptoGroup?.rows.find((row) => row.ticker === "BITO");
     const ibitRow = cryptoGroup?.rows.find((row) => row.ticker === "IBIT");
+    const missingRow = cryptoGroup?.rows.find((row) => row.ticker === "MISSING");
 
     expect(cryptoGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
     expect(bitoRow?.above20Sma).toBe(true);
@@ -166,5 +197,9 @@ describe("loadSnapshot SMA status pilot", () => {
     expect(ibitRow?.above20Sma).toBe(false);
     expect(ibitRow?.above50Sma).toBe(false);
     expect(ibitRow?.above200Sma).toBe(false);
+    expect(bitoRow?.quoteFreshnessStatus).toBe("fresh");
+    expect(ibitRow?.quoteFreshnessStatus).toBe("stale");
+    expect(missingRow?.quoteFreshnessStatus).toBe("unavailable");
+    expect(missingRow?.barDate).toBeNull();
   });
 });

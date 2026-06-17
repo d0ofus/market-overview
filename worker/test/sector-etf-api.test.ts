@@ -63,6 +63,7 @@ function createEtfApiEnv(input: {
                   .slice(0, 2)
                   .map((row, index) => ({
                     ticker: row.ticker.toUpperCase(),
+                    date: row.date,
                     c: row.c,
                     rowNumber: index + 1,
                   })),
@@ -89,11 +90,14 @@ function createEtfApiEnv(input: {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe("sector ETF list API", () => {
   it("returns sector ETF rows with stored 1D stats without live provider fetches", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-17T05:00:00.000Z"));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network should not be called"));
     const env = createEtfApiEnv({
       watchlists: [
@@ -101,10 +105,10 @@ describe("sector ETF list API", () => {
         { listType: "sector", parentSector: "Technology", industry: "Sector ETF", ticker: "XLK", fundName: "Technology Select Sector SPDR Fund", sortOrder: 2, sourceUrl: null },
       ],
       dailyBars: [
-        { ticker: "XLE", date: "2026-05-18", c: 90 },
-        { ticker: "XLE", date: "2026-05-19", c: 99 },
-        { ticker: "XLK", date: "2026-05-18", c: 200 },
-        { ticker: "XLK", date: "2026-05-19", c: 190 },
+        { ticker: "XLE", date: "2026-06-15", c: 90 },
+        { ticker: "XLE", date: "2026-06-16", c: 99 },
+        { ticker: "XLK", date: "2026-06-12", c: 200 },
+        { ticker: "XLK", date: "2026-06-15", c: 190 },
       ],
     });
 
@@ -114,14 +118,20 @@ describe("sector ETF list API", () => {
     );
 
     expect(response.status).toBe(200);
-    const body = await response.json() as { rows: Array<{ ticker: string; change1d: number; lastPrice: number; priceSource: string }> };
+    const body = await response.json() as {
+      expectedAsOfDate: string;
+      rows: Array<{ ticker: string; change1d: number; lastPrice: number; barDate: string | null; priceSource: string; quoteFreshnessStatus: string; quoteSource: string }>;
+    };
+    expect(body.expectedAsOfDate).toBe("2026-06-16");
     expect(body.rows.map((row) => row.ticker)).toEqual(["XLE", "XLK"]);
-    expect(body.rows[0]).toMatchObject({ ticker: "XLE", change1d: 10, lastPrice: 99, priceSource: "daily-bars" });
-    expect(body.rows[1]).toMatchObject({ ticker: "XLK", change1d: -5, lastPrice: 190, priceSource: "daily-bars" });
+    expect(body.rows[0]).toMatchObject({ ticker: "XLE", change1d: 10, lastPrice: 99, barDate: "2026-06-16", priceSource: "daily-bars", quoteFreshnessStatus: "fresh", quoteSource: "daily-bars" });
+    expect(body.rows[1]).toMatchObject({ ticker: "XLK", change1d: -5, lastPrice: 190, barDate: "2026-06-15", priceSource: "daily-bars", quoteFreshnessStatus: "stale", quoteSource: "daily-bars" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("returns industry ETF rows from stored bars without live provider fetches", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-17T05:00:00.000Z"));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network should not be called"));
     const env = createEtfApiEnv({
       watchlists: [
@@ -139,9 +149,35 @@ describe("sector ETF list API", () => {
     );
 
     expect(response.status).toBe(200);
-    const body = await response.json() as { rows: Array<{ ticker: string; change1d: number; lastPrice: number; priceSource: string }> };
+    const body = await response.json() as { rows: Array<{ ticker: string; change1d: number; lastPrice: number; barDate: string | null; priceSource: string; quoteFreshnessStatus: string }> };
     expect(body.rows).toHaveLength(1);
-    expect(body.rows[0]).toMatchObject({ ticker: "SMH", change1d: 10, lastPrice: 275, priceSource: "daily-bars" });
+    expect(body.rows[0]).toMatchObject({ ticker: "SMH", change1d: 10, lastPrice: 275, barDate: "2026-05-19", priceSource: "daily-bars", quoteFreshnessStatus: "stale" });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps unavailable ETF rows visible with null quote metrics", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-17T05:00:00.000Z"));
+    const env = createEtfApiEnv({
+      watchlists: [
+        { listType: "sector", parentSector: "Utilities", industry: "Sector ETF", ticker: "XLU", fundName: "Utilities Select Sector SPDR Fund", sortOrder: 1, sourceUrl: null },
+      ],
+      dailyBars: [],
+    });
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/etfs/sector"),
+      env as never,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { rows: Array<{ ticker: string; change1d: number | null; lastPrice: number | null; barDate: string | null; quoteFreshnessStatus: string }> };
+    expect(body.rows[0]).toMatchObject({
+      ticker: "XLU",
+      change1d: null,
+      lastPrice: null,
+      barDate: null,
+      quoteFreshnessStatus: "unavailable",
+    });
   });
 });

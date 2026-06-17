@@ -5,7 +5,7 @@ import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
-import type { Env, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
+import type { Env, QuoteFreshnessStatus, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
 
@@ -61,7 +61,7 @@ const OVERVIEW_RS_ENABLED_GROUPS = new Set([
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 const OVERVIEW_SNAPSHOT_RETENTION_DAYS = 14;
 const SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE = 25;
-const OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT = 90;
+export const OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT = 90;
 const OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES = new Set([
   "US Index Futures",
   "US Index Futures (Equal Weight)",
@@ -106,6 +106,17 @@ export type OverviewFreshnessDiagnostics = {
   maxBarDate: string | null;
   warning: string | null;
 };
+
+export function isOverviewFreshnessSufficientForScheduledSnapshot(
+  status: string | null | undefined,
+  coveragePct: number | null | undefined,
+): boolean {
+  if (status === "fresh") return true;
+  return status === "partial"
+    && typeof coveragePct === "number"
+    && Number.isFinite(coveragePct)
+    && coveragePct >= OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT;
+}
 
 type OverviewFreshnessTicker = {
   ticker: string;
@@ -242,6 +253,47 @@ function isOverviewFreshnessEligibleTicker(ticker: string, groupTitle: string): 
   if (normalized.startsWith("^")) return false;
   if (OVERVIEW_FRESHNESS_UNSUPPORTED_TICKERS.has(normalized)) return false;
   return true;
+}
+
+function deriveOverviewQuoteFreshness(input: {
+  ticker: string;
+  groupTitle: string;
+  barDate: string | null | undefined;
+  expectedAsOfDate: string;
+  quoteSource: string | null;
+}): { quoteFreshnessStatus: QuoteFreshnessStatus; quoteFreshnessReason: string; quoteSource: string | null } {
+  const ticker = input.ticker.trim().toUpperCase();
+  const barDate = input.barDate ?? null;
+  const source = input.quoteSource ?? "Stored Daily Bars";
+  const eligible = isOverviewFreshnessEligibleTicker(ticker, input.groupTitle);
+  if (!eligible) {
+    return {
+      quoteFreshnessStatus: "unsupported",
+      quoteFreshnessReason: barDate
+        ? `${ticker} is outside automated freshness validation; last stored daily bar is ${barDate}.`
+        : `${ticker} is outside automated freshness validation and has no stored daily bar from current sources.`,
+      quoteSource: source,
+    };
+  }
+  if (!barDate) {
+    return {
+      quoteFreshnessStatus: "unavailable",
+      quoteFreshnessReason: `No stored daily bar is available for ${ticker} from the current sources.`,
+      quoteSource: source,
+    };
+  }
+  if (barDate === input.expectedAsOfDate) {
+    return {
+      quoteFreshnessStatus: "fresh",
+      quoteFreshnessReason: `Stored daily bar is current for ${input.expectedAsOfDate}.`,
+      quoteSource: source,
+    };
+  }
+  return {
+    quoteFreshnessStatus: "stale",
+    quoteFreshnessReason: `Last stored daily bar is ${barDate}; expected ${input.expectedAsOfDate}.`,
+    quoteSource: source,
+  };
 }
 
 function overviewFreshnessTickersFromConfig(config: Awaited<ReturnType<typeof loadConfig>>): OverviewFreshnessTicker[] {
@@ -1719,11 +1771,12 @@ export async function loadSnapshot(
     meta.asOfDate,
   );
   const freshness = freshnessDiagnosticsFromSnapshotMeta(meta, latestAllowedAsOfDate);
+  const expectedAsOfDate = freshness?.expectedAsOfDate ?? meta.asOfDate;
   return {
     asOfDate: meta.asOfDate,
     generatedAt: meta.generatedAt,
     providerLabel: meta.providerLabel,
-    expectedAsOfDate: freshness?.expectedAsOfDate ?? meta.asOfDate,
+    expectedAsOfDate,
     freshnessStatus: freshness?.status ?? "stale",
     freshnessCoveragePct: freshness?.coveragePct ?? 0,
     freshnessCurrentCount: freshness?.currentCount ?? 0,
@@ -1747,29 +1800,40 @@ export async function loadSnapshot(
         columns: g.columns,
         rows: tableRows
           .filter((r) => r.sectionId === sec.id && r.groupId === g.id)
-          .map((r) => ({
-            ...(derivedMetrics.get(r.ticker.toUpperCase()) ?? {
-              change3m: 0,
-              change6m: 0,
-              above20Sma: null,
-              above50Sma: null,
-              above200Sma: null,
-            }),
-            ticker: r.ticker,
-            displayName: r.displayName,
-            price: r.price,
-            change1d: r.change1d,
-            change1w: r.change1w,
-            change5d: r.change5d,
-            change21d: r.change21d,
-            ytd: r.ytd,
-            pctFrom52wHigh: r.pctFrom52wHigh,
-            sparkline: JSON.parse(r.sparklineJson) as number[],
-            relativeStrength30dVsSpy: relativeStrengthByTicker.get(r.ticker.toUpperCase()) ?? null,
-            barDate: r.barDate ?? null,
-            rankKey: r.rankKey,
-            holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
-          })),
+          .map((r) => {
+            const barDate = r.barDate ?? null;
+            const quoteFreshness = deriveOverviewQuoteFreshness({
+              ticker: r.ticker,
+              groupTitle: g.title,
+              barDate,
+              expectedAsOfDate,
+              quoteSource: meta.providerLabel,
+            });
+            return {
+              ...(derivedMetrics.get(r.ticker.toUpperCase()) ?? {
+                change3m: 0,
+                change6m: 0,
+                above20Sma: null,
+                above50Sma: null,
+                above200Sma: null,
+              }),
+              ticker: r.ticker,
+              displayName: r.displayName,
+              price: r.price,
+              change1d: r.change1d,
+              change1w: r.change1w,
+              change5d: r.change5d,
+              change21d: r.change21d,
+              ytd: r.ytd,
+              pctFrom52wHigh: r.pctFrom52wHigh,
+              sparkline: JSON.parse(r.sparklineJson) as number[],
+              relativeStrength30dVsSpy: relativeStrengthByTicker.get(r.ticker.toUpperCase()) ?? null,
+              barDate,
+              ...quoteFreshness,
+              rankKey: r.rankKey,
+              holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
+            };
+          }),
       })),
     })),
   };

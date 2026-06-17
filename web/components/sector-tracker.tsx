@@ -23,10 +23,12 @@ import {
   updateSectorEntry,
   type PeerGroupRow,
   type PeerMetricRow,
+  type SectorEtfRow,
   type SectorFocusNarrative,
   type SectorFocusNarrativeUpdate,
   type SectorMarketLeaderRow,
 } from "@/lib/api";
+import type { QuoteFreshnessStatus } from "@/types/dashboard";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TickerCollectionModal, type TickerCollectionModalItem } from "./ticker-collection-modal";
@@ -80,9 +82,14 @@ const getMonthStartWeekday = (value: string) => {
   return new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
 };
 const pctCls = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
-const signedPct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
-const deltaPillCls = (n: number) =>
-  n >= 0
+const signedPct = (value: number | null | undefined): string => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+};
+const deltaPillCls = (n: number | null | undefined) =>
+  typeof n !== "number" || !Number.isFinite(n)
+    ? "bg-slate-500/12 text-slate-300 ring-1 ring-slate-400/20"
+    : n >= 0
     ? "bg-emerald-500/12 text-pos ring-1 ring-emerald-400/20"
     : "bg-rose-500/12 text-neg ring-1 ring-rose-400/20";
 const INPUT_CLASS =
@@ -153,9 +160,14 @@ type WatchlistEtf = {
   ticker: string;
   fundName: string;
   sortOrder: number;
-  change1d: number;
-  lastPrice: number;
-};
+  change1d: number | null;
+  lastPrice: number | null;
+  barDate?: string | null;
+  priceSource?: string | null;
+  quoteFreshnessStatus?: QuoteFreshnessStatus;
+  quoteFreshnessReason?: string | null;
+  quoteSource?: string | null;
+} & Partial<SectorEtfRow>;
 
 type EtfConstituent = {
   ticker: string;
@@ -238,8 +250,8 @@ function segmentedButtonClass(active: boolean) {
     : "text-slate-300 hover:bg-panelSoft/45";
 }
 
-function formatFundPrice(value: number) {
-  return Number.isFinite(value) ? value.toFixed(2) : "-";
+function formatFundPrice(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "N/A";
 }
 
 function formatCompact(value: number | null | undefined): string {
@@ -255,6 +267,34 @@ function formatMetricPct(value: number | null | undefined): string {
 function metricChangeClass(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "text-slate-100";
   return value < 0 ? "text-neg" : "text-pos";
+}
+
+function quoteFreshnessLabel(status: QuoteFreshnessStatus | undefined): string {
+  if (status === "fresh") return "Fresh";
+  if (status === "stale") return "Stale";
+  if (status === "unavailable") return "N/A";
+  if (status === "unsupported") return "Unverified";
+  return "Unknown";
+}
+
+function quoteFreshnessClass(status: QuoteFreshnessStatus | undefined): string {
+  if (status === "fresh") return "border-emerald-400/25 bg-emerald-500/10 text-emerald-200";
+  if (status === "stale") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
+  if (status === "unavailable") return "border-red-400/35 bg-red-500/10 text-red-200";
+  if (status === "unsupported") return "border-slate-500/45 bg-slate-700/40 text-slate-300";
+  return "border-slate-500/45 bg-slate-700/30 text-slate-300";
+}
+
+function withUnavailableEtfQuotes(rows: WatchlistEtf[]): WatchlistEtf[] {
+  return rows.map((row) => ({
+    ...row,
+    change1d: null,
+    lastPrice: null,
+    barDate: null,
+    quoteFreshnessStatus: "unavailable",
+    quoteFreshnessReason: "ETF definition is available but stored quote data could not be loaded.",
+    quoteSource: "fallback-definitions",
+  }));
 }
 
 function CollapsibleSection({
@@ -299,6 +339,12 @@ function EtfTile({
   onOpenEtf: () => void;
   onExpandChart: () => void;
 }) {
+  const freshnessStatus = etf.quoteFreshnessStatus ?? (etf.barDate ? "fresh" : "unavailable");
+  const freshnessTitle = [
+    etf.quoteFreshnessReason,
+    etf.barDate ? `Bar date: ${etf.barDate}` : null,
+    etf.quoteSource || etf.priceSource ? `Source: ${etf.quoteSource ?? etf.priceSource}` : null,
+  ].filter(Boolean).join(" ");
   return (
     <div className="flex h-full flex-col gap-4 px-1 py-2">
       <div className="flex items-start justify-between gap-3">
@@ -312,15 +358,24 @@ function EtfTile({
             <button className="text-left text-lg font-semibold text-accent transition hover:underline" onClick={onOpenEtf}>
               {etf.ticker}
             </button>
-            <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${deltaPillCls(etf.change1d ?? 0)}`}>
-              {signedPct(etf.change1d ?? 0)}
+            <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${deltaPillCls(etf.change1d)}`}>
+              {signedPct(etf.change1d)}
             </span>
           </div>
           <p className="mt-2 line-clamp-2 text-sm text-slate-400">{etf.fundName}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(freshnessStatus)}`}
+              title={freshnessTitle || quoteFreshnessLabel(freshnessStatus)}
+            >
+              {quoteFreshnessLabel(freshnessStatus)}
+            </span>
+            <span className="font-mono text-[11px] text-slate-500">{etf.barDate ?? "No bar"}</span>
+          </div>
         </div>
         <div className="bg-panelSoft/35 px-3 py-2 text-right">
           <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Last</div>
-          <div className="mt-1 text-sm font-semibold text-slate-100">{formatFundPrice(etf.lastPrice ?? 0)}</div>
+          <div className="mt-1 text-sm font-semibold text-slate-100">{formatFundPrice(etf.lastPrice)}</div>
         </div>
       </div>
       <div className="bg-slate-950/20 p-2.5">
@@ -455,8 +510,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
       industryRows.length === 0 ? "Industry ETF tables are showing fallback ETF definitions because live ETF data is unavailable." : null,
     ].filter((value): value is string => Boolean(value));
 
-    setSectorEtfs((sectorRows.length > 0 ? sectorRows : FALLBACK_SECTOR_ETFS) as WatchlistEtf[]);
-    setIndustryEtfs((industryRows.length > 0 ? industryRows : FALLBACK_INDUSTRY_ETFS) as WatchlistEtf[]);
+    setSectorEtfs((sectorRows.length > 0 ? sectorRows : withUnavailableEtfQuotes(FALLBACK_SECTOR_ETFS)) as WatchlistEtf[]);
+    setIndustryEtfs((industryRows.length > 0 ? industryRows : withUnavailableEtfQuotes(FALLBACK_INDUSTRY_ETFS)) as WatchlistEtf[]);
     setFallbackWarnings((current) => [...current.filter((warning) => !warning.startsWith("Sector ETF") && !warning.startsWith("Industry ETF")), ...warnings]);
   }, []);
 
@@ -805,22 +860,25 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   }, [calendarRows]);
 
   const industryGroups = useMemo(() => {
-    const groups = new Map<string, { rows: WatchlistEtf[]; maxChange: number }>();
+    const groups = new Map<string, { rows: WatchlistEtf[]; maxChange: number | null }>();
     for (const row of industryEtfs) {
       const key = `${row.parentSector ?? "Other"} :: ${row.industry ?? "General"}`;
-      const existing = groups.get(key) ?? { rows: [], maxChange: Number.NEGATIVE_INFINITY };
+      const existing = groups.get(key) ?? { rows: [], maxChange: null };
+      const change = typeof row.change1d === "number" && Number.isFinite(row.change1d) ? row.change1d : null;
       existing.rows.push(row);
-      existing.maxChange = Math.max(existing.maxChange, row.change1d ?? 0);
+      if (change != null && (existing.maxChange == null || change > existing.maxChange)) {
+        existing.maxChange = change;
+      }
       groups.set(key, existing);
     }
 
     return [...groups.entries()]
       .map(([key, value]) => ({
         key,
-        maxChange: value.maxChange === Number.NEGATIVE_INFINITY ? 0 : value.maxChange,
-        rows: [...value.rows].sort((a, b) => b.change1d - a.change1d),
+        maxChange: value.maxChange,
+        rows: [...value.rows].sort((a, b) => (b.change1d ?? Number.NEGATIVE_INFINITY) - (a.change1d ?? Number.NEGATIVE_INFINITY)),
       }))
-      .sort((a, b) => b.maxChange - a.maxChange);
+      .sort((a, b) => (b.maxChange ?? Number.NEGATIVE_INFINITY) - (a.maxChange ?? Number.NEGATIVE_INFINITY));
   }, [industryEtfs]);
 
   const sortedConstituents = useMemo(() => {

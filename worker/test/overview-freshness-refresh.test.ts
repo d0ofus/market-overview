@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   computeOverviewFreshnessDiagnostics,
+  isOverviewFreshnessSufficientForScheduledSnapshot,
   OverviewFreshnessError,
   refreshAndStoreOverviewSnapshot,
 } from "../src/eod";
@@ -199,6 +200,13 @@ function createEnv(db: OverviewFreshnessDb): Env {
 }
 
 describe("overview freshness refresh", () => {
+  it("keeps scheduled repair active for low-coverage partial snapshots", () => {
+    expect(isOverviewFreshnessSufficientForScheduledSnapshot("fresh", 16)).toBe(true);
+    expect(isOverviewFreshnessSufficientForScheduledSnapshot("partial", 95)).toBe(true);
+    expect(isOverviewFreshnessSufficientForScheduledSnapshot("partial", 16)).toBe(false);
+    expect(isOverviewFreshnessSufficientForScheduledSnapshot("stale", 100)).toBe(false);
+  });
+
   it("blocks a current-date overview snapshot when critical ticker bars are stale", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05"],

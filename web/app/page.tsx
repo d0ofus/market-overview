@@ -2,6 +2,7 @@ import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { CurrentFocusPanel } from "@/components/current-focus-panel";
 import { OverviewRefreshMenu } from "@/components/overview-refresh-menu";
+import { QuoteFreshnessAudit } from "@/components/quote-freshness-audit";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
 import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
@@ -79,6 +80,7 @@ export default async function HomePage() {
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
   const currentFocusAnchorId = "overview-current-focus";
   const marketStateAnchorId = "overview-market-state";
+  const quoteAuditAnchorId = "overview-quote-audit";
   const macroRatesAnchorId = "overview-macro-rates";
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
   const jumpGroups = sectionLayouts.flatMap((entry) =>
@@ -89,6 +91,7 @@ export default async function HomePage() {
   const jumpItems = [
     { id: currentFocusAnchorId, label: "Current Focus" },
     { id: marketStateAnchorId, label: "State of Play" },
+    ...(dashboardValue ? [{ id: quoteAuditAnchorId, label: "Quote Audit" }] : []),
     ...jumpGroups,
     { id: macroRatesAnchorId, label: "Macro Rates" },
   ];
@@ -134,6 +137,7 @@ export default async function HomePage() {
           Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.
         </div>
       )}
+      {dashboardValue && <QuoteFreshnessAudit sections={focusedSections} />}
       <div className="grid gap-4">
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">

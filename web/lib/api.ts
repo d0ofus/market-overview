@@ -1,4 +1,4 @@
-import type { SnapshotResponse } from "@/types/dashboard";
+import type { QuoteFreshnessStatus, SnapshotResponse } from "@/types/dashboard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
@@ -2793,12 +2793,29 @@ export function getSectorTrending(days = 30) {
   return getJson<{ days: number; sectors: any[] }>(`/api/sectors/trending?days=${days}`);
 }
 
+export type SectorEtfRow = {
+  listType: "sector" | "industry";
+  parentSector: string | null;
+  industry: string | null;
+  ticker: string;
+  fundName: string;
+  sortOrder: number;
+  sourceUrl?: string | null;
+  change1d: number | null;
+  lastPrice: number | null;
+  barDate: string | null;
+  priceSource?: string | null;
+  quoteFreshnessStatus?: QuoteFreshnessStatus;
+  quoteFreshnessReason?: string | null;
+  quoteSource?: string | null;
+};
+
 export function getSectorEtfs() {
-  return getJson<{ rows: any[] }>("/api/etfs/sector");
+  return getJson<{ expectedAsOfDate?: string | null; rows: SectorEtfRow[] }>("/api/etfs/sector");
 }
 
 export function getIndustryEtfs() {
-  return getJson<{ rows: any[] }>("/api/etfs/industry");
+  return getJson<{ expectedAsOfDate?: string | null; rows: SectorEtfRow[] }>("/api/etfs/industry");
 }
 
 export function getEtfConstituents(ticker: string, forceSync = false) {

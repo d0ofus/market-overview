@@ -9,6 +9,7 @@ import { ChartGridPager } from "./chart-grid-pager";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
+import type { QuoteFreshnessStatus } from "@/types/dashboard";
 
 const CHARTS_PER_PAGE = 20;
 
@@ -28,6 +29,10 @@ type Row = {
   above20Sma: boolean | null;
   above50Sma: boolean | null;
   above200Sma: boolean | null;
+  barDate?: string | null;
+  quoteFreshnessStatus?: QuoteFreshnessStatus;
+  quoteFreshnessReason?: string | null;
+  quoteSource?: string | null;
   holdings: string[] | null;
 };
 
@@ -40,8 +45,8 @@ type Props = {
   anchorId?: string;
 };
 
-const cellClass = (n: number) => (n >= 0 ? "text-pos" : "text-neg");
-const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+const cellClass = (n: number | null | undefined) => (typeof n === "number" && n < 0 ? "text-neg" : "text-pos");
+const pct = (n: number | null | undefined) => (typeof n === "number" && Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "N/A");
 const isSmaColumn = (column: string) => column === "20SMA" || column === "50SMA" || column === "200SMA";
 const smaSortValue = (value: boolean | null): number | null => {
   if (value == null) return null;
@@ -70,6 +75,37 @@ const titleCase = (value: string): string => {
   if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
+const hasQuoteMetrics = (row: Row) => Boolean(row.barDate);
+const quoteFreshnessLabel = (status: QuoteFreshnessStatus | undefined): string => {
+  if (status === "stale") return "Stale";
+  if (status === "unavailable") return "N/A";
+  if (status === "unsupported") return "Unverified";
+  return "Fresh";
+};
+const quoteFreshnessClass = (status: QuoteFreshnessStatus | undefined): string => {
+  if (status === "stale") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
+  if (status === "unavailable") return "border-red-400/35 bg-red-500/10 text-red-200";
+  if (status === "unsupported") return "border-slate-500/45 bg-slate-700/40 text-slate-300";
+  return "border-emerald-400/25 bg-emerald-500/10 text-emerald-200";
+};
+
+function QuoteFreshnessBadge({ row }: { row: Row }) {
+  const status = row.quoteFreshnessStatus;
+  if (!status || status === "fresh") return null;
+  const title = [
+    row.quoteFreshnessReason,
+    row.barDate ? `Bar date: ${row.barDate}` : null,
+    row.quoteSource ? `Source: ${row.quoteSource}` : null,
+  ].filter(Boolean).join(" ");
+  return (
+    <span
+      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(status)}`}
+      title={title || quoteFreshnessLabel(status)}
+    >
+      {quoteFreshnessLabel(status)}
+    </span>
+  );
+}
 
 function SmaStatusIndicator({ value }: { value: boolean | null }) {
   if (value == null) {
@@ -116,6 +152,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return null;
     };
     const numberValueFor = (row: Row, key: string): number | null => {
+      if (!hasQuoteMetrics(row)) return null;
       if (key === "price") return row.price ?? null;
       if (key === "1D") return row.change1d ?? null;
       if (key === "1W") return row.change1w ?? null;
@@ -210,6 +247,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
             >
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
+            <QuoteFreshnessBadge row={row} />
           </div>
         </td>
       );
@@ -220,19 +258,19 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     if (column === "sparkline") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          <Sparkline values={row.sparkline} />
+          {hasQuoteMetrics(row) ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "relativeStrength30dVsSpy") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          <HistogramSparkline values={row.relativeStrength30dVsSpy} />
+          {hasQuoteMetrics(row) ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "price") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{row.price.toFixed(2)}</td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{hasQuoteMetrics(row) ? row.price.toFixed(2) : "N/A"}</td>;
     }
     if (column === "20SMA") {
       return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above20Sma} /></td>;
@@ -244,25 +282,25 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above200Sma} /></td>;
     }
     if (column === "1D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change1d)}`}>{pct(row.change1d)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change1d) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change1d) : "N/A"}</td>;
     }
     if (column === "1W") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change1w)}`}>{pct(row.change1w)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change1w) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change1w) : "N/A"}</td>;
     }
     if (column === "5D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change5d)}`}>{pct(row.change5d)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change5d) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change5d) : "N/A"}</td>;
     }
     if (column === "3M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change3m)}`}>{pct(row.change3m)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change3m) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change3m) : "N/A"}</td>;
     }
     if (column === "6M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.change6m)}`}>{pct(row.change6m)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change6m) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change6m) : "N/A"}</td>;
     }
     if (column === "YTD") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.ytd)}`}>{pct(row.ytd)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.ytd) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.ytd) : "N/A"}</td>;
     }
     if (column === "pctFrom52WHigh") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${cellClass(row.pctFrom52wHigh)}`}>{pct(row.pctFrom52wHigh)}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.pctFrom52wHigh) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.pctFrom52wHigh) : "N/A"}</td>;
     }
     return null;
   };

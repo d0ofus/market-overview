@@ -6,6 +6,7 @@ import {
   computeAndStoreBreadth,
   computeAndStoreSnapshot,
   computeOverviewFreshnessDiagnostics,
+  isOverviewFreshnessSufficientForScheduledSnapshot,
   loadSnapshot,
   OverviewFreshnessError,
   recomputeBreadthFromStoredBars,
@@ -13,7 +14,7 @@ import {
   refreshAndStoreOverviewSnapshot,
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
-import type { Env, PostCloseDailyBarRefreshJob } from "./types";
+import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus } from "./types";
 import {
   configPatchSchema,
   correlationMatrixQuerySchema,
@@ -1988,15 +1989,45 @@ async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, {
   return map;
 }
 
-async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; source: string }>> {
+function deriveStoredQuoteFreshness(input: {
+  ticker: string;
+  barDate: string | null | undefined;
+  expectedAsOfDate: string;
+  source: string | null | undefined;
+}): { quoteFreshnessStatus: QuoteFreshnessStatus; quoteFreshnessReason: string; quoteSource: string | null } {
+  const ticker = input.ticker.trim().toUpperCase();
+  const barDate = input.barDate ?? null;
+  const source = input.source ?? "daily-bars";
+  if (!barDate) {
+    return {
+      quoteFreshnessStatus: "unavailable",
+      quoteFreshnessReason: `No stored daily bar is available for ${ticker} from the current sources.`,
+      quoteSource: source,
+    };
+  }
+  if (barDate === input.expectedAsOfDate) {
+    return {
+      quoteFreshnessStatus: "fresh",
+      quoteFreshnessReason: `Stored daily bar is current for ${input.expectedAsOfDate}.`,
+      quoteSource: source,
+    };
+  }
+  return {
+    quoteFreshnessStatus: "stale",
+    quoteFreshnessReason: `Last stored daily bar is ${barDate}; expected ${input.expectedAsOfDate}.`,
+    quoteSource: source,
+  };
+}
+
+async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; barDate: string | null; source: string }>> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const map = new Map<string, { change1d: number; lastPrice: number; source: string }>();
+  const map = new Map<string, { change1d: number; lastPrice: number; barDate: string | null; source: string }>();
   for (let index = 0; index < unique.length; index += 80) {
     const batch = unique.slice(index, index + 80);
     if (batch.length === 0) continue;
     const rows = await env.DB.prepare(
-      `SELECT ticker, c, rowNumber FROM (
-         SELECT ticker, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rowNumber
+      `SELECT ticker, date, c, rowNumber FROM (
+         SELECT ticker, date, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rowNumber
          FROM daily_bars
          WHERE ticker IN (${batch.map(() => "?").join(",")})
        )
@@ -2004,20 +2035,23 @@ async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<str
        ORDER BY ticker ASC, rowNumber ASC`,
     )
       .bind(...batch)
-      .all<{ ticker: string; c: number; rowNumber: number }>();
-    const closesByTicker = new Map<string, number[]>();
+      .all<{ ticker: string; date: string; c: number; rowNumber: number }>();
+    const barsByTicker = new Map<string, Array<{ date: string; c: number }>>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
-      const closes = closesByTicker.get(ticker) ?? [];
-      closes.push(row.c);
-      closesByTicker.set(ticker, closes);
+      const bars = barsByTicker.get(ticker) ?? [];
+      bars.push({ date: row.date, c: row.c });
+      barsByTicker.set(ticker, bars);
     }
-    for (const [ticker, closes] of closesByTicker.entries()) {
-      const lastPrice = closes[0] ?? 0;
-      const prev = closes[1] ?? 0;
+    for (const [ticker, bars] of barsByTicker.entries()) {
+      const latest = bars[0] ?? null;
+      const previous = bars[1] ?? null;
+      const lastPrice = latest?.c ?? 0;
+      const prev = previous?.c ?? 0;
       map.set(ticker, {
         change1d: lastPrice && prev ? ((lastPrice - prev) / prev) * 100 : 0,
         lastPrice,
+        barDate: latest?.date ?? null,
         source: "daily-bars",
       });
     }
@@ -2905,26 +2939,54 @@ app.get("/api/sectors/calendar", async (c) => {
 app.get("/api/etfs/sector", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "sector");
   const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
+  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());
-      return { ...row, change1d: stats?.change1d ?? 0, lastPrice: stats?.lastPrice ?? 0, priceSource: stats?.source ?? "daily-bars" };
+      const quoteFreshness = deriveStoredQuoteFreshness({
+        ticker: String(row.ticker),
+        barDate: stats?.barDate ?? null,
+        expectedAsOfDate,
+        source: stats?.source ?? "daily-bars",
+      });
+      return {
+        ...row,
+        change1d: stats?.change1d ?? null,
+        lastPrice: stats?.lastPrice ?? null,
+        barDate: stats?.barDate ?? null,
+        priceSource: stats?.source ?? "daily-bars",
+        ...quoteFreshness,
+      };
     }),
   );
-  withStats.sort((a, b) => b.change1d - a.change1d);
-  return c.json({ rows: withStats });
+  withStats.sort((a, b) => (b.change1d ?? Number.NEGATIVE_INFINITY) - (a.change1d ?? Number.NEGATIVE_INFINITY));
+  return c.json({ expectedAsOfDate, rows: withStats });
 });
 
 app.get("/api/etfs/industry", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "industry");
   const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
+  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());
-      return { ...row, change1d: stats?.change1d ?? 0, lastPrice: stats?.lastPrice ?? 0, priceSource: stats?.source ?? "daily-bars" };
+      const quoteFreshness = deriveStoredQuoteFreshness({
+        ticker: String(row.ticker),
+        barDate: stats?.barDate ?? null,
+        expectedAsOfDate,
+        source: stats?.source ?? "daily-bars",
+      });
+      return {
+        ...row,
+        change1d: stats?.change1d ?? null,
+        lastPrice: stats?.lastPrice ?? null,
+        barDate: stats?.barDate ?? null,
+        priceSource: stats?.source ?? "daily-bars",
+        ...quoteFreshness,
+      };
     }),
   );
-  return c.json({ rows: withStats });
+  return c.json({ expectedAsOfDate, rows: withStats });
 });
 
 app.get("/api/etf/:ticker/constituents", async (c) => {
@@ -6653,13 +6715,13 @@ export default {
     }
     if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
 
-    let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null } | null = null;
+    let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null } | null = null;
     try {
       latestOverview = await env.DB.prepare(
-        "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+        "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
       )
         .bind(defaultConfig?.id ?? "default")
-        .first<{ asOfDate: string | null; freshnessStatus?: string | null }>();
+        .first<{ asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null }>();
     } catch {
       latestOverview = await env.DB.prepare(
         "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
@@ -6681,7 +6743,10 @@ export default {
     const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
     const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
     const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
-      && (latestOverview.freshnessStatus === "fresh" || latestOverview.freshnessStatus === "partial");
+      && isOverviewFreshnessSufficientForScheduledSnapshot(
+        latestOverview.freshnessStatus,
+        latestOverview.freshnessCoveragePct ?? null,
+      );
     if (!overviewIsUsable) {
       try {
         await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
