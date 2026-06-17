@@ -5,6 +5,7 @@ import {
   normalizeBraveFomcSources,
   normalizeFomcCommentaryRow,
   parseGeminiFomcJson,
+  shouldGenerateFomcSummary,
   testExports,
 } from "../src/fomc-commentary-service";
 
@@ -27,6 +28,12 @@ const row = {
   provider: "gemini",
   model: "gemini-test",
   error: null,
+  sourceFetchedAt: "2026-07-08T18:00:00.000Z",
+  sourceTextHash: "abc123",
+  lastCheckedAt: "2026-07-08T18:05:00.000Z",
+  lastUnchangedAt: null,
+  lastRefreshAttemptAt: "2026-07-08T18:00:00.000Z",
+  refreshAttemptCount: 1,
 };
 
 describe("FOMC commentary service helpers", () => {
@@ -49,6 +56,9 @@ describe("FOMC commentary service helpers", () => {
     expect(item.highlights).toEqual(["Rates steady", "Inflation still elevated"]);
     expect(item.citationSources).toHaveLength(1);
     expect(item.sourceMode).toBe("official_plus_brave");
+    expect(item.sourceTextHash).toBe("abc123");
+    expect(item.lastCheckedAt).toBe("2026-07-08T18:05:00.000Z");
+    expect(item.refreshAttemptCount).toBe(1);
   });
 
   it("falls back to empty arrays for malformed JSON", () => {
@@ -107,5 +117,41 @@ describe("FOMC commentary service helpers", () => {
       { eventType: "press_conference", meetingDate: "2026-04-29", sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomcpresconf20260429.htm" },
       { eventType: "minutes", meetingDate: "2026-04-29", sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomcminutes20260429.htm" },
     ]);
+  });
+
+  it("normalizes source text before hash comparison", () => {
+    expect(testExports.normalizeSourceTextForHash("A\n\n  B\tC")).toBe("A B C");
+  });
+
+  it("skips Gemini for ready official summaries when source hash is unchanged", () => {
+    expect(shouldGenerateFomcSummary({
+      existingStatus: "ready",
+      existingSourceTextHash: "hash-1",
+      nextSourceTextHash: "hash-1",
+      hasOfficialText: true,
+      sourceMode: "official_plus_brave",
+    })).toBe(false);
+    expect(shouldGenerateFomcSummary({
+      existingStatus: "ready",
+      existingSourceTextHash: "hash-1",
+      nextSourceTextHash: "hash-2",
+      hasOfficialText: true,
+      sourceMode: "official_plus_brave",
+    })).toBe(true);
+    expect(shouldGenerateFomcSummary({
+      force: true,
+      existingStatus: "ready",
+      existingSourceTextHash: "hash-1",
+      nextSourceTextHash: "hash-1",
+      hasOfficialText: true,
+      sourceMode: "official",
+    })).toBe(true);
+    expect(shouldGenerateFomcSummary({
+      existingStatus: "failed",
+      existingSourceTextHash: "hash-1",
+      nextSourceTextHash: "hash-1",
+      hasOfficialText: true,
+      sourceMode: "official",
+    })).toBe(true);
   });
 });

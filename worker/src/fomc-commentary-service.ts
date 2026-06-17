@@ -49,6 +49,12 @@ export type FomcCommentaryItem = {
   provider: string | null;
   model: string | null;
   error: string | null;
+  sourceFetchedAt: string | null;
+  sourceTextHash: string | null;
+  lastCheckedAt: string | null;
+  lastUnchangedAt: string | null;
+  lastRefreshAttemptAt: string | null;
+  refreshAttemptCount: number;
 };
 
 type StoredFomcCommentaryRow = {
@@ -68,6 +74,12 @@ type StoredFomcCommentaryRow = {
   provider: string | null;
   model: string | null;
   error: string | null;
+  sourceFetchedAt: string | null;
+  sourceTextHash: string | null;
+  lastCheckedAt: string | null;
+  lastUnchangedAt: string | null;
+  lastRefreshAttemptAt: string | null;
+  refreshAttemptCount: number | null;
 };
 
 type ExistingFomcCommentaryRow = StoredFomcCommentaryRow & {
@@ -105,6 +117,35 @@ function normalizeStringArray(values: unknown): string[] {
   return values.map((value) => String(value ?? "").trim()).filter(Boolean).slice(0, 6);
 }
 
+function normalizeSourceTextForHash(value: string | null | undefined): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const bytesOut = new Uint8Array(digest);
+  let hex = "";
+  for (let index = 0; index < bytesOut.length; index += 1) {
+    hex += bytesOut[index].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+export function shouldGenerateFomcSummary(input: {
+  force?: boolean;
+  existingStatus?: FomcCommentaryStatus | null;
+  existingSourceTextHash?: string | null;
+  nextSourceTextHash?: string | null;
+  hasOfficialText: boolean;
+  sourceMode: FomcCommentarySourceMode;
+}): boolean {
+  if (input.force) return true;
+  if (input.existingStatus !== "ready") return true;
+  if (!input.hasOfficialText || !input.nextSourceTextHash) return input.sourceMode === "fallback_context";
+  return input.existingSourceTextHash !== input.nextSourceTextHash;
+}
+
 export function normalizeFomcCommentaryRow(row: StoredFomcCommentaryRow): FomcCommentaryItem {
   const highlights = normalizeStringArray(parseJsonArray<unknown>(row.highlightsJson));
   const citations = parseJsonArray<FomcCommentaryCitationSource>(row.citationSourcesJson)
@@ -133,6 +174,12 @@ export function normalizeFomcCommentaryRow(row: StoredFomcCommentaryRow): FomcCo
     provider: row.provider ?? null,
     model: row.model ?? null,
     error: row.error ?? null,
+    sourceFetchedAt: row.sourceFetchedAt ?? null,
+    sourceTextHash: row.sourceTextHash ?? null,
+    lastCheckedAt: row.lastCheckedAt ?? null,
+    lastUnchangedAt: row.lastUnchangedAt ?? null,
+    lastRefreshAttemptAt: row.lastRefreshAttemptAt ?? null,
+    refreshAttemptCount: Number(row.refreshAttemptCount ?? 0),
   };
 }
 
@@ -154,7 +201,13 @@ export async function loadLatestFomcCommentary(env: Env, limit = 4): Promise<Fom
               generated_at as generatedAt,
               provider,
               model,
-              error
+              error,
+              source_fetched_at as sourceFetchedAt,
+              source_text_hash as sourceTextHash,
+              last_checked_at as lastCheckedAt,
+              last_unchanged_at as lastUnchangedAt,
+              last_refresh_attempt_at as lastRefreshAttemptAt,
+              refresh_attempt_count as refreshAttemptCount
          FROM fomc_commentary_items
         ORDER BY COALESCE(release_date, meeting_date) DESC, datetime(updated_at) DESC
         LIMIT ?`,
@@ -371,7 +424,7 @@ function buildFomcPrompt(input: {
   ].join("\n\n");
 }
 
-export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar };
+export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar, normalizeSourceTextForHash };
 
 export function parseGeminiFomcJson(text: string): FomcSummaryJson {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
@@ -406,7 +459,13 @@ async function loadExisting(env: Env, eventType: FomcCommentaryEventType, meetin
               generated_at as generatedAt,
               provider,
               model,
-              error
+              error,
+              source_fetched_at as sourceFetchedAt,
+              source_text_hash as sourceTextHash,
+              last_checked_at as lastCheckedAt,
+              last_unchanged_at as lastUnchangedAt,
+              last_refresh_attempt_at as lastRefreshAttemptAt,
+              refresh_attempt_count as refreshAttemptCount
          FROM fomc_commentary_items
         WHERE event_type = ? AND meeting_date = ? AND source_url = ?
         LIMIT 1`,
@@ -436,14 +495,20 @@ async function upsertFomcCommentaryItem(env: Env, input: {
   status: FomcCommentaryStatus;
   error: string | null;
   generatedAt: string | null;
+  sourceTextHash: string | null;
+  lastCheckedAt: string | null;
+  lastUnchangedAt: string | null;
+  lastRefreshAttemptAt: string | null;
+  refreshAttemptCount: number;
   now: string;
 }): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO fomc_commentary_items
       (id, event_type, meeting_date, release_date, source_url, source_title, source_text, source_fetched_at,
        source_mode, brave_sources_json, citation_sources_json, summary_markdown, highlights_json,
-       trading_read_through, provider, model, status, error, generated_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       trading_read_through, provider, model, status, error, generated_at, source_text_hash, last_checked_at,
+       last_unchanged_at, last_refresh_attempt_at, refresh_attempt_count, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_type, meeting_date, source_url) DO UPDATE SET
        release_date = excluded.release_date,
        source_title = excluded.source_title,
@@ -460,6 +525,11 @@ async function upsertFomcCommentaryItem(env: Env, input: {
        status = excluded.status,
        error = excluded.error,
        generated_at = excluded.generated_at,
+       source_text_hash = excluded.source_text_hash,
+       last_checked_at = excluded.last_checked_at,
+       last_unchanged_at = excluded.last_unchanged_at,
+       last_refresh_attempt_at = excluded.last_refresh_attempt_at,
+       refresh_attempt_count = excluded.refresh_attempt_count,
        updated_at = excluded.updated_at`,
   ).bind(
     input.id,
@@ -481,9 +551,24 @@ async function upsertFomcCommentaryItem(env: Env, input: {
     input.status,
     input.error,
     input.generatedAt,
+    input.sourceTextHash,
+    input.lastCheckedAt,
+    input.lastUnchangedAt,
+    input.lastRefreshAttemptAt,
+    input.refreshAttemptCount,
     input.now,
     input.now,
   ).run();
+}
+
+async function markFomcCommentaryUnchanged(env: Env, id: string, nowIso: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE fomc_commentary_items
+        SET last_checked_at = ?,
+            last_unchanged_at = ?,
+            updated_at = ?
+      WHERE id = ?`,
+  ).bind(nowIso, nowIso, nowIso, id).run();
 }
 
 export async function refreshFomcCommentary(env: Env, options: RefreshOptions = {}): Promise<{ ok: boolean; items: FomcCommentaryItem[]; warning: string | null }> {
@@ -527,13 +612,24 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     ? officialText!
     : fallbackSources.map((source) => `${source.sourceName}: ${source.title ?? ""}. ${source.snippet ?? ""} URL: ${source.url}`).join("\n");
   const citationsForPrompt = sourceMode === "official" ? [] : (sourceMode === "fallback_context" ? fallbackSources : contextSources);
+  const sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
 
   const existing = await loadExisting(env, eventType, meetingDate, sourceUrl);
-  if (!options.force && existing?.status === "ready" && existing.sourceText === officialText && existing.braveSourcesJson === JSON.stringify(braveSources)) {
-    return { ok: true, warning: null, items: [normalizeFomcCommentaryRow(existing)] };
+  const shouldGenerate = shouldGenerateFomcSummary({
+    force: options.force,
+    existingStatus: existing?.status ?? null,
+    existingSourceTextHash: existing?.sourceTextHash ?? null,
+    nextSourceTextHash: sourceTextHash,
+    hasOfficialText,
+    sourceMode,
+  });
+  if (!shouldGenerate && existing?.status === "ready") {
+    await markFomcCommentaryUnchanged(env, existing.id, nowIso);
+    return { ok: true, warning: null, items: await loadLatestFomcCommentary(env, 4) };
   }
 
   const id = existing?.id ?? crypto.randomUUID();
+  const refreshAttemptCount = Number(existing?.refreshAttemptCount ?? 0) + (shouldGenerate && (hasOfficialText || sourceMode === "fallback_context") ? 1 : 0);
   let stored: Parameters<typeof upsertFomcCommentaryItem>[1] = {
     id,
     eventType,
@@ -554,6 +650,11 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     status: "pending_source",
     error: sourceError,
     generatedAt: null,
+    sourceTextHash,
+    lastCheckedAt: nowIso,
+    lastUnchangedAt: null,
+    lastRefreshAttemptAt: shouldGenerate && (hasOfficialText || sourceMode === "fallback_context") ? nowIso : null,
+    refreshAttemptCount,
     now: nowIso,
   };
 

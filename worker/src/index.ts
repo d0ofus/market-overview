@@ -6584,7 +6584,8 @@ export default {
     const cron = (key: string) => cronSettings.get(key);
     const now = new Date(event.scheduledTime || Date.now());
     try {
-      await refreshLatestFomcCommentary(env, { now });
+      const result = await refreshLatestFomcCommentary(env, { now });
+      if (result.warning) console.warn("scheduled FOMC commentary refresh warning", result.warning);
     } catch (error) {
       console.error("scheduled FOMC commentary refresh failed", error);
     }
