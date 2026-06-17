@@ -227,6 +227,9 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
                   {sourceMode === "fallback_context" && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-semibold text-amber-200">Secondary-source fallback</span>
                   )}
+                  {item.provider === "extractive_fallback" && (
+                    <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 font-semibold text-violet-200">Official extractive fallback</span>
+                  )}
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
                   <span>Meeting: <span className="text-slate-200">{formatIsoDate(item.meetingDate)}</span></span>
