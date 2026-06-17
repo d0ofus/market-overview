@@ -2591,7 +2591,7 @@ export async function updateWatchlistReviewApplyStatus(
       receivedAt: now,
     };
 
-    await env.DB.prepare(
+    const result = await env.DB.prepare(
       `UPDATE watchlist_review_apply_dispatches
           SET status = ?,
               claim_owner = CASE WHEN ? = 'claimed' AND ? IS NOT NULL THEN COALESCE(claim_owner, ?) ELSE claim_owner END,
@@ -2604,7 +2604,15 @@ export async function updateWatchlistReviewApplyStatus(
               result_json = COALESCE(?, result_json),
               error = ?,
               updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ?
+          AND approval_revision = ?
+          AND checksum = ?
+          AND idempotency_key = ?
+          AND status NOT IN ('applied', 'apply_failed', 'partial_failed', 'cancelled')
+          AND (
+            (? = 'claimed' AND (claim_owner IS NULL OR claim_owner = ?))
+            OR (? <> 'claimed' AND claim_owner = ? AND status IN ('claimed', 'applying'))
+          )`,
     ).bind(
       nextDispatchStatus,
       input.status,
@@ -2623,7 +2631,16 @@ export async function updateWatchlistReviewApplyStatus(
       cleanText(input.error, 1000),
       now,
       dispatch.id,
+      dispatch.approvalRevision,
+      dispatch.checksum,
+      dispatch.idempotencyKey,
+      input.status,
+      input.claimOwner ?? null,
+      input.status,
+      input.claimOwner ?? null,
     ).run();
+    const changed = Number(result.meta?.changes ?? 0) > 0;
+    if (!changed) throw new Error("Apply status update is stale or no longer owns the active dispatch claim.");
 
     const includedIds = dispatch.approvedSet.changes.map((change) => change.candidateId);
     if (input.status === "applying") {

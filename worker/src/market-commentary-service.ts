@@ -7,6 +7,8 @@ import {
   generateMarkdownWithGemini,
   normalizeSourceAuditRows,
   parseJsonArray,
+  sanitizeInternalSourceMarkdownLinks,
+  sourceCitationPolicyPrompt,
   type MarketReportDataQuality,
   type MarketReportSourceAudit,
 } from "./market-report-common";
@@ -877,6 +879,8 @@ function buildPrompt(evidence: MarketEvidence, settings: MarketCommentarySetting
     "DATA QUALITY NOTES",
     JSON.stringify(evidence.dataQuality, null, 2),
     "",
+    sourceCitationPolicyPrompt(),
+    "",
     "SOURCE AUDIT INPUTS",
     JSON.stringify(evidence.sourceAudit, null, 2),
   ].join("\n");
@@ -998,7 +1002,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
       provider: GEMINI_PROVIDER,
       model,
       status: "ready",
-      reportMarkdown: result.text,
+      reportMarkdown: sanitizeInternalSourceMarkdownLinks(result.text, evidence.sourceAudit),
       sourceAudit: [...evidence.sourceAudit, ...result.sources],
       dataQuality: evidence.dataQuality,
       error: null,

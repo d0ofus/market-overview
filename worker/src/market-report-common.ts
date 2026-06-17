@@ -58,6 +58,39 @@ export function normalizeSourceAuditRows(rows: MarketReportSourceAudit[]): Marke
     .filter((row) => row.sourceName && row.dataUsed);
 }
 
+function normalizeCitationText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function isInternalSourceLinkText(linkText: string, internalSourceNames: string[]): boolean {
+  const normalizedLinkText = normalizeCitationText(linkText);
+  if (!normalizedLinkText) return false;
+  return internalSourceNames.some((sourceName) => {
+    const normalizedSourceName = normalizeCitationText(sourceName);
+    return normalizedSourceName
+      && (normalizedSourceName.includes(normalizedLinkText) || normalizedLinkText.includes(normalizedSourceName));
+  });
+}
+
+export function sourceCitationPolicyPrompt(): string {
+  return [
+    "SOURCE CITATION POLICY",
+    "- Only create markdown links for SOURCE AUDIT INPUTS rows that include a non-null url.",
+    "- Internal app sources with url=null, including scan presets and stored dashboard snapshots, must be cited as plain text source names, never as markdown links.",
+    "- Do not attach external URLs to internal app source names unless that exact URL appears on the same source audit row.",
+  ].join("\n");
+}
+
+export function sanitizeInternalSourceMarkdownLinks(markdown: string, sourceAudit: MarketReportSourceAudit[]): string {
+  const internalSourceNames = normalizeSourceAuditRows(sourceAudit)
+    .filter((source) => !source.url)
+    .map((source) => source.sourceName);
+  if (internalSourceNames.length === 0) return markdown;
+  return markdown.replace(/\[([^\]\n]+)]\((https?:\/\/[^)\s]+)\)/g, (match, linkText: string) => (
+    isInternalSourceLinkText(linkText, internalSourceNames) ? linkText : match
+  ));
+}
+
 export async function braveSearch(apiKey: string, query: string, options?: { freshness?: string; count?: number; timeoutMs?: string | number }): Promise<BraveSearchResult[]> {
   const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", query);

@@ -687,7 +687,7 @@ export async function updateWatchlistReviewAnalysisDispatchStatus(
         receivedAt: now,
       })
       : null;
-    await env.DB.prepare(
+    const result = await env.DB.prepare(
       `UPDATE watchlist_review_analysis_dispatches
           SET status = ?,
               heartbeat_at = ?,
@@ -699,7 +699,11 @@ export async function updateWatchlistReviewAnalysisDispatchStatus(
               result_json = COALESCE(?, result_json),
               error = ?,
               updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ?
+          AND claim_owner = ?
+          AND idempotency_key = ?
+          AND payload_checksum = ?
+          AND status IN ('claimed', 'running')`,
     ).bind(
       input.status,
       now,
@@ -713,9 +717,13 @@ export async function updateWatchlistReviewAnalysisDispatchStatus(
       cleanText(input.error, 1000),
       now,
       dispatch.id,
+      input.claimOwner,
+      input.idempotencyKey,
+      input.payloadChecksum,
     ).run();
+    const changed = Number(result.meta?.changes ?? 0) > 0;
     const nextDispatch = await loadWatchlistReviewAnalysisDispatch(env, dispatch.id);
-    if (!nextDispatch) throw new Error("Watchlist review analysis dispatch not found after status update.");
+    if (!changed || !nextDispatch) throw new Error("Analysis dispatch status update is stale or no longer owns the active claim.");
     return { ok: true, dispatch: nextDispatch, summary: summarizeWatchlistReviewAnalysisDispatch(nextDispatch) };
   } catch (error) {
     if (isSchemaMissingError(error)) throw new WatchlistReviewSchemaMissingError();

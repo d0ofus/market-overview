@@ -32,7 +32,7 @@ function createPrep(overrides: Partial<WatchlistReviewPrepSummary> = {}): Watchl
   };
 }
 
-function createAnalysisEnv() {
+function createAnalysisEnv(options: { raceStatusUpdateClaimOwner?: string } = {}) {
   const prep = createPrep();
   const dispatches = new Map<string, any>();
   const db = {
@@ -117,6 +117,13 @@ function createAnalysisEnv() {
               }
               if (sql.includes("started_at = COALESCE")) {
                 const dispatch = dispatches.get(String(args[11]));
+                if (options.raceStatusUpdateClaimOwner) dispatch.claimOwner = options.raceStatusUpdateClaimOwner;
+                const canUpdate = dispatch
+                  && args[12] === dispatch.claimOwner
+                  && args[13] === dispatch.idempotencyKey
+                  && args[14] === dispatch.payloadChecksum
+                  && ["claimed", "running"].includes(dispatch.status);
+                if (!canUpdate) return { success: true, meta: { changes: 0 } };
                 dispatch.status = args[0] as WatchlistReviewAnalysisDispatchStatus;
                 dispatch.heartbeatAt = args[1];
                 if (args[3]) dispatch.claimExpiresAt = args[3];
@@ -250,6 +257,23 @@ describe("watchlist review analysis dispatch service", () => {
 
     expect(terminal).toMatchObject({ claimed: false, status: "terminal" });
     expect(mismatch).toMatchObject({ claimed: false, status: "checksum_mismatch" });
+  });
+
+  it("rejects stale analysis status updates when the dispatch claim changes between load and update", async () => {
+    const { env, prep } = createAnalysisEnv({ raceStatusUpdateClaimOwner: "hermes-2" });
+    const created = await createWatchlistReviewAnalysisDispatch(env, prep);
+    await claimWatchlistReviewAnalysisDispatch(env, created.dispatch.id, {
+      claimOwner: "hermes-1",
+      idempotencyKey: created.dispatch.idempotencyKey,
+      payloadChecksum: created.dispatch.payloadChecksum,
+    });
+
+    await expect(updateWatchlistReviewAnalysisDispatchStatus(env, created.dispatch.id, {
+      claimOwner: "hermes-1",
+      idempotencyKey: created.dispatch.idempotencyKey,
+      payloadChecksum: created.dispatch.payloadChecksum,
+      status: "running",
+    })).rejects.toThrow(/stale|claim/i);
   });
 
   it("requires the active claim owner for status updates and stores completion result metadata", async () => {

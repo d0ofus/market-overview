@@ -10,12 +10,13 @@ import {
   resolveWatchlistReviewCandidateApplyOutcomes,
   signHermesGenericWebhook,
   signWatchlistReviewWebhook,
+  updateWatchlistReviewApplyStatus,
   watchlistReviewExportCsv,
 } from "../src/watchlist-review-service";
 
 const NOW = "2026-06-12T14:00:00.000Z";
 
-function createDispatchEnv(status = "waiting_for_hermes") {
+function createDispatchEnv(status = "waiting_for_hermes", options: { raceStatusUpdateClaimOwner?: string } = {}) {
   const events: Array<{ eventType: string; actor: string; payloadJson: string }> = [];
   const dispatch = {
     id: "dispatch-1",
@@ -121,6 +122,22 @@ function createDispatchEnv(status = "waiting_for_hermes") {
                 return { success: true, meta: { changes: 0 } };
               }
               if (sql.includes("UPDATE watchlist_review_apply_dispatches") && sql.includes("heartbeat_at")) {
+                if (sql.includes("started_at")) {
+                  if (options.raceStatusUpdateClaimOwner) dispatch.claimOwner = options.raceStatusUpdateClaimOwner;
+                  const canUpdate = args[16] === dispatch.id
+                    && args[17] === dispatch.approvalRevision
+                    && args[18] === dispatch.checksum
+                    && args[19] === dispatch.idempotencyKey
+                    && !["applied", "apply_failed", "partial_failed", "cancelled"].includes(String(dispatch.status))
+                    && ((args[20] === "claimed" && (!dispatch.claimOwner || args[21] === dispatch.claimOwner))
+                      || (args[22] !== "claimed" && args[23] === dispatch.claimOwner && ["claimed", "applying"].includes(String(dispatch.status))));
+                  if (!canUpdate) return { success: true, meta: { changes: 0 } };
+                  dispatch.status = String(args[0]);
+                  dispatch.heartbeatAt = String(args[7]);
+                  dispatch.claimExpiresAt = args[9] == null ? dispatch.claimExpiresAt : String(args[9]);
+                  dispatch.updatedAt = String(args[15]);
+                  return { success: true, meta: { changes: 1 } };
+                }
                 dispatch.heartbeatAt = String(args[0]);
                 dispatch.claimExpiresAt = String(args[1]);
                 dispatch.updatedAt = String(args[2]);
@@ -486,5 +503,27 @@ describe("watchlist review service helpers", () => {
     });
 
     expect(events.map((event) => event.eventType)).toContain("telegram_confirmation_requested");
+  });
+
+  it("rejects stale apply status updates when the dispatch claim changes between load and update", async () => {
+    const { env } = createDispatchEnv("waiting_for_hermes", { raceStatusUpdateClaimOwner: "hermes-default-2" });
+    const claim = {
+      claimOwner: "hermes-default-1",
+      leaseSeconds: 600,
+      approvalRevision: 2,
+      checksum: "a".repeat(64),
+      idempotencyKey: `watchlist-review:run-1:2:${"a".repeat(64)}`,
+    };
+    await claimWatchlistReviewApplyDispatch(env, "dispatch-1", claim);
+
+    await expect(updateWatchlistReviewApplyStatus(env, "run-1", {
+      runId: "run-1",
+      dispatchId: "dispatch-1",
+      status: "applying",
+      claimOwner: "hermes-default-1",
+      approvalRevision: 2,
+      checksum: "a".repeat(64),
+      idempotencyKey: `watchlist-review:run-1:2:${"a".repeat(64)}`,
+    })).rejects.toThrow(/stale|claim/i);
   });
 });
