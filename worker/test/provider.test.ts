@@ -47,6 +47,38 @@ describe("extractPremarketSnapshotFromAlpacaSnapshot", () => {
   });
 });
 
+describe("Alpaca quote snapshots", () => {
+  it("parses the stock snapshots response keyed by ticker at the top level", async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      AAPL: {
+        latestTrade: { p: 105, t: "2026-06-17T20:00:00Z" },
+        dailyBar: { c: 104.5, t: "2026-06-17T04:00:00Z" },
+        prevDailyBar: { c: 100 },
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+
+    await expect(provider.getQuoteSnapshot?.(["AAPL"])).resolves.toMatchObject({
+      AAPL: {
+        price: 105,
+        prevClose: 100,
+        change1d: 5,
+        source: "alpaca-snapshot",
+        tradeTimestamp: "2026-06-17T20:00:00Z",
+        dailyBarTimestamp: "2026-06-17T04:00:00Z",
+      },
+    });
+  });
+});
+
 describe("provider fallback control", () => {
   it("does not chase fallback providers when fallbackEnabled is false", async () => {
     const fetchMock = vi.fn(async () => new Response(

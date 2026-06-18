@@ -107,6 +107,31 @@ type AlpacaPremarketSnapshotInput = {
   prevDailyBar?: { c?: number };
 };
 
+type AlpacaSnapshot = {
+  latestTrade?: { p?: number; t?: string };
+  minuteBar?: { c?: number; v?: number };
+  dailyBar?: { c?: number; t?: string; v?: number };
+  prevDailyBar?: { c?: number };
+};
+
+function extractAlpacaSnapshots(json: unknown): Record<string, AlpacaSnapshot> {
+  if (!json || typeof json !== "object") return {};
+  const raw = json as Record<string, unknown>;
+  const nested = raw.snapshots;
+  const source = nested && typeof nested === "object" ? nested as Record<string, unknown> : raw;
+  const out: Record<string, AlpacaSnapshot> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!value || typeof value !== "object") continue;
+    const upper = key.toUpperCase();
+    if (!/^[A-Z0-9._-]+$/.test(upper)) continue;
+    const snapshot = value as AlpacaSnapshot;
+    if (snapshot.latestTrade || snapshot.minuteBar || snapshot.dailyBar || snapshot.prevDailyBar) {
+      out[upper] = snapshot;
+    }
+  }
+  return out;
+}
+
 export function extractPremarketSnapshotFromAlpacaSnapshot(
   snap: AlpacaPremarketSnapshotInput,
 ): PremarketSnapshot | null {
@@ -710,14 +735,8 @@ class AlpacaProvider implements MarketDataProvider {
         const body = await res.text();
         throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
       }
-      const json = (await res.json()) as {
-        snapshots?: Record<string, {
-          latestTrade?: { p?: number; t?: string };
-          dailyBar?: { c?: number; t?: string };
-          prevDailyBar?: { c?: number };
-        }>;
-      };
-      for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
+      const json = await res.json();
+      for (const [ticker, snap] of Object.entries(extractAlpacaSnapshots(json))) {
         const price = snap.latestTrade?.p ?? snap.dailyBar?.c;
         const prevClose = snap.prevDailyBar?.c;
         if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
@@ -755,15 +774,8 @@ class AlpacaProvider implements MarketDataProvider {
         const body = await res.text();
         throw new Error(`Alpaca premarket snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
       }
-      const json = (await res.json()) as {
-        snapshots?: Record<string, {
-          latestTrade?: { p?: number };
-          minuteBar?: { c?: number; v?: number };
-          dailyBar?: { c?: number; v?: number };
-          prevDailyBar?: { c?: number };
-        }>;
-      };
-      for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
+      const json = await res.json();
+      for (const [ticker, snap] of Object.entries(extractAlpacaSnapshots(json))) {
         const parsed = extractPremarketSnapshotFromAlpacaSnapshot(snap);
         if (!parsed) continue;
         out[ticker.toUpperCase()] = parsed;
