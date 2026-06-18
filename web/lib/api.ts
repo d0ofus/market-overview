@@ -2814,6 +2814,7 @@ export type SectorEtfRow = {
   quoteFreshnessStatus?: QuoteFreshnessStatus;
   quoteFreshnessReason?: string | null;
   quoteSource?: string | null;
+  quoteFetchedAt?: string | null;
 };
 
 export function getSectorEtfs() {

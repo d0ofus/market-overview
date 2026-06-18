@@ -86,6 +86,7 @@ export type SnapshotReadyResponse = {
         quoteFreshnessStatus?: QuoteFreshnessStatus;
         quoteFreshnessReason?: string | null;
         quoteSource?: string | null;
+        quoteFetchedAt?: string | null;
         rankKey: number;
         holdings: string[] | null;
       }>;

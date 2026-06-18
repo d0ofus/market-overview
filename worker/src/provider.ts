@@ -18,10 +18,20 @@ export type PremarketSnapshot = {
   premarketVolume: number;
 };
 
+export type QuoteSnapshot = {
+  price: number;
+  prevClose: number;
+  change1d: number;
+  source: "alpaca-snapshot";
+  fetchedAt: string;
+  tradeTimestamp?: string | null;
+  dailyBarTimestamp?: string | null;
+};
+
 export interface MarketDataProvider {
   label: string;
   getDailyBars(tickers: string[], startDate: string, endDate: string): Promise<DailyBar[]>;
-  getQuoteSnapshot?(tickers: string[]): Promise<Record<string, { price: number; prevClose: number }>>;
+  getQuoteSnapshot?(tickers: string[]): Promise<Record<string, QuoteSnapshot>>;
   getPremarketSnapshot?(tickers: string[]): Promise<Record<string, PremarketSnapshot>>;
 }
 
@@ -679,15 +689,16 @@ class AlpacaProvider implements MarketDataProvider {
     return all;
   }
 
-  async getQuoteSnapshot(tickers: string[]): Promise<Record<string, { price: number; prevClose: number }>> {
+  async getQuoteSnapshot(tickers: string[]): Promise<Record<string, QuoteSnapshot>> {
     const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
-    const out: Record<string, { price: number; prevClose: number }> = {};
+    const out: Record<string, QuoteSnapshot> = {};
     const chunks = this.chunk(unique, 80);
     for (const chunk of chunks) {
       const params = new URLSearchParams({
         symbols: chunk.join(","),
         feed: this.feed,
       });
+      const fetchedAt = new Date().toISOString();
       const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
@@ -700,13 +711,25 @@ class AlpacaProvider implements MarketDataProvider {
         throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
       }
       const json = (await res.json()) as {
-        snapshots?: Record<string, { latestTrade?: { p?: number }; dailyBar?: { c?: number }; prevDailyBar?: { c?: number } }>;
+        snapshots?: Record<string, {
+          latestTrade?: { p?: number; t?: string };
+          dailyBar?: { c?: number; t?: string };
+          prevDailyBar?: { c?: number };
+        }>;
       };
       for (const [ticker, snap] of Object.entries(json.snapshots ?? {})) {
         const price = snap.latestTrade?.p ?? snap.dailyBar?.c;
         const prevClose = snap.prevDailyBar?.c;
         if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
-        out[ticker.toUpperCase()] = { price, prevClose };
+        out[ticker.toUpperCase()] = {
+          price,
+          prevClose,
+          change1d: ((price - prevClose) / prevClose) * 100,
+          source: "alpaca-snapshot",
+          fetchedAt,
+          tradeTimestamp: snap.latestTrade?.t ?? null,
+          dailyBarTimestamp: snap.dailyBar?.t ?? null,
+        };
       }
     }
     return out;

@@ -171,7 +171,7 @@ class OverviewFreshnessDb {
     if (sql.includes("INSERT INTO snapshots_meta")) this.snapshotWrites += 1;
     if (sql.includes("INSERT OR REPLACE INTO snapshot_rows")) {
       this.snapshotRowWrites += 1;
-      this.snapshotRowBarDates.push(args.at(-1) == null ? null : String(args.at(-1)));
+      this.snapshotRowBarDates.push(args[15] == null ? null : String(args[15]));
     }
     return { meta: { rows_written: 1 } };
   }
