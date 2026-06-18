@@ -23,8 +23,156 @@ export type BraveSearchResult = {
   publishedAt: string | null;
 };
 
+export type BraveSearchCaller = "daily_commentary" | "weekly_review" | "fomc";
+
+export type BraveUsageDailyRow = {
+  usageDay: string;
+  caller: BraveSearchCaller;
+  apiCallCount: number;
+  apiErrorCount: number;
+  cacheHitCount: number;
+  lastCalledAt: string | null;
+  lastErrorAt: string | null;
+  updatedAt: string;
+};
+
+export type AdminBraveUsageResponse = {
+  days: number;
+  rows: BraveUsageDailyRow[];
+  totals: {
+    apiCallCount: number;
+    apiErrorCount: number;
+    cacheHitCount: number;
+  };
+};
+
+type BraveSearchCacheRow = {
+  responseJson: string;
+  expiresAt: string;
+};
+
 export const GEMINI_PROVIDER = "gemini";
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
+
+function normalizeBraveQuery(query: string): string {
+  return query.replace(/\s+/g, " ").trim();
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const bytesOut = new Uint8Array(digest);
+  let hex = "";
+  for (let index = 0; index < bytesOut.length; index += 1) {
+    hex += bytesOut[index].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+async function braveCacheKey(input: { query: string; freshness: string; count: number; dateBucket: string }): Promise<string> {
+  return await sha256Hex(`v1|freshness=${input.freshness}|count=${input.count}|bucket=${input.dateBucket}|q=${input.query}`);
+}
+
+function isMissingBraveUsageTable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /no such table|brave_usage_daily/i.test(message);
+}
+
+async function incrementBraveUsage(
+  env: Env,
+  caller: BraveSearchCaller,
+  nowIso: string,
+  delta: { apiCalls?: number; apiErrors?: number; cacheHits?: number },
+): Promise<void> {
+  const apiCalls = delta.apiCalls ?? 0;
+  const apiErrors = delta.apiErrors ?? 0;
+  const cacheHits = delta.cacheHits ?? 0;
+  const lastCalledAt = apiCalls > 0 ? nowIso : null;
+  const lastErrorAt = apiErrors > 0 ? nowIso : null;
+  await env.DB.prepare(
+    `INSERT INTO brave_usage_daily
+       (usage_day, caller, api_call_count, api_error_count, cache_hit_count, last_called_at, last_error_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(usage_day, caller) DO UPDATE SET
+       api_call_count = brave_usage_daily.api_call_count + excluded.api_call_count,
+       api_error_count = brave_usage_daily.api_error_count + excluded.api_error_count,
+       cache_hit_count = brave_usage_daily.cache_hit_count + excluded.cache_hit_count,
+       last_called_at = COALESCE(excluded.last_called_at, brave_usage_daily.last_called_at),
+       last_error_at = COALESCE(excluded.last_error_at, brave_usage_daily.last_error_at),
+       updated_at = excluded.updated_at`,
+  )
+    .bind(nowIso.slice(0, 10), caller, apiCalls, apiErrors, cacheHits, lastCalledAt, lastErrorAt, nowIso)
+    .run();
+}
+
+async function tryIncrementBraveUsage(
+  env: Env,
+  caller: BraveSearchCaller,
+  nowIso: string,
+  delta: { apiCalls?: number; apiErrors?: number; cacheHits?: number },
+): Promise<void> {
+  try {
+    await incrementBraveUsage(env, caller, nowIso, delta);
+  } catch (error) {
+    console.warn("Brave Search usage logging failed", { caller, error });
+  }
+}
+
+async function readBraveCache(env: Env, cacheKey: string, nowIso: string): Promise<BraveSearchResult[] | null> {
+  const row = await env.DB.prepare(
+    `SELECT response_json as responseJson, expires_at as expiresAt
+       FROM brave_search_cache
+      WHERE cache_key = ? AND expires_at > ?
+      LIMIT 1`,
+  ).bind(cacheKey, nowIso).first<BraveSearchCacheRow>();
+  if (!row) return null;
+  const parsed = JSON.parse(row.responseJson) as BraveSearchResult[];
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+async function markBraveCacheHit(env: Env, cacheKey: string, nowIso: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE brave_search_cache
+        SET last_hit_at = ?,
+            hit_count = hit_count + 1
+      WHERE cache_key = ?`,
+  ).bind(nowIso, cacheKey).run();
+}
+
+async function writeBraveCache(env: Env, input: {
+  cacheKey: string;
+  query: string;
+  freshness: string;
+  dateBucket: string;
+  results: BraveSearchResult[];
+  fetchedAt: string;
+  expiresAt: string;
+}): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO brave_search_cache
+       (cache_key, query, freshness, date_bucket, response_json, result_count, fetched_at, expires_at, last_hit_at, hit_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       query = excluded.query,
+       freshness = excluded.freshness,
+       date_bucket = excluded.date_bucket,
+       response_json = excluded.response_json,
+       result_count = excluded.result_count,
+       fetched_at = excluded.fetched_at,
+       expires_at = excluded.expires_at`,
+  )
+    .bind(
+      input.cacheKey,
+      input.query,
+      input.freshness,
+      input.dateBucket,
+      JSON.stringify(input.results),
+      input.results.length,
+      input.fetchedAt,
+      input.expiresAt,
+    )
+    .run();
+}
 
 export function parseJsonArray<T>(value: string | null | undefined): T[] {
   if (!value) return [];
@@ -130,12 +278,76 @@ export async function braveSearch(apiKey: string, query: string, options?: { fre
     }));
 }
 
+export async function cachedBraveSearch(
+  env: Env,
+  query: string,
+  options: {
+    caller: BraveSearchCaller;
+    freshness?: string;
+    count?: number;
+    timeoutMs?: string | number;
+    dateBucket: string;
+    ttlSeconds: number;
+    now?: Date;
+  },
+): Promise<BraveSearchResult[]> {
+  const apiKey = env.BRAVE_SEARCH_API_KEY?.trim();
+  if (!apiKey) throw new Error("BRAVE_SEARCH_API_KEY is not configured.");
+
+  const normalizedQuery = normalizeBraveQuery(query);
+  if (!normalizedQuery) return [];
+
+  const freshness = options.freshness ?? "pd";
+  const count = Math.max(1, Math.min(10, options.count ?? 5));
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
+  const cacheKey = await braveCacheKey({
+    query: normalizedQuery,
+    freshness,
+    count,
+    dateBucket: options.dateBucket,
+  });
+
+  try {
+    const cached = await readBraveCache(env, cacheKey, nowIso);
+    if (cached) {
+      await Promise.all([
+        markBraveCacheHit(env, cacheKey, nowIso).catch((error) => console.warn("Brave Search cache hit update failed", { caller: options.caller, error })),
+        tryIncrementBraveUsage(env, options.caller, nowIso, { cacheHits: 1 }),
+      ]);
+      return cached;
+    }
+  } catch (error) {
+    console.warn("Brave Search cache lookup failed", { caller: options.caller, error });
+  }
+
+  await tryIncrementBraveUsage(env, options.caller, nowIso, { apiCalls: 1 });
+  try {
+    const results = await braveSearch(apiKey, normalizedQuery, { freshness, count, timeoutMs: options.timeoutMs });
+    const ttlSeconds = Math.max(1, Math.floor(options.ttlSeconds));
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+    await writeBraveCache(env, {
+      cacheKey,
+      query: normalizedQuery,
+      freshness,
+      dateBucket: options.dateBucket,
+      results,
+      fetchedAt: nowIso,
+      expiresAt,
+    }).catch((error) => console.warn("Brave Search cache write failed", { caller: options.caller, error }));
+    return results;
+  } catch (error) {
+    await tryIncrementBraveUsage(env, options.caller, nowIso, { apiErrors: 1 });
+    throw error;
+  }
+}
+
 export async function summarizeBraveSearch(
   env: Env,
   queries: string[],
   dataQuality: MarketReportDataQuality[],
   sourceAudit: MarketReportSourceAudit[],
-  options?: { metric?: string; freshness?: string; dataUsedPrefix?: string },
+  options?: { metric?: string; freshness?: string; dataUsedPrefix?: string; caller?: BraveSearchCaller; dateBucket?: string; ttlSeconds?: number; now?: Date },
 ): Promise<string> {
   const metric = options?.metric ?? "Fresh web/news search";
   const apiKey = env.BRAVE_SEARCH_API_KEY?.trim();
@@ -150,9 +362,18 @@ export async function summarizeBraveSearch(
 
   try {
     const uniqueQueries = Array.from(new Set(queries.map((query) => query.trim()).filter(Boolean))).slice(0, 12);
+    const now = options?.now ?? new Date();
+    const dateBucket = options?.dateBucket ?? `daily:${now.toISOString().slice(0, 10)}`;
     const batches = await Promise.all(uniqueQueries.map(async (query) => ({
       query,
-      results: await braveSearch(apiKey, query, { freshness: options?.freshness ?? "pw", timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS }),
+      results: await cachedBraveSearch(env, query, {
+        caller: options?.caller ?? "weekly_review",
+        freshness: options?.freshness ?? "pw",
+        timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS,
+        dateBucket,
+        ttlSeconds: options?.ttlSeconds ?? 86400,
+        now,
+      }),
     })));
     const lines: string[] = [];
     let resultCount = 0;
@@ -179,6 +400,51 @@ export async function summarizeBraveSearch(
     const message = error instanceof Error ? error.message : "Brave Search failed.";
     dataQuality.push({ metric, status: "unavailable", note: message });
     return `${metric}: N/A. ${message}`;
+  }
+}
+
+export async function loadBraveUsageDaily(env: Env, daysInput = 14, now = new Date()): Promise<AdminBraveUsageResponse> {
+  const days = Math.max(1, Math.min(90, Math.floor(Number(daysInput) || 14)));
+  const cutoff = new Date(now.getTime() - (days - 1) * 24 * 60 * 60_000).toISOString().slice(0, 10);
+  try {
+    const rowsResult = await env.DB.prepare(
+      `SELECT usage_day as usageDay,
+              caller,
+              api_call_count as apiCallCount,
+              api_error_count as apiErrorCount,
+              cache_hit_count as cacheHitCount,
+              last_called_at as lastCalledAt,
+              last_error_at as lastErrorAt,
+              updated_at as updatedAt
+         FROM brave_usage_daily
+        WHERE usage_day >= ?
+        ORDER BY usage_day DESC, caller ASC`,
+    ).bind(cutoff).all<BraveUsageDailyRow>();
+    const rows = (rowsResult.results ?? []).map((row) => ({
+      usageDay: row.usageDay,
+      caller: row.caller,
+      apiCallCount: Number(row.apiCallCount ?? 0),
+      apiErrorCount: Number(row.apiErrorCount ?? 0),
+      cacheHitCount: Number(row.cacheHitCount ?? 0),
+      lastCalledAt: row.lastCalledAt ?? null,
+      lastErrorAt: row.lastErrorAt ?? null,
+      updatedAt: row.updatedAt,
+    }));
+    const totals = rows.reduce((acc, row) => ({
+      apiCallCount: acc.apiCallCount + row.apiCallCount,
+      apiErrorCount: acc.apiErrorCount + row.apiErrorCount,
+      cacheHitCount: acc.cacheHitCount + row.cacheHitCount,
+    }), { apiCallCount: 0, apiErrorCount: 0, cacheHitCount: 0 });
+    return { days, rows, totals };
+  } catch (error) {
+    if (isMissingBraveUsageTable(error)) {
+      return {
+        days,
+        rows: [],
+        totals: { apiCallCount: 0, apiErrorCount: 0, cacheHitCount: 0 },
+      };
+    }
+    throw error;
   }
 }
 

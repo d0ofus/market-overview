@@ -181,6 +181,27 @@ export type MarketCommentarySettings = {
   updatedAt: string | null;
 };
 
+export type BraveSearchCaller = "daily_commentary" | "weekly_review" | "fomc";
+
+export type AdminBraveUsageResponse = {
+  days: number;
+  rows: Array<{
+    usageDay: string;
+    caller: BraveSearchCaller;
+    apiCallCount: number;
+    apiErrorCount: number;
+    cacheHitCount: number;
+    lastCalledAt: string | null;
+    lastErrorAt: string | null;
+    updatedAt: string;
+  }>;
+  totals: {
+    apiCallCount: number;
+    apiErrorCount: number;
+    cacheHitCount: number;
+  };
+};
+
 export type OverviewFocusItem = {
   id: string;
   configId: string;
@@ -4316,6 +4337,10 @@ export function updateAdminWorkerSchedule(payload: Omit<WorkerScheduleSettings, 
 
 export function getAdminCronJobs() {
   return adminFetch<AdminCronJobsResponse>("/api/admin/cron-jobs");
+}
+
+export function getAdminBraveUsage(days = 14) {
+  return adminFetch<AdminBraveUsageResponse>(appendQuery("/api/admin/brave-usage", { days }));
 }
 
 export function updateAdminCronJob(key: string, values: AdminCronJob["values"]) {

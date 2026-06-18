@@ -119,7 +119,8 @@ import {
 import { isAdminRequestAuthorized, envFlagEnabled } from "./auth";
 export { isAdminRequestAuthorized, shouldAllowFedWatchForceRefresh } from "./auth";
 import { registerFedWatchRoutes } from "./routes/fedwatch";
-import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary } from "./fomc-commentary-service";
+import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
+import { loadBraveUsageDaily } from "./market-report-common";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -5159,6 +5160,18 @@ app.get("/api/admin/cron-jobs", async (c) => {
   }
 });
 
+app.get("/api/admin/brave-usage", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const days = Number(c.req.query("days") ?? 14);
+    return c.json(await loadBraveUsageDaily(c.env, days));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load Brave Search usage.";
+    console.error("admin Brave Search usage load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/market-commentary/settings", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -6556,8 +6569,10 @@ export default {
     const cron = (key: string) => cronSettings.get(key);
     const now = new Date(event.scheduledTime || Date.now());
     try {
-      const result = await refreshLatestFomcCommentary(env, { now });
-      if (result.warning) console.warn("scheduled FOMC commentary refresh warning", result.warning);
+      if (await shouldRunScheduledFomcRefresh(env, now)) {
+        const result = await refreshLatestFomcCommentary(env, { now });
+        if (result.warning) console.warn("scheduled FOMC commentary refresh warning", result.warning);
+      }
     } catch (error) {
       console.error("scheduled FOMC commentary refresh failed", error);
     }

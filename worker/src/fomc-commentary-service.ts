@@ -1,5 +1,6 @@
 import type { BraveSearchResult } from "./market-report-common";
-import { braveSearch, generateMarkdownWithGemini } from "./market-report-common";
+import { cachedBraveSearch, generateMarkdownWithGemini } from "./market-report-common";
+import { zonedParts } from "./refresh-timing";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
 import type { Env } from "./types";
 
@@ -371,9 +372,69 @@ async function discoverLatestOfficialFomcSources(env: Env, now = new Date()): Pr
   return extractOfficialFomcSourcesFromCalendar(await response.text(), now);
 }
 
-async function collectBraveFomcSources(env: Env, eventType: FomcCommentaryEventType, meetingDate: string): Promise<FomcCommentaryCitationSource[]> {
-  const apiKey = env.BRAVE_SEARCH_API_KEY?.trim();
-  if (!apiKey) return [];
+function fomcReleaseWindowEndMinutes(eventType: FomcCommentaryEventType): number {
+  return eventType === "minutes" ? 15 * 60 + 30 : 16 * 60 + 30;
+}
+
+function isInFomcReleaseWindow(now: Date, eventType: FomcCommentaryEventType): boolean {
+  const ny = zonedParts(now, "America/New_York");
+  const start = 13 * 60 + 45;
+  const end = fomcReleaseWindowEndMinutes(eventType);
+  return ny.minutesOfDay >= start && ny.minutesOfDay <= end;
+}
+
+function isInAnyFomcReleaseWindow(now: Date): boolean {
+  const ny = zonedParts(now, "America/New_York");
+  return ny.minutesOfDay >= 13 * 60 + 45 && ny.minutesOfDay <= 16 * 60 + 30;
+}
+
+async function hasRelevantFomcReleaseMetadata(env: Env, now: Date): Promise<boolean> {
+  const ny = zonedParts(now, "America/New_York");
+  const rows = await env.DB.prepare(
+    `SELECT event_type as eventType
+       FROM fomc_commentary_items
+      WHERE meeting_date = ?
+         OR release_date = ?
+         OR (status = 'pending_source' AND substr(COALESCE(last_checked_at, updated_at, created_at), 1, 10) = ?)
+      LIMIT 10`,
+  ).bind(ny.localDate, ny.localDate, ny.localDate).all<{ eventType: FomcCommentaryEventType }>();
+  return (rows.results ?? []).some((row) => (
+    (row.eventType === "minutes" || row.eventType === "press_conference") && isInFomcReleaseWindow(now, row.eventType)
+  ));
+}
+
+export async function shouldRunScheduledFomcRefresh(env: Env, now = new Date()): Promise<boolean> {
+  const hourlyTick = now.getUTCMinutes() < 15;
+  if (!isInAnyFomcReleaseWindow(now)) return hourlyTick;
+  try {
+    return await hasRelevantFomcReleaseMetadata(env, now) ? true : hourlyTick;
+  } catch {
+    return hourlyTick;
+  }
+}
+
+function fomcBraveCacheOptions(eventType: FomcCommentaryEventType, meetingDate: string, now: Date, pendingSource: boolean): { dateBucket: string; ttlSeconds: number } {
+  if (pendingSource || isInFomcReleaseWindow(now, eventType)) {
+    return {
+      dateBucket: `fomc-hourly:${eventType}:${meetingDate}:${now.toISOString().slice(0, 13)}`,
+      ttlSeconds: 3600,
+    };
+  }
+  return {
+    dateBucket: `fomc-daily:${eventType}:${meetingDate}:${now.toISOString().slice(0, 10)}`,
+    ttlSeconds: 86400,
+  };
+}
+
+async function collectBraveFomcSources(
+  env: Env,
+  eventType: FomcCommentaryEventType,
+  meetingDate: string,
+  options: { now?: Date; pendingSource?: boolean } = {},
+): Promise<FomcCommentaryCitationSource[]> {
+  if (!env.BRAVE_SEARCH_API_KEY?.trim()) return [];
+  const now = options.now ?? new Date();
+  const cacheOptions = fomcBraveCacheOptions(eventType, meetingDate, now, Boolean(options.pendingSource));
   const label = eventType === "minutes" ? "FOMC minutes" : "Federal Reserve Chair Powell press conference transcript";
   const queries = [
     `site:federalreserve.gov ${label} ${meetingDate}`,
@@ -381,7 +442,15 @@ async function collectBraveFomcSources(env: Env, eventType: FomcCommentaryEventT
     `Reuters ${label} highlights ${meetingDate}`,
   ];
   const batches = await Promise.all(queries.map(async (query, index) => {
-    const results = await braveSearch(apiKey, query, { freshness: "py", count: 5, timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS });
+    const results = await cachedBraveSearch(env, query, {
+      caller: "fomc",
+      freshness: "py",
+      count: 5,
+      timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS,
+      dateBucket: cacheOptions.dateBucket,
+      ttlSeconds: cacheOptions.ttlSeconds,
+      now,
+    });
     return normalizeBraveFomcSources(results, index === 0 ? "discovery" : "context");
   }));
   const seen = new Set<string>();
@@ -629,17 +698,15 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   const nowIso = now.toISOString();
   const eventType = options.eventType ?? "minutes";
   const meetingDate = options.meetingDate?.trim() || nowIso.slice(0, 10);
-  const braveSources = await collectBraveFomcSources(env, eventType, meetingDate).catch(() => []);
-  const discoveredOfficial = braveSources.find((source) => isFedUrl(source.url))?.url;
   const explicitSourceUrl = options.sourceUrl?.trim() || null;
-  const sourceUrl = explicitSourceUrl || discoveredOfficial || DEFAULT_SOURCE_URL;
-  const shouldFetchOfficialText = Boolean(explicitSourceUrl || discoveredOfficial);
-
+  let braveSources: FomcCommentaryCitationSource[] = [];
+  let sourceUrl = explicitSourceUrl || DEFAULT_SOURCE_URL;
   let officialText: string | null = null;
   let sourceTitle: string | null = null;
   let fetchedAt: string | null = null;
   let sourceError: string | null = null;
-  if (shouldFetchOfficialText && isFedUrl(sourceUrl)) {
+
+  if (explicitSourceUrl && isFedUrl(sourceUrl)) {
     try {
       const fetched = await fetchOfficialFedText(env, sourceUrl);
       officialText = fetched.text;
@@ -649,15 +716,56 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     } catch (error) {
       sourceError = error instanceof Error ? error.message : "Official Federal Reserve source fetch failed.";
     }
-  } else if (shouldFetchOfficialText) {
+  } else if (explicitSourceUrl) {
     sourceError = "Official FOMC source URL must be on federalreserve.gov.";
-  } else {
-    sourceError = "Official Federal Reserve transcript/minutes URL has not been found yet.";
+  }
+
+  let hasOfficialText = Boolean(officialText && officialText.length >= MIN_OFFICIAL_TEXT_CHARS);
+  let sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
+  let existing = explicitSourceUrl ? await loadExisting(env, eventType, meetingDate, sourceUrl) : null;
+  if (explicitSourceUrl && existing?.status === "ready" && hasOfficialText && sourceTextHash) {
+    const shouldGenerateOfficial = shouldGenerateFomcSummary({
+      force: options.force,
+      existingStatus: existing.status,
+      existingSourceTextHash: existing.sourceTextHash,
+      nextSourceTextHash: sourceTextHash,
+      hasOfficialText,
+      sourceMode: "official",
+    });
+    if (!shouldGenerateOfficial) {
+      await markFomcCommentaryUnchanged(env, existing.id, nowIso);
+      return { ok: true, warning: null, items: await loadLatestFomcCommentary(env, 4) };
+    }
+  }
+
+  const shouldCollectBrave = !explicitSourceUrl || options.force || !hasOfficialText || !existing || existing.status !== "ready" || existing.sourceTextHash !== sourceTextHash;
+  if (shouldCollectBrave) {
+    braveSources = await collectBraveFomcSources(env, eventType, meetingDate, { now, pendingSource: !hasOfficialText }).catch(() => []);
+  }
+
+  if (!explicitSourceUrl) {
+    const discoveredOfficial = braveSources.find((source) => isFedUrl(source.url))?.url;
+    sourceUrl = discoveredOfficial || DEFAULT_SOURCE_URL;
+    if (discoveredOfficial && isFedUrl(sourceUrl)) {
+      try {
+        const fetched = await fetchOfficialFedText(env, sourceUrl);
+        officialText = fetched.text;
+        sourceTitle = fetched.title;
+        fetchedAt = fetched.fetchedAt;
+        if (officialText.length < MIN_OFFICIAL_TEXT_CHARS) sourceError = "Official Federal Reserve source text is not available yet or is too short to summarize.";
+      } catch (error) {
+        sourceError = error instanceof Error ? error.message : "Official Federal Reserve source fetch failed.";
+      }
+    } else {
+      sourceError = "Official Federal Reserve transcript/minutes URL has not been found yet.";
+    }
+    hasOfficialText = Boolean(officialText && officialText.length >= MIN_OFFICIAL_TEXT_CHARS);
+    sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
+    existing = await loadExisting(env, eventType, meetingDate, sourceUrl);
   }
 
   const contextSources = braveSources.filter((source) => source.usedFor === "context");
   const fallbackSources = braveSources.filter((source) => source.usedFor !== "discovery" && !isFedUrl(source.url));
-  const hasOfficialText = Boolean(officialText && officialText.length >= MIN_OFFICIAL_TEXT_CHARS);
   const sourceMode: FomcCommentarySourceMode = hasOfficialText
     ? (contextSources.length ? "official_plus_brave" : "official")
     : (fallbackSources.length ? "fallback_context" : "official");
@@ -665,9 +773,7 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     ? officialText!
     : fallbackSources.map((source) => `${source.sourceName}: ${source.title ?? ""}. ${source.snippet ?? ""} URL: ${source.url}`).join("\n");
   const citationsForPrompt = sourceMode === "official" ? [] : (sourceMode === "fallback_context" ? fallbackSources : contextSources);
-  const sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
 
-  const existing = await loadExisting(env, eventType, meetingDate, sourceUrl);
   const shouldGenerate = shouldGenerateFomcSummary({
     force: options.force,
     existingStatus: existing?.status ?? null,

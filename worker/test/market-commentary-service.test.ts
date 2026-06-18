@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MARKET_COMMENTARY_BRAVE_QUERIES,
   DEFAULT_MARKET_COMMENTARY_SETTINGS,
   DEFAULT_MARKET_COMMENTARY_PROMPT,
   loadMarketCommentarySettings,
@@ -233,6 +234,8 @@ describe("market commentary service", () => {
     expect(settings.scheduleLocalTime).toBe("09:00");
     expect(settings.scheduleDays).toEqual(["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
     expect(settings.braveQueries[0]).toContain("{latestCompletedSessionDate}");
+    expect(DEFAULT_MARKET_COMMENTARY_BRAVE_QUERIES).toHaveLength(4);
+    expect(settings.braveQueries).toHaveLength(4);
   });
 
   it("persists configurable prompt, sources, queries, and schedule settings", async () => {

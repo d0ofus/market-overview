@@ -34,6 +34,17 @@ type StoredWeeklyReview = {
   updatedAt: string;
 };
 
+type StoredBraveUsage = {
+  usageDay: string;
+  caller: "daily_commentary" | "weekly_review" | "fomc";
+  apiCallCount: number;
+  apiErrorCount: number;
+  cacheHitCount: number;
+  lastCalledAt: string | null;
+  lastErrorAt: string | null;
+  updatedAt: string;
+};
+
 const HERMES_PAYLOAD = {
   id: "weekly-market-review-2026-06-08-2026-06-12",
   weekStart: "2026-06-08",
@@ -56,6 +67,7 @@ const HERMES_PAYLOAD = {
 
 class FakeWeeklyReviewDb {
   rows: StoredWeeklyReview[] = [];
+  braveUsageRows: StoredBraveUsage[] = [];
 
   prepare(sql: string) {
     const db = this;
@@ -90,6 +102,12 @@ class FakeWeeklyReviewDb {
         return null as T;
       },
       async all<T>() {
+        if (normalized.includes("FROM brave_usage_daily")) {
+          const cutoff = String(bound[0]);
+          return { results: db.braveUsageRows.filter((row) => row.usageDay >= cutoff).sort((left, right) => (
+            right.usageDay.localeCompare(left.usageDay) || left.caller.localeCompare(right.caller)
+          )) as T[] };
+        }
         if (normalized.includes("FROM weekly_market_reviews")) {
           const limit = Math.max(1, Math.min(100, Number(bound[0] ?? 20)));
           return { results: db.rows.slice().sort(sortList).slice(0, limit) as T[] };
@@ -342,6 +360,58 @@ describe("weekly market review API and service", () => {
     expect(response?.ok).toBe(true);
     expect(response?.report?.generationProvider).toBe("hermes_gpt");
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("requires admin auth for Brave Search usage", async () => {
+    const response = await worker.fetch(
+      new Request("https://example.com/api/admin/brave-usage?days=14"),
+      createEnv(),
+      {} as ExecutionContext,
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("returns Brave Search usage rows, totals, and clamped days for admin", async () => {
+    const db = new FakeWeeklyReviewDb();
+    db.braveUsageRows.push(
+      {
+        usageDay: "2026-06-13",
+        caller: "daily_commentary",
+        apiCallCount: 4,
+        apiErrorCount: 1,
+        cacheHitCount: 2,
+        lastCalledAt: "2026-06-13T12:00:00.000Z",
+        lastErrorAt: "2026-06-13T12:01:00.000Z",
+        updatedAt: "2026-06-13T12:01:00.000Z",
+      },
+      {
+        usageDay: "2026-06-13",
+        caller: "fomc",
+        apiCallCount: 3,
+        apiErrorCount: 0,
+        cacheHitCount: 6,
+        lastCalledAt: "2026-06-13T18:00:00.000Z",
+        lastErrorAt: null,
+        updatedAt: "2026-06-13T18:00:00.000Z",
+      },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.com/api/admin/brave-usage?days=500", {
+        headers: { Authorization: "Bearer secret" },
+      }),
+      createEnv(db),
+      {} as ExecutionContext,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      days: 90,
+      rows: [
+        { usageDay: "2026-06-13", caller: "daily_commentary", apiCallCount: 4, apiErrorCount: 1, cacheHitCount: 2 },
+        { usageDay: "2026-06-13", caller: "fomc", apiCallCount: 3, apiErrorCount: 0, cacheHitCount: 6 },
+      ],
+      totals: { apiCallCount: 7, apiErrorCount: 1, cacheHitCount: 8 },
+    });
   });
 
   it("returns not found for missing report IDs", async () => {

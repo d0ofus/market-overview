@@ -716,6 +716,10 @@ async function gatherWeeklyEvidence(env: Env, week: WeeklyMarketReviewWeek, now:
       metric: "Weekly web/news search",
       freshness: "pw",
       dataUsedPrefix: "Weekly Brave Search result for",
+      caller: "weekly_review",
+      dateBucket: `weekly:${week.weekStart}:${week.weekEnd}`,
+      ttlSeconds: 86400,
+      now,
     }),
   ]);
 

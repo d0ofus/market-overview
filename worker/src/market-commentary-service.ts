@@ -3,7 +3,7 @@ import { getFedWatchSnapshot } from "./fedwatch-service";
 import {
   DEFAULT_GEMINI_MODEL,
   GEMINI_PROVIDER,
-  braveSearch,
+  cachedBraveSearch,
   generateMarkdownWithGemini,
   normalizeSourceAuditRows,
   parseJsonArray,
@@ -633,7 +633,16 @@ async function summarizeSearch(env: Env, session: UsMarketSessionContext, settin
   }
 
   try {
-    const batches = await Promise.all(searchQueriesFor(session, settings).map(async (query) => ({ query, results: await braveSearch(apiKey, query, { freshness: "pd" }) })));
+    const batches = await Promise.all(searchQueriesFor(session, settings).map(async (query) => ({
+      query,
+      results: await cachedBraveSearch(env, query, {
+        caller: "daily_commentary",
+        freshness: "pd",
+        timeoutMs: env.BRAVE_SEARCH_TIMEOUT_MS,
+        dateBucket: `daily:${session.nyDate}`,
+        ttlSeconds: 86400,
+      }),
+    })));
     const lines: string[] = [];
     let resultCount = 0;
     for (const batch of batches) {

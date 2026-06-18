@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   adminFetch,
+  getAdminBraveUsage,
   getAdminCronJobs,
   getAdminMarketCommentarySettings,
   getAdminSymbolCatalogStatus,
   refreshMarketCommentary,
   resetAdminMarketCommentarySettings,
   updateAdminMarketCommentarySettings,
+  type AdminBraveUsageResponse,
   type AdminCronJobsResponse,
   type MarketCommentarySettings,
   type SymbolCatalogStatus,
@@ -40,6 +42,12 @@ const pageTargetOptions = [
 
 type RefreshTarget = (typeof pageTargetOptions)[number]["value"];
 
+const braveCallerLabels: Record<string, string> = {
+  daily_commentary: "Daily",
+  weekly_review: "Weekly",
+  fomc: "FOMC",
+};
+
 export function AdminOperationsDashboard() {
   const [config, setConfig] = useState<OverviewAdminConfig | null>(null);
   const [sectorEtfCount, setSectorEtfCount] = useState(0);
@@ -48,6 +56,7 @@ export function AdminOperationsDashboard() {
   const [symbolStatus, setSymbolStatus] = useState<SymbolCatalogStatus | null>(null);
   const [commentarySettings, setCommentarySettings] = useState<MarketCommentarySettings | null>(null);
   const [cronJobs, setCronJobs] = useState<AdminCronJobsResponse | null>(null);
+  const [braveUsage, setBraveUsage] = useState<AdminBraveUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [schedulePageTarget, setSchedulePageTarget] = useState<RefreshTarget>("overview");
@@ -59,7 +68,7 @@ export function AdminOperationsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const [configRes, sectorRes, industryRes, syncRes, symbolRes, commentarySettingsRes, cronJobsRes] = await Promise.all([
+      const [configRes, sectorRes, industryRes, syncRes, symbolRes, commentarySettingsRes, cronJobsRes, braveUsageRes] = await Promise.all([
         adminFetch<OverviewAdminConfig>("/api/admin/config"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/sector"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/industry"),
@@ -67,6 +76,7 @@ export function AdminOperationsDashboard() {
         getAdminSymbolCatalogStatus().catch(() => null),
         getAdminMarketCommentarySettings().catch(() => null),
         getAdminCronJobs().catch(() => null),
+        getAdminBraveUsage(14).catch(() => null),
       ]);
       setConfig(configRes);
       setSectorEtfCount(sectorRes.rows?.length ?? 0);
@@ -75,6 +85,7 @@ export function AdminOperationsDashboard() {
       setSymbolStatus(symbolRes);
       setCommentarySettings(commentarySettingsRes);
       setCronJobs(cronJobsRes);
+      setBraveUsage(braveUsageRes);
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load admin operations." });
     } finally {
@@ -102,6 +113,21 @@ export function AdminOperationsDashboard() {
       pendingSyncCount,
     };
   }, [config, etfSyncStatus]);
+
+  const braveCallerBreakdown = useMemo(() => {
+    const totals = new Map<string, { apiCallCount: number; apiErrorCount: number; cacheHitCount: number }>();
+    for (const row of braveUsage?.rows ?? []) {
+      const current = totals.get(row.caller) ?? { apiCallCount: 0, apiErrorCount: 0, cacheHitCount: 0 };
+      current.apiCallCount += row.apiCallCount;
+      current.apiErrorCount += row.apiErrorCount;
+      current.cacheHitCount += row.cacheHitCount;
+      totals.set(row.caller, current);
+    }
+    return ["daily_commentary", "weekly_review", "fomc"].map((caller) => ({
+      caller,
+      ...(totals.get(caller) ?? { apiCallCount: 0, apiErrorCount: 0, cacheHitCount: 0 }),
+    }));
+  }, [braveUsage]);
 
   const saveCommentarySettings = async () => {
     if (!commentarySettings) return;
@@ -455,6 +481,40 @@ export function AdminOperationsDashboard() {
                         ? `${symbolStatus.activeCount} active, ${symbolStatus.inactiveCount} inactive, ${symbolStatus.manualCount} manual overrides`
                         : "Symbol directory status unavailable."}
                     </div>
+                  </div>
+                  <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Brave Search Usage</div>
+                      <div className="text-xs text-slate-500">{braveUsage ? `${braveUsage.days}d` : "N/A"}</div>
+                    </div>
+                    {braveUsage ? (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          <div>
+                            <div className="text-slate-500">Calls</div>
+                            <div className="mt-1 text-base font-semibold text-text">{braveUsage.totals.apiCallCount}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">Hits</div>
+                            <div className="mt-1 text-base font-semibold text-text">{braveUsage.totals.cacheHitCount}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">Errors</div>
+                            <div className="mt-1 text-base font-semibold text-text">{braveUsage.totals.apiErrorCount}</div>
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          {braveCallerBreakdown.map((row) => (
+                            <div key={row.caller} className="flex items-center justify-between gap-3 text-xs text-slate-400">
+                              <span>{braveCallerLabels[row.caller] ?? row.caller}</span>
+                              <span>{row.apiCallCount} calls / {row.cacheHitCount} hits / {row.apiErrorCount} errors</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-2">Brave usage unavailable.</div>
+                    )}
                   </div>
                 </div>
               </AdminCard>
