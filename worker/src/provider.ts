@@ -750,11 +750,17 @@ class AlpacaProvider implements MarketDataProvider {
     return out;
   }
 
-  private async fetchQuoteSnapshotChunkWithIsolation(tickers: string[], feed = this.feed): Promise<Record<string, QuoteSnapshot>> {
+  private async fetchQuoteSnapshotChunkWithIsolation(
+    tickers: string[],
+    feed = this.feed,
+    errors: string[] = [],
+  ): Promise<Record<string, QuoteSnapshot>> {
     try {
       return await this.fetchQuoteSnapshotChunk(tickers, feed);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error ?? "Alpaca snapshot fetch failed.");
       if (tickers.length <= 1) {
+        errors.push(`${tickers[0]} ${feed}: ${message}`.slice(0, 240));
         console.error("alpaca snapshot ticker failed", { ticker: tickers[0], feed, error });
         return {};
       }
@@ -766,8 +772,8 @@ class AlpacaProvider implements MarketDataProvider {
       });
       const mid = Math.ceil(tickers.length / 2);
       const [left, right] = await Promise.all([
-        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(0, mid), feed),
-        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(mid), feed),
+        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(0, mid), feed, errors),
+        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(mid), feed, errors),
       ]);
       return { ...left, ...right };
     }
@@ -777,8 +783,9 @@ class AlpacaProvider implements MarketDataProvider {
     const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
     const out: Record<string, QuoteSnapshot> = {};
     const chunks = this.chunk(unique, 80);
+    const errors: string[] = [];
     for (const chunk of chunks) {
-      const chunkSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(chunk, this.feed);
+      const chunkSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(chunk, this.feed, errors);
       Object.assign(out, chunkSnapshots);
 
       if (this.fallbackEnabled && this.feed === "iex") {
@@ -787,7 +794,7 @@ class AlpacaProvider implements MarketDataProvider {
         ));
         if (missingPreferredTickers.length > 0) {
           try {
-            const sipSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(missingPreferredTickers, "sip");
+            const sipSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(missingPreferredTickers, "sip", errors);
             Object.assign(out, sipSnapshots);
           } catch (error) {
             console.error("alpaca snapshot sip fallback failed for preferred tickers", {
@@ -798,6 +805,9 @@ class AlpacaProvider implements MarketDataProvider {
           }
         }
       }
+    }
+    if (unique.length > 0 && Object.keys(out).length === 0 && errors.length > 0) {
+      throw new Error(`Alpaca snapshot fetch failed for all requested tickers; sample errors: ${errors.slice(0, 5).join(" | ")}`);
     }
     return out;
   }

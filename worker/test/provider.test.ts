@@ -107,6 +107,23 @@ describe("Alpaca quote snapshots", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("throws a diagnostic error when every isolated snapshot request fails", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ message: "forbidden feed" }), { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+
+    await expect(provider.getQuoteSnapshot?.(["AAA", "BBB"])).rejects.toThrow(
+      "Alpaca snapshot fetch failed for all requested tickers",
+    );
+  });
 });
 
 describe("provider fallback control", () => {

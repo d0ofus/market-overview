@@ -14,6 +14,7 @@ import {
   refreshAndStoreOverviewSnapshot,
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
+import { refreshOverviewPageData } from "./overview-refresh-service";
 import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus } from "./types";
 import {
   configPatchSchema,
@@ -1319,13 +1320,11 @@ async function refreshPageScopedData(
   tickerInput?: string | null,
 ): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
   if (page === "overview") {
-    const tickers = await loadOverviewTickers(env);
-    const result = await refreshAndStoreOverviewSnapshot(env);
-    return {
-      page,
-      refreshedTickers: tickers.length,
-      notes: `Overview market data ${result.freshness.status}: ${result.freshness.currentCount}/${result.freshness.eligibleCount} tickers current for ${result.asOfDate} (${result.freshness.coveragePct.toFixed(1)}%).`,
-    };
+    return await refreshOverviewPageData(env, {
+      loadOverviewTickers,
+      refreshRecentBarsForTickers,
+      refreshAndStoreOverviewSnapshot,
+    });
   }
   if (page === "breadth") {
     const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
@@ -6154,6 +6153,31 @@ app.post("/api/admin/run-breadth", async (c) => {
     const message = error instanceof Error ? error.message : "run-breadth failed";
     console.error("admin run-breadth failed", { date, error });
     return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/debug/alpaca-snapshots", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { symbols?: unknown; feed?: unknown };
+  const symbols = Array.isArray(body.symbols)
+    ? body.symbols.map((value) => String(value).trim().toUpperCase()).filter((value) => /^[A-Z.\-]{1,20}$/.test(value)).slice(0, 20)
+    : [];
+  if (symbols.length === 0) return c.json({ error: "Provide 1-20 symbols." }, 400);
+  try {
+    const provider = getProvider({ ...c.env, ALPACA_FEED: typeof body.feed === "string" ? body.feed : c.env.ALPACA_FEED });
+    const snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(symbols) : {};
+    return c.json({
+      ok: true,
+      providerLabel: provider.label,
+      feed: typeof body.feed === "string" ? body.feed : c.env.ALPACA_FEED ?? "iex",
+      requestedSymbols: symbols,
+      returnedSymbols: Object.keys(snapshots).sort(),
+      returnedSnapshots: Object.keys(snapshots).length,
+      sampleFields: Object.fromEntries(Object.entries(snapshots).slice(0, 5).map(([ticker, snapshot]) => [ticker, Object.keys(snapshot).sort()])),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Alpaca snapshot diagnostic failed.";
+    return c.json({ error: message.slice(0, 500), requestedSymbols: symbols }, 502);
   }
 });
 

@@ -13,8 +13,32 @@ const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
 const DEFAULT_PATTERN_SCAN_OFFSET_MINUTES = 75;
 const DEFAULT_PATTERN_SCAN_BATCH_SIZE = 40;
 const DEFAULT_PATTERN_SCAN_MAX_BATCHES_PER_TICK = 4;
-const POST_CLOSE_SCOPE = "active-us-common-stocks";
+export const POST_CLOSE_SCOPE = "active-us-common-stocks-plus-overview";
 export const FIXED_WORKER_CRON_EXPRESSION = "*/15 * * * *";
+
+const POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT = `
+  SELECT UPPER(TRIM(s.ticker)) as ticker
+  FROM symbols s
+  WHERE COALESCE(s.is_active, 1) = 1
+    AND COALESCE(s.catalog_managed, 0) = 1
+    AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
+  UNION
+  SELECT UPPER(TRIM(di.ticker)) as ticker
+  FROM dashboard_items di
+  JOIN dashboard_groups dg ON dg.id = di.group_id
+  JOIN dashboard_sections ds ON ds.id = dg.section_id
+  JOIN dashboard_configs dc ON dc.id = ds.config_id
+  WHERE dc.is_default = 1
+    AND di.enabled = 1
+    AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
+`;
+
+export function buildPostCloseDailyBarUniverseQuery(kind: "count" | "batch"): string {
+  if (kind === "count") {
+    return `SELECT COUNT(*) as count FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe WHERE ticker IS NOT NULL AND ticker <> ''`;
+  }
+  return `SELECT ticker FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe WHERE ticker IS NOT NULL AND ticker <> '' ORDER BY ticker ASC LIMIT ? OFFSET ?`;
+}
 
 type WorkerScheduleSettingsRow = {
   id: string;
@@ -344,13 +368,7 @@ async function updatePostCloseDailyBarRefreshJobRecord(
 }
 
 async function loadPostCloseDailyBarUniverseCount(env: Env): Promise<number> {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) as count
-     FROM symbols s
-     WHERE COALESCE(s.is_active, 1) = 1
-       AND COALESCE(s.catalog_managed, 0) = 1
-       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')`,
-  )
+  const row = await env.DB.prepare(buildPostCloseDailyBarUniverseQuery("count"))
     .first<{ count: number | string | null }>();
   return Math.max(0, Number(row?.count ?? 0) || 0);
 }
@@ -360,16 +378,7 @@ async function loadPostCloseDailyBarUniverseBatch(
   cursorOffset: number,
   limit: number,
 ): Promise<string[]> {
-  const rows = await env.DB.prepare(
-    `SELECT s.ticker as ticker
-     FROM symbols s
-     WHERE COALESCE(s.is_active, 1) = 1
-       AND COALESCE(s.catalog_managed, 0) = 1
-       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
-     ORDER BY s.ticker ASC
-     LIMIT ?
-     OFFSET ?`,
-  )
+  const rows = await env.DB.prepare(buildPostCloseDailyBarUniverseQuery("batch"))
     .bind(limit, cursorOffset)
     .all<{ ticker: string }>();
   return (rows.results ?? [])

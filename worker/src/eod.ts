@@ -1333,7 +1333,19 @@ export async function computeAndStoreSnapshot(
   );
   const quoteOverlays = quoteOverlayResult.overlays;
   const quoteOverlayDiagnostics = quoteOverlayResult.diagnostics;
-  const finalFreshness = buildQuoteOverlayFreshnessDiagnostics(freshness, snapshotRows, quoteOverlays, asOfDate);
+  const finalFreshness = (() => {
+    const computed = buildQuoteOverlayFreshnessDiagnostics(freshness, snapshotRows, quoteOverlays, asOfDate);
+    if (quoteOverlayDiagnostics.providerAttempted && quoteOverlayDiagnostics.eligibleTickers > 0 && quoteOverlayDiagnostics.returnedSnapshots === 0) {
+      const overlayWarning = quoteOverlayDiagnostics.providerError
+        ? `Alpaca quote overlay returned zero snapshots: ${quoteOverlayDiagnostics.providerError}`
+        : `Alpaca quote overlay returned zero snapshots for ${quoteOverlayDiagnostics.eligibleTickers} eligible overview tickers.`;
+      return {
+        ...computed,
+        warning: computed.warning ? `${computed.warning} ${overlayWarning}` : overlayWarning,
+      };
+    }
+    return computed;
+  })();
   if (options.requireFreshness && finalFreshness.status === "stale") {
     throw new OverviewFreshnessError(finalFreshness);
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPostCloseBarsWindowOpen, loadWorkerScheduleSettings, updateWorkerScheduleSettings } from "../src/worker-schedule-service";
+import { buildPostCloseDailyBarUniverseQuery, isPostCloseBarsWindowOpen, loadWorkerScheduleSettings, POST_CLOSE_SCOPE, updateWorkerScheduleSettings } from "../src/worker-schedule-service";
 import type { Env } from "../src/types";
 
 type WorkerScheduleRowState = {
@@ -154,5 +154,18 @@ describe("worker schedule service", () => {
     expect(isPostCloseBarsWindowOpen(beforeOffset, "2026-04-20", 60)).toBe(false);
     expect(isPostCloseBarsWindowOpen(afterOffset, "2026-04-20", 60)).toBe(true);
     expect(isPostCloseBarsWindowOpen(new Date("2026-04-21T12:00:00Z"), "2026-04-20", 60)).toBe(true);
+  });
+});
+
+
+describe("post-close daily bar universe", () => {
+  it("uses an explicit overview-plus-common-stock scope and includes configured overview tickers", () => {
+    const query = buildPostCloseDailyBarUniverseQuery("batch");
+
+    expect(POST_CLOSE_SCOPE).toBe("active-us-common-stocks-plus-overview");
+    expect(query).toContain("dashboard_items");
+    expect(query).toContain("UNION");
+    expect(query).toContain("Macro");
+    expect(query).toContain("Equities");
   });
 });
