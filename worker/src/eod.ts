@@ -141,6 +141,10 @@ type SnapshotMetaRow = {
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  quoteOverlayRequestedCount?: number | null;
+  quoteOverlayReturnedCount?: number | null;
+  quoteOverlayError?: string | null;
+  quoteOverlayMissingSampleJson?: string | null;
 };
 
 export class OverviewFreshnessError extends Error {
@@ -241,6 +245,10 @@ export async function ensureOverviewFreshnessSchema(env: Env): Promise<void> {
   await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_min_bar_date TEXT");
   await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_max_bar_date TEXT");
   await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN freshness_warning TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN quote_overlay_requested_count INTEGER");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN quote_overlay_returned_count INTEGER");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN quote_overlay_error TEXT");
+  await addColumnIfMissing(env, "ALTER TABLE snapshots_meta ADD COLUMN quote_overlay_missing_sample_json TEXT");
   await addColumnIfMissing(env, "ALTER TABLE snapshot_rows ADD COLUMN bar_date TEXT");
   await addColumnIfMissing(env, "ALTER TABLE snapshot_rows ADD COLUMN quote_price REAL");
   await addColumnIfMissing(env, "ALTER TABLE snapshot_rows ADD COLUMN quote_prev_close REAL");
@@ -1318,11 +1326,13 @@ export async function computeAndStoreSnapshot(
     }
   }
 
-  const quoteOverlays = await buildOverviewQuoteOverlays(
+  const quoteOverlayResult = await buildOverviewQuoteOverlays(
     env,
     snapshotRows.map((row) => ({ ticker: row.ticker, groupTitle: row.groupTitle, barDate: row.barDate })),
     asOfDate,
   );
+  const quoteOverlays = quoteOverlayResult.overlays;
+  const quoteOverlayDiagnostics = quoteOverlayResult.diagnostics;
   const finalFreshness = buildQuoteOverlayFreshnessDiagnostics(freshness, snapshotRows, quoteOverlays, asOfDate);
   if (options.requireFreshness && finalFreshness.status === "stale") {
     throw new OverviewFreshnessError(finalFreshness);
@@ -1377,9 +1387,13 @@ export async function computeAndStoreSnapshot(
        freshness_critical_missing_json,
        freshness_min_bar_date,
        freshness_max_bar_date,
-       freshness_warning
+       freshness_warning,
+       quote_overlay_requested_count,
+       quote_overlay_returned_count,
+       quote_overlay_error,
+       quote_overlay_missing_sample_json
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(config_id, as_of_date) DO UPDATE SET
        id = excluded.id,
        generated_at = excluded.generated_at,
@@ -1392,7 +1406,11 @@ export async function computeAndStoreSnapshot(
        freshness_critical_missing_json = excluded.freshness_critical_missing_json,
        freshness_min_bar_date = excluded.freshness_min_bar_date,
        freshness_max_bar_date = excluded.freshness_max_bar_date,
-       freshness_warning = excluded.freshness_warning`,
+       freshness_warning = excluded.freshness_warning,
+       quote_overlay_requested_count = excluded.quote_overlay_requested_count,
+       quote_overlay_returned_count = excluded.quote_overlay_returned_count,
+       quote_overlay_error = excluded.quote_overlay_error,
+       quote_overlay_missing_sample_json = excluded.quote_overlay_missing_sample_json`,
   )
     .bind(
       snapshotId,
@@ -1409,6 +1427,10 @@ export async function computeAndStoreSnapshot(
       finalFreshness.minBarDate,
       finalFreshness.maxBarDate,
       finalFreshness.warning,
+      quoteOverlayDiagnostics.eligibleTickers,
+      quoteOverlayDiagnostics.returnedSnapshots,
+      quoteOverlayDiagnostics.providerError,
+      JSON.stringify(quoteOverlayDiagnostics.sampleMissingTickers),
     )
     .run();
   if (previousSnapshot?.id && previousSnapshot.id !== snapshotId) {
@@ -1751,6 +1773,10 @@ export function emptySnapshotResponse(warning = "No stored overview snapshot is 
     freshnessMinBarDate: null,
     freshnessMaxBarDate: null,
     freshnessWarning: warning,
+    quoteOverlayRequestedCount: null,
+    quoteOverlayReturnedCount: null,
+    quoteOverlayError: null,
+    quoteOverlayMissingSample: [],
     config: null,
     sections: [],
   };
@@ -1763,7 +1789,7 @@ async function loadSnapshotMeta(
   requestedDate?: string,
 ): Promise<SnapshotMetaRow | null> {
   const selectWithFreshness =
-    "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_coverage_pct as freshnessCoveragePct, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning FROM snapshots_meta";
+    "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_coverage_pct as freshnessCoveragePct, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning, quote_overlay_requested_count as quoteOverlayRequestedCount, quote_overlay_returned_count as quoteOverlayReturnedCount, quote_overlay_error as quoteOverlayError, quote_overlay_missing_sample_json as quoteOverlayMissingSampleJson FROM snapshots_meta";
   const selectLegacy =
     "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta";
   const where = requestedDate
@@ -1776,7 +1802,11 @@ async function loadSnapshotMeta(
       .first<SnapshotMetaRow>();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "");
-    if (!message.toLowerCase().includes("freshness_") && !message.toLowerCase().includes("expected_as_of_date")) throw error;
+    if (
+      !message.toLowerCase().includes("freshness_")
+      && !message.toLowerCase().includes("expected_as_of_date")
+      && !message.toLowerCase().includes("quote_overlay_")
+    ) throw error;
     return await env.DB.prepare(`${selectLegacy}${where}`)
       .bind(configId, requestedDate ?? latestAllowedAsOfDate)
       .first<SnapshotMetaRow>();
@@ -1897,6 +1927,10 @@ export async function loadSnapshot(
     freshnessMinBarDate: freshness?.minBarDate ?? null,
     freshnessMaxBarDate: freshness?.maxBarDate ?? null,
     freshnessWarning: freshness?.warning ?? null,
+    quoteOverlayRequestedCount: meta.quoteOverlayRequestedCount ?? null,
+    quoteOverlayReturnedCount: meta.quoteOverlayReturnedCount ?? null,
+    quoteOverlayError: meta.quoteOverlayError ?? null,
+    quoteOverlayMissingSample: parseCriticalMissingTickers(meta.quoteOverlayMissingSampleJson),
     config,
     sections: config.sections.map((sec) => ({
       id: sec.id,

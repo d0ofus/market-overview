@@ -714,41 +714,89 @@ class AlpacaProvider implements MarketDataProvider {
     return all;
   }
 
+  private async fetchQuoteSnapshotChunk(tickers: string[], feed = this.feed): Promise<Record<string, QuoteSnapshot>> {
+    const params = new URLSearchParams({
+      symbols: tickers.join(","),
+      feed,
+    });
+    const fetchedAt = new Date().toISOString();
+    const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+      headers: {
+        "APCA-API-KEY-ID": this.key,
+        "APCA-API-SECRET-KEY": this.secret,
+        "User-Agent": "market-command-centre/1.0",
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
+    }
+    const json = await res.json();
+    const out: Record<string, QuoteSnapshot> = {};
+    for (const [ticker, snap] of Object.entries(extractAlpacaSnapshots(json))) {
+      const price = snap.latestTrade?.p ?? snap.dailyBar?.c;
+      const prevClose = snap.prevDailyBar?.c;
+      if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
+      out[ticker.toUpperCase()] = {
+        price,
+        prevClose,
+        change1d: ((price - prevClose) / prevClose) * 100,
+        source: "alpaca-snapshot",
+        fetchedAt,
+        tradeTimestamp: snap.latestTrade?.t ?? null,
+        dailyBarTimestamp: snap.dailyBar?.t ?? null,
+      };
+    }
+    return out;
+  }
+
+  private async fetchQuoteSnapshotChunkWithIsolation(tickers: string[], feed = this.feed): Promise<Record<string, QuoteSnapshot>> {
+    try {
+      return await this.fetchQuoteSnapshotChunk(tickers, feed);
+    } catch (error) {
+      if (tickers.length <= 1) {
+        console.error("alpaca snapshot ticker failed", { ticker: tickers[0], feed, error });
+        return {};
+      }
+      console.error("alpaca snapshot chunk failed; isolating tickers", {
+        count: tickers.length,
+        feed,
+        sampleTickers: tickers.slice(0, 8),
+        error,
+      });
+      const mid = Math.ceil(tickers.length / 2);
+      const [left, right] = await Promise.all([
+        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(0, mid), feed),
+        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(mid), feed),
+      ]);
+      return { ...left, ...right };
+    }
+  }
+
   async getQuoteSnapshot(tickers: string[]): Promise<Record<string, QuoteSnapshot>> {
-    const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
+    const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
     const out: Record<string, QuoteSnapshot> = {};
     const chunks = this.chunk(unique, 80);
     for (const chunk of chunks) {
-      const params = new URLSearchParams({
-        symbols: chunk.join(","),
-        feed: this.feed,
-      });
-      const fetchedAt = new Date().toISOString();
-      const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
-        headers: {
-          "APCA-API-KEY-ID": this.key,
-          "APCA-API-SECRET-KEY": this.secret,
-          "User-Agent": "market-command-centre/1.0",
-        },
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
-      }
-      const json = await res.json();
-      for (const [ticker, snap] of Object.entries(extractAlpacaSnapshots(json))) {
-        const price = snap.latestTrade?.p ?? snap.dailyBar?.c;
-        const prevClose = snap.prevDailyBar?.c;
-        if (typeof price !== "number" || typeof prevClose !== "number" || prevClose === 0) continue;
-        out[ticker.toUpperCase()] = {
-          price,
-          prevClose,
-          change1d: ((price - prevClose) / prevClose) * 100,
-          source: "alpaca-snapshot",
-          fetchedAt,
-          tradeTimestamp: snap.latestTrade?.t ?? null,
-          dailyBarTimestamp: snap.dailyBar?.t ?? null,
-        };
+      const chunkSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(chunk, this.feed);
+      Object.assign(out, chunkSnapshots);
+
+      if (this.fallbackEnabled && this.feed === "iex") {
+        const missingPreferredTickers = chunk.filter((ticker) => (
+          this.fallbackPreferredTickers.has(ticker.toUpperCase()) && !out[ticker.toUpperCase()]
+        ));
+        if (missingPreferredTickers.length > 0) {
+          try {
+            const sipSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(missingPreferredTickers, "sip");
+            Object.assign(out, sipSnapshots);
+          } catch (error) {
+            console.error("alpaca snapshot sip fallback failed for preferred tickers", {
+              count: missingPreferredTickers.length,
+              sampleTickers: missingPreferredTickers.slice(0, 8),
+              error,
+            });
+          }
+        }
       }
     }
     return out;

@@ -2674,6 +2674,10 @@ export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  quoteOverlayRequestedCount?: number | null;
+  quoteOverlayReturnedCount?: number | null;
+  quoteOverlayError?: string | null;
+  quoteOverlayMissingSample?: string[];
 }> {
   const query = page ? `?page=${page}` : "";
   return getJson(`/api/status${query}`);

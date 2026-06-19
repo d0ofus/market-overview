@@ -66,6 +66,10 @@ export default async function HomePage() {
       freshnessMinBarDate: null,
       freshnessMaxBarDate: null,
       freshnessWarning: "Overview freshness could not be loaded.",
+      quoteOverlayRequestedCount: null,
+      quoteOverlayReturnedCount: null,
+      quoteOverlayError: null,
+      quoteOverlayMissingSample: [],
     })),
     getFedWatch().catch(() => ({
       status: "unavailable",
@@ -118,6 +122,10 @@ export default async function HomePage() {
               freshnessMinBarDate: statusValue.freshnessMinBarDate,
               freshnessMaxBarDate: statusValue.freshnessMaxBarDate,
               freshnessWarning: statusValue.freshnessWarning,
+              quoteOverlayRequestedCount: statusValue.quoteOverlayRequestedCount,
+              quoteOverlayReturnedCount: statusValue.quoteOverlayReturnedCount,
+              quoteOverlayError: statusValue.quoteOverlayError,
+              quoteOverlayMissingSample: statusValue.quoteOverlayMissingSample,
             }}
           />
         )}

@@ -77,6 +77,36 @@ describe("Alpaca quote snapshots", () => {
       },
     });
   });
+
+  it("preserves successful snapshot chunks when a later chunk fails", async () => {
+    const tickers = ["AAPL", ...Array.from({ length: 79 }, (_, index) => `OK${index}`), "BADETF"];
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return Response.json({
+          AAPL: {
+            latestTrade: { p: 105, t: "2026-06-18T20:00:00Z" },
+            dailyBar: { c: 104.5, t: "2026-06-18T04:00:00Z" },
+            prevDailyBar: { c: 100 },
+          },
+        });
+      }
+      return new Response(JSON.stringify({ message: "invalid symbol BADETF" }), { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+
+    await expect(provider.getQuoteSnapshot?.(tickers)).resolves.toMatchObject({
+      AAPL: { price: 105, prevClose: 100, source: "alpaca-snapshot" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("provider fallback control", () => {

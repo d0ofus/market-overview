@@ -105,11 +105,31 @@ export function deriveOverviewQuoteOverlayFromSnapshot(input: OverviewQuoteOverl
   };
 }
 
+export type OverviewQuoteOverlayDiagnostics = {
+  requestedTickers: number;
+  eligibleTickers: number;
+  returnedSnapshots: number;
+  quotePriceRows: number;
+  providerAttempted: boolean;
+  providerError: string | null;
+  sampleMissingTickers: string[];
+};
+
+export type OverviewQuoteOverlayResult = {
+  overlays: Map<string, OverviewQuoteOverlay>;
+  diagnostics: OverviewQuoteOverlayDiagnostics;
+};
+
+function quoteOverlayErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? "Overview quote snapshot refresh failed.");
+  return message.slice(0, 500);
+}
+
 export async function buildOverviewQuoteOverlays(
   env: Env,
   rows: Array<{ ticker: string; groupTitle: string; barDate: string | null }>,
   expectedAsOfDate: string,
-): Promise<Map<string, OverviewQuoteOverlay>> {
+): Promise<OverviewQuoteOverlayResult> {
   const uniqueRows = Array.from(
     new Map(rows.map((row) => [row.ticker.trim().toUpperCase(), { ...row, ticker: row.ticker.trim().toUpperCase() }])).values(),
   );
@@ -118,24 +138,44 @@ export async function buildOverviewQuoteOverlays(
     .map((row) => row.ticker);
 
   let snapshots: Record<string, QuoteSnapshot> = {};
+  let providerAttempted = false;
+  let providerError: string | null = null;
   if (eligibleTickers.length > 0) {
     try {
       const provider = getProvider(env);
+      providerAttempted = Boolean(provider.getQuoteSnapshot);
       snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(eligibleTickers) : {};
     } catch (error) {
+      providerError = quoteOverlayErrorMessage(error);
       console.error("overview quote snapshot refresh failed; using stored daily bars", error);
     }
   }
 
   const overlays = new Map<string, OverviewQuoteOverlay>();
+  let quotePriceRows = 0;
   for (const row of uniqueRows) {
-    overlays.set(row.ticker, deriveOverviewQuoteOverlayFromSnapshot({
+    const overlay = deriveOverviewQuoteOverlayFromSnapshot({
       ticker: row.ticker,
       groupTitle: row.groupTitle,
       barDate: row.barDate,
       expectedAsOfDate,
       snapshot: snapshots[row.ticker] ?? null,
-    }));
+    });
+    if (overlay.quotePrice != null) quotePriceRows += 1;
+    overlays.set(row.ticker, overlay);
   }
-  return overlays;
+
+  const missingSnapshotSet = new Set(eligibleTickers.filter((ticker) => !snapshots[ticker]));
+  return {
+    overlays,
+    diagnostics: {
+      requestedTickers: uniqueRows.length,
+      eligibleTickers: eligibleTickers.length,
+      returnedSnapshots: Object.keys(snapshots).length,
+      quotePriceRows,
+      providerAttempted,
+      providerError,
+      sampleMissingTickers: Array.from(missingSnapshotSet).slice(0, 20),
+    },
+  };
 }

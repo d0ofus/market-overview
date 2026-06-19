@@ -20,6 +20,10 @@ export type OverviewRefreshStatus = {
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  quoteOverlayRequestedCount?: number | null;
+  quoteOverlayReturnedCount?: number | null;
+  quoteOverlayError?: string | null;
+  quoteOverlayMissingSample?: string[];
 };
 
 type Props = {
@@ -148,6 +152,18 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
     && typeof freshnessCoveragePct === "number"
       ? `${freshnessCoveragePct.toFixed(1)}% (${freshnessCurrentCount}/${freshnessEligibleCount})`
       : "Coverage unknown";
+  const quoteOverlayRequestedCount = status.quoteOverlayRequestedCount;
+  const quoteOverlayReturnedCount = status.quoteOverlayReturnedCount;
+  const quoteOverlayWarning =
+    typeof quoteOverlayRequestedCount === "number"
+    && quoteOverlayRequestedCount > 0
+    && typeof quoteOverlayReturnedCount === "number"
+      ? quoteOverlayReturnedCount === 0
+        ? `Alpaca quote overlay returned 0/${quoteOverlayRequestedCount} quotes; display is falling back to stored daily bars.`
+        : quoteOverlayReturnedCount < quoteOverlayRequestedCount
+          ? `Alpaca quote overlay returned ${quoteOverlayReturnedCount}/${quoteOverlayRequestedCount} quotes${status.quoteOverlayMissingSample?.length ? `; missing examples: ${status.quoteOverlayMissingSample.slice(0, 5).join(", ")}` : ""}.`
+          : null
+      : null;
 
   return (
     <div
@@ -195,6 +211,8 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
                 </div>
               </div>
               {status.freshnessWarning && <div className="mt-2 text-xs leading-5 opacity-90">{status.freshnessWarning}</div>}
+              {quoteOverlayWarning && <div className="mt-2 rounded-lg border border-warning/25 bg-warning/10 px-2 py-1.5 text-xs leading-5 text-warning">{quoteOverlayWarning}</div>}
+              {status.quoteOverlayError && <div className="mt-2 text-xs leading-5 opacity-80">Quote overlay error: {status.quoteOverlayError}</div>}
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/35 px-3 py-2">

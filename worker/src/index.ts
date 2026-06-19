@@ -2135,6 +2135,10 @@ app.get("/api/status", async (c) => {
         freshnessMinBarDate?: string | null;
         freshnessMaxBarDate?: string | null;
         freshnessWarning?: string | null;
+        quoteOverlayRequestedCount?: number | null;
+        quoteOverlayReturnedCount?: number | null;
+        quoteOverlayError?: string | null;
+        quoteOverlayMissingSampleJson?: string | null;
         as_of_date?: string;
         generated_at?: string;
         provider_label?: string;
@@ -2142,7 +2146,7 @@ app.get("/api/status", async (c) => {
     | null = null;
   try {
     overviewLatest = await c.env.DB.prepare(
-      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+      "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning, quote_overlay_requested_count as quoteOverlayRequestedCount, quote_overlay_returned_count as quoteOverlayReturnedCount, quote_overlay_error as quoteOverlayError, quote_overlay_missing_sample_json as quoteOverlayMissingSampleJson FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
     )
       .bind(config?.id ?? "default", latestAllowedAsOfDate)
       .first<typeof overviewLatest>();
@@ -2195,6 +2199,17 @@ app.get("/api/status", async (c) => {
       : overviewStoredFreshnessMatchesExpected
         ? overviewStoredFreshnessUnknownWarning
         : null,
+    quoteOverlayRequestedCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayRequestedCount ?? null : null,
+    quoteOverlayReturnedCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayReturnedCount ?? null : null,
+    quoteOverlayError: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayError ?? null : null,
+    quoteOverlayMissingSample: overviewStoredFreshnessHasDiagnostics ? (() => {
+      try {
+        const parsed = JSON.parse(overviewLatest?.quoteOverlayMissingSampleJson ?? "[]");
+        return Array.isArray(parsed) ? parsed.map((ticker) => String(ticker)).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    })() : [],
   };
   if (!overviewFreshness.freshnessStatus) {
     try {
@@ -2209,6 +2224,10 @@ app.get("/api/status", async (c) => {
         freshnessMinBarDate: computed.minBarDate,
         freshnessMaxBarDate: computed.maxBarDate,
         freshnessWarning: computed.warning,
+        quoteOverlayRequestedCount: null,
+        quoteOverlayReturnedCount: null,
+        quoteOverlayError: null,
+        quoteOverlayMissingSample: [],
       };
     } catch (error) {
       console.error("status overview freshness computation failed", error);

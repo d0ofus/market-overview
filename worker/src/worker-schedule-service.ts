@@ -9,6 +9,7 @@ const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
 const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 60;
 const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 400;
 const DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK = 4;
+const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
 const DEFAULT_PATTERN_SCAN_OFFSET_MINUTES = 75;
 const DEFAULT_PATTERN_SCAN_BATCH_SIZE = 40;
 const DEFAULT_PATTERN_SCAN_MAX_BATCHES_PER_TICK = 4;
@@ -376,12 +377,27 @@ async function loadPostCloseDailyBarUniverseBatch(
     .filter(Boolean);
 }
 
+function isStaleRunningPostCloseJob(job: PostCloseDailyBarRefreshJobRecord, now = new Date()): boolean {
+  if (job.status !== "running") return false;
+  const updatedAtMs = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
+  return Number.isFinite(updatedAtMs) && now.getTime() - updatedAtMs > POST_CLOSE_STALE_RUNNING_MS;
+}
+
 async function ensurePostCloseDailyBarRefreshJob(
   env: Env,
   tradingDate: string,
 ): Promise<PostCloseDailyBarRefreshJobRecord> {
   const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(env, tradingDate);
   if (existing) {
+    if (isStaleRunningPostCloseJob(existing)) {
+      await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
+        status: "queued",
+        error: null,
+        completedAt: null,
+      });
+      const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
+      if (reset) return reset;
+    }
     if (existing.status === "failed") {
       await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
         status: "queued",

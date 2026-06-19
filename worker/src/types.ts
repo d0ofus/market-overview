@@ -170,6 +170,10 @@ export type SnapshotReadyResponse = {
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  quoteOverlayRequestedCount?: number | null;
+  quoteOverlayReturnedCount?: number | null;
+  quoteOverlayError?: string | null;
+  quoteOverlayMissingSample?: string[];
   config: DashboardConfigPayload;
   sections: Array<{
     id: string;
@@ -227,6 +231,10 @@ export type SnapshotEmptyResponse = {
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  quoteOverlayRequestedCount?: number | null;
+  quoteOverlayReturnedCount?: number | null;
+  quoteOverlayError?: string | null;
+  quoteOverlayMissingSample?: string[];
   config: null;
   sections: [];
 };
