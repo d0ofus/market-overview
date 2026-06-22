@@ -88,6 +88,22 @@ function formatDateTime(value: string | null | undefined): string {
   }).format(parsed);
 }
 
+function mentionSortTime(mention: SocialAlertMention): number {
+  for (const value of [mention.tweetCreatedAt, mention.lastSeenAt, mention.firstSeenAt]) {
+    const time = value ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(time)) return time;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+function compareTickerSummariesNewestFirst(left: SocialAlertTickerSummary, right: SocialAlertTickerSummary): number {
+  const leftTime = mentionSortTime(left.latestMention);
+  const rightTime = mentionSortTime(right.latestMention);
+  if (leftTime > rightTime) return -1;
+  if (leftTime < rightTime) return 1;
+  return left.ticker.localeCompare(right.ticker);
+}
+
 function formatRuntime(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "-";
   if (value < 1000) return `${Math.round(value)}ms`;
@@ -304,7 +320,10 @@ export function SocialAlertsDashboard({ adminAuthenticated, adminConfigured, adm
   const allSelected = activeHandles.length > 0 && activeHandles.slice(0, MAX_HANDLES_PER_RUN).every((row) => selectedIds.has(row.id));
   const metrics = results?.metrics ?? EMPTY_METRICS;
   const rows = results?.rows ?? [];
-  const tickerSummaries = results?.tickerSummaries ?? [];
+  const tickerSummaries = useMemo(
+    () => [...(results?.tickerSummaries ?? [])].sort(compareTickerSummariesNewestFirst),
+    [results?.tickerSummaries],
+  );
   const visibleSummaries = useMemo(() => tickerSummaries.slice((chartPage - 1) * chartsPerPage, chartPage * chartsPerPage), [chartPage, chartsPerPage, tickerSummaries]);
 
   useEffect(() => {

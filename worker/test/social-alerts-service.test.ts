@@ -114,8 +114,8 @@ function createRollingLogDb() {
           limitPerHandle: 50,
           selectedHandlesJson: JSON.stringify(["sourcehandle"]),
           error: null,
-          tweets: 4,
-          cashtagHits: 4,
+          tweets: 5,
+          cashtagHits: 5,
           uniqueTickers: 3,
           failures: 1,
           runtimeMs: 2500,
@@ -140,6 +140,7 @@ function createRollingLogDb() {
           { id: "p2", handle: "sourcehandle", tweetId: "2", tweetCreatedAt: "2026-05-09T13:00:00Z", cashtagsJson: JSON.stringify(["QQQ"]), text: "$QQQ", url: "https://x.com/sourcehandle/status/2", firstSeenAt: "2026-05-09T13:01:00Z", lastSeenAt: "2026-05-09T13:01:00Z" },
           { id: "p3", handle: "sourcehandle", tweetId: "3", tweetCreatedAt: "2026-05-08T13:00:00Z", cashtagsJson: JSON.stringify(["SPY"]), text: "$SPY only", url: "https://x.com/sourcehandle/status/3", firstSeenAt: "2026-05-08T13:01:00Z", lastSeenAt: "2026-05-08T13:01:00Z" },
           { id: "p4", handle: "sourcehandle", tweetId: "4", tweetCreatedAt: "2026-05-07T13:00:00Z", cashtagsJson: JSON.stringify([]), text: "no cashtags", url: "https://x.com/sourcehandle/status/4", firstSeenAt: "2026-05-07T13:01:00Z", lastSeenAt: "2026-05-07T13:01:00Z" },
+          { id: "p5", handle: "sourcehandle", tweetId: "5", tweetCreatedAt: "2026-05-07T12:00:00Z", cashtagsJson: JSON.stringify(["QQQ"]), text: "older $QQQ", url: "https://x.com/sourcehandle/status/5", firstSeenAt: "2026-05-07T12:01:00Z", lastSeenAt: "2026-05-07T12:01:00Z" },
         ] };
       }
       return { results: [] };
@@ -305,21 +306,19 @@ describe("social alerts helpers", () => {
       offset: 0,
     });
 
-    expect(result.rows).toHaveLength(4);
-    expect(result.total).toBe(4);
-    expect(result.rows.map((row) => row.id)).toEqual(["p1", "p2", "p3", "p4"]);
+    expect(result.rows).toHaveLength(5);
+    expect(result.total).toBe(5);
+    expect(result.rows.map((row) => row.id)).toEqual(["p1", "p2", "p3", "p4", "p5"]);
     expect(result.rows[0].cashtags).toEqual(["NVDA"]);
     expect(result.rows[2].cashtags).toEqual([]);
     expect(result.uniqueTickers).toEqual(["NVDA", "QQQ"]);
     expect(result.tickerSummaries).toHaveLength(2);
-    expect(result.tickerSummaries[0]).toMatchObject({
-      ticker: "NVDA",
-      mentionCount: 1,
-      latestMention: { handle: "sourcehandle", text: "$NVDA $SPY" },
-    });
+    expect(result.tickerSummaries.map((summary) => [summary.ticker, summary.mentionCount])).toEqual([["NVDA", 1], ["QQQ", 2]]);
+    expect(result.tickerSummaries[0]?.latestMention).toMatchObject({ handle: "sourcehandle", text: "$NVDA $SPY" });
+    expect(result.tickerSummaries[1]?.mentions.map((mention) => mention.postId)).toEqual(["p2", "p5"]);
     expect(result.metrics).toEqual({
-      tweets: 4,
-      cashtagHits: 2,
+      tweets: 5,
+      cashtagHits: 3,
       uniqueTickers: 2,
       failures: 1,
       runtimeMs: 2500,

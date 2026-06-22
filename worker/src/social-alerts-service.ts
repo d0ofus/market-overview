@@ -1017,6 +1017,30 @@ function mentionFromRow(row: SocialAlertResultRow): SocialAlertMention {
   };
 }
 
+function mentionSortTime(mention: SocialAlertMention): number {
+  for (const value of [mention.tweetCreatedAt, mention.lastSeenAt, mention.firstSeenAt]) {
+    const time = value ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(time)) return time;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+function compareMentionsNewestFirst(left: SocialAlertMention, right: SocialAlertMention): number {
+  const leftTime = mentionSortTime(left);
+  const rightTime = mentionSortTime(right);
+  if (leftTime > rightTime) return -1;
+  if (leftTime < rightTime) return 1;
+  return 0;
+}
+
+function compareTickerSummariesNewestFirst(left: SocialAlertTickerSummary, right: SocialAlertTickerSummary): number {
+  const leftTime = mentionSortTime(left.latestMention);
+  const rightTime = mentionSortTime(right.latestMention);
+  if (leftTime > rightTime) return -1;
+  if (leftTime < rightTime) return 1;
+  return left.ticker.localeCompare(right.ticker);
+}
+
 function buildTickerSummaries(rows: SocialAlertResultRow[]): SocialAlertTickerSummary[] {
   const byTicker = new Map<string, SocialAlertMention[]>();
   for (const row of rows) {
@@ -1027,14 +1051,19 @@ function buildTickerSummaries(rows: SocialAlertResultRow[]): SocialAlertTickerSu
     }
   }
   return Array.from(byTicker.entries())
-    .map(([ticker, mentions]) => ({
-      ticker,
-      mentionCount: mentions.length,
-      latestMention: mentions[0],
-      mentions,
-    }))
-    .filter((row): row is SocialAlertTickerSummary => Boolean(row.latestMention))
-    .sort((left, right) => right.mentionCount - left.mentionCount || left.ticker.localeCompare(right.ticker));
+    .map(([ticker, mentions]) => {
+      const sortedMentions = [...mentions].sort(compareMentionsNewestFirst);
+      const latestMention = sortedMentions[0];
+      if (!latestMention) return null;
+      return {
+        ticker,
+        mentionCount: sortedMentions.length,
+        latestMention,
+        mentions: sortedMentions,
+      };
+    })
+    .filter((row): row is SocialAlertTickerSummary => row !== null)
+    .sort(compareTickerSummariesNewestFirst);
 }
 
 type SocialAlertRunRecord = {

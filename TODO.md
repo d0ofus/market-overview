@@ -78,6 +78,8 @@
 ## WATCHLIST REVIEW
 > Add charts for candidates
 > Add delete button for Review Runs to allow for cleanup of messy list
+> Remove button saying 'Move Blue', if candidate is already blue
+> After ecah approval, can the screen not be refreshed?
 
 ## GAPPERS
 - Add avg traded volume column in table
