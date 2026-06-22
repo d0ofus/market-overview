@@ -275,4 +275,42 @@ describe("dashboard API", () => {
     expect(body.freshnessWarning).toContain("Snapshot freshness diagnostics are unavailable");
     expect(eodMocks.computeOverviewFreshnessDiagnostics).not.toHaveBeenCalled();
   });
+
+  it("runs stored-bars-only overview recompute when admin run-eod has storedOnly=1", async () => {
+    eodMocks.recomputeDashboardFromStoredBars.mockResolvedValueOnce({
+      snapshotId: "snapshot-1",
+      asOfDate: "2026-06-18",
+      freshness: {
+        expectedAsOfDate: "2026-06-18",
+        status: "partial",
+        eligibleCount: 10,
+        currentCount: 8,
+        staleCount: 2,
+        coveragePct: 80,
+        criticalMissingTickers: [],
+        minBarDate: "2026-06-12",
+        maxBarDate: "2026-06-18",
+        warning: null,
+      },
+    });
+    const env = {
+      ...createEnv(),
+      ADMIN_SECRET: "secret",
+    } as Env;
+
+    const response = await worker.fetch(
+      new Request("https://example.com/api/admin/run-eod?date=2026-06-18&configId=default&storedOnly=1", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret" },
+      }),
+      env,
+      createContext(),
+    );
+    const body = await response.json() as { ok: boolean; snapshotId: string; asOfDate: string };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, snapshotId: "snapshot-1", asOfDate: "2026-06-18" });
+    expect(eodMocks.recomputeDashboardFromStoredBars).toHaveBeenCalledWith(env, "2026-06-18", "default");
+    expect(eodMocks.computeAndStoreSnapshot).not.toHaveBeenCalled();
+  });
 });

@@ -67,6 +67,10 @@ describe("loadSnapshot read-only mode", () => {
       freshnessMinBarDate: null,
       freshnessMaxBarDate: null,
       freshnessWarning: "No stored overview snapshot is available. Use Admin refresh to generate one.",
+      quoteOverlayRequestedCount: null,
+      quoteOverlayReturnedCount: null,
+      quoteOverlayError: null,
+      quoteOverlayMissingSample: [],
       config: null,
       sections: [],
     });

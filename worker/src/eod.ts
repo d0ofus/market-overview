@@ -3,9 +3,16 @@ import { loadConfig } from "./db";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
-import { latestUsSessionAsOfDate } from "./refresh-timing";
+import { isUsMarketTradingDay, latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
-import { buildOverviewQuoteOverlays, type OverviewQuoteOverlay } from "./overview-quote-snapshot";
+import {
+  buildOverviewQuoteOverlays,
+  buildOverviewQuoteOverlaysFromSnapshots,
+  fetchOverviewQuoteSnapshots,
+  isOverviewQuoteEligibleTicker,
+  type OverviewQuoteOverlay,
+  type OverviewQuoteSnapshotFetchResult,
+} from "./overview-quote-snapshot";
 import type { Env, QuoteFreshnessStatus, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
@@ -28,8 +35,9 @@ function previousWeekday(date: Date): Date {
 }
 
 function resolveAsOfDate(asOfDateInput?: string): string {
-  if (!asOfDateInput) return latestUsSessionAsOfDate(new Date());
-  return toISODate(previousWeekday(new Date(`${asOfDateInput}T00:00:00Z`)));
+  if (!asOfDateInput) return latestUsMarketSessionAsOfDate(new Date());
+  const isoDate = toISODate(previousWeekday(new Date(`${asOfDateInput}T00:00:00Z`)));
+  return isUsMarketTradingDay(isoDate) ? isoDate : previousUsMarketTradingDay(isoDate);
 }
 
 const OVERALL_BREADTH_UNIVERSE_ID = "overall-market-proxy";
@@ -578,6 +586,18 @@ function overviewConfigTickers(config: Awaited<ReturnType<typeof loadConfig>>): 
   ));
 }
 
+function overviewQuoteSnapshotTickersFromConfig(config: Awaited<ReturnType<typeof loadConfig>>): string[] {
+  return Array.from(new Set(
+    config.sections
+      .flatMap((section) => section.groups)
+      .flatMap((group) => group.items
+        .filter((item) => item.enabled)
+        .map((item) => ({ ticker: item.ticker.trim().toUpperCase(), groupTitle: group.title })))
+      .filter((row) => row.ticker && isOverviewQuoteEligibleTicker(row.ticker, row.groupTitle))
+      .map((row) => row.ticker),
+  ));
+}
+
 function overviewCriticalFreshnessTickers(config: Awaited<ReturnType<typeof loadConfig>>): string[] {
   return overviewFreshnessTickersFromConfig(config)
     .filter((row) => row.eligible && row.critical)
@@ -592,6 +612,7 @@ export async function refreshAndStoreOverviewSnapshot(
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
   const tickers = overviewConfigTickers(config);
+  const quoteSnapshotResult = await fetchOverviewQuoteSnapshots(env, overviewQuoteSnapshotTickersFromConfig(config));
   const criticalTickers = Array.from(new Set(overviewCriticalFreshnessTickers(config).map((ticker) => ticker.toUpperCase())));
   const criticalTickerSet = new Set(criticalTickers);
   const nonCriticalTickers = tickers.filter((ticker) => !criticalTickerSet.has(ticker.toUpperCase()));
@@ -645,6 +666,7 @@ export async function refreshAndStoreOverviewSnapshot(
     pullProviderBars: false,
     requireFreshness: true,
     freshnessDiagnostics: freshness,
+    quoteSnapshotResult,
   });
   return { ...result, fetchedRows, writtenRows };
 }
@@ -1184,6 +1206,7 @@ type SnapshotComputeOptions = {
   providerTickers?: string[] | null;
   requireFreshness?: boolean;
   freshnessDiagnostics?: OverviewFreshnessDiagnostics | null;
+  quoteSnapshotResult?: OverviewQuoteSnapshotFetchResult | null;
 };
 
 export async function computeAndStoreSnapshot(
@@ -1326,11 +1349,10 @@ export async function computeAndStoreSnapshot(
     }
   }
 
-  const quoteOverlayResult = await buildOverviewQuoteOverlays(
-    env,
-    snapshotRows.map((row) => ({ ticker: row.ticker, groupTitle: row.groupTitle, barDate: row.barDate })),
-    asOfDate,
-  );
+  const quoteOverlayRows = snapshotRows.map((row) => ({ ticker: row.ticker, groupTitle: row.groupTitle, barDate: row.barDate }));
+  const quoteOverlayResult = options.quoteSnapshotResult
+    ? buildOverviewQuoteOverlaysFromSnapshots(quoteOverlayRows, asOfDate, options.quoteSnapshotResult)
+    : await buildOverviewQuoteOverlays(env, quoteOverlayRows, asOfDate);
   const quoteOverlays = quoteOverlayResult.overlays;
   const quoteOverlayDiagnostics = quoteOverlayResult.diagnostics;
   const finalFreshness = (() => {
@@ -1776,7 +1798,7 @@ export function emptySnapshotResponse(warning = "No stored overview snapshot is 
     asOfDate: null,
     generatedAt: null,
     providerLabel: null,
-    expectedAsOfDate: latestUsSessionAsOfDate(new Date()),
+    expectedAsOfDate: latestUsMarketSessionAsOfDate(new Date()),
     freshnessStatus: "stale",
     freshnessCoveragePct: 0,
     freshnessCurrentCount: 0,
@@ -1845,7 +1867,7 @@ export async function loadSnapshot(
 ): Promise<SnapshotResponse> {
   const config = await loadConfig(env, configId);
   const allowComputeOnMissing = options.allowComputeOnMissing ?? true;
-  const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const latestAllowedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const meta = await loadSnapshotMeta(env, configId, latestAllowedAsOfDate, requestedDate);
 
   if (!meta && !allowComputeOnMissing) {

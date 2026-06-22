@@ -148,4 +148,148 @@ describe("provider fallback control", () => {
       volume: 1000,
     }]);
   });
+
+  it("does not call SIP or external fallback when IEX has current preferred ETF bars", async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      bars: {
+        SPY: [{ t: "2026-06-18T04:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 1000 }],
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+    const bars = await provider.getDailyBars(["SPY"], "2026-06-18", "2026-06-18");
+
+    expect(bars).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("feed=iex");
+  });
+
+  it("uses SIP for a preferred ETF only when IEX is stale", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("feed=iex")) {
+        return Response.json({
+          bars: {
+            SPY: [{ t: "2026-06-17T04:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 1000 }],
+          },
+        });
+      }
+      return Response.json({
+        bars: {
+          SPY: [{ t: "2026-06-18T04:00:00Z", o: 11, h: 12, l: 10, c: 11.5, v: 1200 }],
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+    const bars = await provider.getDailyBars(["SPY"], "2026-06-17", "2026-06-18");
+
+    expect(bars.map((bar) => bar.date)).toEqual(["2026-06-17", "2026-06-18"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining("feed=iex"),
+      expect.stringContaining("feed=sip"),
+    ]);
+  });
+
+  it("falls back outside Alpaca when a preferred ETF is still missing after SIP", async () => {
+    const yahooTimestamp = Math.floor(Date.parse("2026-06-18T04:00:00Z") / 1000);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("data.alpaca.markets")) {
+        return Response.json({ bars: {} });
+      }
+      return Response.json({
+        chart: {
+          result: [{
+            timestamp: [yahooTimestamp],
+            indicators: {
+              quote: [{
+                open: [20],
+                high: [22],
+                low: [19],
+                close: [21],
+                volume: [2000],
+              }],
+              adjclose: [{ adjclose: [21] }],
+            },
+          }],
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+    const bars = await provider.getDailyBars(["SPY"], "2026-06-18", "2026-06-18");
+
+    expect(bars).toEqual([{
+      ticker: "SPY",
+      date: "2026-06-18",
+      o: 20,
+      h: 22,
+      l: 19,
+      c: 21,
+      volume: 2000,
+    }]);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining("feed=iex"),
+      expect.stringContaining("feed=sip"),
+      expect.stringContaining("query1.finance.yahoo.com"),
+    ]);
+  });
+
+  it("uses Stooq fallback for a non-preferred missing symbol", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("data.alpaca.markets")) return Response.json({ bars: {} });
+      return new Response(
+        "Date,Open,High,Low,Close,Volume\n2026-06-18,30,31,29,30.5,3000\n",
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    });
+    const bars = await provider.getDailyBars(["ABC"], "2026-06-18", "2026-06-18");
+
+    expect(bars).toEqual([{
+      ticker: "ABC",
+      date: "2026-06-18",
+      o: 30,
+      h: 31,
+      l: 29,
+      c: 30.5,
+      volume: 3000,
+    }]);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining("feed=iex"),
+      expect.stringContaining("stooq.com"),
+    ]);
+  });
 });

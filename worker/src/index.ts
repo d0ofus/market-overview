@@ -83,7 +83,8 @@ import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
-import { latestUsSessionAsOfDate, parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
+import { parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
+import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import {
   CENTRAL_CRON_JOB_DEFINITIONS,
   CRON_TIMEZONE_OPTIONS,
@@ -1227,7 +1228,7 @@ async function loadOverviewTickers(env: Env): Promise<string[]> {
   return uniqueTickers((rows.results ?? []).map((r) => r.ticker));
 }
 
-async function loadTickersMissingRecentBars(env: Env, tickers: string[], expectedAsOfDate = latestUsSessionAsOfDate(new Date())): Promise<string[]> {
+async function loadTickersMissingRecentBars(env: Env, tickers: string[], expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date())): Promise<string[]> {
   const unique = uniqueTickers(tickers);
   if (unique.length === 0) return [];
   const lastDateByTicker = new Map<string, string | null>();
@@ -1270,7 +1271,7 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   lastOverviewBarRefreshAt = now;
   const tickers = await loadOverviewTickers(env);
   if (tickers.length === 0) return;
-  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const staleTickers = await loadTickersMissingRecentBars(env, tickers, expectedAsOfDate);
   const shortHistoryTickers = await loadTickersMissingBarHistory(env, tickers, OVERVIEW_SPARKLINE_MIN_POINTS);
   const refreshTickers = uniqueTickers([...staleTickers, ...shortHistoryTickers]);
@@ -1873,7 +1874,7 @@ async function recomputeSp500BreadthFromStoredBarsSafe(env: Env, asOfDate: strin
 }
 
 async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
-  const expectedAsOf = latestUsSessionAsOfDate(new Date());
+  const expectedAsOf = latestUsMarketSessionAsOfDate(new Date());
   let latestSnapshotAsOf: string | null = null;
   try {
     const latestSnapshot = await env.DB.prepare(
@@ -2081,7 +2082,7 @@ async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTicke
     return;
   }
   try {
-    const end = latestUsSessionAsOfDate(new Date());
+    const end = latestUsMarketSessionAsOfDate(new Date());
     const start = new Date(Date.now() - Math.max(1, lookbackDays) * 86400_000).toISOString().slice(0, 10);
     await refreshDailyBarsIncremental(env, { provider, tickers: unique, startDate: start, endDate: end, replaceExisting });
   } catch (error) {
@@ -2119,7 +2120,7 @@ app.get("/api/status", async (c) => {
       : null;
   }
 
-  const latestAllowedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const latestAllowedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   let overviewLatest:
     | {
         asOfDate?: string;
@@ -2930,7 +2931,7 @@ app.get("/api/sectors/calendar", async (c) => {
 app.get("/api/etfs/sector", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "sector");
   const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
-  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());
@@ -2957,7 +2958,7 @@ app.get("/api/etfs/sector", async (c) => {
 app.get("/api/etfs/industry", async (c) => {
   const rows = await listEtfWatchlistRows(c.env, "industry");
   const statsMap = await getStored1dStatsMap(c.env, rows.map((r: any) => r.ticker));
-  const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
+  const expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const withStats = await Promise.all(
     rows.map(async (row: any) => {
       const stats = statsMap.get(String(row.ticker).toUpperCase());
@@ -3877,7 +3878,7 @@ app.get("/api/admin/social-alerts/results", async (c) => {
 
 app.get("/api/ticker/:ticker/news", async (c) => {
   const ticker = c.req.param("ticker").trim().toUpperCase();
-  const tradingDay = (c.req.query("tradingDay") ?? latestUsSessionAsOfDate(new Date())).trim();
+  const tradingDay = (c.req.query("tradingDay") ?? latestUsMarketSessionAsOfDate(new Date())).trim();
   const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 5)));
   if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) return c.json({ error: "Valid ticker is required." }, 400);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(tradingDay)) return c.json({ error: "Valid tradingDay is required." }, 400);
@@ -6088,14 +6089,17 @@ app.get("/api/admin/fundamentals/seed/errors", async (c) => {
 
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
-  const date = c.req.query("date") ?? latestUsSessionAsOfDate(new Date());
+  const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
+  const storedOnly = c.req.query("storedOnly") === "1";
   try {
-    const result = await computeAndStoreSnapshot(c.env, date, configId);
+    const result = storedOnly
+      ? await recomputeDashboardFromStoredBars(c.env, date, configId)
+      : await computeAndStoreSnapshot(c.env, date, configId);
     return c.json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-eod failed";
-    console.error("admin run-eod failed", { date, configId, error });
+    console.error("admin run-eod failed", { date, configId, storedOnly, error });
     return c.json({ error: message }, 500);
   }
 });
@@ -6740,7 +6744,7 @@ export default {
     if (overviewSettings && !isCentralCronEnabled(overviewSettings)) return;
     const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
     const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
-    const expectedAsOf = latestUsSessionAsOfDate(now);
+    const expectedAsOf = latestUsMarketSessionAsOfDate(now);
     if (!postCloseJob && workerSchedule.postCloseBarsEnabled) {
       postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, expectedAsOf);
     }

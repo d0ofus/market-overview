@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getUsMarketSessionContext,
   isUsMarketTradingDay,
+  latestUsMarketSessionAsOfDate,
   previousUsMarketTradingDay,
   usMarketHolidayName,
 } from "../src/market-calendar";
@@ -21,6 +22,12 @@ describe("US market calendar", () => {
   it("walks back through holidays and weekends to the prior trading day", () => {
     expect(previousUsMarketTradingDay("2026-05-26")).toBe("2026-05-22");
     expect(previousUsMarketTradingDay("2026-05-31")).toBe("2026-05-29");
+  });
+
+  it("uses the previous trading day for Juneteenth instead of a weekday-only date", () => {
+    expect(usMarketHolidayName("2026-06-19")).toBe("Juneteenth National Independence Day");
+    expect(isUsMarketTradingDay("2026-06-19")).toBe(false);
+    expect(latestUsMarketSessionAsOfDate(new Date("2026-06-19T22:00:00Z"))).toBe("2026-06-18");
   });
 
   it("labels intraday and post-close sessions in New York time", () => {

@@ -120,36 +120,65 @@ export type OverviewQuoteOverlayResult = {
   diagnostics: OverviewQuoteOverlayDiagnostics;
 };
 
+export type OverviewQuoteSnapshotFetchResult = {
+  snapshots: Record<string, QuoteSnapshot>;
+  providerAttempted: boolean;
+  providerError: string | null;
+};
+
 function quoteOverlayErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error ?? "Overview quote snapshot refresh failed.");
   return message.slice(0, 500);
 }
 
-export async function buildOverviewQuoteOverlays(
-  env: Env,
+function normalizeOverviewQuoteRows(
   rows: Array<{ ticker: string; groupTitle: string; barDate: string | null }>,
-  expectedAsOfDate: string,
-): Promise<OverviewQuoteOverlayResult> {
-  const uniqueRows = Array.from(
+): Array<{ ticker: string; groupTitle: string; barDate: string | null }> {
+  return Array.from(
     new Map(rows.map((row) => [row.ticker.trim().toUpperCase(), { ...row, ticker: row.ticker.trim().toUpperCase() }])).values(),
   );
+}
+
+function eligibleOverviewQuoteTickers(
+  rows: Array<{ ticker: string; groupTitle: string }>,
+): string[] {
+  return rows
+    .filter((row) => isOverviewQuoteEligibleTicker(row.ticker, row.groupTitle))
+    .map((row) => row.ticker);
+}
+
+export async function fetchOverviewQuoteSnapshots(
+  env: Env,
+  tickers: string[],
+): Promise<OverviewQuoteSnapshotFetchResult> {
+  const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  let providerAttempted = false;
+  let providerError: string | null = null;
+  let snapshots: Record<string, QuoteSnapshot> = {};
+  if (uniqueTickers.length === 0) {
+    return { snapshots, providerAttempted, providerError };
+  }
+  try {
+    const provider = getProvider(env);
+    providerAttempted = Boolean(provider.getQuoteSnapshot);
+    snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(uniqueTickers) : {};
+  } catch (error) {
+    providerError = quoteOverlayErrorMessage(error);
+    console.error("overview quote snapshot refresh failed; using stored daily bars", error);
+  }
+  return { snapshots, providerAttempted, providerError };
+}
+
+export function buildOverviewQuoteOverlaysFromSnapshots(
+  rows: Array<{ ticker: string; groupTitle: string; barDate: string | null }>,
+  expectedAsOfDate: string,
+  snapshotResult: OverviewQuoteSnapshotFetchResult,
+): OverviewQuoteOverlayResult {
+  const uniqueRows = normalizeOverviewQuoteRows(rows);
   const eligibleTickers = uniqueRows
     .filter((row) => isOverviewQuoteEligibleTicker(row.ticker, row.groupTitle))
     .map((row) => row.ticker);
-
-  let snapshots: Record<string, QuoteSnapshot> = {};
-  let providerAttempted = false;
-  let providerError: string | null = null;
-  if (eligibleTickers.length > 0) {
-    try {
-      const provider = getProvider(env);
-      providerAttempted = Boolean(provider.getQuoteSnapshot);
-      snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(eligibleTickers) : {};
-    } catch (error) {
-      providerError = quoteOverlayErrorMessage(error);
-      console.error("overview quote snapshot refresh failed; using stored daily bars", error);
-    }
-  }
+  const snapshots = snapshotResult.snapshots;
 
   const overlays = new Map<string, OverviewQuoteOverlay>();
   let quotePriceRows = 0;
@@ -173,9 +202,19 @@ export async function buildOverviewQuoteOverlays(
       eligibleTickers: eligibleTickers.length,
       returnedSnapshots: Object.keys(snapshots).length,
       quotePriceRows,
-      providerAttempted,
-      providerError,
+      providerAttempted: snapshotResult.providerAttempted,
+      providerError: snapshotResult.providerError,
       sampleMissingTickers: Array.from(missingSnapshotSet).slice(0, 20),
     },
   };
+}
+
+export async function buildOverviewQuoteOverlays(
+  env: Env,
+  rows: Array<{ ticker: string; groupTitle: string; barDate: string | null }>,
+  expectedAsOfDate: string,
+): Promise<OverviewQuoteOverlayResult> {
+  const uniqueRows = normalizeOverviewQuoteRows(rows);
+  const snapshotResult = await fetchOverviewQuoteSnapshots(env, eligibleOverviewQuoteTickers(uniqueRows));
+  return buildOverviewQuoteOverlaysFromSnapshots(uniqueRows, expectedAsOfDate, snapshotResult);
 }

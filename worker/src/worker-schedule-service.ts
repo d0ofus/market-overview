@@ -1,5 +1,6 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
-import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
+import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { zonedParts } from "./refresh-timing";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 
 const DEFAULT_WORKER_SCHEDULE_ID = "default";
@@ -17,27 +18,32 @@ export const POST_CLOSE_SCOPE = "active-us-common-stocks-plus-overview";
 export const FIXED_WORKER_CRON_EXPRESSION = "*/15 * * * *";
 
 const POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT = `
-  SELECT UPPER(TRIM(s.ticker)) as ticker
-  FROM symbols s
-  WHERE COALESCE(s.is_active, 1) = 1
-    AND COALESCE(s.catalog_managed, 0) = 1
-    AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
-  UNION
-  SELECT UPPER(TRIM(di.ticker)) as ticker
-  FROM dashboard_items di
-  JOIN dashboard_groups dg ON dg.id = di.group_id
-  JOIN dashboard_sections ds ON ds.id = dg.section_id
-  JOIN dashboard_configs dc ON dc.id = ds.config_id
-  WHERE dc.is_default = 1
-    AND di.enabled = 1
-    AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
+  SELECT ticker, MIN(priority) as priority
+  FROM (
+    SELECT UPPER(TRIM(di.ticker)) as ticker, 0 as priority
+    FROM dashboard_items di
+    JOIN dashboard_groups dg ON dg.id = di.group_id
+    JOIN dashboard_sections ds ON ds.id = dg.section_id
+    JOIN dashboard_configs dc ON dc.id = ds.config_id
+    WHERE dc.is_default = 1
+      AND di.enabled = 1
+      AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
+    UNION ALL
+    SELECT UPPER(TRIM(s.ticker)) as ticker, 1 as priority
+    FROM symbols s
+    WHERE COALESCE(s.is_active, 1) = 1
+      AND COALESCE(s.catalog_managed, 0) = 1
+      AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
+  ) post_close_universe_raw
+  WHERE ticker IS NOT NULL AND ticker <> ''
+  GROUP BY ticker
 `;
 
 export function buildPostCloseDailyBarUniverseQuery(kind: "count" | "batch"): string {
   if (kind === "count") {
-    return `SELECT COUNT(*) as count FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe WHERE ticker IS NOT NULL AND ticker <> ''`;
+    return `SELECT COUNT(*) as count FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe`;
   }
-  return `SELECT ticker FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe WHERE ticker IS NOT NULL AND ticker <> '' ORDER BY ticker ASC LIMIT ? OFFSET ?`;
+  return `SELECT ticker FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe ORDER BY priority ASC, ticker ASC LIMIT ? OFFSET ?`;
 }
 
 type WorkerScheduleSettingsRow = {
@@ -519,7 +525,7 @@ export async function maybeRunScheduledPostCloseDailyBarRefresh(
   settings: WorkerScheduleSettings,
 ): Promise<PostCloseDailyBarRefreshJob | null> {
   if (!settings.postCloseBarsEnabled) return null;
-  const expectedTradingDate = latestUsSessionAsOfDate(now);
+  const expectedTradingDate = latestUsMarketSessionAsOfDate(now);
   if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) return null;
   const jobRecord = await ensurePostCloseDailyBarRefreshJob(env, expectedTradingDate);
   return await processPostCloseDailyBarRefreshJob(env, jobRecord.id, {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { refreshOverviewPageData } from "../src/overview-refresh-service";
 
 describe("refreshOverviewPageData", () => {
-  it("refreshes overview ticker daily bars before rebuilding the stored snapshot", async () => {
+  it("rebuilds the overview snapshot without a redundant long daily-bar refresh", async () => {
     const calls: string[] = [];
     const refreshRecentBarsForTickers = vi.fn(async () => {
       calls.push("bars");
@@ -26,8 +26,8 @@ describe("refreshOverviewPageData", () => {
       refreshAndStoreOverviewSnapshot,
     });
 
-    expect(calls).toEqual(["bars", "snapshot"]);
-    expect(refreshRecentBarsForTickers).toHaveBeenCalledWith({} as never, ["xsd", "spy"], 2000, 400, true);
+    expect(calls).toEqual(["snapshot"]);
+    expect(refreshRecentBarsForTickers).not.toHaveBeenCalled();
     expect(result).toEqual({
       page: "overview",
       refreshedTickers: 2,

@@ -678,8 +678,15 @@ class AlpacaProvider implements MarketDataProvider {
         const latest = latestByTicker.get(ticker);
         if (!latest || row.date > latest) latestByTicker.set(ticker, row.date);
       }
+      const isMissingOrStale = (ticker: string) => {
+        const normalized = ticker.toUpperCase();
+        const latest = latestByTicker.get(normalized);
+        return !latest || latest < endDate;
+      };
       if (this.fallbackEnabled && this.feed === "iex") {
-        const preferredBatch = batch.filter((ticker) => this.fallbackPreferredTickers.has(ticker.toUpperCase()));
+        const preferredBatch = batch.filter((ticker) => (
+          this.fallbackPreferredTickers.has(ticker.toUpperCase()) && isMissingOrStale(ticker)
+        ));
         if (preferredBatch.length > 0) {
           try {
             const sipRows = await this.fetchChunk(preferredBatch, startDate, endDate, "sip");
@@ -694,11 +701,7 @@ class AlpacaProvider implements MarketDataProvider {
           }
         }
       }
-      const missingOrStale = batch.filter((ticker) => {
-        const normalized = ticker.toUpperCase();
-        const latest = latestByTicker.get(normalized);
-        return !latest || latest < endDate || (this.feed === "iex" && this.fallbackPreferredTickers.has(normalized));
-      });
+      const missingOrStale = batch.filter((ticker) => isMissingOrStale(ticker));
       if (this.fallbackEnabled && missingOrStale.length > 0) {
         try {
           const fallbackRows = await this.stooqFallback.getDailyBars(missingOrStale, startDate, endDate);

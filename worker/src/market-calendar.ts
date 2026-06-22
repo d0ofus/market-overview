@@ -185,3 +185,7 @@ export function getUsMarketSessionContext(now = new Date()): UsMarketSessionCont
     closedReason: null,
   };
 }
+
+export function latestUsMarketSessionAsOfDate(now = new Date()): string {
+  return getUsMarketSessionContext(now).latestCompletedSessionDate;
+}

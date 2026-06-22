@@ -159,13 +159,16 @@ describe("worker schedule service", () => {
 
 
 describe("post-close daily bar universe", () => {
-  it("uses an explicit overview-plus-common-stock scope and includes configured overview tickers", () => {
+  it("uses an explicit overview-plus-common-stock scope and prioritizes configured overview tickers", () => {
     const query = buildPostCloseDailyBarUniverseQuery("batch");
 
     expect(POST_CLOSE_SCOPE).toBe("active-us-common-stocks-plus-overview");
     expect(query).toContain("dashboard_items");
-    expect(query).toContain("UNION");
+    expect(query).toContain("0 as priority");
+    expect(query).toContain("1 as priority");
+    expect(query).toContain("UNION ALL");
     expect(query).toContain("Macro");
     expect(query).toContain("Equities");
+    expect(query).toContain("ORDER BY priority ASC, ticker ASC");
   });
 });

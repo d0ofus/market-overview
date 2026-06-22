@@ -25,7 +25,6 @@ export async function refreshOverviewPageData(
   deps: OverviewPageRefreshDeps,
 ): Promise<OverviewPageRefreshResult> {
   const tickers = await deps.loadOverviewTickers(env);
-  await deps.refreshRecentBarsForTickers(env, tickers, 2000, 400, true);
   const result = await deps.refreshAndStoreOverviewSnapshot(env);
   return {
     page: "overview",
