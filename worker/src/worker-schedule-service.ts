@@ -1,5 +1,10 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import {
+  clearProviderSymbolBackoff,
+  loadActiveProviderBackoffTickers,
+  recordProviderSymbolNoDataBackoff,
+} from "./provider-backoff";
 import { zonedParts } from "./refresh-timing";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 
@@ -392,6 +397,67 @@ async function loadPostCloseDailyBarUniverseBatch(
     .filter(Boolean);
 }
 
+async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const out = new Set<string>();
+  for (let i = 0; i < unique.length; i += 80) {
+    const batch = unique.slice(i, i + 80);
+    if (batch.length === 0) continue;
+    const placeholders = batch.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT ticker
+         FROM daily_bars
+        WHERE date = ?
+          AND ticker IN (${placeholders})`,
+    ).bind(date, ...batch).all<{ ticker: string }>();
+    for (const row of rows.results ?? []) {
+      const ticker = row.ticker?.trim().toUpperCase();
+      if (ticker) out.add(ticker);
+    }
+  }
+  return out;
+}
+
+async function loadPostCloseNoDataBackoffProtectedTickers(env: Env, tickers: string[]): Promise<Set<string>> {
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const out = new Set<string>();
+  for (let i = 0; i < unique.length; i += 80) {
+    const batch = unique.slice(i, i + 80);
+    if (batch.length === 0) continue;
+    const placeholders = batch.map(() => "?").join(",");
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT UPPER(TRIM(di.ticker)) as ticker
+           FROM dashboard_items di
+           JOIN dashboard_groups dg ON dg.id = di.group_id
+           JOIN dashboard_sections ds ON ds.id = dg.section_id
+           JOIN dashboard_configs dc ON dc.id = ds.config_id
+          WHERE dc.is_default = 1
+            AND di.enabled = 1
+            AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
+            AND UPPER(TRIM(di.ticker)) IN (${placeholders})
+         UNION
+         SELECT UPPER(TRIM(ticker)) as ticker
+           FROM etf_watchlists
+          WHERE UPPER(TRIM(ticker)) IN (${placeholders})
+         UNION
+         SELECT UPPER(TRIM(ticker)) as ticker
+           FROM symbols
+          WHERE lower(COALESCE(asset_class, '')) = 'etf'
+            AND UPPER(TRIM(ticker)) IN (${placeholders})`,
+      ).bind(...batch, ...batch, ...batch).all<{ ticker: string }>();
+      for (const row of rows.results ?? []) {
+        const ticker = row.ticker?.trim().toUpperCase();
+        if (ticker) out.add(ticker);
+      }
+    } catch (error) {
+      console.warn("post-close backoff protected ticker lookup failed", { batchSize: batch.length, error });
+      for (const ticker of batch) out.add(ticker);
+    }
+  }
+  return out;
+}
+
 function isStaleRunningPostCloseJob(job: PostCloseDailyBarRefreshJobRecord, now = new Date()): boolean {
   if (job.status !== "running") return false;
   const updatedAtMs = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
@@ -468,17 +534,31 @@ export async function processPostCloseDailyBarRefreshJob(
     let processedBatchCount = 0;
 
     while (cursorOffset < job.totalTickers && processedBatchCount < maxBatches) {
-      const tickers = await loadPostCloseDailyBarUniverseBatch(env, cursorOffset, batchSize);
-      if (tickers.length === 0) break;
-      const refresh = await refreshDailyBarsIncremental(env, {
-        tickers,
-        startDate: job.tradingDate,
-        endDate: job.tradingDate,
-      });
-      cursorOffset += tickers.length;
+      const batchTickers = await loadPostCloseDailyBarUniverseBatch(env, cursorOffset, batchSize);
+      if (batchTickers.length === 0) break;
+      const providerKey = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
+      const protectedTickers = await loadPostCloseNoDataBackoffProtectedTickers(env, batchTickers);
+      const preCurrentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      await clearProviderSymbolBackoff(env, providerKey, Array.from(preCurrentTickers));
+      const backoffEligibleTickers = batchTickers.filter((ticker) => !protectedTickers.has(ticker) && !preCurrentTickers.has(ticker));
+      const activeBackoffTickers = await loadActiveProviderBackoffTickers(env, providerKey, backoffEligibleTickers);
+      const tickers = batchTickers.filter((ticker) => !activeBackoffTickers.has(ticker));
+      let refresh = { fetchedRows: 0, writtenRows: 0, currentDateTickers: 0 };
+      if (tickers.length > 0) {
+        refresh = await refreshDailyBarsIncremental(env, {
+          tickers,
+          startDate: job.tradingDate,
+          endDate: job.tradingDate,
+        });
+      }
+      const currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      await clearProviderSymbolBackoff(env, providerKey, Array.from(currentTickers));
+      const noDataTickers = tickers.filter((ticker) => !protectedTickers.has(ticker) && !currentTickers.has(ticker));
+      await recordProviderSymbolNoDataBackoff(env, providerKey, noDataTickers, "post_close_no_current_bar", 7);
+      cursorOffset += batchTickers.length;
       fetchedRows += refresh.fetchedRows;
       writtenRows += refresh.writtenRows;
-      currentDateTickers += refresh.currentDateTickers;
+      currentDateTickers += currentTickers.size;
       missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
       currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
       processedBatchCount += 1;

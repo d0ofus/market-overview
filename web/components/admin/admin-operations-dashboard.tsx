@@ -7,12 +7,14 @@ import {
   getAdminBraveUsage,
   getAdminCronJobs,
   getAdminMarketCommentarySettings,
+  getAdminProviderUsage,
   getAdminSymbolCatalogStatus,
   refreshMarketCommentary,
   resetAdminMarketCommentarySettings,
   updateAdminMarketCommentarySettings,
   type AdminBraveUsageResponse,
   type AdminCronJobsResponse,
+  type AdminProviderUsageResponse,
   type MarketCommentarySettings,
   type SymbolCatalogStatus,
 } from "@/lib/api";
@@ -57,6 +59,7 @@ export function AdminOperationsDashboard() {
   const [commentarySettings, setCommentarySettings] = useState<MarketCommentarySettings | null>(null);
   const [cronJobs, setCronJobs] = useState<AdminCronJobsResponse | null>(null);
   const [braveUsage, setBraveUsage] = useState<AdminBraveUsageResponse | null>(null);
+  const [providerUsage, setProviderUsage] = useState<AdminProviderUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [schedulePageTarget, setSchedulePageTarget] = useState<RefreshTarget>("overview");
@@ -68,7 +71,7 @@ export function AdminOperationsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const [configRes, sectorRes, industryRes, syncRes, symbolRes, commentarySettingsRes, cronJobsRes, braveUsageRes] = await Promise.all([
+      const [configRes, sectorRes, industryRes, syncRes, symbolRes, commentarySettingsRes, cronJobsRes, braveUsageRes, providerUsageRes] = await Promise.all([
         adminFetch<OverviewAdminConfig>("/api/admin/config"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/sector"),
         adminFetch<{ rows: Array<Record<string, unknown>> }>("/api/etfs/industry"),
@@ -77,6 +80,7 @@ export function AdminOperationsDashboard() {
         getAdminMarketCommentarySettings().catch(() => null),
         getAdminCronJobs().catch(() => null),
         getAdminBraveUsage(14).catch(() => null),
+        getAdminProviderUsage(14).catch(() => null),
       ]);
       setConfig(configRes);
       setSectorEtfCount(sectorRes.rows?.length ?? 0);
@@ -86,6 +90,7 @@ export function AdminOperationsDashboard() {
       setCommentarySettings(commentarySettingsRes);
       setCronJobs(cronJobsRes);
       setBraveUsage(braveUsageRes);
+      setProviderUsage(providerUsageRes);
     } catch (error) {
       setMessage({ tone: "danger", text: error instanceof Error ? error.message : "Failed to load admin operations." });
     } finally {
@@ -128,6 +133,10 @@ export function AdminOperationsDashboard() {
       ...(totals.get(caller) ?? { apiCallCount: 0, apiErrorCount: 0, cacheHitCount: 0 }),
     }));
   }, [braveUsage]);
+
+  const topProviderUsageRows = useMemo(() => (
+    (providerUsage?.totalsByProvider ?? []).slice(0, 5)
+  ), [providerUsage]);
 
   const saveCommentarySettings = async () => {
     if (!commentarySettings) return;
@@ -514,6 +523,49 @@ export function AdminOperationsDashboard() {
                       </div>
                     ) : (
                       <div className="mt-2">Brave usage unavailable.</div>
+                    )}
+                  </div>
+                  <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/45 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Provider Usage</div>
+                      <div className="text-xs text-slate-500">{providerUsage ? `${providerUsage.days}d` : "N/A"}</div>
+                    </div>
+                    {providerUsage ? (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          <div>
+                            <div className="text-slate-500">Requests</div>
+                            <div className="mt-1 text-base font-semibold text-text">{providerUsage.totals.requestCount}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">Errors</div>
+                            <div className="mt-1 text-base font-semibold text-text">{providerUsage.totals.errorCount}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">Limited</div>
+                            <div className="mt-1 text-base font-semibold text-text">{providerUsage.totals.rateLimitedCount}</div>
+                          </div>
+                        </div>
+                        {providerUsage.budgetWarnings.length > 0 ? (
+                          <div className="space-y-1 rounded-xl border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                            {providerUsage.budgetWarnings.slice(0, 3).map((warning, index) => (
+                              <div key={`${warning.providerKey}-${warning.level}-${index}`}>{warning.message}</div>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="space-y-1">
+                          {topProviderUsageRows.length > 0 ? topProviderUsageRows.map((row) => (
+                            <div key={row.providerKey} className="flex items-center justify-between gap-3 text-xs text-slate-400">
+                              <span>{row.providerKey}</span>
+                              <span>{row.requestCount} req / {row.symbolCount} symbols / {row.errorCount} errors</span>
+                            </div>
+                          )) : (
+                            <div className="text-xs text-slate-500">No provider calls recorded yet.</div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-2">Provider usage unavailable.</div>
                     )}
                   </div>
                 </div>

@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG_TICKERS } from "./etf-catalog";
+import { meteredFetch, type ProviderUsageMeta } from "./provider-usage";
 
 export type DailyBar = {
   ticker: string;
@@ -38,16 +39,28 @@ export interface MarketDataProvider {
 export type ProviderOptions = {
   yahooPreferredTickers?: Iterable<string>;
   fallbackEnabled?: boolean;
+  fallbackScope?: "preferred" | "all";
+  fallbackRequestLimit?: number;
 };
 
 const PROVIDER_FETCH_TIMEOUT_MS = 8_000;
+const DEFAULT_FALLBACK_REQUESTS_PER_INVOCATION = 8;
 
 function isAbortLikeError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.name === "AbortError" || error.message.toLowerCase().includes("aborted");
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = PROVIDER_FETCH_TIMEOUT_MS): Promise<Response> {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = PROVIDER_FETCH_TIMEOUT_MS,
+  env?: Env,
+  meta?: ProviderUsageMeta,
+): Promise<Response> {
+  if (env && meta) {
+    return await meteredFetch(env, input, init, meta, timeoutMs);
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -98,6 +111,24 @@ function buildFallbackPreferredTickers(extraTickers?: Iterable<string>): Set<str
     if (normalized) out.add(normalized);
   }
   return out;
+}
+
+type FallbackRequestBudget = {
+  limit: number;
+  used: number;
+};
+
+function envInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.trunc(parsed));
+}
+
+function buildFallbackRequestBudget(env: Env, override?: number): FallbackRequestBudget {
+  const limit = typeof override === "number"
+    ? Math.max(0, Math.trunc(override))
+    : envInt(env.MAX_FALLBACK_REQUESTS_PER_INVOCATION, DEFAULT_FALLBACK_REQUESTS_PER_INVOCATION);
+  return { limit, used: 0 };
 }
 
 type AlpacaPremarketSnapshotInput = {
@@ -172,6 +203,9 @@ class StooqProvider implements MarketDataProvider {
     private readonly fmpApiKey = "",
     private readonly alphaVantageApiKey = "",
     private readonly fallbackEnabled = true,
+    private readonly env?: Env,
+    private readonly fallbackBudget?: FallbackRequestBudget,
+    private readonly caller = "market-data-fallback",
   ) {}
 
   private readonly aliases: Record<string, string> = {
@@ -204,15 +238,46 @@ class StooqProvider implements MarketDataProvider {
     return upper;
   }
 
+  private consumeFallbackRequest(providerKey: string, endpointKey: string, ticker: string): boolean {
+    if (!this.fallbackBudget) return true;
+    if (this.fallbackBudget.used >= this.fallbackBudget.limit) {
+      console.warn("provider fallback request cap exhausted", {
+        providerKey,
+        endpointKey,
+        ticker,
+        used: this.fallbackBudget.used,
+        limit: this.fallbackBudget.limit,
+      });
+      return false;
+    }
+    this.fallbackBudget.used += 1;
+    return true;
+  }
+
+  private async fetchFallbackResponse(
+    input: RequestInfo | URL,
+    init: RequestInit,
+    meta: Omit<ProviderUsageMeta, "caller" | "symbolCount"> & { ticker: string },
+  ): Promise<Response | null> {
+    if (!this.consumeFallbackRequest(meta.providerKey, meta.endpointKey, meta.ticker)) return null;
+    return await fetchWithTimeout(input, init, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+      providerKey: meta.providerKey,
+      endpointKey: meta.endpointKey,
+      caller: this.caller,
+      symbolCount: 1,
+    });
+  }
+
   private async fetchCboeVixBars(ticker: string): Promise<DailyBar[]> {
     const upper = ticker.trim().toUpperCase();
     if (upper !== "VIX" && upper !== "^VIX") return [];
     const url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
-    const res = await fetchWithTimeout(url, {
+    const res = await this.fetchFallbackResponse(url, {
       headers: {
         "User-Agent": "market-command-centre/1.0",
       },
-    });
+    }, { providerKey: "cboe", endpointKey: "vix-history", ticker: upper });
+    if (!res) return [];
     if (!res.ok) return [];
     const csv = await res.text();
     const lines = csv.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -250,11 +315,12 @@ class StooqProvider implements MarketDataProvider {
     const hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
     for (const host of hosts) {
       const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=2y`;
-      const res = await fetchWithTimeout(url, {
+      const res = await this.fetchFallbackResponse(url, {
         headers: {
           "User-Agent": "market-command-centre/1.0",
         },
-      });
+      }, { providerKey: "yahoo", endpointKey: "chart", ticker });
+      if (!res) continue;
       if (!res.ok) continue;
       const json = (await res.json()) as {
       chart?: {
@@ -383,14 +449,22 @@ class StooqProvider implements MarketDataProvider {
       Accept: "application/json",
       "User-Agent": "market-command-centre/1.0",
     };
-    const stable = await fetchWithTimeout(`https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`, { headers });
-    if (stable.ok) {
+    const stable = await this.fetchFallbackResponse(
+      `https://financialmodelingprep.com/stable/historical-price-eod/full?${params.toString()}`,
+      { headers },
+      { providerKey: "fmp", endpointKey: "historical-price-eod-full", ticker },
+    );
+    if (stable?.ok) {
       const rows = this.parseFmpBars(ticker, await stable.json() as never);
       if (rows.length > 0) return rows;
     }
 
-    const light = await fetchWithTimeout(`https://financialmodelingprep.com/stable/historical-price-eod/light?${params.toString()}`, { headers });
-    if (light.ok) {
+    const light = await this.fetchFallbackResponse(
+      `https://financialmodelingprep.com/stable/historical-price-eod/light?${params.toString()}`,
+      { headers },
+      { providerKey: "fmp", endpointKey: "historical-price-eod-light", ticker },
+    );
+    if (light?.ok) {
       const rows = this.parseFmpLightBars(ticker, await light.json() as never);
       if (rows.length > 0) return rows;
     }
@@ -401,8 +475,12 @@ class StooqProvider implements MarketDataProvider {
     if (startDate) legacyParams.set("from", startDate);
     if (endDate) legacyParams.set("to", endDate);
     const symbol = encodeURIComponent(ticker.trim().toUpperCase());
-    const legacy = await fetchWithTimeout(`https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?${legacyParams.toString()}`, { headers });
-    if (!legacy.ok) return [];
+    const legacy = await this.fetchFallbackResponse(
+      `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?${legacyParams.toString()}`,
+      { headers },
+      { providerKey: "fmp", endpointKey: "historical-price-full", ticker },
+    );
+    if (!legacy?.ok) return [];
     return this.parseFmpBars(ticker, await legacy.json() as never);
   }
 
@@ -414,12 +492,13 @@ class StooqProvider implements MarketDataProvider {
       outputsize: "compact",
       apikey: this.alphaVantageApiKey,
     });
-    const res = await fetchWithTimeout(`https://www.alphavantage.co/query?${params.toString()}`, {
+    const res = await this.fetchFallbackResponse(`https://www.alphavantage.co/query?${params.toString()}`, {
       headers: {
         Accept: "application/json",
         "User-Agent": "market-command-centre/1.0",
       },
-    });
+    }, { providerKey: "alpha-vantage", endpointKey: "daily-adjusted", ticker });
+    if (!res) return [];
     if (!res.ok) return [];
     const json = (await res.json()) as {
       "Time Series (Daily)"?: Record<string, Record<string, string>>;
@@ -475,11 +554,12 @@ class StooqProvider implements MarketDataProvider {
       const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=d`;
       let csv = "";
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const res = await fetchWithTimeout(url, {
+        const res = await this.fetchFallbackResponse(url, {
           headers: {
             "User-Agent": "market-command-centre/1.0",
           },
-        });
+        }, { providerKey: "stooq", endpointKey: "daily-csv", ticker });
+        if (!res) break;
         if (res.ok) {
           csv = await res.text();
           break;
@@ -567,19 +647,23 @@ class AlpacaProvider implements MarketDataProvider {
   private readonly feed: string;
   private readonly fallbackEnabled: boolean;
   private readonly fallbackPreferredTickers: Set<string>;
+  private readonly fallbackScope: "preferred" | "all";
   private readonly stooqFallback: StooqProvider;
 
-  constructor(env: Env, options: ProviderOptions = {}) {
+  constructor(private readonly env: Env, options: ProviderOptions = {}) {
     this.key = env.ALPACA_API_KEY ?? "";
     this.secret = env.ALPACA_API_SECRET ?? "";
     this.feed = env.ALPACA_FEED ?? "iex";
     this.fallbackEnabled = options.fallbackEnabled ?? true;
+    this.fallbackScope = options.fallbackScope ?? "preferred";
     this.fallbackPreferredTickers = buildFallbackPreferredTickers(options.yahooPreferredTickers);
     this.stooqFallback = new StooqProvider(
       this.fallbackPreferredTickers,
       env.FMP_API_KEY ?? "",
       env.ALPHA_VANTAGE_API_KEY ?? "",
       this.fallbackEnabled,
+      env,
+      buildFallbackRequestBudget(env, options.fallbackRequestLimit),
     );
     if (!this.key || !this.secret) {
       throw new Error("ALPACA_API_KEY and ALPACA_API_SECRET are required when DATA_PROVIDER=alpaca");
@@ -637,6 +721,11 @@ class AlpacaProvider implements MarketDataProvider {
           "APCA-API-SECRET-KEY": this.secret,
           "User-Agent": "market-command-centre/1.0",
         },
+      }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+        providerKey: "alpaca",
+        endpointKey: `daily-bars-${feed}`,
+        caller: "daily-bars",
+        symbolCount: tickers.length,
       });
       if (!res.ok) {
         const body = await res.text();
@@ -701,7 +790,10 @@ class AlpacaProvider implements MarketDataProvider {
           }
         }
       }
-      const missingOrStale = batch.filter((ticker) => isMissingOrStale(ticker));
+      const missingOrStale = batch.filter((ticker) => (
+        isMissingOrStale(ticker)
+        && (this.fallbackScope === "all" || this.fallbackPreferredTickers.has(ticker.toUpperCase()))
+      ));
       if (this.fallbackEnabled && missingOrStale.length > 0) {
         try {
           const fallbackRows = await this.stooqFallback.getDailyBars(missingOrStale, startDate, endDate);
@@ -729,6 +821,11 @@ class AlpacaProvider implements MarketDataProvider {
         "APCA-API-SECRET-KEY": this.secret,
         "User-Agent": "market-command-centre/1.0",
       },
+    }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+      providerKey: "alpaca",
+      endpointKey: `quote-snapshots-${feed}`,
+      caller: "quote-overlay",
+      symbolCount: tickers.length,
     });
     if (!res.ok) {
       const body = await res.text();
@@ -830,6 +927,11 @@ class AlpacaProvider implements MarketDataProvider {
           "APCA-API-SECRET-KEY": this.secret,
           "User-Agent": "market-command-centre/1.0",
         },
+      }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+        providerKey: "alpaca",
+        endpointKey: `premarket-snapshots-${this.feed}`,
+        caller: "premarket",
+        symbolCount: chunk.length,
       });
       if (!res.ok) {
         const body = await res.text();

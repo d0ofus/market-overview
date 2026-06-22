@@ -258,7 +258,7 @@ describe("provider fallback control", () => {
     ]);
   });
 
-  it("uses Stooq fallback for a non-preferred missing symbol", async () => {
+  it("does not use external fallback for a non-preferred missing symbol by default", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("data.alpaca.markets")) return Response.json({ bars: {} });
@@ -276,6 +276,32 @@ describe("provider fallback control", () => {
       ALPACA_API_SECRET: "secret",
       ALPACA_FEED: "iex",
     });
+    const bars = await provider.getDailyBars(["ABC"], "2026-06-18", "2026-06-18");
+
+    expect(bars).toEqual([]);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining("feed=iex"),
+    ]);
+  });
+
+  it("uses Stooq fallback for a non-preferred missing symbol when fallbackScope is all", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("data.alpaca.markets")) return Response.json({ bars: {} });
+      return new Response(
+        "Date,Open,High,Low,Close,Volume\n2026-06-18,30,31,29,30.5,3000\n",
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = getProvider({
+      DB: {} as D1Database,
+      DATA_PROVIDER: "alpaca",
+      ALPACA_API_KEY: "key",
+      ALPACA_API_SECRET: "secret",
+      ALPACA_FEED: "iex",
+    }, { fallbackScope: "all" });
     const bars = await provider.getDailyBars(["ABC"], "2026-06-18", "2026-06-18");
 
     expect(bars).toEqual([{

@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { meteredFetch } from "./provider-usage";
 import {
   canUseEarningsSymbolCatalog,
   earningsDefaultEligibleListedEquitySql,
@@ -463,14 +464,19 @@ function dedupeEvents(rows: EarningsSurpriseEventInput[]): EarningsSurpriseEvent
   });
 }
 
-async function fetchTradingViewPage(payload: TradingViewEarningsSurprisePayload): Promise<TradingViewScanResponse> {
-  const response = await fetch(TV_SCAN_URL, {
+async function fetchTradingViewPage(env: Env, payload: TradingViewEarningsSurprisePayload): Promise<TradingViewScanResponse> {
+  const response = await meteredFetch(env, TV_SCAN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": "market-command-centre/1.0",
     },
     body: JSON.stringify(payload),
+  }, {
+    providerKey: "tradingview",
+    endpointKey: "earnings-surprise",
+    caller: "earnings-surprise",
+    symbolCount: payload.range?.[1] ?? TV_PAGE_SIZE,
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -479,14 +485,14 @@ async function fetchTradingViewPage(payload: TradingViewEarningsSurprisePayload)
   return response.json() as Promise<TradingViewScanResponse>;
 }
 
-async function fetchTradingViewEarningsSurprises(startDate: string, endDate: string): Promise<EarningsSurpriseEventInput[]> {
+async function fetchTradingViewEarningsSurprises(env: Env, startDate: string, endDate: string): Promise<EarningsSurpriseEventInput[]> {
   const allRows: EarningsSurpriseEventInput[] = [];
   for (const side of ["positive", "negative"] as const) {
     let offset = 0;
     let totalCount = Number.POSITIVE_INFINITY;
     while (offset < totalCount && offset < TV_MAX_PROVIDER_ROWS) {
       const payload = buildTradingViewEarningsSurprisePayload({ startDate, endDate, side, offset, limit: TV_PAGE_SIZE });
-      const page = await fetchTradingViewPage(payload);
+      const page = await fetchTradingViewPage(env, payload);
       totalCount = Math.min(Number(page.totalCount ?? 0), TV_MAX_PROVIDER_ROWS);
       const rows = parseTradingViewEarningsSurpriseRows(page);
       allRows.push(...rows);
@@ -509,8 +515,20 @@ function pick(row: Record<string, unknown>, names: string[]): unknown {
   return null;
 }
 
-async function fetchJson<T>(url: string, label: string): Promise<T> {
-  const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "market-command-centre/1.0" } });
+async function fetchJson<T>(
+  env: Env,
+  url: string,
+  label: string,
+  providerKey: "fmp" | "finnhub",
+  endpointKey: string,
+): Promise<T> {
+  const response = await meteredFetch(env, url, {
+    headers: { Accept: "application/json", "User-Agent": "market-command-centre/1.0" },
+  }, {
+    providerKey,
+    endpointKey,
+    caller: "earnings-surprise",
+  });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(`${label} failed (${response.status}): ${body.slice(0, 180)}`);
@@ -566,14 +584,14 @@ function normalizeProviderEvent(raw: unknown, provider: Exclude<EarningsSurprise
 async function fetchFmpBackupEvents(env: Env, startDate: string, endDate: string): Promise<EarningsSurpriseEventInput[] | null> {
   if (!env.FMP_API_KEY) return null;
   const url = `${FMP_EARNINGS_URL}?${new URLSearchParams({ from: startDate, to: endDate, apikey: env.FMP_API_KEY }).toString()}`;
-  const rows = await fetchJson<unknown[]>(url, "FMP earnings calendar");
+  const rows = await fetchJson<unknown[]>(env, url, "FMP earnings calendar", "fmp", "earnings-calendar");
   return dedupeEvents(rows.map((row) => normalizeProviderEvent(row, "fmp")).filter((row): row is EarningsSurpriseEventInput => Boolean(row)));
 }
 
 async function fetchFinnhubBackupEvents(env: Env, startDate: string, endDate: string): Promise<EarningsSurpriseEventInput[] | null> {
   if (!env.FINNHUB_API_KEY) return null;
   const url = `${FINNHUB_EARNINGS_URL}?${new URLSearchParams({ from: startDate, to: endDate, token: env.FINNHUB_API_KEY }).toString()}`;
-  const json = await fetchJson<{ earningsCalendar?: unknown[] }>(url, "Finnhub earnings calendar");
+  const json = await fetchJson<{ earningsCalendar?: unknown[] }>(env, url, "Finnhub earnings calendar", "finnhub", "earnings-calendar");
   return dedupeEvents((json.earningsCalendar ?? []).map((row) => normalizeProviderEvent(row, "finnhub")).filter((row): row is EarningsSurpriseEventInput => Boolean(row)));
 }
 
@@ -743,7 +761,7 @@ export async function syncEarningsSurprises(
   let rows: EarningsSurpriseEventInput[] = [];
   let provider: EarningsSurpriseProvider | null = PRIMARY_PROVIDER;
   try {
-    rows = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsSurprises(windowStart, windowEnd));
+    rows = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsSurprises(env, windowStart, windowEnd));
     const upserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
     await recordSync(env, PRIMARY_PROVIDER, {
       status: "ok",

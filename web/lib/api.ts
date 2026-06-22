@@ -202,6 +202,69 @@ export type AdminBraveUsageResponse = {
   };
 };
 
+export type AdminProviderUsageResponse = {
+  days: number;
+  rows: Array<{
+    usageDay: string;
+    providerKey: string;
+    endpointKey: string;
+    caller: string;
+    requestCount: number;
+    successCount: number;
+    errorCount: number;
+    rateLimitedCount: number;
+    timeoutCount: number;
+    symbolCount: number;
+    rowCount: number;
+    cacheHitCount: number;
+    totalDurationMs: number;
+    lastStatus: number | null;
+    lastError: string | null;
+    lastCalledAt: string | null;
+    updatedAt: string;
+  }>;
+  totalsByProvider: Array<{
+    providerKey: string;
+    requestCount: number;
+    successCount: number;
+    errorCount: number;
+    rateLimitedCount: number;
+    timeoutCount: number;
+    symbolCount: number;
+    rowCount: number;
+    cacheHitCount: number;
+    totalDurationMs: number;
+  }>;
+  totals: {
+    requestCount: number;
+    successCount: number;
+    errorCount: number;
+    rateLimitedCount: number;
+    timeoutCount: number;
+    symbolCount: number;
+    rowCount: number;
+    cacheHitCount: number;
+    totalDurationMs: number;
+  };
+  latestSamples: Array<{
+    usageDay: string;
+    providerKey: string;
+    endpointKey: string;
+    caller: string;
+    lastStatus: number | null;
+    lastError: string | null;
+    lastCalledAt: string | null;
+  }>;
+  budgetWarnings: Array<{
+    providerKey: string;
+    level: "warn" | "hard";
+    message: string;
+    requestCount: number;
+    limit: number;
+    window: "minute" | "day";
+  }>;
+};
+
 export type OverviewFocusItem = {
   id: string;
   configId: string;
@@ -4345,6 +4408,10 @@ export function getAdminCronJobs() {
 
 export function getAdminBraveUsage(days = 14) {
   return adminFetch<AdminBraveUsageResponse>(appendQuery("/api/admin/brave-usage", { days }));
+}
+
+export function getAdminProviderUsage(days = 14) {
+  return adminFetch<AdminProviderUsageResponse>(appendQuery("/api/admin/provider-usage", { days }));
 }
 
 export function updateAdminCronJob(key: string, values: AdminCronJob["values"]) {

@@ -1,4 +1,5 @@
 import { TradingViewPublicLinkProvider } from "./scanning-providers";
+import { meteredFetch } from "./provider-usage";
 import { loadRunCompiledRows, loadRunUniqueTickers } from "./scanning-service";
 import type { ScanCompiledRow, ScanRunSummary, ScanUniqueTickerRow } from "./scanning-types";
 import type { Env } from "./types";
@@ -276,7 +277,7 @@ function mapTradingViewMetricRows(rows: TradingViewMetricResponseRow[] | null | 
   return map;
 }
 
-async function fetchTradingViewMetricMap(rows: WatchlistCandidate[]): Promise<{
+async function fetchTradingViewMetricMap(env: Env, rows: WatchlistCandidate[]): Promise<{
   metrics: Map<string, TradingViewMetricsRow>;
   requestedSymbolCount: number;
   returnedRowCount: number;
@@ -298,13 +299,18 @@ async function fetchTradingViewMetricMap(rows: WatchlistCandidate[]): Promise<{
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
-    const response = await fetch(TV_METRICS_URL, {
+    const response = await meteredFetch(env, TV_METRICS_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "market-command-centre/1.0",
       },
       body: JSON.stringify(payload),
+    }, {
+      providerKey: "tradingview",
+      endpointKey: "watchlist-metrics",
+      caller: "watchlist-compiler",
+      symbolCount: symbolChunk.length,
     });
     if (!response.ok) {
       const body = await response.text();
@@ -335,14 +341,14 @@ function rawWithMetric(raw: unknown, metric: TradingViewMetricsRow): unknown {
   return { row: raw, metrics: metric.raw };
 }
 
-async function enrichWatchlistCandidatesWithTradingViewMetrics(rows: WatchlistCandidate[]): Promise<{
+async function enrichWatchlistCandidatesWithTradingViewMetrics(env: Env, rows: WatchlistCandidate[]): Promise<{
   rows: WatchlistCandidate[];
   trace: WatchlistCompileTrace | null;
 }> {
   if (rows.length === 0) return { rows, trace: null };
   const startedAt = Date.now();
   try {
-    const result = await fetchTradingViewMetricMap(rows);
+    const result = await fetchTradingViewMetricMap(env, rows);
     const enrichedRows = rows.map((row) => {
       const metric = result.metrics.get(row.ticker);
       if (!metric) return row;
@@ -995,7 +1001,7 @@ export async function compileWatchlistSet(env: Env, setId: string): Promise<{ ru
   }
 
   let dedupedRows = Array.from(new Map(normalizedRows.map((row) => [row.canonicalKey, row])).values());
-  const enrichment = await enrichWatchlistCandidatesWithTradingViewMetrics(dedupedRows);
+  const enrichment = await enrichWatchlistCandidatesWithTradingViewMetrics(env, dedupedRows);
   dedupedRows = enrichment.rows;
   if (enrichment.trace) traces.push(enrichment.trace);
   const factorAssessment = await assessWatchlistFactors(env, dedupedRows, set.factorConfig);

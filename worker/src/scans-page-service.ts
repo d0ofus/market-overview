@@ -2,6 +2,7 @@ import { getProvider } from "./provider";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
+import { meteredFetch } from "./provider-usage";
 import {
   advanceRelativeStrengthState,
   bootstrapRelativeStrengthStateFromRatioRows,
@@ -1819,6 +1820,7 @@ async function fetchTradingViewScanRowsInternal(
     maxRowLimit?: number;
     alwaysPaginate?: boolean;
   },
+  env?: Env,
 ): Promise<{
   providerLabel: string;
   matchedRowCount: number;
@@ -1844,14 +1846,22 @@ async function fetchTradingViewScanRowsInternal(
       sortField: activeSortField,
       sortDirection: activeSortDirection,
     });
-    const response = await fetch(TV_SCAN_URL, {
+    const requestInit = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "market-command-centre/1.0",
       },
       body: JSON.stringify(payload),
-    });
+    };
+    const response = env
+      ? await meteredFetch(env, TV_SCAN_URL, requestInit, {
+        providerKey: "tradingview",
+        endpointKey: "scanner-america",
+        caller: "scans-page",
+        symbolCount: rangeLimit,
+      })
+      : await fetch(TV_SCAN_URL, requestInit);
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`TradingView scans request failed (${response.status}): ${body.slice(0, 180)}`);
@@ -1886,6 +1896,7 @@ async function fetchTradingViewScanRowsInternal(
 async function fetchTradingViewScanRows(
   preset: ScanPreset,
   options?: { rules?: ScanPresetRule[]; sortField?: string; sortDirection?: "asc" | "desc"; rowLimit?: number },
+  env?: Env,
 ): Promise<{
   providerLabel: string;
   matchedRowCount: number;
@@ -1893,7 +1904,7 @@ async function fetchTradingViewScanRows(
   error: string | null;
   rows: ScanSnapshotRow[];
 }> {
-  return fetchTradingViewScanRowsInternal(preset, options);
+  return fetchTradingViewScanRowsInternal(preset, options, env);
 }
 
 async function upsertSymbolsFromRows(env: Env, rows: ScanSnapshotRow[]): Promise<void> {
@@ -1931,6 +1942,7 @@ function toTimestampMs(value: string | null | undefined): number | null {
 
 async function fetchRelativeStrengthPrefilterRows(
   preset: ScanPreset,
+  env?: Env,
 ): Promise<ScanSnapshotRow[]> {
   const prefilterRules = preset.prefilterRules.length > 0 ? preset.prefilterRules : preset.rules;
   const result = await fetchTradingViewScanRowsInternal(preset, {
@@ -1940,7 +1952,7 @@ async function fetchRelativeStrengthPrefilterRows(
     rowLimit: MAX_PAGINATED_FETCH_TOTAL,
     maxRowLimit: MAX_PAGINATED_FETCH_TOTAL,
     alwaysPaginate: true,
-  });
+  }, env);
   const rowsByTicker = new Map<string, ScanSnapshotRow>();
   for (const row of result.rows) {
     const ticker = normalizeTicker(row.ticker);
@@ -3738,7 +3750,7 @@ async function createManualRelativeStrengthRun(
   }
 
   const identity = buildRelativeStrengthConfigIdentity(preset);
-  const candidates = (await fetchRelativeStrengthPrefilterRows(preset)).map(snapshotRowToManualRelativeStrengthCandidate);
+  const candidates = (await fetchRelativeStrengthPrefilterRows(preset, env)).map(snapshotRowToManualRelativeStrengthCandidate);
   const runId = crypto.randomUUID();
   try {
     await env.SCANNER_CACHE_DB.prepare(
@@ -5079,7 +5091,7 @@ async function createVcpScanRun(
   }
 
   const identity = buildVcpConfigIdentity(preset);
-  const prefilterRows = await fetchRelativeStrengthPrefilterRows(preset);
+  const prefilterRows = await fetchRelativeStrengthPrefilterRows(preset, env);
   const candidates = prefilterRows
     .slice(0, VCP_SCAN_MAX_UNIVERSE_SIZE)
     .map(snapshotRowToVcpCandidate);
@@ -7834,7 +7846,7 @@ async function createRelativeStrengthRefreshJob(
   });
   if (existing) return existing;
 
-  const candidates = preparedCandidates ?? await fetchRelativeStrengthPrefilterRows(preset);
+  const candidates = preparedCandidates ?? await fetchRelativeStrengthPrefilterRows(preset, env);
   const jobId = crypto.randomUUID();
   const fullCandidateCount = candidates.length;
   const currentTickers = currentTickerSet ?? new Set<string>();
@@ -9038,7 +9050,7 @@ export async function requestScansRefresh(
       job: null,
     };
   }
-  const candidates = await fetchRelativeStrengthPrefilterRows(preset);
+  const candidates = await fetchRelativeStrengthPrefilterRows(preset, env);
   const currentTickerSet = await loadOutputCurrentRelativeStrengthTickerSet(
     env,
     identity,
@@ -9516,7 +9528,7 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
   }
 
   try {
-    const result = await fetchTradingViewScanRows(preset);
+    const result = await fetchTradingViewScanRows(preset, undefined, env);
     await upsertSymbolsFromRows(env, result.rows);
     await storeScanSnapshotResult(env, preset, result);
   } catch (error) {

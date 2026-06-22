@@ -1,4 +1,5 @@
 import { hasSharesOutstandingColumn } from "./peer-groups-service";
+import { meteredFetch } from "./provider-usage";
 import type { Env } from "./types";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -211,7 +212,7 @@ export async function loadSharesOutstandingMap(env: Env, tickers: string[]): Pro
   );
 }
 
-async function fetchTradingViewPeerMetricMap(inputs: PeerMetricInput[], asOf: string): Promise<Map<string, PeerMetricRow>> {
+async function fetchTradingViewPeerMetricMap(env: Env, inputs: PeerMetricInput[], asOf: string): Promise<Map<string, PeerMetricRow>> {
   const requestedSymbols = Array.from(new Set(inputs.flatMap(buildTradingViewTickers)));
   if (requestedSymbols.length === 0) return new Map();
 
@@ -228,13 +229,18 @@ async function fetchTradingViewPeerMetricMap(inputs: PeerMetricInput[], asOf: st
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
-    const response = await fetch(TV_SCAN_URL, {
+    const response = await meteredFetch(env, TV_SCAN_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "market-command-centre/1.0",
       },
       body: JSON.stringify(payload),
+    }, {
+      providerKey: "tradingview",
+      endpointKey: "peer-metrics",
+      caller: "peer-metrics",
+      symbolCount: symbolChunk.length,
     });
     if (!response.ok) {
       const body = await response.text();
@@ -254,7 +260,7 @@ async function fetchTradingViewPeerMetricMap(inputs: PeerMetricInput[], asOf: st
 }
 
 export async function loadPeerMetrics(
-  _env: Env,
+  env: Env,
   inputs: PeerMetricInput[],
 ): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
   const dedupedInputs = Array.from(
@@ -272,7 +278,7 @@ export async function loadPeerMetrics(
 
   const asOf = new Date().toISOString();
   try {
-    const rowsByTicker = await fetchTradingViewPeerMetricMap(dedupedInputs, asOf);
+    const rowsByTicker = await fetchTradingViewPeerMetricMap(env, dedupedInputs, asOf);
       const rows = dedupedInputs.map(({ ticker }) => rowsByTicker.get(ticker) ?? {
         ticker,
         price: null,

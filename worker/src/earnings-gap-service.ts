@@ -1,4 +1,5 @@
 import { zonedParts } from "./refresh-timing";
+import { meteredFetch } from "./provider-usage";
 import type { Env } from "./types";
 import { shouldRunCentralCronLocalTime, type CronJobValues } from "./cron-jobs-service";
 import {
@@ -501,14 +502,19 @@ function dedupeReleases(rows: EarningsGapReleaseInput[]): EarningsGapReleaseInpu
   });
 }
 
-async function fetchTradingViewPage(payload: TradingViewEarningsGapPayload): Promise<TradingViewScanResponse> {
-  const response = await fetch(TV_SCAN_URL, {
+async function fetchTradingViewPage(env: Env, payload: TradingViewEarningsGapPayload): Promise<TradingViewScanResponse> {
+  const response = await meteredFetch(env, TV_SCAN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": "market-command-centre/1.0",
     },
     body: JSON.stringify(payload),
+  }, {
+    providerKey: "tradingview",
+    endpointKey: "earnings-gap",
+    caller: "earnings-gap",
+    symbolCount: payload.range?.[1] ?? TV_PAGE_SIZE,
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -517,13 +523,13 @@ async function fetchTradingViewPage(payload: TradingViewEarningsGapPayload): Pro
   return response.json() as Promise<TradingViewScanResponse>;
 }
 
-async function fetchTradingViewEarningsReleases(startDate: string, endDate: string): Promise<EarningsGapReleaseInput[]> {
+async function fetchTradingViewEarningsReleases(env: Env, startDate: string, endDate: string): Promise<EarningsGapReleaseInput[]> {
   const allRows: EarningsGapReleaseInput[] = [];
   let offset = 0;
   let totalCount = Number.POSITIVE_INFINITY;
   while (offset < totalCount && offset < TV_MAX_PROVIDER_ROWS) {
     const payload = buildTradingViewEarningsGapPayload({ startDate, endDate, offset, limit: TV_PAGE_SIZE });
-    const page = await fetchTradingViewPage(payload);
+    const page = await fetchTradingViewPage(env, payload);
     totalCount = Math.min(Number(page.totalCount ?? 0), TV_MAX_PROVIDER_ROWS);
     allRows.push(...parseTradingViewEarningsGapRows(page));
     const pageCount = page.data?.length ?? 0;
@@ -823,7 +829,7 @@ export async function syncEarningsGaps(
     startedAt,
   });
   try {
-    const releases = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsReleases(windowStart, windowEnd));
+    const releases = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsReleases(env, windowStart, windowEnd));
     const rows = await computeEarningsGapEvents(env, releases, now);
     const rowsUpserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
     if (mode !== "backfill" || done) {

@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
+import { recordProviderUsage } from "./provider-usage";
 
 export type MarketReportSourceAudit = {
   sourceName: string;
@@ -116,6 +117,16 @@ async function tryIncrementBraveUsage(
   } catch (error) {
     console.warn("Brave Search usage logging failed", { caller, error });
   }
+  await recordProviderUsage(env, {
+    providerKey: "brave",
+    endpointKey: "web-search",
+    caller,
+  }, {
+    requestCount: delta.apiCalls ?? 0,
+    successCount: Math.max(0, (delta.apiCalls ?? 0) - (delta.apiErrors ?? 0)),
+    errorCount: delta.apiErrors ?? 0,
+    cacheHitCount: delta.cacheHits ?? 0,
+  });
 }
 
 async function readBraveCache(env: Env, cacheKey: string, nowIso: string): Promise<BraveSearchResult[] | null> {

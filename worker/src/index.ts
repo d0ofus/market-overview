@@ -123,6 +123,7 @@ export { isAdminRequestAuthorized, shouldAllowFedWatchForceRefresh } from "./aut
 import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
+import { loadProviderUsageDaily } from "./provider-usage";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -566,7 +567,7 @@ async function runTickerHistoryBackfill(env: Env, ticker: string, timeframe: Tic
       now: startedAt,
       markAttempted: true,
     });
-    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true);
+    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true, { fallbackScope: "all" });
     const nextBarCount = await countStoredTickerBars(env, ticker);
     const completedAt = new Date().toISOString();
     await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
@@ -1378,7 +1379,7 @@ async function refreshPageScopedData(
     if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
       throw new Error("Valid ticker is required for ticker page refresh.");
     }
-    await refreshRecentBarsForTickers(env, [ticker]);
+    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true, { fallbackScope: "all" });
     return { page, refreshedTickers: 1 };
   }
   if (page === "alerts") {
@@ -2068,15 +2069,27 @@ async function loadYahooPreferredDailyBarTickers(env: Env, tickers: string[]): P
   return Array.from(preferred);
 }
 
-async function refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers = 1600, lookbackDays = 21, replaceExisting = false): Promise<void> {
+type RefreshRecentBarsOptions = {
+  fallbackScope?: "preferred" | "all";
+};
+
+async function refreshRecentBarsForTickers(
+  env: Env,
+  tickers: string[],
+  maxTickers = 1600,
+  lookbackDays = 21,
+  replaceExisting = false,
+  options: RefreshRecentBarsOptions = {},
+): Promise<void> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean))).slice(0, Math.max(1, maxTickers));
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
   try {
-    const yahooPreferredTickers = replaceExisting
-      ? unique
-      : await loadYahooPreferredDailyBarTickers(env, unique);
-    provider = getProvider(env, { yahooPreferredTickers });
+    const yahooPreferredTickers = await loadYahooPreferredDailyBarTickers(env, unique);
+    provider = getProvider(env, {
+      yahooPreferredTickers,
+      fallbackScope: options.fallbackScope ?? "preferred",
+    });
   } catch (error) {
     console.error("market data provider unavailable for recent bar refresh", error);
     return;
@@ -5191,6 +5204,18 @@ app.get("/api/admin/brave-usage", async (c) => {
   }
 });
 
+app.get("/api/admin/provider-usage", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const days = Number(c.req.query("days") ?? 14);
+    return c.json(await loadProviderUsageDaily(c.env, days));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load provider usage.";
+    console.error("admin provider usage load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/market-commentary/settings", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
@@ -5818,7 +5843,7 @@ app.get("/api/admin/provider-check", async (c) => {
   let providerSampleCount = 0;
   let providerError: string | null = null;
   try {
-    const provider = getProvider(c.env);
+    const provider = getProvider(c.env, { fallbackScope: "all", yahooPreferredTickers: [ticker] });
     providerLabel = provider.label;
     const end = new Date().toISOString().slice(0, 10);
     const start = new Date(Date.now() - 14 * 86400_000).toISOString().slice(0, 10);
@@ -6314,7 +6339,7 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   let hasProviderData = false;
   let providerError: string | null = null;
   try {
-    const provider = getProvider(c.env);
+    const provider = getProvider(c.env, { fallbackScope: "all", yahooPreferredTickers: [resolved.ticker] });
     const end = new Date().toISOString().slice(0, 10);
     const start = new Date(Date.now() - 45 * 86400_000).toISOString().slice(0, 10);
     const rows = await provider.getDailyBars([resolved.ticker], start, end);
@@ -6355,7 +6380,7 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   ]);
   await upsertAudit(c.env, "default", "ITEM_ADD", { groupId, payload });
   if (isOverviewSectionTitle(groupMeta?.sectionTitle)) {
-    await refreshRecentBarsForTickers(c.env, [resolved.ticker], 1, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
+    await refreshRecentBarsForTickers(c.env, [resolved.ticker], 1, OVERVIEW_HISTORY_LOOKBACK_DAYS, true, { fallbackScope: "all" });
   }
   await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });

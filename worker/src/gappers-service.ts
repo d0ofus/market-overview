@@ -1,4 +1,5 @@
 import { classifyUsMarketSession } from "./alerts-time";
+import { meteredFetch } from "./provider-usage";
 import type { Env } from "./types";
 
 const GAPPERS_SESSION = "premarket";
@@ -243,17 +244,28 @@ function rowMatchesScanFilters(row: TradingViewGapCandidate, filters: GappersSca
   return row.gapPct > 0;
 }
 
-async function fetchTradingViewGapCandidates(filtersInput?: Partial<GappersScanFilters> | null): Promise<TradingViewGapCandidate[]> {
+async function fetchTradingViewGapCandidates(
+  filtersInput?: Partial<GappersScanFilters> | null,
+  env?: Env,
+): Promise<TradingViewGapCandidate[]> {
   const filters = normalizeGappersScanFilters(filtersInput);
   const payload = buildTradingViewPremarketPayload(filters);
-  const response = await fetch(TV_SCAN_URL, {
+  const requestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": "market-command-centre/1.0",
     },
     body: JSON.stringify(payload),
-  });
+  };
+  const response = env
+    ? await meteredFetch(env, TV_SCAN_URL, requestInit, {
+      providerKey: "tradingview",
+      endpointKey: "premarket-gappers",
+      caller: "gappers",
+      symbolCount: filters.limit,
+    })
+    : await fetch(TV_SCAN_URL, requestInit);
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`TradingView gappers request failed (${response.status}): ${body.slice(0, 180)}`);
@@ -588,7 +600,7 @@ export async function buildGappersSnapshot(
   const llmConfig = resolveLlmConfig(env, llmOverride);
   const marketSession = classifyUsMarketSession(new Date());
   const filters = normalizeGappersScanFilters({ ...filtersInput, limit });
-  const ranked = await fetchTradingViewGapCandidates(filters);
+  const ranked = await fetchTradingViewGapCandidates(filters, env);
   const rowsBase = ranked.map((row) => ({
     ticker: row.ticker,
     name: row.name ?? row.ticker,
