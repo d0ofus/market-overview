@@ -6795,6 +6795,7 @@ export default {
       await runReportsLane();
     } else {
       await runCoreLane();
+      await runMaintenanceLane();
     }
     console.log("scheduled worker lane completed", { cron: event.cron, lane, budget: budget.snapshot() });
   },

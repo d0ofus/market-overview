@@ -33,7 +33,7 @@ export function classifyScheduledCron(cron: string | null | undefined): Schedule
 }
 
 const DEFAULT_BUDGETS: Record<ScheduledLane, number> = {
-  core: 25,
+  core: 50,
   "market-data": 35,
   scans: 30,
   maintenance: 20,
