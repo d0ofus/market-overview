@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { selectPerplexityBrowserProvider } from "./perplexity-browser-provider";
 
+function testEnv(values: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { NODE_ENV: "test", ...values };
+}
+
 test("selects local Chromium when Browserbase env is absent", () => {
-  const decision = selectPerplexityBrowserProvider({});
+  const decision = selectPerplexityBrowserProvider(testEnv());
   assert.equal(decision.provider, "local_chromium");
   assert.equal(decision.browserbaseConfigured, false);
   assert.deepEqual(decision.missingBrowserbaseEnv, [
@@ -14,21 +18,21 @@ test("selects local Chromium when Browserbase env is absent", () => {
 });
 
 test("selects Browserbase when required env vars are present", () => {
-  const decision = selectPerplexityBrowserProvider({
+  const decision = selectPerplexityBrowserProvider(testEnv({
     BROWSERBASE_API_KEY: "key",
     BROWSERBASE_PROJECT_ID: "project",
     BROWSERBASE_CONTEXT_ID: "context",
-  });
+  }));
   assert.equal(decision.provider, "browserbase");
   assert.equal(decision.browserbaseConfigured, true);
   assert.deepEqual(decision.missingBrowserbaseEnv, []);
 });
 
 test("falls back to local Chromium when Browserbase is requested but incomplete", () => {
-  const decision = selectPerplexityBrowserProvider({
+  const decision = selectPerplexityBrowserProvider(testEnv({
     PERPLEXITY_BROWSER_PROVIDER: "browserbase",
     BROWSERBASE_API_KEY: "key",
-  });
+  }));
   assert.equal(decision.provider, "local_chromium");
   assert.equal(decision.browserbaseConfigured, false);
   assert.match(decision.reason ?? "", /BROWSERBASE_PROJECT_ID/);
@@ -36,12 +40,12 @@ test("falls back to local Chromium when Browserbase is requested but incomplete"
 });
 
 test("honors an explicit local Chromium provider even when Browserbase is configured", () => {
-  const decision = selectPerplexityBrowserProvider({
+  const decision = selectPerplexityBrowserProvider(testEnv({
     PERPLEXITY_BROWSER_PROVIDER: "local_chromium",
     BROWSERBASE_API_KEY: "key",
     BROWSERBASE_PROJECT_ID: "project",
     BROWSERBASE_CONTEXT_ID: "context",
-  });
+  }));
   assert.equal(decision.provider, "local_chromium");
   assert.equal(decision.browserbaseConfigured, true);
 });

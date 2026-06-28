@@ -15,12 +15,18 @@ import {
   type MarketCommentaryResponse,
   type WeeklyMarketReviewResponse,
 } from "@/lib/api";
+import {
+  deriveCommentaryFreshnessSummary,
+  type FreshnessTone,
+  type OverviewFreshnessContext,
+} from "@/lib/overview-freshness";
 
 type TabKey = "report" | "sources" | "quality";
 type ReportMode = "daily" | "weekly";
 
 type Props = {
   initial?: MarketCommentaryResponse | null;
+  overviewFreshness?: OverviewFreshnessContext | null;
 };
 
 const COMMENTARY_LOAD_TIMEOUT_MS = 10_000;
@@ -55,6 +61,17 @@ function statusClass(status: MarketCommentaryResponse["status"]): string {
   if (status === "ready") return "border-success/35 bg-success/10 text-success";
   if (status === "failed") return "border-warning/35 bg-warning/10 text-warning";
   return "border-borderSoft bg-panelSoft text-text/70";
+}
+
+function freshnessBadgeClass(tone: FreshnessTone): string {
+  if (tone === "ok") return "border-success/30 bg-success/10 text-success";
+  if (tone === "danger") return "border-red-400/35 bg-red-500/10 text-red-200";
+  return "border-warning/35 bg-warning/10 text-warning";
+}
+
+function freshnessPanelClass(tone: FreshnessTone): string {
+  if (tone === "danger") return "border-red-400/30 bg-red-500/10 text-red-200";
+  return "border-warning/30 bg-warning/10 text-warning";
 }
 
 function isAbortError(error: unknown): boolean {
@@ -154,7 +171,7 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
   );
 }
 
-export function MarketCommentaryPanel({ initial }: Props) {
+export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Props) {
   const [open, setOpen] = useState(true);
   const [mode, setMode] = useState<ReportMode>("daily");
   const [tab, setTab] = useState<TabKey>("report");
@@ -180,6 +197,14 @@ export function MarketCommentaryPanel({ initial }: Props) {
   const dataQuality = mode === "daily" ? dailyReport?.dataQuality ?? [] : weeklyReport?.dataQuality ?? [];
   const hasReport = Boolean(report);
   const activeMarkdown = mode === "daily" ? dailyReport?.reportMarkdown : weeklyReport?.reviewMarkdown;
+  const commentaryFreshness = deriveCommentaryFreshnessSummary({
+    mode,
+    status: activeStatus,
+    warning: activeWarning,
+    report,
+    dataQuality,
+    overview: overviewFreshness,
+  });
   const statusLabel =
     activeLoading && !hasReport
       ? "Loading"
@@ -319,6 +344,11 @@ export function MarketCommentaryPanel({ initial }: Props) {
                 <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">
                   {mode === "daily" ? sessionLabel(dailyReport?.marketSession) : weeklyProviderLabel(weeklyReport)}
                 </span>
+                {!(activeLoading && !hasReport) && (
+                  <span className={`rounded-full border px-2 py-0.5 text-xs ${freshnessBadgeClass(commentaryFreshness.tone)}`}>
+                    {commentaryFreshness.label}
+                  </span>
+                )}
               </div>
               <p className="mt-1 truncate text-xs text-text/60">
                 {summaryText}
@@ -413,6 +443,27 @@ export function MarketCommentaryPanel({ initial }: Props) {
             <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{activeWarning ?? report?.error ?? (mode === "daily" ? "Commentary generation failed." : "Weekly review generation failed.")}</span>
+            </div>
+          )}
+
+          {report && activeStatus !== "failed" && commentaryFreshness.tone !== "ok" && (
+            <div className={`rounded border p-3 text-sm ${freshnessPanelClass(commentaryFreshness.tone)}`}>
+              <div className="flex gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <div className="font-medium">{commentaryFreshness.label}</div>
+                  {commentaryFreshness.message ? (
+                    <div className="mt-1 leading-5 text-current/85">{commentaryFreshness.message}</div>
+                  ) : null}
+                </div>
+              </div>
+              {commentaryFreshness.issues.length > 1 ? (
+                <ul className="mt-2 space-y-1 pl-10 text-xs leading-5 text-current/80">
+                  {commentaryFreshness.issues.slice(1, 4).map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
           )}
 

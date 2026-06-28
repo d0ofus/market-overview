@@ -2,10 +2,12 @@ import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { CurrentFocusPanel } from "@/components/current-focus-panel";
 import { OverviewRefreshMenu } from "@/components/overview-refresh-menu";
+import { OverviewFreshnessBanner } from "@/components/overview-freshness-banner";
 import { QuoteFreshnessAudit } from "@/components/quote-freshness-audit";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
 import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
+import { deriveOverviewFreshnessSummary } from "@/lib/overview-freshness";
 
 export const revalidate = 0;
 
@@ -86,6 +88,20 @@ export default async function HomePage() {
   const marketStateAnchorId = "overview-market-state";
   const quoteAuditAnchorId = "overview-quote-audit";
   const macroRatesAnchorId = "overview-macro-rates";
+  const overviewFreshnessContext = {
+    asOfDate: statusValue.asOfDate,
+    expectedAsOfDate: statusValue.expectedAsOfDate,
+    freshnessStatus: statusValue.freshnessStatus,
+    freshnessCoveragePct: statusValue.freshnessCoveragePct,
+    freshnessCurrentCount: statusValue.freshnessCurrentCount,
+    freshnessEligibleCount: statusValue.freshnessEligibleCount,
+    freshnessCriticalMissingTickers: statusValue.freshnessCriticalMissingTickers,
+    freshnessWarning: statusValue.freshnessWarning,
+    quoteOverlayRequestedCount: statusValue.quoteOverlayRequestedCount,
+    quoteOverlayReturnedCount: statusValue.quoteOverlayReturnedCount,
+    quoteOverlayError: statusValue.quoteOverlayError,
+    quoteOverlayMissingSample: statusValue.quoteOverlayMissingSample,
+  };
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
   const jumpGroups = sectionLayouts.flatMap((entry) =>
     entry.ordered
@@ -99,6 +115,12 @@ export default async function HomePage() {
     ...jumpGroups,
     { id: macroRatesAnchorId, label: "Macro Rates" },
   ];
+  const freshnessSummary = deriveOverviewFreshnessSummary({
+    status: overviewFreshnessContext,
+    sections: focusedSections,
+    dashboardAvailable: Boolean(dashboardValue),
+    auditHref: dashboardValue ? `#${quoteAuditAnchorId}` : null,
+  });
 
   return (
     <div className="space-y-4">
@@ -130,6 +152,7 @@ export default async function HomePage() {
           />
         )}
       />
+      <OverviewFreshnessBanner summary={freshnessSummary} />
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] xl:items-start">
         <CurrentFocusPanel
           anchorId={currentFocusAnchorId}
@@ -137,7 +160,7 @@ export default async function HomePage() {
           initialHistory={focusHistory.rows}
         />
         <div id={marketStateAnchorId} className="scroll-mt-28 md:scroll-mt-32">
-          <MarketCommentaryPanel />
+          <MarketCommentaryPanel overviewFreshness={overviewFreshnessContext} />
         </div>
       </div>
       {!dashboardValue && (
