@@ -17,6 +17,16 @@ import {
 } from "../src/market-commentary-service";
 import type { Env } from "../src/types";
 
+
+type StoredAttempt = {
+  scheduledLocalDate: string;
+  sessionDate: string;
+  status: string;
+  reason: string | null;
+  reportId: string | null;
+  scheduledTimezone: string | null;
+  scheduledLocalTime: string | null;
+};
 type StoredReport = Omit<MarketCommentaryReport, "sourceAudit" | "dataQuality" | "error"> & {
   createdAt: string;
   sourceAuditJson: string;
@@ -61,12 +71,14 @@ function freshSnapshotRow(
 
 class FakeMarketCommentaryDb {
   rows: StoredReport[];
+  attempts: StoredAttempt[];
   settings: MarketCommentarySettings | null;
   snapshotAsOfDate: string | null;
   snapshotFreshness: Parameters<typeof freshSnapshotRow>[1];
 
   constructor(rows: StoredReport[] = [], options: { snapshotAsOfDate?: string | null; snapshotFreshness?: Parameters<typeof freshSnapshotRow>[1] } = {}) {
     this.rows = [...rows];
+    this.attempts = [];
     this.settings = null;
     this.snapshotAsOfDate = options.snapshotAsOfDate ?? null;
     this.snapshotFreshness = options.snapshotFreshness ?? {};
@@ -110,7 +122,7 @@ class FakeMarketCommentaryDb {
         return { results: [] as T[] };
       },
       async run() {
-        if (sql.startsWith("ALTER TABLE market_commentary_reports") || sql.startsWith("CREATE INDEX")) {
+        if (sql.startsWith("ALTER TABLE market_commentary_reports") || sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE TABLE")) {
           return { meta: { rows_written: 0 } };
         }
         if (sql.startsWith("INSERT INTO market_commentary_settings")) {
@@ -135,6 +147,18 @@ class FakeMarketCommentaryDb {
           const before = db.rows.length;
           db.rows = db.rows.filter((row) => row.createdAt >= cutoff);
           return { meta: { rows_written: before - db.rows.length } };
+        }
+        if (sql.startsWith("INSERT INTO market_commentary_schedule_attempts")) {
+          db.attempts.push({
+            scheduledLocalDate: String(bound[1]),
+            sessionDate: String(bound[2]),
+            status: String(bound[3]),
+            reason: bound[4] == null ? null : String(bound[4]),
+            reportId: bound[5] == null ? null : String(bound[5]),
+            scheduledTimezone: bound[6] == null ? null : String(bound[6]),
+            scheduledLocalTime: bound[7] == null ? null : String(bound[7]),
+          });
+          return { meta: { rows_written: 1 } };
         }
         if (sql.startsWith("INSERT INTO market_commentary_reports")) {
           db.rows.push({
@@ -347,6 +371,12 @@ describe("market commentary service", () => {
 
     expect(response).toBeNull();
     expect(db.rows).toHaveLength(0);
+    expect(db.attempts).toEqual([expect.objectContaining({
+      scheduledLocalDate: "2026-05-27",
+      sessionDate: "2026-05-26",
+      status: "skipped",
+      reason: expect.stringContaining("Overview snapshot for 2026-05-26 is not ready"),
+    })]);
   });
 
   it("scheduled generation skips when a same-day ready scheduled attempt already exists", async () => {

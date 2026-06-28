@@ -125,6 +125,7 @@ const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 let marketCommentaryReportScheduleSchemaReady = false;
+let marketCommentaryScheduleAttemptSchemaReady = false;
 const WEEKDAY_LONG_BY_SHORT: Record<string, string> = {
   Mon: "Monday",
   Tue: "Tuesday",
@@ -294,6 +295,65 @@ async function ensureMarketCommentaryReportScheduleSchema(env: Env): Promise<voi
     "CREATE INDEX IF NOT EXISTS idx_market_commentary_scheduled_attempt ON market_commentary_reports (generation_trigger, scheduled_local_date, session_date, created_at DESC)",
   ).run();
   marketCommentaryReportScheduleSchemaReady = true;
+}
+
+type MarketCommentaryScheduleAttemptStatus = "skipped" | "running" | "ready" | "failed";
+
+async function ensureMarketCommentaryScheduleAttemptSchema(env: Env): Promise<void> {
+  if (marketCommentaryScheduleAttemptSchemaReady) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS market_commentary_schedule_attempts (
+      id TEXT PRIMARY KEY,
+      scheduled_local_date TEXT NOT NULL,
+      session_date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT,
+      report_id TEXT,
+      scheduled_timezone TEXT,
+      scheduled_local_time TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ).run();
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_market_commentary_schedule_attempts_latest ON market_commentary_schedule_attempts (scheduled_local_date, session_date, updated_at DESC)",
+  ).run();
+  marketCommentaryScheduleAttemptSchemaReady = true;
+}
+
+async function recordMarketCommentaryScheduleAttempt(
+  env: Env,
+  input: {
+    scheduledLocalDate: string;
+    sessionDate: string;
+    status: MarketCommentaryScheduleAttemptStatus;
+    reason?: string | null;
+    reportId?: string | null;
+    scheduledTimezone?: string | null;
+    scheduledLocalTime?: string | null;
+  },
+): Promise<void> {
+  try {
+    await ensureMarketCommentaryScheduleAttemptSchema(env);
+    await env.DB.prepare(
+      `INSERT INTO market_commentary_schedule_attempts (
+         id, scheduled_local_date, session_date, status, reason, report_id, scheduled_timezone, scheduled_local_time, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        input.scheduledLocalDate,
+        input.sessionDate,
+        input.status,
+        input.reason ?? null,
+        input.reportId ?? null,
+        input.scheduledTimezone ?? null,
+        input.scheduledLocalTime ?? null,
+      )
+      .run();
+  } catch (error) {
+    console.error("scheduled market commentary attempt log failed", error);
+  }
 }
 
 function normalizeBraveQueries(rows: string[]): string[] {
@@ -940,24 +1000,73 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
   const session = getUsMarketSessionContext(now);
   const existingAttempt = await loadScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
   if (existingAttempt) {
+    await recordMarketCommentaryScheduleAttempt(env, {
+      scheduledLocalDate: decision.localDate,
+      sessionDate: session.sessionDate,
+      status: "skipped",
+      reason: `Scheduled report already exists with status ${existingAttempt.status}.`,
+      reportId: existingAttempt.id,
+      scheduledTimezone: decision.timezone,
+      scheduledLocalTime: decision.localTime,
+    });
     return {
       status: existingAttempt.status,
       warning: `Scheduled commentary skipped; a scheduled attempt already exists for ${decision.localDate} / ${session.sessionDate}.`,
       report: existingAttempt,
     };
   }
-  if (!(await overviewSnapshotReadyForSession(env, session.latestCompletedSessionDate))) {
+  const requiredSnapshotDate = overviewSnapshotDateForSession(session);
+  if (!(await overviewSnapshotReadyForSession(env, requiredSnapshotDate))) {
+    await recordMarketCommentaryScheduleAttempt(env, {
+      scheduledLocalDate: decision.localDate,
+      sessionDate: session.sessionDate,
+      status: "skipped",
+      reason: `Overview snapshot for ${requiredSnapshotDate} is not ready.`,
+      scheduledTimezone: decision.timezone,
+      scheduledLocalTime: decision.localTime,
+    });
     return null;
   }
-  return await refreshMarketCommentary(env, {
-    now,
-    force: true,
-    trigger: "scheduled",
-    settings,
+  await recordMarketCommentaryScheduleAttempt(env, {
     scheduledLocalDate: decision.localDate,
+    sessionDate: session.sessionDate,
+    status: "running",
+    reason: null,
     scheduledTimezone: decision.timezone,
     scheduledLocalTime: decision.localTime,
   });
+  try {
+    const response = await refreshMarketCommentary(env, {
+      now,
+      force: true,
+      trigger: "scheduled",
+      settings,
+      scheduledLocalDate: decision.localDate,
+      scheduledTimezone: decision.timezone,
+      scheduledLocalTime: decision.localTime,
+    });
+    await recordMarketCommentaryScheduleAttempt(env, {
+      scheduledLocalDate: decision.localDate,
+      sessionDate: session.sessionDate,
+      status: response.status === "ready" ? "ready" : "failed",
+      reason: response.warning,
+      reportId: response.report?.id ?? null,
+      scheduledTimezone: decision.timezone,
+      scheduledLocalTime: decision.localTime,
+    });
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Scheduled market commentary failed.";
+    await recordMarketCommentaryScheduleAttempt(env, {
+      scheduledLocalDate: decision.localDate,
+      sessionDate: session.sessionDate,
+      status: "failed",
+      reason: message,
+      scheduledTimezone: decision.timezone,
+      scheduledLocalTime: decision.localTime,
+    });
+    throw error;
+  }
 }
 
 export async function refreshMarketCommentary(env: Env, options?: {

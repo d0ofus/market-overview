@@ -124,6 +124,7 @@ import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
 import { loadProviderUsageDaily } from "./provider-usage";
+import { classifyScheduledCron, createScheduledBudget } from "./scheduled-budget";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -6640,200 +6641,161 @@ export default {
     });
     const cron = (key: string) => cronSettings.get(key);
     const now = new Date(event.scheduledTime || Date.now());
-    try {
-      if (await shouldRunScheduledFomcRefresh(env, now)) {
-        const result = await refreshLatestFomcCommentary(env, { now });
-        if (result.warning) console.warn("scheduled FOMC commentary refresh warning", result.warning);
+    const lane = classifyScheduledCron(event.cron);
+    const budget = createScheduledBudget(env, lane);
+    const runBudgeted = async (jobKey: string, units: number, task: () => Promise<void>): Promise<void> => {
+      if (!budget.claim(jobKey, units)) return;
+      try {
+        await task();
+      } catch (error) {
+        console.error(`scheduled ${jobKey} failed`, { lane, error });
       }
-    } catch (error) {
-      console.error("scheduled FOMC commentary refresh failed", error);
-    }
-    try {
-      await maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping"));
-    } catch (error) {
-      console.error("scheduled alerts housekeeping failed", error);
-    }
-    try {
-      await maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping"));
-    } catch (error) {
-      console.error("scheduled social alerts housekeeping failed", error);
-    }
-    try {
-      await maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping"));
-    } catch (error) {
-      console.error("scheduled scans page housekeeping failed", error);
-    }
-    try {
-      await maybeRunScanningHousekeeping(env, cron("scanning-housekeeping"));
-    } catch (error) {
-      console.error("scheduled scanning housekeeping failed", error);
-    }
-    try {
-      await maybeRunGappersHousekeeping(env, cron("gappers-housekeeping"));
-    } catch (error) {
-      console.error("scheduled gappers housekeeping failed", error);
-    }
-    try {
-      const researchQueueSettings = cron("research-queue");
-      if (!researchQueueSettings || isCentralCronEnabled(researchQueueSettings)) {
-        await advanceResearchQueue(env, cronNumber(researchQueueSettings ?? {}, "batchLimit", 2));
-      }
-    } catch (error) {
-      console.error("scheduled research queue advancement failed", error);
-    }
-    try {
-      await runDueWatchlistCompiles(env, now);
-    } catch (error) {
-      console.error("scheduled watchlist compiles failed", error);
-    }
-    try {
-      await maybeRunScheduledSymbolCatalogSync(env, now);
-    } catch (error) {
-      console.error("scheduled symbol catalog sync failed", error);
-    }
-    try {
-      await maybeRunScheduledEarningsCalendarSync(env, now, cron("earnings-calendar"));
-    } catch (error) {
-      console.error("scheduled earnings calendar sync failed", error);
-    }
-    try {
-      await maybeRunScheduledEarningsSurpriseSync(env, now, cron("earnings-surprises"));
-    } catch (error) {
-      console.error("scheduled earnings surprise sync failed", error);
-    }
-    try {
-      await maybeRunScheduledEarningsGapSync(env, now, cron("earnings-gaps"));
-    } catch (error) {
-      console.error("scheduled earnings gap sync failed", error);
-    }
-    try {
-      const settings = cron("earnings-fundamentals-refresh");
-      if (!settings || isCentralCronEnabled(settings)) {
-        await processDueEarningsFundamentalRefreshes(env, { limit: cronNumber(settings ?? {}, "batchLimit", 5), now });
-      }
-    } catch (error) {
-      console.error("scheduled earnings fundamentals refresh failed", error);
-    }
-    try {
-      const settings = cron("fundamentals-seed-queue");
-      if (!settings || isCentralCronEnabled(settings)) {
-        await maybeProcessFundamentalSeedQueue(env, { limit: cronNumber(settings ?? {}, "batchLimit", 10), now });
-      }
-    } catch (error) {
-      console.error("scheduled fundamentals seed queue failed", error);
-    }
-    try {
-      await maybeRunScheduledSocialAlertScrape(env, now);
-    } catch (error) {
-      console.error("scheduled social alerts scrape failed", error);
-    }
-    try {
-      await syncMonthlyEtfSlice(env, cron("etf-constituent-slice"));
-    } catch (error) {
-      console.error("scheduled etf constituent slice failed", error);
-    }
-    const workerSchedule = await loadWorkerScheduleSettings(env);
-    try {
-      await advanceScannerCacheScanRuns(env, {
+    };
+
+    const runMaintenanceLane = async (): Promise<void> => {
+      await runBudgeted("alerts-housekeeping", 4, () => maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping")));
+      await runBudgeted("social-alerts-housekeeping", 4, () => maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping")));
+      await runBudgeted("scans-page-housekeeping", 4, () => maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping")));
+      await runBudgeted("scanning-housekeeping", 4, () => maybeRunScanningHousekeeping(env, cron("scanning-housekeeping")));
+      await runBudgeted("gappers-housekeeping", 4, () => maybeRunGappersHousekeeping(env, cron("gappers-housekeeping")));
+    };
+
+    const runCoreLane = async (): Promise<void> => {
+      await runBudgeted("research-queue", 8, async () => {
+        const settings = cron("research-queue");
+        if (!settings || isCentralCronEnabled(settings)) {
+          await advanceResearchQueue(env, cronNumber(settings ?? {}, "batchLimit", 2));
+        }
+      });
+      await runBudgeted("watchlist-compiles", 8, () => runDueWatchlistCompiles(env, now));
+      await runBudgeted("earnings-calendar", 8, () => maybeRunScheduledEarningsCalendarSync(env, now, cron("earnings-calendar")).then(() => undefined));
+      await runBudgeted("earnings-surprises", 8, () => maybeRunScheduledEarningsSurpriseSync(env, now, cron("earnings-surprises")).then(() => undefined));
+      await runBudgeted("earnings-gaps", 8, () => maybeRunScheduledEarningsGapSync(env, now, cron("earnings-gaps")).then(() => undefined));
+      await runBudgeted("earnings-fundamentals-refresh", 8, async () => {
+        const settings = cron("earnings-fundamentals-refresh");
+        if (!settings || isCentralCronEnabled(settings)) {
+          await processDueEarningsFundamentalRefreshes(env, { limit: cronNumber(settings ?? {}, "batchLimit", 5), now });
+        }
+      });
+      await runBudgeted("fundamentals-seed-queue", 8, async () => {
+        const settings = cron("fundamentals-seed-queue");
+        if (!settings || isCentralCronEnabled(settings)) {
+          await maybeProcessFundamentalSeedQueue(env, { limit: cronNumber(settings ?? {}, "batchLimit", 10), now });
+        }
+      });
+    };
+
+    const runMarketDataLane = async (): Promise<void> => {
+      const workerSchedule = await loadWorkerScheduleSettings(env);
+      await runBudgeted("post-close-daily-bars", 24, () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined));
+      await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now));
+      await runBudgeted("etf-constituent-slice", 10, () => syncMonthlyEtfSlice(env, cron("etf-constituent-slice")));
+    };
+
+    const runScansLane = async (): Promise<void> => {
+      const workerSchedule = await loadWorkerScheduleSettings(env);
+      await runBudgeted("scanner-cache-scan-continuation", 12, () => advanceScannerCacheScanRuns(env, {
         maxRuns: 2,
         batchSize: workerSchedule.rsBackgroundBatchSize,
         timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-      });
-    } catch (error) {
-      console.error("scheduled scanner-cache scan continuation failed", error);
-    }
-    if (workerSchedule.rsBackgroundEnabled) {
-      try {
-        await refreshActiveRelativeStrengthPresets(env, {
+      }));
+      if (workerSchedule.rsBackgroundEnabled) {
+        await runBudgeted("relative-strength-background", 14, () => refreshActiveRelativeStrengthPresets(env, {
           batchSize: workerSchedule.rsBackgroundBatchSize,
           maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
           timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        });
-      } catch (error) {
-        console.error("scheduled relative strength background failed", error);
+        }));
       }
-    }
-    let postCloseJob: PostCloseDailyBarRefreshJob | null = null;
-    try {
-      postCloseJob = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
-    } catch (error) {
-      console.error("scheduled post-close daily bar refresh failed", error);
-    }
-    try {
-      await maybeRunScheduledPatternScan(env, now, workerSchedule);
-    } catch (error) {
-      console.error("scheduled pattern scan failed", error);
-    }
-    const defaultConfig = await loadDefaultConfigRow(env);
-    const overviewSettings = cron("overview-eod");
-    if (overviewSettings && !isCentralCronEnabled(overviewSettings)) return;
-    const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
-    const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
-    const expectedAsOf = latestUsMarketSessionAsOfDate(now);
-    if (!postCloseJob && workerSchedule.postCloseBarsEnabled) {
-      postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, expectedAsOf);
-    }
-    if (!shouldRunScheduledEod(now, timezone, refreshTime)) return;
+      await runBudgeted("pattern-scan", 12, () => maybeRunScheduledPatternScan(env, now, workerSchedule));
+      await runBudgeted("social-alert-scrape", 8, () => maybeRunScheduledSocialAlertScrape(env, now));
+    };
 
-    let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null } | null = null;
-    try {
-      latestOverview = await env.DB.prepare(
-        "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-      )
-        .bind(defaultConfig?.id ?? "default")
-        .first<{ asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null }>();
-    } catch {
-      latestOverview = await env.DB.prepare(
-        "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-      )
-        .bind(defaultConfig?.id ?? "default")
-        .first<{ asOfDate: string | null }>();
-    }
-    const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
-    const trackedUniverseCount = await env.DB.prepare(
-      `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
-    )
-      .bind(...CORE_BREADTH_UNIVERSE_IDS)
-      .first<{ count: number | null }>();
-    const currentBreadthCount = await env.DB.prepare(
-      `SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
-    )
-      .bind(expectedAsOf, ...CORE_BREADTH_UNIVERSE_IDS)
-      .first<{ count: number | null }>();
-    const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
-    const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
-    const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
-      && isOverviewFreshnessSufficientForScheduledSnapshot(
-        latestOverview.freshnessStatus,
-        latestOverview.freshnessCoveragePct ?? null,
-      );
-    if (!overviewIsUsable) {
-      try {
-        await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
-      } catch (error) {
-        if (error instanceof OverviewFreshnessError) {
-          console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);
-        } else {
-          console.error("scheduled overview refresh failed", error);
-        }
+    const runReportsLane = async (): Promise<void> => {
+      if (await shouldRunScheduledFomcRefresh(env, now)) {
+        await runBudgeted("fomc-commentary", 4, async () => {
+          const result = await refreshLatestFomcCommentary(env, { now });
+          if (result.warning) console.warn("scheduled FOMC commentary refresh warning", result.warning);
+        });
       }
+
+      const defaultConfig = await loadDefaultConfigRow(env);
+      const overviewSettings = cron("overview-eod");
+      const overviewEnabled = !overviewSettings || isCentralCronEnabled(overviewSettings);
+      const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
+      const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
+      const expectedAsOf = latestUsMarketSessionAsOfDate(now);
+      const shouldRunEod = overviewEnabled && shouldRunScheduledEod(now, timezone, refreshTime);
+
+      if (shouldRunEod) {
+        await runBudgeted("overview-snapshot", 7, async () => {
+          let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null } | null = null;
+          try {
+            latestOverview = await env.DB.prepare(
+              "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+            )
+              .bind(defaultConfig?.id ?? "default")
+              .first<{ asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null }>();
+          } catch {
+            latestOverview = await env.DB.prepare(
+              "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
+            )
+              .bind(defaultConfig?.id ?? "default")
+              .first<{ asOfDate: string | null }>();
+          }
+          const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
+            && isOverviewFreshnessSufficientForScheduledSnapshot(
+              latestOverview.freshnessStatus,
+              latestOverview.freshnessCoveragePct ?? null,
+            );
+          if (!overviewIsUsable) {
+            try {
+              await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+            } catch (error) {
+              if (error instanceof OverviewFreshnessError) {
+                console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);
+              } else {
+                throw error;
+              }
+            }
+          }
+        });
+
+        await runBudgeted("breadth-recompute", 3, async () => {
+          const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
+          const trackedUniverseCount = await env.DB.prepare(
+            `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
+          )
+            .bind(...CORE_BREADTH_UNIVERSE_IDS)
+            .first<{ count: number | null }>();
+          const currentBreadthCount = await env.DB.prepare(
+            `SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
+          )
+            .bind(expectedAsOf, ...CORE_BREADTH_UNIVERSE_IDS)
+            .first<{ count: number | null }>();
+          const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
+          const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
+          if (!breadthIsComplete) {
+            await recomputeBreadthFromStoredBars(env, expectedAsOf);
+          }
+        });
+      }
+
+      await runBudgeted("market-commentary", 6, () => maybeRunScheduledMarketCommentary(env, now).then(() => undefined));
+      await runBudgeted("weekly-market-review", 5, () => maybeRunScheduledWeeklyMarketReview(env, now).then(() => undefined));
+    };
+
+    console.log("scheduled worker lane started", { cron: event.cron, lane, budget: budget.snapshot() });
+    if (lane === "maintenance") {
+      await runMaintenanceLane();
+    } else if (lane === "market-data") {
+      await runMarketDataLane();
+    } else if (lane === "scans") {
+      await runScansLane();
+    } else if (lane === "reports") {
+      await runReportsLane();
+    } else {
+      await runCoreLane();
     }
-    if (!breadthIsComplete) {
-      await refreshMissingBreadthBarsForCoverage(env, expectedAsOf, {
-        maxTickers: workerSchedule.postCloseBarsBatchSize * workerSchedule.postCloseBarsMaxBatchesPerTick,
-        maxPasses: 2,
-      });
-      await recomputeBreadthFromStoredBars(env, expectedAsOf);
-    }
-    try {
-      await maybeRunScheduledMarketCommentary(env, now);
-    } catch (error) {
-      console.error("scheduled market commentary failed", error);
-    }
-    try {
-      await maybeRunScheduledWeeklyMarketReview(env, now);
-    } catch (error) {
-      console.error("scheduled weekly market review failed", error);
-    }
+    console.log("scheduled worker lane completed", { cron: event.cron, lane, budget: budget.snapshot() });
   },
 };

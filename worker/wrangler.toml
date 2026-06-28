@@ -46,4 +46,10 @@ database_name = "market_perplexity_cache"
 database_id = "efc8828b-6a94-41bd-9f7d-f3b6ece191c4"
 
 [triggers]
-crons = ["*/15 * * * *"]
+crons = [
+  "*/15 * * * *",
+  "2,17,32,47 * * * *",
+  "5,20,35,50 * * * *",
+  "8,23,38,53 * * * *",
+  "11,26,41,56 * * * *",
+]
