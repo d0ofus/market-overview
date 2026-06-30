@@ -1301,45 +1301,83 @@ export function shouldRunScheduledSocialAlertScrape(now: Date, settings: SocialA
   };
 }
 
-async function hasScheduledSocialAlertRunForSlot(env: Env, localDate: string, scheduledLocalSlot: string): Promise<boolean> {
+type ScheduledSocialAlertExistingRun = {
+  id: string;
+  status: string | null;
+  startedAt: string | null;
+};
+
+async function loadScheduledSocialAlertRunForSlot(env: Env, localDate: string, scheduledLocalSlot: string): Promise<ScheduledSocialAlertExistingRun | null> {
   try {
     const row = await env.DB.prepare(
-      "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_slot = ? LIMIT 1",
+      "SELECT id, status, started_at as startedAt FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_slot = ? LIMIT 1",
     )
       .bind(scheduledLocalSlot)
-      .first<{ id: string }>();
-    return Boolean(row?.id);
+      .first<ScheduledSocialAlertExistingRun>();
+    return row?.id ? row : null;
   } catch (error) {
     if (!isMissingColumnError(error)) throw error;
     const row = await env.DB.prepare(
-      "SELECT id FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_date = ? LIMIT 1",
+      "SELECT id, status, started_at as startedAt FROM social_alert_runs WHERE \"trigger\" = 'scheduled' AND scheduled_local_date = ? LIMIT 1",
     )
       .bind(localDate)
-      .first<{ id: string }>();
-    return Boolean(row?.id);
+      .first<ScheduledSocialAlertExistingRun>();
+    return row?.id ? row : null;
   }
 }
 
-export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Date()): Promise<{
+export type ScheduledSocialAlertScrapeDecision = {
   skipped: boolean;
   reason?: string;
-  runId?: string;
   localDate?: string;
   scheduledLocalSlot?: string | null;
-}> {
+  startDate?: string;
+  limitPerHandle?: number;
+  existingRunId?: string;
+  existingRunStatus?: string | null;
+  existingRunStartedAt?: string | null;
+};
+
+export type ScheduledSocialAlertScrapeResult = ScheduledSocialAlertScrapeDecision & {
+  runId?: string;
+};
+
+export async function planScheduledSocialAlertScrape(env: Env, now = new Date()): Promise<ScheduledSocialAlertScrapeDecision> {
   const settings = await getSocialAlertSettings(env);
   const decision = shouldRunScheduledSocialAlertScrape(now, settings);
   if (!decision.shouldRun || !decision.scheduledLocalSlot) {
     return { skipped: true, reason: "not_due", localDate: decision.localDate, scheduledLocalSlot: decision.scheduledLocalSlot };
   }
-  if (await hasScheduledSocialAlertRunForSlot(env, decision.localDate, decision.scheduledLocalSlot)) {
-    return { skipped: true, reason: "already_ran", localDate: decision.localDate, scheduledLocalSlot: decision.scheduledLocalSlot };
+  const existingRun = await loadScheduledSocialAlertRunForSlot(env, decision.localDate, decision.scheduledLocalSlot);
+  if (existingRun) {
+    return {
+      skipped: true,
+      reason: "already_ran",
+      localDate: decision.localDate,
+      scheduledLocalSlot: decision.scheduledLocalSlot,
+      existingRunId: existingRun.id,
+      existingRunStatus: existingRun.status,
+      existingRunStartedAt: existingRun.startedAt,
+    };
   }
-  const startDate = addDaysIso(decision.localDate, -settings.dailyScrapeLookbackDays);
+  return {
+    skipped: false,
+    localDate: decision.localDate,
+    scheduledLocalSlot: decision.scheduledLocalSlot,
+    startDate: addDaysIso(decision.localDate, -settings.dailyScrapeLookbackDays),
+    limitPerHandle: DEFAULT_LIMIT_PER_HANDLE,
+  };
+}
+
+export async function runPlannedScheduledSocialAlertScrape(env: Env, decision: ScheduledSocialAlertScrapeDecision): Promise<ScheduledSocialAlertScrapeResult> {
+  if (decision.skipped) return decision;
+  if (!decision.localDate || !decision.scheduledLocalSlot || !decision.startDate || !decision.limitPerHandle) {
+    throw new Error("Scheduled social alert scrape decision is incomplete.");
+  }
   const result = await runSocialAlertScrape(env, {
     allHandles: true,
-    startDate,
-    limitPerHandle: DEFAULT_LIMIT_PER_HANDLE,
+    startDate: decision.startDate,
+    limitPerHandle: decision.limitPerHandle,
   }, {
     trigger: "scheduled",
     scheduledLocalDate: decision.localDate,
@@ -1351,4 +1389,9 @@ export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Dat
     localDate: decision.localDate,
     scheduledLocalSlot: decision.scheduledLocalSlot,
   };
+}
+
+export async function maybeRunScheduledSocialAlertScrape(env: Env, now = new Date()): Promise<ScheduledSocialAlertScrapeResult> {
+  const decision = await planScheduledSocialAlertScrape(env, now);
+  return runPlannedScheduledSocialAlertScrape(env, decision);
 }

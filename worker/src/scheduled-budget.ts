@@ -16,6 +16,14 @@ export const SCHEDULED_CRONS = [
   SCHEDULED_REPORTS_CRON,
 ] as const;
 
+export const DEPLOYED_SCHEDULED_CRONS = [
+  SCHEDULED_CORE_CRON,
+  SCHEDULED_MARKET_DATA_CRON,
+  SCHEDULED_REPORTS_CRON,
+] as const;
+
+const COMBINED_CORE_FALLBACK_LANES: ScheduledLane[] = ["scans", "maintenance"];
+
 export function classifyScheduledCron(cron: string | null | undefined): ScheduledLane {
   switch ((cron ?? "").trim()) {
     case SCHEDULED_MARKET_DATA_CRON:
@@ -30,6 +38,14 @@ export function classifyScheduledCron(cron: string | null | undefined): Schedule
     default:
       return "core";
   }
+}
+
+export function scheduledLanesForCron(cron: string | null | undefined): ScheduledLane[] {
+  const lane = classifyScheduledCron(cron);
+  if ((cron ?? "").trim() === SCHEDULED_CORE_CRON) {
+    return [lane, ...COMBINED_CORE_FALLBACK_LANES];
+  }
+  return [lane];
 }
 
 const DEFAULT_BUDGETS: Record<ScheduledLane, number> = {

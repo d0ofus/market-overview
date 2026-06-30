@@ -124,7 +124,7 @@ import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
 import { loadProviderUsageDaily } from "./provider-usage";
-import { classifyScheduledCron, createScheduledBudget } from "./scheduled-budget";
+import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, type ScheduledBudget, type ScheduledLane } from "./scheduled-budget";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
   loadMarketCommentarySettings,
@@ -379,8 +379,9 @@ import {
   getSocialAlertSettings,
   listSocialAlertBlacklistedCashtags,
   listSocialAlertHandles,
-  maybeRunScheduledSocialAlertScrape,
+  planScheduledSocialAlertScrape,
   runSocialAlertScrape,
+  runPlannedScheduledSocialAlertScrape,
   saveSocialAlertCredential,
   updateSocialAlertSettings,
 } from "./social-alerts-service";
@@ -6740,38 +6741,82 @@ export default {
     });
     const cron = (key: string) => cronSettings.get(key);
     const now = new Date(event.scheduledTime || Date.now());
-    const lane = classifyScheduledCron(event.cron);
-    const budget = createScheduledBudget(env, lane);
-    const runBudgeted = async (jobKey: string, units: number, task: () => Promise<void>): Promise<void> => {
-      if (!budget.claim(jobKey, units)) {
+    const triggerLane = classifyScheduledCron(event.cron);
+    const lanesToRun = scheduledLanesForCron(event.cron);
+    type ScheduledJobMetadata = Record<string, unknown>;
+    type ScheduledLaneRunner = {
+      budget: ScheduledBudget;
+      runBudgeted: (jobKey: string, units: number, task: () => Promise<void>, metadata?: ScheduledJobMetadata) => Promise<void>;
+      auditSkipped: (jobKey: string, reason: string, metadata?: ScheduledJobMetadata) => Promise<void>;
+    };
+    const laneRunners = new Map<ScheduledLane, ScheduledLaneRunner>();
+    const runnerForLane = (jobLane: ScheduledLane): ScheduledLaneRunner => {
+      const existing = laneRunners.get(jobLane);
+      if (existing) return existing;
+      const laneBudget = createScheduledBudget(env, jobLane);
+      const auditSkipped = async (jobKey: string, reason: string, metadata: ScheduledJobMetadata = {}): Promise<void> => {
         const skippedAuditId = await startScheduledJobRun(env, {
-          lane,
+          lane: jobLane,
           cron: event.cron,
           jobKey,
           scheduledTime: now.toISOString(),
-          metadata: { estimatedUnits: units, budget: budget.snapshot() },
+          metadata: { ...metadata, budget: laneBudget.snapshot() },
         });
-        await finishScheduledJobRun(env, skippedAuditId, "skipped", "Skipped by scheduled budget.", { budget: budget.snapshot() });
+        await finishScheduledJobRun(env, skippedAuditId, "skipped", reason, { ...metadata, budget: laneBudget.snapshot() });
+      };
+      const runBudgeted = async (jobKey: string, units: number, task: () => Promise<void>, metadata: ScheduledJobMetadata = {}): Promise<void> => {
+        if (!laneBudget.claim(jobKey, units)) {
+          await auditSkipped(jobKey, "Skipped by scheduled budget.", { ...metadata, estimatedUnits: units });
+          return;
+        }
+        const auditId = await startScheduledJobRun(env, {
+          lane: jobLane,
+          cron: event.cron,
+          jobKey,
+          scheduledTime: now.toISOString(),
+          metadata: { ...metadata, estimatedUnits: units, budget: laneBudget.snapshot() },
+        });
+        try {
+          await task();
+          await finishScheduledJobRun(env, auditId, "completed", null, { ...metadata, budget: laneBudget.snapshot() });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : `Scheduled ${jobKey} failed.`;
+          await finishScheduledJobRun(env, auditId, "failed", message, { ...metadata, budget: laneBudget.snapshot() });
+          console.error(`scheduled ${jobKey} failed`, { lane: jobLane, error });
+        }
+      };
+      const runner = { budget: laneBudget, runBudgeted, auditSkipped };
+      laneRunners.set(jobLane, runner);
+      return runner;
+    };
+    const budgetSnapshots = () => Object.fromEntries(
+      [...laneRunners.entries()].map(([jobLane, runner]) => [jobLane, runner.budget.snapshot()]),
+    );
+
+    const runScheduledSocialAlertScrapeJob = async (): Promise<void> => {
+      const runner = runnerForLane("scans");
+      const decision = await planScheduledSocialAlertScrape(env, now);
+      const metadata = {
+        localDate: decision.localDate ?? null,
+        scheduledLocalSlot: decision.scheduledLocalSlot ?? null,
+        existingRunId: decision.existingRunId ?? null,
+        existingRunStatus: decision.existingRunStatus ?? null,
+        existingRunStartedAt: decision.existingRunStartedAt ?? null,
+      };
+      if (decision.skipped) {
+        const reason = decision.reason === "already_ran"
+          ? "Social alert scrape already ran for scheduled slot."
+          : "Social alert scrape not due.";
+        await runner.auditSkipped("social-alert-scrape", reason, { ...metadata, decisionReason: decision.reason ?? "not_due" });
         return;
       }
-      const auditId = await startScheduledJobRun(env, {
-        lane,
-        cron: event.cron,
-        jobKey,
-        scheduledTime: now.toISOString(),
-        metadata: { estimatedUnits: units, budget: budget.snapshot() },
-      });
-      try {
-        await task();
-        await finishScheduledJobRun(env, auditId, "completed", null, { budget: budget.snapshot() });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : `Scheduled ${jobKey} failed.`;
-        await finishScheduledJobRun(env, auditId, "failed", message, { budget: budget.snapshot() });
-        console.error(`scheduled ${jobKey} failed`, { lane, error });
-      }
+      await runner.runBudgeted("social-alert-scrape", 8, async () => {
+        await runPlannedScheduledSocialAlertScrape(env, decision);
+      }, metadata);
     };
 
     const runMaintenanceLane = async (): Promise<void> => {
+      const { runBudgeted } = runnerForLane("maintenance");
       await runBudgeted("alerts-housekeeping", 4, () => maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping")));
       await runBudgeted("social-alerts-housekeeping", 4, () => maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping")));
       await runBudgeted("scans-page-housekeeping", 4, () => maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping")));
@@ -6780,6 +6825,7 @@ export default {
     };
 
     const runCoreLane = async (): Promise<void> => {
+      const { runBudgeted } = runnerForLane("core");
       await runBudgeted("research-queue", 8, async () => {
         const settings = cron("research-queue");
         if (!settings || isCentralCronEnabled(settings)) {
@@ -6805,6 +6851,7 @@ export default {
     };
 
     const runMarketDataLane = async (): Promise<void> => {
+      const { runBudgeted } = runnerForLane("market-data");
       const workerSchedule = await loadWorkerScheduleSettings(env);
       await runBudgeted("post-close-daily-bars", 24, () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined));
       await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now));
@@ -6812,6 +6859,8 @@ export default {
     };
 
     const runScansLane = async (): Promise<void> => {
+      await runScheduledSocialAlertScrapeJob();
+      const { runBudgeted } = runnerForLane("scans");
       const workerSchedule = await loadWorkerScheduleSettings(env);
       await runBudgeted("scanner-cache-scan-continuation", 12, () => advanceScannerCacheScanRuns(env, {
         maxRuns: 2,
@@ -6826,10 +6875,10 @@ export default {
         }));
       }
       await runBudgeted("pattern-scan", 12, () => maybeRunScheduledPatternScan(env, now, workerSchedule));
-      await runBudgeted("social-alert-scrape", 8, () => maybeRunScheduledSocialAlertScrape(env, now));
     };
 
     const runReportsLane = async (): Promise<void> => {
+      const { runBudgeted } = runnerForLane("reports");
       if (await shouldRunScheduledFomcRefresh(env, now)) {
         await runBudgeted("fomc-commentary", 4, async () => {
           const result = await refreshLatestFomcCommentary(env, { now });
@@ -6906,20 +6955,24 @@ export default {
       await runBudgeted("weekly-market-review", 5, () => maybeRunScheduledWeeklyMarketReview(env, now).then(() => undefined));
     };
 
-    console.log("scheduled worker lane started", { cron: event.cron, lane, budget: budget.snapshot() });
-    if (lane === "maintenance") {
-      await runMaintenanceLane();
-    } else if (lane === "market-data") {
-      await runMarketDataLane();
-    } else if (lane === "scans") {
-      await runScansLane();
-    } else if (lane === "reports") {
-      await runReportsLane();
-    } else {
-      await runCoreLane();
-      await runScansLane();
-      await runMaintenanceLane();
+    const runLane = async (jobLane: ScheduledLane): Promise<void> => {
+      if (jobLane === "maintenance") {
+        await runMaintenanceLane();
+      } else if (jobLane === "market-data") {
+        await runMarketDataLane();
+      } else if (jobLane === "scans") {
+        await runScansLane();
+      } else if (jobLane === "reports") {
+        await runReportsLane();
+      } else {
+        await runCoreLane();
+      }
+    };
+
+    console.log("scheduled worker lane started", { cron: event.cron, triggerLane, lanesToRun });
+    for (const jobLane of lanesToRun) {
+      await runLane(jobLane);
     }
-    console.log("scheduled worker lane completed", { cron: event.cron, lane, budget: budget.snapshot() });
+    console.log("scheduled worker lane completed", { cron: event.cron, triggerLane, lanesToRun, budgets: budgetSnapshots() });
   },
 };

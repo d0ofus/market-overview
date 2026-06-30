@@ -8,6 +8,7 @@ import {
   getSocialAlertSettings,
   maybeRunScheduledSocialAlertScrape,
   normalizeSocialHandle,
+  planScheduledSocialAlertScrape,
   saveSocialAlertCredential,
   shouldRunScheduledSocialAlertScrape,
   summarizeSocialAlertMetrics,
@@ -176,6 +177,8 @@ function createScheduledSettingsDb(existingScheduledRun: boolean, options: {
   enabled?: boolean;
   includeScrapeIntervalHours?: boolean;
   scrapeIntervalHours?: number | null;
+  existingRunStatus?: string | null;
+  existingRunStartedAt?: string | null;
 } = {}) {
   const runLookupArgs: unknown[][] = [];
   const statementFor = (sql: string, args: unknown[] = []): any => ({
@@ -197,7 +200,13 @@ function createScheduledSettingsDb(existingScheduledRun: boolean, options: {
       }
       if (sql.includes("FROM social_alert_runs")) {
         runLookupArgs.push(args);
-        return existingScheduledRun ? { id: "scheduled-run" } : null;
+        return existingScheduledRun
+          ? {
+            id: "scheduled-run",
+            status: options.existingRunStatus ?? "completed",
+            startedAt: options.existingRunStartedAt ?? "2026-05-09T00:00:00Z",
+          }
+          : null;
       }
       return null;
     },
@@ -411,8 +420,40 @@ describe("social alerts helpers", () => {
     });
   });
 
+  it("plans due scheduled scrapes without running Scweet or claiming expensive work", async () => {
+    const { env, runLookupArgs } = createScheduledSettingsDb(false);
+
+    const result = await planScheduledSocialAlertScrape(env, new Date("2026-05-09T00:05:00Z"));
+
+    expect(result).toEqual({
+      skipped: false,
+      localDate: "2026-05-09",
+      scheduledLocalSlot: "2026-05-09T10:00",
+      startDate: "2026-05-08",
+      limitPerHandle: 50,
+    });
+    expect(runLookupArgs[0]).toEqual(["2026-05-09T10:00"]);
+  });
+
+  it("does not look for prior runs when scheduled social alerts are disabled", async () => {
+    const { env, runLookupArgs } = createScheduledSettingsDb(false, { enabled: false });
+
+    const result = await planScheduledSocialAlertScrape(env, new Date("2026-05-09T00:05:00Z"));
+
+    expect(result).toEqual({
+      skipped: true,
+      reason: "not_due",
+      localDate: "2026-05-09",
+      scheduledLocalSlot: null,
+    });
+    expect(runLookupArgs).toEqual([]);
+  });
+
   it("skips the scheduled scrape after it has already run for the Melbourne local slot", async () => {
-    const { env, runLookupArgs } = createScheduledSettingsDb(true);
+    const { env, runLookupArgs } = createScheduledSettingsDb(true, {
+      existingRunStatus: "running",
+      existingRunStartedAt: "2026-05-09T00:00:00Z",
+    });
 
     const result = await maybeRunScheduledSocialAlertScrape(env, new Date("2026-05-09T00:05:00Z"));
 
@@ -421,6 +462,9 @@ describe("social alerts helpers", () => {
       reason: "already_ran",
       localDate: "2026-05-09",
       scheduledLocalSlot: "2026-05-09T10:00",
+      existingRunId: "scheduled-run",
+      existingRunStatus: "running",
+      existingRunStartedAt: "2026-05-09T00:00:00Z",
     });
     expect(runLookupArgs[0]).toEqual(["2026-05-09T10:00"]);
   });
