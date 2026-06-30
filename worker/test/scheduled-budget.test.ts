@@ -42,4 +42,19 @@ describe("scheduled budget and lane helpers", () => {
     const budget = createScheduledBudget(env, "reports");
     expect(budget.snapshot()).toMatchObject({ lane: "reports", maxUnits: 50, reserveUnits: 12, availableUnits: 38 });
   });
+
+  it("uses defaults when budget environment values are unset or blank", () => {
+    expect(createScheduledBudget({} as Env, "reports").snapshot()).toMatchObject({
+      lane: "reports",
+      maxUnits: 35,
+      reserveUnits: 10,
+      availableUnits: 25,
+    });
+    expect(createScheduledBudget({ SCHEDULED_REPORTS_BUDGET: " ", SCHEDULED_SUBREQUEST_RESERVE: "" } as Env, "reports").snapshot()).toMatchObject({
+      lane: "reports",
+      maxUnits: 35,
+      reserveUnits: 10,
+      availableUnits: 25,
+    });
+  });
 });

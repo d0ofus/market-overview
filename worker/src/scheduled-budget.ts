@@ -50,7 +50,8 @@ const LANE_BUDGET_ENV: Record<ScheduledLane, string> = {
 
 function envNumber(env: Env, key: string, fallback: number): number {
   const raw = (env as unknown as Record<string, string | undefined>)[key];
-  const parsed = Number(raw ?? "");
+  if (raw == null || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : fallback;
 }
 
