@@ -124,8 +124,9 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 120_000;
-const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 7000;
+const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 180_000;
+const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 16000;
+const MARKET_COMMENTARY_MIN_MARKDOWN_LENGTH = 1200;
 let marketCommentaryReportScheduleSchemaReady = false;
 let marketCommentaryScheduleAttemptSchemaReady = false;
 const WEEKDAY_LONG_BY_SHORT: Record<string, string> = {
@@ -957,6 +958,23 @@ function buildPrompt(evidence: MarketEvidence, settings: MarketCommentarySetting
   ].join("\n");
 }
 
+function assertCompleteMarketCommentaryMarkdown(markdown: string): void {
+  const normalized = markdown.toLowerCase();
+  const expectedSections = [
+    "us market state of play",
+    "executive summary",
+    "major index",
+    "market health",
+    "final market view",
+  ];
+  const matchedSections = expectedSections.filter((section) => normalized.includes(section)).length;
+  if (markdown.trim().length < MARKET_COMMENTARY_MIN_MARKDOWN_LENGTH || matchedSections < 3) {
+    throw new Error(
+      `Gemini returned incomplete market commentary (${markdown.trim().length} chars; matched ${matchedSections}/${expectedSections.length} expected sections).`,
+    );
+  }
+}
+
 function fallbackReport(session: UsMarketSessionContext, message: string): string {
   return [
     `# US Market State of Play - ${session.nyDate}`,
@@ -1116,6 +1134,8 @@ export async function refreshMarketCommentary(env: Env, options?: {
       maxOutputTokens: MARKET_COMMENTARY_MAX_OUTPUT_TOKENS,
       timeoutMs: env.MARKET_COMMENTARY_GEMINI_TIMEOUT_MS ?? MARKET_COMMENTARY_GEMINI_TIMEOUT_MS,
     });
+    const reportMarkdown = sanitizeInternalSourceMarkdownLinks(result.text, evidence.sourceAudit);
+    assertCompleteMarketCommentaryMarkdown(reportMarkdown);
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,
       asOf: session.nowIso,
@@ -1125,7 +1145,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
       provider: GEMINI_PROVIDER,
       model,
       status: "ready",
-      reportMarkdown: sanitizeInternalSourceMarkdownLinks(result.text, evidence.sourceAudit),
+      reportMarkdown,
       sourceAudit: [...evidence.sourceAudit, ...result.sources],
       dataQuality: evidence.dataQuality,
       error: null,

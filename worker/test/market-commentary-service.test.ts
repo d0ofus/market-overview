@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_MARKET_COMMENTARY_BRAVE_QUERIES,
   DEFAULT_MARKET_COMMENTARY_SETTINGS,
@@ -550,5 +550,26 @@ describe("market commentary service", () => {
     expect(response.report?.marketSession).toBe("closed");
     expect(response.report?.error).toContain("GEMINI_API_KEY");
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("stores short or malformed Gemini output as a failed report", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-01" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "XLY +1.2%, XLI +0.9%, partial sector fragment" }] } }],
+    }), { status: 200 })));
+
+    try {
+      const response = await refreshMarketCommentary(createEnv(db, { GEMINI_API_KEY: "test-key" }), {
+        now: new Date("2026-06-01T23:00:00.000Z"),
+        force: true,
+      });
+
+      expect(response.status).toBe("failed");
+      expect(response.report?.error).toContain("incomplete market commentary");
+      expect(db.rows).toHaveLength(1);
+      expect(db.rows[0]?.status).toBe("failed");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
