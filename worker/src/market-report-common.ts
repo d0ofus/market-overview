@@ -462,7 +462,7 @@ export async function loadBraveUsageDaily(env: Env, daysInput = 14, now = new Da
 export async function generateMarkdownWithGemini(
   env: Env,
   prompt: string,
-  options?: { maxOutputTokens?: number; temperature?: number; topP?: number; responseMimeType?: string },
+  options?: { maxOutputTokens?: number; temperature?: number; topP?: number; responseMimeType?: string; timeoutMs?: string | number },
 ): Promise<{ text: string; sources: MarketReportSourceAudit[]; model: string; provider: string }> {
   const apiKey = env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
@@ -470,7 +470,7 @@ export async function generateMarkdownWithGemini(
   const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const groundingEnabled = env.GEMINI_SEARCH_GROUNDING_ENABLED?.trim().toLowerCase() === "true";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const timeoutMs = resolveFetchTimeoutMs(env.GEMINI_TIMEOUT_MS, 90_000);
+  const timeoutMs = resolveFetchTimeoutMs(options?.timeoutMs ?? env.GEMINI_TIMEOUT_MS, 90_000);
   const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: {

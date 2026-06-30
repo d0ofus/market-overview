@@ -124,6 +124,8 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 120_000;
+const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 7000;
 let marketCommentaryReportScheduleSchemaReady = false;
 let marketCommentaryScheduleAttemptSchemaReady = false;
 const WEEKDAY_LONG_BY_SHORT: Record<string, string> = {
@@ -1110,7 +1112,10 @@ export async function refreshMarketCommentary(env: Env, options?: {
       throw new Error("GEMINI_API_KEY is not configured.");
     }
     evidence = await gatherMarketEvidence(env, session, settings, overviewSnapshot);
-    const result = await generateMarkdownWithGemini(env, buildPrompt(evidence, settings));
+    const result = await generateMarkdownWithGemini(env, buildPrompt(evidence, settings), {
+      maxOutputTokens: MARKET_COMMENTARY_MAX_OUTPUT_TOKENS,
+      timeoutMs: env.MARKET_COMMENTARY_GEMINI_TIMEOUT_MS ?? MARKET_COMMENTARY_GEMINI_TIMEOUT_MS,
+    });
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,
       asOf: session.nowIso,
