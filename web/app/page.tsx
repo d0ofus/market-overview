@@ -72,6 +72,12 @@ export default async function HomePage() {
       quoteOverlayReturnedCount: null,
       quoteOverlayError: null,
       quoteOverlayMissingSample: [],
+      breadthExpectedAsOfDate: null,
+      breadthStatus: "stale" as const,
+      breadthLatestAsOfDate: null,
+      breadthLastUpdated: null,
+      breadthWarning: "Breadth freshness could not be loaded.",
+      breadthDiagnostics: [],
     })),
     getFedWatch().catch(() => ({
       status: "unavailable",
@@ -101,6 +107,12 @@ export default async function HomePage() {
     quoteOverlayReturnedCount: statusValue.quoteOverlayReturnedCount,
     quoteOverlayError: statusValue.quoteOverlayError,
     quoteOverlayMissingSample: statusValue.quoteOverlayMissingSample,
+    breadthExpectedAsOfDate: statusValue.breadthExpectedAsOfDate,
+    breadthStatus: statusValue.breadthStatus,
+    breadthLatestAsOfDate: statusValue.breadthLatestAsOfDate,
+    breadthLastUpdated: statusValue.breadthLastUpdated,
+    breadthWarning: statusValue.breadthWarning,
+    breadthDiagnostics: statusValue.breadthDiagnostics,
   };
   const sectionLayouts = focusedSections.map((section) => ({ section, ...splitOverviewSectionGroups(section) }));
   const jumpGroups = sectionLayouts.flatMap((entry) =>

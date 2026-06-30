@@ -516,10 +516,10 @@ async function loadRecentReportForSession(env: Env, sessionDate: string): Promis
   return row ? normalizeRow(row) : null;
 }
 
-async function loadScheduledReportForAttempt(env: Env, scheduledLocalDate: string, sessionDate: string): Promise<MarketCommentaryReport | null> {
+async function loadReadyScheduledReportForAttempt(env: Env, scheduledLocalDate: string, sessionDate: string): Promise<MarketCommentaryReport | null> {
   await ensureMarketCommentaryReportScheduleSchema(env);
   const row = await env.DB.prepare(
-    "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports WHERE generation_trigger = 'scheduled' AND scheduled_local_date = ? AND session_date = ? ORDER BY created_at DESC LIMIT 1",
+    "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports WHERE generation_trigger = 'scheduled' AND status = 'ready' AND scheduled_local_date = ? AND session_date = ? ORDER BY created_at DESC LIMIT 1",
   ).bind(scheduledLocalDate, sessionDate).first<MarketCommentaryRow>();
   return row ? normalizeRow(row) : null;
 }
@@ -998,21 +998,29 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
   const decision = scheduledMarketCommentaryDecision(settings, now);
   if (!decision.due || !decision.localDate) return null;
   const session = getUsMarketSessionContext(now);
-  const existingAttempt = await loadScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
-  if (existingAttempt) {
+  await recordMarketCommentaryScheduleAttempt(env, {
+    scheduledLocalDate: decision.localDate,
+    sessionDate: session.sessionDate,
+    status: "running",
+    reason: "Scheduled report due; checking prerequisites.",
+    scheduledTimezone: decision.timezone,
+    scheduledLocalTime: decision.localTime,
+  });
+  const existingReadyReport = await loadReadyScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
+  if (existingReadyReport) {
     await recordMarketCommentaryScheduleAttempt(env, {
       scheduledLocalDate: decision.localDate,
       sessionDate: session.sessionDate,
       status: "skipped",
-      reason: `Scheduled report already exists with status ${existingAttempt.status}.`,
-      reportId: existingAttempt.id,
+      reason: "Ready scheduled report already exists.",
+      reportId: existingReadyReport.id,
       scheduledTimezone: decision.timezone,
       scheduledLocalTime: decision.localTime,
     });
     return {
-      status: existingAttempt.status,
+      status: existingReadyReport.status,
       warning: `Scheduled commentary skipped; a scheduled attempt already exists for ${decision.localDate} / ${session.sessionDate}.`,
-      report: existingAttempt,
+      report: existingReadyReport,
     };
   }
   const requiredSnapshotDate = overviewSnapshotDateForSession(session);
@@ -1027,14 +1035,6 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
     });
     return null;
   }
-  await recordMarketCommentaryScheduleAttempt(env, {
-    scheduledLocalDate: decision.localDate,
-    sessionDate: session.sessionDate,
-    status: "running",
-    reason: null,
-    scheduledTimezone: decision.timezone,
-    scheduledLocalTime: decision.localTime,
-  });
   try {
     const response = await refreshMarketCommentary(env, {
       now,

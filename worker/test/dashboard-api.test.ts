@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, SnapshotEmptyResponse, SnapshotReadyResponse } from "../src/types";
 
 const eodMocks = vi.hoisted(() => ({
+  CORE_BREADTH_UNIVERSE_IDS: ["sp500-core", "nasdaq-core"],
   computeAndStoreSnapshot: vi.fn(),
   computeOverviewFreshnessDiagnostics: vi.fn(),
   loadSnapshot: vi.fn(),
@@ -274,6 +275,81 @@ describe("dashboard API", () => {
     expect(body.freshnessMaxBarDate).toBeNull();
     expect(body.freshnessWarning).toContain("Snapshot freshness diagnostics are unavailable");
     expect(eodMocks.computeOverviewFreshnessDiagnostics).not.toHaveBeenCalled();
+  });
+
+  it("includes read-only breadth diagnostics when breadth is behind overview", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T12:00:00.000Z"));
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => {
+            if (sql.includes("FROM dashboard_configs WHERE is_default = 1")) {
+              return {
+                id: "default",
+                name: "Default Swing Dashboard",
+                timezone: "Australia/Melbourne",
+                eodRunLocalTime: "08:15",
+                eodRunTimeLabel: "08:15 Australia/Melbourne (prev US close)",
+              } as T;
+            }
+            if (sql.includes("FROM snapshots_meta")) {
+              return {
+                asOfDate: "2026-06-12",
+                generatedAt: "2026-06-12T22:16:17.521Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: "2026-06-12",
+                freshnessStatus: "fresh",
+                freshnessCoveragePct: 100,
+                freshnessCurrentCount: 4,
+                freshnessEligibleCount: 4,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: "2026-06-12",
+                freshnessMaxBarDate: "2026-06-12",
+                freshnessWarning: null,
+              } as T;
+            }
+            if (sql.includes("FROM breadth_snapshots")) {
+              return { asOfDate: "2026-06-10", generatedAt: "2026-06-11T03:27:00.000Z" } as T;
+            }
+            if (sql.includes("JOIN daily_bars")) {
+              return { count: 40 } as T;
+            }
+            if (sql.includes("FROM universe_symbols")) {
+              return { count: 100 } as T;
+            }
+            return null as T;
+          },
+        };
+        return statement;
+      }),
+    };
+
+    const env = {
+      ...createEnv(),
+      DB: db,
+    } as unknown as Env;
+    const response = await worker.fetch(new Request("https://example.com/api/status?page=overview"), env, createContext());
+    const body = await response.json() as {
+      breadthExpectedAsOfDate: string;
+      breadthStatus: string;
+      breadthLatestAsOfDate: string | null;
+      breadthWarning: string | null;
+      breadthDiagnostics: Array<{ universeId: string; status: string; latestAsOfDate: string | null; coveragePct: number }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.breadthExpectedAsOfDate).toBe("2026-06-12");
+    expect(body.breadthStatus).toBe("stale");
+    expect(body.breadthLatestAsOfDate).toBe("2026-06-10");
+    expect(body.breadthWarning).toContain("Breadth history is not current");
+    expect(body.breadthDiagnostics[0]).toMatchObject({
+      universeId: "sp500-core",
+      status: "low_coverage",
+      latestAsOfDate: "2026-06-10",
+      coveragePct: 40,
+    });
   });
 
   it("runs stored-bars-only overview recompute when admin run-eod has storedOnly=1", async () => {

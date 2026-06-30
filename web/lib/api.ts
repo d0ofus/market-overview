@@ -2741,6 +2741,23 @@ export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   quoteOverlayReturnedCount?: number | null;
   quoteOverlayError?: string | null;
   quoteOverlayMissingSample?: string[];
+  breadthExpectedAsOfDate?: string | null;
+  breadthStatus?: "fresh" | "partial" | "stale";
+  breadthLatestAsOfDate?: string | null;
+  breadthLastUpdated?: string | null;
+  breadthWarning?: string | null;
+  breadthDiagnostics?: Array<{
+    universeId: string;
+    expectedAsOfDate: string;
+    latestAsOfDate: string | null;
+    latestGeneratedAt: string | null;
+    memberCount: number;
+    currentDateTickers: number;
+    coveragePct: number;
+    minCoveragePct: number;
+    status: "fresh" | "stale" | "missing" | "low_coverage";
+    reason: string;
+  }>;
 }> {
   const query = page ? `?page=${page}` : "";
   return getJson(`/api/status${query}`);

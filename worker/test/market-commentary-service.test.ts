@@ -104,7 +104,10 @@ class FakeMarketCommentaryDb {
           const scheduledLocalDate = String(bound[0]);
           const sessionDate = String(bound[1]);
           return (db.rows
-            .filter((row) => row.generationTrigger === "scheduled" && row.scheduledLocalDate === scheduledLocalDate && row.sessionDate === sessionDate)
+            .filter((row) => row.generationTrigger === "scheduled"
+              && (!sql.includes("status = 'ready'") || row.status === "ready")
+              && row.scheduledLocalDate === scheduledLocalDate
+              && row.sessionDate === sessionDate)
             .sort(sortLatest)[0] ?? null) as T;
         }
         if (sql.includes("FROM market_commentary_reports") && sql.includes("WHERE session_date = ?")) {
@@ -371,12 +374,20 @@ describe("market commentary service", () => {
 
     expect(response).toBeNull();
     expect(db.rows).toHaveLength(0);
-    expect(db.attempts).toEqual([expect.objectContaining({
-      scheduledLocalDate: "2026-05-27",
-      sessionDate: "2026-05-26",
-      status: "skipped",
-      reason: expect.stringContaining("Overview snapshot for 2026-05-26 is not ready"),
-    })]);
+    expect(db.attempts).toEqual([
+      expect.objectContaining({
+        scheduledLocalDate: "2026-05-27",
+        sessionDate: "2026-05-26",
+        status: "running",
+        reason: "Scheduled report due; checking prerequisites.",
+      }),
+      expect.objectContaining({
+        scheduledLocalDate: "2026-05-27",
+        sessionDate: "2026-05-26",
+        status: "skipped",
+        reason: expect.stringContaining("Overview snapshot for 2026-05-26 is not ready"),
+      }),
+    ]);
   });
 
   it("scheduled generation skips when a same-day ready scheduled attempt already exists", async () => {
@@ -394,7 +405,7 @@ describe("market commentary service", () => {
     expect(db.rows).toHaveLength(1);
   });
 
-  it("scheduled generation skips when a same-day failed scheduled attempt already exists", async () => {
+  it("scheduled generation retries when a same-day failed scheduled report already exists", async () => {
     const db = new FakeMarketCommentaryDb([
       createReport("failed", "2026-05-26", "2026-05-26T23:00:00.000Z", {
         status: "failed",
@@ -408,8 +419,21 @@ describe("market commentary service", () => {
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
 
     expect(response?.status).toBe("failed");
-    expect(response?.report?.id).toBe("failed");
-    expect(db.rows).toHaveLength(1);
+    expect(response?.report?.id).not.toBe("failed");
+    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(db.rows).toHaveLength(2);
+    expect(db.attempts[0]).toMatchObject({
+      scheduledLocalDate: "2026-05-27",
+      sessionDate: "2026-05-26",
+      status: "running",
+      reason: "Scheduled report due; checking prerequisites.",
+    });
+    expect(db.attempts.at(-1)).toMatchObject({
+      scheduledLocalDate: "2026-05-27",
+      sessionDate: "2026-05-26",
+      status: "failed",
+      reason: expect.stringContaining("GEMINI_API_KEY"),
+    });
   });
 
   it("scheduled generation stores an isolated failed report when provider config is missing", async () => {

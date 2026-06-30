@@ -158,6 +158,29 @@ test("overview freshness separates fresh live quotes from stale history", () => 
   assert.ok(summary?.message.includes("Live quotes are current"));
 });
 
+test("overview freshness reports stale breadth separately from live quotes", () => {
+  const summary = deriveOverviewFreshnessSummary({
+    status: status({
+      breadthStatus: "stale",
+      breadthExpectedAsOfDate: "2026-06-12",
+      breadthLatestAsOfDate: "2026-06-10",
+      breadthWarning: "Breadth history is not current for 2026-06-12: sp500-core 2026-06-10.",
+    }),
+    sections: sections([
+      { ticker: "SPY", barDate: "2026-06-12", quoteFreshnessStatus: "fresh", barFreshnessStatus: "fresh" },
+      { ticker: "QQQ", barDate: "2026-06-12", quoteFreshnessStatus: "fresh", barFreshnessStatus: "fresh" },
+    ]),
+    dashboardAvailable: true,
+    auditHref: "#overview-quote-audit",
+  });
+
+  assert.equal(summary?.tone, "warning");
+  assert.equal(summary?.title, "Breadth data stale");
+  assert.equal(summary?.counts.needsReview, 0);
+  assert.ok(summary?.details.includes("Breadth history is not current for 2026-06-12: sp500-core 2026-06-10."));
+  assert.match(summary?.message ?? "", /breadth history is lagging/i);
+});
+
 test("commentary freshness labels failed reports", () => {
   const summary = deriveCommentaryFreshnessSummary({
     mode: "daily",

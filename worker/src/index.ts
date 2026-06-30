@@ -125,6 +125,7 @@ import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatest
 import { loadBraveUsageDaily } from "./market-report-common";
 import { loadProviderUsageDaily } from "./provider-usage";
 import { classifyScheduledCron, createScheduledBudget } from "./scheduled-budget";
+import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
@@ -1930,6 +1931,90 @@ async function ensureFreshSp500BreadthSafe(env: Env): Promise<void> {
   }
 }
 
+type BreadthStatusDiagnostic = {
+  universeId: string;
+  expectedAsOfDate: string;
+  latestAsOfDate: string | null;
+  latestGeneratedAt: string | null;
+  memberCount: number;
+  currentDateTickers: number;
+  coveragePct: number;
+  minCoveragePct: number;
+  status: "fresh" | "stale" | "missing" | "low_coverage";
+  reason: string;
+};
+
+function breadthMinCoveragePct(universeId: string): number {
+  if (universeId === "sp500-core") return 95;
+  return CORE_BREADTH_UNIVERSE_IDS.includes(universeId as (typeof CORE_BREADTH_UNIVERSE_IDS)[number]) ? 80 : 1;
+}
+
+async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string): Promise<{
+  status: "fresh" | "partial" | "stale";
+  warning: string | null;
+  diagnostics: BreadthStatusDiagnostic[];
+}> {
+  const diagnostics: BreadthStatusDiagnostic[] = [];
+  for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
+    const [latestRow, memberCountRow, currentDateCountRow] = await Promise.all([
+      env.DB.prepare(
+        "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+      ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>(),
+      env.DB.prepare(
+        "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?",
+      ).bind(universeId).first<{ count: number | null }>(),
+      env.DB.prepare(
+        `SELECT COUNT(DISTINCT us.ticker) as count
+           FROM universe_symbols us
+           JOIN daily_bars db ON UPPER(db.ticker) = UPPER(us.ticker)
+          WHERE us.universe_id = ?
+            AND db.date = ?`,
+      ).bind(universeId, expectedAsOfDate).first<{ count: number | null }>(),
+    ]);
+    const memberCount = Number(memberCountRow?.count ?? 0);
+    const currentDateTickers = Number(currentDateCountRow?.count ?? 0);
+    const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
+    const minCoveragePct = breadthMinCoveragePct(universeId);
+    const latestAsOfDate = latestRow?.asOfDate ?? null;
+    let status: BreadthStatusDiagnostic["status"] = "fresh";
+    let reason = `Breadth snapshot is current for ${expectedAsOfDate}.`;
+    if (memberCount === 0) {
+      status = "missing";
+      reason = "No universe members are stored for this breadth universe.";
+    } else if (!latestAsOfDate) {
+      status = "missing";
+      reason = `No stored breadth snapshot exists; coverage for ${expectedAsOfDate} is ${coveragePct.toFixed(1)}%.`;
+    } else if (latestAsOfDate < expectedAsOfDate) {
+      status = coveragePct >= minCoveragePct ? "stale" : "low_coverage";
+      reason = `Latest stored breadth snapshot is ${latestAsOfDate}; expected ${expectedAsOfDate}. Current-date bar coverage is ${coveragePct.toFixed(1)}% (${currentDateTickers}/${memberCount}), minimum ${minCoveragePct}%.`;
+    } else if (coveragePct < minCoveragePct) {
+      status = "low_coverage";
+      reason = `Current-date bar coverage is ${coveragePct.toFixed(1)}% (${currentDateTickers}/${memberCount}), below the ${minCoveragePct}% minimum.`;
+    }
+    diagnostics.push({
+      universeId,
+      expectedAsOfDate,
+      latestAsOfDate,
+      latestGeneratedAt: latestRow?.generatedAt ?? null,
+      memberCount,
+      currentDateTickers,
+      coveragePct,
+      minCoveragePct,
+      status,
+      reason,
+    });
+  }
+
+  const problemDiagnostics = diagnostics.filter((diagnostic) => diagnostic.status !== "fresh");
+  return {
+    status: problemDiagnostics.length === 0 ? "fresh" : problemDiagnostics.length === diagnostics.length ? "stale" : "partial",
+    warning: problemDiagnostics.length
+      ? `Breadth history is not current for ${expectedAsOfDate}: ${problemDiagnostics.slice(0, 3).map((diagnostic) => `${diagnostic.universeId} ${diagnostic.latestAsOfDate ?? "missing"}`).join(", ")}.`
+      : null,
+    diagnostics,
+  };
+}
+
 function parseBreadthSentiment(raw: unknown): BreadthSentiment {
   if (typeof raw !== "string" || raw.trim().length === 0) return {};
   try {
@@ -2175,6 +2260,14 @@ app.get("/api/status", async (c) => {
     "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
   )
     .first<{ asOfDate?: string; generatedAt?: string; as_of_date?: string; generated_at?: string }>();
+  const breadthDiagnostics = await loadBreadthStatusDiagnostics(c.env, latestAllowedAsOfDate).catch((error) => {
+    console.error("status breadth diagnostics load failed", error);
+    return {
+      status: "stale" as const,
+      warning: "Breadth diagnostics could not be loaded.",
+      diagnostics: [] as BreadthStatusDiagnostic[],
+    };
+  });
 
   const normalizedOverview = {
     lastUpdated: overviewLatest?.generatedAt ?? overviewLatest?.generated_at ?? null,
@@ -2275,6 +2368,12 @@ app.get("/api/status", async (c) => {
     providerLabel: normalizedProvider,
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
     ...overviewFreshness,
+    breadthExpectedAsOfDate: latestAllowedAsOfDate,
+    breadthStatus: breadthDiagnostics.status,
+    breadthLatestAsOfDate: normalizedBreadth.asOfDate,
+    breadthLastUpdated: normalizedBreadth.lastUpdated,
+    breadthWarning: breadthDiagnostics.warning,
+    breadthDiagnostics: breadthDiagnostics.diagnostics,
   });
 });
 
@@ -6644,10 +6743,30 @@ export default {
     const lane = classifyScheduledCron(event.cron);
     const budget = createScheduledBudget(env, lane);
     const runBudgeted = async (jobKey: string, units: number, task: () => Promise<void>): Promise<void> => {
-      if (!budget.claim(jobKey, units)) return;
+      if (!budget.claim(jobKey, units)) {
+        const skippedAuditId = await startScheduledJobRun(env, {
+          lane,
+          cron: event.cron,
+          jobKey,
+          scheduledTime: now.toISOString(),
+          metadata: { estimatedUnits: units, budget: budget.snapshot() },
+        });
+        await finishScheduledJobRun(env, skippedAuditId, "skipped", "Skipped by scheduled budget.", { budget: budget.snapshot() });
+        return;
+      }
+      const auditId = await startScheduledJobRun(env, {
+        lane,
+        cron: event.cron,
+        jobKey,
+        scheduledTime: now.toISOString(),
+        metadata: { estimatedUnits: units, budget: budget.snapshot() },
+      });
       try {
         await task();
+        await finishScheduledJobRun(env, auditId, "completed", null, { budget: budget.snapshot() });
       } catch (error) {
+        const message = error instanceof Error ? error.message : `Scheduled ${jobKey} failed.`;
+        await finishScheduledJobRun(env, auditId, "failed", message, { budget: budget.snapshot() });
         console.error(`scheduled ${jobKey} failed`, { lane, error });
       }
     };
@@ -6759,7 +6878,11 @@ export default {
             }
           }
         });
+      }
 
+      await runBudgeted("market-commentary", 6, () => maybeRunScheduledMarketCommentary(env, now).then(() => undefined));
+
+      if (shouldRunEod) {
         await runBudgeted("breadth-recompute", 3, async () => {
           const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
           const trackedUniverseCount = await env.DB.prepare(
@@ -6780,7 +6903,6 @@ export default {
         });
       }
 
-      await runBudgeted("market-commentary", 6, () => maybeRunScheduledMarketCommentary(env, now).then(() => undefined));
       await runBudgeted("weekly-market-review", 5, () => maybeRunScheduledWeeklyMarketReview(env, now).then(() => undefined));
     };
 

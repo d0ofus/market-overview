@@ -23,6 +23,23 @@ export type OverviewFreshnessContext = {
   quoteOverlayReturnedCount?: number | null;
   quoteOverlayError?: string | null;
   quoteOverlayMissingSample?: string[];
+  breadthExpectedAsOfDate?: string | null;
+  breadthStatus?: OverviewFreshnessStatus;
+  breadthLatestAsOfDate?: string | null;
+  breadthLastUpdated?: string | null;
+  breadthWarning?: string | null;
+  breadthDiagnostics?: Array<{
+    universeId: string;
+    expectedAsOfDate: string;
+    latestAsOfDate: string | null;
+    latestGeneratedAt: string | null;
+    memberCount: number;
+    currentDateTickers: number;
+    coveragePct: number;
+    minCoveragePct: number;
+    status: "fresh" | "stale" | "missing" | "low_coverage";
+    reason: string;
+  }>;
 };
 
 export type OverviewFreshnessSection = {
@@ -164,10 +181,12 @@ export function deriveOverviewFreshnessSummary({
   const hasOverlayGap = Boolean(overlay);
   const hasQuoteProblems = counts.needsReview > 0 || hasOverlayGap;
   const hasHistoryProblems = status.freshnessStatus !== "fresh" || counts.historyNeedsReview > 0;
+  const hasBreadthProblems = Boolean(status.breadthStatus && status.breadthStatus !== "fresh");
   const hasProblems = !dashboardAvailable
     || missingFreshness
     || hasQuoteProblems
-    || hasHistoryProblems;
+    || hasHistoryProblems
+    || hasBreadthProblems;
 
   if (!hasProblems) return null;
 
@@ -189,6 +208,7 @@ export function deriveOverviewFreshnessSummary({
     coverage,
     criticalTickers ? `Critical historical symbols: ${criticalTickers}` : null,
     overlay,
+    hasBreadthProblems ? status.breadthWarning ?? `Breadth data is ${status.breadthStatus}.` : null,
   ].filter((detail): detail is string => Boolean(detail));
 
   const title = !dashboardAvailable
@@ -201,6 +221,8 @@ export function deriveOverviewFreshnessSummary({
           ? "Historical overview data stale"
           : status.freshnessStatus === "partial" || counts.historyNeedsReview > 0
             ? "Historical overview data partial"
+            : hasBreadthProblems
+              ? "Breadth data stale"
             : counts.unverified > 0
               ? "Unverified overview quote rows"
               : "Partial live quote coverage";
@@ -212,6 +234,8 @@ export function deriveOverviewFreshnessSummary({
         ? "Freshness diagnostics are missing for the displayed Overview data."
         : hasQuoteProblems
           ? "Live quote snapshots are incomplete. Use the quote audit before acting on this dashboard."
+          : hasBreadthProblems
+            ? "Live quotes and overview snapshot are current, but breadth history is lagging."
           : "Live quotes are current, but stored daily bars are lagging for historical metrics.");
 
   return {
