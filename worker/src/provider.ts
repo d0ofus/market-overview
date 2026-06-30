@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { EQUAL_WEIGHT_SECTOR_ETFS, ETF_CATALOG_TICKERS } from "./etf-catalog";
 import { meteredFetch, type ProviderUsageMeta } from "./provider-usage";
+import { zonedParts } from "./refresh-timing";
 
 export type DailyBar = {
   ticker: string;
@@ -23,7 +24,7 @@ export type QuoteSnapshot = {
   price: number;
   prevClose: number;
   change1d: number;
-  source: "alpaca-snapshot";
+  source: "alpaca-snapshot" | "yahoo-chart";
   fetchedAt: string;
   tradeTimestamp?: string | null;
   dailyBarTimestamp?: string | null;
@@ -84,6 +85,150 @@ function latestBarDate(bars: DailyBar[]): string | null {
     if (!latest || bar.date > latest) latest = bar.date;
   }
   return latest;
+}
+
+const YAHOO_QUOTE_ALIASES: Record<string, string> = {
+  VIX: "^VIX",
+  VXN: "^VXN",
+  VVIX: "^VVIX",
+  XOI: "^XOI",
+  NWX: "^NWX",
+};
+
+function yahooSymbolForTicker(ticker: string): string {
+  const upper = ticker.trim().toUpperCase();
+  if (YAHOO_QUOTE_ALIASES[upper]) return YAHOO_QUOTE_ALIASES[upper];
+  if (upper.startsWith("^")) return upper;
+  return upper;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function marketDateFromUnixSeconds(value: unknown): string | null {
+  const seconds = finiteNumber(value);
+  if (seconds == null || seconds <= 0) return null;
+  return zonedParts(new Date(seconds * 1000), "America/New_York").localDate;
+}
+
+function latestFiniteClose(closes: Array<number | null | undefined>): number | null {
+  for (let index = closes.length - 1; index >= 0; index -= 1) {
+    const close = finiteNumber(closes[index]);
+    if (close != null) return close;
+  }
+  return null;
+}
+
+function previousFiniteClose(closes: Array<number | null | undefined>): number | null {
+  let seenLatest = false;
+  for (let index = closes.length - 1; index >= 0; index -= 1) {
+    const close = finiteNumber(closes[index]);
+    if (close == null) continue;
+    if (!seenLatest) {
+      seenLatest = true;
+      continue;
+    }
+    return close;
+  }
+  return null;
+}
+
+type YahooChartResult = {
+  meta?: {
+    regularMarketPrice?: number;
+    postMarketPrice?: number;
+    preMarketPrice?: number;
+    chartPreviousClose?: number;
+    previousClose?: number;
+    regularMarketTime?: number;
+    postMarketTime?: number;
+    preMarketTime?: number;
+  };
+  timestamp?: number[];
+  indicators?: {
+    quote?: Array<{
+      close?: Array<number | null>;
+    }>;
+  };
+};
+
+function parseYahooQuoteSnapshot(
+  ticker: string,
+  result: YahooChartResult | null | undefined,
+  fetchedAt: string,
+  expectedAsOfDate?: string | null,
+): QuoteSnapshot | null {
+  const meta = result?.meta;
+  const closes = result?.indicators?.quote?.[0]?.close ?? [];
+  const price = finiteNumber(meta?.regularMarketPrice)
+    ?? finiteNumber(meta?.postMarketPrice)
+    ?? finiteNumber(meta?.preMarketPrice)
+    ?? latestFiniteClose(closes);
+  const prevClose = finiteNumber(meta?.chartPreviousClose)
+    ?? finiteNumber(meta?.previousClose)
+    ?? previousFiniteClose(closes);
+  const timestamp = finiteNumber(meta?.regularMarketTime)
+    ?? finiteNumber(meta?.postMarketTime)
+    ?? finiteNumber(meta?.preMarketTime)
+    ?? finiteNumber(result?.timestamp?.at(-1));
+  const quoteDate = marketDateFromUnixSeconds(timestamp);
+
+  if (expectedAsOfDate && (!quoteDate || quoteDate < expectedAsOfDate)) return null;
+  if (price == null || prevClose == null || prevClose <= 0) return null;
+
+  return {
+    price,
+    prevClose,
+    change1d: ((price - prevClose) / prevClose) * 100,
+    source: "yahoo-chart",
+    fetchedAt,
+    tradeTimestamp: timestamp ? new Date(timestamp * 1000).toISOString() : null,
+    dailyBarTimestamp: null,
+  };
+}
+
+export async function fetchYahooQuoteSnapshots(
+  env: Env,
+  tickers: string[],
+  expectedAsOfDate?: string | null,
+): Promise<Record<string, QuoteSnapshot>> {
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const out: Record<string, QuoteSnapshot> = {};
+  const hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+  for (const ticker of unique) {
+    const symbol = yahooSymbolForTicker(ticker);
+    for (const host of hosts) {
+      try {
+        const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+        const fetchedAt = new Date().toISOString();
+        const res = await fetchWithTimeout(url, {
+          headers: {
+            "User-Agent": "market-command-centre/1.0",
+          },
+        }, PROVIDER_FETCH_TIMEOUT_MS, env, {
+          providerKey: "yahoo",
+          endpointKey: "chart-quote",
+          caller: "quote-overlay-yahoo",
+          symbolCount: 1,
+        });
+        if (!res.ok) continue;
+        const json = await res.json() as {
+          chart?: {
+            result?: YahooChartResult[];
+          };
+        };
+        const snapshot = parseYahooQuoteSnapshot(ticker, json.chart?.result?.[0], fetchedAt, expectedAsOfDate);
+        if (snapshot) {
+          out[ticker] = snapshot;
+          break;
+        }
+      } catch (error) {
+        console.error("yahoo quote snapshot fallback failed", { ticker, host, error });
+      }
+    }
+  }
+  return out;
 }
 
 const IEX_FALLBACK_PREFERRED_TICKERS = new Set([

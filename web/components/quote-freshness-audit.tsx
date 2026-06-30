@@ -1,23 +1,26 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { QuoteFreshnessStatus, SnapshotReadyResponse } from "@/types/dashboard";
+import type { BarFreshnessStatus, QuoteFreshnessStatus, SnapshotReadyResponse } from "@/types/dashboard";
 
 type SnapshotSection = SnapshotReadyResponse["sections"][number];
-type AuditFilter = "problem" | QuoteFreshnessStatus;
+type AuditFilter = "problem" | "history" | QuoteFreshnessStatus;
 
 type AuditRow = {
   ticker: string;
   name: string | null;
   groupTitle: string;
-  status: QuoteFreshnessStatus;
+  quoteStatus: QuoteFreshnessStatus;
+  barStatus: BarFreshnessStatus;
   barDate: string | null;
   source: string | null;
-  reason: string | null;
+  quoteReason: string | null;
+  barReason: string | null;
 };
 
 const FILTERS: Array<{ key: AuditFilter; label: string }> = [
   { key: "problem", label: "Needs Review" },
+  { key: "history", label: "History Issues" },
   { key: "stale", label: "Stale" },
   { key: "unavailable", label: "Unavailable" },
   { key: "unsupported", label: "Unverified" },
@@ -39,8 +42,9 @@ function statusClass(status: QuoteFreshnessStatus): string {
 }
 
 function includesFilter(row: AuditRow, filter: AuditFilter): boolean {
-  if (filter === "problem") return row.status !== "fresh";
-  return row.status === filter;
+  if (filter === "problem") return row.quoteStatus !== "fresh";
+  if (filter === "history") return row.barStatus !== "fresh";
+  return row.quoteStatus === filter;
 }
 
 export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] }) {
@@ -52,10 +56,12 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
           ticker: row.ticker,
           name: row.displayName,
           groupTitle: group.title,
-          status: row.quoteFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable"),
+          quoteStatus: row.quoteFreshnessStatus ?? "unavailable",
+          barStatus: row.barFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable"),
           barDate: row.barDate ?? null,
           source: row.quoteSource ?? null,
-          reason: row.quoteFreshnessReason ?? null,
+          quoteReason: row.quoteFreshnessReason ?? null,
+          barReason: row.barFreshnessReason ?? null,
         })),
       ),
     ).sort((left, right) => {
@@ -65,8 +71,10 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
         unsupported: 2,
         fresh: 3,
       };
-      const statusCompare = statusOrder[left.status] - statusOrder[right.status];
+      const statusCompare = statusOrder[left.quoteStatus] - statusOrder[right.quoteStatus];
       if (statusCompare !== 0) return statusCompare;
+      const barCompare = statusOrder[left.barStatus] - statusOrder[right.barStatus];
+      if (barCompare !== 0) return barCompare;
       const groupCompare = left.groupTitle.localeCompare(right.groupTitle);
       if (groupCompare !== 0) return groupCompare;
       return left.ticker.localeCompare(right.ticker);
@@ -75,9 +83,10 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
 
   const counts = useMemo(() => {
     const initial: Record<QuoteFreshnessStatus, number> = { fresh: 0, stale: 0, unavailable: 0, unsupported: 0 };
-    for (const row of rows) initial[row.status] += 1;
+    for (const row of rows) initial[row.quoteStatus] += 1;
     return initial;
   }, [rows]);
+  const historyProblemCount = rows.filter((row) => row.barStatus !== "fresh").length;
   const visibleRows = rows.filter((row) => includesFilter(row, filter));
   const problemCount = rows.length - counts.fresh;
 
@@ -86,11 +95,11 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
       <div className="flex flex-col gap-3 border-b border-borderSoft px-4 py-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h3 className="font-medium tracking-wide text-slate-100">Quote Freshness Audit</h3>
-          <p className="mt-1 text-xs text-slate-400">{problemCount} need review / {rows.length} tracked rows</p>
+          <p className="mt-1 text-xs text-slate-400">{problemCount} live quote issues / {historyProblemCount} history rows need review / {rows.length} tracked rows</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {FILTERS.map((item) => {
-            const count = item.key === "problem" ? problemCount : counts[item.key];
+            const count = item.key === "problem" ? problemCount : item.key === "history" ? historyProblemCount : counts[item.key];
             const active = filter === item.key;
             return (
               <button
@@ -113,7 +122,7 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
         <table className="min-w-full text-sm">
           <thead className="sticky top-0 bg-slate-900/95">
             <tr>
-              {["Ticker", "Status", "Last Bar", "Group", "Source"].map((heading) => (
+              {["Ticker", "Live Quote", "History", "Last Bar", "Group", "Source"].map((heading) => (
                 <th key={heading} className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-300">
                   {heading}
                 </th>
@@ -128,8 +137,13 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
                   <div className="max-w-72 truncate text-xs text-slate-400">{row.name ?? row.ticker}</div>
                 </td>
                 <td className="px-3 py-2">
-                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusClass(row.status)}`} title={row.reason ?? statusLabel(row.status)}>
-                    {statusLabel(row.status)}
+                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusClass(row.quoteStatus)}`} title={row.quoteReason ?? statusLabel(row.quoteStatus)}>
+                    {statusLabel(row.quoteStatus)}
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusClass(row.barStatus)}`} title={row.barReason ?? statusLabel(row.barStatus)}>
+                    {statusLabel(row.barStatus)}
                   </span>
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-slate-300">{row.barDate ?? "N/A"}</td>
@@ -139,7 +153,7 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
             ))}
             {visibleRows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-3 py-6 text-center text-sm text-slate-400">
+                <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-400">
                   No rows match this filter.
                 </td>
               </tr>

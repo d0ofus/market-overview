@@ -9,7 +9,7 @@ import { ChartGridPager } from "./chart-grid-pager";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
-import type { QuoteFreshnessStatus } from "@/types/dashboard";
+import type { BarFreshnessStatus, QuoteFreshnessStatus } from "@/types/dashboard";
 
 const CHARTS_PER_PAGE = 20;
 
@@ -30,6 +30,11 @@ type Row = {
   above50Sma: boolean | null;
   above200Sma: boolean | null;
   barDate?: string | null;
+  barFreshnessStatus?: BarFreshnessStatus;
+  barFreshnessReason?: string | null;
+  quotePrice?: number | null;
+  quotePrevClose?: number | null;
+  quoteChange1d?: number | null;
   quoteFreshnessStatus?: QuoteFreshnessStatus;
   quoteFreshnessReason?: string | null;
   quoteSource?: string | null;
@@ -75,7 +80,8 @@ const titleCase = (value: string): string => {
   if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
-const hasQuoteMetrics = (row: Row) => Boolean(row.barDate);
+const hasLiveQuoteMetrics = (row: Row) => row.quoteFreshnessStatus === "fresh" && typeof row.quotePrice === "number" && typeof row.quoteChange1d === "number";
+const hasHistoricalMetrics = (row: Row) => Boolean(row.barDate);
 const quoteFreshnessLabel = (status: QuoteFreshnessStatus | undefined): string => {
   if (status === "stale") return "Stale";
   if (status === "unavailable") return "N/A";
@@ -103,6 +109,23 @@ function QuoteFreshnessBadge({ row }: { row: Row }) {
       title={title || quoteFreshnessLabel(status)}
     >
       {quoteFreshnessLabel(status)}
+    </span>
+  );
+}
+
+function HistoryFreshnessBadge({ row }: { row: Row }) {
+  const status = row.barFreshnessStatus;
+  if (!status || status === "fresh") return null;
+  const title = [
+    row.barFreshnessReason,
+    row.barDate ? `Bar date: ${row.barDate}` : null,
+  ].filter(Boolean).join(" ");
+  return (
+    <span
+      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(status)}`}
+      title={title || `History ${quoteFreshnessLabel(status)}`}
+    >
+      History
     </span>
   );
 }
@@ -152,9 +175,9 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return null;
     };
     const numberValueFor = (row: Row, key: string): number | null => {
-      if (!hasQuoteMetrics(row)) return null;
-      if (key === "price") return row.price ?? null;
-      if (key === "1D") return row.change1d ?? null;
+      if (key === "price") return hasLiveQuoteMetrics(row) ? row.quotePrice ?? null : null;
+      if (key === "1D") return hasLiveQuoteMetrics(row) ? row.quoteChange1d ?? null : null;
+      if (!hasHistoricalMetrics(row)) return null;
       if (key === "1W") return row.change1w ?? null;
       if (key === "5D") return row.change5d ?? null;
       if (key === "3M") return row.change3m ?? null;
@@ -248,6 +271,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
             <QuoteFreshnessBadge row={row} />
+            <HistoryFreshnessBadge row={row} />
           </div>
         </td>
       );
@@ -258,19 +282,19 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     if (column === "sparkline") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {hasQuoteMetrics(row) ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
+          {hasHistoricalMetrics(row) ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "relativeStrength30dVsSpy") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {hasQuoteMetrics(row) ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
+          {hasHistoricalMetrics(row) ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "price") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{hasQuoteMetrics(row) ? row.price.toFixed(2) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{hasLiveQuoteMetrics(row) && typeof row.quotePrice === "number" ? row.quotePrice.toFixed(2) : "N/A"}</td>;
     }
     if (column === "20SMA") {
       return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above20Sma} /></td>;
@@ -282,25 +306,25 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above200Sma} /></td>;
     }
     if (column === "1D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change1d) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change1d) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasLiveQuoteMetrics(row) ? cellClass(row.quoteChange1d) : "text-slate-500"}`}>{hasLiveQuoteMetrics(row) ? pct(row.quoteChange1d) : "N/A"}</td>;
     }
     if (column === "1W") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change1w) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change1w) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change1w) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change1w) : "N/A"}</td>;
     }
     if (column === "5D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change5d) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change5d) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change5d) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change5d) : "N/A"}</td>;
     }
     if (column === "3M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change3m) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change3m) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change3m) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change3m) : "N/A"}</td>;
     }
     if (column === "6M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.change6m) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.change6m) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change6m) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change6m) : "N/A"}</td>;
     }
     if (column === "YTD") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.ytd) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.ytd) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.ytd) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.ytd) : "N/A"}</td>;
     }
     if (column === "pctFrom52WHigh") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasQuoteMetrics(row) ? cellClass(row.pctFrom52wHigh) : "text-slate-500"}`}>{hasQuoteMetrics(row) ? pct(row.pctFrom52wHigh) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.pctFrom52wHigh) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.pctFrom52wHigh) : "N/A"}</td>;
     }
     return null;
   };

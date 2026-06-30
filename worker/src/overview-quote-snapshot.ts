@@ -1,5 +1,6 @@
-import { getProvider, type QuoteSnapshot } from "./provider";
-import type { Env, QuoteFreshnessStatus } from "./types";
+import { fetchYahooQuoteSnapshots, getProvider, type QuoteSnapshot } from "./provider";
+import { zonedParts } from "./refresh-timing";
+import type { BarFreshnessStatus, Env, QuoteFreshnessStatus } from "./types";
 
 const OVERVIEW_QUOTE_UNSUPPORTED_TICKERS = new Set([
   "BKX",
@@ -18,6 +19,8 @@ export type OverviewQuoteOverlay = {
   quoteFetchedAt: string | null;
   quoteFreshnessStatus: QuoteFreshnessStatus;
   quoteFreshnessReason: string;
+  barFreshnessStatus: BarFreshnessStatus;
+  barFreshnessReason: string;
 };
 
 export type OverviewQuoteOverlayInput = {
@@ -39,28 +42,63 @@ export function isOverviewQuoteEligibleTicker(ticker: string, groupTitle: string
   return true;
 }
 
-function dailyBarFreshnessReason(ticker: string, barDate: string | null, expectedAsOfDate: string): { status: QuoteFreshnessStatus; reason: string } {
+function barFreshnessDiagnostic(ticker: string, barDate: string | null, expectedAsOfDate: string): { status: BarFreshnessStatus; reason: string } {
   if (!barDate) {
     return {
       status: "unavailable",
-      reason: `No Alpaca snapshot quote or stored daily bar is available for ${ticker}.`,
+      reason: `No stored daily bar is available for ${ticker}.`,
     };
   }
   if (barDate === expectedAsOfDate) {
     return {
       status: "fresh",
-      reason: `No Alpaca snapshot quote is available; stored daily bar is current for ${expectedAsOfDate}.`,
+      reason: `Stored daily bar is current for ${expectedAsOfDate}.`,
     };
   }
   return {
     status: "stale",
-    reason: `No Alpaca snapshot quote is available; last stored daily bar is ${barDate}; expected ${expectedAsOfDate}.`,
+    reason: `Last stored daily bar is ${barDate}; expected ${expectedAsOfDate}.`,
+  };
+}
+
+function quoteSnapshotSourceLabel(source: string): string {
+  if (source === "alpaca-snapshot") return "Alpaca snapshot";
+  if (source === "yahoo-chart") return "Yahoo chart/quote";
+  return source;
+}
+
+function quoteSnapshotMarketDate(snapshot: QuoteSnapshot): string | null {
+  const timestamp = snapshot.tradeTimestamp ?? snapshot.dailyBarTimestamp ?? snapshot.fetchedAt;
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return zonedParts(date, "America/New_York").localDate;
+}
+
+function quoteSnapshotFreshness(snapshot: QuoteSnapshot, expectedAsOfDate: string): { status: QuoteFreshnessStatus; reason: string } {
+  const quoteDate = quoteSnapshotMarketDate(snapshot);
+  if (!quoteDate) {
+    return {
+      status: "stale",
+      reason: "Snapshot quote is missing a usable provider timestamp.",
+    };
+  }
+  if (quoteDate < expectedAsOfDate) {
+    return {
+      status: "stale",
+      reason: `Snapshot quote timestamp is ${quoteDate}; expected ${expectedAsOfDate}.`,
+    };
+  }
+  return {
+    status: "fresh",
+    reason: "Snapshot quote is current.",
   };
 }
 
 export function deriveOverviewQuoteOverlayFromSnapshot(input: OverviewQuoteOverlayInput): OverviewQuoteOverlay {
   const ticker = input.ticker.trim().toUpperCase();
   const barDate = input.barDate ?? null;
+  const barFreshness = barFreshnessDiagnostic(ticker, barDate, input.expectedAsOfDate);
   if (!isOverviewQuoteEligibleTicker(ticker, input.groupTitle)) {
     return {
       ticker,
@@ -73,11 +111,15 @@ export function deriveOverviewQuoteOverlayFromSnapshot(input: OverviewQuoteOverl
       quoteFreshnessReason: barDate
         ? `${ticker} is outside automated quote freshness validation; last stored daily bar is ${barDate}.`
         : `${ticker} is outside automated quote freshness validation and has no stored daily bar from current sources.`,
+      barFreshnessStatus: barFreshness.status,
+      barFreshnessReason: barFreshness.reason,
     };
   }
 
   const snapshot = input.snapshot ?? null;
   if (snapshot) {
+    const sourceLabel = quoteSnapshotSourceLabel(snapshot.source);
+    const quoteFreshness = quoteSnapshotFreshness(snapshot, input.expectedAsOfDate);
     return {
       ticker,
       quotePrice: snapshot.price,
@@ -85,23 +127,24 @@ export function deriveOverviewQuoteOverlayFromSnapshot(input: OverviewQuoteOverl
       quoteChange1d: snapshot.change1d,
       quoteSource: snapshot.source,
       quoteFetchedAt: snapshot.fetchedAt,
-      quoteFreshnessStatus: "fresh",
-      quoteFreshnessReason: barDate
-        ? `Alpaca snapshot quote is available; last stored daily bar is ${barDate}.`
-        : "Alpaca snapshot quote is available; no stored daily bar is available.",
+      quoteFreshnessStatus: quoteFreshness.status,
+      quoteFreshnessReason: `${sourceLabel} quote is available. ${quoteFreshness.reason}`,
+      barFreshnessStatus: barFreshness.status,
+      barFreshnessReason: barFreshness.reason,
     };
   }
 
-  const fallback = dailyBarFreshnessReason(ticker, barDate, input.expectedAsOfDate);
   return {
     ticker,
     quotePrice: null,
     quotePrevClose: null,
     quoteChange1d: null,
-    quoteSource: barDate ? "daily-bars" : null,
+    quoteSource: null,
     quoteFetchedAt: null,
-    quoteFreshnessStatus: fallback.status,
-    quoteFreshnessReason: fallback.reason,
+    quoteFreshnessStatus: "unavailable",
+    quoteFreshnessReason: `No Alpaca or Yahoo snapshot quote is available for ${ticker}.`,
+    barFreshnessStatus: barFreshness.status,
+    barFreshnessReason: barFreshness.reason,
   };
 }
 
@@ -150,23 +193,46 @@ function eligibleOverviewQuoteTickers(
 export async function fetchOverviewQuoteSnapshots(
   env: Env,
   tickers: string[],
+  expectedAsOfDate?: string | null,
 ): Promise<OverviewQuoteSnapshotFetchResult> {
   const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   let providerAttempted = false;
-  let providerError: string | null = null;
+  const providerErrors: string[] = [];
   let snapshots: Record<string, QuoteSnapshot> = {};
   if (uniqueTickers.length === 0) {
-    return { snapshots, providerAttempted, providerError };
+    return { snapshots, providerAttempted, providerError: null };
   }
   try {
     const provider = getProvider(env);
     providerAttempted = Boolean(provider.getQuoteSnapshot);
     snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(uniqueTickers) : {};
   } catch (error) {
-    providerError = quoteOverlayErrorMessage(error);
-    console.error("overview quote snapshot refresh failed; using stored daily bars", error);
+    providerErrors.push(quoteOverlayErrorMessage(error));
+    console.error("overview Alpaca quote snapshot refresh failed; trying Yahoo fallback", error);
   }
-  return { snapshots, providerAttempted, providerError };
+
+  const providerMode = (env.DATA_PROVIDER ?? "alpaca").toLowerCase();
+  const yahooFallbackEnabled = providerMode !== "synthetic" && providerMode !== "csv";
+  const missingTickers = uniqueTickers.filter((ticker) => {
+    const snapshot = snapshots[ticker];
+    if (!snapshot) return true;
+    return Boolean(expectedAsOfDate && quoteSnapshotFreshness(snapshot, expectedAsOfDate).status !== "fresh");
+  });
+  if (yahooFallbackEnabled && missingTickers.length > 0) {
+    try {
+      providerAttempted = true;
+      const yahooSnapshots = await fetchYahooQuoteSnapshots(env, missingTickers, expectedAsOfDate);
+      snapshots = { ...snapshots, ...yahooSnapshots };
+    } catch (error) {
+      providerErrors.push(quoteOverlayErrorMessage(error));
+      console.error("overview Yahoo quote snapshot fallback failed", error);
+    }
+  }
+  return {
+    snapshots,
+    providerAttempted,
+    providerError: providerErrors.length > 0 ? providerErrors.join(" | ").slice(0, 500) : null,
+  };
 }
 
 export function buildOverviewQuoteOverlaysFromSnapshots(
@@ -215,6 +281,6 @@ export async function buildOverviewQuoteOverlays(
   expectedAsOfDate: string,
 ): Promise<OverviewQuoteOverlayResult> {
   const uniqueRows = normalizeOverviewQuoteRows(rows);
-  const snapshotResult = await fetchOverviewQuoteSnapshots(env, eligibleOverviewQuoteTickers(uniqueRows));
+  const snapshotResult = await fetchOverviewQuoteSnapshots(env, eligibleOverviewQuoteTickers(uniqueRows), expectedAsOfDate);
   return buildOverviewQuoteOverlaysFromSnapshots(uniqueRows, expectedAsOfDate, snapshotResult);
 }

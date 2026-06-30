@@ -1,5 +1,6 @@
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
 export type QuoteFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
+export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
 
 export type SnapshotReadyResponse = {
   status?: "ready";
@@ -87,6 +88,11 @@ export type SnapshotReadyResponse = {
         above50Sma: boolean | null;
         above200Sma: boolean | null;
         barDate?: string | null;
+        barFreshnessStatus?: BarFreshnessStatus;
+        barFreshnessReason?: string | null;
+        quotePrice?: number | null;
+        quotePrevClose?: number | null;
+        quoteChange1d?: number | null;
         quoteFreshnessStatus?: QuoteFreshnessStatus;
         quoteFreshnessReason?: string | null;
         quoteSource?: string | null;

@@ -7,9 +7,9 @@ import {
   type OverviewFreshnessContext,
 } from "./overview-freshness";
 import type { MarketCommentaryReport, MarketCommentaryDataQuality } from "./api";
-import type { QuoteFreshnessStatus } from "../types/dashboard";
+import type { BarFreshnessStatus, QuoteFreshnessStatus } from "../types/dashboard";
 
-function sections(rows: Array<{ ticker: string; barDate?: string | null; quoteFreshnessStatus?: QuoteFreshnessStatus }>): OverviewFreshnessSection[] {
+function sections(rows: Array<{ ticker: string; barDate?: string | null; barFreshnessStatus?: BarFreshnessStatus; quoteFreshnessStatus?: QuoteFreshnessStatus }>): OverviewFreshnessSection[] {
   return [
     {
       groups: [
@@ -89,8 +89,8 @@ test("overview freshness marks stale critical symbols as danger", () => {
   });
 
   assert.equal(summary?.tone, "danger");
-  assert.equal(summary?.title, "Stale overview data");
-  assert.ok(summary?.details.includes("Critical stale symbols: XOI, VIX"));
+  assert.equal(summary?.title, "Live quote freshness incomplete");
+  assert.ok(summary?.details.includes("Critical historical symbols: XOI, VIX"));
 });
 
 test("overview freshness marks partial coverage as a warning", () => {
@@ -111,7 +111,7 @@ test("overview freshness marks partial coverage as a warning", () => {
   });
 
   assert.equal(summary?.tone, "warning");
-  assert.equal(summary?.title, "Partial overview freshness");
+  assert.equal(summary?.title, "Historical overview data partial");
   assert.ok(summary?.details.includes("Coverage 3/4 (75.0%)"));
 });
 
@@ -131,7 +131,31 @@ test("overview freshness counts stale, unavailable, and unverified rows", () => 
   assert.equal(summary?.counts.stale, 1);
   assert.equal(summary?.counts.unavailable, 1);
   assert.equal(summary?.counts.unverified, 1);
-  assert.ok(summary?.details.includes("3 rows need review"));
+  assert.ok(summary?.details.includes("3 live quote rows need review"));
+});
+
+test("overview freshness separates fresh live quotes from stale history", () => {
+  const summary = deriveOverviewFreshnessSummary({
+    status: status({
+      freshnessStatus: "partial",
+      freshnessCoveragePct: 50,
+      freshnessCurrentCount: 1,
+      freshnessEligibleCount: 2,
+      freshnessWarning: null,
+    }),
+    sections: sections([
+      { ticker: "EATZ", barDate: "2026-05-06", quoteFreshnessStatus: "fresh", barFreshnessStatus: "stale" },
+      { ticker: "RSHO", barDate: "2026-06-12", quoteFreshnessStatus: "fresh", barFreshnessStatus: "fresh" },
+    ]),
+    dashboardAvailable: true,
+    auditHref: "#overview-quote-audit",
+  });
+
+  assert.equal(summary?.tone, "warning");
+  assert.equal(summary?.title, "Historical overview data stale");
+  assert.equal(summary?.counts.needsReview, 0);
+  assert.equal(summary?.counts.historyNeedsReview, 1);
+  assert.ok(summary?.message.includes("Live quotes are current"));
 });
 
 test("commentary freshness labels failed reports", () => {

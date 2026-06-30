@@ -5,7 +5,7 @@ import type {
   WeeklyMarketReviewReport,
   WeeklyMarketReviewResponse,
 } from "./api";
-import type { QuoteFreshnessStatus } from "../types/dashboard";
+import type { BarFreshnessStatus, QuoteFreshnessStatus } from "../types/dashboard";
 
 export type OverviewFreshnessStatus = "fresh" | "partial" | "stale";
 export type FreshnessTone = "ok" | "warning" | "danger";
@@ -29,6 +29,7 @@ export type OverviewFreshnessSection = {
   groups: Array<{
     rows: Array<{
       barDate?: string | null;
+      barFreshnessStatus?: BarFreshnessStatus;
       quoteFreshnessStatus?: QuoteFreshnessStatus;
     }>;
   }>;
@@ -47,6 +48,9 @@ export type OverviewFreshnessSummary = {
     stale: number;
     unavailable: number;
     unverified: number;
+    historyNeedsReview: number;
+    historyStale: number;
+    historyUnavailable: number;
   };
 };
 
@@ -68,8 +72,12 @@ export type CommentaryFreshnessSummary = {
   issues: string[];
 };
 
-function normalizeRowStatus(row: { quoteFreshnessStatus?: QuoteFreshnessStatus; barDate?: string | null }): QuoteFreshnessStatus {
-  return row.quoteFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable");
+function normalizeQuoteStatus(row: { quoteFreshnessStatus?: QuoteFreshnessStatus }): QuoteFreshnessStatus {
+  return row.quoteFreshnessStatus ?? "unavailable";
+}
+
+function normalizeBarStatus(row: { barFreshnessStatus?: BarFreshnessStatus; barDate?: string | null }): BarFreshnessStatus {
+  return row.barFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable");
 }
 
 function compactTickerList(tickers: string[] | undefined, limit = 6): string | null {
@@ -100,9 +108,9 @@ function quoteOverlayDetail(status: OverviewFreshnessContext): string | null {
   const returned = status.quoteOverlayReturnedCount;
   if (typeof requested === "number" && requested > 0 && typeof returned === "number" && returned < requested) {
     const missing = compactTickerList(status.quoteOverlayMissingSample, 5);
-    return `Quote overlay ${returned}/${requested}${missing ? `; missing ${missing}` : ""}`;
+    return `Live quote snapshots ${returned}/${requested}${missing ? `; missing ${missing}` : ""}`;
   }
-  if (status.quoteOverlayError) return `Quote overlay error: ${status.quoteOverlayError}`;
+  if (status.quoteOverlayError) return `Live quote snapshot error: ${status.quoteOverlayError}`;
   return null;
 }
 
@@ -123,18 +131,28 @@ export function deriveOverviewFreshnessSummary({
     stale: 0,
     unavailable: 0,
     unverified: 0,
+    historyNeedsReview: 0,
+    historyStale: 0,
+    historyUnavailable: 0,
   };
 
   for (const section of sections) {
     for (const group of section.groups) {
       for (const row of group.rows) {
         counts.totalRows += 1;
-        const rowStatus = normalizeRowStatus(row);
-        if (rowStatus === "fresh") continue;
-        counts.needsReview += 1;
-        if (rowStatus === "stale") counts.stale += 1;
-        if (rowStatus === "unavailable") counts.unavailable += 1;
-        if (rowStatus === "unsupported") counts.unverified += 1;
+        const quoteStatus = normalizeQuoteStatus(row);
+        if (quoteStatus !== "fresh") {
+          counts.needsReview += 1;
+          if (quoteStatus === "stale") counts.stale += 1;
+          if (quoteStatus === "unavailable") counts.unavailable += 1;
+          if (quoteStatus === "unsupported") counts.unverified += 1;
+        }
+        const barStatus = normalizeBarStatus(row);
+        if (barStatus !== "fresh") {
+          counts.historyNeedsReview += 1;
+          if (barStatus === "stale") counts.historyStale += 1;
+          if (barStatus === "unavailable") counts.historyUnavailable += 1;
+        }
       }
     }
   }
@@ -144,30 +162,32 @@ export function deriveOverviewFreshnessSummary({
   const overlay = quoteOverlayDetail(status);
   const missingFreshness = !status.freshnessStatus;
   const hasOverlayGap = Boolean(overlay);
+  const hasQuoteProblems = counts.needsReview > 0 || hasOverlayGap;
+  const hasHistoryProblems = status.freshnessStatus !== "fresh" || counts.historyNeedsReview > 0;
   const hasProblems = !dashboardAvailable
     || missingFreshness
-    || status.freshnessStatus !== "fresh"
-    || counts.needsReview > 0
-    || hasOverlayGap;
+    || hasQuoteProblems
+    || hasHistoryProblems;
 
   if (!hasProblems) return null;
 
+  const hasDangerQuoteProblem = counts.stale > 0 || counts.unavailable > 0;
   const tone: Exclude<FreshnessTone, "ok"> = !dashboardAvailable
     || missingFreshness
-    || status.freshnessStatus === "stale"
-    || Boolean(criticalTickers)
-    || counts.stale > 0
-    || counts.unavailable > 0
+    || hasDangerQuoteProblem
     ? "danger"
     : "warning";
 
   const details = [
-    counts.needsReview > 0 ? `${counts.needsReview} rows need review` : null,
-    counts.stale > 0 ? `${counts.stale} stale` : null,
-    counts.unavailable > 0 ? `${counts.unavailable} unavailable` : null,
-    counts.unverified > 0 ? `${counts.unverified} unverified` : null,
+    counts.needsReview > 0 ? `${counts.needsReview} live quote rows need review` : null,
+    counts.stale > 0 ? `${counts.stale} live quote stale` : null,
+    counts.unavailable > 0 ? `${counts.unavailable} live quote unavailable` : null,
+    counts.unverified > 0 ? `${counts.unverified} quote unverified` : null,
+    counts.historyNeedsReview > 0 ? `${counts.historyNeedsReview} history rows need review` : null,
+    counts.historyStale > 0 ? `${counts.historyStale} history stale` : null,
+    counts.historyUnavailable > 0 ? `${counts.historyUnavailable} history unavailable` : null,
     coverage,
-    criticalTickers ? `Critical stale symbols: ${criticalTickers}` : null,
+    criticalTickers ? `Critical historical symbols: ${criticalTickers}` : null,
     overlay,
   ].filter((detail): detail is string => Boolean(detail));
 
@@ -175,22 +195,24 @@ export function deriveOverviewFreshnessSummary({
     ? "Overview data unavailable"
     : missingFreshness
       ? "Overview freshness unknown"
-      : status.freshnessStatus === "stale" || Boolean(criticalTickers) || counts.stale > 0 || counts.unavailable > 0
-        ? "Stale overview data"
-        : status.freshnessStatus === "partial"
-          ? "Partial overview freshness"
-          : counts.unverified > 0
-            ? "Unverified overview rows"
-            : "Partial quote freshness";
+      : hasDangerQuoteProblem
+        ? "Live quote freshness incomplete"
+        : status.freshnessStatus === "stale" || counts.historyStale > 0 || counts.historyUnavailable > 0
+          ? "Historical overview data stale"
+          : status.freshnessStatus === "partial" || counts.historyNeedsReview > 0
+            ? "Historical overview data partial"
+            : counts.unverified > 0
+              ? "Unverified overview quote rows"
+              : "Partial live quote coverage";
 
   const message = status.freshnessWarning
     ?? (!dashboardAvailable
       ? "Overview market data could not be loaded. Refresh before relying on commentary or tables."
       : missingFreshness
         ? "Freshness diagnostics are missing for the displayed Overview data."
-        : status.freshnessStatus === "partial"
-          ? "Some Overview rows are not current. Use the quote audit before acting on this dashboard."
-          : "Quote freshness is incomplete. Use the quote audit before acting on this dashboard.");
+        : hasQuoteProblems
+          ? "Live quote snapshots are incomplete. Use the quote audit before acting on this dashboard."
+          : "Live quotes are current, but stored daily bars are lagging for historical metrics.");
 
   return {
     tone,

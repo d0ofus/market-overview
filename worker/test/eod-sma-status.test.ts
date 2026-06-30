@@ -197,9 +197,12 @@ describe("loadSnapshot SMA status pilot", () => {
     expect(ibitRow?.above20Sma).toBe(false);
     expect(ibitRow?.above50Sma).toBe(false);
     expect(ibitRow?.above200Sma).toBe(false);
-    expect(bitoRow?.quoteFreshnessStatus).toBe("fresh");
-    expect(ibitRow?.quoteFreshnessStatus).toBe("stale");
+    expect(bitoRow?.quoteFreshnessStatus).toBe("unavailable");
+    expect(bitoRow?.barFreshnessStatus).toBe("fresh");
+    expect(ibitRow?.quoteFreshnessStatus).toBe("unavailable");
+    expect(ibitRow?.barFreshnessStatus).toBe("stale");
     expect(missingRow?.quoteFreshnessStatus).toBe("unavailable");
+    expect(missingRow?.barFreshnessStatus).toBe("unavailable");
     expect(missingRow?.barDate).toBeNull();
   });
 });
