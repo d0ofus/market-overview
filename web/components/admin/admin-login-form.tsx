@@ -16,6 +16,7 @@ type Props = {
 
 function defaultRedirectPath(pathname: string | null): string {
   if (pathname === "/research-lab") return pathname;
+  if (pathname === "/options") return pathname;
   if (pathname === "/admin" || pathname?.startsWith("/admin/")) return pathname;
   return "/admin";
 }

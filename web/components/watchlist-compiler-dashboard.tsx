@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Loader2, RefreshCw } from "lucide-react";
+import { BadgeDollarSign, Copy, Loader2, RefreshCw } from "lucide-react";
 import {
   apiUrl,
   compileAdminWatchlistCompilerSet,
@@ -355,6 +355,9 @@ export function WatchlistCompilerDashboard() {
   const exportDate = localDateSuffix();
   const exportCsvUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "csv", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
   const exportTxtUrl = selectedSetId ? getWatchlistCompilerExportUrl(selectedSetId, "txt", viewMode, { runId: selectedRunId, dateSuffix: exportDate }) : null;
+  const optionsUrl = selectedSetId
+    ? `/options?setId=${encodeURIComponent(selectedSetId)}${selectedRunId ? `&runId=${encodeURIComponent(selectedRunId)}` : ""}`
+    : "/options";
 
   const toggleTickerSelection = (ticker: string) => {
     setSelectedTickers((current) => current.includes(ticker) ? current.filter((value) => value !== ticker) : [...current, ticker]);
@@ -491,6 +494,10 @@ export function WatchlistCompilerDashboard() {
               </button>
               {exportCsvUrl ? <a className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60" href={exportCsvUrl} target="_blank" rel="noreferrer">Export CSV</a> : null}
               {exportTxtUrl ? <a className="rounded border border-borderSoft px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60" href={exportTxtUrl} target="_blank" rel="noreferrer">Export TXT</a> : null}
+              <a className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-sm font-medium ${selectedSetId ? "border-accent/40 bg-accent/10 text-accent hover:bg-accent/15" : "pointer-events-none border-borderSoft text-slate-500"}`} href={optionsUrl} aria-disabled={!selectedSetId}>
+                <BadgeDollarSign className="h-4 w-4" />
+                Open Options
+              </a>
               <button className="inline-flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50 hover:bg-accent/15" disabled={!selectedSetId || uniqueVisibleTickers.length === 0 || preparingReview} onClick={() => void prepareWatchlistReview()} type="button">
                 {preparingReview ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 {preparingReview ? "Preparing..." : "Prepare Watchlist Review"}

@@ -279,6 +279,16 @@ export const CENTRAL_CRON_JOB_DEFINITIONS: CentralCronJobDefinition[] = [
     fields: [ENABLED_FIELD, INTERVAL_FIELD, { ...RETENTION_FIELD, max: 30 }],
     cadence: (values) => `${minutesLabel(values.intervalMinutes)}; keep ${values.retentionDays} day${Number(values.retentionDays) === 1 ? "" : "s"}`,
   },
+  {
+    key: "options-housekeeping",
+    label: "Options Cleanup",
+    category: "Queue/Maintenance",
+    description: "Prunes short-retention IBKR options chain and candidate snapshots.",
+    kind: "interval",
+    defaults: { enabled: true, intervalMinutes: 360, retentionDays: 7 },
+    fields: [ENABLED_FIELD, INTERVAL_FIELD, { ...RETENTION_FIELD, max: 30 }],
+    cadence: (values) => `${minutesLabel(values.intervalMinutes)}; keep ${values.retentionDays} days`,
+  },
 ];
 
 export function centralCronDefinitionByKey(key: string): CentralCronJobDefinition | null {

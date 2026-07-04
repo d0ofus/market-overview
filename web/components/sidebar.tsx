@@ -7,6 +7,7 @@ import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
+  BadgeDollarSign,
   Bell,
   CalendarClock,
   ChartCandlestick,
@@ -42,6 +43,7 @@ const links: Array<{ href: string; label: string; Icon: LucideIcon }> = [
   { href: "/pattern-scanner", label: "Pattern Scanner", Icon: ChartCandlestick },
   { href: "/earnings", label: "Earnings", Icon: CalendarClock },
   { href: "/watchlist-compiler", label: "Watchlist Compiler", Icon: ListChecks },
+  { href: "/options", label: "Options", Icon: BadgeDollarSign },
   { href: "/watchlist-review", label: "Watchlist Review", Icon: ClipboardCheck },
   { href: "/research-lab", label: "Research Lab", Icon: FlaskConical },
   { href: "/gappers", label: "Gappers", Icon: TrendingUp },

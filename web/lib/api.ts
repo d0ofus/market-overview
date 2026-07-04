@@ -4058,6 +4058,227 @@ export function compileAdminWatchlistCompilerSet(id: string) {
   );
 }
 
+export type OptionsStrategy = "long_call" | "long_put" | "call_debit_spread" | "put_debit_spread";
+export type OptionSpreadBasis = "historical_bid_ask" | "partial_historical_bid_ask" | "live_quote" | "unavailable";
+
+export type OptionsBridgeHealth = {
+  ok: boolean;
+  reachable: boolean;
+  configured: boolean;
+  enabled: boolean;
+  authenticated: boolean | null;
+  bridgeRunning: boolean | null;
+  ibGatewayRunning: boolean | null;
+  marketDataEntitled: boolean | null;
+  quoteMode: string | null;
+  latestTickAt: string | null;
+  historicalPacing: string | null;
+  lastSuccessfulProbeAt: string | null;
+  lastError: string | null;
+  version: string | null;
+  checkedAt: string;
+};
+
+export type OptionsMarketSession = {
+  nowIso: string;
+  nyDate: string;
+  nyTime: string;
+  sessionDate: string;
+  latestCompletedSessionDate: string;
+  status: "pre_market" | "regular" | "after_hours" | "closed";
+  label: string;
+  dataBasis: "intraday" | "closing" | "pre_market" | "closed_market";
+  isTradingDay: boolean;
+  closedReason: string | null;
+};
+
+export type OptionChainSnapshot = {
+  id: string;
+  requestId: string;
+  watchlistSetId: string | null;
+  watchlistSetName: string | null;
+  watchlistRunId: string | null;
+  ticker: string;
+  provider: string;
+  bridgeStatus: string;
+  underlyingPrice: number | null;
+  underlyingQuoteTime: string | null;
+  optionsAvailable: boolean;
+  ivRank52w: number | null;
+  ivPercentile52w: number | null;
+  dataMode: string | null;
+  latestRthSessionDate: string | null;
+  contractCount: number;
+  candidateCount: number;
+  warnings: string[];
+  rawSummary: Record<string, unknown>;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type OptionCandidateLeg = {
+  action: "buy" | "sell";
+  contractKey: string;
+  ibkrConId: number | null;
+  localSymbol: string | null;
+  expiry: string | null;
+  strike: number | null;
+  right: "call" | "put" | null;
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  delta: number | null;
+  rthMedianSpreadPct: number | null;
+};
+
+export type OptionCandidateRow = {
+  id: string;
+  snapshotId: string;
+  requestId: string;
+  watchlistSetId: string | null;
+  watchlistRunId: string | null;
+  ticker: string;
+  strategy: OptionsStrategy;
+  contractKey: string;
+  ibkrConId: number | null;
+  localSymbol: string | null;
+  expiry: string | null;
+  strike: number | null;
+  right: "call" | "put" | null;
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  last: number | null;
+  volume: number | null;
+  openInterest: number | null;
+  iv: number | null;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  quoteTime: string | null;
+  dataMode: string | null;
+  rthSessionDate: string | null;
+  spreadBasis: OptionSpreadBasis;
+  rthLastBid: number | null;
+  rthLastAsk: number | null;
+  rthMedianSpreadPct: number | null;
+  rthP75SpreadPct: number | null;
+  rthMaxSpreadPct: number | null;
+  rthSampleCount: number | null;
+  rthFirstSampleTime: string | null;
+  rthLastSampleTime: string | null;
+  scoreLiquidity: number | null;
+  scoreSpread: number | null;
+  scoreIv: number | null;
+  scoreStrategy: number | null;
+  score: number | null;
+  debit: number | null;
+  width: number | null;
+  breakeven: number | null;
+  maxLoss: number | null;
+  legs: OptionCandidateLeg[];
+  scoreInputs: Record<string, unknown>;
+  warnings: string[];
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type OptionsStatusResponse = {
+  ok: boolean;
+  bridge: OptionsBridgeHealth;
+  marketSession: OptionsMarketSession;
+  latestSnapshot: OptionChainSnapshot | null;
+  latestCandidate: OptionCandidateRow | null;
+  troubleshooting: Array<{ key: string; label: string; ok: boolean; detail: string | null }>;
+  warnings: string[];
+};
+
+export type OptionsRefreshResponse = {
+  ok: boolean;
+  requestId: string;
+  set: Pick<WatchlistCompilerSetDetail, "id" | "name" | "slug"> | null;
+  runId: string | null;
+  requestedTickers: number;
+  refreshedTickers: number;
+  snapshots: OptionChainSnapshot[];
+  candidates: OptionCandidateRow[];
+  warnings: string[];
+};
+
+export type OptionsWatchlistResponse = {
+  ok: boolean;
+  set: Pick<WatchlistCompilerSetDetail, "id" | "name" | "slug"> | null;
+  runId: string | null;
+  rows: Array<{
+    ticker: string;
+    companyName: string | null;
+    snapshot: OptionChainSnapshot | null;
+    candidateCount: number;
+    topScore: number | null;
+    warnings: string[];
+  }>;
+  warnings: string[];
+};
+
+export type OptionsChainResponse = {
+  ok: boolean;
+  ticker: string;
+  snapshot: OptionChainSnapshot | null;
+  rows: OptionCandidateRow[];
+  warnings: string[];
+};
+
+export type OptionsCandidatesResponse = {
+  ok: boolean;
+  rows: OptionCandidateRow[];
+  grouped: Record<OptionsStrategy, OptionCandidateRow[]>;
+  warnings: string[];
+};
+
+export function getOptionsStatus() {
+  return adminFetch<OptionsStatusResponse>("/api/admin/options/status");
+}
+
+export function getOptionsWatchlist(params?: { setId?: string | null; runId?: string | null }) {
+  return adminFetch<OptionsWatchlistResponse>(appendQuery("/api/admin/options/watchlist", {
+    setId: params?.setId ?? undefined,
+    runId: params?.runId ?? undefined,
+  }));
+}
+
+export function getOptionsCandidates(params?: { setId?: string | null; runId?: string | null; strategy?: OptionsStrategy | "all" | null; limit?: number }) {
+  return adminFetch<OptionsCandidatesResponse>(appendQuery("/api/admin/options/candidates", {
+    setId: params?.setId ?? undefined,
+    runId: params?.runId ?? undefined,
+    strategy: params?.strategy && params.strategy !== "all" ? params.strategy : undefined,
+    limit: params?.limit,
+  }));
+}
+
+export function getOptionsChain(ticker: string, params?: { setId?: string | null; runId?: string | null }) {
+  return adminFetch<OptionsChainResponse>(appendQuery(`/api/admin/options/chains/${encodeURIComponent(ticker)}`, {
+    setId: params?.setId ?? undefined,
+    runId: params?.runId ?? undefined,
+  }));
+}
+
+export function refreshOptionsWatchlist(payload: {
+  setId?: string | null;
+  runId?: string | null;
+  tickers?: string[];
+  minDte?: number;
+  maxDte?: number;
+  minOpenInterest?: number;
+  minVolume?: number;
+  includeHistoricalSpreads?: boolean;
+}) {
+  return adminFetch<OptionsRefreshResponse>("/api/admin/options/refresh", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getResearchProfiles() {
   return getJson<{ rows: ResearchProfileRow[] }>("/api/research/profiles");
 }

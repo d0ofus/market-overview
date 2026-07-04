@@ -21,6 +21,7 @@ function adminRedirectPath(value: FormDataEntryValue | null): string {
   const path = value.trim();
   if (path === "/research-lab") return path;
   if (path === "/social-alerts") return path;
+  if (path === "/options" || path.startsWith("/options?")) return path;
   if (path === "/admin" || path.startsWith("/admin/")) return path;
   return "/admin";
 }

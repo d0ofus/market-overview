@@ -391,6 +391,14 @@ import {
   PerplexityFinanceCacheUnavailableError,
   upsertPerplexityFinanceCache,
 } from "./perplexity-finance-cache-service";
+import {
+  loadOptionsCandidates,
+  loadOptionsChain,
+  loadOptionsStatus,
+  loadOptionsWatchlist,
+  maybeRunOptionsHousekeeping,
+  refreshOptionsForWatchlist,
+} from "./options-service";
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
@@ -5454,6 +5462,84 @@ app.post("/api/admin/watchlist-compiler/sets/:id/compile", async (c) => {
   }
 });
 
+app.get("/api/admin/options/status", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadOptionsStatus(c.env));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load options status.";
+    console.error("options status load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/admin/options/watchlist", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadOptionsWatchlist(c.env, {
+      setId: c.req.query("setId") ?? null,
+      runId: c.req.query("runId") ?? null,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load options watchlist.";
+    console.error("options watchlist load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/admin/options/chains/:ticker", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadOptionsChain(c.env, c.req.param("ticker"), {
+      setId: c.req.query("setId") ?? null,
+      runId: c.req.query("runId") ?? null,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load options chain.";
+    console.error("options chain load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/admin/options/candidates", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    return c.json(await loadOptionsCandidates(c.env, {
+      setId: c.req.query("setId") ?? null,
+      runId: c.req.query("runId") ?? null,
+      strategy: c.req.query("strategy") ?? null,
+      limit: Number(c.req.query("limit") ?? 200),
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load options candidates.";
+    console.error("options candidates load failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/options/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const payload = await c.req.json().catch(() => ({}));
+    const result = await refreshOptionsForWatchlist(c.env, payload);
+    await upsertAudit(c.env, "default", "OPTIONS_REFRESH", {
+      requestId: result.requestId,
+      setId: result.set?.id ?? null,
+      runId: result.runId,
+      requestedTickers: result.requestedTickers,
+      refreshedTickers: result.refreshedTickers,
+      candidateCount: result.candidates.length,
+      ok: result.ok,
+      warnings: result.warnings,
+    });
+    return c.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to refresh options.";
+    console.error("options refresh failed", error);
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/research/runs", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const rows = await listResearchRuns(c.env, {
@@ -6822,6 +6908,7 @@ export default {
       await runBudgeted("scans-page-housekeeping", 4, () => maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping")));
       await runBudgeted("scanning-housekeeping", 4, () => maybeRunScanningHousekeeping(env, cron("scanning-housekeeping")));
       await runBudgeted("gappers-housekeeping", 4, () => maybeRunGappersHousekeeping(env, cron("gappers-housekeeping")));
+      await runBudgeted("options-housekeeping", 4, () => maybeRunOptionsHousekeeping(env, cron("options-housekeeping")).then(() => undefined));
     };
 
     const runCoreLane = async (): Promise<void> => {
