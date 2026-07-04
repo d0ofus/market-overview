@@ -342,7 +342,9 @@ async function sendHermesAnalysisWebhook(
       attempted: false,
       status: "not_configured",
       responseStatus: null,
-      error: url && !secret ? "Hermes watchlist analysis/apply webhook secret is not configured." : null,
+      error: url && !secret
+        ? "Hermes watchlist analysis/apply webhook secret is not configured."
+        : "Hermes watchlist analysis webhook is not configured. No review run will be created until a Hermes poller claims this dispatch or webhook configuration is added.",
     };
   }
 

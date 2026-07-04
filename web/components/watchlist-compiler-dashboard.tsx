@@ -126,7 +126,7 @@ function webhookStatusLabel(status: WatchlistReviewAnalysisWebhookStatus) {
   if (status === "sent") return "Webhook sent, poller fallback enabled";
   if (status === "failed") return "Webhook failed, poller fallback enabled";
   if (status === "already_pending") return "Already queued for Hermes";
-  return "Queued for Hermes poller";
+  return "Hermes webhook not configured";
 }
 
 function enabledFactorCount(config: WatchlistFactorConfig | null | undefined) {
@@ -383,9 +383,12 @@ export function WatchlistCompilerDashboard() {
         enqueueHermesAnalysis: true,
       });
       setReviewPrep(prep);
-      setMessage(prep.analysisDispatch
-        ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} and queued Hermes analysis.`
-        : `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
+      const dispatch = prep.analysisDispatch;
+      setMessage(dispatch?.webhookStatus === "not_configured"
+        ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"}, but Hermes analysis is not configured. No review run will appear until a Hermes poller claims the dispatch or a webhook is configured.`
+        : dispatch
+          ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} and queued Hermes analysis.`
+          : `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to prepare watchlist review.");
     } finally {

@@ -168,6 +168,7 @@ describe("watchlist review analysis dispatch service", () => {
       prepId: prep.prepId,
       status: "queued",
       webhookStatus: "not_configured",
+      error: "Hermes watchlist analysis webhook is not configured. No review run will be created until a Hermes poller claims this dispatch or webhook configuration is added.",
     });
     expect(result.dispatch.payloadPreview).toMatchObject({
       type: "watchlist_review_analysis",
