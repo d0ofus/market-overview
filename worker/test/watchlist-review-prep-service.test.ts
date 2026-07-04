@@ -223,6 +223,25 @@ describe("watchlist review prep service", () => {
     expect(prep.warnings.join(" ")).toContain("Skipped automatic OHLCV refresh for 3 stale or missing symbols");
   });
 
+  it("uses the latest completed market session on observed US market holidays", async () => {
+    const { env } = createPrepEnv({
+      symbols: [{ ticker: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", sector: "Technology", industry: "Consumer Electronics" }],
+      bars: [{ ticker: "AAPL", date: "2026-07-02", o: 100, h: 105, l: 99, c: 104, volume: 2000 }],
+    });
+
+    const prep = await createWatchlistReviewPrep(env, {
+      source: "watchlist-compiler",
+      symbols: ["AAPL"],
+      lookbackBars: 60,
+      refreshIfStale: false,
+      now: new Date("2026-07-03T15:00:00.000Z"),
+    });
+
+    expect(prep.expectedAsOfDate).toBe("2026-07-02");
+    expect(prep.status).toBe("ready");
+    expect(prep.coverage).toMatchObject({ complete: 1, stale: 0, missing: 0, coveragePct: 100 });
+  });
+
   it("returns OHLCV bars rather than close-only data", async () => {
     const { env } = createPrepEnv({
       symbols: [{ ticker: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", sector: "Technology", industry: "Consumer Electronics" }],

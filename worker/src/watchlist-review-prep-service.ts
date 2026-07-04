@@ -1,6 +1,6 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getUsMarketSessionContext } from "./market-calendar";
 import { getProvider } from "./provider";
-import { latestUsSessionAsOfDate } from "./refresh-timing";
 import type { Env } from "./types";
 
 export type WatchlistReviewPrepStatus = "ready" | "ready_with_warnings" | "blocked";
@@ -381,7 +381,7 @@ export async function createWatchlistReviewPrep(
   const symbols = normalizeSymbols(input.symbols);
   if (symbols.length === 0) throw new Error("Provide at least one valid symbol for watchlist review prep.");
   const lookbackBars = Math.max(60, Math.min(520, Math.trunc(input.lookbackBars || 260)));
-  const expectedAsOfDate = latestUsSessionAsOfDate(input.now ?? new Date());
+  const expectedAsOfDate = getUsMarketSessionContext(input.now ?? new Date()).latestCompletedSessionDate;
   const startDate = startDateForLookback(expectedAsOfDate, lookbackBars);
   const provider = providerMetadata(env);
 

@@ -30,6 +30,12 @@ describe("US market calendar", () => {
     expect(latestUsMarketSessionAsOfDate(new Date("2026-06-19T22:00:00Z"))).toBe("2026-06-18");
   });
 
+  it("uses the previous trading day for observed Independence Day", () => {
+    expect(usMarketHolidayName("2026-07-03")).toBe("Independence Day");
+    expect(isUsMarketTradingDay("2026-07-03")).toBe(false);
+    expect(latestUsMarketSessionAsOfDate(new Date("2026-07-03T22:00:00Z"))).toBe("2026-07-02");
+  });
+
   it("labels intraday and post-close sessions in New York time", () => {
     const intraday = getUsMarketSessionContext(new Date("2026-05-26T15:00:00Z"));
     expect(intraday.status).toBe("regular");
