@@ -8,6 +8,7 @@ import {
   patternProfilePatchSchema,
   scanPresetPatchSchema,
   scanPresetRuleSchema,
+  watchlistReviewPrepCreateSchema,
 } from "../src/validation";
 
 describe("validation", () => {
@@ -117,6 +118,15 @@ describe("validation", () => {
     expect(parsed.rsBackgroundBatchSize).toBe(40);
     expect(parsed.rsBackgroundMaxBatchesPerTick).toBe(12);
     expect(parsed.postCloseBarsOffsetMinutes).toBe(60);
+  });
+
+  it("defaults watchlist review prep to packaged bars without synchronous refresh", () => {
+    const parsed = watchlistReviewPrepCreateSchema.parse({
+      symbols: ["aapl"],
+    });
+
+    expect(parsed.refreshIfStale).toBe(false);
+    expect(parsed.symbols).toEqual(["AAPL"]);
   });
 
   it("validates pattern profile scanner settings", () => {

@@ -35,9 +35,11 @@ function createPrepEnv(input: { bars?: Bar[]; symbols?: SymbolRow[] } = {}) {
           return {
             async all() {
               if (sql.includes("MAX(date) as latestDate")) {
-                const requested = new Set(args.map((arg) => String(arg).toUpperCase()));
+                const endDate = String(args.at(-1));
+                const startDate = String(args.at(-2));
+                const requested = new Set(args.slice(0, -2).map((arg) => String(arg).toUpperCase()));
                 const grouped = new Map<string, Bar[]>();
-                for (const bar of bars.filter((bar) => requested.has(bar.ticker))) {
+                for (const bar of bars.filter((bar) => requested.has(bar.ticker) && bar.date >= startDate && bar.date <= endDate)) {
                   grouped.set(bar.ticker, [...(grouped.get(bar.ticker) ?? []), bar]);
                 }
                 return {
@@ -106,6 +108,7 @@ function createPrepEnv(input: { bars?: Bar[]; symbols?: SymbolRow[] } = {}) {
       ALPACA_API_KEY: "do-not-leak-key",
       ALPACA_API_SECRET: "do-not-leak-secret",
     } as any,
+    bars,
     preps,
   };
 }
@@ -136,7 +139,6 @@ describe("watchlist review prep service", () => {
       watchlistRunId: "compile-run-1",
       symbols: ["AAPL", "aapl", "MSFT", "NONE"],
       lookbackBars: 260,
-      refreshIfStale: false,
       now: new Date("2026-06-13T12:00:00.000Z"),
     });
 
@@ -155,6 +157,70 @@ describe("watchlist review prep service", () => {
 
     const loaded = await loadWatchlistReviewPrep(env, prep.prepId);
     expect(loaded?.prepId).toBe(prep.prepId);
+  });
+
+  it("refreshes a small stale subset when explicitly requested", async () => {
+    const { env, bars } = createPrepEnv({
+      symbols: [{ ticker: "MSFT", name: "Microsoft Corporation", exchange: "NASDAQ", sector: "Technology", industry: "Software" }],
+      bars: [{ ticker: "MSFT", date: "2026-06-11", o: 50, h: 55, l: 49, c: 54, volume: 1500 }],
+    });
+    const refreshSpy = vi.spyOn(dailyBarsModule, "refreshDailyBarsIncremental").mockImplementation(async (_env, input: any) => {
+      for (const ticker of input.tickers) {
+        bars.push({ ticker, date: input.endDate, o: 55, h: 58, l: 54, c: 57, volume: 2500 });
+      }
+      return {
+        requestedTickers: input.tickers.length,
+        fetchedRows: input.tickers.length,
+        writtenRows: input.tickers.length,
+        skippedCurrentTickers: 0,
+        currentDateTickers: input.tickers.length,
+        missingCurrentDateTickers: 0,
+        currentDateCoveragePct: 100,
+      };
+    });
+
+    const prep = await createWatchlistReviewPrep(env, {
+      source: "watchlist-compiler",
+      symbols: ["MSFT"],
+      lookbackBars: 60,
+      refreshIfStale: true,
+      now: new Date("2026-06-13T12:00:00.000Z"),
+    });
+
+    expect(refreshSpy).toHaveBeenCalledWith(env, expect.objectContaining({
+      tickers: ["MSFT"],
+      endDate: "2026-06-12",
+    }));
+    expect(prep.status).toBe("ready");
+    expect(prep.coverage).toMatchObject({ complete: 1, stale: 0, missing: 0, coveragePct: 100 });
+    expect(prep.timing.refreshedSymbols).toBe(1);
+  });
+
+  it("skips explicit refresh when the stale subset exceeds the sync limit", async () => {
+    const refreshSpy = vi.spyOn(dailyBarsModule, "refreshDailyBarsIncremental").mockResolvedValue({
+      requestedTickers: 0,
+      fetchedRows: 0,
+      writtenRows: 0,
+      skippedCurrentTickers: 0,
+      currentDateTickers: 0,
+      missingCurrentDateTickers: 0,
+      currentDateCoveragePct: 0,
+    });
+    const { env } = createPrepEnv();
+    env.WATCHLIST_REVIEW_PREP_SYNC_REFRESH_LIMIT = "2";
+
+    const prep = await createWatchlistReviewPrep(env, {
+      source: "watchlist-compiler",
+      symbols: ["AAA", "BBB", "CCC"],
+      lookbackBars: 60,
+      refreshIfStale: true,
+      now: new Date("2026-06-13T12:00:00.000Z"),
+    });
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(prep.status).toBe("blocked");
+    expect(prep.timing.refreshedSymbols).toBe(0);
+    expect(prep.warnings.join(" ")).toContain("Skipped automatic OHLCV refresh for 3 stale or missing symbols");
   });
 
   it("returns OHLCV bars rather than close-only data", async () => {

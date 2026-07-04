@@ -378,7 +378,7 @@ export function WatchlistCompilerDashboard() {
         watchlistRunId: selectedRunId,
         symbols,
         lookbackBars: 260,
-        refreshIfStale: true,
+        refreshIfStale: false,
         providerPreference: "app-default",
         enqueueHermesAnalysis: true,
       });

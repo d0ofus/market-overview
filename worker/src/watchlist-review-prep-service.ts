@@ -129,7 +129,7 @@ export type CreateWatchlistReviewPrepInput = {
   watchlistRunId?: string | null;
   symbols: string[];
   lookbackBars: number;
-  refreshIfStale: boolean;
+  refreshIfStale?: boolean;
   now?: Date;
 };
 
@@ -159,6 +159,8 @@ const PREP_SELECT = `
     updated_at as updatedAt
   FROM watchlist_review_preps
 `;
+
+const DEFAULT_SYNC_REFRESH_LIMIT = 25;
 
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
@@ -227,6 +229,11 @@ function numberOr(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function syncRefreshLimit(env: Env): number {
+  const parsed = Number(env.WATCHLIST_REVIEW_PREP_SYNC_REFRESH_LIMIT ?? DEFAULT_SYNC_REFRESH_LIMIT);
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : DEFAULT_SYNC_REFRESH_LIMIT;
+}
+
 async function loadSymbolMetadata(env: Env, tickers: string[]): Promise<Map<string, SymbolMetaRow>> {
   const meta = new Map<string, SymbolMetaRow>();
   for (const group of chunk(tickers)) {
@@ -249,16 +256,23 @@ async function loadSymbolMetadata(env: Env, tickers: string[]): Promise<Map<stri
   return meta;
 }
 
-async function loadLatestBars(env: Env, tickers: string[]): Promise<Map<string, { latestDate: string | null; barCount: number }>> {
+async function loadLatestBars(
+  env: Env,
+  tickers: string[],
+  startDate: string,
+  expectedAsOfDate: string,
+): Promise<Map<string, { latestDate: string | null; barCount: number }>> {
   const latest = new Map<string, { latestDate: string | null; barCount: number }>();
   for (const group of chunk(tickers)) {
     const placeholders = group.map(() => "?").join(",");
     const rows = await env.DB.prepare(
-      `SELECT UPPER(ticker) as ticker, MAX(date) as latestDate, COUNT(*) as barCount
+      `SELECT ticker, MAX(date) as latestDate, COUNT(*) as barCount
        FROM daily_bars
-       WHERE UPPER(ticker) IN (${placeholders})
-       GROUP BY UPPER(ticker)`,
-    ).bind(...group).all<LatestBarRow>();
+       WHERE ticker IN (${placeholders})
+         AND date >= ?
+         AND date <= ?
+       GROUP BY ticker`,
+    ).bind(...group, startDate, expectedAsOfDate).all<LatestBarRow>();
     for (const row of rows.results ?? []) {
       latest.set(row.ticker.toUpperCase(), {
         latestDate: row.latestDate ?? null,
@@ -373,18 +387,21 @@ export async function createWatchlistReviewPrep(
 
   const dbStartedAt = Date.now();
   let [latest, meta] = await Promise.all([
-    loadLatestBars(env, symbols),
+    loadLatestBars(env, symbols, startDate, expectedAsOfDate),
     loadSymbolMetadata(env, symbols),
   ]);
   let dbReadMs = Date.now() - dbStartedAt;
   let refreshMs = 0;
+  let refreshedSymbols = 0;
+  let skippedRefreshWarning: string | null = null;
+  const refreshRequested = input.refreshIfStale === true;
 
   const toRefresh = symbols.filter((ticker) => {
     const row = latest.get(ticker);
     return !row?.latestDate || row.latestDate < expectedAsOfDate;
   });
 
-  if (input.refreshIfStale && toRefresh.length > 0) {
+  if (refreshRequested && toRefresh.length > 0 && toRefresh.length <= syncRefreshLimit(env)) {
     const refreshStartedAt = Date.now();
     try {
       await refreshDailyBarsIncremental(env, {
@@ -395,18 +412,22 @@ export async function createWatchlistReviewPrep(
         providerBatchSize: 80,
         continueOnError: true,
       });
+      refreshedSymbols = toRefresh.length;
     } finally {
       refreshMs = Date.now() - refreshStartedAt;
     }
     const reloadStartedAt = Date.now();
-    latest = await loadLatestBars(env, symbols);
+    latest = await loadLatestBars(env, symbols, startDate, expectedAsOfDate);
     dbReadMs += Date.now() - reloadStartedAt;
+  } else if (refreshRequested && toRefresh.length > syncRefreshLimit(env)) {
+    skippedRefreshWarning = `Skipped automatic OHLCV refresh for ${toRefresh.length} stale or missing symbols because it exceeds the synchronous refresh limit of ${syncRefreshLimit(env)}. Use the scheduled post-close bar refresh or select a smaller subset.`;
   }
 
   const symbolRows = buildSymbols(symbols, meta, latest, expectedAsOfDate);
   const coverage = coverageFor(symbolRows);
   const status = statusFor(symbolRows, coverage);
   const warnings = warningsFor(status, coverage);
+  if (skippedRefreshWarning) warnings.push(skippedRefreshWarning);
   const now = new Date().toISOString();
   const prepId = `watchlist-review-prep-${expectedAsOfDate}-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -441,8 +462,8 @@ export async function createWatchlistReviewPrep(
     dbReadMs,
     totalMs: Date.now() - startedAt,
     requestedSymbols: symbolRows.length,
-    refreshedSymbols: input.refreshIfStale ? toRefresh.length : 0,
-    skippedFreshSymbols: Math.max(0, symbolRows.length - (input.refreshIfStale ? toRefresh.length : 0)),
+    refreshedSymbols,
+    skippedFreshSymbols: Math.max(0, symbolRows.length - refreshedSymbols),
   });
 }
 
@@ -462,12 +483,12 @@ async function loadOhlcvBars(
   for (const group of chunk(tickers)) {
     const placeholders = group.map(() => "?").join(",");
     const rows = await env.DB.prepare(
-      `SELECT UPPER(ticker) as ticker, date, o, h, l, c, volume
+      `SELECT ticker, date, o, h, l, c, volume
        FROM daily_bars
-       WHERE UPPER(ticker) IN (${placeholders})
+       WHERE ticker IN (${placeholders})
          AND date >= ?
          AND date <= ?
-       ORDER BY UPPER(ticker) ASC, date ASC`,
+       ORDER BY ticker ASC, date ASC`,
     ).bind(...group, startDate, expectedAsOfDate).all<OhlcvRow>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();

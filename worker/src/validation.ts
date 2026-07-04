@@ -313,7 +313,7 @@ export const watchlistReviewPrepCreateSchema = z.object({
   watchlistRunId: z.string().trim().min(1).max(160).nullable().optional(),
   symbols: z.array(watchlistReviewPrepSymbolSchema).min(1).max(1000),
   lookbackBars: z.number().int().min(60).max(520).optional().default(260),
-  refreshIfStale: z.boolean().optional().default(true),
+  refreshIfStale: z.boolean().optional().default(false),
   providerPreference: z.literal("app-default").optional(),
   enqueueHermesAnalysis: z.boolean().optional().default(false),
 });
