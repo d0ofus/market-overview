@@ -3,5 +3,11 @@ param(
 )
 
 $buffer = [byte[]]::new($Bytes)
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($buffer)
-[Convert]::ToHexString($buffer).ToLowerInvariant()
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+  $rng.GetBytes($buffer)
+} finally {
+  $rng.Dispose()
+}
+
+($buffer | ForEach-Object { $_.ToString("x2") }) -join ""
