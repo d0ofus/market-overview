@@ -241,8 +241,8 @@ class IbkrOptionsClient:
             contracts = []
             for expiry in expiries:
                 for strike in strikes:
-                    contracts.append(Option(ticker, expiry.replace("-", ""), strike, "C", "SMART", currency="USD"))
-                    contracts.append(Option(ticker, expiry.replace("-", ""), strike, "P", "SMART", currency="USD"))
+                    contracts.append(self._option_contract(Option, ticker, expiry, strike, "C", selected_params))
+                    contracts.append(self._option_contract(Option, ticker, expiry, strike, "P", selected_params))
                     if len(contracts) >= max_per_ticker:
                         break
                 if len(contracts) >= max_per_ticker:
@@ -251,7 +251,10 @@ class IbkrOptionsClient:
             qualified_options = ib.qualifyContracts(*contracts) if contracts else []
             rows = self._snapshot_options(ib, qualified_options[:max_per_ticker])
             if not rows and contracts:
-                warnings.append("No option quote rows were returned before the snapshot timeout.")
+                warnings.append(
+                    f"IBKR qualified 0/{len(contracts)} sampled option contracts. "
+                    "Check option permissions, trading class, or increase maxContractsPerTicker.",
+                )
             results.append({
                 "ticker": ticker,
                 "provider": "ibkr_bridge",
@@ -371,11 +374,24 @@ class IbkrOptionsClient:
     def _filter_strikes(self, strikes: set[float], underlying_price: float | None) -> list[float]:
         clean = sorted(float(strike) for strike in strikes if as_float(strike) is not None)
         if underlying_price is None or underlying_price <= 0:
-            return clean
+            indexed = list(enumerate(clean))
+            midpoint = (len(clean) - 1) / 2
+            return [strike for index, strike in sorted(indexed, key=lambda row: (abs(row[0] - midpoint), row[1]))]
         low = underlying_price * (1 - self.config.chain_moneyness_pct)
         high = underlying_price * (1 + self.config.chain_moneyness_pct)
         filtered = [strike for strike in clean if low <= strike <= high]
-        return filtered or clean
+        ordered = sorted(filtered or clean, key=lambda strike: (abs(strike - underlying_price), strike))
+        return ordered
+
+    def _option_contract(self, option_cls: Any, ticker: str, expiry: str, strike: float, right: str, params: Any) -> Any:
+        kwargs = {
+            "currency": "USD",
+            "tradingClass": getattr(params, "tradingClass", "") or "",
+        }
+        multiplier = getattr(params, "multiplier", "") or ""
+        if multiplier:
+            kwargs["multiplier"] = str(multiplier)
+        return option_cls(ticker, expiry.replace("-", ""), strike, right, "SMART", **kwargs)
 
     def _snapshot_options(self, ib: Any, contracts: list[Any]) -> list[dict[str, Any]]:
         if not contracts:
