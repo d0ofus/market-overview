@@ -211,74 +211,94 @@ class IbkrOptionsClient:
             ticker = normalize_ticker(raw_ticker)
             if not ticker:
                 continue
+            api_errors, detach_error_capture = self._attach_ib_error_capture(ib)
             warnings: list[str] = []
-            stock = Stock(ticker, "SMART", "USD")
-            qualified_stock = ib.qualifyContracts(stock)
-            if not qualified_stock:
-                results.append({
-                    "ticker": ticker,
-                    "status": "no_underlying",
-                    "optionsAvailable": False,
-                    "warnings": ["IBKR did not qualify the stock contract."],
-                    "contracts": [],
-                })
-                continue
-            stock = qualified_stock[0]
-            underlying_price, underlying_time, underlying_warning = self._snapshot_underlying(ib, stock)
-            if underlying_warning:
-                warnings.append(underlying_warning)
-            params = ib.reqSecDefOptParams(ticker, "", stock.secType, stock.conId)
-            selected_params = self._select_option_params(params)
-            if selected_params is None:
-                option_warnings = ["IBKR returned no option security definition parameters."]
+            try:
+                stock = Stock(ticker, "SMART", "USD")
+                qualified_stock = ib.qualifyContracts(stock)
+                if not qualified_stock:
+                    results.append({
+                        "ticker": ticker,
+                        "status": "no_underlying",
+                        "optionsAvailable": False,
+                        "warnings": [
+                            "IBKR did not qualify the stock contract.",
+                            *self._format_ib_api_warnings(api_errors),
+                        ],
+                        "contracts": [],
+                    })
+                    continue
+                stock = qualified_stock[0]
+                underlying_price, underlying_time, underlying_warning = self._snapshot_underlying(ib, stock)
                 if underlying_warning:
-                    option_warnings.insert(0, underlying_warning)
-                results.append({
-                    "ticker": ticker,
-                    "status": "no_options",
-                    "underlyingPrice": underlying_price,
-                    "underlyingQuoteTime": underlying_time,
-                    "optionsAvailable": False,
-                    "warnings": option_warnings,
-                    "contracts": [],
-                })
-                continue
+                    warnings.append(underlying_warning)
+                params = ib.reqSecDefOptParams(ticker, "", stock.secType, stock.conId)
+                selected_params = self._select_option_params(params)
+                if selected_params is None:
+                    option_warnings = ["IBKR returned no option security definition parameters."]
+                    if underlying_warning:
+                        option_warnings.insert(0, underlying_warning)
+                    option_warnings.extend(self._format_ib_api_warnings(api_errors))
+                    results.append({
+                        "ticker": ticker,
+                        "status": "no_options",
+                        "underlyingPrice": underlying_price,
+                        "underlyingQuoteTime": underlying_time,
+                        "optionsAvailable": False,
+                        "warnings": option_warnings,
+                        "contracts": [],
+                    })
+                    continue
 
-            expiries = self._filter_expiries(selected_params.expirations, request.minDte, request.maxDte)
-            strikes = self._filter_strikes(selected_params.strikes, underlying_price)
-            contracts = []
-            for expiry in expiries:
-                for strike in strikes:
-                    contracts.append(self._option_contract(Option, ticker, expiry, strike, "C", selected_params))
-                    contracts.append(self._option_contract(Option, ticker, expiry, strike, "P", selected_params))
+                expiries = self._filter_expiries(selected_params.expirations, request.minDte, request.maxDte)
+                strikes = self._filter_strikes(selected_params.strikes, underlying_price)
+                contracts = []
+                for expiry in expiries:
+                    for strike in strikes:
+                        contracts.append(self._option_contract(Option, ticker, expiry, strike, "C", selected_params))
+                        contracts.append(self._option_contract(Option, ticker, expiry, strike, "P", selected_params))
+                        if len(contracts) >= max_per_ticker:
+                            break
                     if len(contracts) >= max_per_ticker:
                         break
-                if len(contracts) >= max_per_ticker:
-                    break
 
-            qualified_options = ib.qualifyContracts(*contracts) if contracts else []
-            rows = self._snapshot_options(ib, qualified_options[:max_per_ticker])
-            if not rows and contracts:
-                warnings.append(
-                    f"IBKR qualified 0/{len(contracts)} sampled option contracts. "
-                    "Check option permissions, trading class, or increase maxContractsPerTicker.",
-                )
-            results.append({
-                "ticker": ticker,
-                "provider": "ibkr_bridge",
-                "status": "ok",
-                "underlyingPrice": underlying_price,
-                "underlyingQuoteTime": underlying_time,
-                "optionsAvailable": bool(rows),
-                "ivRank52w": None,
-                "ivPercentile52w": None,
-                "dataMode": self._market_data_mode_label(),
-                "warnings": warnings,
-                "contracts": rows,
-            })
+                qualified_options = ib.qualifyContracts(*contracts) if contracts else []
+                rows = self._snapshot_options(ib, qualified_options[:max_per_ticker])
+                warnings.extend(self._format_ib_api_warnings(api_errors))
+                if rows and not any(self._row_has_quote(row) for row in rows):
+                    warnings.append(
+                        "No option top-of-book quotes returned for sampled contracts. "
+                        "Check U.S. options market-data permissions, paper-account data sharing, or retry during RTH.",
+                    )
+                if not rows and contracts:
+                    warnings.append(
+                        f"IBKR qualified 0/{len(contracts)} sampled option contracts. "
+                        "Check option permissions, trading class, or increase maxContractsPerTicker.",
+                    )
+                results.append({
+                    "ticker": ticker,
+                    "provider": "ibkr_bridge",
+                    "status": "ok",
+                    "underlyingPrice": underlying_price,
+                    "underlyingQuoteTime": underlying_time,
+                    "optionsAvailable": bool(rows),
+                    "ivRank52w": None,
+                    "ivPercentile52w": None,
+                    "dataMode": self._market_data_mode_label(),
+                    "warnings": warnings,
+                    "contracts": rows,
+                })
+            finally:
+                detach_error_capture()
 
         self._last_success_at = datetime.utcnow().isoformat() + "Z"
         return {"results": results}
+
+    def _row_has_quote(self, row: dict[str, Any]) -> bool:
+        quote = row.get("quote") if isinstance(row, dict) else None
+        if not isinstance(quote, dict):
+            return False
+        return any(quote.get(key) is not None for key in ("bid", "ask", "last", "mid"))
 
     def historical_bid_ask(self, request: HistoricalBidAskRequest) -> dict[str, Any]:
         if request.tickType.upper() != "BID_ASK":
