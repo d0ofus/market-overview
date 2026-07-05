@@ -311,15 +311,13 @@ class IbkrOptionsClient:
                         ],
                     ))
                     continue
-                ticks = ib.reqHistoricalTicks(
+                ticks, request_warnings = self._request_historical_bid_ask_ticks(
+                    ib,
                     qualified[0],
-                    start.strftime("%Y%m%d %H:%M:%S UTC"),
-                    end.strftime("%Y%m%d %H:%M:%S UTC"),
+                    start,
+                    end,
                     sample_target,
-                    "BID_ASK",
                     bool(request.useRth),
-                    True,
-                    [],
                 )
                 samples = [
                     BidAskSample(
@@ -331,7 +329,8 @@ class IbkrOptionsClient:
                 ]
                 metrics = summarize_bid_ask_samples(samples)
                 api_warnings = self._format_ib_api_warnings(api_errors)
-                warnings = [] if metrics["sampleCount"] else ["IBKR returned no BID_ASK ticks for the requested RTH window."]
+                warnings = [] if metrics["sampleCount"] else ["IBKR returned no Bid_Ask ticks for the requested RTH window."]
+                warnings.extend(request_warnings)
                 warnings.extend(api_warnings)
                 rows.append({
                     "contractKey": item.contractKey or item.localSymbol or str(getattr(qualified[0], "conId", "")),
@@ -359,6 +358,39 @@ class IbkrOptionsClient:
 
         self._last_success_at = datetime.utcnow().isoformat() + "Z"
         return {"contracts": rows}
+
+    def _request_historical_bid_ask_ticks(
+        self,
+        ib: Any,
+        contract: Any,
+        start: datetime,
+        end: datetime,
+        sample_target: int,
+        use_rth: bool,
+    ) -> tuple[list[Any], list[str]]:
+        end_text = end.strftime("%Y%m%d %H:%M:%S UTC")
+        start_text = start.strftime("%Y%m%d %H:%M:%S UTC")
+        attempts = [
+            ("RTH close end-only", "", end_text),
+            ("RTH open start-only", start_text, ""),
+        ]
+        warnings: list[str] = []
+        for label, start_value, end_value in attempts:
+            ticks = ib.reqHistoricalTicks(
+                contract,
+                start_value,
+                end_value,
+                sample_target,
+                "Bid_Ask",
+                use_rth,
+                True,
+                [],
+            )
+            if ticks:
+                if label != attempts[0][0]:
+                    warnings.append(f"Historical Bid_Ask used fallback request variant: {label}.")
+                return list(ticks), warnings
+        return [], ["IBKR returned no ticks for end-only and start-only historical Bid_Ask request variants."]
 
     def _historical_unavailable_row(
         self,

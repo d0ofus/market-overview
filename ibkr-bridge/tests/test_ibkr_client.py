@@ -51,6 +51,31 @@ class FakeIbApiError:
         return []
 
 
+class FakeTick:
+    time = "2026-07-02 15:59:00"
+    priceBid = 5.1
+    priceAsk = 5.3
+
+
+class FakeIbHistoricalSuccess:
+    def __init__(self):
+        self.errorEvent = FakeEvent()
+        self.requests = []
+
+    def qualifyContracts(self, contract):
+        return [contract]
+
+    def reqHistoricalTicks(self, contract, start, end, count, what_to_show, use_rth, ignore_size, options):
+        self.requests.append({
+            "start": start,
+            "end": end,
+            "whatToShow": what_to_show,
+            "useRth": use_rth,
+            "ignoreSize": ignore_size,
+        })
+        return [FakeTick()]
+
+
 class FakeTicker:
     last = None
     close = None
@@ -116,8 +141,33 @@ def test_historical_bid_ask_includes_ibkr_api_error_warnings(monkeypatch):
     ))
 
     warnings = result["contracts"][0]["warnings"]
-    assert "IBKR returned no BID_ASK ticks for the requested RTH window." in warnings
+    assert "IBKR returned no Bid_Ask ticks for the requested RTH window." in warnings
     assert "IBKR API 162: Historical Market Data Service error message: No market data permissions." in warnings
+
+
+def test_historical_bid_ask_uses_end_only_bid_ask_request(monkeypatch):
+    fake_ib = FakeIbHistoricalSuccess()
+    client = IbkrOptionsClient(BridgeConfig(bridge_token="secret"))
+    monkeypatch.setattr(client, "_connect", lambda: fake_ib)
+    monkeypatch.setattr(client, "_load_ib_insync", lambda: (None, None, None, FakeContract))
+
+    result = client.historical_bid_ask(HistoricalBidAskRequest(
+        sessionDate="2026-07-02",
+        contracts=[{
+            "ticker": "AAPL",
+            "contractKey": "898625843",
+            "ibkrConId": 898625843,
+            "localSymbol": "AAPL  260720P00295000",
+        }],
+    ))
+
+    request = fake_ib.requests[0]
+    assert request["start"] == ""
+    assert request["end"].endswith("20:00:00 UTC")
+    assert request["whatToShow"] == "Bid_Ask"
+    assert request["useRth"] is True
+    assert result["contracts"][0]["spreadBasis"] == "historical_bid_ask"
+    assert result["contracts"][0]["sampleCount"] == 1
 
 
 def test_underlying_snapshot_uses_daily_close_when_top_of_book_is_unavailable():
