@@ -60,11 +60,14 @@ function scoreClass(score: number | null | undefined) {
   return "text-neg";
 }
 
-function statusPill(ok: boolean, label: string, detail?: string | null) {
+function statusPill(ok: boolean, label: string, detail?: string | null, tone: "warning" | "danger" = "warning") {
+  const blockedClass = tone === "danger"
+    ? "border-neg/35 bg-neg/10 text-neg"
+    : "border-yellow-400/40 bg-yellow-500/10 text-yellow-200";
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
-        ok ? "border-pos/30 bg-pos/10 text-pos" : "border-yellow-400/40 bg-yellow-500/10 text-yellow-200"
+        ok ? "border-pos/30 bg-pos/10 text-pos" : blockedClass
       }`}
       title={detail ?? undefined}
     >
@@ -72,6 +75,10 @@ function statusPill(ok: boolean, label: string, detail?: string | null) {
       {label}
     </span>
   );
+}
+
+function hasDataFarmWarning(warnings: string[]) {
+  return warnings.some((warning) => /IBKR API 21(03|05|19)|data farm|HMDS/i.test(warning));
 }
 
 function strategyLabel(strategy: StrategyFilter) {
@@ -174,6 +181,20 @@ function candidateMatches(row: OptionCandidateRow, filters: {
   const query = filters.search.trim().toUpperCase();
   if (!query) return true;
   return row.ticker.includes(query) || (row.localSymbol ?? "").toUpperCase().includes(query);
+}
+
+function rthSampleCount(row: OptionCandidateRow) {
+  return row.rthSampleCount ?? 0;
+}
+
+function prioritizeRthRows(rows: OptionCandidateRow[]) {
+  return [...rows].sort((left, right) => {
+    const sampleCompare = rthSampleCount(right) - rthSampleCount(left);
+    if (sampleCompare !== 0) return sampleCompare;
+    const spreadCompare = (left.rthMedianSpreadPct ?? Number.POSITIVE_INFINITY) - (right.rthMedianSpreadPct ?? Number.POSITIVE_INFINITY);
+    if (Number.isFinite(spreadCompare) && spreadCompare !== 0) return spreadCompare;
+    return (right.score ?? -1) - (left.score ?? -1);
+  });
 }
 
 function WarningList({ warnings }: { warnings: string[] }) {
@@ -450,8 +471,12 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
 
   const filteredChainRows = useMemo(() => {
     const rows = chain?.rows ?? [];
-    return rows.filter((row) => candidateMatches(row, { minDte, maxDte, minOpenInterest, minVolume, maxSpreadPct, search }));
+    return prioritizeRthRows(rows.filter((row) => candidateMatches(row, { minDte, maxDte, minOpenInterest, minVolume, maxSpreadPct, search })));
   }, [chain, maxDte, maxSpreadPct, minDte, minOpenInterest, minVolume, search]);
+  const chainRthRows = useMemo(
+    () => (chain?.rows ?? []).filter((row) => rthSampleCount(row) > 0 && row.rthMedianSpreadPct != null).length,
+    [chain],
+  );
 
   const statusWarnings = [
     ...(status?.warnings ?? []),
@@ -459,6 +484,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
     ...(candidates?.warnings ?? []),
     ...(chain?.warnings ?? []),
   ];
+  const dataFarmsBlocked = hasDataFarmWarning(statusWarnings);
   const filterControls: Array<{
     label: string;
     value: number;
@@ -483,7 +509,12 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
                 {statusPill(status.bridge.enabled, "Enabled")}
                 {statusPill(status.bridge.reachable, "Bridge")}
                 {statusPill(status.bridge.authenticated === true, "IBKR auth")}
-                {statusPill(status.bridge.marketDataEntitled !== false, "Entitlements")}
+                {statusPill(
+                  status.bridge.marketDataEntitled === true,
+                  status.bridge.marketDataEntitled == null ? "Entitlements unknown" : "Entitlements",
+                  status.bridge.marketDataEntitled == null ? "The bridge has not confirmed market-data entitlement state yet." : null,
+                )}
+                {dataFarmsBlocked ? statusPill(false, "Data farms blocked", "IBKR returned market-data or historical-data farm errors for the selected probe.", "danger") : null}
                 <span className="rounded-full border border-borderSoft/70 bg-panelSoft/50 px-2 py-0.5 text-[11px] text-slate-300">
                   {status.bridge.quoteMode ?? "quote mode unknown"}
                 </span>
@@ -700,7 +731,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
               <div>
                 <h3 className="text-sm font-semibold text-slate-200">{selectedTicker ?? "Ticker"} Chain Drilldown</h3>
                 <p className="text-xs text-slate-500">
-                  {chain?.snapshot ? `${chain.snapshot.contractCount} contracts inspected; ${chain.snapshot.candidateCount} candidates persisted.` : "Run a refresh to populate this ticker."}
+                  {chain?.snapshot ? `${chain.snapshot.contractCount} contracts inspected; ${chain.snapshot.candidateCount} candidates persisted; ${chainRthRows} with RTH spread samples.` : "Run a refresh to populate this ticker."}
                 </p>
               </div>
               {chainLoading ? <span className="inline-flex items-center gap-2 text-xs text-slate-400"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading</span> : null}

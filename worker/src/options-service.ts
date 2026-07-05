@@ -1249,6 +1249,11 @@ function buildChainRows(input: {
     }))
     .map((row) => ({ ...row, expiresAt: input.expiresAt }))
     .sort((left, right) => {
+      const sampleCompare = (right.rthSampleCount ?? 0) - (left.rthSampleCount ?? 0);
+      if (sampleCompare !== 0) return sampleCompare;
+      if (left.rthMedianSpreadPct != null || right.rthMedianSpreadPct != null) {
+        return (left.rthMedianSpreadPct ?? Number.POSITIVE_INFINITY) - (right.rthMedianSpreadPct ?? Number.POSITIVE_INFINITY);
+      }
       const expiryCompare = String(left.expiry ?? "").localeCompare(String(right.expiry ?? ""));
       if (expiryCompare !== 0) return expiryCompare;
       const rightCompare = String(left.right ?? "").localeCompare(String(right.right ?? ""));
@@ -1258,18 +1263,49 @@ function buildChainRows(input: {
     .slice(0, 500);
 }
 
+function historicalProbeScore(chain: NormalizedTickerChain, contract: NormalizedContract, defaults: RefreshDefaults, now = new Date()): number {
+  const dte = daysToExpiry(contract.expiry, now);
+  const dteScore = dte == null
+    ? 0
+    : dte >= 7 && dte <= 60
+      ? 500
+      : dte >= 5 && dte <= defaults.maxDte
+        ? 350
+        : dte >= defaults.minDte
+          ? 150
+          : 0;
+  const underlying = chain.underlyingPrice;
+  const moneynessScore = underlying != null && underlying > 0 && contract.strike != null
+    ? Math.max(0, 300 - (Math.abs(contract.strike - underlying) / underlying) * 1500)
+    : 0;
+  const delta = contract.delta == null ? null : Math.abs(contract.delta);
+  const deltaScore = delta == null
+    ? 0
+    : delta >= 0.25 && delta <= 0.60
+      ? 250
+      : Math.max(0, 120 - Math.abs(delta - 0.40) * 240);
+  const liquidityScoreValue = Math.min(200, (contract.openInterest ?? 0) / 5 + (contract.volume ?? 0));
+  const identityScore = contract.ibkrConId != null ? 25 : contract.localSymbol ? 10 : 0;
+  return dteScore + moneynessScore + deltaScore + liquidityScoreValue + identityScore;
+}
+
 function selectContractsForSpreadProbe(chains: NormalizedTickerChain[], defaults: RefreshDefaults): NormalizedContract[] {
   const selected = chains
-    .flatMap((chain) => chain.contracts)
-    .filter((contract) => passesBaseFilters(contract, defaults))
+    .flatMap((chain) => chain.contracts.map((contract) => ({ chain, contract })))
+    .filter(({ contract }) => passesBaseFilters(contract, defaults))
     .sort((left, right) => {
-      const leftScore = (left.openInterest ?? 0) + (left.volume ?? 0) * 3 + (passesLongDelta(left) ? 500 : 0);
-      const rightScore = (right.openInterest ?? 0) + (right.volume ?? 0) * 3 + (passesLongDelta(right) ? 500 : 0);
-      return rightScore - leftScore;
+      const scoreCompare = historicalProbeScore(right.chain, right.contract, defaults) - historicalProbeScore(left.chain, left.contract, defaults);
+      if (scoreCompare !== 0) return scoreCompare;
+      const leftDte = daysToExpiry(left.contract.expiry) ?? Number.POSITIVE_INFINITY;
+      const rightDte = daysToExpiry(right.contract.expiry) ?? Number.POSITIVE_INFINITY;
+      if (leftDte !== rightDte) return leftDte - rightDte;
+      const leftDistance = left.chain.underlyingPrice != null && left.contract.strike != null ? Math.abs(left.contract.strike - left.chain.underlyingPrice) : Number.POSITIVE_INFINITY;
+      const rightDistance = right.chain.underlyingPrice != null && right.contract.strike != null ? Math.abs(right.contract.strike - right.chain.underlyingPrice) : Number.POSITIVE_INFINITY;
+      return leftDistance - rightDistance;
     });
   const seen = new Set<string>();
   const out: NormalizedContract[] = [];
-  for (const contract of selected) {
+  for (const { contract } of selected) {
     if (seen.has(contract.contractKey)) continue;
     seen.add(contract.contractKey);
     out.push(contract);

@@ -61,6 +61,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe("options service", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -187,6 +188,60 @@ describe("options service", () => {
     expect(quoteStatements).toHaveLength(1);
     expect(quoteStatements[0].__args[3]).toBe("chain");
     expect(quoteStatements[0].__args[31]).toBe(4.2);
+  });
+
+  it("prioritizes usable DTE and moneyness for historical spread probes when live liquidity fields are missing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-05T12:00:00Z"));
+    const { env, batchStatements } = createOptionsEnv({ OPTIONS_HISTORICAL_SPREAD_MAX_CONTRACTS: "1" });
+    let historicalRequest: any = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/options/chains")) {
+        return jsonResponse({
+          results: [{
+            ticker: "AAPL",
+            underlyingPrice: 295,
+            optionsAvailable: true,
+            dataMode: "realtime",
+            contracts: [
+              { contractKey: "AAPL-C-20260706-205", localSymbol: "AAPL  260706C00205000", expiry: "2026-07-06", right: "C", strike: 205, bid: null, ask: null, volume: null, openInterest: 0, delta: null },
+              { contractKey: "AAPL-C-20260717-295", localSymbol: "AAPL  260717C00295000", expiry: "2026-07-17", right: "C", strike: 295, bid: null, ask: null, volume: null, openInterest: 0, delta: null },
+            ],
+          }],
+        });
+      }
+      if (url.endsWith("/v1/options/historical-bid-ask")) {
+        historicalRequest = JSON.parse(String(init?.body ?? "{}"));
+        return jsonResponse({
+          contracts: [{
+            contractKey: "AAPL-C-20260717-295",
+            sessionDate: "2026-07-02",
+            medianSpreadPct: 3.9,
+            p75SpreadPct: 4.5,
+            sampleCount: 301,
+          }],
+        });
+      }
+      return jsonResponse({ ok: true });
+    }));
+
+    const result = await refreshOptionsForWatchlist(env, {
+      tickers: ["AAPL"],
+      minDte: 1,
+      maxDte: 120,
+      minOpenInterest: 0,
+      minVolume: 0,
+      persistChainRows: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(historicalRequest.contracts).toHaveLength(1);
+    expect(historicalRequest.contracts[0].contractKey).toBe("AAPL-C-20260717-295");
+    const quoteStatements = batchStatements.filter((statement) => statement.__sql.includes("INSERT INTO option_contract_quotes"));
+    expect(quoteStatements[0].__args[8]).toBe("AAPL-C-20260717-295");
+    expect(quoteStatements[0].__args[31]).toBe(3.9);
+    vi.useRealTimers();
   });
 
   it("parses bridge health into troubleshooting status", async () => {
