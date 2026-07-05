@@ -4135,6 +4135,7 @@ export type OptionCandidateRow = {
   id: string;
   snapshotId: string;
   requestId: string;
+  rowKind: "candidate" | "chain";
   watchlistSetId: string | null;
   watchlistRunId: string | null;
   ticker: string;
@@ -4271,7 +4272,9 @@ export function refreshOptionsWatchlist(payload: {
   maxDte?: number;
   minOpenInterest?: number;
   minVolume?: number;
+  maxContractsPerTicker?: number;
   includeHistoricalSpreads?: boolean;
+  persistChainRows?: boolean;
 }) {
   return adminFetch<OptionsRefreshResponse>("/api/admin/options/refresh", {
     method: "POST",

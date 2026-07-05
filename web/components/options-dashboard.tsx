@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, Search, ShieldAlert, SlidersHorizontal, WifiOff } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, CheckCircle2, Loader2, PlayCircle, RefreshCw, Search, ShieldAlert, SlidersHorizontal, WifiOff } from "lucide-react";
 import {
+  getPeerDirectory,
   getOptionsCandidates,
   getOptionsChain,
   getOptionsStatus,
@@ -14,6 +15,7 @@ import {
   type OptionsStatusResponse,
   type OptionsStrategy,
   type OptionsWatchlistResponse,
+  type PeerDirectoryRow,
 } from "@/lib/api";
 
 type StrategyFilter = OptionsStrategy | "all";
@@ -76,6 +78,11 @@ function strategyLabel(strategy: StrategyFilter) {
   return strategy === "all" ? "All Candidates" : STRATEGY_LABELS[strategy];
 }
 
+function rowStrategyLabel(row: OptionCandidateRow) {
+  if (row.rowKind === "chain") return row.right === "put" ? "Chain Put" : "Chain Call";
+  return STRATEGY_LABELS[row.strategy];
+}
+
 function dte(expiry: string | null | undefined) {
   if (!expiry) return null;
   const parsed = Date.parse(`${expiry}T21:00:00Z`);
@@ -124,7 +131,7 @@ function WarningList({ warnings }: { warnings: string[] }) {
   );
 }
 
-function CandidateTable({ rows, onSelectTicker }: { rows: OptionCandidateRow[]; onSelectTicker: (ticker: string) => void }) {
+function CandidateTable({ rows, onSelectTicker }: { rows: OptionCandidateRow[]; onSelectTicker: (ticker: string, row: OptionCandidateRow) => void }) {
   if (rows.length === 0) {
     return <div className="rounded border border-borderSoft/60 bg-panelSoft/30 px-4 py-8 text-center text-sm text-slate-400">No candidates match the current filters.</div>;
   }
@@ -143,11 +150,11 @@ function CandidateTable({ rows, onSelectTicker }: { rows: OptionCandidateRow[]; 
             <tr key={row.id} className="border-t border-borderSoft/50 hover:bg-slate-900/40">
               <td className={`px-2 py-2 font-semibold ${scoreClass(row.score)}`}>{fmtNumber(row.score, 0)}</td>
               <td className="px-2 py-2">
-                <button type="button" onClick={() => onSelectTicker(row.ticker)} className="font-semibold text-accent hover:underline">
+                <button type="button" onClick={() => onSelectTicker(row.ticker, row)} className="font-semibold text-accent hover:underline">
                   {row.ticker}
                 </button>
               </td>
-              <td className="whitespace-nowrap px-2 py-2 text-slate-200">{STRATEGY_LABELS[row.strategy]}</td>
+              <td className="whitespace-nowrap px-2 py-2 text-slate-200">{rowStrategyLabel(row)}</td>
               <td className="whitespace-nowrap px-2 py-2 text-slate-300">{row.expiry ?? "-"}</td>
               <td className="px-2 py-2 text-slate-300">{fmtNumber(dte(row.expiry), 0)}</td>
               <td className="px-2 py-2 text-slate-300">{fmtNumber(row.strike)}</td>
@@ -179,9 +186,11 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
   const [candidates, setCandidates] = useState<OptionsCandidatesResponse | null>(null);
   const [chain, setChain] = useState<OptionsChainResponse | null>(null);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [selectedTickerScope, setSelectedTickerScope] = useState<"watchlist" | "adhoc">("watchlist");
   const [strategy, setStrategy] = useState<StrategyFilter>("all");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [singleRefreshing, setSingleRefreshing] = useState(false);
   const [chainLoading, setChainLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [minDte, setMinDte] = useState(14);
@@ -190,8 +199,20 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
   const [minVolume, setMinVolume] = useState(10);
   const [maxSpreadPct, setMaxSpreadPct] = useState(12);
   const [search, setSearch] = useState("");
+  const [tickerQuery, setTickerQuery] = useState("");
+  const [singleTicker, setSingleTicker] = useState("");
+  const [tickerResults, setTickerResults] = useState<PeerDirectoryRow[]>([]);
+  const [tickerTotal, setTickerTotal] = useState(0);
+  const [tickerSearching, setTickerSearching] = useState(false);
+  const [tickerSearchError, setTickerSearchError] = useState<string | null>(null);
+  const [relaxedSinglePull, setRelaxedSinglePull] = useState(true);
+  const tickerSearchRequestRef = useRef(0);
 
   const context = useMemo(() => ({ setId: initialSetId, runId: initialRunId }), [initialRunId, initialSetId]);
+  const selectedChainContext = useMemo(
+    () => selectedTickerScope === "adhoc" ? { setId: null, runId: null } : context,
+    [context, selectedTickerScope],
+  );
 
   const loadAll = async () => {
     setLoading(true);
@@ -207,6 +228,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
       setCandidates(nextCandidates);
       const firstTicker = selectedTicker ?? nextWatchlist.rows.find((row) => row.snapshot)?.ticker ?? nextWatchlist.rows[0]?.ticker ?? null;
       setSelectedTicker(firstTicker);
+      setSelectedTickerScope("watchlist");
       if (firstTicker) {
         const nextChain = await getOptionsChain(firstTicker, context);
         setChain(nextChain);
@@ -226,17 +248,49 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
   useEffect(() => {
     if (!selectedTicker) return;
     setChainLoading(true);
-    getOptionsChain(selectedTicker, context)
+    getOptionsChain(selectedTicker, selectedChainContext)
       .then(setChain)
       .catch((error) => setMessage(error instanceof Error ? error.message : "Failed to load option chain."))
       .finally(() => setChainLoading(false));
-  }, [context, selectedTicker]);
+  }, [selectedChainContext, selectedTicker]);
 
   useEffect(() => {
     getOptionsCandidates({ ...context, strategy, limit: 250 })
       .then(setCandidates)
       .catch((error) => setMessage(error instanceof Error ? error.message : "Failed to load options candidates."));
   }, [context, strategy]);
+
+  useEffect(() => {
+    const query = tickerQuery.trim();
+    const requestId = ++tickerSearchRequestRef.current;
+    if (!query) {
+      setTickerResults([]);
+      setTickerTotal(0);
+      setTickerSearchError(null);
+      setTickerSearching(false);
+      return;
+    }
+    setTickerSearching(true);
+    setTickerSearchError(null);
+    const timer = window.setTimeout(() => {
+      getPeerDirectory({ q: query, limit: 12, offset: 0 })
+        .then((result) => {
+          if (requestId !== tickerSearchRequestRef.current) return;
+          setTickerResults(result.rows);
+          setTickerTotal(result.total);
+        })
+        .catch((error) => {
+          if (requestId !== tickerSearchRequestRef.current) return;
+          setTickerSearchError(error instanceof Error ? error.message : "Failed to search tickers.");
+          setTickerResults([]);
+          setTickerTotal(0);
+        })
+        .finally(() => {
+          if (requestId === tickerSearchRequestRef.current) setTickerSearching(false);
+        });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [tickerQuery]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -253,11 +307,74 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
       setMessage(result.ok
         ? `Refreshed ${result.refreshedTickers}/${result.requestedTickers} tickers and ranked ${result.candidates.length} candidates.`
         : result.warnings.join(" ") || "Options refresh did not run.");
+      setSelectedTickerScope("watchlist");
       await loadAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to refresh options.");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const selectTickerResult = (row: PeerDirectoryRow) => {
+    const ticker = row.ticker.toUpperCase();
+    setSingleTicker(ticker);
+    setTickerQuery(ticker);
+    setSelectedTicker(ticker);
+    setSelectedTickerScope("adhoc");
+  };
+
+  const selectRowTicker = (ticker: string, row: OptionCandidateRow) => {
+    setSelectedTicker(ticker);
+    setSelectedTickerScope(row.rowKind === "chain" || (!row.watchlistSetId && !row.watchlistRunId) ? "adhoc" : "watchlist");
+  };
+
+  const refreshSingleTicker = async () => {
+    const ticker = (singleTicker || tickerQuery).trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9.\-]{0,15}$/.test(ticker)) {
+      setMessage("Enter a valid ticker from the symbol directory.");
+      return;
+    }
+    const effectiveMinDte = relaxedSinglePull ? 1 : minDte;
+    const effectiveMinOpenInterest = relaxedSinglePull ? 0 : minOpenInterest;
+    const effectiveMinVolume = relaxedSinglePull ? 0 : minVolume;
+    if (relaxedSinglePull) {
+      setMinDte(1);
+      setMinOpenInterest(0);
+      setMinVolume(0);
+      setMaxSpreadPct(100);
+    }
+    setSingleRefreshing(true);
+    setMessage(null);
+    try {
+      const result = await refreshOptionsWatchlist({
+        tickers: [ticker],
+        minDte: effectiveMinDte,
+        maxDte,
+        minOpenInterest: effectiveMinOpenInterest,
+        minVolume: effectiveMinVolume,
+        maxContractsPerTicker: 300,
+        includeHistoricalSpreads: true,
+        persistChainRows: true,
+      });
+      const [nextStatus, nextChain, nextCandidates] = await Promise.all([
+        getOptionsStatus(),
+        getOptionsChain(ticker),
+        getOptionsCandidates({ ...context, strategy, limit: 250 }),
+      ]);
+      setStatus(nextStatus);
+      setChain(nextChain);
+      setCandidates(nextCandidates);
+      setSelectedTicker(ticker);
+      setSelectedTickerScope("adhoc");
+      const contractCount = result.snapshots[0]?.contractCount ?? 0;
+      setMessage(result.ok
+        ? `${ticker}: refreshed ${contractCount} contracts, ranked ${result.candidates.length} candidates, loaded ${nextChain.rows.length} drilldown rows.`
+        : result.warnings.join(" ") || `${ticker}: options refresh did not run.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Failed to refresh ${ticker}.`);
+    } finally {
+      setSingleRefreshing(false);
     }
   };
 
@@ -336,6 +453,80 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
       {message ? <div className="rounded border border-borderSoft/70 bg-panelSoft/60 px-3 py-2 text-sm text-slate-300">{message}</div> : null}
       <WarningList warnings={statusWarnings} />
 
+      <div className="card p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-200">Single Ticker Probe</h3>
+            <p className="text-xs text-slate-500">Peer Groups directory</p>
+          </div>
+          {tickerQuery.trim() ? (
+            <span className="rounded-full border border-borderSoft/70 px-2 py-0.5 text-[11px] text-slate-400">
+              {tickerSearching ? "Searching..." : `${tickerTotal.toLocaleString()} matches`}
+            </span>
+          ) : null}
+        </div>
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),auto,auto]">
+          <label className="space-y-1 text-xs text-slate-400">
+            <span>Ticker or company</span>
+            <div className="flex items-center rounded border border-borderSoft bg-panelSoft px-2">
+              <Search className="h-4 w-4 text-slate-500" />
+              <input
+                value={tickerQuery}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setTickerQuery(next);
+                  setSingleTicker(next.trim().toUpperCase());
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void refreshSingleTicker();
+                }}
+                className="w-full bg-transparent px-2 py-2 text-sm text-slate-200 outline-none"
+                placeholder="AAPL or Apple"
+              />
+            </div>
+          </label>
+          <label className="flex items-end gap-2 pb-2 text-xs text-slate-300">
+            <input
+              type="checkbox"
+              checked={relaxedSinglePull}
+              onChange={(event) => setRelaxedSinglePull(event.target.checked)}
+              className="h-4 w-4 rounded border-borderSoft bg-panelSoft"
+            />
+            Relax floors
+          </label>
+          <button
+            type="button"
+            onClick={() => void refreshSingleTicker()}
+            disabled={singleRefreshing || !(singleTicker || tickerQuery).trim()}
+            className="inline-flex items-center justify-center gap-2 self-end rounded border border-accent/40 bg-accent/10 px-3 py-2 text-sm font-medium text-accent disabled:opacity-50 hover:bg-accent/15"
+          >
+            {singleRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+            {singleRefreshing ? "Generating..." : "Generate Chain"}
+          </button>
+        </div>
+        {tickerSearchError ? <p className="mt-2 text-xs text-red-300">{tickerSearchError}</p> : null}
+        {tickerResults.length > 0 ? (
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            {tickerResults.map((row) => (
+              <button
+                key={row.ticker}
+                type="button"
+                onClick={() => selectTickerResult(row)}
+                className={`rounded border px-3 py-2 text-left text-xs transition ${
+                  singleTicker === row.ticker
+                    ? "border-accent/50 bg-accent/10"
+                    : "border-borderSoft/70 bg-panelSoft/40 hover:bg-slate-900/50"
+                }`}
+              >
+                <div className="font-semibold text-accent">{row.ticker}</div>
+                <div className="mt-0.5 truncate text-slate-300">{row.name ?? "-"}</div>
+                <div className="mt-1 truncate text-[11px] text-slate-500">{[row.sector, row.industry].filter(Boolean).join(" / ") || row.exchange || "-"}</div>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
       <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.85fr),minmax(0,1.7fr)]">
         <section className="card p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -357,7 +548,16 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
                   {(watchlist?.rows ?? []).map((row) => (
                     <tr key={row.ticker} className={`border-t border-borderSoft/50 hover:bg-slate-900/40 ${selectedTicker === row.ticker ? "bg-accent/5" : ""}`}>
                       <td className="px-2 py-1.5">
-                        <button type="button" onClick={() => setSelectedTicker(row.ticker)} className="font-semibold text-accent hover:underline">{row.ticker}</button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedTicker(row.ticker);
+                            setSelectedTickerScope("watchlist");
+                          }}
+                          className="font-semibold text-accent hover:underline"
+                        >
+                          {row.ticker}
+                        </button>
                         <div className="max-w-36 truncate text-[10px] text-slate-500">{row.companyName ?? ""}</div>
                       </td>
                       <td className="px-2 py-1.5">{row.snapshot?.optionsAvailable ? <span className="text-pos">listed</span> : row.snapshot ? <span className="text-neg">none</span> : <span className="text-slate-500">unknown</span>}</td>
@@ -427,7 +627,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
                 ))}
               </div>
             </div>
-            <CandidateTable rows={filteredCandidates} onSelectTicker={setSelectedTicker} />
+            <CandidateTable rows={filteredCandidates} onSelectTicker={selectRowTicker} />
           </div>
 
           <div className="card p-3">
@@ -454,7 +654,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
                 No stored chain view for this ticker yet.
               </div>
             ) : (
-              <CandidateTable rows={filteredChainRows} onSelectTicker={setSelectedTicker} />
+              <CandidateTable rows={filteredChainRows} onSelectTicker={selectRowTicker} />
             )}
           </div>
         </section>

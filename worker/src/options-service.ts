@@ -22,6 +22,7 @@ export type OptionsRefreshRequest = {
   minVolume?: number;
   maxContractsPerTicker?: number;
   includeHistoricalSpreads?: boolean;
+  persistChainRows?: boolean;
 };
 
 export type OptionsBridgeHealth = {
@@ -71,6 +72,7 @@ export type OptionCandidateRow = {
   id: string;
   snapshotId: string;
   requestId: string;
+  rowKind: "candidate" | "chain";
   watchlistSetId: string | null;
   watchlistRunId: string | null;
   ticker: string;
@@ -521,6 +523,7 @@ async function ensureOptionsSchema(env: Env): Promise<void> {
       id TEXT PRIMARY KEY,
       snapshot_id TEXT NOT NULL,
       request_id TEXT NOT NULL,
+      row_kind TEXT NOT NULL DEFAULT 'candidate',
       watchlist_set_id TEXT,
       watchlist_run_id TEXT,
       ticker TEXT NOT NULL,
@@ -570,9 +573,20 @@ async function ensureOptionsSchema(env: Env): Promise<void> {
       expires_at TEXT NOT NULL
     )`,
   ).run();
+  try {
+    const rowKindColumn = await env.DB.prepare(
+      "SELECT COUNT(*) as count FROM pragma_table_info('option_contract_quotes') WHERE name = 'row_kind'",
+    ).first<{ count: number }>();
+    if (!Number(rowKindColumn?.count ?? 0)) {
+      await env.DB.prepare("ALTER TABLE option_contract_quotes ADD COLUMN row_kind TEXT NOT NULL DEFAULT 'candidate'").run();
+    }
+  } catch {
+    // Production D1 is updated by migrations; this keeps older local DBs usable.
+  }
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ticker_created ON option_chain_snapshots (ticker, created_at DESC)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_watchlist_created ON option_chain_snapshots (watchlist_set_id, watchlist_run_id, created_at DESC)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_snapshot ON option_contract_quotes (snapshot_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_row_kind_ticker ON option_contract_quotes (row_kind, ticker)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_ticker_score ON option_contract_quotes (ticker, score DESC)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_strategy_score ON option_contract_quotes (strategy, score DESC)").run();
 }
@@ -954,6 +968,7 @@ function baseCandidate(input: {
   defaults: RefreshDefaults;
   latestRthSessionDate: string;
   extraWarnings?: string[];
+  rowKind?: OptionCandidateRow["rowKind"];
 }): OptionCandidateRow {
   const spread = spreadScore(input.contract.rthSpread, input.contract.bid, input.contract.ask);
   const liquidity = liquidityScore(input.contract);
@@ -974,6 +989,7 @@ function baseCandidate(input: {
     id: rowId("optq"),
     snapshotId: input.snapshotId,
     requestId: input.requestIdValue,
+    rowKind: input.rowKind ?? "candidate",
     watchlistSetId: input.watchlistSetId,
     watchlistRunId: input.watchlistRunId,
     ticker: input.chain.ticker,
@@ -1111,6 +1127,7 @@ function buildSpreadCandidate(input: {
     id: rowId("optq"),
     snapshotId: input.snapshotId,
     requestId: input.requestIdValue,
+    rowKind: "candidate",
     watchlistSetId: input.watchlistSetId,
     watchlistRunId: input.watchlistRunId,
     ticker: input.chain.ticker,
@@ -1208,6 +1225,37 @@ function buildCandidates(input: {
     .map((row) => ({ ...row, expiresAt: input.expiresAt }))
     .sort((left, right) => (right.score ?? -1) - (left.score ?? -1))
     .slice(0, 250);
+}
+
+function buildChainRows(input: {
+  chain: NormalizedTickerChain;
+  snapshotId: string;
+  requestIdValue: string;
+  watchlistSetId: string | null;
+  watchlistRunId: string | null;
+  defaults: RefreshDefaults;
+  latestRthSessionDate: string;
+  expiresAt: string;
+  excludeContractKeys?: Set<string>;
+}): OptionCandidateRow[] {
+  const excluded = input.excludeContractKeys ?? new Set<string>();
+  return input.chain.contracts
+    .filter((contract) => contract.right && contract.strike != null && !excluded.has(contract.contractKey))
+    .map((contract) => baseCandidate({
+      ...input,
+      contract,
+      strategy: contract.right === "put" ? "long_put" : "long_call",
+      rowKind: "chain",
+    }))
+    .map((row) => ({ ...row, expiresAt: input.expiresAt }))
+    .sort((left, right) => {
+      const expiryCompare = String(left.expiry ?? "").localeCompare(String(right.expiry ?? ""));
+      if (expiryCompare !== 0) return expiryCompare;
+      const rightCompare = String(left.right ?? "").localeCompare(String(right.right ?? ""));
+      if (rightCompare !== 0) return rightCompare;
+      return (left.strike ?? 0) - (right.strike ?? 0);
+    })
+    .slice(0, 500);
 }
 
 function selectContractsForSpreadProbe(chains: NormalizedTickerChain[], defaults: RefreshDefaults): NormalizedContract[] {
@@ -1350,18 +1398,19 @@ async function persistRefresh(env: Env, snapshots: OptionChainSnapshot[], candid
     )),
     ...candidates.map((row) => env.DB.prepare(
       `INSERT INTO option_contract_quotes (
-        id, snapshot_id, request_id, watchlist_set_id, watchlist_run_id, ticker, strategy, contract_key,
+        id, snapshot_id, request_id, row_kind, watchlist_set_id, watchlist_run_id, ticker, strategy, contract_key,
         ibkr_con_id, local_symbol, expiry, strike, right, bid, ask, mid, last, volume, open_interest,
         iv, delta, gamma, theta, vega, quote_time, data_mode, rth_session_date, spread_basis,
         rth_last_bid, rth_last_ask, rth_median_spread_pct, rth_p75_spread_pct, rth_max_spread_pct,
         rth_sample_count, rth_first_sample_time, rth_last_sample_time, score_liquidity, score_spread,
         score_iv, score_strategy, score, debit, width, breakeven, max_loss, legs_json, score_inputs_json,
         warnings_json, created_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       row.id,
       row.snapshotId,
       row.requestId,
+      row.rowKind,
       row.watchlistSetId,
       row.watchlistRunId,
       row.ticker,
@@ -1475,6 +1524,7 @@ function mapSnapshot(row: SnapshotRow): OptionChainSnapshot {
 function mapCandidate(row: CandidateDbRow): OptionCandidateRow {
   return {
     ...row,
+    rowKind: row.rowKind ?? "candidate",
     score: row.score == null ? null : Number(row.score),
     scoreLiquidity: row.scoreLiquidity == null ? null : Number(row.scoreLiquidity),
     scoreSpread: row.scoreSpread == null ? null : Number(row.scoreSpread),
@@ -1571,9 +1621,14 @@ async function loadCandidates(env: Env, options: {
   strategy?: string | null;
   limit?: number;
   snapshotId?: string | null;
+  rowKind?: "candidate" | "chain" | "all";
 } = {}): Promise<OptionCandidateRow[]> {
   const clauses = ["datetime(expires_at) >= datetime('now')"];
   const args: unknown[] = [];
+  if (options.rowKind !== "all") {
+    clauses.push("row_kind = ?");
+    args.push(options.rowKind ?? "candidate");
+  }
   if (options.ticker) {
     clauses.push("ticker = ?");
     args.push(options.ticker.toUpperCase());
@@ -1596,7 +1651,7 @@ async function loadCandidates(env: Env, options: {
   }
   const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
   const rows = await env.DB.prepare(
-    `SELECT id, snapshot_id as snapshotId, request_id as requestId, watchlist_set_id as watchlistSetId,
+    `SELECT id, snapshot_id as snapshotId, request_id as requestId, row_kind as rowKind, watchlist_set_id as watchlistSetId,
             watchlist_run_id as watchlistRunId, ticker, strategy, contract_key as contractKey, ibkr_con_id as ibkrConId,
             local_symbol as localSymbol, expiry, strike, right, bid, ask, mid, last, volume, open_interest as openInterest,
             iv, delta, gamma, theta, vega, quote_time as quoteTime, data_mode as dataMode, rth_session_date as rthSessionDate,
@@ -1610,7 +1665,13 @@ async function loadCandidates(env: Env, options: {
             created_at as createdAt, expires_at as expiresAt
        FROM option_contract_quotes
       WHERE ${clauses.join(" AND ")}
-      ORDER BY score DESC, datetime(created_at) DESC
+      ORDER BY
+        CASE row_kind WHEN 'candidate' THEN 0 ELSE 1 END,
+        score DESC,
+        expiry ASC,
+        right ASC,
+        strike ASC,
+        datetime(created_at) DESC
       LIMIT ${limit}`,
   ).bind(...args).all<CandidateDbRow>();
   return (rows.results ?? []).map(mapCandidate);
@@ -1760,7 +1821,29 @@ export async function refreshOptionsForWatchlist(env: Env, input: OptionsRefresh
     snapshot.candidateCount = rows.length;
     return rows;
   });
-  await persistRefresh(env, snapshots, candidates);
+  const chainRows = input.persistChainRows
+    ? chains.flatMap((chain) => {
+      const snapshot = snapshotByTicker.get(chain.ticker);
+      if (!snapshot) return [];
+      const excluded = new Set(
+        candidates
+          .filter((row) => row.ticker === chain.ticker && !row.contractKey.includes("|"))
+          .map((row) => row.contractKey),
+      );
+      return buildChainRows({
+        chain,
+        snapshotId: snapshot.id,
+        requestIdValue: id,
+        watchlistSetId: context.set?.id ?? null,
+        watchlistRunId: context.runId,
+        defaults,
+        latestRthSessionDate,
+        expiresAt: exp,
+        excludeContractKeys: excluded,
+      });
+    })
+    : [];
+  await persistRefresh(env, snapshots, [...candidates, ...chainRows]);
   return {
     ok: true,
     requestId: id,
@@ -1810,6 +1893,7 @@ export async function loadOptionsChain(env: Env, tickerInput: string, input: { s
     setId: input.setId ?? snapshot?.watchlistSetId ?? null,
     runId: input.runId ?? snapshot?.watchlistRunId ?? null,
     snapshotId: snapshot?.id ?? null,
+    rowKind: "all",
     limit: 300,
   });
   const warnings = snapshot ? snapshot.warnings : ["No stored options refresh for this ticker. Run an options refresh first."];

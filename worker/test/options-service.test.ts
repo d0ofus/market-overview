@@ -142,6 +142,53 @@ describe("options service", () => {
     expect(batchStatements.some((statement) => statement.__sql.includes("INSERT INTO option_contract_quotes"))).toBe(true);
   });
 
+  it("persists selected ticker chain rows separately from ranked candidates", async () => {
+    const { env, batchStatements } = createOptionsEnv();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/options/chains")) {
+        return jsonResponse({
+          results: [{
+            ticker: "AAPL",
+            optionsAvailable: true,
+            dataMode: "delayed",
+            contracts: [
+              { contractKey: "AAPL-C-20260821-220", localSymbol: "AAPL  260821C00220000", expiry: "2026-08-21", right: "C", strike: 220, bid: null, ask: null, volume: null, openInterest: 0, delta: null },
+            ],
+          }],
+        });
+      }
+      if (url.endsWith("/v1/options/historical-bid-ask")) {
+        return jsonResponse({
+          contracts: [{
+            contractKey: "AAPL-C-20260821-220",
+            sessionDate: "2026-07-02",
+            medianSpreadPct: 4.2,
+            p75SpreadPct: 5.1,
+            sampleCount: 300,
+          }],
+        });
+      }
+      return jsonResponse({ ok: true });
+    }));
+
+    const result = await refreshOptionsForWatchlist(env, {
+      tickers: ["AAPL"],
+      minDte: 1,
+      maxDte: 120,
+      minOpenInterest: 0,
+      minVolume: 0,
+      persistChainRows: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.candidates).toHaveLength(0);
+    const quoteStatements = batchStatements.filter((statement) => statement.__sql.includes("INSERT INTO option_contract_quotes"));
+    expect(quoteStatements).toHaveLength(1);
+    expect(quoteStatements[0].__args[3]).toBe("chain");
+    expect(quoteStatements[0].__args[31]).toBe(4.2);
+  });
+
   it("parses bridge health into troubleshooting status", async () => {
     const { env } = createOptionsEnv();
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
