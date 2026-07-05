@@ -97,6 +97,67 @@ function basisLabel(value: string | null | undefined) {
   return "Unavailable";
 }
 
+function rowQuality(row: OptionCandidateRow): { label: string; className: string; title: string } {
+  const warnings = row.warnings.join(" ").toLowerCase();
+  const hasRthSpread = ["historical_bid_ask", "partial_historical_bid_ask"].includes(row.spreadBasis)
+    && row.rthMedianSpreadPct != null
+    && (row.rthSampleCount ?? 0) > 0;
+  const hasLiveSpread = row.spreadBasis === "live_quote" && row.rthMedianSpreadPct != null;
+  const hasLiquidity = (row.openInterest ?? 0) >= 100 && (row.volume ?? 0) >= 10;
+  const hasFarmIssue = /api 21(05|19)|data farm|hmds|no security definition/.test(warnings);
+  const hasTopOfBookIssue = /top-of-book unavailable|no top-of-book/.test(warnings);
+
+  if (hasRthSpread && hasLiquidity) {
+    return {
+      label: "Tradable data",
+      className: "border-pos/30 bg-pos/10 text-pos",
+      title: "RTH BID/ASK samples and liquidity fields are present.",
+    };
+  }
+  if (hasRthSpread || hasLiveSpread) {
+    return {
+      label: "Spread OK",
+      className: "border-yellow-400/35 bg-yellow-500/10 text-yellow-200",
+      title: "Spread data is present, but liquidity fields are incomplete or below the default thresholds.",
+    };
+  }
+  if (hasFarmIssue) {
+    return {
+      label: "Data blocked",
+      className: "border-neg/30 bg-neg/10 text-neg",
+      title: "IBKR market-data or historical-data farm was unavailable for this contract.",
+    };
+  }
+  if (hasTopOfBookIssue) {
+    return {
+      label: "No quote",
+      className: "border-yellow-400/35 bg-yellow-500/10 text-yellow-200",
+      title: "The contract is listed, but no usable top-of-book or RTH spread data was returned.",
+    };
+  }
+  if (row.rowKind === "chain") {
+    return {
+      label: "Listed only",
+      className: "border-borderSoft bg-panelSoft/70 text-slate-300",
+      title: "The contract was discovered in the option chain, but has not passed spread/liquidity checks.",
+    };
+  }
+  return {
+    label: "Unverified",
+    className: "border-yellow-400/35 bg-yellow-500/10 text-yellow-200",
+    title: "Missing RTH BID/ASK spread samples.",
+  };
+}
+
+function QualityPill({ row }: { row: OptionCandidateRow }) {
+  const quality = rowQuality(row);
+  return (
+    <span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium ${quality.className}`} title={quality.title}>
+      {quality.label}
+    </span>
+  );
+}
+
 function candidateMatches(row: OptionCandidateRow, filters: {
   minDte: number;
   maxDte: number;
@@ -140,7 +201,7 @@ function CandidateTable({ rows, onSelectTicker }: { rows: OptionCandidateRow[]; 
       <table className="min-w-full text-xs">
         <thead className="sticky top-0 z-10 bg-slate-950/95 text-slate-300">
           <tr>
-            {["Score", "Ticker", "Strategy", "Expiry", "DTE", "Strike", "Delta", "OI", "Vol", "Spread", "Samples", "Debit", "Width", "Breakeven", "Basis", "Warnings"].map((label) => (
+            {["Quality", "Score", "Ticker", "Strategy", "Expiry", "DTE", "Strike", "Delta", "OI", "Vol", "Spread", "Samples", "Debit", "Width", "Breakeven", "Basis", "Warnings"].map((label) => (
               <th key={label} className="whitespace-nowrap px-2 py-2 text-left font-semibold">{label}</th>
             ))}
           </tr>
@@ -148,6 +209,7 @@ function CandidateTable({ rows, onSelectTicker }: { rows: OptionCandidateRow[]; 
         <tbody>
           {rows.map((row) => (
             <tr key={row.id} className="border-t border-borderSoft/50 hover:bg-slate-900/40">
+              <td className="px-2 py-2"><QualityPill row={row} /></td>
               <td className={`px-2 py-2 font-semibold ${scoreClass(row.score)}`}>{fmtNumber(row.score, 0)}</td>
               <td className="px-2 py-2">
                 <button type="button" onClick={() => onSelectTicker(row.ticker, row)} className="font-semibold text-accent hover:underline">
@@ -380,8 +442,11 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
 
   const filteredCandidates = useMemo(() => {
     const rows = candidates?.rows ?? [];
-    return rows.filter((row) => candidateMatches(row, { minDte, maxDte, minOpenInterest, minVolume, maxSpreadPct, search }));
-  }, [candidates, maxDte, maxSpreadPct, minDte, minOpenInterest, minVolume, search]);
+    const scopedRows = selectedTickerScope === "adhoc" && selectedTicker
+      ? rows.filter((row) => row.ticker === selectedTicker)
+      : rows;
+    return scopedRows.filter((row) => candidateMatches(row, { minDte, maxDte, minOpenInterest, minVolume, maxSpreadPct, search }));
+  }, [candidates, maxDte, maxSpreadPct, minDte, minOpenInterest, minVolume, search, selectedTicker, selectedTickerScope]);
 
   const filteredChainRows = useMemo(() => {
     const rows = chain?.rows ?? [];
@@ -390,7 +455,7 @@ export function OptionsDashboard({ initialSetId = null, initialRunId = null }: P
 
   const statusWarnings = [
     ...(status?.warnings ?? []),
-    ...(watchlist?.warnings ?? []),
+    ...(selectedTickerScope === "adhoc" ? [] : (watchlist?.warnings ?? [])),
     ...(candidates?.warnings ?? []),
     ...(chain?.warnings ?? []),
   ];
