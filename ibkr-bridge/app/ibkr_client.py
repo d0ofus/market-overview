@@ -127,15 +127,15 @@ class IbkrOptionsClient:
     def _load_ib_insync(self) -> Any:
         ensure_thread_event_loop()
         try:
-            from ib_insync import IB, Option, Stock  # type: ignore
+            from ib_insync import Contract, IB, Option, Stock  # type: ignore
         except Exception as exc:  # pragma: no cover - exercised only without optional runtime dependency
             raise RuntimeError(f"ib-insync is not installed or failed to import: {exc}") from exc
-        return IB, Option, Stock
+        return IB, Option, Stock, Contract
 
     def _connect(self) -> Any:
         ensure_thread_event_loop()
         with self._lock:
-            IB, _, _ = self._load_ib_insync()
+            IB, _, _, _ = self._load_ib_insync()
             if self._ib is None:
                 self._ib = IB()
             if not self._ib.isConnected():
@@ -200,7 +200,7 @@ class IbkrOptionsClient:
 
     def chains(self, request: ChainRequest) -> dict[str, Any]:
         ib = self._connect()
-        _, Option, Stock = self._load_ib_insync()
+        _, Option, Stock, _ = self._load_ib_insync()
         results: list[dict[str, Any]] = []
         max_per_ticker = min(request.maxContractsPerTicker, self.config.max_contracts_per_ticker)
 
@@ -276,13 +276,13 @@ class IbkrOptionsClient:
         if request.tickType.upper() != "BID_ASK":
             raise ValueError("Only BID_ASK historical ticks are supported.")
         ib = self._connect()
-        _, Option, _ = self._load_ib_insync()
+        _, Option, _, Contract = self._load_ib_insync()
         start, end = latest_rth_window(request.sessionDate)
         rows: list[dict[str, Any]] = []
         sample_target = max(10, min(1000, request.sampleTarget))
 
         for item in request.contracts:
-            contract = self._option_from_request(Option, item)
+            contract = self._option_from_request(Contract, Option, item)
             if contract is None:
                 rows.append({
                     "contractKey": item.contractKey or item.localSymbol or "unknown",
@@ -447,7 +447,17 @@ class IbkrOptionsClient:
             "warnings": [] if bid is not None or ask is not None or last is not None else ["No top-of-book option quote returned."],
         }
 
-    def _option_from_request(self, option_cls: Any, item: OptionContractRequest) -> Any | None:
+    def _option_from_request(self, contract_cls: Any, option_cls: Any, item: OptionContractRequest) -> Any | None:
+        if item.ibkrConId is not None:
+            kwargs = {
+                "conId": int(item.ibkrConId),
+                "secType": "OPT",
+                "exchange": "SMART",
+                "currency": "USD",
+            }
+            if item.localSymbol:
+                kwargs["localSymbol"] = item.localSymbol
+            return contract_cls(**kwargs)
         ticker = normalize_ticker(item.ticker)
         right = right_to_ib(item.right)
         expiry = expiry_to_ib(item.expiry)
