@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime
 from threading import RLock
@@ -105,6 +106,13 @@ def latest_rth_window(session_date: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def ensure_thread_event_loop() -> None:
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 @dataclass
 class IbkrOptionsClient:
     config: BridgeConfig
@@ -117,6 +125,7 @@ class IbkrOptionsClient:
         self._latest_tick_at: str | None = None
 
     def _load_ib_insync(self) -> Any:
+        ensure_thread_event_loop()
         try:
             from ib_insync import IB, Option, Stock  # type: ignore
         except Exception as exc:  # pragma: no cover - exercised only without optional runtime dependency
@@ -124,6 +133,7 @@ class IbkrOptionsClient:
         return IB, Option, Stock
 
     def _connect(self) -> Any:
+        ensure_thread_event_loop()
         with self._lock:
             IB, _, _ = self._load_ib_insync()
             if self._ib is None:
