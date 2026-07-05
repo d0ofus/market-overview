@@ -113,6 +113,9 @@ def ensure_thread_event_loop() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+IBKR_INFO_ERROR_CODES = {2104, 2106, 2107, 2108, 2158}
+
+
 @dataclass
 class IbkrOptionsClient:
     config: BridgeConfig
@@ -287,6 +290,7 @@ class IbkrOptionsClient:
         sample_target = max(10, min(1000, request.sampleTarget))
 
         for item in request.contracts:
+            api_errors, detach_error_capture = self._attach_ib_error_capture(ib)
             try:
                 contract = self._option_from_request(Contract, Option, item)
                 if contract is None:
@@ -301,7 +305,10 @@ class IbkrOptionsClient:
                     rows.append(self._historical_unavailable_row(
                         item,
                         request.sessionDate,
-                        "IBKR did not qualify the option contract.",
+                        [
+                            "IBKR did not qualify the option contract.",
+                            *self._format_ib_api_warnings(api_errors),
+                        ],
                     ))
                     continue
                 ticks = ib.reqHistoricalTicks(
@@ -323,6 +330,9 @@ class IbkrOptionsClient:
                     for tick in ticks
                 ]
                 metrics = summarize_bid_ask_samples(samples)
+                api_warnings = self._format_ib_api_warnings(api_errors)
+                warnings = [] if metrics["sampleCount"] else ["IBKR returned no BID_ASK ticks for the requested RTH window."]
+                warnings.extend(api_warnings)
                 rows.append({
                     "contractKey": item.contractKey or item.localSymbol or str(getattr(qualified[0], "conId", "")),
                     "ibkrConId": getattr(qualified[0], "conId", item.ibkrConId),
@@ -330,16 +340,20 @@ class IbkrOptionsClient:
                     "sessionDate": request.sessionDate,
                     "spreadBasis": "historical_bid_ask" if metrics["sampleCount"] else "unavailable",
                     **metrics,
-                    "warnings": [] if metrics["sampleCount"] else ["IBKR returned no BID_ASK ticks for the requested RTH window."],
+                    "warnings": warnings,
                 })
             except Exception as exc:
                 self._last_error = str(exc)
                 rows.append(self._historical_unavailable_row(
                     item,
                     request.sessionDate,
-                    f"IBKR historical BID_ASK request failed: {exc}",
+                    [
+                        f"IBKR historical BID_ASK request failed: {exc}",
+                        *self._format_ib_api_warnings(api_errors),
+                    ],
                 ))
             finally:
+                detach_error_capture()
                 if self.config.historical_request_spacing_seconds > 0:
                     time.sleep(self.config.historical_request_spacing_seconds)
 
@@ -350,8 +364,9 @@ class IbkrOptionsClient:
         self,
         item: OptionContractRequest,
         session_date: str,
-        warning: str,
+        warning: str | list[str],
     ) -> dict[str, Any]:
+        warnings = [warning] if isinstance(warning, str) else [item for item in warning if item]
         return {
             "contractKey": item.contractKey or item.localSymbol or "unknown",
             "ibkrConId": item.ibkrConId,
@@ -359,8 +374,55 @@ class IbkrOptionsClient:
             "sessionDate": session_date,
             "spreadBasis": "unavailable",
             "sampleCount": 0,
-            "warnings": [warning],
+            "warnings": warnings,
         }
+
+    def _attach_ib_error_capture(self, ib: Any) -> tuple[list[dict[str, Any]], Any]:
+        errors: list[dict[str, Any]] = []
+        error_event = getattr(ib, "errorEvent", None)
+        if error_event is None:
+            return errors, lambda: None
+
+        def on_error(req_id: Any, error_code: Any, error_string: Any, contract: Any = None) -> None:
+            errors.append({
+                "reqId": req_id,
+                "code": error_code,
+                "message": error_string,
+                "contract": getattr(contract, "localSymbol", None) or getattr(contract, "symbol", None),
+            })
+
+        try:
+            error_event.connect(on_error)
+        except Exception:
+            return errors, lambda: None
+
+        def detach() -> None:
+            try:
+                error_event.disconnect(on_error)
+            except Exception:
+                pass
+
+        return errors, detach
+
+    def _format_ib_api_warnings(self, errors: list[dict[str, Any]]) -> list[str]:
+        warnings: list[str] = []
+        seen: set[str] = set()
+        for error in errors:
+            code = as_int(error.get("code"))
+            if code in IBKR_INFO_ERROR_CODES:
+                continue
+            message = str(error.get("message") or "").strip()
+            if not message:
+                continue
+            warning = f"IBKR API {code}: {message}" if code is not None else f"IBKR API: {message}"
+            contract = error.get("contract")
+            if contract:
+                warning = f"{warning} ({contract})"
+            if warning not in seen:
+                warnings.append(warning)
+                seen.add(warning)
+                self._last_error = warning
+        return warnings
 
     def _market_data_mode_label(self) -> str:
         return {

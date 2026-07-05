@@ -9,12 +9,46 @@ class FakeContract:
             setattr(self, key, value)
 
 
+class FakeEvent:
+    def __init__(self):
+        self.listeners = []
+
+    def connect(self, listener):
+        self.listeners.append(listener)
+
+    def disconnect(self, listener):
+        self.listeners.remove(listener)
+
+    def emit(self, *args):
+        for listener in list(self.listeners):
+            listener(*args)
+
+
 class FakeIb:
+    errorEvent = FakeEvent()
+
     def qualifyContracts(self, contract):
         return [contract]
 
     def reqHistoricalTicks(self, *_args, **_kwargs):
         raise RuntimeError("No market data permissions for historical BID_ASK.")
+
+
+class FakeIbApiError:
+    def __init__(self):
+        self.errorEvent = FakeEvent()
+
+    def qualifyContracts(self, contract):
+        return [contract]
+
+    def reqHistoricalTicks(self, *_args, **_kwargs):
+        self.errorEvent.emit(
+            42,
+            162,
+            "Historical Market Data Service error message: No market data permissions.",
+            None,
+        )
+        return []
 
 
 class FakeTicker:
@@ -64,6 +98,26 @@ def test_historical_bid_ask_contract_failure_returns_unavailable_row(monkeypatch
     assert row["spreadBasis"] == "unavailable"
     assert row["sampleCount"] == 0
     assert "historical BID_ASK request failed" in row["warnings"][0]
+
+
+def test_historical_bid_ask_includes_ibkr_api_error_warnings(monkeypatch):
+    client = IbkrOptionsClient(BridgeConfig(bridge_token="secret"))
+    monkeypatch.setattr(client, "_connect", lambda: FakeIbApiError())
+    monkeypatch.setattr(client, "_load_ib_insync", lambda: (None, None, None, FakeContract))
+
+    result = client.historical_bid_ask(HistoricalBidAskRequest(
+        sessionDate="2026-07-02",
+        contracts=[{
+            "ticker": "AAPL",
+            "contractKey": "898626037",
+            "ibkrConId": 898626037,
+            "localSymbol": "AAPL  260720P00310000",
+        }],
+    ))
+
+    warnings = result["contracts"][0]["warnings"]
+    assert "IBKR returned no BID_ASK ticks for the requested RTH window." in warnings
+    assert "IBKR API 162: Historical Market Data Service error message: No market data permissions." in warnings
 
 
 def test_underlying_snapshot_uses_daily_close_when_top_of_book_is_unavailable():
