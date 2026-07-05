@@ -70,6 +70,13 @@ Probe a small chain only after IB Gateway is running and authenticated:
 scripts\check-bridge.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>" -ProbeTicker AAPL
 ```
 
+The checker defaults to `-MinDte 1` so it can test the front liquid expiry
+visible in TWS. Override it when you want to mimic the app's strategy filters:
+
+```powershell
+scripts\check-bridge.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>" -ProbeTicker AAPL -MinDte 14 -MaxDte 90
+```
+
 For paper-account testing without live market-data subscriptions, set
 `IBKR_MARKET_DATA_TYPE=3` in `.env`, restart the bridge, and rerun the probe.
 Mode `3` asks IBKR for delayed data where available.

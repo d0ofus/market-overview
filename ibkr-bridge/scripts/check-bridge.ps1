@@ -5,7 +5,10 @@ param(
   [string]$CfAccessClientId,
   [string]$CfAccessClientSecret,
   [string]$ProbeTicker,
-  [string]$HistoricalSessionDate
+  [string]$HistoricalSessionDate,
+  [int]$MinDte = 1,
+  [int]$MaxDte = 90,
+  [int]$MaxContractsPerTicker = 40
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,14 +73,14 @@ $Health = Invoke-BridgeRequest -Method GET -Uri "$Base/health" -Headers $Headers
 $Health | ConvertTo-Json -Depth 8
 
 if ($ProbeTicker) {
-  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker"
+  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $MinDte-$MaxDte"
   $Body = @{
     tickers = @($ProbeTicker)
     includeGreeks = $true
     includeIvRank = $true
-    minDte = 14
-    maxDte = 90
-    maxContractsPerTicker = 40
+    minDte = $MinDte
+    maxDte = $MaxDte
+    maxContractsPerTicker = $MaxContractsPerTicker
   } | ConvertTo-Json -Depth 8
   $Chain = Invoke-BridgeRequest -Method POST -Uri "$Base/v1/options/chains" -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 120
   $Chain | ConvertTo-Json -Depth 10
