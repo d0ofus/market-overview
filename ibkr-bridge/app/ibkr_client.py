@@ -321,7 +321,8 @@ class IbkrOptionsClient:
                     ))
                     continue
                 qualified = ib.qualifyContracts(contract)
-                if not qualified:
+                effective_contract = qualified[0] if qualified else contract if item.ibkrConId is not None else None
+                if effective_contract is None:
                     rows.append(self._historical_unavailable_row(
                         item,
                         request.sessionDate,
@@ -331,9 +332,12 @@ class IbkrOptionsClient:
                         ],
                     ))
                     continue
+                identity_warnings = [] if qualified else [
+                    "IBKR did not re-qualify the option conId; historical request used the supplied conId directly.",
+                ]
                 ticks, request_warnings = self._request_historical_bid_ask_ticks(
                     ib,
-                    qualified[0],
+                    effective_contract,
                     start,
                     end,
                     sample_target,
@@ -348,14 +352,32 @@ class IbkrOptionsClient:
                     for tick in ticks
                 ]
                 metrics = summarize_bid_ask_samples(samples)
+                if not metrics["sampleCount"]:
+                    bar_samples, bar_warnings = self._request_historical_bid_ask_bars(
+                        ib,
+                        effective_contract,
+                        end,
+                        bool(request.useRth),
+                    )
+                    bar_metrics = summarize_bid_ask_samples(bar_samples)
+                    if bar_metrics["sampleCount"]:
+                        metrics = bar_metrics
+                        request_warnings = [
+                            *request_warnings,
+                            "Tick-level Bid_Ask history was unavailable; used 1-minute historical BID_ASK bars.",
+                            *bar_warnings,
+                        ]
+                    else:
+                        request_warnings = [*request_warnings, *bar_warnings]
                 api_warnings = self._format_ib_api_warnings(api_errors)
                 warnings = [] if metrics["sampleCount"] else ["IBKR returned no Bid_Ask ticks for the requested RTH window."]
+                warnings.extend(identity_warnings)
                 warnings.extend(request_warnings)
                 warnings.extend(api_warnings)
                 rows.append({
-                    "contractKey": item.contractKey or item.localSymbol or str(getattr(qualified[0], "conId", "")),
-                    "ibkrConId": getattr(qualified[0], "conId", item.ibkrConId),
-                    "localSymbol": getattr(qualified[0], "localSymbol", item.localSymbol),
+                    "contractKey": item.contractKey or item.localSymbol or str(getattr(effective_contract, "conId", "")),
+                    "ibkrConId": getattr(effective_contract, "conId", item.ibkrConId),
+                    "localSymbol": getattr(effective_contract, "localSymbol", item.localSymbol) or item.localSymbol,
                     "sessionDate": request.sessionDate,
                     "spreadBasis": "historical_bid_ask" if metrics["sampleCount"] else "unavailable",
                     **metrics,
@@ -411,6 +433,37 @@ class IbkrOptionsClient:
                     warnings.append(f"Historical Bid_Ask used fallback request variant: {label}.")
                 return list(ticks), warnings
         return [], ["IBKR returned no ticks for end-only and start-only historical Bid_Ask request variants."]
+
+    def _request_historical_bid_ask_bars(
+        self,
+        ib: Any,
+        contract: Any,
+        end: datetime,
+        use_rth: bool,
+    ) -> tuple[list[BidAskSample], list[str]]:
+        end_text = end.strftime("%Y%m%d %H:%M:%S UTC")
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_text,
+            durationStr="1 D",
+            barSizeSetting="1 min",
+            whatToShow="BID_ASK",
+            useRTH=use_rth,
+            formatDate=2,
+            keepUpToDate=False,
+            chartOptions=[],
+        )
+        samples = [
+            BidAskSample(
+                time=getattr(bar, "date", None),
+                bid=as_float(getattr(bar, "open", None)),
+                ask=as_float(getattr(bar, "close", None)),
+            )
+            for bar in list(bars or [])
+        ]
+        if samples:
+            return samples, []
+        return [], ["IBKR returned no 1-minute historical BID_ASK bars for the requested RTH session."]
 
     def _historical_unavailable_row(
         self,
@@ -642,15 +695,12 @@ class IbkrOptionsClient:
 
     def _option_from_request(self, contract_cls: Any, option_cls: Any, item: OptionContractRequest) -> Any | None:
         if item.ibkrConId is not None:
-            kwargs = {
-                "conId": int(item.ibkrConId),
-                "secType": "OPT",
-                "exchange": "SMART",
-                "currency": "USD",
-            }
-            if item.localSymbol:
-                kwargs["localSymbol"] = item.localSymbol
-            return contract_cls(**kwargs)
+            return contract_cls(
+                conId=int(item.ibkrConId),
+                secType="OPT",
+                exchange="SMART",
+                currency="USD",
+            )
         ticker = normalize_ticker(item.ticker)
         right = right_to_ib(item.right)
         expiry = expiry_to_ib(item.expiry)
