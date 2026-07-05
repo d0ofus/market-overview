@@ -70,6 +70,10 @@ Probe a small chain only after IB Gateway is running and authenticated:
 scripts\check-bridge.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>" -ProbeTicker AAPL
 ```
 
+For paper-account testing without live market-data subscriptions, set
+`IBKR_MARKET_DATA_TYPE=3` in `.env`, restart the bridge, and rerun the probe.
+Mode `3` asks IBKR for delayed data where available.
+
 ## Run At Login
 
 After local health checks pass:
@@ -141,7 +145,7 @@ Common failures:
 - Access HTML/login response: missing or wrong Cloudflare Access service-token headers.
 - `ibkr.authenticated=false`: IB Gateway is closed, logged out, wrong port, or API sockets are disabled.
 - Empty chains: missing market data permissions, pacing, no listed options, or filters too narrow.
-- Empty historical spread samples: no RTH BID_ASK ticks returned for that contract/session.
+- Empty historical spread samples: no RTH BID_ASK ticks returned for that contract/session. Retry with a near-the-money contract during or after a completed regular session.
 
 ## Tests
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import time
 import asyncio
+import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timezone
 from threading import RLock
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -221,17 +221,22 @@ class IbkrOptionsClient:
                 })
                 continue
             stock = qualified_stock[0]
-            underlying_price, underlying_time = self._snapshot_underlying(ib, stock)
+            underlying_price, underlying_time, underlying_warning = self._snapshot_underlying(ib, stock)
+            if underlying_warning:
+                warnings.append(underlying_warning)
             params = ib.reqSecDefOptParams(ticker, "", stock.secType, stock.conId)
             selected_params = self._select_option_params(params)
             if selected_params is None:
+                option_warnings = ["IBKR returned no option security definition parameters."]
+                if underlying_warning:
+                    option_warnings.insert(0, underlying_warning)
                 results.append({
                     "ticker": ticker,
                     "status": "no_options",
                     "underlyingPrice": underlying_price,
                     "underlyingQuoteTime": underlying_time,
                     "optionsAvailable": False,
-                    "warnings": ["IBKR returned no option security definition parameters."],
+                    "warnings": option_warnings,
                     "contracts": [],
                 })
                 continue
@@ -365,14 +370,67 @@ class IbkrOptionsClient:
             4: "delayed_frozen",
         }.get(self.config.ibkr_market_data_type, "unknown")
 
-    def _snapshot_underlying(self, ib: Any, stock: Any) -> tuple[float | None, str | None]:
-        ticker = ib.reqMktData(stock, "", False, False)
-        ib.sleep(self.config.market_snapshot_seconds)
-        price = as_float(ticker.marketPrice()) or as_float(getattr(ticker, "last", None)) or as_float(getattr(ticker, "close", None))
-        quote_time = datetime.utcnow().isoformat() + "Z"
-        self._latest_tick_at = quote_time if price is not None else self._latest_tick_at
-        ib.cancelMktData(stock)
-        return price, quote_time if price is not None else None
+    def _snapshot_underlying(self, ib: Any, stock: Any) -> tuple[float | None, str | None, str | None]:
+        ticker = None
+        try:
+            ticker = ib.reqMktData(stock, "", False, False)
+            ib.sleep(self.config.market_snapshot_seconds)
+            price = as_float(ticker.marketPrice()) or as_float(getattr(ticker, "last", None)) or as_float(getattr(ticker, "close", None))
+            quote_time = datetime.utcnow().isoformat() + "Z"
+            if price is not None:
+                self._latest_tick_at = quote_time
+                return price, quote_time, None
+        finally:
+            if ticker is not None:
+                ib.cancelMktData(stock)
+
+        fallback_price, fallback_time = self._historical_underlying_close(ib, stock)
+        if fallback_price is not None:
+            return (
+                fallback_price,
+                fallback_time,
+                "Underlying top-of-book unavailable; strike sampling used latest daily close.",
+            )
+        return None, None, None
+
+    def _historical_underlying_close(self, ib: Any, stock: Any) -> tuple[float | None, str | None]:
+        try:
+            bars = ib.reqHistoricalData(
+                stock,
+                endDateTime="",
+                durationStr="10 D",
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+                keepUpToDate=False,
+                chartOptions=[],
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            return None, None
+
+        for bar in reversed(list(bars or [])):
+            close = as_float(getattr(bar, "close", None))
+            if close is None:
+                continue
+            return close, self._bar_time_to_text(getattr(bar, "date", None))
+        return None, None
+
+    def _bar_time_to_text(self, value: Any) -> str | None:
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        if isinstance(value, date):
+            return f"{value.isoformat()}T00:00:00Z"
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        parsed_date = parse_expiry(text)
+        if parsed_date:
+            return f"{parsed_date.isoformat()}T00:00:00Z"
+        return text
 
     def _select_option_params(self, params: list[Any]) -> Any | None:
         if not params:

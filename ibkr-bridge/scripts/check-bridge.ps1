@@ -77,16 +77,22 @@ if ($ProbeTicker) {
     includeIvRank = $true
     minDte = 14
     maxDte = 90
-    maxContractsPerTicker = 20
+    maxContractsPerTicker = 40
   } | ConvertTo-Json -Depth 8
   $Chain = Invoke-BridgeRequest -Method POST -Uri "$Base/v1/options/chains" -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 120
   $Chain | ConvertTo-Json -Depth 10
 
   if ($HistoricalSessionDate) {
+    $Underlying = $Chain.results |
+      Where-Object { $_.underlyingPrice -ne $null } |
+      Select-Object -First 1 -ExpandProperty underlyingPrice
     $Contract = $Chain.results |
       ForEach-Object { $_.contracts } |
       Where-Object { $_.ibkrConId -or $_.contractKey } |
-      Sort-Object @{ Expression = { if ($_.openInterest -ne $null) { -1 * [int]$_.openInterest } else { 0 } } } |
+      Sort-Object `
+        @{ Expression = { if ($_.quote -and ($_.quote.bid -ne $null -or $_.quote.ask -ne $null -or $_.quote.last -ne $null)) { 0 } else { 1 } } }, `
+        @{ Expression = { if ($_.openInterest -ne $null) { -1 * [int]$_.openInterest } else { 0 } } }, `
+        @{ Expression = { if ($Underlying -ne $null -and $_.strike -ne $null) { [Math]::Abs([double]$_.strike - [double]$Underlying) } else { [double]::MaxValue } } } |
       Select-Object -First 1
     if (-not $Contract) {
       throw "No returned option contract had enough identity for a historical BID_ASK probe."
