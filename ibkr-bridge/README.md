@@ -78,7 +78,10 @@ scripts\check-bridge.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>" -ProbeTicker AAPL -M
 ```
 
 Use `-TargetExpiry` for the option expiration and `-HistoricalSessionDate`
-for the completed regular session used to sample historical bid/ask ticks:
+for the completed regular session used to sample historical bid/ask ticks.
+When `-TargetExpiry` is supplied, the checker narrows the chain request to
+that expiry's DTE so the bridge does not fill its contract cap with earlier
+expiries first:
 
 ```powershell
 scripts\check-bridge.ps1 `

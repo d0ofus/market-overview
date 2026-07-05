@@ -89,14 +89,30 @@ if (-not $Health.ok -and -not $ContinueOnUnhealthy) {
 }
 
 if ($ProbeTicker) {
+  $RequestMinDte = $MinDte
+  $RequestMaxDte = $MaxDte
+  if ($TargetExpiry) {
+    try {
+      $TargetExpiryDate = [DateTime]::ParseExact($TargetExpiry, "yyyy-MM-dd", [Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+      throw "-TargetExpiry must use YYYY-MM-DD format, for example 2026-07-17."
+    }
+    $TargetDte = ($TargetExpiryDate.Date - (Get-Date).Date).Days
+    if ($TargetDte -lt 0) {
+      throw "-TargetExpiry $TargetExpiry is in the past for this machine date $((Get-Date).Date.ToString("yyyy-MM-dd"))."
+    }
+    $RequestMinDte = $TargetDte
+    $RequestMaxDte = $TargetDte
+  }
+
   $ExpiryText = if ($TargetExpiry) { ", target option expiry $TargetExpiry" } else { "" }
-  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $MinDte-$MaxDte$ExpiryText"
+  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $RequestMinDte-$RequestMaxDte$ExpiryText"
   $Body = @{
     tickers = @($ProbeTicker)
     includeGreeks = $true
     includeIvRank = $true
-    minDte = $MinDte
-    maxDte = $MaxDte
+    minDte = $RequestMinDte
+    maxDte = $RequestMaxDte
     maxContractsPerTicker = $MaxContractsPerTicker
   } | ConvertTo-Json -Depth 8
   $Chain = Invoke-BridgeRequest -Method POST -Uri "$Base/v1/options/chains" -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 120
