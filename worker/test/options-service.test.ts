@@ -161,6 +161,24 @@ describe("options service", () => {
     expect(status.troubleshooting.find((row) => row.key === "auth")?.ok).toBe(true);
   });
 
+  it("sends bridge bearer and Cloudflare Access headers", async () => {
+    const { env } = createOptionsEnv({
+      IBKR_OPTIONS_CF_ACCESS_CLIENT_ID: "access-id",
+      IBKR_OPTIONS_CF_ACCESS_CLIENT_SECRET: "access-secret",
+    });
+    const fetchSpy = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await loadOptionsStatus(env);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Headers;
+    expect(headers.get("authorization")).toBe("Bearer secret");
+    expect(headers.get("CF-Access-Client-Id")).toBe("access-id");
+    expect(headers.get("CF-Access-Client-Secret")).toBe("access-secret");
+  });
+
   it("requires admin auth for options routes", async () => {
     const { env } = createOptionsEnv({ ADMIN_SECRET: "secret" });
 

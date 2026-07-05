@@ -1,4 +1,9 @@
 node_modules
+.venv
+ibkr-bridge/.env
+ibkr-bridge/.venv
+__pycache__/
+*.py[cod]
 .next
 out
 .wrangler

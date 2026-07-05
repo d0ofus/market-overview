@@ -103,6 +103,11 @@ Worker (`worker/wrangler.toml` vars and secrets):
 - `IBKR_NEWS_ENABLED` (`true`/`false`; adapter-ready interface, default `false`)
 - `IBKR_NEWS_ENDPOINT` (optional phase-2 IBKR adapter endpoint)
 - `IBKR_NEWS_TOKEN` (optional phase-2 IBKR adapter token)
+- `IBKR_OPTIONS_ENABLED` (`true`/`false`; default `false` until the private bridge is verified)
+- `IBKR_OPTIONS_ENDPOINT` (secret; private Cloudflare Access-protected bridge URL)
+- `IBKR_OPTIONS_TOKEN` (secret; bearer token shared with the bridge)
+- `IBKR_OPTIONS_CF_ACCESS_CLIENT_ID` (secret; Cloudflare Access service-token client id)
+- `IBKR_OPTIONS_CF_ACCESS_CLIENT_SECRET` (secret; Cloudflare Access service-token client secret)
 - `HERMES_WATCHLIST_APPLY_WEBHOOK_URL` (optional Hermes apply webhook; apply dispatches remain poller-visible if omitted)
 - `HERMES_WATCHLIST_APPLY_WEBHOOK_SECRET` (secret; signs Hermes apply webhook payloads)
 - `HERMES_WATCHLIST_ANALYSIS_WEBHOOK_URL` (optional override for Hermes analysis webhook; defaults to the apply webhook URL)
@@ -229,6 +234,18 @@ wrangler deploy --config worker/wrangler.toml
 - Output: `web/.next`
 - Set `NEXT_PUBLIC_API_BASE` to the Worker URL
 - Set `ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET`, and `ADMIN_SECRET` as Sensitive Environment Variables
+
+## IBKR Options Bridge
+
+The `/options` workflow uses a private read-only bridge for IBKR option chains and RTH historical `BID_ASK` spread probes. The bridge is intentionally separate from the Worker because it must run next to IB Gateway on a private always-on machine.
+
+Production path:
+
+```text
+Worker -> Cloudflare Access -> Cloudflare Tunnel -> bridge on 127.0.0.1:8765 -> IB Gateway
+```
+
+Bridge implementation and setup scripts live in `ibkr-bridge/`. Keep `IBKR_OPTIONS_ENABLED=false` until the bridge machine, Cloudflare Tunnel, and Cloudflare Access service token all pass health checks.
 
 ## Watchlist Review Prep Workflow
 
