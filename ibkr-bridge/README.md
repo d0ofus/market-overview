@@ -77,6 +77,17 @@ visible in TWS. Override it when you want to mimic the app's strategy filters:
 scripts\check-bridge.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>" -ProbeTicker AAPL -MinDte 14 -MaxDte 90
 ```
 
+Use `-TargetExpiry` for the option expiration and `-HistoricalSessionDate`
+for the completed regular session used to sample historical bid/ask ticks:
+
+```powershell
+scripts\check-bridge.ps1 `
+  -BridgeToken "<IBKR_BRIDGE_TOKEN>" `
+  -ProbeTicker AAPL `
+  -TargetExpiry 2026-07-17 `
+  -HistoricalSessionDate 2026-07-02
+```
+
 For paper-account testing without live market-data subscriptions, set
 `IBKR_MARKET_DATA_TYPE=3` in `.env`, restart the bridge, and rerun the probe.
 Mode `3` asks IBKR for delayed data where available.

@@ -5,7 +5,9 @@ param(
   [string]$CfAccessClientId,
   [string]$CfAccessClientSecret,
   [string]$ProbeTicker,
+  [Alias("RthSessionDate")]
   [string]$HistoricalSessionDate,
+  [string]$TargetExpiry,
   [int]$MinDte = 1,
   [int]$MaxDte = 90,
   [int]$MaxContractsPerTicker = 40,
@@ -87,7 +89,8 @@ if (-not $Health.ok -and -not $ContinueOnUnhealthy) {
 }
 
 if ($ProbeTicker) {
-  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $MinDte-$MaxDte"
+  $ExpiryText = if ($TargetExpiry) { ", target option expiry $TargetExpiry" } else { "" }
+  Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $MinDte-$MaxDte$ExpiryText"
   $Body = @{
     tickers = @($ProbeTicker)
     includeGreeks = $true
@@ -103,9 +106,25 @@ if ($ProbeTicker) {
     $Underlying = $Chain.results |
       Where-Object { $_.underlyingPrice -ne $null } |
       Select-Object -First 1 -ExpandProperty underlyingPrice
-    $Contract = $Chain.results |
+
+    $CandidateContracts = $Chain.results |
       ForEach-Object { $_.contracts } |
-      Where-Object { $_.ibkrConId -or $_.contractKey } |
+      Where-Object { $_.ibkrConId -or $_.contractKey }
+
+    if ($TargetExpiry) {
+      $CandidateContracts = $CandidateContracts | Where-Object { $_.expiry -eq $TargetExpiry }
+      if (-not $CandidateContracts) {
+        $AvailableExpiries = $Chain.results |
+          ForEach-Object { $_.contracts } |
+          Where-Object { $_.expiry } |
+          Select-Object -ExpandProperty expiry -Unique |
+          Sort-Object
+        $AvailableText = if ($AvailableExpiries) { $AvailableExpiries -join ", " } else { "<none returned>" }
+        throw "No returned option contracts matched -TargetExpiry $TargetExpiry. Available expiries: $AvailableText"
+      }
+    }
+
+    $Contract = $CandidateContracts |
       Sort-Object `
         @{ Expression = { if ($_.quote -and ($_.quote.bid -ne $null -or $_.quote.ask -ne $null -or $_.quote.last -ne $null)) { 0 } else { 1 } } }, `
         @{ Expression = { if ($_.openInterest -ne $null) { -1 * [int]$_.openInterest } else { 0 } } }, `
@@ -115,7 +134,7 @@ if ($ProbeTicker) {
       throw "No returned option contract had enough identity for a historical BID_ASK probe."
     }
     $ContractLabel = if ($Contract.localSymbol) { $Contract.localSymbol } else { $Contract.contractKey }
-    Write-Host "Checking $Base/v1/options/historical-bid-ask for $ContractLabel on $HistoricalSessionDate"
+    Write-Host "Checking $Base/v1/options/historical-bid-ask for $ContractLabel expiring $($Contract.expiry) using RTH session $HistoricalSessionDate"
     $HistoryBody = @{
       sessionDate = $HistoricalSessionDate
       useRth = 1
