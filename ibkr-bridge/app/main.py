@@ -53,6 +53,14 @@ def create_app(config: BridgeConfig | None = None, client: OptionsClient | None 
             return await asyncio.to_thread(client.historical_bid_ask, request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "IBKR historical BID_ASK probe failed.",
+                    "error": str(exc),
+                },
+            ) from exc
 
     return app
 

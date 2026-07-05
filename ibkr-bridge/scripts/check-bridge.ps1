@@ -19,9 +19,54 @@ if ($CfAccessClientSecret) {
   $Headers["CF-Access-Client-Secret"] = $CfAccessClientSecret
 }
 
+function Invoke-BridgeRequest {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Method,
+    [Parameter(Mandatory = $true)]
+    [string]$Uri,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Headers,
+    [string]$ContentType,
+    [string]$Body,
+    [int]$TimeoutSec = 30
+  )
+
+  $Params = @{
+    Method = $Method
+    Uri = $Uri
+    Headers = $Headers
+    TimeoutSec = $TimeoutSec
+  }
+  if ($ContentType) {
+    $Params["ContentType"] = $ContentType
+  }
+  if ($Body) {
+    $Params["Body"] = $Body
+  }
+
+  try {
+    Invoke-RestMethod @Params
+  } catch {
+    $Response = $_.Exception.Response
+    if ($Response) {
+      $Stream = $Response.GetResponseStream()
+      if ($Stream) {
+        $Reader = New-Object System.IO.StreamReader($Stream)
+        $ResponseBody = $Reader.ReadToEnd()
+        if ($ResponseBody) {
+          Write-Host "Bridge error response body:"
+          Write-Host $ResponseBody
+        }
+      }
+    }
+    throw
+  }
+}
+
 $Base = $BridgeUrl.TrimEnd("/")
 Write-Host "Checking $Base/health"
-$Health = Invoke-RestMethod -Method GET -Uri "$Base/health" -Headers $Headers -TimeoutSec 30
+$Health = Invoke-BridgeRequest -Method GET -Uri "$Base/health" -Headers $Headers -TimeoutSec 30
 $Health | ConvertTo-Json -Depth 8
 
 if ($ProbeTicker) {
@@ -34,7 +79,7 @@ if ($ProbeTicker) {
     maxDte = 90
     maxContractsPerTicker = 20
   } | ConvertTo-Json -Depth 8
-  $Chain = Invoke-RestMethod -Method POST -Uri "$Base/v1/options/chains" -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 120
+  $Chain = Invoke-BridgeRequest -Method POST -Uri "$Base/v1/options/chains" -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 120
   $Chain | ConvertTo-Json -Depth 10
 
   if ($HistoricalSessionDate) {
@@ -63,6 +108,6 @@ if ($ProbeTicker) {
         right = $Contract.right
       })
     } | ConvertTo-Json -Depth 8
-    Invoke-RestMethod -Method POST -Uri "$Base/v1/options/historical-bid-ask" -Headers $Headers -ContentType "application/json" -Body $HistoryBody -TimeoutSec 180 | ConvertTo-Json -Depth 10
+    Invoke-BridgeRequest -Method POST -Uri "$Base/v1/options/historical-bid-ask" -Headers $Headers -ContentType "application/json" -Body $HistoryBody -TimeoutSec 180 | ConvertTo-Json -Depth 10
   }
 }

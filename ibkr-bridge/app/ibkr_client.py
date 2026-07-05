@@ -282,59 +282,80 @@ class IbkrOptionsClient:
         sample_target = max(10, min(1000, request.sampleTarget))
 
         for item in request.contracts:
-            contract = self._option_from_request(Contract, Option, item)
-            if contract is None:
-                rows.append({
-                    "contractKey": item.contractKey or item.localSymbol or "unknown",
-                    "sessionDate": request.sessionDate,
-                    "spreadBasis": "unavailable",
-                    "sampleCount": 0,
-                    "warnings": ["Insufficient contract identity for IBKR historical tick request."],
-                })
-                continue
-            qualified = ib.qualifyContracts(contract)
-            if not qualified:
-                rows.append({
-                    "contractKey": item.contractKey or item.localSymbol or "unknown",
-                    "sessionDate": request.sessionDate,
-                    "spreadBasis": "unavailable",
-                    "sampleCount": 0,
-                    "warnings": ["IBKR did not qualify the option contract."],
-                })
-                continue
-            ticks = ib.reqHistoricalTicks(
-                qualified[0],
-                start.strftime("%Y%m%d %H:%M:%S UTC"),
-                end.strftime("%Y%m%d %H:%M:%S UTC"),
-                sample_target,
-                "BID_ASK",
-                bool(request.useRth),
-                True,
-                [],
-            )
-            samples = [
-                BidAskSample(
-                    time=getattr(tick, "time", None),
-                    bid=as_float(getattr(tick, "priceBid", None)),
-                    ask=as_float(getattr(tick, "priceAsk", None)),
+            try:
+                contract = self._option_from_request(Contract, Option, item)
+                if contract is None:
+                    rows.append(self._historical_unavailable_row(
+                        item,
+                        request.sessionDate,
+                        "Insufficient contract identity for IBKR historical tick request.",
+                    ))
+                    continue
+                qualified = ib.qualifyContracts(contract)
+                if not qualified:
+                    rows.append(self._historical_unavailable_row(
+                        item,
+                        request.sessionDate,
+                        "IBKR did not qualify the option contract.",
+                    ))
+                    continue
+                ticks = ib.reqHistoricalTicks(
+                    qualified[0],
+                    start.strftime("%Y%m%d %H:%M:%S UTC"),
+                    end.strftime("%Y%m%d %H:%M:%S UTC"),
+                    sample_target,
+                    "BID_ASK",
+                    bool(request.useRth),
+                    True,
+                    [],
                 )
-                for tick in ticks
-            ]
-            metrics = summarize_bid_ask_samples(samples)
-            rows.append({
-                "contractKey": item.contractKey or item.localSymbol or str(getattr(qualified[0], "conId", "")),
-                "ibkrConId": getattr(qualified[0], "conId", item.ibkrConId),
-                "localSymbol": getattr(qualified[0], "localSymbol", item.localSymbol),
-                "sessionDate": request.sessionDate,
-                "spreadBasis": "historical_bid_ask" if metrics["sampleCount"] else "unavailable",
-                **metrics,
-                "warnings": [] if metrics["sampleCount"] else ["IBKR returned no BID_ASK ticks for the requested RTH window."],
-            })
-            if self.config.historical_request_spacing_seconds > 0:
-                time.sleep(self.config.historical_request_spacing_seconds)
+                samples = [
+                    BidAskSample(
+                        time=getattr(tick, "time", None),
+                        bid=as_float(getattr(tick, "priceBid", None)),
+                        ask=as_float(getattr(tick, "priceAsk", None)),
+                    )
+                    for tick in ticks
+                ]
+                metrics = summarize_bid_ask_samples(samples)
+                rows.append({
+                    "contractKey": item.contractKey or item.localSymbol or str(getattr(qualified[0], "conId", "")),
+                    "ibkrConId": getattr(qualified[0], "conId", item.ibkrConId),
+                    "localSymbol": getattr(qualified[0], "localSymbol", item.localSymbol),
+                    "sessionDate": request.sessionDate,
+                    "spreadBasis": "historical_bid_ask" if metrics["sampleCount"] else "unavailable",
+                    **metrics,
+                    "warnings": [] if metrics["sampleCount"] else ["IBKR returned no BID_ASK ticks for the requested RTH window."],
+                })
+            except Exception as exc:
+                self._last_error = str(exc)
+                rows.append(self._historical_unavailable_row(
+                    item,
+                    request.sessionDate,
+                    f"IBKR historical BID_ASK request failed: {exc}",
+                ))
+            finally:
+                if self.config.historical_request_spacing_seconds > 0:
+                    time.sleep(self.config.historical_request_spacing_seconds)
 
         self._last_success_at = datetime.utcnow().isoformat() + "Z"
         return {"contracts": rows}
+
+    def _historical_unavailable_row(
+        self,
+        item: OptionContractRequest,
+        session_date: str,
+        warning: str,
+    ) -> dict[str, Any]:
+        return {
+            "contractKey": item.contractKey or item.localSymbol or "unknown",
+            "ibkrConId": item.ibkrConId,
+            "localSymbol": item.localSymbol,
+            "sessionDate": session_date,
+            "spreadBasis": "unavailable",
+            "sampleCount": 0,
+            "warnings": [warning],
+        }
 
     def _market_data_mode_label(self) -> str:
         return {
