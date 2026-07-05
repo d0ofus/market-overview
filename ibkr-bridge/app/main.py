@@ -39,7 +39,10 @@ def create_app(config: BridgeConfig | None = None, client: OptionsClient | None 
     async def option_chains(request: ChainRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
         if not request.tickers:
             return {"results": []}
-        return await asyncio.to_thread(client.chains, request)
+        try:
+            return await asyncio.to_thread(client.chains, request)
+        except Exception as exc:
+            raise bridge_unavailable("IBKR option chain request failed.", exc) from exc
 
     @app.post("/v1/options/historical-bid-ask")
     async def historical_bid_ask(request: HistoricalBidAskRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -54,15 +57,20 @@ def create_app(config: BridgeConfig | None = None, client: OptionsClient | None 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "message": "IBKR historical BID_ASK probe failed.",
-                    "error": str(exc),
-                },
-            ) from exc
+            raise bridge_unavailable("IBKR historical BID_ASK probe failed.", exc) from exc
 
     return app
+
+
+def bridge_unavailable(message: str, exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "message": message,
+            "error": str(exc),
+            "hint": "IB Gateway/TWS must be running, logged in, API sockets enabled, and listening on the configured IBKR_HOST/IBKR_PORT.",
+        },
+    )
 
 
 app = create_app()

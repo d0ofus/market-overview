@@ -8,7 +8,8 @@ param(
   [string]$HistoricalSessionDate,
   [int]$MinDte = 1,
   [int]$MaxDte = 90,
-  [int]$MaxContractsPerTicker = 40
+  [int]$MaxContractsPerTicker = 40,
+  [switch]$ContinueOnUnhealthy
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +72,19 @@ $Base = $BridgeUrl.TrimEnd("/")
 Write-Host "Checking $Base/health"
 $Health = Invoke-BridgeRequest -Method GET -Uri "$Base/health" -Headers $Headers -TimeoutSec 30
 $Health | ConvertTo-Json -Depth 8
+
+if (-not $Health.ok -and -not $ContinueOnUnhealthy) {
+  $IbkrHost = if ($Health.ibkr.host) { $Health.ibkr.host } else { "127.0.0.1" }
+  $IbkrPort = if ($Health.ibkr.port) { $Health.ibkr.port } else { "<unknown>" }
+  Write-Host ""
+  Write-Host "Bridge is running, but IBKR is not reachable at ${IbkrHost}:${IbkrPort}."
+  if ($Health.lastError) {
+    Write-Host "IBKR connection error: $($Health.lastError)"
+  }
+  Write-Host "Start/login to IB Gateway or TWS, confirm API sockets are enabled, and verify the port matches IBKR_PORT in .env."
+  Write-Host "Use -ContinueOnUnhealthy only when you intentionally want to test endpoint error handling."
+  exit 2
+}
 
 if ($ProbeTicker) {
   Write-Host "Checking $Base/v1/options/chains for $ProbeTicker with DTE $MinDte-$MaxDte"

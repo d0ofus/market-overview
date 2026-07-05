@@ -66,9 +66,19 @@ class FakeClient:
         }
 
 
+class FailingClient(FakeClient):
+    def chains(self, request):
+        raise ConnectionRefusedError("[WinError 1225] The remote computer refused the network connection")
+
+
 def make_client():
     config = BridgeConfig(bridge_token="secret")
     return TestClient(create_app(config=config, client=FakeClient()))
+
+
+def make_failing_client():
+    config = BridgeConfig(bridge_token="secret")
+    return TestClient(create_app(config=config, client=FailingClient()))
 
 
 def auth_headers():
@@ -92,6 +102,18 @@ def test_chain_endpoint_returns_worker_compatible_shape():
     data = response.json()
     assert data["results"][0]["ticker"] == "AAPL"
     assert data["results"][0]["contracts"][0]["contractKey"] == "AAPL-C-20260821-220"
+
+
+def test_chain_endpoint_returns_structured_503_when_ibkr_is_unreachable():
+    client = make_failing_client()
+
+    response = client.post("/v1/options/chains", json={"tickers": ["AAPL"]}, headers=auth_headers())
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["message"] == "IBKR option chain request failed."
+    assert "refused" in detail["error"]
+    assert "IB Gateway/TWS" in detail["hint"]
 
 
 def test_historical_bid_ask_requires_rth_and_returns_metrics():
