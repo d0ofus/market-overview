@@ -95,6 +95,48 @@ For paper-account testing without live market-data subscriptions, set
 `IBKR_MARKET_DATA_TYPE=3` in `.env`, restart the bridge, and rerun the probe.
 Mode `3` asks IBKR for delayed data where available.
 
+## Temporary TryCloudflare Smoke Test
+
+Before buying or attaching a domain, use a temporary `trycloudflare.com`
+Quick Tunnel to prove the Worker can reach the bridge over HTTPS. This is a
+testing-only path:
+
+- the URL is random and changes whenever the tunnel restarts
+- it is not protected by Cloudflare Access service tokens
+- the bridge bearer token is still required on every request
+- keep the `cloudflared` PowerShell window open while testing
+
+Start the bridge locally, then in another PowerShell window run:
+
+```powershell
+scripts\start-quick-tunnel.ps1 -BridgeToken "<IBKR_BRIDGE_TOKEN>"
+```
+
+Copy the generated `https://*.trycloudflare.com` URL from the `cloudflared`
+output, then validate through the tunnel:
+
+```powershell
+scripts\check-bridge.ps1 `
+  -BridgeUrl "https://<random>.trycloudflare.com" `
+  -BridgeToken "<IBKR_BRIDGE_TOKEN>" `
+  -ProbeTicker AAPL `
+  -TargetExpiry 2026-07-17 `
+  -HistoricalSessionDate 2026-07-02
+```
+
+If the remote check works, submit temporary Worker secrets without Access
+headers:
+
+```powershell
+scripts\set-worker-options-secrets.ps1 `
+  -BridgeEndpoint "https://<random>.trycloudflare.com" `
+  -BridgeToken "<IBKR_BRIDGE_TOKEN>"
+```
+
+Do not install the Quick Tunnel as a service. Once the smoke test passes,
+replace this with a named tunnel on your own Cloudflare-managed hostname and
+enable Cloudflare Access.
+
 ## Run At Login
 
 After local health checks pass:
