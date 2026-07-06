@@ -89,7 +89,7 @@ describe("options service", () => {
 
     const snapshotQueries = allStatements.filter((statement) => statement.__sql.includes("FROM option_chain_snapshots"));
     expect(snapshotQueries.length).toBeGreaterThan(1);
-    expect(Math.max(...snapshotQueries.map((statement) => statement.__args.length))).toBeLessThanOrEqual(900);
+    expect(Math.max(...snapshotQueries.map((statement) => statement.__args.length))).toBeLessThanOrEqual(90);
     expect(snapshotQueries.reduce((total, statement) => (
       total + statement.__args.filter((arg) => typeof arg === "string" && /^T\d+$/.test(arg)).length
     ), 0)).toBe(tickers.length);
