@@ -267,6 +267,7 @@ const DEFAULT_HISTORICAL_SPREAD_MAX_CONTRACTS = 40;
 const DEFAULT_HISTORICAL_SPREAD_SAMPLE_TARGET = 300;
 const DEFAULT_OPTIONS_TIMEOUT_MS = 30_000;
 const OPTIONS_HOUSEKEEPING_INTERVAL_MINUTES = 360;
+const D1_SAFE_MAX_BOUND_VARIABLES = 900;
 
 let lastOptionsHousekeepingAt: string | null = null;
 
@@ -330,6 +331,14 @@ function uniqueTickers(values: unknown[]): string[] {
     out.push(ticker);
   }
   return out;
+}
+
+function chunkArray<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1619,33 +1628,39 @@ async function loadLatestCandidate(env: Env): Promise<OptionCandidateRow | null>
   return rows[0] ?? null;
 }
 
-async function loadSnapshotsForTickers(env: Env, tickers: string[], setId?: string | null, runId?: string | null): Promise<Map<string, OptionChainSnapshot>> {
+export async function loadSnapshotsForTickers(env: Env, tickers: string[], setId?: string | null, runId?: string | null): Promise<Map<string, OptionChainSnapshot>> {
   const out = new Map<string, OptionChainSnapshot>();
   if (tickers.length === 0) return out;
-  const clauses = [`ticker IN (${tickers.map(() => "?").join(",")})`];
-  const args: unknown[] = [...tickers];
-  if (setId) {
-    clauses.push("watchlist_set_id = ?");
-    args.push(setId);
-  }
-  if (runId) {
-    clauses.push("watchlist_run_id = ?");
-    args.push(runId);
-  }
-  const rows = await env.DB.prepare(
-    `SELECT id, request_id as requestId, watchlist_set_id as watchlistSetId, watchlist_set_name as watchlistSetName,
-            watchlist_run_id as watchlistRunId, ticker, provider, bridge_status as bridgeStatus,
-            underlying_price as underlyingPrice, underlying_quote_time as underlyingQuoteTime,
-            options_available as optionsAvailable, iv_rank_52w as ivRank52w, iv_percentile_52w as ivPercentile52w,
-            data_mode as dataMode, latest_rth_session_date as latestRthSessionDate, contract_count as contractCount,
-            candidate_count as candidateCount, warnings_json as warningsJson, raw_summary_json as rawSummaryJson,
-            created_at as createdAt, expires_at as expiresAt
-       FROM option_chain_snapshots
-      WHERE ${clauses.join(" AND ")}
-      ORDER BY datetime(created_at) DESC`,
-  ).bind(...args).all<SnapshotRow>();
-  for (const row of rows.results ?? []) {
-    if (!out.has(row.ticker)) out.set(row.ticker, mapSnapshot(row));
+
+  const fixedVariableCount = (setId ? 1 : 0) + (runId ? 1 : 0);
+  const tickersPerQuery = Math.max(1, D1_SAFE_MAX_BOUND_VARIABLES - fixedVariableCount);
+
+  for (const tickerChunk of chunkArray(tickers, tickersPerQuery)) {
+    const clauses = [`ticker IN (${tickerChunk.map(() => "?").join(",")})`];
+    const args: unknown[] = [...tickerChunk];
+    if (setId) {
+      clauses.push("watchlist_set_id = ?");
+      args.push(setId);
+    }
+    if (runId) {
+      clauses.push("watchlist_run_id = ?");
+      args.push(runId);
+    }
+    const rows = await env.DB.prepare(
+      `SELECT id, request_id as requestId, watchlist_set_id as watchlistSetId, watchlist_set_name as watchlistSetName,
+              watchlist_run_id as watchlistRunId, ticker, provider, bridge_status as bridgeStatus,
+              underlying_price as underlyingPrice, underlying_quote_time as underlyingQuoteTime,
+              options_available as optionsAvailable, iv_rank_52w as ivRank52w, iv_percentile_52w as ivPercentile52w,
+              data_mode as dataMode, latest_rth_session_date as latestRthSessionDate, contract_count as contractCount,
+              candidate_count as candidateCount, warnings_json as warningsJson, raw_summary_json as rawSummaryJson,
+              created_at as createdAt, expires_at as expiresAt
+         FROM option_chain_snapshots
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY datetime(created_at) DESC`,
+    ).bind(...args).all<SnapshotRow>();
+    for (const row of rows.results ?? []) {
+      if (!out.has(row.ticker)) out.set(row.ticker, mapSnapshot(row));
+    }
   }
   return out;
 }

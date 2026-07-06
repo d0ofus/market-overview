@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import {
+  loadSnapshotsForTickers,
   refreshOptionsForWatchlist,
   loadOptionsStatus,
 } from "../src/options-service";
@@ -18,6 +19,7 @@ type MockStatement = {
 function createOptionsEnv(overrides: Partial<Env> = {}) {
   const batchStatements: MockStatement[] = [];
   const runStatements: MockStatement[] = [];
+  const allStatements: MockStatement[] = [];
   const makeStatement = (sql: string, args: unknown[] = []): MockStatement => ({
     __sql: sql,
     __args: args,
@@ -26,6 +28,7 @@ function createOptionsEnv(overrides: Partial<Env> = {}) {
       return null as T | null;
     },
     async all<T>() {
+      allStatements.push(makeStatement(sql, args));
       return { results: [] as T[] };
     },
     async run() {
@@ -49,7 +52,7 @@ function createOptionsEnv(overrides: Partial<Env> = {}) {
     } as unknown as D1Database,
     ...overrides,
   } as Env;
-  return { env, batchStatements, runStatements };
+  return { env, batchStatements, runStatements, allStatements };
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -76,6 +79,20 @@ describe("options service", () => {
     expect(result.ok).toBe(false);
     expect(result.warnings.join(" ")).toContain("disabled");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("chunks snapshot lookups to stay under D1 variable limits", async () => {
+    const { env, allStatements } = createOptionsEnv();
+    const tickers = Array.from({ length: 1105 }, (_, index) => `T${index}`);
+
+    await loadSnapshotsForTickers(env, tickers, "set-1", "run-1");
+
+    const snapshotQueries = allStatements.filter((statement) => statement.__sql.includes("FROM option_chain_snapshots"));
+    expect(snapshotQueries.length).toBeGreaterThan(1);
+    expect(Math.max(...snapshotQueries.map((statement) => statement.__args.length))).toBeLessThanOrEqual(900);
+    expect(snapshotQueries.reduce((total, statement) => (
+      total + statement.__args.filter((arg) => typeof arg === "string" && /^T\d+$/.test(arg)).length
+    ), 0)).toBe(tickers.length);
   });
 
   it("normalizes bridge chains, probes historical BID_ASK spreads, scores, and persists candidates", async () => {
