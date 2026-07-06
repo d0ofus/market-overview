@@ -123,10 +123,33 @@ function analysisStatusClass(status: WatchlistReviewAnalysisDispatchStatus) {
 }
 
 function webhookStatusLabel(status: WatchlistReviewAnalysisWebhookStatus) {
-  if (status === "sent") return "Webhook sent, poller fallback enabled";
-  if (status === "failed") return "Webhook failed, poller fallback enabled";
-  if (status === "already_pending") return "Already queued for Hermes";
-  return "Hermes webhook not configured";
+  if (status === "sent") return "Webhook sent; poller fallback also enabled";
+  if (status === "failed") return "Webhook failed; poller fallback active";
+  if (status === "already_pending") return "Already queued for Hermes poller";
+  return "Webhook disabled intentionally; Hermes poller fallback active";
+}
+
+function isTerminalAnalysisStatus(status: WatchlistReviewAnalysisDispatchStatus) {
+  return status === "completed" || status === "partial_failed" || status === "failed" || status === "cancelled";
+}
+
+function minutesSince(value: string | null | undefined) {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  if (Number.isNaN(parsed)) return null;
+  return Math.max(0, Math.floor((Date.now() - parsed) / 60_000));
+}
+
+function pollerEtaLabel(status: WatchlistReviewAnalysisDispatchStatus, requestedAt: string) {
+  if (status === "completed") return "Completed — review run is ready.";
+  if (status === "failed" || status === "partial_failed" || status === "cancelled") return "Terminal status — inspect the error/details below.";
+  if (status === "claimed" || status === "running") return "Hermes has claimed the dispatch and is processing it now.";
+  const age = minutesSince(requestedAt);
+  if (age == null) return "Waiting for Hermes poller fallback.";
+  if (age < 2) return `Queued ${age}m — waiting for the 1-minute Hermes poller.`;
+  if (age < 5) return `Queued ${age}m — poller may be preflighting TradingView.`;
+  if (age < 15) return `Queued ${age}m — needs attention if it does not claim soon.`;
+  return `Queued ${age}m — likely stuck; check Hermes poller, TradingView preflight, or prep freshness.`;
 }
 
 function enabledFactorCount(config: WatchlistFactorConfig | null | undefined) {
@@ -387,11 +410,9 @@ export function WatchlistCompilerDashboard() {
       });
       setReviewPrep(prep);
       const dispatch = prep.analysisDispatch;
-      setMessage(dispatch?.webhookStatus === "not_configured"
-        ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"}, but Hermes analysis is not configured. No review run will appear until a Hermes poller claims the dispatch or a webhook is configured.`
-        : dispatch
-          ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} and queued Hermes analysis.`
-          : `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
+      setMessage(dispatch
+        ? `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"}. Hermes poller fallback is active and should pick this up within about 1 minute.`
+        : `Prepared ${prep.symbolCount} symbol${prep.symbolCount === 1 ? "" : "s"} for watchlist review.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to prepare watchlist review.");
     } finally {
@@ -399,20 +420,33 @@ export function WatchlistCompilerDashboard() {
     }
   };
 
-  const refreshReviewDispatch = async () => {
+  const refreshReviewDispatch = async (options: { quiet?: boolean } = {}) => {
     const dispatchId = reviewPrep?.analysisDispatch?.dispatchId;
     if (!dispatchId || !reviewPrep) return;
     setRefreshingReviewDispatch(true);
     try {
       const res = await getWatchlistReviewAnalysisDispatch(dispatchId);
-      setReviewPrep({ ...reviewPrep, analysisDispatch: res.summary });
-      setMessage(`Hermes analysis status: ${analysisStatusLabel(res.summary.status)}.`);
+      setReviewPrep((current) => current ? { ...current, analysisDispatch: res.summary } : current);
+      if (!options.quiet || isTerminalAnalysisStatus(res.summary.status)) {
+        setMessage(res.summary.createdReviewRunId
+          ? `Hermes analysis completed. Review run ${res.summary.createdReviewRunId} is ready.`
+          : `Hermes analysis status: ${analysisStatusLabel(res.summary.status)}.`);
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to refresh Hermes analysis status.");
+      if (!options.quiet) setMessage(error instanceof Error ? error.message : "Failed to refresh Hermes analysis status.");
     } finally {
       setRefreshingReviewDispatch(false);
     }
   };
+
+  useEffect(() => {
+    const dispatch = reviewPrep?.analysisDispatch;
+    if (!dispatch || isTerminalAnalysisStatus(dispatch.status)) return;
+    const timer = window.setInterval(() => {
+      void refreshReviewDispatch({ quiet: true });
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [reviewPrep?.analysisDispatch?.dispatchId, reviewPrep?.analysisDispatch?.status]);
 
   const openHistory = async (ticker: string) => {
     setHistoryTicker(ticker);
@@ -544,6 +578,9 @@ export function WatchlistCompilerDashboard() {
                     </span>
                     <span className="text-slate-400">{webhookStatusLabel(reviewPrep.analysisDispatch.webhookStatus)}</span>
                   </div>
+                  <div className="mt-2 rounded border border-slate-700/60 bg-slate-950/40 px-2 py-1 text-[11px] text-slate-300">
+                    {pollerEtaLabel(reviewPrep.analysisDispatch.status, reviewPrep.analysisDispatch.requestedAt)}
+                  </div>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                     <div>Analysis Dispatch: <span className="font-mono text-slate-200">{reviewPrep.analysisDispatch.dispatchId}</span></div>
                     <div>Updated: <span className="font-semibold">{formatTime(reviewPrep.analysisDispatch.updatedAt)}</span></div>
@@ -555,7 +592,10 @@ export function WatchlistCompilerDashboard() {
                       Open Watchlist Review
                     </a>
                   ) : null}
-                  {reviewPrep.analysisDispatch.error ? <div className="mt-2 text-[11px] text-yellow-200">{reviewPrep.analysisDispatch.error}</div> : null}
+                  {reviewPrep.analysisDispatch.error && reviewPrep.analysisDispatch.webhookStatus !== "not_configured" ? <div className="mt-2 text-[11px] text-yellow-200">{reviewPrep.analysisDispatch.error}</div> : null}
+                  {reviewPrep.analysisDispatch.webhookStatus === "not_configured" && !isTerminalAnalysisStatus(reviewPrep.analysisDispatch.status) ? (
+                    <div className="mt-2 text-[11px] text-slate-400">Webhook delivery is disabled by design for this workflow; the script-only Hermes poller is the active path.</div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="mt-2 text-[11px] text-yellow-200">
