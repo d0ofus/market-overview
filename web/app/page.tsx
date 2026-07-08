@@ -6,6 +6,7 @@ import { OverviewFreshnessBanner } from "@/components/overview-freshness-banner"
 import { QuoteFreshnessAudit } from "@/components/quote-freshness-audit";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
+import { ManualRefreshButton } from "@/components/manual-refresh-button";
 import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
 import { deriveOverviewFreshnessSummary } from "@/lib/overview-freshness";
 
@@ -50,15 +51,20 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const [dashboard, statusValue, fedWatch, focusItems, focusHistory] = await Promise.all([
-    getDashboard().catch(() => null),
+  const [dashboardResult, statusValue, fedWatch, focusItems, focusHistory] = await Promise.all([
+    getDashboard()
+      .then((data) => ({ data, error: null as string | null }))
+      .catch((error) => ({
+        data: null,
+        error: error instanceof Error ? error.message : "Overview data could not be loaded.",
+      })),
     getStatus("overview").catch(() => ({
       timezone: "Australia/Melbourne",
       autoRefreshLabel: "08:15 Australia/Melbourne",
       autoRefreshLocalTime: "08:15",
       lastUpdated: null,
       asOfDate: null,
-      providerLabel: "Alpaca (IEX Delayed Daily Bars)",
+      providerLabel: "Alpaca snapshots + stored daily bars",
       expectedAsOfDate: null,
       freshnessStatus: "stale" as const,
       freshnessCoveragePct: 0,
@@ -87,7 +93,11 @@ export default async function HomePage() {
     getOverviewFocusItems().catch(() => ({ rows: [] })),
     getOverviewFocusHistory().catch(() => ({ rows: [] })),
   ]);
+  const dashboard = dashboardResult.data;
   const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
+  const dashboardUnavailableMessage = dashboardResult.error
+    ?? (dashboard?.status === "empty" ? dashboard.warning : null)
+    ?? "Overview data is temporarily unavailable.";
   const focusedSections = (dashboardValue?.sections ?? []).filter((s) => s.title.includes("Macro") || s.title.includes("Equities"));
   const groupAnchorId = (groupId: string) => `overview-group-${groupId}`;
   const currentFocusAnchorId = "overview-current-focus";
@@ -140,28 +150,31 @@ export default async function HomePage() {
         items={jumpItems}
         showHeading={false}
         actions={(
-          <OverviewRefreshMenu
-            status={{
-              asOfDate: statusValue.asOfDate,
-              lastUpdated: statusValue.lastUpdated,
-              timezone: statusValue.timezone,
-              autoRefreshLabel: statusValue.autoRefreshLabel,
-              providerLabel: statusValue.providerLabel,
-              expectedAsOfDate: statusValue.expectedAsOfDate,
-              freshnessStatus: statusValue.freshnessStatus,
-              freshnessCoveragePct: statusValue.freshnessCoveragePct,
-              freshnessCurrentCount: statusValue.freshnessCurrentCount,
-              freshnessEligibleCount: statusValue.freshnessEligibleCount,
-              freshnessCriticalMissingTickers: statusValue.freshnessCriticalMissingTickers,
-              freshnessMinBarDate: statusValue.freshnessMinBarDate,
-              freshnessMaxBarDate: statusValue.freshnessMaxBarDate,
-              freshnessWarning: statusValue.freshnessWarning,
-              quoteOverlayRequestedCount: statusValue.quoteOverlayRequestedCount,
-              quoteOverlayReturnedCount: statusValue.quoteOverlayReturnedCount,
-              quoteOverlayError: statusValue.quoteOverlayError,
-              quoteOverlayMissingSample: statusValue.quoteOverlayMissingSample,
-            }}
-          />
+          <div className="flex flex-wrap items-start gap-2 lg:items-center">
+            <ManualRefreshButton page="overview" idleLabel="Refresh Overview Data" />
+            <OverviewRefreshMenu
+              status={{
+                asOfDate: statusValue.asOfDate,
+                lastUpdated: statusValue.lastUpdated,
+                timezone: statusValue.timezone,
+                autoRefreshLabel: statusValue.autoRefreshLabel,
+                providerLabel: statusValue.providerLabel,
+                expectedAsOfDate: statusValue.expectedAsOfDate,
+                freshnessStatus: statusValue.freshnessStatus,
+                freshnessCoveragePct: statusValue.freshnessCoveragePct,
+                freshnessCurrentCount: statusValue.freshnessCurrentCount,
+                freshnessEligibleCount: statusValue.freshnessEligibleCount,
+                freshnessCriticalMissingTickers: statusValue.freshnessCriticalMissingTickers,
+                freshnessMinBarDate: statusValue.freshnessMinBarDate,
+                freshnessMaxBarDate: statusValue.freshnessMaxBarDate,
+                freshnessWarning: statusValue.freshnessWarning,
+                quoteOverlayRequestedCount: statusValue.quoteOverlayRequestedCount,
+                quoteOverlayReturnedCount: statusValue.quoteOverlayReturnedCount,
+                quoteOverlayError: statusValue.quoteOverlayError,
+                quoteOverlayMissingSample: statusValue.quoteOverlayMissingSample,
+              }}
+            />
+          </div>
         )}
       />
       <OverviewFreshnessBanner summary={freshnessSummary} />
@@ -176,8 +189,9 @@ export default async function HomePage() {
         </div>
       </div>
       {!dashboardValue && (
-        <div className="card p-4 text-sm text-red-300">
-          Overview data is temporarily unavailable. Open Admin and use the Refresh Overview Data button.
+        <div className="card flex flex-col gap-3 p-4 text-sm text-red-300 md:flex-row md:items-center md:justify-between">
+          <span>{dashboardUnavailableMessage}</span>
+          <ManualRefreshButton page="overview" idleLabel="Refresh Overview Data" />
         </div>
       )}
       {dashboardValue && <QuoteFreshnessAudit sections={focusedSections} />}

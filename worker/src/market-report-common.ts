@@ -54,6 +54,7 @@ type BraveSearchCacheRow = {
 
 export const GEMINI_PROVIDER = "gemini";
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
+const GEMINI_FETCH_TIMEOUT_MAX_MS = 300_000;
 
 function normalizeBraveQuery(query: string): string {
   return query.replace(/\s+/g, " ").trim();
@@ -470,7 +471,7 @@ export async function generateMarkdownWithGemini(
   const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const groundingEnabled = env.GEMINI_SEARCH_GROUNDING_ENABLED?.trim().toLowerCase() === "true";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const timeoutMs = resolveFetchTimeoutMs(options?.timeoutMs ?? env.GEMINI_TIMEOUT_MS, 90_000);
+  const timeoutMs = resolveFetchTimeoutMs(options?.timeoutMs ?? env.GEMINI_TIMEOUT_MS, 90_000, GEMINI_FETCH_TIMEOUT_MAX_MS);
   const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: {

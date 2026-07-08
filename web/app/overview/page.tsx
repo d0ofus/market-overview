@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
+import HomePage, { revalidate } from "../page";
 
-export default function OverviewAliasPage() {
-  redirect("/");
-}
+export { revalidate };
+export default HomePage;

@@ -1336,7 +1336,7 @@ async function refreshPageScopedData(
     return await refreshOverviewPageData(env, {
       loadOverviewTickers,
       refreshRecentBarsForTickers,
-      refreshAndStoreOverviewSnapshot,
+      refreshAndStoreOverviewSnapshot: (targetEnv, options) => refreshAndStoreOverviewSnapshot(targetEnv, undefined, "default", options),
     });
   }
   if (page === "breadth") {

@@ -13,4 +13,9 @@ describe("fetch timeout config", () => {
     expect(resolveFetchTimeoutMs("300000", 15_000)).toBe(120_000);
     expect(resolveFetchTimeoutMs("20000", 15_000)).toBe(20_000);
   });
+
+  it("allows call sites to opt into a higher maximum timeout", () => {
+    expect(resolveFetchTimeoutMs("240000", 15_000, 300_000)).toBe(240_000);
+    expect(resolveFetchTimeoutMs("500000", 15_000, 300_000)).toBe(300_000);
+  });
 });

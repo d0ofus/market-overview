@@ -117,7 +117,9 @@ class FakeMarketCommentaryDb {
             .sort(sortLatest)[0] ?? null) as T;
         }
         if (sql.includes("FROM market_commentary_reports")) {
-          return ([...db.rows].sort(sortLatest)[0] ?? null) as T;
+          return (db.rows
+            .filter((row) => !sql.includes("status = 'ready'") || row.status === "ready")
+            .sort(sortLatest)[0] ?? null) as T;
         }
         return null as T;
       },
@@ -492,6 +494,22 @@ describe("market commentary service", () => {
     const response = await loadLatestMarketCommentary(createEnv(db));
     expect(response.status).toBe("ready");
     expect(response.report?.id).toBe("latest");
+  });
+
+  it("keeps the latest ready report visible when the newest attempt failed", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("ready", "2026-05-22", "2026-05-22T21:10:00.000Z"),
+      createReport("failed-newer", "2026-05-23", "2026-05-23T21:10:00.000Z", {
+        status: "failed",
+        errorMessage: "Request timed out after 120000ms.",
+      }),
+    ]);
+    const response = await loadLatestMarketCommentary(createEnv(db));
+
+    expect(response.status).toBe("ready");
+    expect(response.report?.id).toBe("ready");
+    expect(response.warning).toContain("Latest commentary attempt failed: Request timed out after 120000ms.");
+    expect(response.warning).toContain("Showing latest ready report from 2026-05-22.");
   });
 
   it("prunes reports older than the configured 30-day history", async () => {

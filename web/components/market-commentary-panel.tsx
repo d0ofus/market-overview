@@ -446,6 +446,13 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
             </div>
           )}
 
+          {activeWarning && activeStatus !== "failed" && (
+            <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{activeWarning}</span>
+            </div>
+          )}
+
           {report && activeStatus !== "failed" && commentaryFreshness.tone !== "ok" && (
             <div className={`rounded border p-3 text-sm ${freshnessPanelClass(commentaryFreshness.tone)}`}>
               <div className="flex gap-2">

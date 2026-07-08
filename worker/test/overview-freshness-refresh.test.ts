@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  computeAndStoreSnapshot,
   computeOverviewFreshnessDiagnostics,
   isOverviewFreshnessSufficientForScheduledSnapshot,
   OverviewFreshnessError,
@@ -13,6 +14,7 @@ class OverviewFreshnessDb {
   snapshotWrites = 0;
   snapshotRowWrites = 0;
   snapshotRowBarDates: Array<string | null> = [];
+  snapshotRows: Array<{ ticker: string; price: number; change1d: number; rankKey: number }> = [];
   readonly dailyBars: DailyBarSeed;
 
   private readonly config = {
@@ -171,6 +173,12 @@ class OverviewFreshnessDb {
     if (sql.includes("INSERT INTO snapshots_meta")) this.snapshotWrites += 1;
     if (sql.includes("INSERT OR REPLACE INTO snapshot_rows")) {
       this.snapshotRowWrites += 1;
+      this.snapshotRows.push({
+        ticker: String(args[3]),
+        price: Number(args[5]),
+        change1d: Number(args[6]),
+        rankKey: Number(args[13]),
+      });
       this.snapshotRowBarDates.push(args[15] == null ? null : String(args[15]));
     }
     return { meta: { rows_written: 1 } };
@@ -262,6 +270,89 @@ describe("overview freshness refresh", () => {
     expect(diagnostics.status).toBe("partial");
     expect(diagnostics.coveragePct).toBe(50);
     expect(diagnostics.criticalMissingTickers).toEqual([]);
+  });
+
+  it("uses fresh quote snapshots for stored 1D price, change, and rank values", async () => {
+    const db = new OverviewFreshnessDb({
+      SPY: ["2026-06-05", "2026-06-12"],
+      QQQ: ["2026-06-05", "2026-06-12"],
+      DIA: ["2026-06-05", "2026-06-12"],
+      IWM: ["2026-06-05", "2026-06-12"],
+      XLF: ["2026-06-05", "2026-06-12"],
+      XLK: ["2026-06-05", "2026-06-12"],
+      XBI: ["2026-06-05", "2026-06-12"],
+      SMH: ["2026-06-05", "2026-06-12"],
+      IBIT: ["2026-06-05", "2026-06-12"],
+      ARKK: ["2026-06-05", "2026-06-12"],
+    });
+
+    await computeAndStoreSnapshot(createEnv(db), "2026-06-12", "default", {
+      includeBreadth: false,
+      pullProviderBars: false,
+      requireFreshness: true,
+      freshnessDiagnostics: {
+        expectedAsOfDate: "2026-06-12",
+        status: "fresh",
+        eligibleCount: 10,
+        currentCount: 10,
+        staleCount: 0,
+        coveragePct: 100,
+        criticalMissingTickers: [],
+        minBarDate: "2026-06-12",
+        maxBarDate: "2026-06-12",
+        warning: null,
+      },
+      quoteSnapshotResult: {
+        providerAttempted: true,
+        providerError: null,
+        snapshots: {
+          SPY: {
+            price: 130,
+            prevClose: 100,
+            change1d: 30,
+            source: "alpaca-snapshot",
+            fetchedAt: "2026-06-12T18:00:00.000Z",
+            tradeTimestamp: "2026-06-12T18:00:00.000Z",
+          },
+          QQQ: {
+            price: 101,
+            prevClose: 100,
+            change1d: 1,
+            source: "alpaca-snapshot",
+            fetchedAt: "2026-06-12T18:00:00.000Z",
+            tradeTimestamp: "2026-06-12T18:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    const spyRow = db.snapshotRows.find((row) => row.ticker === "SPY");
+    expect(spyRow).toEqual(expect.objectContaining({
+      price: 130,
+      change1d: 30,
+      rankKey: 30,
+    }));
+  });
+
+  it("writes a stale snapshot in best-effort mode instead of throwing a freshness error", async () => {
+    const db = new OverviewFreshnessDb({
+      SPY: ["2026-06-05"],
+      QQQ: ["2026-06-05"],
+      DIA: ["2026-06-05"],
+      IWM: ["2026-06-05"],
+      XLF: ["2026-06-05"],
+      XLK: ["2026-06-05"],
+      XBI: ["2026-06-05"],
+      SMH: ["2026-06-05"],
+      IBIT: ["2026-06-05"],
+      ARKK: ["2026-06-05"],
+    });
+
+    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12", "default", { requireFreshness: false });
+
+    expect(result.freshness.status).toBe("stale");
+    expect(db.snapshotWrites).toBe(1);
+    expect(db.snapshotRowWrites).toBe(10);
   });
 
   it("writes a partial snapshot when critical tickers are fresh and non-critical overview rows are stale", async () => {

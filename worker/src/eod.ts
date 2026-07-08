@@ -14,7 +14,7 @@ import {
   type OverviewQuoteOverlay,
   type OverviewQuoteSnapshotFetchResult,
 } from "./overview-quote-snapshot";
-import type { BarFreshnessStatus, Env, QuoteFreshnessStatus, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
+import type { BarFreshnessStatus, Env, QuoteFreshnessStatus, RankingWindow, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
 
@@ -365,6 +365,31 @@ function criticalTickersWithoutLiveQuotes(
   return Array.from(missing).sort();
 }
 
+function hasFreshLiveQuoteOverlay(overlay: OverviewQuoteOverlay | null | undefined): overlay is OverviewQuoteOverlay & {
+  quotePrice: number;
+  quoteChange1d: number;
+} {
+  return overlay?.quoteFreshnessStatus === "fresh"
+    && typeof overlay.quotePrice === "number"
+    && Number.isFinite(overlay.quotePrice)
+    && typeof overlay.quoteChange1d === "number"
+    && Number.isFinite(overlay.quoteChange1d);
+}
+
+function overviewCurrentValuesFromQuoteOverlay(
+  row: { price: number; change1d: number; rankKey: number; rankingWindowDefault: RankingWindow },
+  overlay: OverviewQuoteOverlay | null | undefined,
+): { price: number; change1d: number; rankKey: number } {
+  if (!hasFreshLiveQuoteOverlay(overlay)) {
+    return { price: row.price, change1d: row.change1d, rankKey: row.rankKey };
+  }
+  return {
+    price: overlay.quotePrice,
+    change1d: overlay.quoteChange1d,
+    rankKey: row.rankingWindowDefault === "1D" ? overlay.quoteChange1d : row.rankKey,
+  };
+}
+
 function normalizeFreshnessDiagnostics(input: Partial<OverviewFreshnessDiagnostics> & { expectedAsOfDate: string }): OverviewFreshnessDiagnostics {
   const eligibleCount = Math.max(0, Number(input.eligibleCount ?? 0));
   const currentCount = Math.max(0, Number(input.currentCount ?? 0));
@@ -541,6 +566,7 @@ export async function refreshAndStoreOverviewSnapshot(
   env: Env,
   asOfDateInput?: string,
   configId = DEFAULT_CONFIG_ID,
+  options: { requireFreshness?: boolean } = {},
 ): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics; fetchedRows: number; writtenRows: number }> {
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
@@ -597,7 +623,7 @@ export async function refreshAndStoreOverviewSnapshot(
   const result = await computeAndStoreSnapshot(env, asOfDate, configId, {
     includeBreadth: false,
     pullProviderBars: false,
-    requireFreshness: true,
+    requireFreshness: options.requireFreshness ?? true,
     freshnessDiagnostics: freshness,
     quoteSnapshotResult,
   });
@@ -1247,6 +1273,7 @@ export async function computeAndStoreSnapshot(
     displayName: string;
     holdings: string[] | null;
     barDate: string | null;
+    rankingWindowDefault: RankingWindow;
     price: number;
     change1d: number;
     change1w: number;
@@ -1273,6 +1300,7 @@ export async function computeAndStoreSnapshot(
             displayName: String(item.displayName ?? symbolNameMap.get(item.ticker) ?? item.ticker),
             holdings: item.holdings ?? null,
             barDate: cleaned.dates.at(-1) ?? null,
+            rankingWindowDefault: group.rankingWindowDefault,
             ...metrics,
             rankKey: rankValue(metrics, group.rankingWindowDefault),
           };
@@ -1288,6 +1316,9 @@ export async function computeAndStoreSnapshot(
     : await buildOverviewQuoteOverlays(env, quoteOverlayRows, asOfDate);
   const quoteOverlays = quoteOverlayResult.overlays;
   const quoteOverlayDiagnostics = quoteOverlayResult.diagnostics;
+  if (quoteOverlayDiagnostics.returnedSnapshots > 0) {
+    providerLabel = "Alpaca snapshots + stored daily bars";
+  }
   const finalFreshness = (() => {
     let warning = freshness.warning;
     if (quoteOverlayDiagnostics.providerAttempted && quoteOverlayDiagnostics.eligibleTickers > 0 && quoteOverlayDiagnostics.returnedSnapshots === 0) {
@@ -1314,6 +1345,7 @@ export async function computeAndStoreSnapshot(
   const rowInserts = [];
   for (const row of snapshotRows) {
     const overlay = quoteOverlays.get(row.ticker.toUpperCase()) ?? null;
+    const currentValues = overviewCurrentValuesFromQuoteOverlay(row, overlay);
     rowInserts.push(
       env.DB.prepare(
         "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json, bar_date, quote_price, quote_prev_close, quote_change_1d, quote_source, quote_fetched_at, quote_freshness_status, quote_freshness_reason, bar_freshness_status, bar_freshness_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1323,15 +1355,15 @@ export async function computeAndStoreSnapshot(
         row.groupId,
         row.ticker,
         row.displayName,
-        row.price,
-        row.change1d,
+        currentValues.price,
+        currentValues.change1d,
         row.change1w,
         row.change5d,
         row.change21d,
         row.ytd,
         row.pctFrom52wHigh,
         JSON.stringify(row.sparkline),
-        row.rankKey,
+        currentValues.rankKey,
         row.holdings ? JSON.stringify(row.holdings) : null,
         row.barDate,
         overlay?.quotePrice ?? null,
@@ -1732,7 +1764,7 @@ type LoadSnapshotOptions = {
   allowComputeOnMissing?: boolean;
 };
 
-export function emptySnapshotResponse(warning = "No stored overview snapshot is available. Use Admin refresh to generate one."): SnapshotEmptyResponse {
+export function emptySnapshotResponse(warning = "No stored overview snapshot is available. Use Refresh Overview Data to generate one."): SnapshotEmptyResponse {
   return {
     status: "empty",
     warning,
@@ -1785,6 +1817,34 @@ async function loadSnapshotMeta(
     return await env.DB.prepare(`${selectLegacy}${where}`)
       .bind(configId, requestedDate ?? latestAllowedAsOfDate)
       .first<SnapshotMetaRow>();
+  }
+}
+
+function parseStoredNumberArray(raw: string | null | undefined): number[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+  } catch {
+    return [];
+  }
+}
+
+function parseStoredStringArray(raw: string | null | undefined): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const values = parsed
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return values.length > 0 ? values : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1940,6 +2000,7 @@ export async function loadSnapshot(
               ? r.barFreshnessStatus
               : null;
             const hasStoredLiveQuote = isLiveQuoteSource(r.quoteSource) && r.quotePrice != null && r.quotePrevClose != null && r.quoteChange1d != null && Boolean(r.quoteFetchedAt);
+            const hasStoredFreshLiveQuote = hasStoredLiveQuote && storedQuoteFreshnessStatus === "fresh";
             const displayedQuoteFreshness = storedQuoteFreshnessStatus && (hasStoredLiveQuote || storedQuoteFreshnessStatus === "unsupported")
               ? {
                 quoteFreshnessStatus: storedQuoteFreshnessStatus,
@@ -1965,14 +2026,14 @@ export async function loadSnapshot(
               }),
               ticker: r.ticker,
               displayName: r.displayName,
-              price: hasStoredLiveQuote ? r.quotePrice ?? r.price : r.price,
-              change1d: hasStoredLiveQuote ? r.quoteChange1d ?? r.change1d : r.change1d,
+              price: hasStoredFreshLiveQuote ? r.quotePrice ?? r.price : r.price,
+              change1d: hasStoredFreshLiveQuote ? r.quoteChange1d ?? r.change1d : r.change1d,
               change1w: r.change1w,
               change5d: r.change5d,
               change21d: r.change21d,
               ytd: r.ytd,
               pctFrom52wHigh: r.pctFrom52wHigh,
-              sparkline: JSON.parse(r.sparklineJson) as number[],
+              sparkline: parseStoredNumberArray(r.sparklineJson),
               relativeStrength30dVsSpy: relativeStrengthByTicker.get(r.ticker.toUpperCase()) ?? null,
               barDate,
               ...displayedBarFreshness,
@@ -1982,7 +2043,7 @@ export async function loadSnapshot(
               ...displayedQuoteFreshness,
               quoteFetchedAt: hasStoredLiveQuote ? r.quoteFetchedAt ?? null : null,
               rankKey: r.rankKey,
-              holdings: r.holdingsJson ? (JSON.parse(r.holdingsJson) as string[]) : null,
+              holdings: parseStoredStringArray(r.holdingsJson),
             };
           }),
       })),

@@ -55,7 +55,7 @@ const readySnapshot: SnapshotReadyResponse = {
 
 const emptySnapshot: SnapshotEmptyResponse = {
   status: "empty",
-  warning: "No stored overview snapshot is available. Use Admin refresh to generate one.",
+  warning: "No stored overview snapshot is available. Use Refresh Overview Data to generate one.",
   asOfDate: null,
   generatedAt: null,
   providerLabel: null,

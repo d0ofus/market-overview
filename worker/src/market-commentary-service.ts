@@ -127,6 +127,8 @@ const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "F
 const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 240_000;
 const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 16000;
 const MARKET_COMMENTARY_MIN_MARKDOWN_LENGTH = 1200;
+const MARKET_COMMENTARY_REPORT_SELECT =
+  "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports";
 let marketCommentaryReportScheduleSchemaReady = false;
 let marketCommentaryScheduleAttemptSchemaReady = false;
 const WEEKDAY_LONG_BY_SHORT: Record<string, string> = {
@@ -488,7 +490,7 @@ function normalizeRow(row: MarketCommentaryRow): MarketCommentaryReport {
 
 export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommentaryResponse> {
   const row = await env.DB.prepare(
-    "SELECT id, session_date as sessionDate, as_of as asOf, market_session as marketSession, market_session_label as marketSessionLabel, data_basis as dataBasis, provider, model, status, report_markdown as reportMarkdown, source_audit_json as sourceAuditJson, data_quality_json as dataQualityJson, error_message as errorMessage, created_at as createdAt, updated_at as updatedAt FROM market_commentary_reports ORDER BY session_date DESC, created_at DESC LIMIT 1",
+    `${MARKET_COMMENTARY_REPORT_SELECT} ORDER BY session_date DESC, created_at DESC LIMIT 1`,
   ).first<MarketCommentaryRow>();
 
   if (!row) {
@@ -499,10 +501,30 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
     };
   }
 
+  if (row.status !== "failed") {
+    return {
+      status: row.status,
+      warning: null,
+      report: normalizeRow(row),
+    };
+  }
+
+  const readyRow = await env.DB.prepare(
+    `${MARKET_COMMENTARY_REPORT_SELECT} WHERE status = 'ready' ORDER BY session_date DESC, created_at DESC LIMIT 1`,
+  ).first<MarketCommentaryRow>();
+  if (!readyRow) {
+    return {
+      status: row.status,
+      warning: row.errorMessage,
+      report: normalizeRow(row),
+    };
+  }
+
+  const failedReason = row.errorMessage?.trim() || "Unknown error";
   return {
-    status: row.status,
-    warning: row.status === "failed" ? row.errorMessage : null,
-    report: normalizeRow(row),
+    status: "ready",
+    warning: `Latest commentary attempt failed: ${failedReason}. Showing latest ready report from ${readyRow.sessionDate}.`,
+    report: normalizeRow(readyRow),
   };
 }
 
