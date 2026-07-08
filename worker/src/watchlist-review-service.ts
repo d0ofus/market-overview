@@ -751,6 +751,20 @@ export function computeWatchlistReviewSummaryCounts(candidates: Array<{ recommen
   return counts;
 }
 
+function computeWatchlistReviewCandidateCounts(candidates: WatchlistReviewCandidate[]) {
+  return {
+    candidateCount: candidates.length,
+    pendingCount: candidates.filter((candidate) => candidate.status === "pending").length,
+    approvedCount: candidates.filter((candidate) => (
+      candidate.status === "approved"
+      || candidate.status === "overridden"
+      || candidate.status === "applied"
+    )).length,
+    skippedCount: candidates.filter((candidate) => candidate.status === "skipped").length,
+    destructiveCount: candidates.filter((candidate) => candidate.destructiveAction).length,
+  };
+}
+
 function normalizeReasons(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map((item) => cleanText(item, 400)).filter((item): item is string => Boolean(item)).slice(0, 12);
@@ -1357,7 +1371,15 @@ export async function loadWatchlistReviewRunDetail(env: Env, runId: string): Pro
       loadRunCandidates(env, runId),
       loadRunEvents(env, runId),
     ]);
-    return { run, candidates, events };
+    return {
+      run: {
+        ...run,
+        ...computeWatchlistReviewCandidateCounts(candidates),
+        summaryCounts: computeWatchlistReviewSummaryCounts(candidates),
+      },
+      candidates,
+      events,
+    };
   } catch (error) {
     if (isSchemaMissingError(error)) throw new WatchlistReviewSchemaMissingError();
     throw error;

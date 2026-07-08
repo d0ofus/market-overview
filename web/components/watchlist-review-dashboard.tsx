@@ -419,24 +419,21 @@ export function WatchlistReviewDashboard() {
   }, [selectedRunId, detail?.run.applyStatus]);
 
   useEffect(() => {
-    if (!detail?.run) return;
+    if (!detail) return;
     const detailRun = detail.run;
+    const candidateCounts = countCandidates(detail.candidates);
     setRuns((current) => current.map((run) => (
       run.id === detailRun.id
         ? {
             ...run,
-            candidateCount: detailRun.candidateCount,
-            pendingCount: detailRun.pendingCount,
-            approvedCount: detailRun.approvedCount,
-            skippedCount: detailRun.skippedCount,
-            destructiveCount: detailRun.destructiveCount,
+            ...candidateCounts,
             status: detailRun.status,
-            summaryCounts: detailRun.summaryCounts,
+            summaryCounts: computeSummaryCounts(detail.candidates),
             updatedAt: detailRun.updatedAt,
           }
         : run
     )));
-  }, [detail?.run]);
+  }, [detail]);
 
   const candidates = detail?.candidates ?? [];
   const sectorOptions = useMemo(() => Array.from(new Set(candidates.flatMap(sectorTags))).sort(), [candidates]);

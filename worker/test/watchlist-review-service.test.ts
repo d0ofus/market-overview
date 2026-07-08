@@ -5,6 +5,7 @@ import {
   claimWatchlistReviewApplyDispatch,
   buildWatchlistReviewExportPayload,
   checksumWatchlistReviewApplySet,
+  loadWatchlistReviewRunDetail,
   normalizeWatchlistReviewImport,
   recordWatchlistReviewTelegramConfirmationRequested,
   resolveWatchlistReviewCandidateApplyOutcomes,
@@ -161,6 +162,178 @@ function createDispatchEnv(status = "waiting_for_hermes", options: { raceStatusU
   return { env: { DB: db } as any, dispatch, events };
 }
 
+function createReviewDetailEnv() {
+  const run = {
+    id: "watchlist-review-detail",
+    prepId: "prep-1",
+    analysisDispatchId: "analysis-1",
+    analysisMetadataJson: "{}",
+    sourceWatchlistName: "All Scans",
+    sourceWatchlistId: null,
+    watchlistSetId: "set-1",
+    watchlistRunId: "compile-run-1",
+    totalTickersScanned: 384,
+    status: "ready",
+    notes: null,
+    summaryCountsJson: JSON.stringify({ keep_current: 99 }),
+    generatedBy: "hermes",
+    analysisVersion: "v0.1",
+    exportPath: null,
+    applyStatus: "not_queued",
+    approvalRevision: 0,
+    approvedChecksum: null,
+    activeApplyDispatchId: null,
+    approvedApplyCount: 0,
+    skippedApplyCount: 0,
+    destructiveApplyCount: 0,
+    readyToApplyAt: null,
+    dispatchRequestedAt: null,
+    dispatchedToHermesAt: null,
+    applyStartedAt: null,
+    applyCompletedAt: null,
+    applyFailedAt: null,
+    applyError: null,
+    applyResultSummaryJson: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const candidates = [
+    {
+      id: "candidate-ASTH",
+      runId: run.id,
+      ticker: "ASTH",
+      companyName: "Astrana Health Inc.",
+      currentFlag: "blue",
+      proposedFlag: "red",
+      recommendationType: "BLUE_TO_RED",
+      confidence: 0.72,
+      reasonsJson: "[]",
+      metricsJson: "{}",
+      sectorContextJson: null,
+      chartImageUrl: null,
+      chartSnapshotPath: null,
+      tvSymbol: null,
+      dataFreshnessJson: "{}",
+      analysisSource: "data_only",
+      destructiveAction: 0,
+      destructiveConfirmed: 0,
+      removalReason: null,
+      status: "pending",
+      userOverrideFlag: null,
+      userNote: null,
+      approvedBy: null,
+      approvedAt: null,
+      appliedAt: null,
+      applyStatus: "not_queued",
+      applyError: null,
+      applyUpdatedAt: null,
+      lastApplyDispatchId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    {
+      id: "candidate-DRFT",
+      runId: run.id,
+      ticker: "DRFT",
+      companyName: "Drift Corp.",
+      currentFlag: "yellow",
+      proposedFlag: "remove",
+      recommendationType: "ANY_TO_UNFLAG",
+      confidence: 0.61,
+      reasonsJson: "[]",
+      metricsJson: "{}",
+      sectorContextJson: null,
+      chartImageUrl: null,
+      chartSnapshotPath: null,
+      tvSymbol: null,
+      dataFreshnessJson: "{}",
+      analysisSource: "data_only",
+      destructiveAction: 1,
+      destructiveConfirmed: 1,
+      removalReason: "Support failed.",
+      status: "approved",
+      userOverrideFlag: null,
+      userNote: null,
+      approvedBy: "tester",
+      approvedAt: NOW,
+      appliedAt: null,
+      applyStatus: "not_queued",
+      applyError: null,
+      applyUpdatedAt: null,
+      lastApplyDispatchId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    {
+      id: "candidate-KEEP",
+      runId: run.id,
+      ticker: "KEEP",
+      companyName: "Keep Holdings",
+      currentFlag: "blue",
+      proposedFlag: "keep",
+      recommendationType: "KEEP_CURRENT",
+      confidence: 0.8,
+      reasonsJson: "[]",
+      metricsJson: "{}",
+      sectorContextJson: null,
+      chartImageUrl: null,
+      chartSnapshotPath: null,
+      tvSymbol: null,
+      dataFreshnessJson: "{}",
+      analysisSource: "data_only",
+      destructiveAction: 0,
+      destructiveConfirmed: 0,
+      removalReason: null,
+      status: "skipped",
+      userOverrideFlag: null,
+      userNote: null,
+      approvedBy: null,
+      approvedAt: null,
+      appliedAt: null,
+      applyStatus: "not_queued",
+      applyError: null,
+      applyUpdatedAt: null,
+      lastApplyDispatchId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+  ];
+  const events = [{
+    id: "event-1",
+    runId: run.id,
+    candidateId: null,
+    ticker: null,
+    eventType: "run_imported",
+    previousStatus: null,
+    nextStatus: null,
+    previousFlag: null,
+    nextFlag: null,
+    actor: "authorized-user",
+    payloadJson: "{}",
+    createdAt: NOW,
+  }];
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(...args: unknown[]) {
+          return {
+            async first() {
+              if (sql.includes("FROM watchlist_review_runs") && args[0] === run.id) return run;
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM watchlist_review_candidates") && args[0] === run.id) return { results: candidates };
+              if (sql.includes("FROM watchlist_review_events") && args[0] === run.id) return { results: events };
+              return { results: [] };
+            },
+          };
+        },
+      };
+    },
+  };
+  return { env: { DB: db } as any, run };
+}
+
 describe("watchlist review service helpers", () => {
   it("normalizes Hermes review-run imports and preserves compiler linkage", () => {
     const normalized = normalizeWatchlistReviewImport({
@@ -226,6 +399,22 @@ describe("watchlist review service helpers", () => {
       recommendationType: "ANY_TO_UNFLAG",
       destructiveAction: true,
     });
+  });
+
+  it("loads detail runs with candidate-derived counts and fresh summary counts", async () => {
+    const { env, run } = createReviewDetailEnv();
+
+    const detail = await loadWatchlistReviewRunDetail(env, run.id);
+
+    expect(detail?.run.candidateCount).toBe(3);
+    expect(detail?.run.pendingCount).toBe(1);
+    expect(detail?.run.approvedCount).toBe(1);
+    expect(detail?.run.skippedCount).toBe(1);
+    expect(detail?.run.destructiveCount).toBe(1);
+    expect(detail?.run.summaryCounts.blue_to_red).toBe(1);
+    expect(detail?.run.summaryCounts.unflag).toBe(1);
+    expect(detail?.run.summaryCounts.keep_current).toBe(1);
+    expect(detail?.candidates).toHaveLength(3);
   });
 
   it("blocks destructive approved exports until candidate and export confirmations are present", () => {
