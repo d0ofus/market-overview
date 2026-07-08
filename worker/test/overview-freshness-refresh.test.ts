@@ -14,7 +14,18 @@ class OverviewFreshnessDb {
   snapshotWrites = 0;
   snapshotRowWrites = 0;
   snapshotRowBarDates: Array<string | null> = [];
-  snapshotRows: Array<{ ticker: string; price: number; change1d: number; rankKey: number }> = [];
+  snapshotRows: Array<{
+    ticker: string;
+    price: number;
+    change1d: number;
+    change3m: number;
+    change6m: number;
+    above20Sma: number | null;
+    above50Sma: number | null;
+    above200Sma: number | null;
+    rankKey: number;
+    relativeStrength30dVsSpyJson: string | null;
+  }> = [];
   readonly dailyBars: DailyBarSeed;
 
   private readonly config = {
@@ -177,9 +188,15 @@ class OverviewFreshnessDb {
         ticker: String(args[3]),
         price: Number(args[5]),
         change1d: Number(args[6]),
-        rankKey: Number(args[13]),
+        change3m: Number(args[9]),
+        change6m: Number(args[10]),
+        above20Sma: args[27] == null ? null : Number(args[27]),
+        above50Sma: args[28] == null ? null : Number(args[28]),
+        above200Sma: args[29] == null ? null : Number(args[29]),
+        rankKey: Number(args[15]),
+        relativeStrength30dVsSpyJson: args[30] == null ? null : String(args[30]),
       });
-      this.snapshotRowBarDates.push(args[15] == null ? null : String(args[15]));
+      this.snapshotRowBarDates.push(args[17] == null ? null : String(args[17]));
     }
     return { meta: { rows_written: 1 } };
   }
@@ -332,6 +349,11 @@ describe("overview freshness refresh", () => {
       change1d: 30,
       rankKey: 30,
     }));
+    const xlfRow = db.snapshotRows.find((row) => row.ticker === "XLF");
+    expect(xlfRow?.change3m).toEqual(expect.any(Number));
+    expect(xlfRow?.change6m).toEqual(expect.any(Number));
+    expect(xlfRow?.above20Sma).toBeNull();
+    expect(xlfRow?.relativeStrength30dVsSpyJson).toContain("[");
   });
 
   it("writes a stale snapshot in best-effort mode instead of throwing a freshness error", async () => {

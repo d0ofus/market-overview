@@ -6,6 +6,7 @@ import {
   computeAndStoreBreadth,
   computeAndStoreSnapshot,
   computeOverviewFreshnessDiagnostics,
+  emptySnapshotResponse,
   isOverviewFreshnessSufficientForScheduledSnapshot,
   loadSnapshot,
   OverviewFreshnessError,
@@ -15,7 +16,7 @@ import {
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
 import { refreshOverviewPageData } from "./overview-refresh-service";
-import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus } from "./types";
+import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus, SnapshotResponse } from "./types";
 import {
   configPatchSchema,
   correlationMatrixQuerySchema,
@@ -402,6 +403,8 @@ import {
 
 const app = new Hono<{ Bindings: Env }>();
 const API_REVISION = "2026-03-07-alerts-email-ingestion";
+const DASHBOARD_RESPONSE_CACHE_MAX_ENTRIES = 20;
+const DASHBOARD_STALE_FALLBACK_WARNING = "Dashboard data was served from the most recent successful cached response because D1 temporarily reset during load.";
 const CATALOG_ENSURE_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_BAR_REFRESH_INTERVAL_MS = 5 * 60_000;
 const OVERVIEW_SPARKLINE_MIN_POINTS = 90;
@@ -418,6 +421,52 @@ let lastSocialAlertsHousekeepingAt = 0;
 let lastScanningHousekeepingAt = 0;
 let lastGappersHousekeepingAt = 0;
 let lastScansPageHousekeepingAt = 0;
+const dashboardResponseCache = new Map<string, { data: SnapshotResponse; cachedAt: string; versionKey: string }>();
+
+function dashboardRequestCacheKey(configId: string, date?: string): string {
+  return `dashboard:${configId}:${date ?? "latest"}`;
+}
+
+function dashboardVersionKey(configId: string, date: string | undefined, data: SnapshotResponse): string {
+  return `${dashboardRequestCacheKey(configId, date)}:${data.asOfDate ?? "empty"}:${data.generatedAt ?? "none"}`;
+}
+
+function rememberDashboardResponse(configId: string, date: string | undefined, data: SnapshotResponse): void {
+  const key = dashboardRequestCacheKey(configId, date);
+  dashboardResponseCache.delete(key);
+  dashboardResponseCache.set(key, {
+    data,
+    cachedAt: new Date().toISOString(),
+    versionKey: dashboardVersionKey(configId, date, data),
+  });
+  while (dashboardResponseCache.size > DASHBOARD_RESPONSE_CACHE_MAX_ENTRIES) {
+    const oldestKey = dashboardResponseCache.keys().next().value;
+    if (!oldestKey) break;
+    dashboardResponseCache.delete(oldestKey);
+  }
+}
+
+function withDashboardFallbackWarning(data: SnapshotResponse, cachedAt: string): SnapshotResponse {
+  const warning = `${DASHBOARD_STALE_FALLBACK_WARNING} Cached at ${cachedAt}.`;
+  if (data.status === "empty") {
+    return {
+      ...data,
+      warning,
+      freshnessWarning: warning,
+    };
+  }
+  return {
+    ...data,
+    freshnessWarning: data.freshnessWarning ? `${data.freshnessWarning} ${warning}` : warning,
+  };
+}
+
+function isD1CpuResetError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const lower = message.toLowerCase();
+  return lower.includes("d1_error")
+    && (lower.includes("cpu time limit") || lower.includes("was reset") || lower.includes("reset during load"));
+}
 
 app.use("/api/*", cors());
 
@@ -2395,9 +2444,19 @@ app.get("/api/dashboard", async (c) => {
     data = await loadSnapshot(c.env, configId, date, { allowComputeOnMissing: false });
   } catch (error) {
     console.error("dashboard read-only load failed", { configId, date, error });
-    return c.json({ error: error instanceof Error ? error.message : "Failed to load dashboard snapshot." }, 500);
+    const cached = dashboardResponseCache.get(dashboardRequestCacheKey(configId, date));
+    if (cached && isD1CpuResetError(error)) {
+      c.header("Cache-Control", "public, max-age=60");
+      c.header("X-Dashboard-Stale-Fallback", "1");
+      c.header("X-Dashboard-Cache-Version", cached.versionKey);
+      return c.json(withDashboardFallbackWarning(cached.data, cached.cachedAt), 200);
+    }
+    c.header("Cache-Control", "no-store");
+    return c.json(emptySnapshotResponse(error instanceof Error ? error.message : "Failed to load dashboard snapshot."), 200);
   }
+  rememberDashboardResponse(configId, date, data);
   c.header("Cache-Control", "public, max-age=300");
+  c.header("X-Dashboard-Cache-Version", dashboardVersionKey(configId, date, data));
   return c.json(data);
 });
 

@@ -210,5 +210,9 @@ describe("loadSnapshot read-only mode", () => {
     expect(row?.ticker).toBe("SPY");
     expect(row?.sparkline).toEqual([]);
     expect(row?.holdings).toBeNull();
+    expect(row?.change3m).toBeNull();
+    expect(row?.change6m).toBeNull();
+    expect(snapshot.freshnessWarning).toContain("Snapshot derived metrics are unavailable");
+    expect(db.statements.some((sql) => sql.includes("daily_bars"))).toBe(false);
   });
 });

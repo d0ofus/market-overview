@@ -20,8 +20,8 @@ type Row = {
   change1d: number;
   change1w: number;
   change5d: number;
-  change3m: number;
-  change6m: number;
+  change3m: number | null;
+  change6m: number | null;
   ytd: number;
   pctFrom52wHigh: number;
   sparkline: number[];

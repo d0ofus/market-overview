@@ -5,6 +5,27 @@ const eodMocks = vi.hoisted(() => ({
   CORE_BREADTH_UNIVERSE_IDS: ["sp500-core", "nasdaq-core"],
   computeAndStoreSnapshot: vi.fn(),
   computeOverviewFreshnessDiagnostics: vi.fn(),
+  emptySnapshotResponse: vi.fn((warning = "No stored overview snapshot is available. Use Refresh Overview Data to generate one.") => ({
+    status: "empty",
+    warning,
+    asOfDate: null,
+    generatedAt: null,
+    providerLabel: null,
+    freshnessStatus: "stale",
+    freshnessCoveragePct: 0,
+    freshnessCurrentCount: 0,
+    freshnessEligibleCount: 0,
+    freshnessCriticalMissingTickers: [],
+    freshnessMinBarDate: null,
+    freshnessMaxBarDate: null,
+    freshnessWarning: warning,
+    quoteOverlayRequestedCount: null,
+    quoteOverlayReturnedCount: null,
+    quoteOverlayError: null,
+    quoteOverlayMissingSample: [],
+    config: null,
+    sections: [],
+  })),
   loadSnapshot: vi.fn(),
   OverviewFreshnessError: class OverviewFreshnessError extends Error {},
   recomputeBreadthFromStoredBars: vi.fn(),
@@ -118,16 +139,17 @@ describe("dashboard API", () => {
     expect(env.DB.prepare).not.toHaveBeenCalled();
   });
 
-  it("returns a load error without recomputing", async () => {
+  it("returns a degraded empty snapshot on load errors without recomputing", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     eodMocks.loadSnapshot.mockRejectedValueOnce(new Error("snapshot table unavailable"));
 
     const env = createEnv();
     const response = await worker.fetch(new Request("https://example.com/api/dashboard"), env, createContext());
-    const body = await response.json() as { error: string };
+    const body = await response.json() as SnapshotEmptyResponse;
 
-    expect(response.status).toBe(500);
-    expect(body.error).toBe("snapshot table unavailable");
+    expect(response.status).toBe(200);
+    expect(body.status).toBe("empty");
+    expect(body.warning).toBe("snapshot table unavailable");
     expect(errorSpy).toHaveBeenCalledWith(
       "dashboard read-only load failed",
       expect.objectContaining({
@@ -135,6 +157,29 @@ describe("dashboard API", () => {
         date: undefined,
       }),
     );
+    expect(eodMocks.computeAndStoreSnapshot).not.toHaveBeenCalled();
+    expect(eodMocks.recomputeDashboardFromStoredBars).not.toHaveBeenCalled();
+    expect(env.DB.prepare).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("returns a stale cached dashboard body when D1 resets after a successful load", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    eodMocks.loadSnapshot
+      .mockResolvedValueOnce(readySnapshot)
+      .mockRejectedValueOnce(new Error("D1_ERROR: D1 DB exceeded its CPU time limit and was reset."));
+
+    const env = createEnv();
+    const first = await worker.fetch(new Request("https://example.com/api/dashboard?date=2026-05-26"), env, createContext());
+    expect(first.status).toBe(200);
+
+    const second = await worker.fetch(new Request("https://example.com/api/dashboard?date=2026-05-26"), env, createContext());
+    const body = await second.json() as SnapshotReadyResponse;
+
+    expect(second.status).toBe(200);
+    expect(second.headers.get("X-Dashboard-Stale-Fallback")).toBe("1");
+    expect(body.asOfDate).toBe("2026-05-26");
+    expect(body.freshnessWarning).toContain("most recent successful cached response");
     expect(eodMocks.computeAndStoreSnapshot).not.toHaveBeenCalled();
     expect(eodMocks.recomputeDashboardFromStoredBars).not.toHaveBeenCalled();
     expect(env.DB.prepare).not.toHaveBeenCalled();
