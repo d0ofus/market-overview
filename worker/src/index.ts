@@ -1384,7 +1384,6 @@ async function refreshPageScopedData(
   if (page === "overview") {
     return await refreshOverviewPageData(env, {
       loadOverviewTickers,
-      refreshRecentBarsForTickers,
       refreshAndStoreOverviewSnapshot: (targetEnv, options) => refreshAndStoreOverviewSnapshot(targetEnv, undefined, "default", options),
     });
   }
@@ -2014,21 +2013,49 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
 }> {
   const diagnostics: BreadthStatusDiagnostic[] = [];
   for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
-    const [latestRow, memberCountRow, currentDateCountRow] = await Promise.all([
-      env.DB.prepare(
-        "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-      ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>(),
-      env.DB.prepare(
-        "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?",
-      ).bind(universeId).first<{ count: number | null }>(),
-      env.DB.prepare(
-        `SELECT COUNT(DISTINCT us.ticker) as count
-           FROM universe_symbols us
-           JOIN daily_bars db ON UPPER(db.ticker) = UPPER(us.ticker)
-          WHERE us.universe_id = ?
-            AND db.date = ?`,
-      ).bind(universeId, expectedAsOfDate).first<{ count: number | null }>(),
-    ]);
+    let latestRow: { asOfDate: string | null; generatedAt: string | null } | null;
+    let memberCountRow: { count: number | null } | null;
+    let currentDateCountRow: { count: number | null } | null;
+    try {
+      [latestRow, memberCountRow, currentDateCountRow] = await Promise.all([
+        env.DB.prepare(
+          "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+        ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>(),
+        env.DB.prepare(
+          "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?",
+        ).bind(universeId).first<{ count: number | null }>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) as count
+             FROM universe_symbols us
+            WHERE us.universe_id = ?
+              AND EXISTS (
+                SELECT 1
+                  FROM daily_bars db
+                 WHERE db.ticker = us.ticker
+                   AND db.date = ?
+              )`,
+        ).bind(universeId, expectedAsOfDate).first<{ count: number | null }>(),
+      ]);
+    } catch (error) {
+      console.error("breadth status diagnostic query failed", { universeId, error });
+      diagnostics.push({
+        universeId,
+        expectedAsOfDate,
+        latestAsOfDate: null,
+        latestGeneratedAt: null,
+        memberCount: 0,
+        currentDateTickers: 0,
+        coveragePct: 0,
+        minCoveragePct: breadthMinCoveragePct(universeId),
+        status: "stale",
+        reason: "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.",
+      });
+      return {
+        status: "stale",
+        warning: "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.",
+        diagnostics,
+      };
+    }
     const memberCount = Number(memberCountRow?.count ?? 0);
     const currentDateTickers = Number(currentDateCountRow?.count ?? 0);
     const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
@@ -6470,6 +6497,16 @@ app.post("/api/admin/refresh-page", async (c) => {
   } catch (error) {
     if (error instanceof OverviewFreshnessError) {
       return c.json({ error: error.message, freshness: error.diagnostics }, 409);
+    }
+    if (page === "overview" && isD1CpuResetError(error)) {
+      const note = "Overview refresh hit D1 CPU limits before a new snapshot could be written. Existing overview data remains available; broad post-close daily-bar catch-up will continue through the scheduled worker job.";
+      console.error("admin overview refresh hit D1 CPU limit", { page, error });
+      return c.json({
+        ok: false,
+        page,
+        refreshedTickers: 0,
+        notes: note,
+      }, 200);
     }
     const message = error instanceof Error ? error.message : "page refresh failed";
     console.error("admin refresh-page failed", { page, error });

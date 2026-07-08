@@ -14,6 +14,7 @@ class OverviewFreshnessDb {
   snapshotWrites = 0;
   snapshotRowWrites = 0;
   snapshotRowBarDates: Array<string | null> = [];
+  queries: Array<{ sql: string; args: unknown[] }> = [];
   snapshotRows: Array<{
     ticker: string;
     price: number;
@@ -130,11 +131,20 @@ class OverviewFreshnessDb {
   }
 
   rowsForSql<T>(sql: string, args: unknown[]): T[] {
-    if (sql.includes("SELECT ticker, date, c FROM daily_bars")) {
-      const cutoff = String(args[0]);
-      return this.items.flatMap((item, itemIndex) =>
-        (this.dailyBars[item.ticker.toUpperCase()] ?? [])
-          .filter((date) => date <= cutoff)
+    this.queries.push({ sql, args });
+    if (sql.includes("SELECT ticker, date, c") && sql.includes("FROM daily_bars")) {
+      const hasLowerBound = sql.includes("date >= ?");
+      const startDate = hasLowerBound ? String(args.at(-2)) : null;
+      const cutoff = String(args.at(-1) ?? args[0]);
+      const requestedTickers = new Set(
+        (hasLowerBound ? args.slice(0, -2) : args.slice(0, -1))
+          .map((value) => String(value).toUpperCase()),
+      );
+      return this.items
+        .filter((item) => requestedTickers.size === 0 || requestedTickers.has(item.ticker.toUpperCase()))
+        .flatMap((item, itemIndex) =>
+          (this.dailyBars[item.ticker.toUpperCase()] ?? [])
+          .filter((date) => (!startDate || date >= startDate) && date <= cutoff)
           .sort()
           .map((date, dateIndex) => ({
             ticker: item.ticker,
@@ -354,6 +364,40 @@ describe("overview freshness refresh", () => {
     expect(xlfRow?.change6m).toEqual(expect.any(Number));
     expect(xlfRow?.above20Sma).toBeNull();
     expect(xlfRow?.relativeStrength30dVsSpyJson).toContain("[");
+  });
+
+  it("loads snapshot history with explicit tickers and a lower date bound", async () => {
+    const db = new OverviewFreshnessDb({
+      SPY: ["2025-01-02", "2026-06-05", "2026-06-12"],
+      QQQ: ["2026-06-05", "2026-06-12"],
+      DIA: ["2026-06-05", "2026-06-12"],
+      IWM: ["2026-06-05", "2026-06-12"],
+      XLF: ["2026-06-05", "2026-06-12"],
+      XLK: ["2026-06-05", "2026-06-12"],
+      XBI: ["2026-06-05", "2026-06-12"],
+      SMH: ["2026-06-05", "2026-06-12"],
+      IBIT: ["2026-06-05", "2026-06-12"],
+      ARKK: ["2026-06-05", "2026-06-12"],
+    });
+
+    await computeAndStoreSnapshot(createEnv(db), "2026-06-12", "default", {
+      includeBreadth: false,
+      pullProviderBars: false,
+      requireFreshness: false,
+    });
+
+    const barQuery = db.queries.find((query) =>
+      query.sql.includes("SELECT ticker, date, c")
+        && query.sql.includes("FROM daily_bars")
+        && query.sql.includes("date >= ?"),
+    );
+    expect(barQuery?.sql).toContain("ticker IN");
+    expect(barQuery?.sql).toContain("date <= ?");
+    expect(barQuery?.sql).not.toContain("SELECT ticker FROM dashboard_items");
+    expect(barQuery?.args).toContain("SPY");
+    expect(barQuery?.args).toContain("2025-04-18");
+    expect(barQuery?.args.at(-1)).toBe("2026-06-12");
+    expect(db.snapshotRows.find((row) => row.ticker === "SPY")?.price).not.toBe(100);
   });
 
   it("writes a stale snapshot in best-effort mode instead of throwing a freshness error", async () => {

@@ -325,8 +325,10 @@ describe("dashboard API", () => {
   it("includes read-only breadth diagnostics when breadth is behind overview", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-13T12:00:00.000Z"));
+    const preparedSql: string[] = [];
     const db = {
       prepare: vi.fn((sql: string) => {
+        preparedSql.push(sql);
         const statement = {
           bind: (..._args: unknown[]) => statement,
           first: async <T>() => {
@@ -358,7 +360,7 @@ describe("dashboard API", () => {
             if (sql.includes("FROM breadth_snapshots")) {
               return { asOfDate: "2026-06-10", generatedAt: "2026-06-11T03:27:00.000Z" } as T;
             }
-            if (sql.includes("JOIN daily_bars")) {
+            if (sql.includes("EXISTS") && sql.includes("FROM daily_bars")) {
               return { count: 40 } as T;
             }
             if (sql.includes("FROM universe_symbols")) {
@@ -395,6 +397,43 @@ describe("dashboard API", () => {
       latestAsOfDate: "2026-06-10",
       coveragePct: 40,
     });
+    expect(preparedSql.join("\n")).toContain("EXISTS");
+    expect(preparedSql.join("\n")).toContain("db.ticker = us.ticker");
+    expect(preparedSql.join("\n")).not.toContain("UPPER(db.ticker) = UPPER(us.ticker)");
+    expect(preparedSql.join("\n")).not.toContain("JOIN daily_bars db ON");
+  });
+
+  it("returns a recoverable overview refresh response when D1 resets during the refresh request", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const env = {
+      ...createEnv(),
+      ADMIN_SECRET: "secret",
+      DB: {
+        prepare: vi.fn(() => {
+          throw new Error("D1_ERROR: D1 DB exceeded its CPU time limit and was reset.");
+        }),
+      },
+    } as unknown as Env;
+
+    const response = await worker.fetch(
+      new Request("https://example.com/api/admin/refresh-page", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret" },
+        body: JSON.stringify({ page: "overview" }),
+      }),
+      env,
+      createContext(),
+    );
+    const body = await response.json() as { ok: boolean; page: string; refreshedTickers: number; notes: string };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: false,
+      page: "overview",
+      refreshedTickers: 0,
+    });
+    expect(body.notes).toContain("Existing overview data remains available");
+    errorSpy.mockRestore();
   });
 
   it("runs stored-bars-only overview recompute when admin run-eod has storedOnly=1", async () => {

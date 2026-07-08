@@ -66,6 +66,7 @@ const OVERVIEW_RS_ENABLED_GROUPS = new Set([
 const OVERVIEW_RS_BENCHMARK_TICKER = "SPY";
 const OVERVIEW_SNAPSHOT_RETENTION_DAYS = 14;
 const SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE = 25;
+const OVERVIEW_SNAPSHOT_BAR_LOOKBACK_DAYS = 420;
 export const OVERVIEW_FRESHNESS_MIN_COVERAGE_PCT = 90;
 const OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES = new Set([
   "US Index Futures",
@@ -756,6 +757,33 @@ async function loadBarsForTickers(
   return rows;
 }
 
+async function loadOverviewSnapshotBarsForTickers(
+  env: Env,
+  tickers: string[],
+  asOfDate: string,
+): Promise<Array<{ ticker: string; date: string; c: number }>> {
+  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
+  const rows: Array<{ ticker: string; date: string; c: number }> = [];
+  const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - OVERVIEW_SNAPSHOT_BAR_LOOKBACK_DAYS * 86400_000));
+  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `SELECT ticker, date, c
+         FROM daily_bars
+        WHERE ticker IN (${placeholders})
+          AND date >= ?
+          AND date <= ?
+        ORDER BY ticker, date`,
+    )
+      .bind(...chunk, startDate, asOfDate)
+      .all<{ ticker: string; date: string; c: number }>();
+    rows.push(...(result.results ?? []));
+  }
+  return rows;
+}
+
 async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
   const out = new Set<string>();
@@ -1125,17 +1153,21 @@ export async function computeAndStoreSnapshot(
 
   const freshness = options.freshnessDiagnostics ?? await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
 
-  const barRows = await env.DB.prepare(
-    "SELECT ticker, date, c FROM daily_bars WHERE ticker IN (SELECT ticker FROM dashboard_items) AND date <= ? ORDER BY ticker, date",
-  )
-    .bind(asOfDate)
-    .all<{ ticker: string; date: string; c: number }>();
+  const needsBenchmarkBars = config.sections.some((section) =>
+    section.groups.some((group) =>
+      OVERVIEW_RS_ENABLED_GROUPS.has(group.id) && group.items.some((item) => item.enabled),
+    ),
+  );
+  const snapshotBarTickers = needsBenchmarkBars
+    ? Array.from(new Set([...dashboardTickers, OVERVIEW_RS_BENCHMARK_TICKER]))
+    : dashboardTickers;
+  const barRows = await loadOverviewSnapshotBarsForTickers(env, snapshotBarTickers, asOfDate);
 
   const symbols = await env.DB.prepare("SELECT ticker, name FROM symbols").all<{ ticker: string; name: string }>();
   const symbolNameMap = new Map((symbols.results ?? []).map((s) => [s.ticker, s.name]));
 
   const barsByTicker = new Map<string, { dates: string[]; closes: number[] }>();
-  for (const row of barRows.results ?? []) {
+  for (const row of barRows) {
     const existing = barsByTicker.get(row.ticker) ?? { dates: [], closes: [] };
     existing.dates.push(row.date);
     existing.closes.push(row.c);

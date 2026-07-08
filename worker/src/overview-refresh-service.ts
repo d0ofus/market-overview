@@ -8,7 +8,6 @@ export type OverviewPageRefreshResult = {
 
 export type OverviewPageRefreshDeps = {
   loadOverviewTickers(env: Env): Promise<string[]>;
-  refreshRecentBarsForTickers(env: Env, tickers: string[], maxTickers?: number, lookbackDays?: number, replaceExisting?: boolean): Promise<void>;
   refreshAndStoreOverviewSnapshot(env: Env, options?: { requireFreshness?: boolean }): Promise<{
     asOfDate: string;
     fetchedRows?: number;
@@ -27,17 +26,13 @@ export async function refreshOverviewPageData(
   deps: OverviewPageRefreshDeps,
 ): Promise<OverviewPageRefreshResult> {
   const tickers = await deps.loadOverviewTickers(env);
-  let result = await deps.refreshAndStoreOverviewSnapshot(env, { requireFreshness: false });
-  let historyCatchUpAttempted = false;
-  if (result.freshness.status !== "fresh" && tickers.length > 0) {
-    historyCatchUpAttempted = true;
-    await deps.refreshRecentBarsForTickers(env, tickers, 1600, 21, true);
-    result = await deps.refreshAndStoreOverviewSnapshot(env, { requireFreshness: false });
-  }
+  const result = await deps.refreshAndStoreOverviewSnapshot(env, { requireFreshness: false });
   const rowSummary = typeof result.fetchedRows === "number" || typeof result.writtenRows === "number"
     ? ` Fetched ${result.fetchedRows ?? 0} rows; wrote ${result.writtenRows ?? 0}.`
     : "";
-  const catchUpSummary = historyCatchUpAttempted ? " Historical bar catch-up was attempted." : "";
+  const catchUpSummary = result.freshness.status === "fresh"
+    ? ""
+    : " Broad post-close daily-bar catch-up will continue through the scheduled worker job.";
   return {
     page: "overview",
     refreshedTickers: tickers.length,
