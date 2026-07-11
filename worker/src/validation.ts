@@ -502,12 +502,30 @@ const scanRuleValueSchema = z.union([
   scanRuleFieldReferenceSchema,
 ]);
 
-export const scanPresetRuleSchema = z.object({
+function normalizeScanRuleListValue(operator: unknown, value: unknown): unknown {
+  if (operator !== "in" && operator !== "not_in") return value;
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .flatMap((item) => typeof item === "string"
+      ? item.split(",").map((part) => part.trim()).filter(Boolean)
+      : [item])
+    .filter((item) => item !== undefined && item !== null && item !== "");
+}
+
+export const scanPresetRuleSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const candidate = value as Record<string, unknown>;
+  return {
+    ...candidate,
+    field: typeof candidate.field === "string" ? candidate.field.trim() : candidate.field,
+    value: normalizeScanRuleListValue(candidate.operator, candidate.value),
+  };
+}, z.object({
   id: z.string().min(1),
   field: z.string().min(1),
   operator: z.enum(["gt", "gte", "lt", "lte", "eq", "neq", "in", "not_in"]),
   value: scanRuleValueSchema,
-}).superRefine((rule, ctx) => {
+})).superRefine((rule, ctx) => {
   if (typeof rule.value === "object" && rule.value !== null && !Array.isArray(rule.value) && rule.value.type === "field") {
     if (rule.operator === "in" || rule.operator === "not_in") {
       ctx.addIssue({

@@ -37,6 +37,11 @@ import {
   type ScanRuleOperator,
   type ScanSnapshot,
 } from "@/lib/api";
+import {
+  isScanRuleFieldReferenceValue,
+  literalScanRuleValues,
+  normalizeScanRuleForSave,
+} from "@/lib/scan-rule-normalize";
 import { TradingViewWidget } from "./tradingview-widget";
 import { PeerGroupModal } from "./peer-group-modal";
 
@@ -57,7 +62,8 @@ type SortKey =
   | "dailyPivot"
   | "dailyPivotGapPct"
   | "weeklyHigh"
-  | "weeklyHighGapPct";
+  | "weeklyHighGapPct"
+  | "custom";
 
 type ResultColumnKey =
   | "ticker"
@@ -82,6 +88,13 @@ type TradingViewFieldOption = {
   value: string;
   label: string;
   type: string;
+  hasOptions?: boolean;
+  optionCount?: number;
+};
+
+type TradingViewValueOption = {
+  value: string;
+  label?: string;
 };
 
 type WorkspaceTab = "scan" | "compile";
@@ -362,7 +375,7 @@ function formatRatio(value: number | null | undefined): string {
 }
 
 function isFieldReferenceValue(value: ScanRule["value"]): value is ScanRuleFieldReference {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "field";
+  return isScanRuleFieldReferenceValue(value);
 }
 
 function getRuleValueMode(rule: ScanRule): "literal" | "field" {
@@ -376,6 +389,14 @@ function emptyFieldReferenceValue(): ScanRuleFieldReference {
 function valueToInput(rule: ScanRule): string {
   if (isFieldReferenceValue(rule.value)) return "";
   return Array.isArray(rule.value) ? rule.value.join(", ") : String(rule.value ?? "");
+}
+
+function literalRuleValues(rule: ScanRule): Array<string | number | boolean> {
+  return literalScanRuleValues(rule);
+}
+
+function selectedLiteralTextValues(rule: ScanRule): string[] {
+  return literalRuleValues(rule).map((value) => String(value));
 }
 
 function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
@@ -396,6 +417,26 @@ function ruleFromInput(rule: ScanRule, rawValue: string): ScanRule {
     ...rule,
     value: Number.isFinite(parsed) && !/[A-Za-z]/.test(trimmed) ? parsed : trimmed,
   };
+}
+
+function ruleFromFixedOption(rule: ScanRule, value: string): ScanRule {
+  if (isFieldReferenceValue(rule.value)) return rule;
+  return {
+    ...rule,
+    value: rule.operator === "in" || rule.operator === "not_in" ? (value ? [value] : []) : value,
+  };
+}
+
+function ruleFromFixedOptions(rule: ScanRule, values: string[]): ScanRule {
+  if (isFieldReferenceValue(rule.value)) return rule;
+  return { ...rule, value: values };
+}
+
+function ruleFromBooleanInput(rule: ScanRule, rawValue: string): ScanRule {
+  if (isFieldReferenceValue(rule.value)) return rule;
+  if (rawValue === "true") return { ...rule, value: true };
+  if (rawValue === "false") return { ...rule, value: false };
+  return { ...rule, value: "" };
 }
 
 function compareFieldToInput(rule: ScanRule): string {
@@ -446,9 +487,11 @@ function setRuleCompareMultiplier(rule: ScanRule, rawValue: string): ScanRule {
 }
 
 function normalizeRuleForSave(rule: ScanRule, rawCompareMultiplierInput?: string): ScanRule {
-  if (!isFieldReferenceValue(rule.value)) return rule;
-  const withField = setRuleCompareField(rule, rule.value.field.trim());
-  return setRuleCompareMultiplier(withField, rawCompareMultiplierInput ?? compareMultiplierToInput(withField));
+  return normalizeScanRuleForSave(rule, rawCompareMultiplierInput);
+}
+
+function optionDisplayLabel(option: TradingViewValueOption): string {
+  return option.label ? `${option.value} - ${option.label}` : option.value;
 }
 
 function humanizeFieldName(field: string): string {
@@ -468,12 +511,16 @@ function isSuggestedField(field: string, options: TradingViewFieldOption[]): boo
   return options.some((option) => option.value === field);
 }
 
-function rawNumber(row: ScanRow, ...keys: string[]): number | null {
+function rawValue(row: ScanRow, ...keys: string[]): string | number | null {
   try {
     const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
     for (const key of keys) {
       const value = raw?.[key];
       if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string" && value.trim()) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : value;
+      }
     }
   } catch {
     return null;
@@ -481,7 +528,22 @@ function rawNumber(row: ScanRow, ...keys: string[]): number | null {
   return null;
 }
 
-function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): ScanRow[] {
+function rawNumber(row: ScanRow, ...keys: string[]): number | null {
+  const value = rawValue(row, ...keys);
+  return typeof value === "number" ? value : null;
+}
+
+function camelizeFieldName(field: string): string {
+  return field.replace(/[_|.-]+([a-zA-Z0-9])/g, (_match, char: string) => char.toUpperCase());
+}
+
+function rawSortValue(row: ScanRow, field: string | null): string | number {
+  const normalized = String(field ?? "").trim();
+  if (!normalized) return Number.NEGATIVE_INFINITY;
+  return rawValue(row, normalized, camelizeFieldName(normalized)) ?? Number.NEGATIVE_INFINITY;
+}
+
+function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc", customSortField: string | null): ScanRow[] {
   const copy = [...rows];
   copy.sort((a, b) => {
     const valueFor = (row: ScanRow): string | number => {
@@ -501,6 +563,7 @@ function sortRows(rows: ScanRow[], sortKey: SortKey, sortDir: "asc" | "desc"): S
       if (sortKey === "dailyPivotGapPct") return rawNumber(row, "dailyPivotGapPct", "daily_pivot_gap_pct") ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "weeklyHigh") return rawNumber(row, "weeklyHigh", "weekly_high") ?? Number.NEGATIVE_INFINITY;
       if (sortKey === "weeklyHighGapPct") return rawNumber(row, "weeklyHighGapPct", "weekly_high_gap_pct") ?? Number.NEGATIVE_INFINITY;
+      if (sortKey === "custom") return rawSortValue(row, customSortField);
       return row.priceAvgVolume ?? Number.NEGATIVE_INFINITY;
     };
     const left = valueFor(a);
@@ -533,6 +596,7 @@ function sortKeyFromPresetField(field: string | null | undefined): SortKey {
   if (normalized === "daily_pivot_gap_pct") return "dailyPivotGapPct";
   if (normalized === "weekly_high") return "weeklyHigh";
   if (normalized === "weekly_high_gap_pct") return "weeklyHighGapPct";
+  if (normalized) return "custom";
   return "change1d";
 }
 
@@ -584,9 +648,13 @@ export function ScansPageDashboard() {
   const [newsLoadingTicker, setNewsLoadingTicker] = useState<string | null>(null);
   const [peerTicker, setPeerTicker] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("change1d");
+  const [customSortField, setCustomSortField] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [visibleColumns, setVisibleColumns] = useState<ResultColumnKey[]>(DEFAULT_VISIBLE_COLUMNS);
   const [fieldOptionsByQuery, setFieldOptionsByQuery] = useState<Record<string, TradingViewFieldOption[]>>({});
+  const [fieldDetailByValue, setFieldDetailByValue] = useState<Record<string, TradingViewFieldOption>>({});
+  const [valueOptionsByFieldQuery, setValueOptionsByFieldQuery] = useState<Record<string, TradingViewValueOption[]>>({});
+  const [valueOptionQueryByRule, setValueOptionQueryByRule] = useState<Record<string, string>>({});
   const [fieldLabelMap, setFieldLabelMap] = useState<Record<string, string>>(FIELD_LABELS);
   const [compareMultiplierInputByRule, setCompareMultiplierInputByRule] = useState<Record<string, string>>({});
   const [ruleValueInputByRule, setRuleValueInputByRule] = useState<Record<string, string>>({});
@@ -644,6 +712,18 @@ export function ScansPageDashboard() {
   }, [draftRules]);
 
   useEffect(() => {
+    setValueOptionQueryByRule((current) => {
+      const next: Record<string, string> = {};
+      for (const rule of draftRules) {
+        if (current[rule.id] != null) {
+          next[rule.id] = current[rule.id];
+        }
+      }
+      return next;
+    });
+  }, [draftRules]);
+
+  useEffect(() => {
     const queries = Array.from(new Set(["", ...draftRules.map((rule) => rule.field.trim())]));
     for (const query of queries) {
       const key = query.toLowerCase();
@@ -659,6 +739,7 @@ export function ScansPageDashboard() {
           setFieldOptionsByQuery((current) => current[key] ? current : { ...current, [key]: rows });
           if (rows.length > 0) {
             setFieldLabelMap((current) => ({ ...current, ...Object.fromEntries(rows.map((row) => [row.value, row.label])) }));
+            setFieldDetailByValue((current) => ({ ...current, ...Object.fromEntries(rows.map((row) => [row.value, row])) }));
           }
         } catch {
           // Keep the editor usable even if the catalog lookup fails.
@@ -666,6 +747,37 @@ export function ScansPageDashboard() {
       })();
     }
   }, [draftRules, fieldOptionsByQuery]);
+
+  useEffect(() => {
+    const fieldQueryMap = new Map<string, readonly [string, string]>();
+    for (const rule of draftRules) {
+      const field = rule.field.trim();
+      if (!field) continue;
+      const query = valueOptionQueryByRule[rule.id]?.trim() ?? "";
+      fieldQueryMap.set(`${field}\n${query.toLowerCase()}`, [field, query]);
+    }
+    const fieldQueries = [...fieldQueryMap.values()];
+    for (const [field, query] of fieldQueries) {
+      const key = `${field}\n${query.toLowerCase()}`;
+      if (valueOptionsByFieldQuery[key]) continue;
+      void (async () => {
+        try {
+          const params = new URLSearchParams({ field, limit: String(DEFAULT_FIELD_SEARCH_LIMIT) });
+          if (query) params.set("optionQ", query);
+          const response = await fetch(`/api/tradingview-stock-fields?${params.toString()}`);
+          if (!response.ok) return;
+          const payload = await response.json() as { field?: TradingViewFieldOption | null; rows?: TradingViewValueOption[] };
+          if (payload.field) {
+            setFieldDetailByValue((current) => ({ ...current, [payload.field!.value]: payload.field! }));
+            setFieldLabelMap((current) => ({ ...current, [payload.field!.value]: payload.field!.label }));
+          }
+          setValueOptionsByFieldQuery((current) => current[key] ? current : { ...current, [key]: payload.rows ?? [] });
+        } catch {
+          // Keep free-text fallback behavior if the option catalog lookup fails.
+        }
+      })();
+    }
+  }, [draftRules, valueOptionQueryByRule, valueOptionsByFieldQuery]);
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -677,13 +789,15 @@ export function ScansPageDashboard() {
   );
 
   const sortedRows = useMemo(
-    () => sortRows(snapshot?.rows ?? [], sortKey, sortDir),
-    [snapshot?.rows, sortDir, sortKey],
+    () => sortRows(snapshot?.rows ?? [], sortKey, sortDir, customSortField),
+    [customSortField, snapshot?.rows, sortDir, sortKey],
   );
   const orderedVisibleColumns = useMemo(
     () => RESULT_COLUMNS.filter((column) => visibleColumns.includes(column.key)),
     [visibleColumns],
   );
+  const draftSortFieldIsKnown = SORT_FIELD_OPTIONS.some((option) => option.value === draftPreset.sortField);
+  const draftSortFieldLabel = fieldLabelMap[draftPreset.sortField.trim()] ?? getFieldLabel(draftPreset.sortField);
   const compiledExportUrl = useMemo(
     () => (
       selectedCompilePresetId
@@ -805,7 +919,9 @@ export function ScansPageDashboard() {
 
   useEffect(() => {
     if (!selectedPreset) return;
-    setSortKey(sortKeyFromPresetField(selectedPreset.sortField));
+    const nextSortKey = sortKeyFromPresetField(selectedPreset.sortField);
+    setSortKey(nextSortKey);
+    setCustomSortField(nextSortKey === "custom" ? selectedPreset.sortField : null);
     setSortDir(selectedPreset.sortDirection === "asc" ? "asc" : "desc");
   }, [selectedPreset]);
 
@@ -928,7 +1044,7 @@ export function ScansPageDashboard() {
         isDefault: draftPreset.isDefault,
         isActive: draftPreset.isActive,
         rules: isComputedScanType(draftPreset.scanType) ? [] : activeRules,
-        prefilterRules: isComputedScanType(draftPreset.scanType) ? activeRules : draftPreset.prefilterRules,
+        prefilterRules: activeRules,
         benchmarkTicker: draftPreset.scanType === "relative-strength"
           ? (draftPreset.benchmarkTicker?.trim() || "SPY")
           : undefined,
@@ -1128,6 +1244,7 @@ export function ScansPageDashboard() {
       return;
     }
     setSortKey(key);
+    setCustomSortField(null);
     setSortDir(key === "ticker" || key === "name" || key === "sector" || key === "industry" ? "asc" : "desc");
   };
 
@@ -1689,11 +1806,25 @@ export function ScansPageDashboard() {
                   <div className="grid gap-2 md:grid-cols-2">
                     <label className="block">
                       Sort Field
-                      <select className={FORM_SELECT_CLASS} value={draftPreset.sortField} onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value }))}>
+                      <select
+                        className={FORM_SELECT_CLASS}
+                        value={draftSortFieldIsKnown ? draftPreset.sortField : CUSTOM_FIELD_OPTION}
+                        onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value === CUSTOM_FIELD_OPTION ? "" : event.target.value }))}
+                      >
                         {SORT_FIELD_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>{option.label}</option>
                         ))}
+                        {!draftSortFieldIsKnown && draftPreset.sortField.trim() ? (
+                          <option value={CUSTOM_FIELD_OPTION}>Custom field ({draftSortFieldLabel})</option>
+                        ) : null}
+                        <option value={CUSTOM_FIELD_OPTION}>Custom field...</option>
                       </select>
+                      <input
+                        className={FORM_INPUT_CLASS}
+                        value={draftPreset.sortField}
+                        onChange={(event) => setDraftPreset((current) => ({ ...current, sortField: event.target.value }))}
+                        placeholder="Sort field ID"
+                      />
                     </label>
                     <label className="block">
                       Sort Direction
@@ -1810,6 +1941,15 @@ export function ScansPageDashboard() {
                         : RULE_OPERATORS;
                       const compareMultiplierInput = compareMultiplierInputByRule[rule.id] ?? compareMultiplierToInput(rule);
                       const rawRuleValueInput = ruleValueInputByRule[rule.id] ?? valueToInput(rule);
+                      const selectedFieldMeta = fieldDetailByValue[rule.field.trim()] ?? fieldOptions.find((field) => field.value === rule.field.trim());
+                      const valueOptionQuery = valueOptionQueryByRule[rule.id] ?? "";
+                      const valueOptionKey = `${rule.field.trim()}\n${valueOptionQuery.trim().toLowerCase()}`;
+                      const valueOptions = valueOptionsByFieldQuery[valueOptionKey] ?? [];
+                      const selectedValueTexts = selectedLiteralTextValues(rule);
+                      const selectedValueSet = new Set(selectedValueTexts);
+                      const hasFixedOptions = valueMode === LITERAL_VALUE_MODE && Boolean(selectedFieldMeta?.hasOptions);
+                      const isBooleanLiteral = valueMode === LITERAL_VALUE_MODE && selectedFieldMeta?.type === "bool";
+                      const isNumericLiteral = valueMode === LITERAL_VALUE_MODE && ["number", "percent", "fundamental_price", "price"].includes(selectedFieldMeta?.type ?? "");
                       return (
                         <div key={rule.id} className="rounded-xl border border-borderSoft/70 bg-panelSoft/30 p-3">
                           <div className="mb-2 grid gap-2 md:grid-cols-[minmax(0,1.2fr),minmax(0,1fr),7rem]">
@@ -1930,11 +2070,91 @@ export function ScansPageDashboard() {
                                   />
                                 </label>
                               </div>
+                            ) : hasFixedOptions ? (
+                              <div className="grid gap-2">
+                                <label className="block">
+                                  Search Values
+                                  <input
+                                    className={FORM_INPUT_CLASS}
+                                    value={valueOptionQuery}
+                                    onChange={(event) => setValueOptionQueryByRule((current) => ({ ...current, [rule.id]: event.target.value }))}
+                                    placeholder={`Search ${selectedFieldMeta?.optionCount ?? ""} options`.trim()}
+                                  />
+                                </label>
+                                {rule.operator === "in" || rule.operator === "not_in" ? (
+                                  <div className="grid gap-2">
+                                    {selectedValueTexts.length > 0 ? (
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {selectedValueTexts.map((value) => (
+                                          <button
+                                            key={value}
+                                            className="rounded-md border border-borderSoft/70 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/70"
+                                            type="button"
+                                            onClick={() => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromFixedOptions(row, selectedValueTexts.filter((item) => item !== value)) : row))}
+                                          >
+                                            {value}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                    <div className="max-h-44 overflow-y-auto rounded-lg border border-borderSoft/70 bg-slate-950/30 p-2">
+                                      {valueOptions.length > 0 ? valueOptions.map((option) => {
+                                        const checked = selectedValueSet.has(option.value);
+                                        return (
+                                          <label key={option.value} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-200 hover:bg-slate-800/60">
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => {
+                                                const next = checked
+                                                  ? selectedValueTexts.filter((value) => value !== option.value)
+                                                  : [...selectedValueTexts, option.value];
+                                                updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromFixedOptions(row, next) : row));
+                                              }}
+                                            />
+                                            <span className="truncate">{optionDisplayLabel(option)}</span>
+                                          </label>
+                                        );
+                                      }) : (
+                                        <div className="px-2 py-2 text-xs text-slate-500">No matching values.</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <label className="block">
+                                    Value
+                                    <select
+                                      className={FORM_SELECT_CLASS}
+                                      value={selectedValueTexts[0] ?? ""}
+                                      onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromFixedOption(row, event.target.value) : row))}
+                                    >
+                                      <option value="">Choose value...</option>
+                                      {valueOptions.map((option) => (
+                                        <option key={option.value} value={option.value}>{optionDisplayLabel(option)}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                )}
+                              </div>
+                            ) : isBooleanLiteral ? (
+                              <label className="block">
+                                Value
+                                <select
+                                  className={FORM_SELECT_CLASS}
+                                  value={typeof rule.value === "boolean" ? String(rule.value) : ""}
+                                  onChange={(event) => updateDraftRules((rules) => rules.map((row) => row.id === rule.id ? ruleFromBooleanInput(row, event.target.value) : row))}
+                                >
+                                  <option value="">Choose value...</option>
+                                  <option value="true">True</option>
+                                  <option value="false">False</option>
+                                </select>
+                              </label>
                             ) : (
                               <label className="block">
                                 Value
                                 <input
                                   className={FORM_INPUT_CLASS}
+                                  type={isNumericLiteral && rule.operator !== "in" && rule.operator !== "not_in" ? "number" : "text"}
                                   value={rawRuleValueInput}
                                   onChange={(event) => {
                                     const rawValue = event.target.value;

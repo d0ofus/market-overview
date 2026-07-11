@@ -70,6 +70,18 @@ describe("validation", () => {
     });
   });
 
+  it("normalizes comma-delimited scan rule values for list operators", () => {
+    const parsed = scanPresetRuleSchema.parse({
+      id: "type-list",
+      field: " type ",
+      operator: "in",
+      value: "stock, dr",
+    });
+
+    expect(parsed.field).toBe("type");
+    expect(parsed.value).toEqual(["stock", "dr"]);
+  });
+
   it("accepts null benchmark tickers in scan preset patches", () => {
     const parsed = scanPresetPatchSchema.parse({
       name: "Top Gainers Copy",

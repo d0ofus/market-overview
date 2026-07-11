@@ -6,9 +6,10 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "test": "npm run test:perplexity && npm run test:admin-auth && npm run test:freshness",
+    "test": "npm run test:perplexity && npm run test:admin-auth && npm run test:freshness && npm run test:fields",
     "test:admin-auth": "tsx --test lib/admin-auth-core.test.ts lib/admin-auth.test.ts",
     "test:freshness": "tsx --test lib/overview-freshness.test.ts",
+    "test:fields": "tsx --test lib/tradingview-stock-field-search.test.ts lib/scan-rule-normalize.test.ts",
     "test:perplexity": "tsx --test lib/perplexity-finance-parser.test.ts lib/perplexity-browser-provider.test.ts",
     "test:perplexity-parser": "npm run test:perplexity"
   },

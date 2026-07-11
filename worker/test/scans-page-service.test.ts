@@ -1580,6 +1580,64 @@ describe("scans page service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("normalizes comma-delimited 3M list filters and sorts raw TradingView performance fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            s: "NYSE:ADR",
+            d: ["ADR Co", "Technology", "Software", 2.1, 750_000_000, 1.2, 8, 2_000_000, 16_000_000, 2_500_000, "NYSE", "dr", 150],
+          },
+          {
+            s: "NASDAQ:RXT",
+            d: ["Rackspace Technology", "Technology", "Software", 22.2, 1_330_000_000, 2.24, 5.34, 10_000_000, 53_400_000, 41_400_000, "NASDAQ", "stock", 486.81],
+          },
+          {
+            s: "NASDAQ:BIOX",
+            d: ["Biotech Co", "Health Care", "Biotechnology", 12.5, 800_000_000, 1.6, 7, 3_000_000, 21_000_000, 3_100_000, "NASDAQ", "stock", 220],
+          },
+          {
+            s: "NASDAQ:LOWP",
+            d: ["Low Perf", "Technology", "Software", 4.5, 900_000_000, 1.4, 6, 3_500_000, 21_000_000, 4_000_000, "NASDAQ", "stock", 40],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTradingViewScanRows({
+      ...topGainersPreset,
+      name: "Weekly - Top Gainers: 3 Months",
+      rules: [
+        { id: "perf-3m", field: "Perf.3M", operator: "gt", value: 50 },
+        { id: "market-cap", field: "market_cap_basic", operator: "gt", value: 50_000_000 },
+        { id: "close", field: "close", operator: "gt", value: 1 },
+        { id: "type", field: "type", operator: "in", value: "stock, dr" },
+        { id: "exchange", field: "exchange", operator: "in", value: ["NASDAQ", "NYSE", "AMEX", "CBOE"] },
+        { id: "volume", field: "volume", operator: "gt", value: 1_000_000 },
+        {
+          id: "industry",
+          field: "industry",
+          operator: "not_in",
+          value: [
+            "Biotechnology",
+            "Pharmaceuticals: generic",
+            "Pharmaceuticals: major",
+            "Pharmaceuticals: other",
+          ],
+        },
+      ],
+      sortField: "Perf.3M",
+      sortDirection: "desc",
+      rowLimit: 250,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.rows.map((row) => row.ticker)).toEqual(["RXT", "ADR"]);
+    vi.unstubAllGlobals();
+  });
+
   it("applies field-reference comparisons after the TradingView response is parsed", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

@@ -688,7 +688,7 @@ function parseRules(raw: unknown): ScanPresetRule[] {
   if (typeof raw !== "string" || !raw.trim()) return [];
   try {
     const parsed = JSON.parse(raw) as ScanPresetRule[];
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map(normalizeScanRule) : [];
   } catch {
     return [];
   }
@@ -1090,6 +1090,41 @@ function isFieldReferenceValue(value: ScanRuleValue): value is ScanRuleFieldRefe
   return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "field";
 }
 
+function splitListRuleText(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeScanRule(rule: ScanPresetRule): ScanPresetRule {
+  const field = rule.field.trim();
+  if (isFieldReferenceValue(rule.value)) {
+    return {
+      ...rule,
+      field,
+      value: {
+        type: "field",
+        field: rule.value.field.trim(),
+        multiplier: typeof rule.value.multiplier === "number" && Number.isFinite(rule.value.multiplier)
+          ? rule.value.multiplier
+          : undefined,
+      },
+    };
+  }
+  if (rule.operator === "in" || rule.operator === "not_in") {
+    const values = (Array.isArray(rule.value) ? rule.value : [rule.value])
+      .flatMap((value) => typeof value === "string" ? splitListRuleText(value) : [value])
+      .map((value) => normalizeScalarValue(value))
+      .filter((value) => typeof value !== "string" || value.length > 0);
+    return { ...rule, field, value: values };
+  }
+  return { ...rule, field, value: Array.isArray(rule.value)
+    ? rule.value.map((value) => normalizeScalarValue(value))
+    : normalizeScalarValue(rule.value)
+  };
+}
+
 function normalizeRuleValues(value: ScanRuleValue): Array<string | number | boolean> {
   if (isFieldReferenceValue(value)) return [];
   if (Array.isArray(value)) return value.map((item) => normalizeScalarValue(item));
@@ -1207,7 +1242,7 @@ function rowValueForField(row: TradingViewScanRow, field: string): unknown {
 }
 
 function rowMatchesRules(row: TradingViewScanRow, rules: ScanPresetRule[]): boolean {
-  return rules.every((rule) => valueMatchesRule(rowValueForField(row, rule.field), rule, row));
+  return rules.map(normalizeScanRule).every((rule) => valueMatchesRule(rowValueForField(row, rule.field), rule, row));
 }
 
 function normalizeScanRow(row: TradingViewScanRow): ScanSnapshotRow | null {
@@ -1262,14 +1297,16 @@ function sortSnapshotRows(rows: ScanSnapshotRow[], sortField: string, sortDirect
     if (normalized === "rs_close") return row.rsClose ?? Number.NEGATIVE_INFINITY;
     if (normalized === "rs_ma") return row.rsMa ?? Number.NEGATIVE_INFINITY;
     if (normalized === "approx_rs_rating") return row.approxRsRating ?? Number.NEGATIVE_INFINITY;
-    if (normalized === "trend_score" || normalized === "daily_pivot" || normalized === "daily_pivot_gap_pct" || normalized === "weekly_high" || normalized === "weekly_high_gap_pct") {
-      try {
-        const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
-        const camelField = normalized.replace(/_([a-z])/g, (_match: string, char: string) => char.toUpperCase());
-        return asFiniteNumber(raw?.[normalized]) ?? asFiniteNumber(raw?.[camelField]) ?? Number.NEGATIVE_INFINITY;
-      } catch {
-        return Number.NEGATIVE_INFINITY;
-      }
+    try {
+      const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+      const camelField = normalized.replace(/_([a-z])/g, (_match: string, char: string) => char.toUpperCase());
+      const rawValue = raw?.[normalized] ?? raw?.[camelField];
+      const rawNumber = asFiniteNumber(rawValue);
+      if (rawNumber != null) return rawNumber;
+      const rawText = asComparableString(rawValue);
+      if (rawText != null) return rawText;
+    } catch {
+      // Ignore malformed raw JSON and fall through to the legacy 1D change default.
     }
     return row.change1d ?? Number.NEGATIVE_INFINITY;
   };
@@ -1611,8 +1648,8 @@ export async function upsertScanPreset(env: Env, input: {
   const id = input.id?.trim() || crypto.randomUUID();
   const scanType = normalizeScanType(input.scanType);
   const isDefault = input.isDefault === true;
-  const rules = input.rules ?? [];
-  const prefilterRules = input.prefilterRules ?? rules;
+  const rules = (input.rules ?? []).map(normalizeScanRule);
+  const prefilterRules = (input.prefilterRules ?? rules).map(normalizeScanRule);
   const vcpConfig = normalizeVcpConfig({
     dailyPivotLookback: input.vcpDailyPivotLookback,
     weeklyHighLookback: input.vcpWeeklyHighLookback,
@@ -1735,7 +1772,7 @@ function buildTradingViewScanPayload(
   preset: ScanPreset,
   options?: { rangeOffset?: number; rangeLimit?: number; rules?: ScanPresetRule[]; sortField?: string; sortDirection?: "asc" | "desc" },
 ): TradingViewScanPayload {
-  const activeRules = options?.rules ?? preset.rules;
+  const activeRules = (options?.rules ?? preset.rules).map(normalizeScanRule);
   const activeSortField = options?.sortField ?? preset.sortField;
   const activeSortDirection = options?.sortDirection ?? preset.sortDirection;
   const baseColumns = [
@@ -1829,7 +1866,7 @@ async function fetchTradingViewScanRowsInternal(
   rows: ScanSnapshotRow[];
 }> {
   const candidates: TradingViewScanRow[] = [];
-  const activeRules = options?.rules ?? preset.rules;
+  const activeRules = (options?.rules ?? preset.rules).map(normalizeScanRule);
   const activeSortField = options?.sortField ?? preset.sortField;
   const activeSortDirection = options?.sortDirection ?? preset.sortDirection;
   const activeRowLimit = clamp(options?.rowLimit ?? preset.rowLimit, 1, options?.maxRowLimit ?? MAX_FETCH_RANGE);
@@ -9491,6 +9528,7 @@ async function hydrateScanSnapshot(
   preset: ScanPreset,
   snapshot: ScanSnapshotHeader,
 ): Promise<ScanSnapshot> {
+  const rows = await loadScanSnapshotRows(env, snapshot.id);
   return {
     id: snapshot.id,
     presetId: preset.id,
@@ -9501,7 +9539,7 @@ async function hydrateScanSnapshot(
     matchedRowCount: snapshot.matchedRowCount,
     status: snapshot.status,
     error: snapshot.error,
-    rows: await loadScanSnapshotRows(env, snapshot.id),
+    rows: sortSnapshotRows(rows, preset.sortField, preset.sortDirection),
   };
 }
 
