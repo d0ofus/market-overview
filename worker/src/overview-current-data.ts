@@ -1,9 +1,10 @@
 import { computeMetrics, isPriceAboveSma, sanitizeBarSeries } from "./metrics";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { getMarketDataDb } from "./market-data-db";
 import { getProvider, type QuoteSnapshot } from "./provider";
 import { meteredFetch } from "./provider-usage";
 import { zonedParts } from "./refresh-timing";
-import type { Env } from "./types";
+import type { Env, OverviewCurrentProviderStatus as SharedOverviewCurrentProviderStatus } from "./types";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_REQUEST_CHUNK_SIZE = 100;
@@ -13,6 +14,9 @@ const CURRENT_RETRY_MINUTES = 15;
 const MAX_ALPACA_SNAPSHOT_BATCHES_PER_REFRESH = 4;
 const ALPACA_SNAPSHOT_BATCH_SIZE = 80;
 const TV_PREFIXES = ["NASDAQ", "NYSE", "AMEX", "CBOE", "INDEX", "TVC"] as const;
+const TV_SYMBOL_OVERRIDES: Record<string, string> = {
+  VIX: "CBOE:VIX",
+};
 export const OVERVIEW_REQUIRED_CURRENT_FIELDS = [
   "price",
   "change1d",
@@ -49,14 +53,7 @@ export const OVERVIEW_CURRENT_COLUMNS = [
   "type",
 ] as const;
 
-export type OverviewCurrentProviderStatus =
-  | "supported"
-  | "unsupported"
-  | "stale"
-  | "missing"
-  | "rate-limited"
-  | "auth-blocked"
-  | "provider-error";
+export type OverviewCurrentProviderStatus = SharedOverviewCurrentProviderStatus;
 
 export type OverviewCurrentDisplayStatus = "fresh" | "unavailable" | "retrying";
 
@@ -252,18 +249,24 @@ function startDateForHistory(sessionDate: string): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function addColumnIfMissing(env: Env, sql: string): Promise<void> {
-  try {
-    await env.DB.prepare(sql).run();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error ?? "");
-    if (!/duplicate column name/i.test(message)) throw error;
-  }
-}
-
 export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
   if (schemaReady) return;
-  await env.DB.prepare(
+  const db = getMarketDataDb(env);
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS alpaca_daily_bars (
+       feed TEXT NOT NULL,
+       ticker TEXT NOT NULL,
+       date TEXT NOT NULL,
+       o REAL NOT NULL,
+       h REAL NOT NULL,
+       l REAL NOT NULL,
+       c REAL NOT NULL,
+       volume REAL,
+       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (feed, ticker, date)
+     ) STRICT, WITHOUT ROWID`,
+  ).run();
+  await db.prepare(
     `CREATE TABLE IF NOT EXISTS overview_provider_symbols (
        provider_key TEXT NOT NULL,
        ticker TEXT NOT NULL,
@@ -274,7 +277,7 @@ export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
        PRIMARY KEY (provider_key, ticker)
      )`,
   ).run();
-  await env.DB.prepare(
+  await db.prepare(
     `CREATE TABLE IF NOT EXISTS overview_current_data (
        config_id TEXT NOT NULL,
        session_date TEXT NOT NULL,
@@ -309,7 +312,7 @@ export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
        PRIMARY KEY (config_id, session_date, ticker)
      )`,
   ).run();
-  await env.DB.prepare(
+  await db.prepare(
     `CREATE TABLE IF NOT EXISTS overview_current_refresh_jobs (
        config_id TEXT NOT NULL,
        session_date TEXT NOT NULL,
@@ -326,11 +329,8 @@ export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
        PRIMARY KEY (config_id, session_date)
      )`,
   ).run();
-  await addColumnIfMissing(env, "ALTER TABLE daily_bars ADD COLUMN source_provider TEXT");
-  await addColumnIfMissing(env, "ALTER TABLE daily_bars ADD COLUMN source_feed TEXT");
-  await addColumnIfMissing(env, "ALTER TABLE daily_bars ADD COLUMN fetched_at TEXT");
-  await env.DB.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_daily_bars_provider_feed_ticker_date ON daily_bars (source_provider, source_feed, ticker, date)",
+  await db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_overview_current_data_session_status ON overview_current_data (config_id, session_date, status)",
   ).run();
   schemaReady = true;
 }
@@ -403,30 +403,43 @@ export function parseTradingViewOverviewRow(
 
 async function loadOverviewTickerInputs(env: Env, configId: string): Promise<OverviewTickerInput[]> {
   const rows = await env.DB.prepare(
-    `SELECT DISTINCT UPPER(TRIM(di.ticker)) as ticker, s.exchange,
-            tv.provider_symbol as tradingViewSymbol
+    `SELECT DISTINCT UPPER(TRIM(di.ticker)) as ticker, s.exchange
      FROM dashboard_items di
      JOIN dashboard_groups dg ON dg.id = di.group_id
      JOIN dashboard_sections ds ON ds.id = dg.section_id
      LEFT JOIN symbols s ON UPPER(s.ticker) = UPPER(di.ticker)
-     LEFT JOIN overview_provider_symbols tv
-       ON tv.provider_key = 'tradingview'
-      AND UPPER(tv.ticker) = UPPER(di.ticker)
-      AND tv.support_status = 'supported'
      WHERE ds.config_id = ?
        AND di.enabled = 1
        AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
      ORDER BY ticker`,
   )
     .bind(configId)
-    .all<{ ticker: string; exchange: string | null; tradingViewSymbol: string | null }>();
-  return (rows.results ?? [])
+    .all<{ ticker: string; exchange: string | null }>();
+  const normalized = (rows.results ?? [])
     .map((row) => ({
       ticker: String(row.ticker ?? "").trim().toUpperCase(),
       exchange: row.exchange ?? null,
-      tradingViewSymbol: row.tradingViewSymbol ?? null,
     }))
     .filter((row) => Boolean(row.ticker));
+  const tradingViewSymbols = new Map<string, string>();
+  const db = getMarketDataDb(env);
+  for (const tickerChunk of chunk(normalized.map((row) => row.ticker), DB_CHUNK_SIZE)) {
+    const placeholders = tickerChunk.map(() => "?").join(",");
+    const mappings = await db.prepare(
+      `SELECT ticker, provider_symbol as providerSymbol
+       FROM overview_provider_symbols
+       WHERE provider_key = 'tradingview'
+         AND support_status = 'supported'
+         AND ticker IN (${placeholders})`,
+    ).bind(...tickerChunk).all<{ ticker: string; providerSymbol: string | null }>();
+    for (const mapping of mappings.results ?? []) {
+      if (mapping.providerSymbol) tradingViewSymbols.set(mapping.ticker.toUpperCase(), mapping.providerSymbol);
+    }
+  }
+  return normalized.map((row) => ({
+    ...row,
+    tradingViewSymbol: tradingViewSymbols.get(row.ticker) ?? TV_SYMBOL_OVERRIDES[row.ticker] ?? null,
+  }));
 }
 
 async function fetchTradingViewRows(
@@ -629,6 +642,7 @@ async function syncAlpacaAssetSupport(
   env: Env,
   tickers: string[],
 ): Promise<Map<string, OverviewProviderDiagnostic>> {
+  const db = getMarketDataDb(env);
   const diagnostics = new Map<string, OverviewProviderDiagnostic>();
   if ((env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() !== "alpaca") {
     for (const ticker of tickers) {
@@ -643,7 +657,7 @@ async function syncAlpacaAssetSupport(
   const today = new Date().toISOString().slice(0, 10);
   for (const tickerChunk of chunk(tickers, DB_CHUNK_SIZE)) {
     const placeholders = tickerChunk.map(() => "?").join(",");
-    const cached = await env.DB.prepare(
+    const cached = await db.prepare(
       `SELECT ticker, support_status as supportStatus, reason
        FROM overview_provider_symbols
        WHERE provider_key = 'alpaca'
@@ -696,7 +710,7 @@ async function syncAlpacaAssetSupport(
         providerSymbol: supported ? ticker : null,
       };
       diagnostics.set(ticker, diagnostic);
-      return env.DB.prepare(
+      return db.prepare(
         `INSERT INTO overview_provider_symbols (provider_key, ticker, provider_symbol, support_status, reason, checked_at)
          VALUES ('alpaca', ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(provider_key, ticker) DO UPDATE SET
@@ -706,7 +720,7 @@ async function syncAlpacaAssetSupport(
            checked_at = CURRENT_TIMESTAMP`,
       ).bind(ticker, supported ? ticker : null, diagnostic.status, diagnostic.reason);
     });
-    for (const statementChunk of chunk(statements, 100)) await env.DB.batch(statementChunk);
+    for (const statementChunk of chunk(statements, 100)) await db.batch(statementChunk);
   } catch (error) {
     const diagnostic = { status: statusFromError(error), reason: errorMessage(error) } satisfies OverviewProviderDiagnostic;
     for (const ticker of tickers) {
@@ -751,29 +765,29 @@ async function loadAlpacaBarMetrics(
   expectedSessionDate: string,
   alpacaFeed: string,
 ): Promise<Map<string, AlpacaBarMetrics>> {
+  const db = getMarketDataDb(env);
   const rowsByTicker = new Map<string, { dates: string[]; closes: number[]; sourceProvider: string | null; sourceFeed: string | null }>();
   const startDate = startDateForHistory(expectedSessionDate);
   for (const tickerChunk of chunk(tickers, DB_CHUNK_SIZE)) {
     const placeholders = tickerChunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
-      `SELECT ticker, date, c, source_provider as sourceProvider, source_feed as sourceFeed
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+    const rows = await db.prepare(
+      `SELECT ticker, date, c
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date BETWEEN ? AND ?
-         AND source_provider = 'alpaca'
-         AND source_feed = ?
        ORDER BY ticker, date`,
     )
-      .bind(...tickerChunk, startDate, expectedSessionDate, alpacaFeed)
-      .all<{ ticker: string; date: string; c: number; sourceProvider: string | null; sourceFeed: string | null }>();
+      .bind(alpacaFeed, ...tickerChunk, startDate, expectedSessionDate)
+      .all<{ ticker: string; date: string; c: number }>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
       const existing = rowsByTicker.get(ticker) ?? { dates: [], closes: [], sourceProvider: null, sourceFeed: null };
       existing.dates.push(row.date);
       existing.closes.push(Number(row.c));
       if (row.date === expectedSessionDate) {
-        existing.sourceProvider = row.sourceProvider ?? null;
-        existing.sourceFeed = row.sourceFeed ?? null;
+        existing.sourceProvider = "alpaca";
+        existing.sourceFeed = alpacaFeed;
       }
       rowsByTicker.set(ticker, existing);
     }
@@ -1017,10 +1031,17 @@ export function doesOverviewCurrentRowNeedRepair(row: OverviewCurrentData): bool
   if (row.status === "retrying") return true;
   if (row.status === "unavailable" || isOverviewCurrentRowComplete(row)) return false;
   const tradingView = row.providerStatuses.tradingview;
-  const alpacaAsset = row.providerStatuses.alpacaAsset;
-  const tradingViewCanImprove = tradingView?.status !== "unsupported" && tradingView?.status !== "auth-blocked";
-  const alpacaCanImprove = alpacaAsset?.status !== "unsupported" && alpacaAsset?.status !== "auth-blocked";
-  return tradingViewCanImprove || alpacaCanImprove;
+  const alpacaBars = row.providerStatuses.alpacaBars;
+  const retryableStatuses = new Set<OverviewCurrentProviderStatus>([
+    "stale",
+    "missing",
+    "rate-limited",
+    "provider-error",
+  ]);
+  return Boolean(
+    (tradingView?.status && retryableStatuses.has(tradingView.status))
+    || (alpacaBars?.status && retryableStatuses.has(alpacaBars.status)),
+  );
 }
 
 function retryAfterFromReason(reason: string, nowMs: number): string | null {
@@ -1047,7 +1068,8 @@ function nextCurrentRetryAt(rows: OverviewCurrentData[], nowMs = Date.now()): st
 }
 
 async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurrentData[]): Promise<void> {
-  const statements = rows.map((row) => env.DB.prepare(
+  const db = getMarketDataDb(env);
+  const statements = rows.map((row) => db.prepare(
     `INSERT INTO overview_current_data (
        config_id, session_date, ticker, status, reason, price, change_1d, change_1w, change_5d,
        change_3m, change_6m, ytd, pct_from_52w_high, above_20_sma, above_50_sma, above_200_sma,
@@ -1115,11 +1137,11 @@ async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurr
     row.tradingViewCurrentSession,
     row.fetchedAt,
   ));
-  for (const statementChunk of chunk(statements, 100)) await env.DB.batch(statementChunk);
+  for (const statementChunk of chunk(statements, 100)) await db.batch(statementChunk);
 
   const symbolStatements = rows.map((row) => {
     const diagnostic = row.providerStatuses.tradingview;
-    return env.DB.prepare(
+    return db.prepare(
       `INSERT INTO overview_provider_symbols (provider_key, ticker, provider_symbol, support_status, reason, checked_at)
        VALUES ('tradingview', ?, ?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(provider_key, ticker) DO UPDATE SET
@@ -1129,7 +1151,7 @@ async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurr
          checked_at = CURRENT_TIMESTAMP`,
     ).bind(row.ticker, row.tradingViewSymbol, diagnostic?.status ?? "missing", diagnostic?.reason ?? row.reason);
   });
-  for (const statementChunk of chunk(symbolStatements, 100)) await env.DB.batch(statementChunk);
+  for (const statementChunk of chunk(symbolStatements, 100)) await db.batch(statementChunk);
 }
 
 export async function refreshOverviewCurrentData(
@@ -1138,11 +1160,12 @@ export async function refreshOverviewCurrentData(
   sessionDate = latestUsMarketSessionAsOfDate(new Date()),
 ): Promise<OverviewCurrentRefreshResult> {
   await ensureOverviewCurrentDataSchema(env);
+  const db = getMarketDataDb(env);
   const inputs = await loadOverviewTickerInputs(env, configId);
   const tickers = inputs.map((input) => input.ticker);
   const fetchedAt = new Date().toISOString();
   const feed = (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
-  await env.DB.prepare(
+  await db.prepare(
     `INSERT INTO overview_current_refresh_jobs
        (config_id, session_date, status, attempt_count, requested_tickers, started_at, updated_at)
      VALUES (?, ?, 'running', 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -1153,7 +1176,7 @@ export async function refreshOverviewCurrentData(
        last_error = NULL,
        updated_at = CURRENT_TIMESTAMP`,
   ).bind(configId, sessionDate, tickers.length).run();
-  const refreshJob = await env.DB.prepare(
+  const refreshJob = await db.prepare(
     `SELECT attempt_count as attemptCount
      FROM overview_current_refresh_jobs
      WHERE config_id = ? AND session_date = ?`,
@@ -1239,7 +1262,7 @@ export async function refreshOverviewCurrentData(
   const unavailableTickers = rows.length - freshTickers;
   const retrying = rows.some(doesOverviewCurrentRowNeedRepair);
   const nextAttemptAt = retrying ? nextCurrentRetryAt(rows) : null;
-  await env.DB.prepare(
+  await db.prepare(
     `UPDATE overview_current_refresh_jobs
      SET status = ?, fresh_tickers = ?, unavailable_tickers = ?, next_attempt_at = ?,
          completed_at = ?, updated_at = CURRENT_TIMESTAMP
@@ -1280,7 +1303,7 @@ export async function loadOverviewCurrentData(
   configId: string,
   sessionDate: string,
 ): Promise<Map<string, OverviewCurrentData>> {
-  const rows = await env.DB.prepare(
+  const rows = await getMarketDataDb(env).prepare(
     `SELECT ticker, session_date as sessionDate, status, reason, price, change_1d as change1d,
             change_1w as change1w, change_5d as change5d, change_3m as change3m,
             change_6m as change6m, ytd, pct_from_52w_high as pctFrom52wHigh,
@@ -1382,7 +1405,7 @@ export async function refreshOverviewCurrentDataIfDue(
   options: { forceCompleted?: boolean } = {},
 ): Promise<OverviewCurrentRefreshResult | null> {
   await ensureOverviewCurrentDataSchema(env);
-  const job = await env.DB.prepare(
+  const job = await getMarketDataDb(env).prepare(
     `SELECT status, next_attempt_at as nextAttemptAt, updated_at as updatedAt
      FROM overview_current_refresh_jobs
      WHERE config_id = ? AND session_date = ?`,

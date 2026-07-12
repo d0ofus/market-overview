@@ -131,12 +131,12 @@ class OverviewFreshnessDb {
 
   rowsForSql<T>(sql: string, args: unknown[]): T[] {
     this.queries.push({ sql, args });
-    if (sql.includes("SELECT ticker, date, c") && sql.includes("FROM daily_bars")) {
+    if (sql.includes("SELECT ticker, date, c") && sql.includes("FROM alpaca_daily_bars")) {
       const hasLowerBound = sql.includes("date >= ?");
-      const startDate = hasLowerBound ? String(args.at(-3)) : null;
-      const cutoff = String(args.at(-2) ?? args[0]);
+      const startDate = hasLowerBound ? String(args.at(-2)) : null;
+      const cutoff = String(args.at(-1) ?? args[0]);
       const requestedTickers = new Set(
-        (hasLowerBound ? args.slice(0, -3) : args.slice(0, -2))
+        (hasLowerBound ? args.slice(1, -2) : args.slice(1, -1))
           .map((value) => String(value).toUpperCase()),
       );
       return this.items
@@ -162,9 +162,9 @@ class OverviewFreshnessDb {
       return this.items.map((item) => ({ ticker: item.ticker, name: item.displayName })) as T[];
     }
     if (sql.includes("FROM etf_watchlists")) return [];
-    if (sql.includes("MAX(date) as lastDate") && sql.includes("FROM daily_bars")) {
-      const cutoff = sql.includes("date <= ?") ? String(args.at(-2)) : null;
-      const tickers = args.slice(0, -2)
+    if (sql.includes("MAX(date) as lastDate") && sql.includes("FROM alpaca_daily_bars")) {
+      const cutoff = sql.includes("date <= ?") ? String(args.at(-1)) : null;
+      const tickers = args.slice(1, -1)
         .map((value) => String(value).toUpperCase())
         .filter((value) => this.dailyBars[value]);
       return tickers.flatMap((ticker) => {
@@ -173,10 +173,10 @@ class OverviewFreshnessDb {
         return lastDate ? [{ ticker, lastDate }] : [];
       }) as T[];
     }
-    if (sql.includes("SELECT DISTINCT ticker") && sql.includes("FROM daily_bars")) {
-      const date = String(args.at(-2));
+    if (sql.includes("SELECT DISTINCT ticker") && sql.includes("FROM alpaca_daily_bars")) {
+      const date = String(args.at(-1));
       const tickers = args
-        .slice(0, -2)
+        .slice(1, -1)
         .map((value) => String(value).toUpperCase())
         .filter((ticker) => (this.dailyBars[ticker] ?? []).includes(date));
       return tickers.map((ticker) => ({ ticker })) as T[];
@@ -356,7 +356,7 @@ describe("overview freshness refresh", () => {
 
     const barQuery = db.queries.find((query) =>
       query.sql.includes("SELECT ticker, date, c")
-        && query.sql.includes("FROM daily_bars")
+        && query.sql.includes("FROM alpaca_daily_bars")
         && query.sql.includes("date >= ?"),
     );
     expect(barQuery?.sql).toContain("ticker IN");
@@ -364,7 +364,7 @@ describe("overview freshness refresh", () => {
     expect(barQuery?.sql).not.toContain("SELECT ticker FROM dashboard_items");
     expect(barQuery?.args).toContain("SPY");
     expect(barQuery?.args).toContain("2025-04-18");
-    expect(barQuery?.args.at(-2)).toBe("2026-06-12");
+    expect(barQuery?.args.at(-1)).toBe("2026-06-12");
     expect(db.snapshotRows.find((row) => row.ticker === "SPY")?.price).not.toBe(100);
   });
 

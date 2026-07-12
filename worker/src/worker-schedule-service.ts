@@ -1,6 +1,7 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { cleanupMarketDataOperationalState, getMarketDataDb, marketDataFeed, withDatabase } from "./market-data-db";
 import {
   clearProviderSymbolBackoff,
 } from "./provider-backoff";
@@ -24,13 +25,20 @@ const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
 const DEFAULT_PATTERN_SCAN_OFFSET_MINUTES = 75;
 const DEFAULT_PATTERN_SCAN_BATCH_SIZE = 40;
 const DEFAULT_PATTERN_SCAN_MAX_BATCHES_PER_TICK = 4;
+const BREADTH_HISTORY_UNIVERSE_IDS = [
+  "sp500-core",
+  "nasdaq-core",
+  "nyse-core",
+  "russell2000-core",
+  "overall-market-proxy",
+] as const;
 export const POST_CLOSE_SCOPE = "active-us-common-stocks-plus-overview";
 export const FIXED_WORKER_CRON_EXPRESSION = "*/15 * * * *";
 
 const POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT = `
-  SELECT ticker, MIN(priority) as priority
+  SELECT ticker, MIN(priority) as priority, MAX(history_required) as history_required
   FROM (
-    SELECT UPPER(TRIM(di.ticker)) as ticker, 0 as priority
+    SELECT UPPER(TRIM(di.ticker)) as ticker, 0 as priority, 1 as history_required
     FROM dashboard_items di
     JOIN dashboard_groups dg ON dg.id = di.group_id
     JOIN dashboard_sections ds ON ds.id = dg.section_id
@@ -39,11 +47,15 @@ const POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT = `
       AND di.enabled = 1
       AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
     UNION ALL
-    SELECT UPPER(TRIM(s.ticker)) as ticker, 1 as priority
+    SELECT UPPER(TRIM(s.ticker)) as ticker, 1 as priority, 0 as history_required
     FROM symbols s
     WHERE COALESCE(s.is_active, 1) = 1
       AND COALESCE(s.catalog_managed, 0) = 1
       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
+    UNION ALL
+    SELECT UPPER(TRIM(us.ticker)) as ticker, 1 as priority, 1 as history_required
+    FROM universe_symbols us
+    WHERE us.universe_id IN (${BREADTH_HISTORY_UNIVERSE_IDS.map((id) => `'${id}'`).join(", ")})
   ) post_close_universe_raw
   WHERE ticker IS NOT NULL AND ticker <> ''
   GROUP BY ticker
@@ -58,6 +70,10 @@ export function buildPostCloseDailyBarUniverseQuery(kind: "count" | "batch"): st
 
 let postCloseRetrySchemaReady = false;
 
+function postCloseStateEnv(env: Env): Env {
+  return withDatabase(env, getMarketDataDb(env));
+}
+
 async function addPostCloseColumnIfMissing(env: Env, sql: string): Promise<void> {
   try {
     await env.DB.prepare(sql).run();
@@ -69,6 +85,31 @@ async function addPostCloseColumnIfMissing(env: Env, sql: string): Promise<void>
 
 async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
   if (postCloseRetrySchemaReady) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS post_close_daily_bar_refresh_jobs (
+       id TEXT PRIMARY KEY,
+       trading_date TEXT NOT NULL,
+       scope TEXT NOT NULL,
+       status TEXT NOT NULL,
+       started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       completed_at TEXT,
+       error TEXT,
+       total_tickers INTEGER NOT NULL DEFAULT 0,
+       processed_tickers INTEGER NOT NULL DEFAULT 0,
+       cursor_offset INTEGER NOT NULL DEFAULT 0,
+       fetched_rows INTEGER NOT NULL DEFAULT 0,
+       written_rows INTEGER NOT NULL DEFAULT 0,
+       current_date_tickers INTEGER NOT NULL DEFAULT 0,
+       missing_current_date_tickers INTEGER NOT NULL DEFAULT 0,
+       current_date_coverage_pct REAL NOT NULL DEFAULT 0,
+       attempt_count INTEGER NOT NULL DEFAULT 0,
+       next_attempt_at TEXT,
+       error_code TEXT,
+       lease_expires_at TEXT,
+       UNIQUE(scope, trading_date)
+     )`,
+  ).run();
   await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
   await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN next_attempt_at TEXT");
   await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN error_code TEXT");
@@ -113,25 +154,24 @@ async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
   postCloseRetrySchemaReady = true;
 }
 
-async function materializePostCloseJobItems(env: Env, jobId: string): Promise<void> {
-  await env.DB.prepare(
+async function materializePostCloseJobItems(env: Env, stateEnv: Env, jobId: string): Promise<void> {
+  const existing = await stateEnv.DB.prepare(
+    "SELECT COUNT(*) as count FROM post_close_daily_bar_refresh_job_items WHERE job_id = ?",
+  ).bind(jobId).first<{ count: number | null }>();
+  if (Number(existing?.count ?? 0) > 0) return;
+  const universe = await env.DB.prepare(
+    `SELECT ticker, history_required as historyRequired
+     FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe
+     ORDER BY priority ASC, ticker ASC`,
+  ).all<{ ticker: string; historyRequired: number }>();
+  const statements = (universe.results ?? []).map((row, ordinal) => stateEnv.DB.prepare(
     `INSERT OR IGNORE INTO post_close_daily_bar_refresh_job_items
        (job_id, ordinal, ticker, history_required, status, updated_at)
-     SELECT ?, ROW_NUMBER() OVER (ORDER BY priority ASC, ticker ASC) - 1, ticker,
-            CASE WHEN priority = 0 THEN 1 ELSE 0 END,
-            'queued', CURRENT_TIMESTAMP
-     FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe`,
-  ).bind(jobId).run();
-  await env.DB.prepare(
-    `UPDATE post_close_daily_bar_refresh_job_items
-     SET history_required = 1
-     WHERE job_id = ?
-       AND ticker IN (
-         SELECT ticker
-         FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe
-         WHERE priority = 0
-       )`,
-  ).bind(jobId).run();
+     VALUES (?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)`,
+  ).bind(jobId, ordinal, row.ticker, Number(row.historyRequired) === 1 ? 1 : 0));
+  for (let index = 0; index < statements.length; index += 500) {
+    await stateEnv.DB.batch(statements.slice(index, index + 500));
+  }
 }
 
 async function loadPostCloseJobItemBatch(
@@ -694,14 +734,13 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
     const batch = unique.slice(i, i + 80);
     if (batch.length === 0) continue;
     const placeholders = batch.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT DISTINCT ticker
-         FROM daily_bars
-        WHERE date = ?
-          AND source_provider = 'alpaca'
-          AND source_feed = ?
+         FROM alpaca_daily_bars
+        WHERE feed = ?
+          AND date = ?
           AND ticker IN (${placeholders})`,
-    ).bind(date, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex", ...batch).all<{ ticker: string }>();
+    ).bind(marketDataFeed(env), date, ...batch).all<{ ticker: string }>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker?.trim().toUpperCase();
       if (ticker) out.add(ticker);
@@ -717,7 +756,7 @@ async function loadKnownUnsupportedAlpacaTickers(env: Env, tickers: string[]): P
     const tickerChunk = unique.slice(index, index + 80);
     const placeholders = tickerChunk.map(() => "?").join(",");
     try {
-      const rows = await env.DB.prepare(
+      const rows = await getMarketDataDb(env).prepare(
         `SELECT ticker
          FROM overview_provider_symbols
          WHERE provider_key = 'alpaca'
@@ -783,7 +822,7 @@ async function loadOverviewHistoryStates(
   for (let index = 0; index < unique.length; index += 80) {
     const tickerChunk = unique.slice(index, index + 80);
     const placeholders = tickerChunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT ticker, lookback_start as lookbackStart, through_date as throughDate
        FROM overview_alpaca_history_state
        WHERE source_feed = ?
@@ -802,7 +841,8 @@ async function checkpointOverviewHistoryStates(
   lookbackStart: string,
   throughDate: string,
 ): Promise<void> {
-  const statements = tickers.map((ticker) => env.DB.prepare(
+  const db = getMarketDataDb(env);
+  const statements = tickers.map((ticker) => db.prepare(
     `INSERT INTO overview_alpaca_history_state
        (ticker, source_feed, lookback_start, through_date, status, last_error, updated_at)
      VALUES (?, ?, ?, ?, 'completed', NULL, CURRENT_TIMESTAMP)
@@ -814,7 +854,7 @@ async function checkpointOverviewHistoryStates(
        updated_at = CURRENT_TIMESTAMP`,
   ).bind(ticker, sourceFeed, lookbackStart, throughDate));
   for (let index = 0; index < statements.length; index += 100) {
-    await env.DB.batch(statements.slice(index, index + 100));
+    await db.batch(statements.slice(index, index + 100));
   }
 }
 
@@ -828,23 +868,24 @@ async function ensurePostCloseDailyBarRefreshJob(
   env: Env,
   tradingDate: string,
 ): Promise<PostCloseDailyBarRefreshJobRecord> {
-  await ensurePostCloseRetrySchema(env);
-  const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(env, tradingDate);
+  const stateEnv = postCloseStateEnv(env);
+  await ensurePostCloseRetrySchema(stateEnv);
+  const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate);
   if (existing) {
-    await materializePostCloseJobItems(env, existing.id);
+    await materializePostCloseJobItems(env, stateEnv, existing.id);
     if (isStaleRunningPostCloseJob(existing)) {
-      await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
+      await updatePostCloseDailyBarRefreshJobRecord(stateEnv, existing.id, {
         status: "queued",
         error: null,
         completedAt: null,
         leaseExpiresAt: null,
       });
-      const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
+      const reset = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, existing.id);
       if (reset) return reset;
     }
     if (existing.status === "failed") {
       if (existing.errorCode === "auth-blocked") return existing;
-      await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
+      await updatePostCloseDailyBarRefreshJobRecord(stateEnv, existing.id, {
         status: "queued",
         error: null,
         errorCode: null,
@@ -852,7 +893,7 @@ async function ensurePostCloseDailyBarRefreshJob(
         nextAttemptAt: null,
         leaseExpiresAt: null,
       });
-      const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
+      const reset = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, existing.id);
       if (reset) return reset;
     }
     return existing;
@@ -860,16 +901,16 @@ async function ensurePostCloseDailyBarRefreshJob(
 
   const id = crypto.randomUUID();
   const totalTickers = await loadPostCloseDailyBarUniverseCount(env);
-  await env.DB.prepare(
+  await stateEnv.DB.prepare(
     `INSERT INTO post_close_daily_bar_refresh_jobs
       (id, trading_date, scope, status, started_at, updated_at, completed_at, error, total_tickers, processed_tickers, cursor_offset, missing_current_date_tickers)
      VALUES (?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, ?)`,
   )
     .bind(id, tradingDate, POST_CLOSE_SCOPE, totalTickers, totalTickers)
     .run();
-  const created = await loadPostCloseDailyBarRefreshJobRecord(env, id);
+  const created = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, id);
   if (!created) throw new Error("Failed to create post-close daily bar refresh job.");
-  await materializePostCloseJobItems(env, id);
+  await materializePostCloseJobItems(env, stateEnv, id);
   return created;
 }
 
@@ -878,8 +919,9 @@ export async function processPostCloseDailyBarRefreshJob(
   jobId: string,
   options?: { batchSize?: number; maxBatches?: number },
 ): Promise<PostCloseDailyBarRefreshJob | null> {
-  await ensurePostCloseRetrySchema(env);
-  const job = await loadPostCloseDailyBarRefreshJobRecord(env, jobId);
+  const stateEnv = postCloseStateEnv(env);
+  await ensurePostCloseRetrySchema(stateEnv);
+  const job = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, jobId);
   if (!job) return null;
   if (job.status === "completed" || job.status === "failed") {
     return mapPostCloseDailyBarRefreshJobRecord(job);
@@ -897,7 +939,7 @@ export async function processPostCloseDailyBarRefreshJob(
   }> = [];
   let activeLeaseToken: string | null = null;
   try {
-    await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+    await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
       status: "running",
       error: null,
       errorCode: null,
@@ -914,7 +956,7 @@ export async function processPostCloseDailyBarRefreshJob(
 
     while (processedBatchCount < maxBatches) {
       if (cursorOffset >= job.totalTickers) cursorOffset = 0;
-      let candidateItems = await loadPostCloseJobItemBatch(env, job.id, cursorOffset, batchSize);
+      let candidateItems = await loadPostCloseJobItemBatch(stateEnv, job.id, cursorOffset, batchSize);
       if (candidateItems.length === 0) {
         if (cursorOffset > 0) {
           cursorOffset = 0;
@@ -928,7 +970,7 @@ export async function processPostCloseDailyBarRefreshJob(
         candidateItems.map((item) => item.ticker),
       );
       if (unsupportedTickers.size > 0) {
-        await updatePostCloseJobItems(env, job.id, Array.from(unsupportedTickers), {
+        await updatePostCloseJobItems(stateEnv, job.id, Array.from(unsupportedTickers), {
           status: "unsupported",
           nextAttemptAt: null,
           leaseExpiresAt: null,
@@ -961,7 +1003,7 @@ export async function processPostCloseDailyBarRefreshJob(
       activeLeaseToken = crypto.randomUUID();
       const itemLeaseExpiresAt = new Date(Date.now() + POST_CLOSE_ITEM_LEASE_MS).toISOString();
       const batchItems = await leasePostCloseJobItems(
-        env,
+        stateEnv,
         job.id,
         selectedBatchItems,
         activeLeaseToken,
@@ -986,6 +1028,8 @@ export async function processPostCloseDailyBarRefreshJob(
           endDate: job.tradingDate,
           replaceExisting: true,
           providerBatchSize: MAX_POST_CLOSE_PROVIDER_BATCH_SIZE,
+          target: "market",
+          mirrorLatestToLegacy: true,
         });
       }
       const currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
@@ -1002,7 +1046,7 @@ export async function processPostCloseDailyBarRefreshJob(
         historyLookbackStart,
         job.tradingDate,
       );
-      await updatePostCloseJobItems(env, job.id, completedTickers, {
+      await updatePostCloseJobItems(stateEnv, job.id, completedTickers, {
         status: "completed",
         barDate: job.tradingDate,
         nextAttemptAt: null,
@@ -1020,7 +1064,7 @@ export async function processPostCloseDailyBarRefreshJob(
         missingByAttempt.set(itemAttempt, rows);
       }
       for (const [itemAttempt, itemTickers] of missingByAttempt) {
-        await updatePostCloseJobItems(env, job.id, itemTickers, {
+        await updatePostCloseJobItems(stateEnv, job.id, itemTickers, {
           status: "missing",
           nextAttemptAt: new Date(Date.now() + retryDelayMinutes(itemAttempt) * 60_000).toISOString(),
           leaseExpiresAt: null,
@@ -1035,11 +1079,11 @@ export async function processPostCloseDailyBarRefreshJob(
       processedBatchCount += 1;
       leasedItems = [];
       activeLeaseToken = null;
-      const summary = await loadPostCloseJobItemSummary(env, job.id);
+      const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
       const currentDateTickers = summary.completedCount;
       const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
       const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
-      await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+      await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
         status: "running",
         processedTickers: currentDateTickers,
         cursorOffset,
@@ -1052,12 +1096,12 @@ export async function processPostCloseDailyBarRefreshJob(
       });
     }
 
-    const summary = await loadPostCloseJobItemSummary(env, job.id);
+    const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
     const currentDateTickers = summary.completedCount;
     const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
     const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
     if (summary.incompleteCount === 0) {
-      await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+      await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
         status: "completed",
         processedTickers: currentDateTickers,
         cursorOffset: job.totalTickers,
@@ -1074,7 +1118,7 @@ export async function processPostCloseDailyBarRefreshJob(
       const nextAttemptAt = summary.readyCount > 0
         ? null
         : summary.nextAttemptAt ?? new Date(Date.now() + POST_CLOSE_RETRY_MINUTES * 60_000).toISOString();
-      await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+      await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
         status: "queued",
         processedTickers: currentDateTickers,
         cursorOffset: cursorOffset >= job.totalTickers ? 0 : cursorOffset,
@@ -1099,7 +1143,7 @@ export async function processPostCloseDailyBarRefreshJob(
       retryGroups.set(key, rows);
     }
     for (const [retryKey, tickers] of retryGroups) {
-      await updatePostCloseJobItems(env, job.id, tickers, {
+      await updatePostCloseJobItems(stateEnv, job.id, tickers, {
         status: errorCode,
         nextAttemptAt: retryKey === "terminal" ? null : retryKey,
         leaseExpiresAt: null,
@@ -1111,7 +1155,7 @@ export async function processPostCloseDailyBarRefreshJob(
     const retryTimes = Array.from(retryGroups.keys()).filter((value) => value !== "terminal").sort();
     const nextAttemptAt = retryTimes[0]
       ?? (leasedItems.length === 0 ? retryAtForPostCloseError(error, attemptCount) : null);
-    await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+    await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
       status: errorCode === "auth-blocked" ? "failed" : "queued",
       error: error instanceof Error ? error.message : "Post-close daily bar refresh failed.",
       errorCode,
@@ -1121,7 +1165,7 @@ export async function processPostCloseDailyBarRefreshJob(
     });
   }
 
-  const updated = await loadPostCloseDailyBarRefreshJobRecord(env, job.id);
+  const updated = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, job.id);
   return updated ? mapPostCloseDailyBarRefreshJobRecord(updated) : null;
 }
 
@@ -1133,6 +1177,7 @@ export async function maybeRunScheduledPostCloseDailyBarRefresh(
   if (!settings.postCloseBarsEnabled) return null;
   const expectedTradingDate = latestUsMarketSessionAsOfDate(now);
   if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) return null;
+  await cleanupMarketDataOperationalState(env, expectedTradingDate);
   const jobRecord = await ensurePostCloseDailyBarRefreshJob(env, expectedTradingDate);
   return await processPostCloseDailyBarRefreshJob(env, jobRecord.id, {
     batchSize: settings.postCloseBarsBatchSize,
@@ -1144,7 +1189,8 @@ export async function loadLatestPostCloseDailyBarRefreshJobForDate(
   env: Env,
   tradingDate: string,
 ): Promise<PostCloseDailyBarRefreshJob | null> {
-  await ensurePostCloseRetrySchema(env);
-  const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(env, tradingDate);
+  const stateEnv = postCloseStateEnv(env);
+  await ensurePostCloseRetrySchema(stateEnv);
+  const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate);
   return record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
 }

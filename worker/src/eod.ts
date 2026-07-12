@@ -4,6 +4,7 @@ import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
 import { isUsMarketTradingDay, latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
 import {
   isOverviewQuoteEligibleTicker,
@@ -437,16 +438,15 @@ async function computeOverviewFreshnessDiagnosticsForConfig(
   for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
     const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
     const placeholders = buildPlaceholders(chunk.length);
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT ticker, MAX(date) as lastDate
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date <= ?
-         AND source_provider = 'alpaca'
-         AND source_feed = ?
        GROUP BY ticker`,
     )
-      .bind(...chunk, expectedAsOfDate, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex")
+      .bind(marketDataFeed(env), ...chunk, expectedAsOfDate)
       .all<{ ticker: string; lastDate: string | null }>();
     for (const row of rows.results ?? []) {
       latestByTicker.set(row.ticker.toUpperCase(), row.lastDate ?? null);
@@ -513,15 +513,14 @@ async function loadOverviewFreshnessMissingTickers(
   for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
     const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
     const placeholders = buildPlaceholders(chunk.length);
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT DISTINCT ticker
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
-         AND date = ?
-         AND source_provider = 'alpaca'
-         AND source_feed = ?`,
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
+         AND date = ?`,
     )
-      .bind(...chunk, expectedAsOfDate, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex")
+      .bind(marketDataFeed(env), ...chunk, expectedAsOfDate)
       .all<{ ticker: string }>();
     for (const row of rows.results ?? []) current.add(row.ticker.toUpperCase());
   }
@@ -575,6 +574,8 @@ export async function refreshAndStoreOverviewSnapshot(
         endDate: asOfDate,
         replaceExisting: true,
         providerBatchSize: 80,
+        target: "market",
+        mirrorLatestToLegacy: true,
       });
       fetchedRows += refresh.fetchedRows;
       writtenRows += refresh.writtenRows;
@@ -724,14 +725,13 @@ async function loadBarsForTickers(
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
     const sql = `SELECT ticker, date, c, volume
-      FROM daily_bars
-      WHERE ticker IN (${placeholders})
+      FROM alpaca_daily_bars
+      WHERE feed = ?
+        AND ticker IN (${placeholders})
         AND date <= ?
-        AND source_provider = 'alpaca'
-        AND source_feed = ?
       ORDER BY ticker, date`;
-    const result = await env.DB.prepare(sql)
-      .bind(...chunk, asOfDate, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex")
+    const result = await getMarketDataDb(env).prepare(sql)
+      .bind(marketDataFeed(env), ...chunk, asOfDate)
       .all<{ ticker: string; date: string; c: number; volume: number | null }>();
     rows.push(...(result.results ?? []));
   }
@@ -750,17 +750,16 @@ async function loadOverviewSnapshotBarsForTickers(
     const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
-    const result = await env.DB.prepare(
+    const result = await getMarketDataDb(env).prepare(
       `SELECT ticker, date, c
-         FROM daily_bars
-        WHERE ticker IN (${placeholders})
+         FROM alpaca_daily_bars
+        WHERE feed = ?
+          AND ticker IN (${placeholders})
           AND date >= ?
           AND date <= ?
-          AND source_provider = 'alpaca'
-          AND source_feed = ?
         ORDER BY ticker, date`,
     )
-      .bind(...chunk, startDate, asOfDate, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex")
+      .bind(marketDataFeed(env), ...chunk, startDate, asOfDate)
       .all<{ ticker: string; date: string; c: number }>();
     rows.push(...(result.results ?? []));
   }
@@ -774,15 +773,14 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
     const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
-    const result = await env.DB.prepare(
+    const result = await getMarketDataDb(env).prepare(
       `SELECT DISTINCT ticker
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
-         AND date = ?
-         AND source_provider = 'alpaca'
-         AND source_feed = ?`,
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
+         AND date = ?`,
     )
-      .bind(...chunk, date, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex")
+      .bind(marketDataFeed(env), ...chunk, date)
       .all<{ ticker: string }>();
     for (const row of result.results ?? []) {
       out.add(row.ticker.toUpperCase());
@@ -1513,6 +1511,8 @@ export async function refreshMissingBreadthBarsForCoverage(
       endDate: asOfDate,
       replaceExisting: true,
       continueOnError: true,
+      target: "market",
+      mirrorLatestToLegacy: true,
     });
     fetchedRows += refresh.fetchedRows;
     writtenRows += refresh.writtenRows;
@@ -1559,7 +1559,14 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
     const provider = getProvider(env, { fallbackEnabled: false });
     const endDate = asOfDate;
     const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 320 * 86400_000));
-    const refresh = await refreshDailyBarsIncremental(env, { provider, tickers, startDate, endDate });
+    const refresh = await refreshDailyBarsIncremental(env, {
+      provider,
+      tickers,
+      startDate,
+      endDate,
+      target: "market",
+      mirrorLatestToLegacy: true,
+    });
     barCount = refresh.writtenRows;
   } catch (error) {
     console.error("sp500 core breadth refresh provider pull failed; using stored bars", error);

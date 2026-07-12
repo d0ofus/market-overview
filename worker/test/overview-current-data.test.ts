@@ -248,6 +248,45 @@ describe("overview TradingView current data", () => {
     expect(doesOverviewCurrentRowNeedRepair(row)).toBe(true);
   });
 
+  it("stops retrying a structurally unavailable field after both exact-session providers resolve", () => {
+    const tv = parseTradingViewOverviewRow(
+      "NEWETF",
+      "AMEX:NEWETF",
+      tradingViewData({ SMA200: null }),
+      "2026-07-10",
+    );
+    const row = resolveOverviewCurrentRow({
+      ticker: "NEWETF",
+      sessionDate: "2026-07-10",
+      tv,
+      alpacaSnapshot: null,
+      alpacaSnapshotDiagnostic: { status: "missing", reason: "No snapshot." },
+      alpacaAssetDiagnostic: { status: "supported", reason: "Active asset." },
+      bars: {
+        status: "supported",
+        reason: "Exact-session history is present but the listing is younger than 200 sessions.",
+        barDate: "2026-07-10",
+        price: 105,
+        change1d: 1,
+        change1w: 2,
+        change3m: 3,
+        change6m: null,
+        ytd: 4,
+        pctFrom52wHigh: -2,
+        above20Sma: true,
+        above50Sma: true,
+        above200Sma: null,
+      },
+      alpacaFeed: "iex",
+      fetchedAt: "2026-07-10T21:00:00.000Z",
+    });
+
+    expect(row.status).toBe("fresh");
+    expect(row.above200Sma).toBeNull();
+    expect(isOverviewCurrentRowComplete(row)).toBe(false);
+    expect(doesOverviewCurrentRowNeedRepair(row)).toBe(false);
+  });
+
   it("classifies a ticker unsupported when neither provider covers it", () => {
     const tv = parseTradingViewOverviewRow(
       "EATZ",

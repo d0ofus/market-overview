@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_daily_bars_provider_feed_ticker_date;

@@ -11,7 +11,7 @@
     "build": "npm run build -w worker && npm run build -w web",
     "test": "npm run test -w worker",
     "test:ibkr-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File ibkr-bridge/scripts/run-tests.ps1",
-    "seed": "npm run seed -w worker && npm run seed:perplexity-cache -w worker"
+    "seed": "npm run seed -w worker && npm run seed:market-data -w worker && npm run seed:perplexity-cache -w worker"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

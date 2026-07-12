@@ -173,6 +173,89 @@ describe("refreshDailyBarsIncremental", () => {
     });
     expect(result.currentDateCoveragePct).toBeCloseTo(33.333, 2);
   });
+
+  it("stores full Alpaca history in MARKET_DATA_DB and mirrors only the latest session", async () => {
+    const marketStatements: Array<{ sql: string; args: unknown[] }> = [];
+    const legacyStatements: Array<{ sql: string; args: unknown[] }> = [];
+    const createTrackingDb = (target: "market" | "legacy") => ({
+      prepare(sql: string) {
+        const bind = (...args: unknown[]) => ({
+          __sql: sql,
+          __args: args,
+          async all<T>() {
+            if (target === "market" && sql.includes("SELECT ticker, date, o")) {
+              return {
+                results: [{ ticker: "AAA", date: "2026-06-02", o: 10, h: 12, l: 9, c: 11, volume: 1_000 }] as T[],
+              };
+            }
+            if (target === "market" && sql.includes("SELECT ticker FROM alpaca_daily_bars")) {
+              return { results: [{ ticker: "AAA" }] as T[] };
+            }
+            return { results: [] as T[] };
+          },
+          async first<T>() {
+            return null as T;
+          },
+          async run() {
+            (target === "market" ? marketStatements : legacyStatements).push({ sql, args });
+            return { meta: { changes: 0, size_after: 1024 } };
+          },
+        });
+        return {
+          bind,
+          async all<T>() {
+            return bind().all<T>();
+          },
+          async first<T>() {
+            return bind().first<T>();
+          },
+          async run() {
+            return bind().run();
+          },
+        };
+      },
+      async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+        for (const statement of statements) {
+          (target === "market" ? marketStatements : legacyStatements).push({
+            sql: statement.__sql ?? "",
+            args: statement.__args ?? [],
+          });
+        }
+        return statements.map(() => ({ meta: { size_after: 1024 } }));
+      },
+    }) as unknown as D1Database;
+    const env = {
+      DB: createTrackingDb("legacy"),
+      MARKET_DATA_DB: createTrackingDb("market"),
+      MARKET_DATA_DB_REQUIRED: "true",
+      DATA_PROVIDER: "alpaca",
+      ALPACA_FEED: "iex",
+      MARKET_DATA_DAILY_WRITE_BUDGET: "75000",
+    } as any;
+    const provider: MarketDataProvider = {
+      label: "Alpaca test",
+      getDailyBars: vi.fn(async () => [
+        { ticker: "AAA", date: "2026-06-01", o: 9, h: 11, l: 8, c: 10, volume: 900 },
+        { ticker: "AAA", date: "2026-06-02", o: 10, h: 12, l: 9, c: 11, volume: 1_000 },
+      ]),
+    };
+
+    const result = await refreshDailyBarsIncremental(env, {
+      tickers: ["AAA"],
+      startDate: "2026-06-01",
+      endDate: "2026-06-02",
+      provider,
+      replaceExisting: true,
+      target: "market",
+      mirrorLatestToLegacy: true,
+    });
+
+    const marketBarWrites = marketStatements.filter((statement) => statement.sql.includes("INSERT INTO alpaca_daily_bars"));
+    const legacyBarWrites = legacyStatements.filter((statement) => statement.sql.includes("INSERT INTO daily_bars"));
+    expect(marketBarWrites.map((statement) => statement.args[2])).toEqual(["2026-06-01", "2026-06-02"]);
+    expect(legacyBarWrites.map((statement) => statement.args[1])).toEqual(["2026-06-02"]);
+    expect(result).toMatchObject({ writtenRows: 2, mirroredRows: 1, currentDateTickers: 1 });
+  });
 });
 
 describe("provider fetch timeouts", () => {

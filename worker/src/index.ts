@@ -86,7 +86,7 @@ import {
   watchlistSourcePatchSchema,
 } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
-import { refreshDailyBarsIncremental } from "./daily-bars";
+import { refreshDailyBarsIncremental, type DailyBarStorageTarget } from "./daily-bars";
 import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
@@ -94,6 +94,7 @@ import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import {
   CENTRAL_CRON_JOB_DEFINITIONS,
   CRON_TIMEZONE_OPTIONS,
@@ -1339,7 +1340,7 @@ async function ensureOverviewCatalogCoverage(env: Env, options: { respectThrottl
 
   await env.DB.batch([...structureStatements, ...thematicItemStatements, ...equalWeightItemStatements, ...usIndexEqualWeightItemStatements, ...symbolStatements]);
   if (needsBarRefresh) {
-    await refreshRecentBarsForTickers(env, allTickers, 2000);
+    await refreshRecentBarsForTickers(env, allTickers, 2000, OVERVIEW_HISTORY_LOOKBACK_DAYS, false, { target: "market" });
   }
   if (needsSnapshotRefresh) {
     await recomputeDashboardFromStoredBars(env);
@@ -1382,8 +1383,8 @@ async function loadTickersMissingRecentBars(env: Env, tickers: string[], expecte
   const chunkSize = 80;
   for (let i = 0; i < unique.length; i += chunkSize) {
     const chunk = unique.slice(i, i + chunkSize);
-    const sql = `SELECT ticker, MAX(date) as lastDate FROM daily_bars WHERE ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
-    const rows = await env.DB.prepare(sql).bind(...chunk).all<{ ticker: string; lastDate: string | null }>();
+    const sql = `SELECT ticker, MAX(date) as lastDate FROM alpaca_daily_bars WHERE feed = ? AND ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
+    const rows = await getMarketDataDb(env).prepare(sql).bind(marketDataFeed(env), ...chunk).all<{ ticker: string; lastDate: string | null }>();
     for (const row of rows.results ?? []) {
       lastDateByTicker.set(row.ticker.toUpperCase(), row.lastDate ?? null);
     }
@@ -1401,8 +1402,8 @@ async function loadTickersMissingBarHistory(env: Env, tickers: string[], minBars
   const chunkSize = 80;
   for (let i = 0; i < unique.length; i += chunkSize) {
     const chunk = unique.slice(i, i + chunkSize);
-    const sql = `SELECT ticker, COUNT(*) as barCount FROM daily_bars WHERE ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
-    const rows = await env.DB.prepare(sql).bind(...chunk).all<{ ticker: string; barCount: number }>();
+    const sql = `SELECT ticker, COUNT(*) as barCount FROM alpaca_daily_bars WHERE feed = ? AND ticker IN (${chunk.map(() => "?").join(",")}) GROUP BY ticker`;
+    const rows = await getMarketDataDb(env).prepare(sql).bind(marketDataFeed(env), ...chunk).all<{ ticker: string; barCount: number }>();
     for (const row of rows.results ?? []) {
       barCountByTicker.set(row.ticker.toUpperCase(), Number(row.barCount ?? 0));
     }
@@ -1423,7 +1424,7 @@ async function maybeRefreshOverviewBars(env: Env): Promise<void> {
   const shortHistoryTickers = await loadTickersMissingBarHistory(env, tickers, OVERVIEW_SPARKLINE_MIN_POINTS);
   const refreshTickers = uniqueTickers([...staleTickers, ...shortHistoryTickers]);
   if (refreshTickers.length === 0) return;
-  await refreshRecentBarsForTickers(env, refreshTickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS, true);
+  await refreshRecentBarsForTickers(env, refreshTickers, 400, OVERVIEW_HISTORY_LOOKBACK_DAYS, true, { target: "market" });
   await recomputeDashboardFromStoredBars(env);
 }
 
@@ -2328,6 +2329,7 @@ async function loadYahooPreferredDailyBarTickers(env: Env, tickers: string[]): P
 
 type RefreshRecentBarsOptions = {
   fallbackScope?: "preferred" | "all";
+  target?: DailyBarStorageTarget;
 };
 
 async function refreshRecentBarsForTickers(
@@ -2342,11 +2344,15 @@ async function refreshRecentBarsForTickers(
   if (unique.length === 0) return;
   let provider: ReturnType<typeof getProvider> | null = null;
   try {
-    const yahooPreferredTickers = await loadYahooPreferredDailyBarTickers(env, unique);
-    provider = getProvider(env, {
-      yahooPreferredTickers,
-      fallbackScope: options.fallbackScope ?? "preferred",
-    });
+    if (options.target === "market") {
+      provider = getProvider(env, { fallbackEnabled: false });
+    } else {
+      const yahooPreferredTickers = await loadYahooPreferredDailyBarTickers(env, unique);
+      provider = getProvider(env, {
+        yahooPreferredTickers,
+        fallbackScope: options.fallbackScope ?? "preferred",
+      });
+    }
   } catch (error) {
     console.error("market data provider unavailable for recent bar refresh", error);
     return;
@@ -2354,7 +2360,15 @@ async function refreshRecentBarsForTickers(
   try {
     const end = latestUsMarketSessionAsOfDate(new Date());
     const start = new Date(Date.now() - Math.max(1, lookbackDays) * 86400_000).toISOString().slice(0, 10);
-    await refreshDailyBarsIncremental(env, { provider, tickers: unique, startDate: start, endDate: end, replaceExisting });
+    await refreshDailyBarsIncremental(env, {
+      provider,
+      tickers: unique,
+      startDate: start,
+      endDate: end,
+      replaceExisting,
+      target: options.target,
+      mirrorLatestToLegacy: options.target === "market",
+    });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);
   }
@@ -6507,12 +6521,53 @@ app.post("/api/admin/overview-current/refresh", async (c) => {
   }
 });
 
+app.post("/api/admin/overview-current/history-refresh", async (c) => {
+  if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const settings = await loadWorkerScheduleSettings(c.env);
+    const result = await maybeRunScheduledPostCloseDailyBarRefresh(c.env, new Date(), settings);
+    return c.json(result ?? {
+      status: "deferred",
+      reason: "The post-close history window is not open or the refresh is disabled.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Overview history refresh failed.";
+    console.error("admin overview history refresh failed", { error });
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/overview-current/rebuild", async (c) => {
+  if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
+  const configId = c.req.query("configId") ?? "default";
+  try {
+    const result = await recomputeDashboardFromStoredBars(c.env, date, configId);
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Overview stored-data rebuild failed.";
+    console.error("admin overview stored-data rebuild failed", { date, configId, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/admin/overview-current/audit", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
     const currentRows = await loadOverviewCurrentData(c.env, configId, date);
+    const tickersWithCurrentBars = new Set<string>();
+    const currentTickers = Array.from(currentRows.keys());
+    for (let index = 0; index < currentTickers.length; index += 80) {
+      const tickerChunk = currentTickers.slice(index, index + 80);
+      const placeholders = tickerChunk.map(() => "?").join(",");
+      const bars = await getMarketDataDb(c.env).prepare(
+        `SELECT ticker FROM alpaca_daily_bars
+         WHERE feed = ? AND date = ? AND ticker IN (${placeholders})`,
+      ).bind(marketDataFeed(c.env), date, ...tickerChunk).all<{ ticker: string }>();
+      for (const bar of bars.results ?? []) tickersWithCurrentBars.add(bar.ticker.toUpperCase());
+    }
     const storedRows = await c.env.DB.prepare(
       `SELECT sr.ticker, sr.price, sr.change_1d as change1d, sr.change_1w as change1w,
               sr.change_3m as change3m, sr.change_6m as change6m, sr.ytd
@@ -6532,12 +6587,20 @@ app.get("/api/admin/overview-current/audit", async (c) => {
     const storedByTicker = new Map((storedRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
     const rows = Array.from(currentRows.values()).map((row) => {
       const missingFields = OVERVIEW_REQUIRED_CURRENT_FIELDS.filter((field) => !row.fieldSources[field]);
+      const alpacaAssetStatus = row.providerStatuses.alpacaAsset?.status;
+      const historyTerminal = alpacaAssetStatus === "unsupported" || alpacaAssetStatus === "auth-blocked";
+      const historyReady = tickersWithCurrentBars.has(row.ticker.toUpperCase());
+      const historyNeedsRepair = !historyReady && !historyTerminal;
+      const currentNeedsRepair = doesOverviewCurrentRowNeedRepair(row);
       return {
         ticker: row.ticker,
         sessionDate: row.sessionDate,
         status: row.status,
         complete: isOverviewCurrentRowComplete(row),
-        needsRepair: doesOverviewCurrentRowNeedRepair(row),
+        needsRepair: currentNeedsRepair || historyNeedsRepair,
+        currentNeedsRepair,
+        historyReady,
+        historyNeedsRepair,
         missingFields,
         reason: row.reason,
         fieldSources: row.fieldSources,
@@ -6559,6 +6622,8 @@ app.get("/api/admin/overview-current/audit", async (c) => {
       total: rows.length,
       fresh: rows.filter((row) => row.status === "fresh").length,
       complete: rows.filter((row) => row.complete).length,
+      historyReady: rows.filter((row) => row.historyReady).length,
+      historyNeedsRepair: rows.filter((row) => row.historyNeedsRepair).length,
       incomplete: rows.filter((row) => !row.complete).length,
       needsRepair: rows.filter((row) => row.needsRepair).length,
       retrying: rows.filter((row) => row.status === "retrying").length,
@@ -6833,7 +6898,7 @@ app.post("/api/admin/group/:groupId/items", async (c) => {
   ]);
   await upsertAudit(c.env, "default", "ITEM_ADD", { groupId, payload });
   if (isOverviewSectionTitle(groupMeta?.sectionTitle)) {
-    await refreshRecentBarsForTickers(c.env, [resolved.ticker], 1, OVERVIEW_HISTORY_LOOKBACK_DAYS, true, { fallbackScope: "all" });
+    await refreshRecentBarsForTickers(c.env, [resolved.ticker], 1, OVERVIEW_HISTORY_LOOKBACK_DAYS, true, { target: "market" });
   }
   await refreshSnapshotSafe(c.env);
   return c.json({ ok: true });

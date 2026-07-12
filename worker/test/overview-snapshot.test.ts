@@ -33,7 +33,7 @@ function createEnv(state: FakeDbState) {
         if (sql.includes("FROM snapshot_rows sr") && sql.includes("sparkline_json as sparklineJson")) {
           return { results: (state.sparklineRows ?? []) as T[] };
         }
-        if (sql.includes("FROM daily_bars") && sql.includes("ORDER BY ticker, date")) {
+        if (sql.includes("FROM alpaca_daily_bars") && sql.includes("ORDER BY ticker, date")) {
           return {
             results: Object.entries(state.barSeries ?? {}).flatMap(([ticker, rows]) =>
               rows.map((row) => ({ ticker, date: row.date, c: row.c })),

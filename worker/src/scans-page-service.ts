@@ -1,5 +1,6 @@
 import { getProvider } from "./provider";
 import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getMarketDataDb } from "./market-data-db";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
 import { meteredFetch } from "./provider-usage";
@@ -1567,7 +1568,7 @@ export async function listScanPresets(env: Env): Promise<ScanPreset[]> {
 }
 
 export async function loadScanPreset(env: Env, presetId: string): Promise<ScanPreset | null> {
-  const row = await env.DB.prepare(
+  const row = await getMarketDataDb(env).prepare(
     "SELECT id, name, scan_type as scanType, is_default as isDefault, is_active as isActive, rules_json as rulesJson, prefilter_rules_json as prefilterRulesJson, benchmark_ticker as benchmarkTicker, vertical_offset as verticalOffset, rs_ma_length as rsMaLength, rs_ma_type as rsMaType, new_high_lookback as newHighLookback, output_mode as outputMode, vcp_daily_pivot_lookback as vcpDailyPivotLookback, vcp_weekly_high_lookback as vcpWeeklyHighLookback, vcp_pivot_age_bars as vcpPivotAgeBars, vcp_daily_near_pct as vcpDailyNearPct, vcp_weekly_near_pct as vcpWeeklyNearPct, sort_field as sortField, sort_direction as sortDirection, row_limit as rowLimit, created_at as createdAt, updated_at as updatedAt FROM scan_presets WHERE id = ? LIMIT 1",
   )
     .bind(presetId)
