@@ -5,6 +5,7 @@ export type Env = {
   PATTERN_DB?: D1Database;
   PERPLEXITY_CACHE_DB?: D1Database;
   ADMIN_SECRET?: string;
+  OVERVIEW_ROLLOUT_SECRET?: string;
   ADMIN_AUTH_FAIL_CLOSED?: string;
   DATA_PROVIDER?: string;
   ALPACA_API_KEY?: string;

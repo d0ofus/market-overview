@@ -127,8 +127,8 @@ import {
   getGappersSnapshot,
   refreshGappersSnapshot,
 } from "./gappers-service";
-import { isAdminRequestAuthorized, envFlagEnabled } from "./auth";
-export { isAdminRequestAuthorized, shouldAllowFedWatchForceRefresh } from "./auth";
+import { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, envFlagEnabled } from "./auth";
+export { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, shouldAllowFedWatchForceRefresh } from "./auth";
 import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
@@ -6489,7 +6489,7 @@ app.post("/api/admin/run-eod", async (c) => {
 });
 
 app.post("/api/admin/overview-current/refresh", async (c) => {
-  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
@@ -6508,7 +6508,7 @@ app.post("/api/admin/overview-current/refresh", async (c) => {
 });
 
 app.get("/api/admin/overview-current/audit", async (c) => {
-  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {

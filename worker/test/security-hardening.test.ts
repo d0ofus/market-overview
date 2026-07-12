@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAdminRequestAuthorized,
+  isOverviewRolloutRequestAuthorized,
   shouldAllowFedWatchForceRefresh,
 } from "../src/index";
 import type { Env } from "../src/types";
@@ -26,6 +27,18 @@ describe("worker security hardening helpers", () => {
 
   it("accepts the configured admin bearer secret", () => {
     expect(isAdminRequestAuthorized(request("Bearer secret"), env({ ADMIN_SECRET: "secret", ADMIN_AUTH_FAIL_CLOSED: "true" }))).toBe(true);
+  });
+
+  it("keeps overview rollout endpoints fail-closed without an explicit secret", () => {
+    expect(isOverviewRolloutRequestAuthorized(request(), env({}))).toBe(false);
+    expect(isOverviewRolloutRequestAuthorized(request("Bearer anything"), env({}))).toBe(false);
+  });
+
+  it("accepts either scoped rollout or admin credentials for overview rollout endpoints", () => {
+    const configured = env({ ADMIN_SECRET: "admin", OVERVIEW_ROLLOUT_SECRET: "rollout" });
+    expect(isOverviewRolloutRequestAuthorized(request("Bearer rollout"), configured)).toBe(true);
+    expect(isOverviewRolloutRequestAuthorized(request("Bearer admin"), configured)).toBe(true);
+    expect(isOverviewRolloutRequestAuthorized(request("Bearer wrong"), configured)).toBe(false);
   });
 
   it("rejects forced FedWatch refresh for public callers by default", () => {
