@@ -11,6 +11,8 @@ export type DailyBar = {
   l: number;
   c: number;
   volume: number;
+  sourceProvider?: string;
+  sourceFeed?: string | null;
 };
 
 export type PremarketSnapshot = {
@@ -26,6 +28,8 @@ export type QuoteSnapshot = {
   change1d: number;
   source: "alpaca-snapshot" | "yahoo-chart";
   fetchedAt: string;
+  tradePrice?: number | null;
+  dailyBarPrice?: number | null;
   tradeTimestamp?: string | null;
   dailyBarTimestamp?: string | null;
 };
@@ -450,6 +454,8 @@ class StooqProvider implements MarketDataProvider {
         l: low,
         c: close,
         volume: 0,
+        sourceProvider: "cboe",
+        sourceFeed: null,
       });
     }
     return out;
@@ -512,6 +518,8 @@ class StooqProvider implements MarketDataProvider {
           l: low as number,
           c: typeof adjustedClose === "number" && Number.isFinite(adjustedClose) ? adjustedClose : close as number,
           volume: typeof volumes[i] === "number" && Number.isFinite(volumes[i] as number) ? (volumes[i] as number) : 0,
+          sourceProvider: "yahoo",
+          sourceFeed: null,
         });
       }
       if (out.length > 0) return out;
@@ -548,6 +556,8 @@ class StooqProvider implements MarketDataProvider {
         l: low as number,
         c: close as number,
         volume: typeof row.volume === "number" && Number.isFinite(row.volume) ? row.volume : 0,
+        sourceProvider: "fmp",
+        sourceFeed: null,
       });
     }
     return out;
@@ -577,6 +587,8 @@ class StooqProvider implements MarketDataProvider {
         l: close,
         c: close,
         volume: typeof row.volume === "number" && Number.isFinite(row.volume) ? row.volume : 0,
+        sourceProvider: "fmp",
+        sourceFeed: null,
       });
     }
     return out;
@@ -666,6 +678,8 @@ class StooqProvider implements MarketDataProvider {
         l: low,
         c: close,
         volume: Number.isFinite(volume) ? volume : 0,
+        sourceProvider: "alpha-vantage",
+        sourceFeed: null,
       });
     }
     return out;
@@ -732,6 +746,8 @@ class StooqProvider implements MarketDataProvider {
           l: low,
           c: close,
           volume: Number.isNaN(volume) ? 0 : volume,
+          sourceProvider: "stooq",
+          sourceFeed: null,
         });
       }
       if (out.length === 0) {
@@ -827,22 +843,7 @@ class AlpacaProvider implements MarketDataProvider {
 
   private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
     if (tickers.length === 0) return [];
-    try {
-      return await this.fetchChunk(tickers, startDate, endDate, feed);
-    } catch (error) {
-      if (tickers.length === 1) {
-        console.error("alpaca ticker fetch failed", { ticker: tickers[0], error });
-        return [];
-      }
-      const mid = Math.ceil(tickers.length / 2);
-      const left = tickers.slice(0, mid);
-      const right = tickers.slice(mid);
-      const [leftRows, rightRows] = await Promise.all([
-        this.fetchChunkWithIsolation(left, startDate, endDate, feed),
-        this.fetchChunkWithIsolation(right, startDate, endDate, feed),
-      ]);
-      return [...leftRows, ...rightRows];
-    }
+    return await this.fetchChunk(tickers, startDate, endDate, feed);
   }
 
   private async fetchChunk(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
@@ -874,7 +875,10 @@ class AlpacaProvider implements MarketDataProvider {
       });
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`Alpaca bars fetch failed (${res.status}): ${body.slice(0, 180)}`);
+        const retryAfter = res.headers.get("Retry-After");
+        throw new Error(
+          `Alpaca bars fetch failed (${res.status})${retryAfter ? `; retry-after=${retryAfter}` : ""}: ${body.slice(0, 180)}`,
+        );
       }
       const json = (await res.json()) as {
         bars?: Record<string, Array<{ t: string; o: number; h: number; l: number; c: number; v?: number }>>;
@@ -890,6 +894,8 @@ class AlpacaProvider implements MarketDataProvider {
             l: b.l,
             c: b.c,
             volume: b.v ?? 0,
+            sourceProvider: "alpaca",
+            sourceFeed: feed,
           });
         }
       }
@@ -974,7 +980,10 @@ class AlpacaProvider implements MarketDataProvider {
     });
     if (!res.ok) {
       const body = await res.text();
-      throw new Error(`Alpaca snapshot fetch failed (${res.status}): ${body.slice(0, 180)}`);
+      const retryAfter = res.headers.get("Retry-After");
+      throw new Error(
+        `Alpaca snapshot fetch failed (${res.status})${retryAfter ? `; retry-after=${retryAfter}` : ""}: ${body.slice(0, 180)}`,
+      );
     }
     const json = await res.json();
     const out: Record<string, QuoteSnapshot> = {};
@@ -988,6 +997,8 @@ class AlpacaProvider implements MarketDataProvider {
         change1d: ((price - prevClose) / prevClose) * 100,
         source: "alpaca-snapshot",
         fetchedAt,
+        tradePrice: snap.latestTrade?.p ?? null,
+        dailyBarPrice: snap.dailyBar?.c ?? null,
         tradeTimestamp: snap.latestTrade?.t ?? null,
         dailyBarTimestamp: snap.dailyBar?.t ?? null,
       };
@@ -1004,23 +1015,14 @@ class AlpacaProvider implements MarketDataProvider {
       return await this.fetchQuoteSnapshotChunk(tickers, feed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? "Alpaca snapshot fetch failed.");
-      if (tickers.length <= 1) {
-        errors.push(`${tickers[0]} ${feed}: ${message}`.slice(0, 240));
-        console.error("alpaca snapshot ticker failed", { ticker: tickers[0], feed, error });
-        return {};
-      }
-      console.error("alpaca snapshot chunk failed; isolating tickers", {
+      errors.push(`${tickers.slice(0, 4).join(",")} ${feed}: ${message}`.slice(0, 240));
+      console.error("alpaca snapshot chunk failed", {
         count: tickers.length,
         feed,
         sampleTickers: tickers.slice(0, 8),
         error,
       });
-      const mid = Math.ceil(tickers.length / 2);
-      const [left, right] = await Promise.all([
-        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(0, mid), feed, errors),
-        this.fetchQuoteSnapshotChunkWithIsolation(tickers.slice(mid), feed, errors),
-      ]);
-      return { ...left, ...right };
+      throw error;
     }
   }
 

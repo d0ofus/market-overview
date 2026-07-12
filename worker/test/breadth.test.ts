@@ -17,9 +17,9 @@ function createBreadthEnv(tickers: string[], bars: DailyBar[]) {
             if (sql.includes("SELECT ticker FROM universe_symbols")) {
               return { results: normalizedTickers.map((ticker) => ({ ticker })) as T[] };
             }
-            if (sql.includes("SELECT ticker, date, c, volume FROM daily_bars")) {
-              const asOfDate = String(args.at(-1));
-              const requested = new Set(args.slice(0, -1).map((arg) => String(arg).toUpperCase()));
+            if (sql.includes("SELECT ticker, date, c, volume") && sql.includes("FROM daily_bars")) {
+              const asOfDate = String(args.at(-2));
+              const requested = new Set(args.slice(0, -2).map((arg) => String(arg).toUpperCase()));
               return {
                 results: normalizedBars
                   .filter((bar) => requested.has(bar.ticker) && bar.date <= asOfDate)

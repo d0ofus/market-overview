@@ -64,7 +64,7 @@ export default async function HomePage() {
       autoRefreshLocalTime: "08:15",
       lastUpdated: null,
       asOfDate: null,
-      providerLabel: "Alpaca snapshots + stored daily bars",
+      providerLabel: "TradingView scanner + Alpaca bars",
       expectedAsOfDate: null,
       freshnessStatus: "stale" as const,
       freshnessCoveragePct: 0,

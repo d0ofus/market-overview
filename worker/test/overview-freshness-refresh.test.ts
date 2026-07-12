@@ -3,7 +3,6 @@ import {
   computeAndStoreSnapshot,
   computeOverviewFreshnessDiagnostics,
   isOverviewFreshnessSufficientForScheduledSnapshot,
-  OverviewFreshnessError,
   refreshAndStoreOverviewSnapshot,
 } from "../src/eod";
 import type { Env } from "../src/types";
@@ -17,14 +16,14 @@ class OverviewFreshnessDb {
   queries: Array<{ sql: string; args: unknown[] }> = [];
   snapshotRows: Array<{
     ticker: string;
-    price: number;
-    change1d: number;
-    change3m: number;
-    change6m: number;
+    price: number | null;
+    change1d: number | null;
+    change3m: number | null;
+    change6m: number | null;
     above20Sma: number | null;
     above50Sma: number | null;
     above200Sma: number | null;
-    rankKey: number;
+    rankKey: number | null;
     relativeStrength30dVsSpyJson: string | null;
   }> = [];
   readonly dailyBars: DailyBarSeed;
@@ -134,10 +133,10 @@ class OverviewFreshnessDb {
     this.queries.push({ sql, args });
     if (sql.includes("SELECT ticker, date, c") && sql.includes("FROM daily_bars")) {
       const hasLowerBound = sql.includes("date >= ?");
-      const startDate = hasLowerBound ? String(args.at(-2)) : null;
-      const cutoff = String(args.at(-1) ?? args[0]);
+      const startDate = hasLowerBound ? String(args.at(-3)) : null;
+      const cutoff = String(args.at(-2) ?? args[0]);
       const requestedTickers = new Set(
-        (hasLowerBound ? args.slice(0, -2) : args.slice(0, -1))
+        (hasLowerBound ? args.slice(0, -3) : args.slice(0, -2))
           .map((value) => String(value).toUpperCase()),
       );
       return this.items
@@ -164,8 +163,8 @@ class OverviewFreshnessDb {
     }
     if (sql.includes("FROM etf_watchlists")) return [];
     if (sql.includes("MAX(date) as lastDate") && sql.includes("FROM daily_bars")) {
-      const cutoff = sql.includes("date <= ?") ? String(args.at(-1)) : null;
-      const tickers = args
+      const cutoff = sql.includes("date <= ?") ? String(args.at(-2)) : null;
+      const tickers = args.slice(0, -2)
         .map((value) => String(value).toUpperCase())
         .filter((value) => this.dailyBars[value]);
       return tickers.flatMap((ticker) => {
@@ -175,9 +174,9 @@ class OverviewFreshnessDb {
       }) as T[];
     }
     if (sql.includes("SELECT DISTINCT ticker") && sql.includes("FROM daily_bars")) {
-      const date = String(args.at(-1));
+      const date = String(args.at(-2));
       const tickers = args
-        .slice(0, -1)
+        .slice(0, -2)
         .map((value) => String(value).toUpperCase())
         .filter((ticker) => (this.dailyBars[ticker] ?? []).includes(date));
       return tickers.map((ticker) => ({ ticker })) as T[];
@@ -196,14 +195,14 @@ class OverviewFreshnessDb {
       this.snapshotRowWrites += 1;
       this.snapshotRows.push({
         ticker: String(args[3]),
-        price: Number(args[5]),
-        change1d: Number(args[6]),
-        change3m: Number(args[9]),
-        change6m: Number(args[10]),
+        price: args[5] == null ? null : Number(args[5]),
+        change1d: args[6] == null ? null : Number(args[6]),
+        change3m: args[9] == null ? null : Number(args[9]),
+        change6m: args[10] == null ? null : Number(args[10]),
         above20Sma: args[27] == null ? null : Number(args[27]),
         above50Sma: args[28] == null ? null : Number(args[28]),
         above200Sma: args[29] == null ? null : Number(args[29]),
-        rankKey: Number(args[15]),
+        rankKey: args[15] == null ? null : Number(args[15]),
         relativeStrength30dVsSpyJson: args[30] == null ? null : String(args[30]),
       });
       this.snapshotRowBarDates.push(args[17] == null ? null : String(args[17]));
@@ -231,18 +230,19 @@ function createEnv(db: OverviewFreshnessDb): Env {
     DB: db as unknown as D1Database,
     DATA_PROVIDER: "synthetic",
     APP_TIMEZONE: "Australia/Melbourne",
+    OVERVIEW_CURRENT_V2_ENABLED: "false",
   } as Env;
 }
 
 describe("overview freshness refresh", () => {
   it("keeps scheduled repair active for low-coverage partial snapshots", () => {
     expect(isOverviewFreshnessSufficientForScheduledSnapshot("fresh", 16)).toBe(true);
-    expect(isOverviewFreshnessSufficientForScheduledSnapshot("partial", 95)).toBe(true);
+    expect(isOverviewFreshnessSufficientForScheduledSnapshot("partial", 95)).toBe(false);
     expect(isOverviewFreshnessSufficientForScheduledSnapshot("partial", 16)).toBe(false);
     expect(isOverviewFreshnessSufficientForScheduledSnapshot("stale", 100)).toBe(false);
   });
 
-  it("blocks a current-date overview snapshot when critical ticker bars are stale", async () => {
+  it("writes a fail-closed snapshot when critical ticker bars are stale", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05"],
       QQQ: ["2026-06-05"],
@@ -256,15 +256,9 @@ describe("overview freshness refresh", () => {
       ARKK: ["2026-06-05"],
     });
 
-    let caught: unknown = null;
-    try {
-      await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12");
-    } catch (error) {
-      caught = error;
-    }
+    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12");
 
-    expect(caught).toBeInstanceOf(OverviewFreshnessError);
-    expect((caught as OverviewFreshnessError).diagnostics).toMatchObject({
+    expect(result.freshness).toMatchObject({
       expectedAsOfDate: "2026-06-12",
       status: "stale",
       currentCount: 0,
@@ -272,10 +266,10 @@ describe("overview freshness refresh", () => {
       minBarDate: "2026-06-05",
       maxBarDate: "2026-06-05",
     });
-    expect((caught as OverviewFreshnessError).diagnostics.criticalMissingTickers).toEqual(["DIA", "IWM", "QQQ", "SPY", "XLF"]);
-    expect((caught as OverviewFreshnessError).diagnostics.warning).toContain("SPY (US Index Futures) last updated 2026-06-05");
-    expect(db.snapshotWrites).toBe(0);
-    expect(db.snapshotRowWrites).toBe(0);
+    expect(result.freshness.criticalMissingTickers).toEqual(["DIA", "IWM", "QQQ", "SPY", "XLF"]);
+    expect(result.freshness.warning).toContain("SPY (US Index Futures) last updated 2026-06-05");
+    expect(db.snapshotWrites).toBe(1);
+    expect(db.snapshotRows.every((row) => row.price == null && row.change1d == null)).toBe(true);
   });
 
   it("marks representative freshness partial when critical tickers are current and broad coverage is below the warning threshold", async () => {
@@ -299,7 +293,7 @@ describe("overview freshness refresh", () => {
     expect(diagnostics.criticalMissingTickers).toEqual([]);
   });
 
-  it("uses fresh quote snapshots for stored 1D price, change, and rank values", async () => {
+  it("does not fall back to stored scalar metrics when exact-session current data is missing", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05", "2026-06-12"],
       QQQ: ["2026-06-05", "2026-06-12"],
@@ -315,8 +309,6 @@ describe("overview freshness refresh", () => {
 
     await computeAndStoreSnapshot(createEnv(db), "2026-06-12", "default", {
       includeBreadth: false,
-      pullProviderBars: false,
-      requireFreshness: true,
       freshnessDiagnostics: {
         expectedAsOfDate: "2026-06-12",
         status: "fresh",
@@ -329,39 +321,17 @@ describe("overview freshness refresh", () => {
         maxBarDate: "2026-06-12",
         warning: null,
       },
-      quoteSnapshotResult: {
-        providerAttempted: true,
-        providerError: null,
-        snapshots: {
-          SPY: {
-            price: 130,
-            prevClose: 100,
-            change1d: 30,
-            source: "alpaca-snapshot",
-            fetchedAt: "2026-06-12T18:00:00.000Z",
-            tradeTimestamp: "2026-06-12T18:00:00.000Z",
-          },
-          QQQ: {
-            price: 101,
-            prevClose: 100,
-            change1d: 1,
-            source: "alpaca-snapshot",
-            fetchedAt: "2026-06-12T18:00:00.000Z",
-            tradeTimestamp: "2026-06-12T18:00:00.000Z",
-          },
-        },
-      },
     });
 
     const spyRow = db.snapshotRows.find((row) => row.ticker === "SPY");
     expect(spyRow).toEqual(expect.objectContaining({
-      price: 130,
-      change1d: 30,
-      rankKey: 30,
+      price: null,
+      change1d: null,
+      rankKey: null,
     }));
     const xlfRow = db.snapshotRows.find((row) => row.ticker === "XLF");
-    expect(xlfRow?.change3m).toEqual(expect.any(Number));
-    expect(xlfRow?.change6m).toEqual(expect.any(Number));
+    expect(xlfRow?.change3m).toBeNull();
+    expect(xlfRow?.change6m).toBeNull();
     expect(xlfRow?.above20Sma).toBeNull();
     expect(xlfRow?.relativeStrength30dVsSpyJson).toContain("[");
   });
@@ -382,8 +352,6 @@ describe("overview freshness refresh", () => {
 
     await computeAndStoreSnapshot(createEnv(db), "2026-06-12", "default", {
       includeBreadth: false,
-      pullProviderBars: false,
-      requireFreshness: false,
     });
 
     const barQuery = db.queries.find((query) =>
@@ -396,7 +364,7 @@ describe("overview freshness refresh", () => {
     expect(barQuery?.sql).not.toContain("SELECT ticker FROM dashboard_items");
     expect(barQuery?.args).toContain("SPY");
     expect(barQuery?.args).toContain("2025-04-18");
-    expect(barQuery?.args.at(-1)).toBe("2026-06-12");
+    expect(barQuery?.args.at(-2)).toBe("2026-06-12");
     expect(db.snapshotRows.find((row) => row.ticker === "SPY")?.price).not.toBe(100);
   });
 

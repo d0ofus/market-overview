@@ -117,7 +117,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
             }
             continue;
           }
-          if (statement.__sql?.includes("INSERT OR REPLACE INTO daily_bars")) {
+          if (statement.__sql?.includes("INTO daily_bars")) {
             const [ticker, date, o, h, l, c, volume] = statement.__args ?? [];
             const nextRow = {
               ticker: String(ticker),

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildPostCloseDailyBarUniverseQuery, isPostCloseBarsWindowOpen, loadWorkerScheduleSettings, POST_CLOSE_SCOPE, updateWorkerScheduleSettings } from "../src/worker-schedule-service";
+import {
+  boundPostCloseProviderWork,
+  buildPostCloseDailyBarUniverseQuery,
+  classifyPostCloseError,
+  isPostCloseBarsWindowOpen,
+  loadWorkerScheduleSettings,
+  planPostCloseProviderBatch,
+  POST_CLOSE_SCOPE,
+  updateWorkerScheduleSettings,
+} from "../src/worker-schedule-service";
 import type { Env } from "../src/types";
 
 type WorkerScheduleRowState = {
@@ -170,5 +179,50 @@ describe("post-close daily bar universe", () => {
     expect(query).toContain("Macro");
     expect(query).toContain("Equities");
     expect(query).toContain("ORDER BY priority ASC, ticker ASC");
+  });
+
+  it("hard-bounds Alpaca work per Worker invocation", () => {
+    expect(boundPostCloseProviderWork({ batchSize: 2_000, maxBatches: 20 })).toEqual({
+      batchSize: 80,
+      maxBatches: 4,
+    });
+  });
+
+  it("bootstraps unverified overview history in 25-symbol requests", () => {
+    const items = Array.from({ length: 80 }, (_, index) => ({
+      ticker: `ETF${index}`,
+      historyRequired: 1,
+    }));
+    const plan = planPostCloseProviderBatch({
+      items,
+      historyStates: new Map(),
+      tradingDate: "2026-07-10",
+      batchSize: 80,
+    });
+
+    expect(plan.items).toHaveLength(25);
+    expect(plan.refreshStartDate).toBe("2025-05-16");
+  });
+
+  it("uses incremental catch-up after overview history is verified", () => {
+    const items = [{ ticker: "SPY", historyRequired: 1 }];
+    const plan = planPostCloseProviderBatch({
+      items,
+      historyStates: new Map([[
+        "SPY",
+        { ticker: "SPY", lookbackStart: "2025-01-01", throughDate: "2026-07-08" },
+      ]]),
+      tradingDate: "2026-07-10",
+      batchSize: 80,
+    });
+
+    expect(plan.items).toEqual(items);
+    expect(plan.refreshStartDate).toBe("2026-07-09");
+  });
+
+  it("classifies transient limits separately from authentication failures", () => {
+    expect(classifyPostCloseError(new Error("Alpaca bars fetch failed (429)"))).toBe("rate-limited");
+    expect(classifyPostCloseError(new Error("Alpaca bars fetch failed (403)"))).toBe("auth-blocked");
+    expect(classifyPostCloseError(new Error("network timeout"))).toBe("provider-error");
   });
 });

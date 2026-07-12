@@ -78,7 +78,7 @@ describe("Alpaca quote snapshots", () => {
     });
   });
 
-  it("preserves successful snapshot chunks when a later chunk fails", async () => {
+  it("fails the bounded snapshot batch without recursively fanning out", async () => {
     const tickers = ["AAPL", ...Array.from({ length: 79 }, (_, index) => `OK${index}`), "BADETF"];
     const fetchMock = vi.fn(async () => {
       if (fetchMock.mock.calls.length === 1) {
@@ -102,9 +102,7 @@ describe("Alpaca quote snapshots", () => {
       ALPACA_FEED: "iex",
     });
 
-    await expect(provider.getQuoteSnapshot?.(tickers)).resolves.toMatchObject({
-      AAPL: { price: 105, prevClose: 100, source: "alpaca-snapshot" },
-    });
+    await expect(provider.getQuoteSnapshot?.(tickers)).rejects.toThrow("Alpaca snapshot fetch failed (400)");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -121,8 +119,9 @@ describe("Alpaca quote snapshots", () => {
     });
 
     await expect(provider.getQuoteSnapshot?.(["AAA", "BBB"])).rejects.toThrow(
-      "Alpaca snapshot fetch failed for all requested tickers",
+      "Alpaca snapshot fetch failed (403)",
     );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -146,6 +145,8 @@ describe("provider fallback control", () => {
       l: 9,
       c: 10,
       volume: 1000,
+      sourceProvider: "stooq",
+      sourceFeed: null,
     }]);
   });
 
@@ -167,6 +168,7 @@ describe("provider fallback control", () => {
     const bars = await provider.getDailyBars(["SPY"], "2026-06-18", "2026-06-18");
 
     expect(bars).toHaveLength(1);
+    expect(bars[0]).toMatchObject({ sourceProvider: "alpaca", sourceFeed: "iex" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain("feed=iex");
   });
@@ -199,6 +201,7 @@ describe("provider fallback control", () => {
     const bars = await provider.getDailyBars(["SPY"], "2026-06-17", "2026-06-18");
 
     expect(bars.map((bar) => bar.date)).toEqual(["2026-06-17", "2026-06-18"]);
+    expect(bars.map((bar) => bar.sourceFeed)).toEqual(["iex", "sip"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       expect.stringContaining("feed=iex"),
@@ -250,6 +253,8 @@ describe("provider fallback control", () => {
       l: 19,
       c: 21,
       volume: 2000,
+      sourceProvider: "yahoo",
+      sourceFeed: null,
     }]);
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       expect.stringContaining("feed=iex"),
@@ -312,6 +317,8 @@ describe("provider fallback control", () => {
       l: 29,
       c: 30.5,
       volume: 3000,
+      sourceProvider: "stooq",
+      sourceFeed: null,
     }]);
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       expect.stringContaining("feed=iex"),

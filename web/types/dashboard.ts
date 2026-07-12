@@ -1,6 +1,31 @@
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
 export type QuoteFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
 export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
+export type OverviewCurrentProviderStatus = "supported" | "unsupported" | "stale" | "missing" | "rate-limited" | "auth-blocked" | "provider-error";
+
+export type OverviewCurrentData = {
+  sessionDate: string;
+  status: "fresh" | "unavailable" | "retrying";
+  reason: string;
+  quoteSource: string | null;
+  performanceSource: string | null;
+  smaSource: string | null;
+  fieldSources: Record<string, string>;
+  providerStatuses: Record<string, {
+    status: OverviewCurrentProviderStatus;
+    reason: string;
+    providerSymbol?: string | null;
+    marketTimestamp?: string | null;
+  }>;
+  fetchedAt: string;
+  tradingViewSymbol: string | null;
+  tradingViewTime: string | null;
+  tradingViewLastBarUpdateTime: string | null;
+  tradingViewLastPriceUpdateTime: string | null;
+  tradingViewUpdateTime: string | null;
+  tradingViewUpdateMode: string | null;
+  tradingViewCurrentSession: string | null;
+};
 
 export type SnapshotReadyResponse = {
   status?: "ready";
@@ -73,16 +98,16 @@ export type SnapshotReadyResponse = {
       rows: Array<{
         ticker: string;
         displayName: string | null;
-        price: number;
-        change1d: number;
-        change1w: number;
-        change5d: number;
+        price: number | null;
+        change1d: number | null;
+        change1w: number | null;
+        change5d: number | null;
         change3m: number | null;
         change6m: number | null;
-        change21d: number;
-        ytd: number;
-        pctFrom52wHigh: number;
-        sparkline: number[];
+        change21d: number | null;
+        ytd: number | null;
+        pctFrom52wHigh: number | null;
+        sparkline: number[] | null;
         relativeStrength30dVsSpy: number[] | null;
         above20Sma: boolean | null;
         above50Sma: boolean | null;
@@ -97,7 +122,15 @@ export type SnapshotReadyResponse = {
         quoteFreshnessReason?: string | null;
         quoteSource?: string | null;
         quoteFetchedAt?: string | null;
-        rankKey: number;
+        currentData?: OverviewCurrentData;
+        historyData?: {
+          sessionDate: string;
+          status: BarFreshnessStatus;
+          reason: string;
+          barDate: string | null;
+          source: string | null;
+        };
+        rankKey: number | null;
         holdings: string[] | null;
       }>;
     }>;

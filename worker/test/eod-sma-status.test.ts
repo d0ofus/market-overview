@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { loadSnapshot } from "../src/eod";
 
+const fixtureAsOfDate = isoDateAt(219);
+
 function isoDateAt(offset: number): string {
   const date = new Date(Date.UTC(2024, 0, 1 + offset));
   return date.toISOString().slice(0, 10);
@@ -16,7 +18,7 @@ function makeDailyBars(ticker: string, values: number[]) {
 }
 
 function createEnv() {
-  const asOfDate = isoDateAt(219);
+  const asOfDate = fixtureAsOfDate;
   const dashboardConfig = {
     id: "default",
     name: "Default Swing Dashboard",
@@ -64,7 +66,7 @@ function createEnv() {
     id: "snap-sma",
     asOfDate,
     generatedAt: "2025-01-08T00:00:00.000Z",
-    providerLabel: "Stored Daily Bars",
+    providerLabel: "TradingView scanner + Alpaca iex bars",
     expectedAsOfDate: asOfDate,
     freshnessStatus: "partial",
     freshnessCoveragePct: 50,
@@ -165,7 +167,7 @@ function createEnv() {
           return {
             async first<T>() {
               if (sql.includes("FROM dashboard_configs WHERE id = ?")) return dashboardConfig as T;
-              if (sql.includes("FROM snapshots_meta WHERE config_id = ?") && sql.includes("ORDER BY as_of_date DESC, generated_at DESC LIMIT 1")) {
+              if (sql.includes("FROM snapshots_meta WHERE config_id = ?")) {
                 return snapshotMeta as T;
               }
               return null as T;
@@ -183,20 +185,20 @@ function createEnv() {
 }
 
 describe("loadSnapshot SMA status pilot", () => {
-  it("computes non-persisted 20SMA, 50SMA, and 200SMA flags from daily bars", async () => {
-    const snapshot = await loadSnapshot(createEnv() as never);
+  it("does not expose legacy SMA values without exact-session current-data provenance", async () => {
+    const snapshot = await loadSnapshot(createEnv() as never, "default", fixtureAsOfDate);
     const cryptoGroup = snapshot.sections[0]?.groups.find((group) => group.id === "g-crypto");
     const bitoRow = cryptoGroup?.rows.find((row) => row.ticker === "BITO");
     const ibitRow = cryptoGroup?.rows.find((row) => row.ticker === "IBIT");
     const missingRow = cryptoGroup?.rows.find((row) => row.ticker === "MISSING");
 
     expect(cryptoGroup?.columns).toEqual(["ticker", "name", "price", "1D", "1W", "3M", "6M", "YTD", "sparkline", "relativeStrength30dVsSpy", "20SMA", "50SMA", "200SMA"]);
-    expect(bitoRow?.above20Sma).toBe(true);
-    expect(bitoRow?.above50Sma).toBe(true);
-    expect(bitoRow?.above200Sma).toBe(true);
-    expect(ibitRow?.above20Sma).toBe(false);
-    expect(ibitRow?.above50Sma).toBe(false);
-    expect(ibitRow?.above200Sma).toBe(false);
+    expect(bitoRow?.above20Sma).toBeNull();
+    expect(bitoRow?.above50Sma).toBeNull();
+    expect(bitoRow?.above200Sma).toBeNull();
+    expect(ibitRow?.above20Sma).toBeNull();
+    expect(ibitRow?.above50Sma).toBeNull();
+    expect(ibitRow?.above200Sma).toBeNull();
     expect(bitoRow?.quoteFreshnessStatus).toBe("unavailable");
     expect(bitoRow?.barFreshnessStatus).toBe("fresh");
     expect(ibitRow?.quoteFreshnessStatus).toBe("unavailable");

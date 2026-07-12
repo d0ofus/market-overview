@@ -1,4 +1,4 @@
-import { fetchYahooQuoteSnapshots, getProvider, type QuoteSnapshot } from "./provider";
+import { getProvider, type QuoteSnapshot } from "./provider";
 import { zonedParts } from "./refresh-timing";
 import type { BarFreshnessStatus, Env, QuoteFreshnessStatus } from "./types";
 
@@ -68,7 +68,7 @@ function quoteSnapshotSourceLabel(source: string): string {
 }
 
 function quoteSnapshotMarketDate(snapshot: QuoteSnapshot): string | null {
-  const timestamp = snapshot.tradeTimestamp ?? snapshot.dailyBarTimestamp ?? snapshot.fetchedAt;
+  const timestamp = snapshot.tradeTimestamp ?? snapshot.dailyBarTimestamp;
   if (!timestamp) return null;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
@@ -142,7 +142,7 @@ export function deriveOverviewQuoteOverlayFromSnapshot(input: OverviewQuoteOverl
     quoteSource: null,
     quoteFetchedAt: null,
     quoteFreshnessStatus: "unavailable",
-    quoteFreshnessReason: `No Alpaca or Yahoo snapshot quote is available for ${ticker}.`,
+    quoteFreshnessReason: `No current provider snapshot quote is available for ${ticker}.`,
     barFreshnessStatus: barFreshness.status,
     barFreshnessReason: barFreshness.reason,
   };
@@ -193,7 +193,7 @@ function eligibleOverviewQuoteTickers(
 export async function fetchOverviewQuoteSnapshots(
   env: Env,
   tickers: string[],
-  expectedAsOfDate?: string | null,
+  _expectedAsOfDate?: string | null,
 ): Promise<OverviewQuoteSnapshotFetchResult> {
   const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   let providerAttempted = false;
@@ -203,30 +203,12 @@ export async function fetchOverviewQuoteSnapshots(
     return { snapshots, providerAttempted, providerError: null };
   }
   try {
-    const provider = getProvider(env);
+    const provider = getProvider(env, { fallbackEnabled: false });
     providerAttempted = Boolean(provider.getQuoteSnapshot);
     snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(uniqueTickers) : {};
   } catch (error) {
     providerErrors.push(quoteOverlayErrorMessage(error));
-    console.error("overview Alpaca quote snapshot refresh failed; trying Yahoo fallback", error);
-  }
-
-  const providerMode = (env.DATA_PROVIDER ?? "alpaca").toLowerCase();
-  const yahooFallbackEnabled = providerMode !== "synthetic" && providerMode !== "csv";
-  const missingTickers = uniqueTickers.filter((ticker) => {
-    const snapshot = snapshots[ticker];
-    if (!snapshot) return true;
-    return Boolean(expectedAsOfDate && quoteSnapshotFreshness(snapshot, expectedAsOfDate).status !== "fresh");
-  });
-  if (yahooFallbackEnabled && missingTickers.length > 0) {
-    try {
-      providerAttempted = true;
-      const yahooSnapshots = await fetchYahooQuoteSnapshots(env, missingTickers, expectedAsOfDate);
-      snapshots = { ...snapshots, ...yahooSnapshots };
-    } catch (error) {
-      providerErrors.push(quoteOverlayErrorMessage(error));
-      console.error("overview Yahoo quote snapshot fallback failed", error);
-    }
+    console.error("overview Alpaca quote snapshot refresh failed", error);
   }
   return {
     snapshots,

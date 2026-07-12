@@ -23,6 +23,7 @@ describe("overview quote snapshot overlay", () => {
         change1d: 1,
         source: "alpaca-snapshot",
         fetchedAt: "2026-06-18T05:00:00.000Z",
+        tradeTimestamp: "2026-06-17T20:00:00.000Z",
       },
     });
 
@@ -52,7 +53,7 @@ describe("overview quote snapshot overlay", () => {
     expect(overlay.quotePrice).toBeNull();
     expect(overlay.quoteSource).toBeNull();
     expect(overlay.quoteFreshnessStatus).toBe("unavailable");
-    expect(overlay.quoteFreshnessReason).toBe("No Alpaca or Yahoo snapshot quote is available for GLD.");
+    expect(overlay.quoteFreshnessReason).toBe("No current provider snapshot quote is available for GLD.");
     expect(overlay.barFreshnessStatus).toBe("stale");
     expect(overlay.barFreshnessReason).toBe("Last stored daily bar is 2026-06-12; expected 2026-06-17.");
   });
@@ -98,6 +99,7 @@ describe("overview quote snapshot overlay", () => {
             change1d: 1,
             source: "alpaca-snapshot",
             fetchedAt: "2026-06-18T21:05:00.000Z",
+            tradeTimestamp: "2026-06-18T20:00:00.000Z",
           },
         },
       },
@@ -126,25 +128,8 @@ describe("overview quote snapshot overlay", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to Yahoo chart quotes when Alpaca misses a ticker", async () => {
-    const regularMarketTime = Math.floor(Date.parse("2026-06-29T20:00:00.000Z") / 1000);
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      chart: {
-        result: [
-          {
-            meta: {
-              regularMarketPrice: 100,
-              chartPreviousClose: 98,
-              regularMarketTime,
-            },
-            timestamp: [regularMarketTime],
-            indicators: {
-              quote: [{ close: [100] }],
-            },
-          },
-        ],
-      },
-    }), { status: 200 }));
+  it("does not use Yahoo as an overview quote fallback", async () => {
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await fetchOverviewQuoteSnapshots(
@@ -153,15 +138,10 @@ describe("overview quote snapshot overlay", () => {
       "2026-06-29",
     );
 
-    expect(result.providerAttempted).toBe(true);
+    expect(result.providerAttempted).toBe(false);
     expect(result.providerError).toBeNull();
-    expect(result.snapshots.RSHO).toMatchObject({
-      price: 100,
-      prevClose: 98,
-      source: "yahoo-chart",
-    });
-    expect(result.snapshots.RSHO?.change1d).toBeCloseTo(2.0408, 4);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.snapshots.RSHO).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("shows EATZ and RSHO as live-quote fresh even when their daily bars are stale", () => {

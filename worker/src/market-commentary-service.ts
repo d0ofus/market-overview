@@ -628,6 +628,8 @@ function summarizeDashboard(snapshot: SnapshotResponse | null, session: UsMarket
     `Existing app snapshot as of ${snapshot.asOfDate}, generated ${snapshot.generatedAt}, provider ${snapshot.providerLabel}.`,
     `Current report session date: ${session.sessionDate}. Latest completed US session: ${session.latestCompletedSessionDate}.`,
   ];
+  const metric = (value: number | null | undefined, suffix = ""): string =>
+    typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : "N/A";
   if (snapshot.freshnessStatus === "partial") {
     lines.push(
       `Data quality warning: snapshot coverage is partial (${snapshot.freshnessCurrentCount ?? 0}/${snapshot.freshnessEligibleCount ?? 0} tickers current). Treat only rows tagged current for ${session.sessionDate} as current-market evidence; stale or unknown rows are included only for audit context.`,
@@ -643,9 +645,10 @@ function summarizeDashboard(snapshot: SnapshotResponse | null, session: UsMarket
           row.above50Sma == null ? "50SMA N/A" : row.above50Sma ? "above 50SMA" : "below 50SMA",
           row.above200Sma == null ? "200SMA N/A" : row.above200Sma ? "above 200SMA" : "below 200SMA",
         ].join(", ");
-        const rowDate = row.barDate ?? "unknown";
-        const rowFreshness = row.barDate === session.sessionDate ? `current ${session.sessionDate}` : `stale/unknown bar ${rowDate}`;
-        return `${row.ticker} (${row.displayName ?? row.ticker}): ${rowFreshness}, price ${row.price}, 1D ${row.change1d?.toFixed?.(2) ?? row.change1d}%, 1W ${row.change1w?.toFixed?.(2) ?? row.change1w}%, YTD ${row.ytd?.toFixed?.(2) ?? row.ytd}%, ${sma}`;
+        const rowFreshness = row.currentData?.status === "fresh"
+          ? `current ${row.currentData.sessionDate}`
+          : `current data ${row.currentData?.status ?? "unavailable"}`;
+        return `${row.ticker} (${row.displayName ?? row.ticker}): ${rowFreshness}, price ${metric(row.price)}, 1D ${metric(row.change1d, "%")}, 1W ${metric(row.change1w, "%")}, YTD ${metric(row.ytd, "%")}, ${sma}`;
       });
       lines.push(`- ${group.title}: ${rows.length ? rows.join("; ") : "N/A"}`);
     }

@@ -6357,7 +6357,19 @@ async function storeDailyBars(env: Env, bars: RelativeStrengthDailyBar[]): Promi
   if (bars.length === 0) return;
   const statements = bars.map((bar) =>
     env.DB.prepare(
-      "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO daily_bars
+         (ticker, date, o, h, l, c, volume, source_provider, source_feed, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'scanner-fallback', NULL, CURRENT_TIMESTAMP)
+       ON CONFLICT(ticker, date) DO UPDATE SET
+         o = excluded.o,
+         h = excluded.h,
+         l = excluded.l,
+         c = excluded.c,
+         volume = excluded.volume,
+         source_provider = excluded.source_provider,
+         source_feed = NULL,
+         fetched_at = excluded.fetched_at
+       WHERE COALESCE(daily_bars.source_provider, '') <> 'alpaca'`,
     ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, (bar as { volume?: number }).volume ?? 0),
   );
   for (let index = 0; index < statements.length; index += RS_JOB_INSERT_CHUNK_SIZE) {

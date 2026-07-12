@@ -267,7 +267,7 @@ function createEnv() {
     id: "snap-1",
     asOfDate: "2025-01-07",
     generatedAt: "2025-01-08T00:00:00.000Z",
-    providerLabel: "Stored Daily Bars",
+    providerLabel: "TradingView scanner + Alpaca iex bars",
   };
   const snapshotRows = [
     {
@@ -430,7 +430,26 @@ function createEnv() {
       rankKey: 20,
       holdingsJson: null,
     },
-  ];
+  ].map((row) => {
+    const ratios: Record<string, number[] | null> = {
+      SPY: null,
+      BITO: [2, 2, 2, 2],
+      GLD: [3, 3, 3, 3],
+      USO: [1.5, 1.5, 1.5, 1.5],
+      EWJ: [4, 4, 4, 4],
+      EEM: [2.5, 2.5, 2.5, 2.5],
+      META: [5, 5, 5, 5],
+      SMH: [3.5, 3.5, 3.5, 3.5],
+      XLK: [4.5, 4.5, 4.5, 4.5],
+      RYT: [5.5, 5.5, 5.5, 5.5],
+    };
+    return {
+      ...row,
+      barDate: snapshotMeta.asOfDate,
+      barFreshnessStatus: "fresh",
+      relativeStrength30dVsSpyJson: ratios[row.ticker] ? JSON.stringify(ratios[row.ticker]) : null,
+    };
+  });
   const dailyBars = [
     { ticker: "BITO", date: "2025-01-02", c: 20, volume: 1000 },
     { ticker: "BITO", date: "2025-01-03", c: 21, volume: 1100 },
@@ -517,7 +536,7 @@ function createEnv() {
               if (sql.includes("FROM dashboard_configs WHERE id = ?")) {
                 return dashboardConfig as T;
               }
-              if (sql.includes("FROM snapshots_meta WHERE config_id = ?") && sql.includes("ORDER BY as_of_date DESC, generated_at DESC LIMIT 1")) {
+              if (sql.includes("FROM snapshots_meta WHERE config_id = ?")) {
                 return snapshotMeta as T;
               }
               return null as T;
@@ -536,7 +555,7 @@ function createEnv() {
 
 describe("loadSnapshot relative strength pilot", () => {
   it("populates configured overview groups with RS 30d vs SPY and leaves non-enabled rows empty", async () => {
-    const snapshot = await loadSnapshot(createEnv() as never);
+    const snapshot = await loadSnapshot(createEnv() as never, "default", "2025-01-07");
     const macroSection = snapshot.sections[0];
     const cryptoGroup = macroSection.groups.find((group) => group.id === "g-crypto");
     const indexGroup = macroSection.groups.find((group) => group.id === "g-us-index");

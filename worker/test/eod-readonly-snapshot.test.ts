@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadSnapshot } from "../src/eod";
 import type { Env } from "../src/types";
 
@@ -57,7 +57,7 @@ class MalformedStoredSnapshotDb extends ReadOnlySnapshotDb {
             id: "snapshot-1",
             asOfDate: "2026-06-12",
             generatedAt: "2026-06-12T22:00:00.000Z",
-            providerLabel: "Alpaca snapshots + stored daily bars",
+            providerLabel: "TradingView scanner + Alpaca iex bars",
             expectedAsOfDate: "2026-06-12",
             freshnessStatus: "fresh",
             freshnessCurrentCount: 1,
@@ -214,5 +214,24 @@ describe("loadSnapshot read-only mode", () => {
     expect(row?.change6m).toBeNull();
     expect(snapshot.freshnessWarning).toContain("Snapshot derived metrics are unavailable");
     expect(db.statements.some((sql) => sql.includes("daily_bars"))).toBe(false);
+  });
+
+  it("does not expose a prior-session snapshot through the latest-session reader", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-12T12:00:00.000Z"));
+    const db = new MalformedStoredSnapshotDb();
+    try {
+      const snapshot = await loadSnapshot(createEnv(db), "default", undefined, { allowComputeOnMissing: false });
+      const row = snapshot.sections[0]?.groups[0]?.rows[0];
+
+      expect(snapshot.expectedAsOfDate).toBe("2026-07-10");
+      expect(snapshot.freshnessStatus).toBe("stale");
+      expect(row?.price).toBeNull();
+      expect(row?.sparkline).toBeNull();
+      expect(row?.quoteFreshnessStatus).toBe("unavailable");
+      expect(row?.barFreshnessStatus).toBe("stale");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -16,6 +16,14 @@ import {
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
 import { refreshOverviewPageData } from "./overview-refresh-service";
+import {
+  doesOverviewCurrentRowNeedRepair,
+  isOverviewCurrentRowComplete,
+  loadOverviewCurrentData,
+  maybeRunScheduledOverviewCurrentRefresh,
+  OVERVIEW_REQUIRED_CURRENT_FIELDS,
+  refreshOverviewCurrentDataIfDue,
+} from "./overview-current-data";
 import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus, SnapshotResponse } from "./types";
 import {
   configPatchSchema,
@@ -428,7 +436,15 @@ function dashboardRequestCacheKey(configId: string, date?: string): string {
 }
 
 function dashboardVersionKey(configId: string, date: string | undefined, data: SnapshotResponse): string {
-  return `${dashboardRequestCacheKey(configId, date)}:${data.asOfDate ?? "empty"}:${data.generatedAt ?? "none"}`;
+  const currentDataVersion = data.status === "empty"
+    ? "none"
+    : data.sections
+      .flatMap((section) => section.groups)
+      .flatMap((group) => group.rows)
+      .map((row) => row.currentData?.fetchedAt ?? "")
+      .sort()
+      .at(-1) || "none";
+  return `${dashboardRequestCacheKey(configId, date)}:${data.asOfDate ?? "empty"}:${data.generatedAt ?? "none"}:${currentDataVersion}`;
 }
 
 function rememberDashboardResponse(configId: string, date: string | undefined, data: SnapshotResponse): void {
@@ -455,9 +471,79 @@ function withDashboardFallbackWarning(data: SnapshotResponse, cachedAt: string):
       freshnessWarning: warning,
     };
   }
+  const expectedSessionDate = latestUsMarketSessionAsOfDate(new Date());
   return {
     ...data,
+    expectedAsOfDate: expectedSessionDate,
     freshnessWarning: data.freshnessWarning ? `${data.freshnessWarning} ${warning}` : warning,
+    sections: data.sections.map((section) => ({
+      ...section,
+      groups: section.groups.map((group) => ({
+        ...group,
+        rows: group.rows.map((row) => {
+          const currentIsExact = row.currentData?.sessionDate === expectedSessionDate;
+          const historyIsExact = row.historyData?.sessionDate === expectedSessionDate
+            && row.historyData.status === "fresh"
+            && row.barDate === expectedSessionDate;
+          return {
+            ...row,
+            price: currentIsExact ? row.price : null,
+            change1d: currentIsExact ? row.change1d : null,
+            change1w: currentIsExact ? row.change1w : null,
+            change5d: currentIsExact ? row.change5d : null,
+            change3m: currentIsExact ? row.change3m : null,
+            change6m: currentIsExact ? row.change6m : null,
+            ytd: currentIsExact ? row.ytd : null,
+            pctFrom52wHigh: currentIsExact ? row.pctFrom52wHigh : null,
+            above20Sma: currentIsExact ? row.above20Sma : null,
+            above50Sma: currentIsExact ? row.above50Sma : null,
+            above200Sma: currentIsExact ? row.above200Sma : null,
+            quotePrice: currentIsExact ? row.quotePrice : null,
+            quotePrevClose: currentIsExact ? row.quotePrevClose : null,
+            quoteChange1d: currentIsExact ? row.quoteChange1d : null,
+            quoteSource: currentIsExact ? row.quoteSource : null,
+            quoteFetchedAt: currentIsExact ? row.quoteFetchedAt : null,
+            quoteFreshnessStatus: currentIsExact ? row.quoteFreshnessStatus : "unavailable",
+            quoteFreshnessReason: currentIsExact
+              ? row.quoteFreshnessReason
+              : `Cached current data is not for expected session ${expectedSessionDate}.`,
+            currentData: currentIsExact ? row.currentData : {
+              sessionDate: expectedSessionDate,
+              status: "unavailable",
+              reason: `Cached current data is not for expected session ${expectedSessionDate}.`,
+              quoteSource: null,
+              performanceSource: null,
+              smaSource: null,
+              fieldSources: {},
+              providerStatuses: {},
+              fetchedAt: cachedAt,
+              tradingViewSymbol: null,
+              tradingViewTime: null,
+              tradingViewLastBarUpdateTime: null,
+              tradingViewLastPriceUpdateTime: null,
+              tradingViewUpdateTime: null,
+              tradingViewUpdateMode: null,
+              tradingViewCurrentSession: null,
+            },
+            change21d: historyIsExact ? row.change21d : null,
+            sparkline: historyIsExact ? row.sparkline : null,
+            relativeStrength30dVsSpy: historyIsExact ? row.relativeStrength30dVsSpy : null,
+            barFreshnessStatus: historyIsExact ? row.barFreshnessStatus : "unavailable",
+            barFreshnessReason: historyIsExact
+              ? row.barFreshnessReason
+              : `Cached history is not verified for expected session ${expectedSessionDate}.`,
+            historyData: historyIsExact ? row.historyData : {
+              sessionDate: expectedSessionDate,
+              status: "unavailable",
+              reason: `Cached history is not verified for expected session ${expectedSessionDate}.`,
+              barDate: row.barDate ?? null,
+              source: null,
+            },
+            rankKey: currentIsExact ? row.rankKey : null,
+          };
+        }),
+      })),
+    })),
   };
 }
 
@@ -6393,11 +6479,95 @@ app.post("/api/admin/run-eod", async (c) => {
   try {
     const result = storedOnly
       ? await recomputeDashboardFromStoredBars(c.env, date, configId)
-      : await computeAndStoreSnapshot(c.env, date, configId);
+      : await refreshAndStoreOverviewSnapshot(c.env, date, configId, { requireFreshness: false });
     return c.json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-eod failed";
     console.error("admin run-eod failed", { date, configId, storedOnly, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post("/api/admin/overview-current/refresh", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
+  const configId = c.req.query("configId") ?? "default";
+  try {
+    const result = await refreshOverviewCurrentDataIfDue(c.env, configId, date);
+    return c.json(result ?? {
+      configId,
+      sessionDate: date,
+      status: "deferred",
+      reason: "The session is complete or its provider retry window has not opened yet.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Overview current-data refresh failed.";
+    console.error("admin overview current-data refresh failed", { date, configId, error });
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/admin/overview-current/audit", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
+  const configId = c.req.query("configId") ?? "default";
+  try {
+    const currentRows = await loadOverviewCurrentData(c.env, configId, date);
+    const storedRows = await c.env.DB.prepare(
+      `SELECT sr.ticker, sr.price, sr.change_1d as change1d, sr.change_1w as change1w,
+              sr.change_3m as change3m, sr.change_6m as change6m, sr.ytd
+       FROM snapshot_rows sr
+       JOIN snapshots_meta sm ON sm.id = sr.snapshot_id
+       WHERE sm.config_id = ? AND sm.as_of_date = ?
+       ORDER BY sr.ticker`,
+    ).bind(configId, date).all<{
+      ticker: string;
+      price: number | null;
+      change1d: number | null;
+      change1w: number | null;
+      change3m: number | null;
+      change6m: number | null;
+      ytd: number | null;
+    }>();
+    const storedByTicker = new Map((storedRows.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
+    const rows = Array.from(currentRows.values()).map((row) => {
+      const missingFields = OVERVIEW_REQUIRED_CURRENT_FIELDS.filter((field) => !row.fieldSources[field]);
+      return {
+        ticker: row.ticker,
+        sessionDate: row.sessionDate,
+        status: row.status,
+        complete: isOverviewCurrentRowComplete(row),
+        needsRepair: doesOverviewCurrentRowNeedRepair(row),
+        missingFields,
+        reason: row.reason,
+        fieldSources: row.fieldSources,
+        providerStatuses: row.providerStatuses,
+        current: {
+          price: row.price,
+          change1d: row.change1d,
+          change1w: row.change1w,
+          change3m: row.change3m,
+          change6m: row.change6m,
+          ytd: row.ytd,
+        },
+        storedSnapshot: storedByTicker.get(row.ticker) ?? null,
+      };
+    });
+    return c.json({
+      configId,
+      sessionDate: date,
+      total: rows.length,
+      fresh: rows.filter((row) => row.status === "fresh").length,
+      complete: rows.filter((row) => row.complete).length,
+      incomplete: rows.filter((row) => !row.complete).length,
+      needsRepair: rows.filter((row) => row.needsRepair).length,
+      retrying: rows.filter((row) => row.status === "retrying").length,
+      unavailable: rows.filter((row) => row.status === "unavailable").length,
+      rows,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Overview current-data audit failed.";
+    console.error("admin overview current-data audit failed", { date, configId, error });
     return c.json({ error: message }, 500);
   }
 });
@@ -6838,7 +7008,7 @@ app.post("/api/admin/upload-bars", async (c) => {
   if (rows.length === 0) return c.json({ ok: true, upserted: 0 });
   const statements = rows.map((r) =>
     c.env.DB.prepare(
-      "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume, source_provider, source_feed, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual-upload', NULL, CURRENT_TIMESTAMP)",
     ).bind(r.ticker.toUpperCase(), r.date, r.o, r.h, r.l, r.c, r.volume ?? 0),
   );
   await c.env.DB.batch(statements);
@@ -7036,6 +7206,7 @@ export default {
     const runMarketDataLane = async (): Promise<void> => {
       const { runBudgeted } = runnerForLane("market-data");
       const workerSchedule = await loadWorkerScheduleSettings(env);
+      await runBudgeted("overview-current-data", 12, () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined));
       await runBudgeted("post-close-daily-bars", 24, () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined));
       await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now));
       await runBudgeted("etf-constituent-slice", 10, () => syncMonthlyEtfSlice(env, cron("etf-constituent-slice")));
@@ -7100,7 +7271,9 @@ export default {
             );
           if (!overviewIsUsable) {
             try {
-              await refreshAndStoreOverviewSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default");
+              await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default", {
+                includeBreadth: false,
+              });
             } catch (error) {
               if (error instanceof OverviewFreshnessError) {
                 console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);

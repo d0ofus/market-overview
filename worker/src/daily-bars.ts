@@ -123,6 +123,8 @@ async function writeFetchedDailyBars(
   startDate: string,
   endDate: string,
   replaceExisting: boolean,
+  sourceProvider: string,
+  sourceFeed: string | null,
 ): Promise<number> {
   const barsToWrite = dedupeFetchedBars(bars, latestByTicker, startDate, endDate, replaceExisting);
   if (barsToWrite.length === 0) return 0;
@@ -131,8 +133,35 @@ async function writeFetchedDailyBars(
     env,
     barsToWrite.map((bar) =>
       env.DB.prepare(
-        "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume ?? 0),
+        `INSERT INTO daily_bars
+           (ticker, date, o, h, l, c, volume, source_provider, source_feed, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(ticker, date) DO UPDATE SET
+           o = excluded.o,
+           h = excluded.h,
+           l = excluded.l,
+           c = excluded.c,
+           volume = excluded.volume,
+           source_provider = excluded.source_provider,
+           source_feed = excluded.source_feed,
+           fetched_at = excluded.fetched_at
+         WHERE excluded.source_provider = 'alpaca'
+            OR COALESCE(daily_bars.source_provider, '') <> 'alpaca'`,
+      ).bind(
+        bar.ticker.toUpperCase(),
+        bar.date,
+        bar.o,
+        bar.h,
+        bar.l,
+        bar.c,
+        bar.volume ?? 0,
+        bar.sourceProvider ?? sourceProvider,
+        bar.sourceProvider
+          ? bar.sourceProvider === sourceProvider
+            ? bar.sourceFeed ?? sourceFeed
+            : bar.sourceFeed ?? null
+          : sourceFeed,
+      ),
     ),
   );
   for (const bar of barsToWrite) {
@@ -175,6 +204,10 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   }
 
   const provider = input.provider ?? getProvider(env);
+  const sourceProvider = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
+  const sourceFeed = sourceProvider === "alpaca"
+    ? (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex"
+    : null;
   const latestByTicker = await loadLatestBarDates(env, tickers);
   const grouped = input.replaceExisting
     ? new Map([[input.startDate, tickers]])
@@ -198,6 +231,8 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
           input.startDate,
           input.endDate,
           input.replaceExisting ?? false,
+          sourceProvider,
+          sourceFeed,
         );
       } catch (error) {
         if (!input.continueOnError) throw error;

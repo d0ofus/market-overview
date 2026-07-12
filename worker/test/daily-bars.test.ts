@@ -13,7 +13,7 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
       const ticker = args[0];
       if (ticker != null) symbols.add(String(ticker).toUpperCase());
     }
-    if (sql.includes("INSERT OR REPLACE INTO daily_bars")) {
+    if (sql.includes("INTO daily_bars")) {
       const [ticker, date, o, h, l, c, volume] = args;
       const normalizedTicker = String(ticker).toUpperCase();
       const rows = barsByTicker.get(normalizedTicker) ?? [];

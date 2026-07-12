@@ -467,6 +467,8 @@ function summarizeDashboard(snapshot: SnapshotResponse | null, week: WeeklyMarke
     `Dashboard snapshot generated ${snapshot.generatedAt}; as-of ${snapshot.asOfDate}; freshness ${snapshot.freshnessStatus ?? "unknown"}.`,
     `Target weekly window: ${week.weekStart} to ${week.weekEnd}. Use 1W/5D changes as weekly evidence where available.`,
   ];
+  const metric = (value: number | null | undefined, suffix = ""): string =>
+    typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : "N/A";
   for (const section of snapshot.sections.filter((entry) => entry.title.includes("Macro") || entry.title.includes("Equities"))) {
     lines.push(`Section: ${section.title}`);
     for (const group of section.groups) {
@@ -480,8 +482,10 @@ function summarizeDashboard(snapshot: SnapshotResponse | null, week: WeeklyMarke
         || group.title.includes("Rates");
       if (!groupRelevant) continue;
       const rows = group.rows.slice(0, 15).map((row) => {
-        const barDate = row.barDate ?? "unknown";
-        return `${row.ticker} (${row.displayName ?? row.ticker}): bar ${barDate}, price ${row.price}, 1D ${row.change1d?.toFixed?.(2) ?? row.change1d}%, 1W ${row.change1w?.toFixed?.(2) ?? row.change1w}%, 5D ${row.change5d?.toFixed?.(2) ?? row.change5d}%, YTD ${row.ytd?.toFixed?.(2) ?? row.ytd}%`;
+        const currentState = row.currentData?.status === "fresh"
+          ? `current ${row.currentData.sessionDate}`
+          : `current data ${row.currentData?.status ?? "unavailable"}`;
+        return `${row.ticker} (${row.displayName ?? row.ticker}): ${currentState}, price ${metric(row.price)}, 1D ${metric(row.change1d, "%")}, 1W ${metric(row.change1w, "%")}, 5D ${metric(row.change5d, "%")}, YTD ${metric(row.ytd, "%")}`;
       });
       lines.push(`- ${group.title}: ${rows.length ? rows.join("; ") : "N/A"}`);
     }

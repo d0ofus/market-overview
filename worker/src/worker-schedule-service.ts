@@ -1,9 +1,8 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getProvider } from "./provider";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import {
   clearProviderSymbolBackoff,
-  loadActiveProviderBackoffTickers,
-  recordProviderSymbolNoDataBackoff,
 } from "./provider-backoff";
 import { zonedParts } from "./refresh-timing";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
@@ -13,8 +12,14 @@ const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 50;
 const DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK = 20;
 const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
 const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 60;
-const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 400;
+const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 80;
 const DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK = 4;
+const MAX_POST_CLOSE_PROVIDER_BATCH_SIZE = 80;
+const MAX_POST_CLOSE_PROVIDER_BATCHES_PER_TICK = 4;
+const OVERVIEW_HISTORY_BOOTSTRAP_BATCH_SIZE = 25;
+const OVERVIEW_HISTORY_LOOKBACK_DAYS = 420;
+const POST_CLOSE_ITEM_LEASE_MS = 10 * 60_000;
+const POST_CLOSE_RETRY_MINUTES = 15;
 const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
 const DEFAULT_PATTERN_SCAN_OFFSET_MINUTES = 75;
 const DEFAULT_PATTERN_SCAN_BATCH_SIZE = 40;
@@ -49,6 +54,269 @@ export function buildPostCloseDailyBarUniverseQuery(kind: "count" | "batch"): st
     return `SELECT COUNT(*) as count FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe`;
   }
   return `SELECT ticker FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe ORDER BY priority ASC, ticker ASC LIMIT ? OFFSET ?`;
+}
+
+let postCloseRetrySchemaReady = false;
+
+async function addPostCloseColumnIfMissing(env: Env, sql: string): Promise<void> {
+  try {
+    await env.DB.prepare(sql).run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!/duplicate column name/i.test(message)) throw error;
+  }
+}
+
+async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
+  if (postCloseRetrySchemaReady) return;
+  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
+  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN next_attempt_at TEXT");
+  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN error_code TEXT");
+  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN lease_expires_at TEXT");
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS post_close_daily_bar_refresh_job_items (
+       job_id TEXT NOT NULL,
+       ordinal INTEGER NOT NULL,
+       ticker TEXT NOT NULL,
+       history_required INTEGER NOT NULL DEFAULT 0,
+       status TEXT NOT NULL DEFAULT 'queued',
+       attempt_count INTEGER NOT NULL DEFAULT 0,
+       next_attempt_at TEXT,
+       lease_expires_at TEXT,
+       lease_token TEXT,
+       last_error TEXT,
+       bar_date TEXT,
+       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (job_id, ticker)
+     )`,
+  ).run();
+  await addPostCloseColumnIfMissing(
+    env,
+    "ALTER TABLE post_close_daily_bar_refresh_job_items ADD COLUMN history_required INTEGER NOT NULL DEFAULT 0",
+  );
+  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_job_items ADD COLUMN lease_token TEXT");
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS overview_alpaca_history_state (
+       ticker TEXT NOT NULL,
+       source_feed TEXT NOT NULL,
+       lookback_start TEXT NOT NULL,
+       through_date TEXT NOT NULL,
+       status TEXT NOT NULL,
+       last_error TEXT,
+       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (ticker, source_feed)
+     )`,
+  ).run();
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_post_close_bar_items_due ON post_close_daily_bar_refresh_job_items (job_id, status, next_attempt_at, ordinal)",
+  ).run();
+  postCloseRetrySchemaReady = true;
+}
+
+async function materializePostCloseJobItems(env: Env, jobId: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO post_close_daily_bar_refresh_job_items
+       (job_id, ordinal, ticker, history_required, status, updated_at)
+     SELECT ?, ROW_NUMBER() OVER (ORDER BY priority ASC, ticker ASC) - 1, ticker,
+            CASE WHEN priority = 0 THEN 1 ELSE 0 END,
+            'queued', CURRENT_TIMESTAMP
+     FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe`,
+  ).bind(jobId).run();
+  await env.DB.prepare(
+    `UPDATE post_close_daily_bar_refresh_job_items
+     SET history_required = 1
+     WHERE job_id = ?
+       AND ticker IN (
+         SELECT ticker
+         FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe
+         WHERE priority = 0
+       )`,
+  ).bind(jobId).run();
+}
+
+async function loadPostCloseJobItemBatch(
+  env: Env,
+  jobId: string,
+  cursorOffset: number,
+  limit: number,
+): Promise<Array<{ ticker: string; ordinal: number; attemptCount: number; historyRequired: number }>> {
+  const rows = await env.DB.prepare(
+    `SELECT ticker, ordinal, attempt_count as attemptCount, history_required as historyRequired
+     FROM post_close_daily_bar_refresh_job_items
+     WHERE job_id = ?
+       AND ordinal >= ?
+       AND status NOT IN ('completed', 'unsupported')
+       AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
+       AND (lease_expires_at IS NULL OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP)
+     ORDER BY ordinal ASC
+     LIMIT ?`,
+  ).bind(jobId, cursorOffset, limit).all<{
+    ticker: string;
+    ordinal: number;
+    attemptCount: number;
+    historyRequired: number;
+  }>();
+  return rows.results ?? [];
+}
+
+async function updatePostCloseJobItems(
+  env: Env,
+  jobId: string,
+  tickers: string[],
+  input: {
+    status: string;
+    nextAttemptAt?: string | null;
+    leaseExpiresAt?: string | null;
+    leaseToken?: string | null;
+    expectedLeaseToken?: string | null;
+    lastError?: string | null;
+    barDate?: string | null;
+  },
+): Promise<void> {
+  if (tickers.length === 0) return;
+  const statements = tickers.map((ticker) => env.DB.prepare(
+    `UPDATE post_close_daily_bar_refresh_job_items
+     SET status = ?,
+         next_attempt_at = ?,
+         lease_expires_at = ?,
+         lease_token = ?,
+         last_error = ?,
+         bar_date = COALESCE(?, bar_date),
+         updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ? AND ticker = ?
+       AND (? IS NULL OR lease_token = ?)`,
+  ).bind(
+    input.status,
+    input.nextAttemptAt ?? null,
+    input.leaseExpiresAt ?? null,
+    input.leaseToken ?? null,
+    input.lastError ?? null,
+    input.barDate ?? null,
+    jobId,
+    ticker,
+    input.expectedLeaseToken ?? null,
+    input.expectedLeaseToken ?? null,
+  ));
+  for (let index = 0; index < statements.length; index += 100) {
+    await env.DB.batch(statements.slice(index, index + 100));
+  }
+}
+
+async function leasePostCloseJobItems(
+  env: Env,
+  jobId: string,
+  items: Array<{ ticker: string }>,
+  leaseToken: string,
+  leaseExpiresAt: string,
+): Promise<Array<{ ticker: string; ordinal: number; attemptCount: number; historyRequired: number }>> {
+  if (items.length === 0) return [];
+  const statements = items.map((item) => env.DB.prepare(
+    `UPDATE post_close_daily_bar_refresh_job_items
+     SET status = 'running',
+         attempt_count = attempt_count + 1,
+         next_attempt_at = NULL,
+         lease_token = ?,
+         lease_expires_at = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ? AND ticker = ?
+       AND status NOT IN ('completed', 'unsupported')
+       AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
+       AND (lease_expires_at IS NULL OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP)`,
+  ).bind(leaseToken, leaseExpiresAt, jobId, item.ticker));
+  await env.DB.batch(statements);
+  const rows = await env.DB.prepare(
+    `SELECT ticker, ordinal, attempt_count as attemptCount, history_required as historyRequired
+     FROM post_close_daily_bar_refresh_job_items
+     WHERE job_id = ? AND lease_token = ?
+     ORDER BY ordinal ASC`,
+  ).bind(jobId, leaseToken).all<{
+    ticker: string;
+    ordinal: number;
+    attemptCount: number;
+    historyRequired: number;
+  }>();
+  return rows.results ?? [];
+}
+
+async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
+  completedCount: number;
+  incompleteCount: number;
+  readyCount: number;
+  nextAttemptAt: string | null;
+}> {
+  const row = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completedCount,
+       SUM(CASE WHEN status NOT IN ('completed', 'unsupported') THEN 1 ELSE 0 END) as incompleteCount,
+       SUM(CASE WHEN status NOT IN ('completed', 'unsupported')
+                 AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
+                 AND (lease_expires_at IS NULL OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP)
+                THEN 1 ELSE 0 END) as readyCount,
+       MIN(CASE WHEN status NOT IN ('completed', 'unsupported') THEN next_attempt_at END) as nextAttemptAt
+     FROM post_close_daily_bar_refresh_job_items
+     WHERE job_id = ?`,
+  ).bind(jobId).first<{
+    completedCount: number | null;
+    incompleteCount: number | null;
+    readyCount: number | null;
+    nextAttemptAt: string | null;
+  }>();
+  return {
+    completedCount: Number(row?.completedCount ?? 0),
+    incompleteCount: Number(row?.incompleteCount ?? 0),
+    readyCount: Number(row?.readyCount ?? 0),
+    nextAttemptAt: row?.nextAttemptAt ?? null,
+  };
+}
+
+function retryDelayMinutes(attemptCount: number): number {
+  return [15, 30, 60, 120][Math.min(Math.max(0, attemptCount - 1), 3)];
+}
+
+function addUtcDays(isoDate: string, days: number): string {
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+export function classifyPostCloseError(error: unknown): "rate-limited" | "auth-blocked" | "provider-error" {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (/\b429\b|rate.?limit|provider budget exceeded/i.test(message)) return "rate-limited";
+  if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|auth/i.test(message)) return "auth-blocked";
+  return "provider-error";
+}
+
+export function boundPostCloseProviderWork(input: { batchSize?: number; maxBatches?: number }): {
+  batchSize: number;
+  maxBatches: number;
+} {
+  return {
+    batchSize: Math.min(
+      MAX_POST_CLOSE_PROVIDER_BATCH_SIZE,
+      Math.max(1, input.batchSize ?? DEFAULT_POST_CLOSE_BARS_BATCH_SIZE),
+    ),
+    maxBatches: Math.min(
+      MAX_POST_CLOSE_PROVIDER_BATCHES_PER_TICK,
+      Math.max(1, input.maxBatches ?? DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK),
+    ),
+  };
+}
+
+function retryAtForPostCloseError(error: unknown, attemptCount: number): string | null {
+  const code = classifyPostCloseError(error);
+  if (code === "auth-blocked") return null;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const retryAfterSeconds = message.match(/retry-after=(\d+(?:\.\d+)?)/i);
+  if (retryAfterSeconds) {
+    const seconds = Number(retryAfterSeconds[1]);
+    if (Number.isFinite(seconds) && seconds >= 0) return new Date(Date.now() + seconds * 1000).toISOString();
+  }
+  const retryAfterDate = message.match(/retry-after=([^;]*?GMT)/i);
+  if (retryAfterDate) {
+    const parsed = Date.parse(retryAfterDate[1].trim());
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return new Date(Date.now() + retryDelayMinutes(attemptCount) * 60_000).toISOString();
 }
 
 type WorkerScheduleSettingsRow = {
@@ -86,6 +354,10 @@ type PostCloseDailyBarRefreshJobRecord = {
   currentDateTickers: number;
   missingCurrentDateTickers: number;
   currentDateCoveragePct: number;
+  attemptCount: number;
+  nextAttemptAt: string | null;
+  errorCode: string | null;
+  leaseExpiresAt: string | null;
 };
 
 function asBooleanFlag(value: number | null | undefined, fallback: boolean): boolean {
@@ -246,6 +518,9 @@ function mapPostCloseDailyBarRefreshJobRecord(
     currentDateTickers: Number(record.currentDateTickers ?? 0),
     missingCurrentDateTickers: Number(record.missingCurrentDateTickers ?? 0),
     currentDateCoveragePct: Number(record.currentDateCoveragePct ?? 0),
+    attemptCount: Number(record.attemptCount ?? 0),
+    nextAttemptAt: record.nextAttemptAt ?? null,
+    errorCode: record.errorCode ?? null,
   };
 }
 
@@ -270,7 +545,11 @@ async function loadPostCloseDailyBarRefreshJobRecord(
         written_rows as writtenRows,
         current_date_tickers as currentDateTickers,
         missing_current_date_tickers as missingCurrentDateTickers,
-        current_date_coverage_pct as currentDateCoveragePct
+        current_date_coverage_pct as currentDateCoveragePct,
+        attempt_count as attemptCount,
+        next_attempt_at as nextAttemptAt,
+        error_code as errorCode,
+        lease_expires_at as leaseExpiresAt
      FROM post_close_daily_bar_refresh_jobs
      WHERE id = ?
      LIMIT 1`,
@@ -300,7 +579,11 @@ async function loadLatestPostCloseDailyBarRefreshJobRecordForDate(
         written_rows as writtenRows,
         current_date_tickers as currentDateTickers,
         missing_current_date_tickers as missingCurrentDateTickers,
-        current_date_coverage_pct as currentDateCoveragePct
+        current_date_coverage_pct as currentDateCoveragePct,
+        attempt_count as attemptCount,
+        next_attempt_at as nextAttemptAt,
+        error_code as errorCode,
+        lease_expires_at as leaseExpiresAt
      FROM post_close_daily_bar_refresh_jobs
      WHERE scope = ?
        AND trading_date = ?
@@ -325,6 +608,10 @@ async function updatePostCloseDailyBarRefreshJobRecord(
     currentDateTickers: number;
     missingCurrentDateTickers: number;
     currentDateCoveragePct: number;
+    attemptCount: number;
+    nextAttemptAt: string | null;
+    errorCode: string | null;
+    leaseExpiresAt: string | null;
   }>,
 ): Promise<void> {
   const assignments: string[] = ["updated_at = CURRENT_TIMESTAMP"];
@@ -369,6 +656,22 @@ async function updatePostCloseDailyBarRefreshJobRecord(
     assignments.push("current_date_coverage_pct = ?");
     values.push(input.currentDateCoveragePct);
   }
+  if (typeof input.attemptCount === "number") {
+    assignments.push("attempt_count = ?");
+    values.push(input.attemptCount);
+  }
+  if (input.nextAttemptAt !== undefined) {
+    assignments.push("next_attempt_at = ?");
+    values.push(input.nextAttemptAt);
+  }
+  if (input.errorCode !== undefined) {
+    assignments.push("error_code = ?");
+    values.push(input.errorCode);
+  }
+  if (input.leaseExpiresAt !== undefined) {
+    assignments.push("lease_expires_at = ?");
+    values.push(input.leaseExpiresAt);
+  }
   await env.DB.prepare(
     `UPDATE post_close_daily_bar_refresh_jobs
      SET ${assignments.join(", ")}
@@ -384,19 +687,6 @@ async function loadPostCloseDailyBarUniverseCount(env: Env): Promise<number> {
   return Math.max(0, Number(row?.count ?? 0) || 0);
 }
 
-async function loadPostCloseDailyBarUniverseBatch(
-  env: Env,
-  cursorOffset: number,
-  limit: number,
-): Promise<string[]> {
-  const rows = await env.DB.prepare(buildPostCloseDailyBarUniverseQuery("batch"))
-    .bind(limit, cursorOffset)
-    .all<{ ticker: string }>();
-  return (rows.results ?? [])
-    .map((row) => row.ticker.trim().toUpperCase())
-    .filter(Boolean);
-}
-
 async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
   const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   const out = new Set<string>();
@@ -408,8 +698,10 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
       `SELECT DISTINCT ticker
          FROM daily_bars
         WHERE date = ?
+          AND source_provider = 'alpaca'
+          AND source_feed = ?
           AND ticker IN (${placeholders})`,
-    ).bind(date, ...batch).all<{ ticker: string }>();
+    ).bind(date, (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex", ...batch).all<{ ticker: string }>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker?.trim().toUpperCase();
       if (ticker) out.add(ticker);
@@ -418,44 +710,112 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
   return out;
 }
 
-async function loadPostCloseNoDataBackoffProtectedTickers(env: Env, tickers: string[]): Promise<Set<string>> {
+async function loadKnownUnsupportedAlpacaTickers(env: Env, tickers: string[]): Promise<Set<string>> {
   const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   const out = new Set<string>();
-  for (let i = 0; i < unique.length; i += 80) {
-    const batch = unique.slice(i, i + 80);
-    if (batch.length === 0) continue;
-    const placeholders = batch.map(() => "?").join(",");
+  for (let index = 0; index < unique.length; index += 80) {
+    const tickerChunk = unique.slice(index, index + 80);
+    const placeholders = tickerChunk.map(() => "?").join(",");
     try {
       const rows = await env.DB.prepare(
-        `SELECT UPPER(TRIM(di.ticker)) as ticker
-           FROM dashboard_items di
-           JOIN dashboard_groups dg ON dg.id = di.group_id
-           JOIN dashboard_sections ds ON ds.id = dg.section_id
-           JOIN dashboard_configs dc ON dc.id = ds.config_id
-          WHERE dc.is_default = 1
-            AND di.enabled = 1
-            AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
-            AND UPPER(TRIM(di.ticker)) IN (${placeholders})
-         UNION
-         SELECT UPPER(TRIM(ticker)) as ticker
-           FROM etf_watchlists
-          WHERE UPPER(TRIM(ticker)) IN (${placeholders})
-         UNION
-         SELECT UPPER(TRIM(ticker)) as ticker
-           FROM symbols
-          WHERE lower(COALESCE(asset_class, '')) = 'etf'
-            AND UPPER(TRIM(ticker)) IN (${placeholders})`,
-      ).bind(...batch, ...batch, ...batch).all<{ ticker: string }>();
-      for (const row of rows.results ?? []) {
-        const ticker = row.ticker?.trim().toUpperCase();
-        if (ticker) out.add(ticker);
-      }
+        `SELECT ticker
+         FROM overview_provider_symbols
+         WHERE provider_key = 'alpaca'
+           AND support_status = 'unsupported'
+           AND ticker IN (${placeholders})`,
+      ).bind(...tickerChunk).all<{ ticker: string }>();
+      for (const row of rows.results ?? []) out.add(row.ticker.toUpperCase());
     } catch (error) {
-      console.warn("post-close backoff protected ticker lookup failed", { batchSize: batch.length, error });
-      for (const ticker of batch) out.add(ticker);
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      if (!/no such table/i.test(message)) throw error;
+      return out;
     }
   }
   return out;
+}
+
+type OverviewHistoryState = {
+  ticker: string;
+  lookbackStart: string;
+  throughDate: string;
+};
+
+export function planPostCloseProviderBatch<T extends {
+  ticker: string;
+  historyRequired: number;
+}>(input: {
+  items: T[];
+  historyStates: Map<string, OverviewHistoryState>;
+  tradingDate: string;
+  batchSize: number;
+}): { items: T[]; refreshStartDate: string; historyLookbackStart: string } {
+  const historyLookbackStart = addUtcDays(input.tradingDate, -OVERVIEW_HISTORY_LOOKBACK_DAYS);
+  const historyStaleBoundary = addUtcDays(input.tradingDate, -7);
+  const historyCandidates = input.items.filter((item) => Number(item.historyRequired) === 1);
+  const bootstrapItems = historyCandidates.filter((item) => {
+    const state = input.historyStates.get(item.ticker);
+    return !state
+      || state.lookbackStart > historyLookbackStart
+      || state.throughDate < historyStaleBoundary;
+  });
+  const items = bootstrapItems.length > 0
+    ? bootstrapItems.slice(0, Math.min(input.batchSize, OVERVIEW_HISTORY_BOOTSTRAP_BATCH_SIZE))
+    : input.items;
+  const refreshStartDate = bootstrapItems.length > 0
+    ? historyLookbackStart
+    : items.reduce((earliest, item) => {
+      if (Number(item.historyRequired) !== 1) return earliest;
+      const throughDate = input.historyStates.get(item.ticker)?.throughDate;
+      if (!throughDate) return earliest;
+      const nextDate = addUtcDays(throughDate, 1);
+      return nextDate < earliest ? nextDate : earliest;
+    }, input.tradingDate);
+  return { items, refreshStartDate, historyLookbackStart };
+}
+
+async function loadOverviewHistoryStates(
+  env: Env,
+  tickers: string[],
+  sourceFeed: string,
+): Promise<Map<string, OverviewHistoryState>> {
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const out = new Map<string, OverviewHistoryState>();
+  for (let index = 0; index < unique.length; index += 80) {
+    const tickerChunk = unique.slice(index, index + 80);
+    const placeholders = tickerChunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT ticker, lookback_start as lookbackStart, through_date as throughDate
+       FROM overview_alpaca_history_state
+       WHERE source_feed = ?
+         AND status = 'completed'
+         AND ticker IN (${placeholders})`,
+    ).bind(sourceFeed, ...tickerChunk).all<OverviewHistoryState>();
+    for (const row of rows.results ?? []) out.set(row.ticker.toUpperCase(), row);
+  }
+  return out;
+}
+
+async function checkpointOverviewHistoryStates(
+  env: Env,
+  tickers: string[],
+  sourceFeed: string,
+  lookbackStart: string,
+  throughDate: string,
+): Promise<void> {
+  const statements = tickers.map((ticker) => env.DB.prepare(
+    `INSERT INTO overview_alpaca_history_state
+       (ticker, source_feed, lookback_start, through_date, status, last_error, updated_at)
+     VALUES (?, ?, ?, ?, 'completed', NULL, CURRENT_TIMESTAMP)
+     ON CONFLICT(ticker, source_feed) DO UPDATE SET
+       lookback_start = MIN(overview_alpaca_history_state.lookback_start, excluded.lookback_start),
+       through_date = MAX(overview_alpaca_history_state.through_date, excluded.through_date),
+       status = 'completed',
+       last_error = NULL,
+       updated_at = CURRENT_TIMESTAMP`,
+  ).bind(ticker, sourceFeed, lookbackStart, throughDate));
+  for (let index = 0; index < statements.length; index += 100) {
+    await env.DB.batch(statements.slice(index, index + 100));
+  }
 }
 
 function isStaleRunningPostCloseJob(job: PostCloseDailyBarRefreshJobRecord, now = new Date()): boolean {
@@ -468,27 +828,29 @@ async function ensurePostCloseDailyBarRefreshJob(
   env: Env,
   tradingDate: string,
 ): Promise<PostCloseDailyBarRefreshJobRecord> {
+  await ensurePostCloseRetrySchema(env);
   const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(env, tradingDate);
   if (existing) {
+    await materializePostCloseJobItems(env, existing.id);
     if (isStaleRunningPostCloseJob(existing)) {
       await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
         status: "queued",
         error: null,
         completedAt: null,
+        leaseExpiresAt: null,
       });
       const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
       if (reset) return reset;
     }
     if (existing.status === "failed") {
+      if (existing.errorCode === "auth-blocked") return existing;
       await updatePostCloseDailyBarRefreshJobRecord(env, existing.id, {
         status: "queued",
         error: null,
+        errorCode: null,
         completedAt: null,
-        fetchedRows: 0,
-        writtenRows: 0,
-        currentDateTickers: 0,
-        missingCurrentDateTickers: existing.totalTickers,
-        currentDateCoveragePct: 0,
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
       });
       const reset = await loadPostCloseDailyBarRefreshJobRecord(env, existing.id);
       if (reset) return reset;
@@ -507,6 +869,7 @@ async function ensurePostCloseDailyBarRefreshJob(
     .run();
   const created = await loadPostCloseDailyBarRefreshJobRecord(env, id);
   if (!created) throw new Error("Failed to create post-close daily bar refresh job.");
+  await materializePostCloseJobItems(env, id);
   return created;
 }
 
@@ -515,83 +878,246 @@ export async function processPostCloseDailyBarRefreshJob(
   jobId: string,
   options?: { batchSize?: number; maxBatches?: number },
 ): Promise<PostCloseDailyBarRefreshJob | null> {
+  await ensurePostCloseRetrySchema(env);
   const job = await loadPostCloseDailyBarRefreshJobRecord(env, jobId);
   if (!job) return null;
   if (job.status === "completed" || job.status === "failed") {
     return mapPostCloseDailyBarRefreshJobRecord(job);
   }
+  if (job.nextAttemptAt && Date.parse(job.nextAttemptAt) > Date.now()) {
+    return mapPostCloseDailyBarRefreshJobRecord(job);
+  }
 
+  const attemptCount = Number(job.attemptCount ?? 0) + 1;
+  let leasedItems: Array<{
+    ticker: string;
+    ordinal: number;
+    attemptCount: number;
+    historyRequired: number;
+  }> = [];
+  let activeLeaseToken: string | null = null;
   try {
-    await updatePostCloseDailyBarRefreshJobRecord(env, job.id, { status: "running", error: null });
+    await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+      status: "running",
+      error: null,
+      errorCode: null,
+      nextAttemptAt: null,
+      attemptCount,
+      leaseExpiresAt: new Date(Date.now() + POST_CLOSE_ITEM_LEASE_MS).toISOString(),
+    });
     let cursorOffset = job.cursorOffset;
     let fetchedRows = Number(job.fetchedRows ?? 0);
     let writtenRows = Number(job.writtenRows ?? 0);
-    let currentDateTickers = Number(job.currentDateTickers ?? 0);
-    let missingCurrentDateTickers = Number(job.missingCurrentDateTickers ?? Math.max(0, job.totalTickers - currentDateTickers));
-    let currentDateCoveragePct = Number(job.currentDateCoveragePct ?? 0);
-    const batchSize = Math.max(1, options?.batchSize ?? DEFAULT_POST_CLOSE_BARS_BATCH_SIZE);
-    const maxBatches = Math.max(1, options?.maxBatches ?? DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK);
+    const { batchSize, maxBatches } = boundPostCloseProviderWork(options ?? {});
     let processedBatchCount = 0;
+    const provider = getProvider(env, { fallbackEnabled: false });
 
-    while (cursorOffset < job.totalTickers && processedBatchCount < maxBatches) {
-      const batchTickers = await loadPostCloseDailyBarUniverseBatch(env, cursorOffset, batchSize);
-      if (batchTickers.length === 0) break;
+    while (processedBatchCount < maxBatches) {
+      if (cursorOffset >= job.totalTickers) cursorOffset = 0;
+      let candidateItems = await loadPostCloseJobItemBatch(env, job.id, cursorOffset, batchSize);
+      if (candidateItems.length === 0) {
+        if (cursorOffset > 0) {
+          cursorOffset = 0;
+          continue;
+        }
+        break;
+      }
+      const candidateEndOrdinal = candidateItems.at(-1)?.ordinal ?? cursorOffset;
+      const unsupportedTickers = await loadKnownUnsupportedAlpacaTickers(
+        env,
+        candidateItems.map((item) => item.ticker),
+      );
+      if (unsupportedTickers.size > 0) {
+        await updatePostCloseJobItems(env, job.id, Array.from(unsupportedTickers), {
+          status: "unsupported",
+          nextAttemptAt: null,
+          leaseExpiresAt: null,
+          leaseToken: null,
+          lastError: "Ticker is not present in Alpaca's active US-equity asset catalog.",
+        });
+        candidateItems = candidateItems.filter((item) => !unsupportedTickers.has(item.ticker));
+      }
+      if (candidateItems.length === 0) {
+        cursorOffset = candidateEndOrdinal + 1;
+        processedBatchCount += 1;
+        continue;
+      }
+      const sourceFeed = (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+      const historyCandidates = candidateItems.filter((item) => Number(item.historyRequired) === 1);
+      const historyStates = await loadOverviewHistoryStates(
+        env,
+        historyCandidates.map((item) => item.ticker),
+        sourceFeed,
+      );
+      const batchPlan = planPostCloseProviderBatch({
+        items: candidateItems,
+        historyStates,
+        tradingDate: job.tradingDate,
+        batchSize,
+      });
+      const selectedBatchItems = batchPlan.items;
+      const refreshStartDate = batchPlan.refreshStartDate;
+      const historyLookbackStart = batchPlan.historyLookbackStart;
+      activeLeaseToken = crypto.randomUUID();
+      const itemLeaseExpiresAt = new Date(Date.now() + POST_CLOSE_ITEM_LEASE_MS).toISOString();
+      const batchItems = await leasePostCloseJobItems(
+        env,
+        job.id,
+        selectedBatchItems,
+        activeLeaseToken,
+        itemLeaseExpiresAt,
+      );
+      if (batchItems.length === 0) {
+        cursorOffset = (selectedBatchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
+        activeLeaseToken = null;
+        continue;
+      }
+      const batchTickers = batchItems.map((item) => item.ticker);
+      leasedItems = batchItems;
       const providerKey = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
-      const protectedTickers = await loadPostCloseNoDataBackoffProtectedTickers(env, batchTickers);
       const preCurrentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
       await clearProviderSymbolBackoff(env, providerKey, Array.from(preCurrentTickers));
-      const backoffEligibleTickers = batchTickers.filter((ticker) => !protectedTickers.has(ticker) && !preCurrentTickers.has(ticker));
-      const activeBackoffTickers = await loadActiveProviderBackoffTickers(env, providerKey, backoffEligibleTickers);
-      const tickers = batchTickers.filter((ticker) => !activeBackoffTickers.has(ticker));
       let refresh = { fetchedRows: 0, writtenRows: 0, currentDateTickers: 0 };
-      if (tickers.length > 0) {
+      if (refreshStartDate < job.tradingDate || preCurrentTickers.size < batchTickers.length) {
         refresh = await refreshDailyBarsIncremental(env, {
-          tickers,
-          startDate: job.tradingDate,
+          provider,
+          tickers: batchTickers,
+          startDate: refreshStartDate,
           endDate: job.tradingDate,
+          replaceExisting: true,
+          providerBatchSize: MAX_POST_CLOSE_PROVIDER_BATCH_SIZE,
         });
       }
       const currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
       await clearProviderSymbolBackoff(env, providerKey, Array.from(currentTickers));
-      const noDataTickers = tickers.filter((ticker) => !protectedTickers.has(ticker) && !currentTickers.has(ticker));
-      await recordProviderSymbolNoDataBackoff(env, providerKey, noDataTickers, "post_close_no_current_bar", 7);
-      cursorOffset += batchTickers.length;
+      const completedTickers = batchTickers.filter((ticker) => currentTickers.has(ticker));
+      const missingTickers = batchTickers.filter((ticker) => !currentTickers.has(ticker));
+      const completedHistoryTickers = batchItems
+        .filter((item) => Number(item.historyRequired) === 1 && currentTickers.has(item.ticker))
+        .map((item) => item.ticker);
+      await checkpointOverviewHistoryStates(
+        env,
+        completedHistoryTickers,
+        sourceFeed,
+        historyLookbackStart,
+        job.tradingDate,
+      );
+      await updatePostCloseJobItems(env, job.id, completedTickers, {
+        status: "completed",
+        barDate: job.tradingDate,
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
+        leaseToken: null,
+        expectedLeaseToken: activeLeaseToken,
+        lastError: null,
+      });
+      const missingByAttempt = new Map<number, string[]>();
+      for (const item of batchItems) {
+        if (!missingTickers.includes(item.ticker)) continue;
+        const itemAttempt = Math.max(1, Number(item.attemptCount ?? 1));
+        const rows = missingByAttempt.get(itemAttempt) ?? [];
+        rows.push(item.ticker);
+        missingByAttempt.set(itemAttempt, rows);
+      }
+      for (const [itemAttempt, itemTickers] of missingByAttempt) {
+        await updatePostCloseJobItems(env, job.id, itemTickers, {
+          status: "missing",
+          nextAttemptAt: new Date(Date.now() + retryDelayMinutes(itemAttempt) * 60_000).toISOString(),
+          leaseExpiresAt: null,
+          leaseToken: null,
+          expectedLeaseToken: activeLeaseToken,
+          lastError: `No Alpaca ${env.ALPACA_FEED ?? "iex"} bar was returned for ${job.tradingDate}.`,
+        });
+      }
+      cursorOffset = (batchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
       fetchedRows += refresh.fetchedRows;
       writtenRows += refresh.writtenRows;
-      currentDateTickers += currentTickers.size;
-      missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
-      currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
       processedBatchCount += 1;
+      leasedItems = [];
+      activeLeaseToken = null;
+      const summary = await loadPostCloseJobItemSummary(env, job.id);
+      const currentDateTickers = summary.completedCount;
+      const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
+      const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
       await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
         status: "running",
-        processedTickers: cursorOffset,
+        processedTickers: currentDateTickers,
         cursorOffset,
         fetchedRows,
         writtenRows,
         currentDateTickers,
         missingCurrentDateTickers,
         currentDateCoveragePct,
+        leaseExpiresAt: null,
       });
     }
 
-    if (cursorOffset >= job.totalTickers) {
+    const summary = await loadPostCloseJobItemSummary(env, job.id);
+    const currentDateTickers = summary.completedCount;
+    const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
+    const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
+    if (summary.incompleteCount === 0) {
       await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
         status: "completed",
-        processedTickers: cursorOffset,
-        cursorOffset,
+        processedTickers: currentDateTickers,
+        cursorOffset: job.totalTickers,
         completedAt: new Date().toISOString(),
         fetchedRows,
         writtenRows,
         currentDateTickers,
         missingCurrentDateTickers,
         currentDateCoveragePct,
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
+      });
+    } else {
+      const nextAttemptAt = summary.readyCount > 0
+        ? null
+        : summary.nextAttemptAt ?? new Date(Date.now() + POST_CLOSE_RETRY_MINUTES * 60_000).toISOString();
+      await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
+        status: "queued",
+        processedTickers: currentDateTickers,
+        cursorOffset: cursorOffset >= job.totalTickers ? 0 : cursorOffset,
+        fetchedRows,
+        writtenRows,
+        currentDateTickers,
+        missingCurrentDateTickers,
+        currentDateCoveragePct,
+        nextAttemptAt,
+        leaseExpiresAt: null,
       });
     }
   } catch (error) {
+    const errorCode = classifyPostCloseError(error);
+    const retryGroups = new Map<string, string[]>();
+    for (const item of leasedItems) {
+      const itemAttempt = Math.max(1, Number(item.attemptCount ?? 1));
+      const retryAt = retryAtForPostCloseError(error, itemAttempt);
+      const key = retryAt ?? "terminal";
+      const rows = retryGroups.get(key) ?? [];
+      rows.push(item.ticker);
+      retryGroups.set(key, rows);
+    }
+    for (const [retryKey, tickers] of retryGroups) {
+      await updatePostCloseJobItems(env, job.id, tickers, {
+        status: errorCode,
+        nextAttemptAt: retryKey === "terminal" ? null : retryKey,
+        leaseExpiresAt: null,
+        leaseToken: null,
+        expectedLeaseToken: activeLeaseToken,
+        lastError: error instanceof Error ? error.message : "Post-close daily bar refresh failed.",
+      });
+    }
+    const retryTimes = Array.from(retryGroups.keys()).filter((value) => value !== "terminal").sort();
+    const nextAttemptAt = retryTimes[0]
+      ?? (leasedItems.length === 0 ? retryAtForPostCloseError(error, attemptCount) : null);
     await updatePostCloseDailyBarRefreshJobRecord(env, job.id, {
-      status: "failed",
+      status: errorCode === "auth-blocked" ? "failed" : "queued",
       error: error instanceof Error ? error.message : "Post-close daily bar refresh failed.",
-      completedAt: new Date().toISOString(),
+      errorCode,
+      nextAttemptAt,
+      leaseExpiresAt: null,
+      completedAt: errorCode === "auth-blocked" ? new Date().toISOString() : null,
     });
   }
 
@@ -618,6 +1144,7 @@ export async function loadLatestPostCloseDailyBarRefreshJobForDate(
   env: Env,
   tradingDate: string,
 ): Promise<PostCloseDailyBarRefreshJob | null> {
+  await ensurePostCloseRetrySchema(env);
   const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(env, tradingDate);
   return record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
 }

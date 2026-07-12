@@ -125,9 +125,9 @@ function quoteOverlayDetail(status: OverviewFreshnessContext): string | null {
   const returned = status.quoteOverlayReturnedCount;
   if (typeof requested === "number" && requested > 0 && typeof returned === "number" && returned < requested) {
     const missing = compactTickerList(status.quoteOverlayMissingSample, 5);
-    return `Live quote snapshots ${returned}/${requested}${missing ? `; missing ${missing}` : ""}`;
+    return `Current-session data ${returned}/${requested}${missing ? `; unavailable ${missing}` : ""}`;
   }
-  if (status.quoteOverlayError) return `Live quote snapshot error: ${status.quoteOverlayError}`;
+  if (status.quoteOverlayError) return `Current-data provider error: ${status.quoteOverlayError}`;
   return null;
 }
 
@@ -198,10 +198,10 @@ export function deriveOverviewFreshnessSummary({
     : "warning";
 
   const details = [
-    counts.needsReview > 0 ? `${counts.needsReview} live quote rows need review` : null,
-    counts.stale > 0 ? `${counts.stale} live quote stale` : null,
-    counts.unavailable > 0 ? `${counts.unavailable} live quote unavailable` : null,
-    counts.unverified > 0 ? `${counts.unverified} quote unverified` : null,
+    counts.needsReview > 0 ? `${counts.needsReview} current-data rows need review` : null,
+    counts.stale > 0 ? `${counts.stale} current-data rows stale` : null,
+    counts.unavailable > 0 ? `${counts.unavailable} current-data rows unavailable` : null,
+    counts.unverified > 0 ? `${counts.unverified} source unsupported` : null,
     counts.historyNeedsReview > 0 ? `${counts.historyNeedsReview} history rows need review` : null,
     counts.historyStale > 0 ? `${counts.historyStale} history stale` : null,
     counts.historyUnavailable > 0 ? `${counts.historyUnavailable} history unavailable` : null,
@@ -216,7 +216,7 @@ export function deriveOverviewFreshnessSummary({
     : missingFreshness
       ? "Overview freshness unknown"
       : hasDangerQuoteProblem
-        ? "Live quote freshness incomplete"
+        ? "Current-session data incomplete"
         : status.freshnessStatus === "stale" || counts.historyStale > 0 || counts.historyUnavailable > 0
           ? "Historical overview data stale"
           : status.freshnessStatus === "partial" || counts.historyNeedsReview > 0
@@ -224,8 +224,8 @@ export function deriveOverviewFreshnessSummary({
             : hasBreadthProblems
               ? "Breadth data stale"
             : counts.unverified > 0
-              ? "Unverified overview quote rows"
-              : "Partial live quote coverage";
+              ? "Unsupported overview rows"
+              : "Current-session coverage incomplete";
 
   const message = status.freshnessWarning
     ?? (!dashboardAvailable
@@ -233,10 +233,10 @@ export function deriveOverviewFreshnessSummary({
       : missingFreshness
         ? "Freshness diagnostics are missing for the displayed Overview data."
         : hasQuoteProblems
-          ? "Live quote snapshots are incomplete. Use the quote audit before acting on this dashboard."
+          ? "Current-session values are incomplete. Unavailable fields are hidden; use the data audit for provider details."
           : hasBreadthProblems
             ? "Live quotes and overview snapshot are current, but breadth history is lagging."
-          : "Live quotes are current, but stored daily bars are lagging for historical metrics.");
+          : "Current scalar values are available, but stored daily bars are lagging for historical metrics.");
 
   return {
     tone,

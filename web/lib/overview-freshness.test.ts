@@ -89,7 +89,7 @@ test("overview freshness marks stale critical symbols as danger", () => {
   });
 
   assert.equal(summary?.tone, "danger");
-  assert.equal(summary?.title, "Live quote freshness incomplete");
+  assert.equal(summary?.title, "Current-session data incomplete");
   assert.ok(summary?.details.includes("Critical historical symbols: XOI, VIX"));
 });
 
@@ -131,7 +131,7 @@ test("overview freshness counts stale, unavailable, and unverified rows", () => 
   assert.equal(summary?.counts.stale, 1);
   assert.equal(summary?.counts.unavailable, 1);
   assert.equal(summary?.counts.unverified, 1);
-  assert.ok(summary?.details.includes("3 live quote rows need review"));
+  assert.ok(summary?.details.includes("3 current-data rows need review"));
 });
 
 test("overview freshness separates fresh live quotes from stale history", () => {
@@ -155,7 +155,7 @@ test("overview freshness separates fresh live quotes from stale history", () => 
   assert.equal(summary?.title, "Historical overview data stale");
   assert.equal(summary?.counts.needsReview, 0);
   assert.equal(summary?.counts.historyNeedsReview, 1);
-  assert.ok(summary?.message.includes("Live quotes are current"));
+  assert.ok(summary?.message.includes("Current scalar values are available"));
 });
 
 test("overview freshness reports stale breadth separately from live quotes", () => {

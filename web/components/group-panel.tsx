@@ -9,22 +9,22 @@ import { ChartGridPager } from "./chart-grid-pager";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
-import type { BarFreshnessStatus, QuoteFreshnessStatus } from "@/types/dashboard";
+import type { BarFreshnessStatus, OverviewCurrentData, QuoteFreshnessStatus } from "@/types/dashboard";
 
 const CHARTS_PER_PAGE = 20;
 
 type Row = {
   ticker: string;
   displayName: string | null;
-  price: number;
-  change1d: number;
-  change1w: number;
-  change5d: number;
+  price: number | null;
+  change1d: number | null;
+  change1w: number | null;
+  change5d: number | null;
   change3m: number | null;
   change6m: number | null;
-  ytd: number;
-  pctFrom52wHigh: number;
-  sparkline: number[];
+  ytd: number | null;
+  pctFrom52wHigh: number | null;
+  sparkline: number[] | null;
   relativeStrength30dVsSpy: number[] | null;
   above20Sma: boolean | null;
   above50Sma: boolean | null;
@@ -38,6 +38,7 @@ type Row = {
   quoteFreshnessStatus?: QuoteFreshnessStatus;
   quoteFreshnessReason?: string | null;
   quoteSource?: string | null;
+  currentData?: OverviewCurrentData;
   holdings: string[] | null;
 };
 
@@ -80,12 +81,15 @@ const titleCase = (value: string): string => {
   if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
-const hasLiveQuoteMetrics = (row: Row) => row.quoteFreshnessStatus === "fresh" && typeof row.quotePrice === "number" && typeof row.quoteChange1d === "number";
-const hasHistoricalMetrics = (row: Row) => Boolean(row.barDate);
+const hasCurrentField = (row: Row, field: string): boolean => {
+  if (row.currentData) return Boolean(row.currentData.fieldSources[field]);
+  return row.quoteFreshnessStatus === "fresh";
+};
+const hasHistoricalMetrics = (row: Row) => row.barFreshnessStatus === "fresh";
 const quoteFreshnessLabel = (status: QuoteFreshnessStatus | undefined): string => {
   if (status === "stale") return "Stale";
   if (status === "unavailable") return "N/A";
-  if (status === "unsupported") return "Unverified";
+  if (status === "unsupported") return "Unsupported";
   return "Fresh";
 };
 const quoteFreshnessClass = (status: QuoteFreshnessStatus | undefined): string => {
@@ -97,18 +101,23 @@ const quoteFreshnessClass = (status: QuoteFreshnessStatus | undefined): string =
 
 function QuoteFreshnessBadge({ row }: { row: Row }) {
   const status = row.quoteFreshnessStatus;
-  if (!status || status === "fresh") return null;
+  const retrying = row.currentData?.status === "retrying";
+  if ((!status || status === "fresh") && !retrying) return null;
+  const providerDetails = Object.entries(row.currentData?.providerStatuses ?? {})
+    .map(([provider, diagnostic]) => `${provider}: ${diagnostic.status} (${diagnostic.reason})`)
+    .join(" ");
   const title = [
-    row.quoteFreshnessReason,
+    row.currentData?.reason ?? row.quoteFreshnessReason,
+    providerDetails || null,
     row.barDate ? `Bar date: ${row.barDate}` : null,
     row.quoteSource ? `Source: ${row.quoteSource}` : null,
   ].filter(Boolean).join(" ");
   return (
     <span
-      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(status)}`}
+      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(retrying ? "stale" : status)}`}
       title={title || quoteFreshnessLabel(status)}
     >
-      {quoteFreshnessLabel(status)}
+      {retrying ? "Retrying" : quoteFreshnessLabel(status)}
     </span>
   );
 }
@@ -132,7 +141,7 @@ function HistoryFreshnessBadge({ row }: { row: Row }) {
 
 function SmaStatusIndicator({ value }: { value: boolean | null }) {
   if (value == null) {
-    return <span className="inline-block h-3 w-3" title="Not enough history" />;
+    return <span className="text-xs text-slate-500" title="Current-session SMA status unavailable">N/A</span>;
   }
   if (value) {
     return (
@@ -175,20 +184,22 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       return null;
     };
     const numberValueFor = (row: Row, key: string): number | null => {
-      if (key === "price") return hasLiveQuoteMetrics(row) ? row.quotePrice ?? null : null;
-      if (key === "1D") return hasLiveQuoteMetrics(row) ? row.quoteChange1d ?? null : null;
-      if (!hasHistoricalMetrics(row)) return null;
-      if (key === "1W") return row.change1w ?? null;
-      if (key === "5D") return row.change5d ?? null;
-      if (key === "3M") return row.change3m ?? null;
-      if (key === "6M") return row.change6m ?? null;
-      if (key === "YTD") return row.ytd ?? null;
-      if (key === "pctFrom52WHigh") return row.pctFrom52wHigh ?? null;
+      if (key === "price") return hasCurrentField(row, "price") ? row.quotePrice ?? null : null;
+      if (key === "1D") return hasCurrentField(row, "change1d") ? row.quoteChange1d ?? null : null;
+      if (key === "sparkline" || key === "relativeStrength30dVsSpy") {
+        if (!hasHistoricalMetrics(row)) return null;
+      }
+      if (key === "1W") return hasCurrentField(row, "change1w") ? row.change1w ?? null : null;
+      if (key === "5D") return hasCurrentField(row, "change5d") ? row.change5d ?? null : null;
+      if (key === "3M") return hasCurrentField(row, "change3m") ? row.change3m ?? null : null;
+      if (key === "6M") return hasCurrentField(row, "change6m") ? row.change6m ?? null : null;
+      if (key === "YTD") return hasCurrentField(row, "ytd") ? row.ytd ?? null : null;
+      if (key === "pctFrom52WHigh") return hasCurrentField(row, "pctFrom52wHigh") ? row.pctFrom52wHigh ?? null : null;
       if (key === "sparkline") return row.sparkline?.[row.sparkline.length - 1] ?? null;
       if (key === "relativeStrength30dVsSpy") return regressionSlope(row.relativeStrength30dVsSpy);
-      if (key === "20SMA") return smaSortValue(row.above20Sma);
-      if (key === "50SMA") return smaSortValue(row.above50Sma);
-      if (key === "200SMA") return smaSortValue(row.above200Sma);
+      if (key === "20SMA") return hasCurrentField(row, "above20Sma") ? smaSortValue(row.above20Sma) : null;
+      if (key === "50SMA") return hasCurrentField(row, "above50Sma") ? smaSortValue(row.above50Sma) : null;
+      if (key === "200SMA") return hasCurrentField(row, "above200Sma") ? smaSortValue(row.above200Sma) : null;
       return null;
     };
     copy.sort((a, b) => {
@@ -282,7 +293,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     if (column === "sparkline") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {hasHistoricalMetrics(row) ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
+          {hasHistoricalMetrics(row) && row.sparkline ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
@@ -294,37 +305,37 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       );
     }
     if (column === "price") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{hasLiveQuoteMetrics(row) && typeof row.quotePrice === "number" ? row.quotePrice.toFixed(2) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2">{hasCurrentField(row, "price") && typeof row.quotePrice === "number" ? row.quotePrice.toFixed(2) : "N/A"}</td>;
     }
     if (column === "20SMA") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above20Sma} /></td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={hasCurrentField(row, "above20Sma") ? row.above20Sma : null} /></td>;
     }
     if (column === "50SMA") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above50Sma} /></td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={hasCurrentField(row, "above50Sma") ? row.above50Sma : null} /></td>;
     }
     if (column === "200SMA") {
-      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={row.above200Sma} /></td>;
+      return <td key={`${row.ticker}-${column}`} className="px-3 py-2 text-center"><SmaStatusIndicator value={hasCurrentField(row, "above200Sma") ? row.above200Sma : null} /></td>;
     }
     if (column === "1D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasLiveQuoteMetrics(row) ? cellClass(row.quoteChange1d) : "text-slate-500"}`}>{hasLiveQuoteMetrics(row) ? pct(row.quoteChange1d) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "change1d") ? cellClass(row.quoteChange1d) : "text-slate-500"}`}>{hasCurrentField(row, "change1d") ? pct(row.quoteChange1d) : "N/A"}</td>;
     }
     if (column === "1W") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change1w) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change1w) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "change1w") ? cellClass(row.change1w) : "text-slate-500"}`}>{hasCurrentField(row, "change1w") ? pct(row.change1w) : "N/A"}</td>;
     }
     if (column === "5D") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change5d) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change5d) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "change5d") ? cellClass(row.change5d) : "text-slate-500"}`}>{hasCurrentField(row, "change5d") ? pct(row.change5d) : "N/A"}</td>;
     }
     if (column === "3M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change3m) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change3m) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "change3m") ? cellClass(row.change3m) : "text-slate-500"}`}>{hasCurrentField(row, "change3m") ? pct(row.change3m) : "N/A"}</td>;
     }
     if (column === "6M") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.change6m) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.change6m) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "change6m") ? cellClass(row.change6m) : "text-slate-500"}`}>{hasCurrentField(row, "change6m") ? pct(row.change6m) : "N/A"}</td>;
     }
     if (column === "YTD") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.ytd) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.ytd) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "ytd") ? cellClass(row.ytd) : "text-slate-500"}`}>{hasCurrentField(row, "ytd") ? pct(row.ytd) : "N/A"}</td>;
     }
     if (column === "pctFrom52WHigh") {
-      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasHistoricalMetrics(row) ? cellClass(row.pctFrom52wHigh) : "text-slate-500"}`}>{hasHistoricalMetrics(row) ? pct(row.pctFrom52wHigh) : "N/A"}</td>;
+      return <td key={`${row.ticker}-${column}`} className={`px-3 py-2 ${hasCurrentField(row, "pctFrom52wHigh") ? cellClass(row.pctFrom52wHigh) : "text-slate-500"}`}>{hasCurrentField(row, "pctFrom52wHigh") ? pct(row.pctFrom52wHigh) : "N/A"}</td>;
     }
     return null;
   };
