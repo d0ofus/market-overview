@@ -53,6 +53,7 @@ function createApiScansEnv(input?: {
   snapshots?: MutableSnapshot[];
   rowsBySnapshotId?: Record<string, Array<Record<string, unknown>>>;
   adminSecret?: string;
+  marketDataDb?: D1Database;
 }): Env {
   const presets = [...(input?.presets ?? [])];
   const compilePresets = [...(input?.compilePresets ?? [])];
@@ -94,6 +95,7 @@ function createApiScansEnv(input?: {
 
   return {
     ADMIN_SECRET: input?.adminSecret,
+    MARKET_DATA_DB: input?.marketDataDb,
     DB: {
       prepare(sql: string) {
         const makeBound = (args: unknown[]) => ({
@@ -315,6 +317,89 @@ afterEach(() => {
 });
 
 describe("scans page API", () => {
+  it("loads scan presets from the primary database when market data has a separate binding", async () => {
+    const marketDataPrepare = vi.fn(() => {
+      throw new Error("Scan metadata must not be queried from MARKET_DATA_DB.");
+    });
+    const env = createApiScansEnv({
+      marketDataDb: { prepare: marketDataPrepare } as unknown as D1Database,
+      presets: [{
+        id: "preset-a",
+        name: "Leaders",
+        scanType: "tradingview",
+        isDefault: true,
+        isActive: true,
+        rules: [],
+        prefilterRules: [],
+        benchmarkTicker: null,
+        verticalOffset: 30,
+        rsMaLength: 21,
+        rsMaType: "EMA",
+        newHighLookback: 252,
+        outputMode: "all",
+        sortField: "change",
+        sortDirection: "desc",
+        rowLimit: 100,
+        createdAt: "",
+        updatedAt: "",
+      }],
+      compilePresets: [{
+        id: "compile-daily",
+        name: "Daily",
+        createdAt: "",
+        updatedAt: "",
+        members: [
+          { scanPresetId: "preset-a", scanPresetName: "Leaders", sortOrder: 1 },
+        ],
+      }],
+      snapshots: [{
+        id: "snap-a",
+        presetId: "preset-a",
+        providerLabel: "TV",
+        generatedAt: "2026-03-18T01:00:00.000Z",
+        rowCount: 1,
+        matchedRowCount: 1,
+        status: "ok",
+        error: null,
+      }],
+      rowsBySnapshotId: {
+        "snap-a": [{
+          ticker: "NVDA",
+          name: "NVIDIA",
+          sector: "Technology",
+          industry: "Semiconductors",
+          change1d: 5.3,
+          marketCap: 1,
+          price: 120,
+          avgVolume: 10,
+          priceAvgVolume: 1200,
+          rawJson: JSON.stringify({ relative_volume_10d_calc: 2.1 }),
+        }],
+      },
+    });
+
+    const scanResponse = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/scans?presetId=preset-a"),
+      env as never,
+    );
+    const compiledResponse = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/scans/compile-presets/compile-daily/compiled"),
+      env as never,
+    );
+
+    expect(scanResponse.status).toBe(200);
+    await expect(scanResponse.json()).resolves.toMatchObject({
+      presetId: "preset-a",
+      rows: [{ ticker: "NVDA" }],
+    });
+    expect(compiledResponse.status).toBe(200);
+    await expect(compiledResponse.json()).resolves.toMatchObject({
+      compilePresetId: "compile-daily",
+      rows: [{ ticker: "NVDA" }],
+    });
+    expect(marketDataPrepare).not.toHaveBeenCalled();
+  });
+
   it("exports single scan files with the scan filename format", async () => {
     const env = createApiScansEnv({
       presets: [{
