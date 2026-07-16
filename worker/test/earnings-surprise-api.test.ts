@@ -65,6 +65,40 @@ function createMissingGapSeasonEnv(): Env {
   };
 }
 
+function createMissingSurpriseLiquidityEnv(): Env {
+  return {
+    ADMIN_SECRET: "secret",
+    DB: {
+      prepare(sql: string) {
+        const statement = (args: unknown[]) => ({
+          async first<T>() {
+            if (sql.includes("sqlite_master")) return { count: 1 } as T;
+            if (sql.includes("pragma_table_info")) {
+              return { count: String(args[0] ?? "") === "avg_dollar_volume_30d" ? 0 : 1 } as T;
+            }
+            return null as T;
+          },
+          async all<T>() {
+            return { results: [] as T[] };
+          },
+          async run() {
+            return {};
+          },
+        });
+        return {
+          bind(...args: unknown[]) {
+            return statement(args);
+          },
+          ...statement([]),
+        };
+      },
+      async batch() {
+        return [];
+      },
+    } as unknown as D1Database,
+  };
+}
+
 function createMissingGapEpsEnv(): Env {
   return {
     ADMIN_SECRET: "secret",
@@ -239,6 +273,19 @@ describe("earnings surprise API", () => {
     expect(res.status).toBe(200);
     expect(json.schemaReady).toBe(false);
     expect(json.warning).toContain("0051_earnings_surprises.sql");
+  });
+
+  it("returns a liquidity schema warning before migration 0089", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost/api/earnings/surprises?limit=10"),
+      createMissingSurpriseLiquidityEnv(),
+      {} as ExecutionContext,
+    );
+    const json = await res.json() as { schemaReady?: boolean; warning?: string };
+
+    expect(res.status).toBe(200);
+    expect(json.schemaReady).toBe(false);
+    expect(json.warning).toContain("0089_earnings_surprise_liquidity.sql");
   });
 
   it("returns a schema warning from the public gap endpoint before migration", async () => {

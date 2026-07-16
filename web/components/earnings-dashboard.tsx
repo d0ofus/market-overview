@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, LayoutGrid, Loader2, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Search, Table2 } from "lucide-react";
 import {
   getEarningsGaps,
   getEarningsGapsExportUrl,
@@ -37,6 +37,14 @@ import {
   type ColumnWidthSpec,
   type GapColumnWidthKey,
 } from "@/lib/earnings-column-widths";
+import {
+  buildEarningsGridQuery,
+  gapRowToGridCard,
+  normalizeEarningsResultView,
+  surpriseRowToGridCard,
+  type EarningsResultView,
+} from "@/lib/earnings-multi-chart";
+import { EarningsMultiChartGrid } from "./earnings-multi-chart-grid";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 
 type SortKey =
@@ -147,6 +155,9 @@ const SURPRISE_COLUMNS_STORAGE_KEY = "earnings-surprises-column-order-v1";
 const GAP_COLUMNS_STORAGE_KEY = "earnings-gaps-column-order-v1";
 const GAP_COLUMN_WIDTHS_STORAGE_KEY = "earnings-gaps-column-widths-v1";
 const GAP_FONT_SIZE_STORAGE_KEY = "earnings-gaps-font-size-v1";
+const SURPRISE_RESULT_VIEW_STORAGE_KEY = "earnings-surprises-result-view-v1";
+const GAP_RESULT_VIEW_STORAGE_KEY = "earnings-gaps-result-view-v1";
+const DEFAULT_CHARTS_PER_PAGE = 12;
 const DEFAULT_SURPRISE_COLUMN_ORDER: SurpriseColumnKey[] = [
   "reportDate",
   "ticker",
@@ -466,6 +477,61 @@ function usePersistedGapFontSize(storageKey: string) {
   return [fontSize, setFontSize] as const;
 }
 
+function usePersistedResultView(storageKey: string) {
+  const [view, setView] = useState<EarningsResultView>("table");
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    try {
+      setView(normalizeEarningsResultView(window.localStorage.getItem(storageKey)));
+    } catch {
+      setView("table");
+    } finally {
+      setHydrated(true);
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(storageKey, view);
+    } catch {
+      // Browser storage can be unavailable in private or locked-down profiles.
+    }
+  }, [hydrated, storageKey, view]);
+
+  return [view, setView] as const;
+}
+
+function ResultViewToggle({ view, onChange }: { view: EarningsResultView; onChange: (view: EarningsResultView) => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-borderSoft/70 bg-panel/80 px-4 py-3">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-100">Results View</h3>
+        <p className="text-xs text-slate-500">Table and chart pages are tracked independently.</p>
+      </div>
+      <div role="group" aria-label="Earnings results view" className="inline-flex overflow-hidden rounded border border-borderSoft/80 bg-panelSoft/80">
+        <button
+          type="button"
+          className={`inline-flex h-9 items-center gap-2 px-3 text-sm transition ${view === "table" ? "bg-accent text-slate-950" : "text-slate-200 hover:bg-panelSoft"}`}
+          aria-pressed={view === "table"}
+          onClick={() => onChange("table")}
+        >
+          <Table2 className="h-4 w-4" /> Table
+        </button>
+        <button
+          type="button"
+          className={`inline-flex h-9 items-center gap-2 border-l border-borderSoft/80 px-3 text-sm transition ${view === "grid" ? "bg-accent text-slate-950" : "text-slate-200 hover:bg-panelSoft"}`}
+          aria-pressed={view === "grid"}
+          onClick={() => onChange("grid")}
+        >
+          <LayoutGrid className="h-4 w-4" /> Multi Grid
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ResultsPager({
   loading,
   limit,
@@ -717,6 +783,13 @@ function EarningsSurprisesPanel() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [query, setQuery] = useState<EarningsSurprisesQuery>(() => draftToQuery(defaultDraftFilters(), "epsSurprisePct", "desc"));
   const [data, setData] = useState<EarningsSurprisesResponse | null>(null);
+  const [resultView, setResultView] = usePersistedResultView(SURPRISE_RESULT_VIEW_STORAGE_KEY);
+  const [gridPage, setGridPage] = useState(1);
+  const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
+  const [gridData, setGridData] = useState<EarningsSurprisesResponse | null>(null);
+  const [gridLoading, setGridLoading] = useState(false);
+  const [gridError, setGridError] = useState<string | null>(null);
+  const [gridReloadToken, setGridReloadToken] = useState(0);
   const [status, setStatus] = useState<EarningsSurprisesStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
@@ -729,6 +802,9 @@ function EarningsSurprisesPanel() {
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
+  const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
+  const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
+  const gridCards = useMemo(() => (gridData?.rows ?? []).map(surpriseRowToGridCard), [gridData]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
   const rows = data?.rows ?? [];
@@ -780,8 +856,34 @@ function EarningsSurprisesPanel() {
     };
   }, [queryKey]);
 
+  useEffect(() => {
+    if (resultView !== "grid") return;
+    let active = true;
+    setGridLoading(true);
+    setGridError(null);
+    getEarningsSurprises(gridQuery)
+      .then((nextData) => {
+        if (active) setGridData(nextData);
+      })
+      .catch((err) => {
+        if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings surprise charts.");
+      })
+      .finally(() => {
+        if (active) setGridLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [gridQueryKey, gridReloadToken, resultView]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
+    if (gridPage > totalPages) setGridPage(totalPages);
+  }, [chartsPerPage, gridData?.total, gridPage]);
+
   const applyFilters = () => {
     setMessage(null);
+    setGridPage(1);
     setQuery(draftToQuery(draft, sortKey, sortDir, 0));
   };
 
@@ -790,6 +892,7 @@ function EarningsSurprisesPanel() {
     setDraft(next);
     setSortKey("epsSurprisePct");
     setSortDir("desc");
+    setGridPage(1);
     setQuery(draftToQuery(next, "epsSurprisePct", "desc", 0));
   };
 
@@ -801,6 +904,7 @@ function EarningsSurprisesPanel() {
       const result = await syncAdminEarningsSurprises(mode);
       setMessage(`${mode === "backfill" ? "Backfill" : "Sync"} complete: ${result.rowsUpserted} row${result.rowsUpserted === 1 ? "" : "s"} upserted.`);
       await load();
+      setGridReloadToken((current) => current + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to sync earnings surprises.");
     } finally {
@@ -812,6 +916,7 @@ function EarningsSurprisesPanel() {
     const nextDir = key === sortKey ? (sortDir === "asc" ? "desc" : "asc") : key === "ticker" || key === "companyName" || key === "season" || key === "sector" || key === "industry" || key === "exchange" ? "asc" : "desc";
     setSortKey(key);
     setSortDir(nextDir);
+    setGridPage(1);
     setQuery((current) => ({ ...current, sort: key, sortDir: nextDir, offset: 0 }));
   };
 
@@ -1056,7 +1161,15 @@ function EarningsSurprisesPanel() {
               <Search className="h-4 w-4" />
               Apply
             </button>
-            <button type="button" className={BUTTON_CLASS} disabled={loading || Boolean(syncing)} onClick={() => void load()}>
+            <button
+              type="button"
+              className={BUTTON_CLASS}
+              disabled={loading || gridLoading || Boolean(syncing)}
+              onClick={() => {
+                void load();
+                setGridReloadToken((current) => current + 1);
+              }}
+            >
               <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
               Reload
             </button>
@@ -1072,6 +1185,9 @@ function EarningsSurprisesPanel() {
         </div>
       </div>
 
+      <ResultViewToggle view={resultView} onChange={setResultView} />
+
+      {resultView === "table" ? (
       <div className="rounded border border-borderSoft/70 bg-panel/80">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
           <div>
@@ -1126,6 +1242,21 @@ function EarningsSurprisesPanel() {
           </table>
         </div>
       </div>
+      ) : (
+        <EarningsMultiChartGrid
+          cards={gridCards}
+          total={gridData?.total ?? 0}
+          page={gridPage}
+          pageSize={chartsPerPage}
+          loading={gridLoading}
+          error={gridError}
+          onPageChange={setGridPage}
+          onPageSizeChange={(nextPageSize) => {
+            setChartsPerPage(nextPageSize);
+            setGridPage(1);
+          }}
+        />
+      )}
       </section>
       <HoverChartPreviewPanel
         preview={hoverChart.preview}
@@ -1151,6 +1282,13 @@ function EarningsGapsPanel() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [query, setQuery] = useState<EarningsGapsQuery>(() => gapDraftToQuery(defaultGapDraftFilters(), "qualifyingGapPct", "desc"));
   const [data, setData] = useState<EarningsGapsResponse | null>(null);
+  const [resultView, setResultView] = usePersistedResultView(GAP_RESULT_VIEW_STORAGE_KEY);
+  const [gridPage, setGridPage] = useState(1);
+  const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
+  const [gridData, setGridData] = useState<EarningsGapsResponse | null>(null);
+  const [gridLoading, setGridLoading] = useState(false);
+  const [gridError, setGridError] = useState<string | null>(null);
+  const [gridReloadToken, setGridReloadToken] = useState(0);
   const [status, setStatus] = useState<EarningsGapsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
@@ -1170,6 +1308,9 @@ function EarningsGapsPanel() {
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
+  const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
+  const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
+  const gridCards = useMemo(() => (gridData?.rows ?? []).map(gapRowToGridCard), [gridData]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
   const rows = data?.rows ?? [];
@@ -1222,8 +1363,34 @@ function EarningsGapsPanel() {
     };
   }, [queryKey]);
 
+  useEffect(() => {
+    if (resultView !== "grid") return;
+    let active = true;
+    setGridLoading(true);
+    setGridError(null);
+    getEarningsGaps(gridQuery)
+      .then((nextData) => {
+        if (active) setGridData(nextData);
+      })
+      .catch((err) => {
+        if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings gap-up charts.");
+      })
+      .finally(() => {
+        if (active) setGridLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [gridQueryKey, gridReloadToken, resultView]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
+    if (gridPage > totalPages) setGridPage(totalPages);
+  }, [chartsPerPage, gridData?.total, gridPage]);
+
   const applyFilters = () => {
     setMessage(null);
+    setGridPage(1);
     setQuery(gapDraftToQuery(draft, sortKey, sortDir, 0));
   };
 
@@ -1232,6 +1399,7 @@ function EarningsGapsPanel() {
     setDraft(next);
     setSortKey("qualifyingGapPct");
     setSortDir("desc");
+    setGridPage(1);
     setQuery(gapDraftToQuery(next, "qualifyingGapPct", "desc", 0));
   };
 
@@ -1246,6 +1414,7 @@ function EarningsGapsPanel() {
         const result = await syncAdminEarningsGaps(mode);
         setMessage(`Gap sync complete: ${result.rowsUpserted} qualifying row${result.rowsUpserted === 1 ? "" : "s"} upserted from ${result.rowsSeen} release row${result.rowsSeen === 1 ? "" : "s"}.`);
         await load();
+        setGridReloadToken((current) => current + 1);
         return;
       }
 
@@ -1296,6 +1465,7 @@ function EarningsGapsPanel() {
         setMessage(`Backfilled ${failedSlice}; continuing... batch ${batchCount}/${totalBatches}.`);
       }
       await load();
+      setGridReloadToken((current) => current + 1);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to sync earnings gap-ups.";
       const retry = mode === "backfill" ? ` Failed batch: ${failedSlice}. Retry cursor: ${retryCursor ?? "start"}.` : "";
@@ -1309,6 +1479,7 @@ function EarningsGapsPanel() {
     const nextDir = key === sortKey ? (sortDir === "asc" ? "desc" : "asc") : key === "ticker" || key === "companyName" || key === "season" || key === "gapSource" || key === "sector" || key === "industry" || key === "exchange" ? "asc" : "desc";
     setSortKey(key);
     setSortDir(nextDir);
+    setGridPage(1);
     setQuery((current) => ({ ...current, sort: key, sortDir: nextDir, offset: 0 }));
   };
 
@@ -1653,7 +1824,15 @@ function EarningsGapsPanel() {
               <Search className="h-4 w-4" />
               Apply
             </button>
-            <button type="button" className={BUTTON_CLASS} disabled={loading || Boolean(syncing)} onClick={() => void load()}>
+            <button
+              type="button"
+              className={BUTTON_CLASS}
+              disabled={loading || gridLoading || Boolean(syncing)}
+              onClick={() => {
+                void load();
+                setGridReloadToken((current) => current + 1);
+              }}
+            >
               <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
               Reload
             </button>
@@ -1669,6 +1848,9 @@ function EarningsGapsPanel() {
         </div>
       </div>
 
+      <ResultViewToggle view={resultView} onChange={setResultView} />
+
+      {resultView === "table" ? (
       <div className="min-w-0 max-w-full rounded border border-borderSoft/70 bg-panel/80">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
           <div>
@@ -1775,6 +1957,21 @@ function EarningsGapsPanel() {
           </table>
         </div>
       </div>
+      ) : (
+        <EarningsMultiChartGrid
+          cards={gridCards}
+          total={gridData?.total ?? 0}
+          page={gridPage}
+          pageSize={chartsPerPage}
+          loading={gridLoading}
+          error={gridError}
+          onPageChange={setGridPage}
+          onPageSizeChange={(nextPageSize) => {
+            setChartsPerPage(nextPageSize);
+            setGridPage(1);
+          }}
+        />
+      )}
       </section>
       <HoverChartPreviewPanel
         preview={hoverChart.preview}

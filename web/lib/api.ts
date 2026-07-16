@@ -685,6 +685,7 @@ export type EarningsSurpriseRow = {
   sector: string | null;
   industry: string | null;
   marketCap: number | null;
+  avgDollarVolume30d: number | null;
   reportDate: string;
   reportTimestamp: number | null;
   reportTime: string | null;

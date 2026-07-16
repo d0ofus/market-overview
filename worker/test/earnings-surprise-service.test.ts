@@ -46,6 +46,9 @@ function tvRow(input: {
   epsSurprisePct: number;
   reportIso: string;
   fiscalIso: string;
+  close?: number | null;
+  avgVolume30d?: number | null;
+  avgDollarVolume30d?: number | null;
 }) {
   const epsSurprise = input.epsActual - input.epsEstimate;
   return {
@@ -69,6 +72,9 @@ function tvRow(input: {
       unix(input.reportIso),
       input.epsSurprisePct >= 0 ? 1 : -1,
       unix(input.fiscalIso),
+      input.close ?? null,
+      input.avgVolume30d ?? null,
+      input.avgDollarVolume30d ?? null,
     ],
   };
 }
@@ -155,6 +161,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
         __args: args,
         async first<T>() {
           if (sql.includes("sqlite_master")) return { count: 1 } as T;
+          if (sql.includes("pragma_table_info")) return { count: 1 } as T;
           if (sql.includes("SELECT COUNT(*) as count FROM earnings_surprise_events")) {
             return { count: applyFilters(sql, args).length } as T;
           }
@@ -255,6 +262,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
           sector,
           industry,
           marketCap,
+          avgDollarVolume30d,
           reportDate,
           reportTimestamp,
           reportTime,
@@ -283,6 +291,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
           sector: sector == null ? null : String(sector),
           industry: industry == null ? null : String(industry),
           marketCap: marketCap == null ? null : Number(marketCap),
+          avgDollarVolume30d: avgDollarVolume30d == null ? null : Number(avgDollarVolume30d),
           reportDate: String(reportDate),
           reportTimestamp: reportTimestamp == null ? null : Number(reportTimestamp),
           reportTime: reportTime == null ? null : String(reportTime),
@@ -328,6 +337,7 @@ describe("earnings surprise service", () => {
     expect(positive.sort).toEqual({ sortBy: "eps_surprise_percent_fq", sortOrder: "desc" });
     expect(positive.range).toEqual([500, 750]);
     expect(positive.filter).toContainEqual({ left: "eps_surprise_percent_fq", operation: "greater", right: 0 });
+    expect(positive.columns.slice(-3)).toEqual(["close", "average_volume_30d_calc", "AvgValue.Traded_30d"]);
 
     const negative = buildTradingViewEarningsSurprisePayload({
       startDate: "2026-01-01",
@@ -353,6 +363,9 @@ describe("earnings surprise service", () => {
           epsSurprisePct: 3.08,
           reportIso: "2026-05-01T20:30:00Z",
           fiscalIso: "2026-03-31T00:00:00Z",
+          close: 200,
+          avgVolume30d: 50_000_000,
+          avgDollarVolume30d: 10_500_000_000,
         }),
       ],
     });
@@ -367,8 +380,30 @@ describe("earnings surprise service", () => {
       epsActual: 2.01,
       epsSurprisePct: 3.08,
       revenueSurprisePct: 5.263157,
+      avgDollarVolume30d: 10_500_000_000,
     });
     expect(deriveEarningsSeason(null, "2026-05-20")).toBe("2026 Q2");
+  });
+
+  it("derives TradingView dollar volume from close and average volume when the direct field is null", () => {
+    const [derived] = parseTradingViewEarningsSurpriseRows({
+      data: [tvRow({
+        symbol: "MSFT",
+        name: "Microsoft",
+        exchange: "NASDAQ",
+        sector: "Tech",
+        industry: "Software",
+        marketCap: 3_000_000_000_000,
+        epsActual: 3,
+        epsEstimate: 2.5,
+        epsSurprisePct: 20,
+        reportIso: "2026-05-02T20:30:00Z",
+        fiscalIso: "2026-03-31T00:00:00Z",
+        close: 450,
+        avgVolume30d: 20_000_000,
+      })],
+    });
+    expect(derived.avgDollarVolume30d).toBe(9_000_000_000);
   });
 
   it("skips TradingView preferred and non-common issue rows", () => {
@@ -440,13 +475,14 @@ describe("earnings surprise service", () => {
     expect(env.__events).toHaveLength(1);
     expect(env.__events[0].ticker).toBe("FMPA");
     expect(env.__events[0].epsSurprisePct).toBeCloseTo(20);
+    expect(env.__events[0].avgDollarVolume30d).toBeNull();
   });
 
   it("queries filters, sorting, pagination, and facets", async () => {
     const env = createEnv([
-      { id: "1", provider: "tradingview", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", exchange: "NASDAQ", companyName: "Apple Inc.", sector: "Tech", industry: "Hardware", marketCap: 3_000_000_000_000, reportDate: "2026-05-01", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 2, epsEstimate: 1.8, epsSurprise: 0.2, epsSurprisePct: 11.1, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
-      { id: "2", provider: "tradingview", sourceSymbol: "NYSE:LOW", ticker: "LOW", exchange: "NYSE", companyName: "Low Inc.", sector: "Retail", industry: "Home Improvement", marketCap: 80_000_000_000, reportDate: "2026-05-03", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 1, epsEstimate: 1.2, epsSurprise: -0.2, epsSurprisePct: -16.7, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
-      { id: "3", provider: "tradingview", sourceSymbol: "OTC:OTCM", ticker: "OTCM", exchange: "OTC", companyName: "OTC Markets", sector: "Finance", industry: "Financial Publishing", marketCap: 700_000_000, reportDate: "2026-05-04", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 1, epsEstimate: 0.9, epsSurprise: 0.1, epsSurprisePct: 11.11, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
+      { id: "1", provider: "tradingview", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", exchange: "NASDAQ", companyName: "Apple Inc.", sector: "Tech", industry: "Hardware", marketCap: 3_000_000_000_000, avgDollarVolume30d: 12_000_000_000, reportDate: "2026-05-01", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 2, epsEstimate: 1.8, epsSurprise: 0.2, epsSurprisePct: 11.1, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
+      { id: "2", provider: "tradingview", sourceSymbol: "NYSE:LOW", ticker: "LOW", exchange: "NYSE", companyName: "Low Inc.", sector: "Retail", industry: "Home Improvement", marketCap: 80_000_000_000, avgDollarVolume30d: null, reportDate: "2026-05-03", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 1, epsEstimate: 1.2, epsSurprise: -0.2, epsSurprisePct: -16.7, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
+      { id: "3", provider: "tradingview", sourceSymbol: "OTC:OTCM", ticker: "OTCM", exchange: "OTC", companyName: "OTC Markets", sector: "Finance", industry: "Financial Publishing", marketCap: 700_000_000, avgDollarVolume30d: null, reportDate: "2026-05-04", reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: 1, epsEstimate: 0.9, epsSurprise: 0.1, epsSurprisePct: 11.11, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null },
     ]);
 
     const result = await queryEarningsSurprises(env, {
@@ -462,11 +498,12 @@ describe("earnings surprise service", () => {
 
     expect(result.total).toBe(1);
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(result.rows[0].avgDollarVolume30d).toBe(12_000_000_000);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
   });
 
   it("excludes preferred issues from query, export, status, and supports limit zero", async () => {
-    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, avgDollarVolume30d: null, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
     const env = createEnv([
       { ...base, id: "1", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", reportDate: "2026-05-01", epsSurprisePct: 5 },
       { ...base, id: "2", sourceSymbol: "NASDAQ:FBIOP", ticker: "FBIOP", companyName: "Fortress Biotech Series A Cumulative Redeemable Perpetual Preferred Stock", reportDate: "2026-05-02", epsSurprisePct: 50 },
@@ -497,7 +534,7 @@ describe("earnings surprise service", () => {
   });
 
   it("exports top surprise tickers with filters, sorting, and export limit clamp", async () => {
-    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, avgDollarVolume30d: null, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
     const env = createEnv([
       { ...base, id: "1", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", reportDate: "2026-05-01", epsSurprisePct: 5 },
       { ...base, id: "2", sourceSymbol: "NASDAQ:BBB", ticker: "BBB", reportDate: "2026-05-02", epsSurprisePct: 25 },

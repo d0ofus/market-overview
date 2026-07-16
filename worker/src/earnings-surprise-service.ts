@@ -60,6 +60,7 @@ export type EarningsSurpriseEventInput = {
   sector: string | null;
   industry: string | null;
   marketCap: number | null;
+  avgDollarVolume30d: number | null;
   reportDate: string;
   reportTimestamp: number | null;
   reportTime: string | null;
@@ -86,6 +87,7 @@ export type EarningsSurpriseRow = {
   sector: string | null;
   industry: string | null;
   marketCap: number | null;
+  avgDollarVolume30d: number | null;
   reportDate: string;
   reportTimestamp: number | null;
   reportTime: string | null;
@@ -201,6 +203,9 @@ const TV_COLUMNS = [
   "earnings_release_date",
   "earnings_release_time",
   "earnings_release_calendar_date",
+  "close",
+  "average_volume_30d_calc",
+  "AvgValue.Traded_30d",
 ];
 
 const SORT_COLUMNS: Record<string, string> = {
@@ -345,18 +350,35 @@ async function tableExists(env: Env, tableName: string): Promise<boolean> {
   return Number(row?.count ?? 0) > 0;
 }
 
-export async function hasEarningsSurpriseSchema(env: Env): Promise<boolean> {
+async function columnExists(env: Env, tableName: string, columnName: string): Promise<boolean> {
+  const safeTable = tableName === "earnings_surprise_events" ? "earnings_surprise_events" : tableName;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as count FROM pragma_table_info('${safeTable}') WHERE name = ?`,
+  ).bind(columnName).first<{ count: number }>();
+  return Number(row?.count ?? 0) > 0;
+}
+
+async function earningsSurpriseSchemaWarning(env: Env): Promise<string | null> {
   const [eventsReady, syncsReady] = await Promise.all([
     tableExists(env, "earnings_surprise_events"),
     tableExists(env, "earnings_surprise_syncs"),
   ]);
-  return eventsReady && syncsReady;
+  if (!eventsReady || !syncsReady) {
+    return "Earnings surprise schema is missing. Apply worker/migrations/0051_earnings_surprises.sql.";
+  }
+  if (!(await columnExists(env, "earnings_surprise_events", "avg_dollar_volume_30d"))) {
+    return "Earnings surprise liquidity schema is missing. Apply worker/migrations/0089_earnings_surprise_liquidity.sql.";
+  }
+  return null;
+}
+
+export async function hasEarningsSurpriseSchema(env: Env): Promise<boolean> {
+  return (await earningsSurpriseSchemaWarning(env)) == null;
 }
 
 async function requireEarningsSurpriseSchema(env: Env): Promise<void> {
-  if (!(await hasEarningsSurpriseSchema(env))) {
-    throw new Error("Earnings surprise schema is missing. Apply worker/migrations/0051_earnings_surprises.sql.");
-  }
+  const warning = await earningsSurpriseSchemaWarning(env);
+  if (warning) throw new Error(warning);
 }
 
 export function buildTradingViewEarningsSurprisePayload(input: {
@@ -385,7 +407,7 @@ export function buildTradingViewEarningsSurprisePayload(input: {
 
 export function parseTradingViewEarningsSurpriseRows(response: TradingViewScanResponse): EarningsSurpriseEventInput[] {
   return (response.data ?? [])
-    .map((entry) => {
+    .map((entry): EarningsSurpriseEventInput | null => {
       const data = Array.isArray(entry.d) ? entry.d : [];
       const sourceSymbol = String(entry.s ?? "").trim().toUpperCase();
       const ticker = parseTradingViewTicker(sourceSymbol);
@@ -400,6 +422,11 @@ export function parseTradingViewEarningsSurpriseRows(response: TradingViewScanRe
       const epsEstimate = parseMaybeNumber(data[8]);
       const epsSurprise = parseMaybeNumber(data[9]);
       const epsSurprisePct = parseMaybeNumber(data[10]);
+      const close = parseMaybeNumber(data[18]);
+      const avgVolume30d = parseMaybeNumber(data[19]);
+      const avgDollarVolume30d = parseMaybeNumber(data[20]) ?? (
+        close != null && avgVolume30d != null ? close * avgVolume30d : null
+      );
       if (epsSurprisePct == null || epsSurprisePct === 0) return null;
       return {
         provider: PRIMARY_PROVIDER,
@@ -410,6 +437,7 @@ export function parseTradingViewEarningsSurpriseRows(response: TradingViewScanRe
         sector: normalizeText(data[4]),
         industry: normalizeText(data[5]),
         marketCap: parseMaybeNumber(data[6]),
+        avgDollarVolume30d,
         reportDate,
         reportTimestamp,
         reportTime: normalizeReportTime(data[16]),
@@ -448,6 +476,7 @@ function dedupeEvents(rows: EarningsSurpriseEventInput[]): EarningsSurpriseEvent
       sector: preferred.sector ?? fallback.sector,
       industry: preferred.industry ?? fallback.industry,
       marketCap: preferred.marketCap ?? fallback.marketCap,
+      avgDollarVolume30d: preferred.avgDollarVolume30d ?? fallback.avgDollarVolume30d,
       epsActual: preferred.epsActual ?? fallback.epsActual,
       epsEstimate: preferred.epsEstimate ?? fallback.epsEstimate,
       epsSurprise: preferred.epsSurprise ?? fallback.epsSurprise,
@@ -562,6 +591,7 @@ function normalizeProviderEvent(raw: unknown, provider: Exclude<EarningsSurprise
     sector: null,
     industry: null,
     marketCap: null,
+    avgDollarVolume30d: null,
     reportDate,
     reportTimestamp: null,
     reportTime: normalizeReportTime(pick(row, ["hour", "time"])),
@@ -671,13 +701,13 @@ async function upsertEvents(env: Env, rows: EarningsSurpriseEventInput[]): Promi
   const now = new Date().toISOString();
   const statements = rows.map((row) => env.DB.prepare(
     `INSERT INTO earnings_surprise_events (
-       id, provider, source_symbol, ticker, exchange, company_name, sector, industry, market_cap,
+       id, provider, source_symbol, ticker, exchange, company_name, sector, industry, market_cap, avg_dollar_volume_30d,
        report_date, report_timestamp, report_time, fiscal_period_end, season,
        eps_actual, eps_estimate, eps_surprise, eps_surprise_pct,
        revenue_actual, revenue_estimate, revenue_surprise, revenue_surprise_pct,
        raw_json, first_seen_at, last_seen_at, created_at, updated_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(ticker, report_date, fiscal_period_end) DO UPDATE SET
        provider = CASE WHEN excluded.provider = 'tradingview' THEN excluded.provider ELSE earnings_surprise_events.provider END,
        source_symbol = COALESCE(excluded.source_symbol, earnings_surprise_events.source_symbol),
@@ -686,6 +716,7 @@ async function upsertEvents(env: Env, rows: EarningsSurpriseEventInput[]): Promi
        sector = COALESCE(excluded.sector, earnings_surprise_events.sector),
        industry = COALESCE(excluded.industry, earnings_surprise_events.industry),
        market_cap = COALESCE(excluded.market_cap, earnings_surprise_events.market_cap),
+       avg_dollar_volume_30d = COALESCE(excluded.avg_dollar_volume_30d, earnings_surprise_events.avg_dollar_volume_30d),
        report_timestamp = COALESCE(excluded.report_timestamp, earnings_surprise_events.report_timestamp),
        report_time = COALESCE(excluded.report_time, earnings_surprise_events.report_time),
        season = excluded.season,
@@ -710,6 +741,7 @@ async function upsertEvents(env: Env, rows: EarningsSurpriseEventInput[]): Promi
     row.sector,
     row.industry,
     row.marketCap,
+    row.avgDollarVolume30d,
     row.reportDate,
     row.reportTimestamp,
     row.reportTime,
@@ -888,6 +920,7 @@ function mapRow(row: Record<string, unknown>): EarningsSurpriseRow {
     sector: row.sector == null ? null : String(row.sector),
     industry: row.industry == null ? null : String(row.industry),
     marketCap: parseMaybeNumber(row.marketCap),
+    avgDollarVolume30d: parseMaybeNumber(row.avgDollarVolume30d),
     reportDate: String(row.reportDate ?? ""),
     reportTimestamp: parseMaybeNumber(row.reportTimestamp),
     reportTime: row.reportTime == null ? null : String(row.reportTime),
@@ -920,10 +953,11 @@ async function loadFacet(env: Env, field: "season" | "sector" | "industry" | "ex
 }
 
 export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQuery = {}): Promise<EarningsSurprisesResponse> {
-  if (!(await hasEarningsSurpriseSchema(env))) {
+  const schemaWarning = await earningsSurpriseSchemaWarning(env);
+  if (schemaWarning) {
     return {
       schemaReady: false,
-      warning: "Earnings surprise schema is missing. Apply worker/migrations/0051_earnings_surprises.sql.",
+      warning: schemaWarning,
       generatedAt: new Date().toISOString(),
       total: 0,
       limit: DEFAULT_QUERY_LIMIT,
@@ -943,7 +977,8 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
   const rows = await env.DB.prepare(
     `SELECT
        id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
-       sector, industry, market_cap as marketCap, report_date as reportDate,
+       sector, industry, market_cap as marketCap, avg_dollar_volume_30d as avgDollarVolume30d,
+       report_date as reportDate,
        report_timestamp as reportTimestamp, report_time as reportTime,
        fiscal_period_end as fiscalPeriodEnd, season,
        eps_actual as epsActual, eps_estimate as epsEstimate, eps_surprise as epsSurprise,
@@ -991,10 +1026,11 @@ export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSur
 }
 
 export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSurprisesStatus> {
-  if (!(await hasEarningsSurpriseSchema(env))) {
+  const schemaWarning = await earningsSurpriseSchemaWarning(env);
+  if (schemaWarning) {
     return {
       schemaReady: false,
-      warning: "Earnings surprise schema is missing. Apply worker/migrations/0051_earnings_surprises.sql.",
+      warning: schemaWarning,
       counts: { total: 0, positive: 0, negative: 0, latestReportDate: null, earliestReportDate: null },
       syncs: [],
       latestRows: [],
