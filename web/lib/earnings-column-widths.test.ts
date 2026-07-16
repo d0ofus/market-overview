@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   GAP_COLUMN_WIDTH_SPECS,
+  GAP_FONT_SIZE_DEFAULT_PX,
+  GAP_FONT_SIZE_MAX_PX,
+  GAP_FONT_SIZE_MIN_PX,
+  adjustGapFontSize,
   defaultColumnWidths,
+  gapHeaderFontSize,
   normalizeColumnWidths,
+  normalizeGapFontSize,
   resizeAdjacentColumnWidths,
   type ColumnWidthSpec,
 } from "./earnings-column-widths";
@@ -17,6 +23,33 @@ const SPECS = {
 function total(widths: Record<string, number>): number {
   return Object.values(widths).reduce((sum, width) => sum + width, 0);
 }
+
+test("gap font size defaults invalid persisted values", () => {
+  assert.equal(normalizeGapFontSize(undefined), GAP_FONT_SIZE_DEFAULT_PX);
+  assert.equal(normalizeGapFontSize(null), GAP_FONT_SIZE_DEFAULT_PX);
+  assert.equal(normalizeGapFontSize("14"), GAP_FONT_SIZE_DEFAULT_PX);
+  assert.equal(normalizeGapFontSize(Number.NaN), GAP_FONT_SIZE_DEFAULT_PX);
+});
+
+test("gap font size rounds and clamps persisted values", () => {
+  assert.equal(normalizeGapFontSize(12.4), 12);
+  assert.equal(normalizeGapFontSize(12.5), 13);
+  assert.equal(normalizeGapFontSize(2), GAP_FONT_SIZE_MIN_PX);
+  assert.equal(normalizeGapFontSize(40), GAP_FONT_SIZE_MAX_PX);
+});
+
+test("gap font controls step by one pixel and stop at their limits", () => {
+  assert.equal(adjustGapFontSize(12, -1), 11);
+  assert.equal(adjustGapFontSize(12, 1), 13);
+  assert.equal(adjustGapFontSize(GAP_FONT_SIZE_MIN_PX, -1), GAP_FONT_SIZE_MIN_PX);
+  assert.equal(adjustGapFontSize(GAP_FONT_SIZE_MAX_PX, 1), GAP_FONT_SIZE_MAX_PX);
+});
+
+test("gap headers remain one pixel smaller than the body", () => {
+  assert.equal(gapHeaderFontSize(GAP_FONT_SIZE_MIN_PX), GAP_FONT_SIZE_MIN_PX - 1);
+  assert.equal(gapHeaderFontSize(GAP_FONT_SIZE_DEFAULT_PX), GAP_FONT_SIZE_DEFAULT_PX - 1);
+  assert.equal(gapHeaderFontSize(GAP_FONT_SIZE_MAX_PX), GAP_FONT_SIZE_MAX_PX - 1);
+});
 
 test("gap column defaults total 100 percent", () => {
   const widths = defaultColumnWidths(GAP_COLUMN_WIDTH_SPECS);

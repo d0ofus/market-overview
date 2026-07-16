@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, RefreshCw, RotateCcw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Search } from "lucide-react";
 import {
   getEarningsGaps,
   getEarningsGapsExportUrl,
@@ -24,8 +24,14 @@ import {
 } from "@/lib/api";
 import {
   GAP_COLUMN_WIDTH_SPECS,
+  GAP_FONT_SIZE_DEFAULT_PX,
+  GAP_FONT_SIZE_MAX_PX,
+  GAP_FONT_SIZE_MIN_PX,
+  adjustGapFontSize,
   defaultColumnWidths,
+  gapHeaderFontSize,
   normalizeColumnWidths,
+  normalizeGapFontSize,
   resizeAdjacentColumnWidths,
   type ColumnWidthMap,
   type ColumnWidthSpec,
@@ -140,6 +146,7 @@ const EXPORT_LIMIT_MAX = 1000;
 const SURPRISE_COLUMNS_STORAGE_KEY = "earnings-surprises-column-order-v1";
 const GAP_COLUMNS_STORAGE_KEY = "earnings-gaps-column-order-v1";
 const GAP_COLUMN_WIDTHS_STORAGE_KEY = "earnings-gaps-column-widths-v1";
+const GAP_FONT_SIZE_STORAGE_KEY = "earnings-gaps-font-size-v1";
 const DEFAULT_SURPRISE_COLUMN_ORDER: SurpriseColumnKey[] = [
   "reportDate",
   "ticker",
@@ -177,7 +184,7 @@ const DEFAULT_GAP_COLUMN_ORDER: GapColumnKey[] = [
   "industry",
   "exchange",
 ];
-const GAP_CELL_CLASS = "whitespace-normal px-1.5 py-2 align-top text-[11px] leading-tight [overflow-wrap:anywhere]";
+const GAP_CELL_CLASS = "whitespace-normal px-1.5 py-2 align-top leading-tight [overflow-wrap:anywhere]";
 
 function isoDateMonthsAgo(months: number): string {
   const now = new Date();
@@ -435,6 +442,30 @@ function usePersistedColumnWidths<Key extends string>(
   return [widths, setWidths, reset] as const;
 }
 
+function usePersistedGapFontSize(storageKey: string) {
+  const [fontSize, setFontSize] = useState(GAP_FONT_SIZE_DEFAULT_PX);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      setFontSize(normalizeGapFontSize(stored ? JSON.parse(stored) : null));
+    } catch {
+      setFontSize(GAP_FONT_SIZE_DEFAULT_PX);
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const timeout = window.setTimeout(() => {
+      window.localStorage.setItem(storageKey, JSON.stringify(fontSize));
+    }, 120);
+    return () => window.clearTimeout(timeout);
+  }, [fontSize, storageKey]);
+
+  return [fontSize, setFontSize] as const;
+}
+
 function ResultsPager({
   loading,
   limit,
@@ -565,14 +596,14 @@ function DraggableColumnHeader<Key extends string, Row, Sort extends string>({
         {column.sortKey ? (
           <button
             type="button"
-            className={`${compact ? "inline-flex min-w-0 max-w-full flex-1 flex-wrap items-start gap-x-0.5 whitespace-normal break-words text-[10px] leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "inline-flex min-w-max items-center gap-1 text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
+            className={`${compact ? "inline-flex min-w-0 max-w-full flex-1 flex-wrap items-start gap-x-0.5 whitespace-normal break-words leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "inline-flex min-w-max items-center gap-1 text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
             onClick={() => onSort(column.sortKey as Sort)}
           >
             {column.label}
-            {sortKey === column.sortKey ? <span className={`text-accent ${compact ? "text-[9px]" : ""}`}>{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
+            {sortKey === column.sortKey ? <span className="text-accent">{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
           </button>
         ) : (
-          <span className={`${compact ? "min-w-0 flex-1 whitespace-normal break-words text-[10px] leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500`}>{column.label}</span>
+          <span className={`${compact ? "min-w-0 flex-1 whitespace-normal break-words leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500`}>{column.label}</span>
         )}
       </div>
       {compact && canResize && onResizeStart && onResizeBy ? (
@@ -1129,6 +1160,7 @@ function EarningsGapsPanel() {
     GAP_COLUMN_WIDTHS_STORAGE_KEY,
     GAP_COLUMN_WIDTH_SPECS,
   );
+  const [gapFontSize, setGapFontSize] = usePersistedGapFontSize(GAP_FONT_SIZE_STORAGE_KEY);
   const [draggedColumn, setDraggedColumn] = useState<GapColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -1282,6 +1314,10 @@ function EarningsGapsPanel() {
 
   const goPage = (nextOffset: number) => {
     setQuery((current) => ({ ...current, offset: Math.max(0, nextOffset) }));
+  };
+
+  const changeGapFontSize = (delta: number) => {
+    setGapFontSize((current) => adjustGapFontSize(current, delta));
   };
 
   const openExpandedChart = (ticker: string) => {
@@ -1640,6 +1676,35 @@ function EarningsGapsPanel() {
             <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
+            <div
+              role="group"
+              aria-label="Release Gap-Ups font size"
+              className="inline-flex h-10 items-stretch overflow-hidden rounded border border-borderSoft/80 bg-panelSoft/80 text-slate-100"
+            >
+              <span aria-live="polite" className="inline-flex min-w-[4.5rem] items-center justify-center px-2 text-xs font-medium text-slate-300">
+                Text {gapFontSize}px
+              </span>
+              <button
+                type="button"
+                className="inline-flex w-8 items-center justify-center border-l border-borderSoft/80 transition hover:bg-panelSoft disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={gapFontSize <= GAP_FONT_SIZE_MIN_PX}
+                onClick={() => changeGapFontSize(-1)}
+                title="Decrease Release Gap-Ups font size"
+                aria-label="Decrease Release Gap-Ups font size"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                className="inline-flex w-8 items-center justify-center border-l border-borderSoft/80 transition hover:bg-panelSoft disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={gapFontSize >= GAP_FONT_SIZE_MAX_PX}
+                onClick={() => changeGapFontSize(1)}
+                title="Increase Release Gap-Ups font size"
+                aria-label="Increase Release Gap-Ups font size"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </div>
             <button
               type="button"
               className={BUTTON_CLASS}
@@ -1654,13 +1719,17 @@ function EarningsGapsPanel() {
           </div>
         </div>
         <div className="max-w-full overflow-x-auto min-[1440px]:overflow-x-hidden">
-          <table ref={gapTableRef} className="w-full min-w-[70rem] table-fixed text-left text-[11px] min-[1440px]:min-w-0">
+          <table
+            ref={gapTableRef}
+            className="w-full min-w-[70rem] table-fixed text-left min-[1440px]:min-w-0"
+            style={{ fontSize: `${gapFontSize}px` }}
+          >
             <colgroup>
               {orderedColumns.map((column) => (
                 <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />
               ))}
             </colgroup>
-            <thead className="border-b border-borderSoft/70 bg-panelSoft/35">
+            <thead className="border-b border-borderSoft/70 bg-panelSoft/35" style={{ fontSize: `${gapHeaderFontSize(gapFontSize)}px` }}>
               <tr>
                 {orderedColumns.map((column, index) => (
                   <DraggableColumnHeader

@@ -30,6 +30,22 @@ export type GapColumnWidthKey = keyof typeof GAP_COLUMN_WIDTH_SPECS;
 export type ColumnWidthMap<Key extends string> = Record<Key, number>;
 
 const TOTAL_WIDTH_PCT = 100;
+export const GAP_FONT_SIZE_DEFAULT_PX = 12;
+export const GAP_FONT_SIZE_MIN_PX = 10;
+export const GAP_FONT_SIZE_MAX_PX = 16;
+
+export function normalizeGapFontSize(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return GAP_FONT_SIZE_DEFAULT_PX;
+  return Math.min(GAP_FONT_SIZE_MAX_PX, Math.max(GAP_FONT_SIZE_MIN_PX, Math.round(value)));
+}
+
+export function adjustGapFontSize(current: number, delta: number): number {
+  return normalizeGapFontSize(current + delta);
+}
+
+export function gapHeaderFontSize(bodyFontSize: number): number {
+  return normalizeGapFontSize(bodyFontSize) - 1;
+}
 
 function recordValue(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
