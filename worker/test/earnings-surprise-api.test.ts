@@ -275,6 +275,25 @@ describe("earnings surprise API", () => {
     expect(json.warning).toContain("0051_earnings_surprises.sql");
   });
 
+  it("exposes D1-only snapshot endpoints with schema warnings before migration", async () => {
+    const env = createMissingSchemaEnv();
+    const [surprises, gaps] = await Promise.all([
+      worker.fetch(new Request("http://localhost/api/earnings/surprises/snapshot?startDate=2026-01-01"), env, {} as ExecutionContext),
+      worker.fetch(new Request("http://localhost/api/earnings/gaps/snapshot?startDate=2026-01-01"), env, {} as ExecutionContext),
+    ]);
+    const surpriseJson = await surprises.json() as { schemaReady?: boolean; warning?: string; rows?: unknown[] };
+    const gapJson = await gaps.json() as { schemaReady?: boolean; warning?: string; rows?: unknown[] };
+
+    expect(surprises.status).toBe(200);
+    expect(surpriseJson.schemaReady).toBe(false);
+    expect(surpriseJson.warning).toContain("0051_earnings_surprises.sql");
+    expect(surpriseJson.rows).toEqual([]);
+    expect(gaps.status).toBe(200);
+    expect(gapJson.schemaReady).toBe(false);
+    expect(gapJson.warning).toContain("0052_earnings_gaps.sql");
+    expect(gapJson.rows).toEqual([]);
+  });
+
   it("returns a liquidity schema warning before migration 0089", async () => {
     const res = await worker.fetch(
       new Request("http://localhost/api/earnings/surprises?limit=10"),

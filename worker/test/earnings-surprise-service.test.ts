@@ -3,6 +3,7 @@ import {
   buildTradingViewEarningsSurprisePayload,
   deriveEarningsSeason,
   exportEarningsSurpriseTickers,
+  loadEarningsSurprisesSnapshot,
   loadEarningsSurprisesStatus,
   parseTradingViewEarningsSurpriseRows,
   queryEarningsSurprises,
@@ -204,9 +205,12 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
               const limit = Number(args.at(-1) ?? 100);
               return { results: applyFilters(sql, args.slice(0, -1)).slice(0, limit).map((row) => ({ ticker: row.ticker })) as T[] };
             }
-            const limit = Number(args.at(-2) ?? 100);
-            const offset = Number(args.at(-1) ?? 0);
-            return { results: applyFilters(sql, args.slice(0, -2)).slice(offset, offset + limit) as T[] };
+            if (sql.includes("LIMIT ? OFFSET ?")) {
+              const limit = Number(args.at(-2) ?? 100);
+              const offset = Number(args.at(-1) ?? 0);
+              return { results: applyFilters(sql, args.slice(0, -2)).slice(offset, offset + limit) as T[] };
+            }
+            return { results: applyFilters(sql, args) as T[] };
           }
           return { results: [] as T[] };
         },
@@ -507,6 +511,53 @@ describe("earnings surprise service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
     expect(result.rows[0].avgDollarVolume30d).toBe(12_000_000_000);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
+  });
+
+  it("loads one unpaginated filtered snapshot and derives its facets", async () => {
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", industry: "Software", marketCap: 1_000_000_000, avgDollarVolume30d: null, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q2", epsActual: null, epsEstimate: null, epsSurprise: null, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const env = createEnv([
+      { ...base, id: "old", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", sector: "Tech", reportDate: "2026-05-01", epsSurprisePct: 5 },
+      { ...base, id: "new", sourceSymbol: "NASDAQ:BBB", ticker: "BBB", sector: "Tech", reportDate: "2026-05-03", epsSurprisePct: 10 },
+      { ...base, id: "excluded", sourceSymbol: "NASDAQ:CCC", ticker: "CCC", sector: "Retail", reportDate: "2026-05-04", epsSurprisePct: -2 },
+    ]);
+
+    const result = await loadEarningsSurprisesSnapshot(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      surpriseSide: "positive",
+    });
+
+    expect(result.total).toBe(2);
+    expect(result.rows.map((item) => item.id)).toEqual(["new", "old"]);
+    expect(result.facets.sectors).toEqual([{ value: "Tech", count: 2 }]);
+    const snapshotQueries = env.__queries.filter((sql) => sql.includes("FROM earnings_surprise_events"));
+    expect(snapshotQueries).toHaveLength(1);
+    expect(snapshotQueries[0]).not.toContain("LIMIT ? OFFSET ?");
+    expect(snapshotQueries[0]).not.toContain("GROUP BY");
+  });
+
+  it("defaults public queries and exports to newest report date first", async () => {
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, avgDollarVolume30d: null, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q2", epsActual: null, epsEstimate: null, epsSurprise: null, epsSurprisePct: 1, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const env = createEnv([
+      { ...base, id: "old", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", reportDate: "2026-05-01" },
+      { ...base, id: "new", sourceSymbol: "NASDAQ:BBB", ticker: "BBB", reportDate: "2026-05-03" },
+    ]);
+
+    const result = await queryEarningsSurprises(env, { startDate: "2026-01-01", includeOtc: true });
+    const exported = await exportEarningsSurpriseTickers(env, { startDate: "2026-01-01", includeOtc: true });
+
+    expect(result.rows.map((item) => item.id)).toEqual(["new", "old"]);
+    expect(exported).toEqual(["BBB", "AAA"]);
+    expect(env.__queries.filter((sql) => sql.includes("ORDER BY report_date DESC"))).toHaveLength(2);
+  });
+
+  it("loads status latest rows without recursively querying counts and facets", async () => {
+    const env = createEnv([]);
+    await loadEarningsSurprisesStatus(env);
+
+    expect(env.__queries.some((sql) => sql.includes("GROUP BY"))).toBe(false);
+    expect(env.__queries.some((sql) => sql.includes("LIMIT ? OFFSET ?"))).toBe(false);
+    expect(env.__queries.some((sql) => sql.includes("ORDER BY report_date DESC, ticker ASC, id ASC") && sql.includes("LIMIT 12"))).toBe(true);
   });
 
   it("uses a deterministic total order for tied surprise rows and exports", async () => {

@@ -209,6 +209,7 @@ import {
 } from "./earnings-calendar-service";
 import {
   exportEarningsSurpriseTickers,
+  loadEarningsSurprisesSnapshot,
   loadEarningsSurprisesStatus,
   maybeRunScheduledEarningsSurpriseSync,
   queryEarningsSurprises,
@@ -217,6 +218,7 @@ import {
 } from "./earnings-surprise-service";
 import {
   exportEarningsGapTickers,
+  loadEarningsGapsSnapshot,
   loadEarningsGapsStatus,
   maybeRunScheduledEarningsGapSync,
   queryEarningsGaps,
@@ -3849,6 +3851,15 @@ app.get("/api/earnings/surprises", async (c) => {
   }
 });
 
+app.get("/api/earnings/surprises/snapshot", async (c) => {
+  try {
+    return c.json(await loadEarningsSurprisesSnapshot(c.env, readEarningsSurprisesQuery(c.req.raw)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings surprises snapshot.";
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/earnings/surprises/export.txt", async (c) => {
   try {
     const tickers = await exportEarningsSurpriseTickers(c.env, {
@@ -3879,6 +3890,15 @@ app.get("/api/earnings/gaps", async (c) => {
     return c.json(await queryEarningsGaps(c.env, readEarningsGapsQuery(c.req.raw)));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load earnings gap-ups.";
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get("/api/earnings/gaps/snapshot", async (c) => {
+  try {
+    return c.json(await loadEarningsGapsSnapshot(c.env, readEarningsGapsQuery(c.req.raw)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load earnings gap-ups snapshot.";
     return c.json({ error: message }, 500);
   }
 });

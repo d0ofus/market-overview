@@ -4,22 +4,22 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, LayoutGrid, Loader2, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Search, Table2 } from "lucide-react";
 import {
-  getEarningsGaps,
   getEarningsGapsExportUrl,
+  getEarningsGapsSnapshot,
   getEarningsGapsStatus,
-  getEarningsSurprises,
   getEarningsSurprisesExportUrl,
+  getEarningsSurprisesSnapshot,
   getEarningsSurprisesStatus,
   syncAdminEarningsGaps,
   syncAdminEarningsSurprises,
   type EarningsGapRow,
   type EarningsGapsQuery,
-  type EarningsGapsResponse,
+  type EarningsGapsSnapshotResponse,
   type EarningsGapsStatus,
   type EarningsSurpriseFacet,
   type EarningsSurpriseRow,
   type EarningsSurprisesQuery,
-  type EarningsSurprisesResponse,
+  type EarningsSurprisesSnapshotResponse,
   type EarningsSurprisesStatus,
 } from "@/lib/api";
 import {
@@ -38,18 +38,21 @@ import {
   type GapColumnWidthKey,
 } from "@/lib/earnings-column-widths";
 import {
-  buildEarningsGridQuery,
-  currentEarningsGridData,
   gapRowToGridCard,
   normalizeEarningsResultView,
   surpriseRowToGridCard,
-  type EarningsGridSnapshot,
   type EarningsResultView,
 } from "@/lib/earnings-multi-chart";
+import {
+  earningsSnapshotFilterQuery,
+  sliceEarningsSnapshotRows,
+  sortEarningsSnapshotRows,
+  type EarningsSnapshotSortKey,
+} from "@/lib/earnings-snapshot";
 import { EarningsMultiChartGrid } from "./earnings-multi-chart-grid";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 
-type SortKey =
+type SortKey = Extract<EarningsSnapshotSortKey,
   | "reportDate"
   | "ticker"
   | "companyName"
@@ -60,11 +63,11 @@ type SortKey =
   | "marketCap"
   | "sector"
   | "industry"
-  | "exchange";
+  | "exchange">;
 
 type EarningsView = "surprises" | "gaps";
 
-type GapSortKey =
+type GapSortKey = Extract<EarningsSnapshotSortKey,
   | "reportDate"
   | "ticker"
   | "companyName"
@@ -79,7 +82,7 @@ type GapSortKey =
   | "gapSource"
   | "sector"
   | "industry"
-  | "exchange";
+  | "exchange">;
 
 type DraftFilters = {
   q: string;
@@ -771,81 +774,104 @@ function ViewTabs({ view, onChange }: { view: EarningsView; onChange: (view: Ear
 
 export function EarningsDashboard() {
   const [view, setView] = useState<EarningsView>("surprises");
+  const [visitedViews, setVisitedViews] = useState<Set<EarningsView>>(() => new Set(["surprises"]));
+
+  const changeView = (nextView: EarningsView) => {
+    setView(nextView);
+    setVisitedViews((current) => {
+      if (current.has(nextView)) return current;
+      const next = new Set(current);
+      next.add(nextView);
+      return next;
+    });
+  };
+
   return (
     <div className="space-y-5">
-      <ViewTabs view={view} onChange={setView} />
-      {view === "surprises" ? <EarningsSurprisesPanel /> : <EarningsGapsPanel />}
+      <ViewTabs view={view} onChange={changeView} />
+      {visitedViews.has("surprises") ? (
+        <div hidden={view !== "surprises"} aria-hidden={view !== "surprises"}>
+          <EarningsSurprisesPanel />
+        </div>
+      ) : null}
+      {visitedViews.has("gaps") ? (
+        <div hidden={view !== "gaps"} aria-hidden={view !== "gaps"}>
+          <EarningsGapsPanel />
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function EarningsSurprisesPanel() {
   const [draft, setDraft] = useState<DraftFilters>(() => defaultDraftFilters());
-  const [sortKey, setSortKey] = useState<SortKey>("epsSurprisePct");
+  const [sortKey, setSortKey] = useState<SortKey>("reportDate");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [query, setQuery] = useState<EarningsSurprisesQuery>(() => draftToQuery(defaultDraftFilters(), "epsSurprisePct", "desc"));
-  const [data, setData] = useState<EarningsSurprisesResponse | null>(null);
+  const [query, setQuery] = useState<EarningsSurprisesQuery>(() => draftToQuery(defaultDraftFilters(), "reportDate", "desc"));
+  const [data, setData] = useState<EarningsSurprisesSnapshotResponse | null>(null);
   const [resultView, setResultView] = usePersistedResultView(SURPRISE_RESULT_VIEW_STORAGE_KEY);
   const [gridPage, setGridPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
-  const [gridSnapshot, setGridSnapshot] = useState<EarningsGridSnapshot<EarningsSurprisesResponse> | null>(null);
-  const [gridLoading, setGridLoading] = useState(false);
-  const [gridError, setGridError] = useState<string | null>(null);
-  const [gridReloadToken, setGridReloadToken] = useState(0);
   const [status, setStatus] = useState<EarningsSurprisesStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
   const [exportLimit, setExportLimit] = useState(String(EXPORT_LIMIT_DEFAULT));
   const [columnOrder, setColumnOrder] = usePersistedColumnOrder(SURPRISE_COLUMNS_STORAGE_KEY, DEFAULT_SURPRISE_COLUMN_ORDER);
   const [draggedColumn, setDraggedColumn] = useState<SurpriseColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
-  const queryKey = useMemo(() => JSON.stringify(query), [query]);
-  const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
-  const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
-  const gridData = currentEarningsGridData(gridSnapshot, gridQueryKey);
-  const gridCards = useMemo(() => (gridData?.rows ?? []).map(surpriseRowToGridCard), [gridData]);
+  const snapshotQuery = useMemo(() => earningsSnapshotFilterQuery(query), [query]);
+  const snapshotQueryKey = useMemo(() => JSON.stringify(snapshotQuery), [snapshotQuery]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
-  const rows = data?.rows ?? [];
+  const sortedRows = useMemo(
+    () => sortEarningsSnapshotRows(data?.rows ?? [], sortKey, sortDir),
+    [data?.rows, sortDir, sortKey],
+  );
+  const rows = useMemo(() => sliceEarningsSnapshotRows(sortedRows, limit, offset), [limit, offset, sortedRows]);
   const total = data?.total ?? 0;
+  const gridRows = useMemo(
+    () => sliceEarningsSnapshotRows(sortedRows, chartsPerPage, (gridPage - 1) * chartsPerPage),
+    [chartsPerPage, gridPage, sortedRows],
+  );
+  const gridCards = useMemo(() => gridRows.map(surpriseRowToGridCard), [gridRows]);
   const latestSync = status?.syncs[0] ?? null;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + rows.length, total);
   const exportUrl = useMemo(
     () => getEarningsSurprisesExportUrl({ ...query, limit: clampExportLimit(exportLimit), offset: 0 }, exportDateSuffix()),
-    [exportLimit, queryKey],
+    [exportLimit, query],
   );
 
   const load = async () => {
-    setLoading(true);
+    setRefreshing(true);
     setError(null);
-    try {
-      const [nextData, nextStatus] = await Promise.all([
-        getEarningsSurprises(query),
-        getEarningsSurprisesStatus(),
-      ]);
-      setData(nextData);
-      setStatus(nextStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load earnings surprises.");
-    } finally {
-      setLoading(false);
-    }
+    setStatusError(null);
+    await Promise.all([
+      getEarningsSurprisesSnapshot(snapshotQuery)
+        .then(setData)
+        .catch((err) => setError(err instanceof Error ? err.message : "Failed to load earnings surprises.")),
+      getEarningsSurprisesStatus()
+        .then(setStatus)
+        .catch((err) => setStatusError(err instanceof Error ? err.message : "Failed to load earnings surprise status.")),
+    ]);
+    setRefreshing(false);
   };
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
-    Promise.all([getEarningsSurprises(query), getEarningsSurprisesStatus()])
-      .then(([nextData, nextStatus]) => {
+    setData(null);
+    getEarningsSurprisesSnapshot(snapshotQuery)
+      .then((nextData) => {
         if (!active) return;
         setData(nextData);
-        setStatus(nextStatus);
       })
       .catch((err) => {
         if (!active) return;
@@ -857,34 +883,32 @@ function EarningsSurprisesPanel() {
     return () => {
       active = false;
     };
-  }, [queryKey]);
+  }, [snapshotQueryKey]);
 
   useEffect(() => {
-    if (resultView !== "grid") return;
     let active = true;
-    setGridLoading(true);
-    setGridError(null);
-    setGridSnapshot((current) => current?.queryKey === gridQueryKey ? null : current);
-    getEarningsSurprises(gridQuery)
-      .then((nextData) => {
-        if (active) setGridSnapshot({ queryKey: gridQueryKey, data: nextData });
+    setStatusError(null);
+    getEarningsSurprisesStatus()
+      .then((nextStatus) => {
+        if (active) setStatus(nextStatus);
       })
       .catch((err) => {
-        if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings surprise charts.");
-      })
-      .finally(() => {
-        if (active) setGridLoading(false);
+        if (active) setStatusError(err instanceof Error ? err.message : "Failed to load earnings surprise status.");
       });
     return () => {
       active = false;
     };
-  }, [gridQueryKey, gridReloadToken, resultView]);
+  }, []);
 
   useEffect(() => {
-    if (!gridData) return;
-    const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
+    const totalPages = Math.max(1, Math.ceil(total / chartsPerPage));
     if (gridPage > totalPages) setGridPage(totalPages);
-  }, [chartsPerPage, gridData?.total, gridPage]);
+  }, [chartsPerPage, gridPage, total]);
+
+  useEffect(() => {
+    const lastOffset = limit === 0 || total === 0 ? 0 : Math.floor((total - 1) / limit) * limit;
+    if (offset > lastOffset) setQuery((current) => ({ ...current, offset: lastOffset }));
+  }, [limit, offset, total]);
 
   const applyFilters = () => {
     setMessage(null);
@@ -895,10 +919,10 @@ function EarningsSurprisesPanel() {
   const clearFilters = () => {
     const next = defaultDraftFilters();
     setDraft(next);
-    setSortKey("epsSurprisePct");
+    setSortKey("reportDate");
     setSortDir("desc");
     setGridPage(1);
-    setQuery(draftToQuery(next, "epsSurprisePct", "desc", 0));
+    setQuery(draftToQuery(next, "reportDate", "desc", 0));
   };
 
   const runSync = async (mode: "incremental" | "backfill") => {
@@ -909,7 +933,6 @@ function EarningsSurprisesPanel() {
       const result = await syncAdminEarningsSurprises(mode);
       setMessage(`${mode === "backfill" ? "Backfill" : "Sync"} complete: ${result.rowsUpserted} row${result.rowsUpserted === 1 ? "" : "s"} upserted.`);
       await load();
-      setGridReloadToken((current) => current + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to sync earnings surprises.");
     } finally {
@@ -1053,6 +1076,9 @@ function EarningsSurprisesPanel() {
       {error ? (
         <div className="rounded border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div>
       ) : null}
+      {statusError ? (
+        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{statusError}</div>
+      ) : null}
       {message ? (
         <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{message}</div>
       ) : null}
@@ -1169,13 +1195,10 @@ function EarningsSurprisesPanel() {
             <button
               type="button"
               className={BUTTON_CLASS}
-              disabled={loading || gridLoading || Boolean(syncing)}
-              onClick={() => {
-                void load();
-                setGridReloadToken((current) => current + 1);
-              }}
+              disabled={loading || refreshing || Boolean(syncing)}
+              onClick={() => void load()}
             >
-              <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              <RefreshCw className={loading || refreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
               Reload
             </button>
             <button type="button" className={BUTTON_CLASS} disabled={Boolean(syncing)} onClick={() => void runSync("incremental")}>
@@ -1197,7 +1220,10 @@ function EarningsSurprisesPanel() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">Surprise Log</h3>
-            <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
+            <p className="text-xs text-slate-500">
+              {data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}
+              {refreshing ? " · Refreshing snapshot…" : ""}
+            </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
             <ExportTickersControl href={exportUrl} value={exportLimit} onChange={setExportLimit} />
@@ -1250,11 +1276,11 @@ function EarningsSurprisesPanel() {
       ) : (
         <EarningsMultiChartGrid
           cards={gridCards}
-          total={gridData?.total ?? 0}
+          total={total}
           page={gridPage}
           pageSize={chartsPerPage}
-          loading={gridLoading}
-          error={gridError}
+          loading={loading}
+          error={error}
           onPageChange={setGridPage}
           onPageSizeChange={(nextPageSize) => {
             setChartsPerPage(nextPageSize);
@@ -1283,19 +1309,16 @@ function gapSourceLabel(value: string | null | undefined): string {
 
 function EarningsGapsPanel() {
   const [draft, setDraft] = useState<GapDraftFilters>(() => defaultGapDraftFilters());
-  const [sortKey, setSortKey] = useState<GapSortKey>("qualifyingGapPct");
+  const [sortKey, setSortKey] = useState<GapSortKey>("reportDate");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [query, setQuery] = useState<EarningsGapsQuery>(() => gapDraftToQuery(defaultGapDraftFilters(), "qualifyingGapPct", "desc"));
-  const [data, setData] = useState<EarningsGapsResponse | null>(null);
+  const [query, setQuery] = useState<EarningsGapsQuery>(() => gapDraftToQuery(defaultGapDraftFilters(), "reportDate", "desc"));
+  const [data, setData] = useState<EarningsGapsSnapshotResponse | null>(null);
   const [resultView, setResultView] = usePersistedResultView(GAP_RESULT_VIEW_STORAGE_KEY);
   const [gridPage, setGridPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
-  const [gridSnapshot, setGridSnapshot] = useState<EarningsGridSnapshot<EarningsGapsResponse> | null>(null);
-  const [gridLoading, setGridLoading] = useState(false);
-  const [gridError, setGridError] = useState<string | null>(null);
-  const [gridReloadToken, setGridReloadToken] = useState(0);
   const [status, setStatus] = useState<EarningsGapsStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
   const [exportLimit, setExportLimit] = useState(String(EXPORT_LIMIT_DEFAULT));
   const [columnOrder, setColumnOrder] = usePersistedColumnOrder(GAP_COLUMNS_STORAGE_KEY, DEFAULT_GAP_COLUMN_ORDER);
@@ -1306,56 +1329,61 @@ function EarningsGapsPanel() {
   const [gapFontSize, setGapFontSize] = usePersistedGapFontSize(GAP_FONT_SIZE_STORAGE_KEY);
   const [draggedColumn, setDraggedColumn] = useState<GapColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const gapTableRef = useRef<HTMLTableElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
-  const queryKey = useMemo(() => JSON.stringify(query), [query]);
-  const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
-  const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
-  const gridData = currentEarningsGridData(gridSnapshot, gridQueryKey);
-  const gridCards = useMemo(() => (gridData?.rows ?? []).map(gapRowToGridCard), [gridData]);
+  const snapshotQuery = useMemo(() => earningsSnapshotFilterQuery(query), [query]);
+  const snapshotQueryKey = useMemo(() => JSON.stringify(snapshotQuery), [snapshotQuery]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
-  const rows = data?.rows ?? [];
+  const sortedRows = useMemo(
+    () => sortEarningsSnapshotRows(data?.rows ?? [], sortKey, sortDir),
+    [data?.rows, sortDir, sortKey],
+  );
+  const rows = useMemo(() => sliceEarningsSnapshotRows(sortedRows, limit, offset), [limit, offset, sortedRows]);
   const total = data?.total ?? 0;
+  const gridRows = useMemo(
+    () => sliceEarningsSnapshotRows(sortedRows, chartsPerPage, (gridPage - 1) * chartsPerPage),
+    [chartsPerPage, gridPage, sortedRows],
+  );
+  const gridCards = useMemo(() => gridRows.map(gapRowToGridCard), [gridRows]);
   const latestSync = status?.syncs[0] ?? null;
   const latestScheduledSync = status?.syncs.find((row) => row.scheduledLocalDate) ?? null;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + rows.length, total);
   const exportUrl = useMemo(
     () => getEarningsGapsExportUrl({ ...query, limit: clampExportLimit(exportLimit), offset: 0 }, exportDateSuffix()),
-    [exportLimit, queryKey],
+    [exportLimit, query],
   );
 
   const load = async () => {
-    setLoading(true);
+    setRefreshing(true);
     setError(null);
-    try {
-      const [nextData, nextStatus] = await Promise.all([
-        getEarningsGaps(query),
-        getEarningsGapsStatus(),
-      ]);
-      setData(nextData);
-      setStatus(nextStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load earnings gap-ups.");
-    } finally {
-      setLoading(false);
-    }
+    setStatusError(null);
+    await Promise.all([
+      getEarningsGapsSnapshot(snapshotQuery)
+        .then(setData)
+        .catch((err) => setError(err instanceof Error ? err.message : "Failed to load earnings gap-ups.")),
+      getEarningsGapsStatus()
+        .then(setStatus)
+        .catch((err) => setStatusError(err instanceof Error ? err.message : "Failed to load earnings gap status.")),
+    ]);
+    setRefreshing(false);
   };
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
-    Promise.all([getEarningsGaps(query), getEarningsGapsStatus()])
-      .then(([nextData, nextStatus]) => {
+    setData(null);
+    getEarningsGapsSnapshot(snapshotQuery)
+      .then((nextData) => {
         if (!active) return;
         setData(nextData);
-        setStatus(nextStatus);
       })
       .catch((err) => {
         if (!active) return;
@@ -1367,34 +1395,32 @@ function EarningsGapsPanel() {
     return () => {
       active = false;
     };
-  }, [queryKey]);
+  }, [snapshotQueryKey]);
 
   useEffect(() => {
-    if (resultView !== "grid") return;
     let active = true;
-    setGridLoading(true);
-    setGridError(null);
-    setGridSnapshot((current) => current?.queryKey === gridQueryKey ? null : current);
-    getEarningsGaps(gridQuery)
-      .then((nextData) => {
-        if (active) setGridSnapshot({ queryKey: gridQueryKey, data: nextData });
+    setStatusError(null);
+    getEarningsGapsStatus()
+      .then((nextStatus) => {
+        if (active) setStatus(nextStatus);
       })
       .catch((err) => {
-        if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings gap-up charts.");
-      })
-      .finally(() => {
-        if (active) setGridLoading(false);
+        if (active) setStatusError(err instanceof Error ? err.message : "Failed to load earnings gap status.");
       });
     return () => {
       active = false;
     };
-  }, [gridQueryKey, gridReloadToken, resultView]);
+  }, []);
 
   useEffect(() => {
-    if (!gridData) return;
-    const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
+    const totalPages = Math.max(1, Math.ceil(total / chartsPerPage));
     if (gridPage > totalPages) setGridPage(totalPages);
-  }, [chartsPerPage, gridData?.total, gridPage]);
+  }, [chartsPerPage, gridPage, total]);
+
+  useEffect(() => {
+    const lastOffset = limit === 0 || total === 0 ? 0 : Math.floor((total - 1) / limit) * limit;
+    if (offset > lastOffset) setQuery((current) => ({ ...current, offset: lastOffset }));
+  }, [limit, offset, total]);
 
   const applyFilters = () => {
     setMessage(null);
@@ -1405,10 +1431,10 @@ function EarningsGapsPanel() {
   const clearFilters = () => {
     const next = defaultGapDraftFilters();
     setDraft(next);
-    setSortKey("qualifyingGapPct");
+    setSortKey("reportDate");
     setSortDir("desc");
     setGridPage(1);
-    setQuery(gapDraftToQuery(next, "qualifyingGapPct", "desc", 0));
+    setQuery(gapDraftToQuery(next, "reportDate", "desc", 0));
   };
 
   const runSync = async (mode: "incremental" | "backfill") => {
@@ -1422,7 +1448,6 @@ function EarningsGapsPanel() {
         const result = await syncAdminEarningsGaps(mode);
         setMessage(`Gap sync complete: ${result.rowsUpserted} qualifying row${result.rowsUpserted === 1 ? "" : "s"} upserted from ${result.rowsSeen} release row${result.rowsSeen === 1 ? "" : "s"}.`);
         await load();
-        setGridReloadToken((current) => current + 1);
         return;
       }
 
@@ -1473,7 +1498,6 @@ function EarningsGapsPanel() {
         setMessage(`Backfilled ${failedSlice}; continuing... batch ${batchCount}/${totalBatches}.`);
       }
       await load();
-      setGridReloadToken((current) => current + 1);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to sync earnings gap-ups.";
       const retry = mode === "backfill" ? ` Failed batch: ${failedSlice}. Retry cursor: ${retryCursor ?? "start"}.` : "";
@@ -1723,6 +1747,9 @@ function EarningsGapsPanel() {
       {error ? (
         <div className="rounded border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div>
       ) : null}
+      {statusError ? (
+        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{statusError}</div>
+      ) : null}
       {message ? (
         <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{message}</div>
       ) : null}
@@ -1835,13 +1862,10 @@ function EarningsGapsPanel() {
             <button
               type="button"
               className={BUTTON_CLASS}
-              disabled={loading || gridLoading || Boolean(syncing)}
-              onClick={() => {
-                void load();
-                setGridReloadToken((current) => current + 1);
-              }}
+              disabled={loading || refreshing || Boolean(syncing)}
+              onClick={() => void load()}
             >
-              <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              <RefreshCw className={loading || refreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
               Reload
             </button>
             <button type="button" className={BUTTON_CLASS} disabled={Boolean(syncing)} onClick={() => void runSync("incremental")}>
@@ -1863,7 +1887,10 @@ function EarningsGapsPanel() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">Release Gap-Ups</h3>
-            <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
+            <p className="text-xs text-slate-500">
+              {data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}
+              {refreshing ? " · Refreshing snapshot…" : ""}
+            </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
             <div
@@ -1968,11 +1995,11 @@ function EarningsGapsPanel() {
       ) : (
         <EarningsMultiChartGrid
           cards={gridCards}
-          total={gridData?.total ?? 0}
+          total={total}
           page={gridPage}
           pageSize={chartsPerPage}
-          loading={gridLoading}
-          error={gridError}
+          loading={loading}
+          error={error}
           onPageChange={setGridPage}
           onPageSizeChange={(nextPageSize) => {
             setChartsPerPage(nextPageSize);

@@ -3,6 +3,7 @@ import {
   buildTradingViewEarningsGapPayload,
   computeEarningsGapEvents,
   exportEarningsGapTickers,
+  loadEarningsGapsSnapshot,
   loadEarningsGapsStatus,
   maybeRunScheduledEarningsGapSync,
   parseTradingViewEarningsGapRows,
@@ -757,6 +758,59 @@ describe("earnings gap service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["B", "C"]);
     expect(result.rows.every((row) => row.season === "2026 Q2")).toBe(true);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q2", count: 2 });
+  });
+
+  it("loads one unpaginated filtered gap snapshot and derives its facets", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "AAA", reportDate: "2026-05-10", sector: "Tech", gapSource: "postmarket", qualifyingGapPct: 7 }),
+        storedEvent({ ticker: "BBB", reportDate: "2026-05-12", sector: "Tech", gapSource: "regular_open", qualifyingGapPct: 9 }),
+        storedEvent({ ticker: "CCC", reportDate: "2026-05-13", sector: "Retail", gapSource: "postmarket", qualifyingGapPct: 2 }),
+      ],
+    });
+
+    const result = await loadEarningsGapsSnapshot(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sector: "Tech",
+    });
+
+    expect(result.total).toBe(2);
+    expect(result.rows.map((item) => item.ticker)).toEqual(["BBB", "AAA"]);
+    expect(result.facets.sectors).toEqual([{ value: "Tech", count: 2 }]);
+    expect(result.facets.gapSources).toEqual([
+      { value: "postmarket", count: 1 },
+      { value: "regular_open", count: 1 },
+    ]);
+    const snapshotQueries = env.__queries.filter((sql) => sql.includes("FROM earnings_gap_events"));
+    expect(snapshotQueries).toHaveLength(1);
+    expect(snapshotQueries[0]).not.toContain("LIMIT ? OFFSET ?");
+    expect(snapshotQueries[0]).not.toContain("GROUP BY");
+  });
+
+  it("defaults gap queries and exports to newest report date first", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "AAA", reportDate: "2026-05-10", qualifyingGapPct: 20 }),
+        storedEvent({ ticker: "BBB", reportDate: "2026-05-12", qualifyingGapPct: 5 }),
+      ],
+    });
+
+    const result = await queryEarningsGaps(env, { startDate: "2026-01-01", includeOtc: true });
+    const exported = await exportEarningsGapTickers(env, { startDate: "2026-01-01", includeOtc: true });
+
+    expect(result.rows.map((item) => item.ticker)).toEqual(["BBB", "AAA"]);
+    expect(exported).toEqual(["BBB", "AAA"]);
+    expect(env.__queries.filter((sql) => sql.includes("ORDER BY report_date DESC"))).toHaveLength(2);
+  });
+
+  it("loads gap status latest rows without recursively querying counts and facets", async () => {
+    const env = createEnv();
+    await loadEarningsGapsStatus(env);
+
+    expect(env.__queries.some((sql) => sql.includes("GROUP BY"))).toBe(false);
+    expect(env.__queries.some((sql) => sql.includes("LIMIT ? OFFSET ?"))).toBe(false);
+    expect(env.__queries.some((sql) => sql.includes("ORDER BY report_date DESC, ticker ASC, id ASC") && sql.includes("LIMIT 12"))).toBe(true);
   });
 
   it("returns EPS fields and sorts gap rows by EPS percentage and difference", async () => {

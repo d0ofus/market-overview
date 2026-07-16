@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EarningsGapRow, EarningsSurpriseRow } from "./api";
 import {
-  buildEarningsGridQuery,
-  currentEarningsGridData,
   earningsGridMetricClass,
   gapRowToGridCard,
   normalizeEarningsResultView,
@@ -79,34 +77,6 @@ test("earnings result view defaults malformed and missing storage to table", () 
   assert.equal(normalizeEarningsResultView("multi"), "table");
   assert.equal(normalizeEarningsResultView("table"), "table");
   assert.equal(normalizeEarningsResultView("grid"), "grid");
-});
-
-test("grid query preserves active filters and sort while owning pagination", () => {
-  const query = buildEarningsGridQuery({
-    q: "AAPL",
-    sector: "Technology",
-    sort: "epsSurprisePct",
-    sortDir: "desc",
-    limit: 200,
-    offset: 600,
-  }, 3, 12);
-  assert.deepEqual(query, {
-    q: "AAPL",
-    sector: "Technology",
-    sort: "epsSurprisePct",
-    sortDir: "desc",
-    limit: 12,
-    offset: 24,
-  });
-  assert.equal(buildEarningsGridQuery({}, 9, 100).limit, 48);
-});
-
-test("grid snapshots are visible only for the active sorted query", () => {
-  const response = { rows: ["AAPL", "MSFT"], total: 2 };
-  const snapshot = { queryKey: "reportDate-desc", data: response };
-  assert.equal(currentEarningsGridData(snapshot, "reportDate-asc"), null);
-  assert.equal(currentEarningsGridData(snapshot, "reportDate-desc"), response);
-  assert.equal(currentEarningsGridData(null, "reportDate-desc"), null);
 });
 
 test("Surprises adapter emits the exact card metric order and signed formatting", () => {

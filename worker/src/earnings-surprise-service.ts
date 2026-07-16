@@ -140,6 +140,8 @@ export type EarningsSurprisesResponse = {
   };
 };
 
+export type EarningsSurprisesSnapshotResponse = Omit<EarningsSurprisesResponse, "limit" | "offset">;
+
 export type EarningsSurpriseSyncResult = {
   ok: boolean;
   mode: EarningsSurpriseSyncMode;
@@ -939,6 +941,46 @@ function mapRow(row: Record<string, unknown>): EarningsSurpriseRow {
   };
 }
 
+const EARNINGS_SURPRISE_SELECT_COLUMNS = `
+  id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
+  sector, industry, market_cap as marketCap, avg_dollar_volume_30d as avgDollarVolume30d,
+  report_date as reportDate,
+  report_timestamp as reportTimestamp, report_time as reportTime,
+  fiscal_period_end as fiscalPeriodEnd, season,
+  eps_actual as epsActual, eps_estimate as epsEstimate, eps_surprise as epsSurprise,
+  eps_surprise_pct as epsSurprisePct, revenue_actual as revenueActual,
+  revenue_estimate as revenueEstimate, revenue_surprise as revenueSurprise,
+  revenue_surprise_pct as revenueSurprisePct, first_seen_at as firstSeenAt,
+  last_seen_at as lastSeenAt`;
+
+function compareFacetValues(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function deriveFacet(
+  rows: EarningsSurpriseRow[],
+  field: "season" | "sector" | "industry" | "exchange",
+): Array<{ value: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const value = String(row[field] ?? "");
+    if (value !== "") counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Array.from(counts, ([value, count]) => ({ value, count }))
+    .sort((left, right) => right.count - left.count || compareFacetValues(left.value, right.value))
+    .slice(0, 80);
+}
+
+function deriveSnapshotFacets(rows: EarningsSurpriseRow[]): EarningsSurprisesResponse["facets"] {
+  return {
+    seasons: deriveFacet(rows, "season"),
+    sectors: deriveFacet(rows, "sector"),
+    industries: deriveFacet(rows, "industry"),
+    exchanges: deriveFacet(rows, "exchange"),
+  };
+}
+
 async function loadFacet(env: Env, field: "season" | "sector" | "industry" | "exchange", whereSql: string, args: unknown[]): Promise<Array<{ value: string; count: number }>> {
   const rows = await env.DB.prepare(
     `SELECT ${field} as value, COUNT(*) as count
@@ -968,24 +1010,14 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
   }
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const count = await env.DB.prepare(
     `SELECT COUNT(*) as count FROM earnings_surprise_events ${whereSql}`,
   ).bind(...args).first<{ count: number }>();
   const rows = await env.DB.prepare(
-    `SELECT
-       id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
-       sector, industry, market_cap as marketCap, avg_dollar_volume_30d as avgDollarVolume30d,
-       report_date as reportDate,
-       report_timestamp as reportTimestamp, report_time as reportTime,
-       fiscal_period_end as fiscalPeriodEnd, season,
-       eps_actual as epsActual, eps_estimate as epsEstimate, eps_surprise as epsSurprise,
-       eps_surprise_pct as epsSurprisePct, revenue_actual as revenueActual,
-       revenue_estimate as revenueEstimate, revenue_surprise as revenueSurprise,
-       revenue_surprise_pct as revenueSurprisePct, first_seen_at as firstSeenAt,
-       last_seen_at as lastSeenAt
+    `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
      FROM earnings_surprise_events
      ${whereSql}
      ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
@@ -1009,10 +1041,43 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
   };
 }
 
+export async function loadEarningsSurprisesSnapshot(
+  env: Env,
+  query: EarningsSurprisesQuery = {},
+): Promise<EarningsSurprisesSnapshotResponse> {
+  const schemaWarning = await earningsSurpriseSchemaWarning(env);
+  if (schemaWarning) {
+    return {
+      schemaReady: false,
+      warning: schemaWarning,
+      generatedAt: new Date().toISOString(),
+      total: 0,
+      rows: [],
+      facets: { seasons: [], sectors: [], industries: [], exchanges: [] },
+    };
+  }
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
+  const result = await env.DB.prepare(
+    `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
+     FROM earnings_surprise_events
+     ${whereSql}
+     ORDER BY report_date DESC, ticker ASC, id ASC`,
+  ).bind(...args).all<Record<string, unknown>>();
+  const rows = (result.results ?? []).map(mapRow);
+  return {
+    schemaReady: true,
+    warning: null,
+    generatedAt: new Date().toISOString(),
+    total: rows.length,
+    rows,
+    facets: deriveSnapshotFacets(rows),
+  };
+}
+
 export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSurprisesQuery = {}): Promise<string[]> {
   if (!(await hasEarningsSurpriseSchema(env))) return [];
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "epsSurprisePct")] ?? SORT_COLUMNS.epsSurprisePct;
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const rows = await env.DB.prepare(
@@ -1057,7 +1122,13 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
        FROM earnings_surprise_syncs
        ORDER BY updated_at DESC`,
     ).all<EarningsSurprisesStatus["syncs"][number]>(),
-    queryEarningsSurprises(env, { limit: 12, offset: 0, includeOtc: false, sort: "reportDate", sortDir: "desc" }),
+    env.DB.prepare(
+      `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
+       FROM earnings_surprise_events
+       WHERE ${defaultEligibilitySql}
+       ORDER BY report_date DESC, ticker ASC, id ASC
+       LIMIT 12`,
+    ).all<Record<string, unknown>>(),
   ]);
   return {
     schemaReady: true,
@@ -1070,7 +1141,7 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
       earliestReportDate: counts?.earliestReportDate ?? null,
     },
     syncs: syncs.results ?? [],
-    latestRows: latest.rows,
+    latestRows: (latest.results ?? []).map(mapRow),
   };
 }
 

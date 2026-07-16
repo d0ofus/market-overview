@@ -724,6 +724,8 @@ export type EarningsSurprisesResponse = {
   };
 };
 
+export type EarningsSurprisesSnapshotResponse = Omit<EarningsSurprisesResponse, "limit" | "offset">;
+
 export type EarningsSurprisesStatus = {
   schemaReady: boolean;
   warning: string | null;
@@ -859,6 +861,8 @@ export type EarningsGapsResponse = {
     gapSources: EarningsSurpriseFacet[];
   };
 };
+
+export type EarningsGapsSnapshotResponse = Omit<EarningsGapsResponse, "limit" | "offset">;
 
 export type EarningsGapsStatus = {
   schemaReady: boolean;
@@ -3256,6 +3260,23 @@ export function getEarningsSurprises(query?: EarningsSurprisesQuery) {
   }));
 }
 
+export function getEarningsSurprisesSnapshot(query?: EarningsSurprisesQuery) {
+  return getJson<EarningsSurprisesSnapshotResponse>(appendQuery("/api/earnings/surprises/snapshot", {
+    q: query?.q,
+    season: query?.season,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    minEpsSurprisePct: query?.minEpsSurprisePct,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
+    surpriseSide: query?.surpriseSide,
+  }));
+}
+
 export function getEarningsSurprisesExportUrl(query?: EarningsSurprisesQuery, dateSuffix?: string | null) {
   return apiUrl(appendQuery("/api/earnings/surprises/export.txt", {
     limit: query?.limit,
@@ -3306,6 +3327,23 @@ export function getEarningsGaps(query?: EarningsGapsQuery) {
     includeOtc: query?.includeOtc ? 1 : undefined,
     sort: query?.sort,
     sortDir: query?.sortDir,
+  }));
+}
+
+export function getEarningsGapsSnapshot(query?: EarningsGapsQuery) {
+  return getJson<EarningsGapsSnapshotResponse>(appendQuery("/api/earnings/gaps/snapshot", {
+    q: query?.q,
+    startDate: query?.startDate,
+    endDate: query?.endDate,
+    season: query?.season,
+    minMarketCap: query?.minMarketCap,
+    maxMarketCap: query?.maxMarketCap,
+    minAvgDollarVolume: query?.minAvgDollarVolume,
+    minGapPct: query?.minGapPct,
+    sector: query?.sector,
+    industry: query?.industry,
+    exchange: query?.exchange,
+    includeOtc: query?.includeOtc ? 1 : undefined,
   }));
 }
 

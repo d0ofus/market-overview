@@ -158,6 +158,8 @@ export type EarningsGapsResponse = {
   };
 };
 
+export type EarningsGapsSnapshotResponse = Omit<EarningsGapsResponse, "limit" | "offset">;
+
 export type EarningsGapSyncResult = {
   ok: boolean;
   mode: EarningsGapSyncMode;
@@ -1076,6 +1078,48 @@ function mapRow(row: Record<string, unknown>): EarningsGapRow {
   };
 }
 
+const EARNINGS_GAP_SELECT_COLUMNS = `
+  id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
+  sector, industry, market_cap as marketCap, price, avg_volume_30d as avgVolume30d,
+  avg_dollar_volume_30d as avgDollarVolume30d, report_date as reportDate,
+  season, eps_provider as epsProvider, eps_actual as epsActual, eps_estimate as epsEstimate,
+  eps_surprise as epsSurprise, eps_surprise_pct as epsSurprisePct,
+  report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
+  previous_close as previousClose, reaction_open as reactionOpen,
+  regular_open_gap_pct as regularOpenGapPct, postmarket_price as postmarketPrice,
+  postmarket_gap_pct as postmarketGapPct, postmarket_volume as postmarketVolume,
+  qualifying_gap_pct as qualifyingGapPct, gap_source as gapSource,
+  first_seen_at as firstSeenAt, last_seen_at as lastSeenAt`;
+
+function compareFacetValues(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function deriveFacet(
+  rows: EarningsGapRow[],
+  field: "season" | "sector" | "industry" | "exchange" | "gapSource",
+): Array<{ value: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const value = String(row[field] ?? "");
+    if (value !== "") counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Array.from(counts, ([value, count]) => ({ value, count }))
+    .sort((left, right) => right.count - left.count || compareFacetValues(left.value, right.value))
+    .slice(0, 80);
+}
+
+function deriveSnapshotFacets(rows: EarningsGapRow[]): EarningsGapsResponse["facets"] {
+  return {
+    seasons: deriveFacet(rows, "season"),
+    sectors: deriveFacet(rows, "sector"),
+    industries: deriveFacet(rows, "industry"),
+    exchanges: deriveFacet(rows, "exchange"),
+    gapSources: deriveFacet(rows, "gapSource"),
+  };
+}
+
 async function loadFacet(env: Env, field: "season" | "sector" | "industry" | "exchange" | "gap_source", whereSql: string, args: unknown[]): Promise<Array<{ value: string; count: number }>> {
   const rows = await env.DB.prepare(
     `SELECT ${field} as value, COUNT(*) as count
@@ -1105,25 +1149,14 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
   }
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const count = await env.DB.prepare(
     `SELECT COUNT(*) as count FROM earnings_gap_events ${whereSql}`,
   ).bind(...args).first<{ count: number }>();
   const rows = await env.DB.prepare(
-    `SELECT
-       id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
-       sector, industry, market_cap as marketCap, price, avg_volume_30d as avgVolume30d,
-       avg_dollar_volume_30d as avgDollarVolume30d, report_date as reportDate,
-       season, eps_provider as epsProvider, eps_actual as epsActual, eps_estimate as epsEstimate,
-       eps_surprise as epsSurprise, eps_surprise_pct as epsSurprisePct,
-       report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
-       previous_close as previousClose, reaction_open as reactionOpen,
-       regular_open_gap_pct as regularOpenGapPct, postmarket_price as postmarketPrice,
-       postmarket_gap_pct as postmarketGapPct, postmarket_volume as postmarketVolume,
-       qualifying_gap_pct as qualifyingGapPct, gap_source as gapSource,
-       first_seen_at as firstSeenAt, last_seen_at as lastSeenAt
+    `SELECT ${EARNINGS_GAP_SELECT_COLUMNS}
      FROM earnings_gap_events
      ${whereSql}
      ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
@@ -1148,10 +1181,43 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
   };
 }
 
+export async function loadEarningsGapsSnapshot(
+  env: Env,
+  query: EarningsGapsQuery = {},
+): Promise<EarningsGapsSnapshotResponse> {
+  const schemaWarning = await earningsGapSchemaWarning(env);
+  if (schemaWarning) {
+    return {
+      schemaReady: false,
+      warning: schemaWarning,
+      generatedAt: new Date().toISOString(),
+      total: 0,
+      rows: [],
+      facets: { seasons: [], sectors: [], industries: [], exchanges: [], gapSources: [] },
+    };
+  }
+  const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
+  const result = await env.DB.prepare(
+    `SELECT ${EARNINGS_GAP_SELECT_COLUMNS}
+     FROM earnings_gap_events
+     ${whereSql}
+     ORDER BY report_date DESC, ticker ASC, id ASC`,
+  ).bind(...args).all<Record<string, unknown>>();
+  const rows = (result.results ?? []).map(mapRow);
+  return {
+    schemaReady: true,
+    warning: null,
+    generatedAt: new Date().toISOString(),
+    total: rows.length,
+    rows,
+    facets: deriveSnapshotFacets(rows),
+  };
+}
+
 export async function exportEarningsGapTickers(env: Env, query: EarningsGapsQuery = {}): Promise<string[]> {
   if (await earningsGapSchemaWarning(env)) return [];
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "qualifyingGapPct")] ?? SORT_COLUMNS.qualifyingGapPct;
+  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const rows = await env.DB.prepare(
@@ -1199,7 +1265,13 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
        ORDER BY datetime(updated_at) DESC
        LIMIT 12`,
     ).all<EarningsGapsStatus["syncs"][number]>(),
-    queryEarningsGaps(env, { limit: 12, offset: 0, includeOtc: false, sort: "reportDate", sortDir: "desc" }),
+    env.DB.prepare(
+      `SELECT ${EARNINGS_GAP_SELECT_COLUMNS}
+       FROM earnings_gap_events
+       WHERE ${defaultEligibilitySql}
+       ORDER BY report_date DESC, ticker ASC, id ASC
+       LIMIT 12`,
+    ).all<Record<string, unknown>>(),
   ]);
   return {
     schemaReady: true,
@@ -1213,7 +1285,7 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
       earliestReportDate: counts?.earliestReportDate ?? null,
     },
     syncs: syncs.results ?? [],
-    latestRows: latest.rows,
+    latestRows: (latest.results ?? []).map(mapRow),
   };
 }
 

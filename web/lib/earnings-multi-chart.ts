@@ -1,8 +1,6 @@
 import type {
   EarningsGapRow,
-  EarningsGapsQuery,
   EarningsSurpriseRow,
-  EarningsSurprisesQuery,
 } from "./api";
 
 export type EarningsResultView = "table" | "grid";
@@ -23,34 +21,8 @@ export type EarningsGridCard = {
   expandedMetrics: EarningsGridMetric[];
 };
 
-export type EarningsGridSnapshot<T> = {
-  queryKey: string;
-  data: T;
-};
-
-export function currentEarningsGridData<T>(
-  snapshot: EarningsGridSnapshot<T> | null,
-  queryKey: string,
-): T | null {
-  return snapshot?.queryKey === queryKey ? snapshot.data : null;
-}
-
 export function normalizeEarningsResultView(value: unknown): EarningsResultView {
   return value === "grid" ? "grid" : "table";
-}
-
-export function buildEarningsGridQuery<T extends EarningsSurprisesQuery | EarningsGapsQuery>(
-  query: T,
-  page: number,
-  pageSize: number,
-): T & { limit: number; offset: number } {
-  const safePageSize = Math.max(1, Math.min(48, Math.round(pageSize) || 12));
-  const safePage = Math.max(1, Math.round(page) || 1);
-  return {
-    ...query,
-    limit: safePageSize,
-    offset: (safePage - 1) * safePageSize,
-  };
 }
 
 export function formatEarningsGridCompact(value: number | null | undefined): string {
