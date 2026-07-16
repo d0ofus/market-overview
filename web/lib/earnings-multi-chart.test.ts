@@ -3,6 +3,7 @@ import test from "node:test";
 import type { EarningsGapRow, EarningsSurpriseRow } from "./api";
 import {
   buildEarningsGridQuery,
+  currentEarningsGridData,
   earningsGridMetricClass,
   gapRowToGridCard,
   normalizeEarningsResultView,
@@ -98,6 +99,14 @@ test("grid query preserves active filters and sort while owning pagination", () 
     offset: 24,
   });
   assert.equal(buildEarningsGridQuery({}, 9, 100).limit, 48);
+});
+
+test("grid snapshots are visible only for the active sorted query", () => {
+  const response = { rows: ["AAPL", "MSFT"], total: 2 };
+  const snapshot = { queryKey: "reportDate-desc", data: response };
+  assert.equal(currentEarningsGridData(snapshot, "reportDate-asc"), null);
+  assert.equal(currentEarningsGridData(snapshot, "reportDate-desc"), response);
+  assert.equal(currentEarningsGridData(null, "reportDate-desc"), null);
 });
 
 test("Surprises adapter emits the exact card metric order and signed formatting", () => {

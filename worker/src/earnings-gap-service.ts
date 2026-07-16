@@ -1126,7 +1126,7 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
        first_seen_at as firstSeenAt, last_seen_at as lastSeenAt
      FROM earnings_gap_events
      ${whereSql}
-     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ? OFFSET ?`,
   ).bind(...args, limit, offset).all<Record<string, unknown>>();
   const [seasons, sectors, industries, exchanges, gapSources] = await Promise.all([
@@ -1158,7 +1158,7 @@ export async function exportEarningsGapTickers(env: Env, query: EarningsGapsQuer
     `SELECT ticker
      FROM earnings_gap_events
      ${whereSql}
-     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ?`,
   ).bind(...args, limit).all<{ ticker: string }>();
   return (rows.results ?? []).map((row) => String(row.ticker ?? "").trim()).filter(Boolean);

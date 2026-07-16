@@ -79,9 +79,10 @@ function tvRow(input: {
   };
 }
 
-function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; __syncs: Map<string, StoredSync> } {
+function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; __syncs: Map<string, StoredSync>; __queries: string[] } {
   const events = [...seed];
   const syncs = new Map<string, StoredSync>();
+  const queries: string[] = [];
 
   const applyFilters = (sql: string, args: unknown[]): StoredEvent[] => {
     let cursor = 0;
@@ -148,7 +149,12 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
         const result = typeof a === "number" && typeof b === "number"
           ? a - b
           : String(a).localeCompare(String(b));
-        return direction === "ASC" ? result : -result;
+        if (result !== 0) return direction === "ASC" ? result : -result;
+        const tickerResult = left.ticker.localeCompare(right.ticker);
+        if (tickerResult !== 0) return tickerResult;
+        const reportDateResult = right.reportDate.localeCompare(left.reportDate);
+        if (reportDateResult !== 0) return reportDateResult;
+        return left.id.localeCompare(right.id);
       });
     }
     return rows;
@@ -156,6 +162,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
 
   const db = {
     prepare(sql: string) {
+      queries.push(sql);
       const makeBound = (args: unknown[]) => ({
         __sql: sql,
         __args: args,
@@ -318,7 +325,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
       return [];
     },
   };
-  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs };
+  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs, __queries: queries };
 }
 
 describe("earnings surprise service", () => {
@@ -500,6 +507,24 @@ describe("earnings surprise service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
     expect(result.rows[0].avgDollarVolume30d).toBe(12_000_000_000);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
+  });
+
+  it("uses a deterministic total order for tied surprise rows and exports", async () => {
+    const base = { provider: "tradingview", exchange: "NASDAQ", companyName: "Company", sector: "Tech", industry: "Software", marketCap: 1_000_000_000, avgDollarVolume30d: null, reportTimestamp: null, reportTime: null, fiscalPeriodEnd: "2026-03-31", season: "2026 Q1", epsActual: null, epsEstimate: null, epsSurprise: null, epsSurprisePct: 10, revenueActual: null, revenueEstimate: null, revenueSurprise: null, revenueSurprisePct: null, firstSeenAt: null, lastSeenAt: null, rawJson: null };
+    const env = createEnv([
+      { ...base, id: "a-old", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", reportDate: "2026-04-01" },
+      { ...base, id: "a-new", sourceSymbol: "NASDAQ:AAPL", ticker: "AAPL", reportDate: "2026-07-01" },
+      { ...base, id: "m", sourceSymbol: "NASDAQ:MSFT", ticker: "MSFT", reportDate: "2026-06-01" },
+    ]);
+
+    const result = await queryEarningsSurprises(env, { includeOtc: true, sort: "epsSurprisePct", sortDir: "desc" });
+    const exported = await exportEarningsSurpriseTickers(env, { includeOtc: true, sort: "epsSurprisePct", sortDir: "desc" });
+
+    expect(result.rows.map((row) => row.id)).toEqual(["a-new", "a-old", "m"]);
+    expect(exported).toEqual(["AAPL", "AAPL", "MSFT"]);
+    expect(env.__queries.filter((sql) => sql.includes("ORDER BY eps_surprise_pct DESC")).every((sql) => (
+      sql.includes("ORDER BY eps_surprise_pct DESC, ticker ASC, report_date DESC, id ASC")
+    ))).toBe(true);
   });
 
   it("excludes preferred issues from query, export, status, and supports limit zero", async () => {

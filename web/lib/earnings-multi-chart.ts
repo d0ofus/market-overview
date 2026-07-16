@@ -23,6 +23,18 @@ export type EarningsGridCard = {
   expandedMetrics: EarningsGridMetric[];
 };
 
+export type EarningsGridSnapshot<T> = {
+  queryKey: string;
+  data: T;
+};
+
+export function currentEarningsGridData<T>(
+  snapshot: EarningsGridSnapshot<T> | null,
+  queryKey: string,
+): T | null {
+  return snapshot?.queryKey === queryKey ? snapshot.data : null;
+}
+
 export function normalizeEarningsResultView(value: unknown): EarningsResultView {
   return value === "grid" ? "grid" : "table";
 }

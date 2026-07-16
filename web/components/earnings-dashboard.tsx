@@ -39,9 +39,11 @@ import {
 } from "@/lib/earnings-column-widths";
 import {
   buildEarningsGridQuery,
+  currentEarningsGridData,
   gapRowToGridCard,
   normalizeEarningsResultView,
   surpriseRowToGridCard,
+  type EarningsGridSnapshot,
   type EarningsResultView,
 } from "@/lib/earnings-multi-chart";
 import { EarningsMultiChartGrid } from "./earnings-multi-chart-grid";
@@ -786,7 +788,7 @@ function EarningsSurprisesPanel() {
   const [resultView, setResultView] = usePersistedResultView(SURPRISE_RESULT_VIEW_STORAGE_KEY);
   const [gridPage, setGridPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
-  const [gridData, setGridData] = useState<EarningsSurprisesResponse | null>(null);
+  const [gridSnapshot, setGridSnapshot] = useState<EarningsGridSnapshot<EarningsSurprisesResponse> | null>(null);
   const [gridLoading, setGridLoading] = useState(false);
   const [gridError, setGridError] = useState<string | null>(null);
   const [gridReloadToken, setGridReloadToken] = useState(0);
@@ -804,6 +806,7 @@ function EarningsSurprisesPanel() {
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
   const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
+  const gridData = currentEarningsGridData(gridSnapshot, gridQueryKey);
   const gridCards = useMemo(() => (gridData?.rows ?? []).map(surpriseRowToGridCard), [gridData]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
@@ -861,9 +864,10 @@ function EarningsSurprisesPanel() {
     let active = true;
     setGridLoading(true);
     setGridError(null);
+    setGridSnapshot((current) => current?.queryKey === gridQueryKey ? null : current);
     getEarningsSurprises(gridQuery)
       .then((nextData) => {
-        if (active) setGridData(nextData);
+        if (active) setGridSnapshot({ queryKey: gridQueryKey, data: nextData });
       })
       .catch((err) => {
         if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings surprise charts.");
@@ -877,6 +881,7 @@ function EarningsSurprisesPanel() {
   }, [gridQueryKey, gridReloadToken, resultView]);
 
   useEffect(() => {
+    if (!gridData) return;
     const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
     if (gridPage > totalPages) setGridPage(totalPages);
   }, [chartsPerPage, gridData?.total, gridPage]);
@@ -1285,7 +1290,7 @@ function EarningsGapsPanel() {
   const [resultView, setResultView] = usePersistedResultView(GAP_RESULT_VIEW_STORAGE_KEY);
   const [gridPage, setGridPage] = useState(1);
   const [chartsPerPage, setChartsPerPage] = useState(DEFAULT_CHARTS_PER_PAGE);
-  const [gridData, setGridData] = useState<EarningsGapsResponse | null>(null);
+  const [gridSnapshot, setGridSnapshot] = useState<EarningsGridSnapshot<EarningsGapsResponse> | null>(null);
   const [gridLoading, setGridLoading] = useState(false);
   const [gridError, setGridError] = useState<string | null>(null);
   const [gridReloadToken, setGridReloadToken] = useState(0);
@@ -1310,6 +1315,7 @@ function EarningsGapsPanel() {
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const gridQuery = useMemo(() => buildEarningsGridQuery(query, gridPage, chartsPerPage), [chartsPerPage, gridPage, queryKey]);
   const gridQueryKey = useMemo(() => JSON.stringify(gridQuery), [gridQuery]);
+  const gridData = currentEarningsGridData(gridSnapshot, gridQueryKey);
   const gridCards = useMemo(() => (gridData?.rows ?? []).map(gapRowToGridCard), [gridData]);
   const limit = query.limit ?? 100;
   const offset = query.offset ?? 0;
@@ -1368,9 +1374,10 @@ function EarningsGapsPanel() {
     let active = true;
     setGridLoading(true);
     setGridError(null);
+    setGridSnapshot((current) => current?.queryKey === gridQueryKey ? null : current);
     getEarningsGaps(gridQuery)
       .then((nextData) => {
-        if (active) setGridData(nextData);
+        if (active) setGridSnapshot({ queryKey: gridQueryKey, data: nextData });
       })
       .catch((err) => {
         if (active) setGridError(err instanceof Error ? err.message : "Failed to load earnings gap-up charts.");
@@ -1384,6 +1391,7 @@ function EarningsGapsPanel() {
   }, [gridQueryKey, gridReloadToken, resultView]);
 
   useEffect(() => {
+    if (!gridData) return;
     const totalPages = Math.max(1, Math.ceil((gridData?.total ?? 0) / chartsPerPage));
     if (gridPage > totalPages) setGridPage(totalPages);
   }, [chartsPerPage, gridData?.total, gridPage]);

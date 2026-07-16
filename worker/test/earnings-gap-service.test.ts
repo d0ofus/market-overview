@@ -149,6 +149,7 @@ function createEnv(input: {
   __events: StoredEvent[];
   __syncs: StoredSync[];
   __metrics: { cleanupRuns: number; dailyBarQueries: number };
+  __queries: string[];
 } {
   const bars = input.bars ?? [];
   const syncs = [...(input.syncs ?? [])];
@@ -157,6 +158,7 @@ function createEnv(input: {
   const hasSeasonColumn = input.hasSeasonColumn ?? true;
   const hasEpsColumns = input.hasEpsColumns ?? true;
   const metrics = { cleanupRuns: 0, dailyBarQueries: 0 };
+  const queries: string[] = [];
 
   const countPlaceholders = (sql: string, field: string) => {
     const match = sql.match(new RegExp(`${field} IN \\(([^)]*)\\)`));
@@ -205,6 +207,7 @@ function createEnv(input: {
         eps_surprise: "epsSurprise",
         eps_surprise_pct: "epsSurprisePct",
         qualifying_gap_pct: "qualifyingGapPct",
+        report_date: "reportDate",
         ticker: "ticker",
       };
       const key = map[column] ?? "ticker";
@@ -214,7 +217,12 @@ function createEnv(input: {
         const result = typeof a === "number" && typeof b === "number"
           ? a - b
           : String(a).localeCompare(String(b));
-        return direction === "ASC" ? result : -result;
+        if (result !== 0) return direction === "ASC" ? result : -result;
+        const tickerResult = left.ticker.localeCompare(right.ticker);
+        if (tickerResult !== 0) return tickerResult;
+        const reportDateResult = right.reportDate.localeCompare(left.reportDate);
+        if (reportDateResult !== 0) return reportDateResult;
+        return left.id.localeCompare(right.id);
       });
     }
     return rows;
@@ -222,6 +230,7 @@ function createEnv(input: {
 
   const db = {
     prepare(sql: string) {
+      queries.push(sql);
       const makeBound = (args: unknown[]) => ({
         __sql: sql,
         __args: args,
@@ -431,7 +440,7 @@ function createEnv(input: {
     },
   };
 
-  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs, __metrics: metrics };
+  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs, __metrics: metrics, __queries: queries };
 }
 
 describe("earnings gap service", () => {
@@ -774,6 +783,29 @@ describe("earnings gap service", () => {
     expect(byPct.rows.map((row) => row.ticker)).toEqual(["HIGH", "LOW"]);
     expect(byPct.rows[0]).toMatchObject({ epsProvider: "tradingview", epsActual: 1.8, epsEstimate: 1, epsSurprisePct: 80 });
     expect(byDiff.rows.map((row) => row.ticker)).toEqual(["LOW", "HIGH"]);
+  });
+
+  it("uses a deterministic total order for tied gap rows and exports", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "AAPL", reportDate: "2026-04-01", qualifyingGapPct: 10 }),
+        storedEvent({ ticker: "AAPL", reportDate: "2026-07-01", qualifyingGapPct: 10 }),
+        storedEvent({ ticker: "MSFT", reportDate: "2026-06-01", qualifyingGapPct: 10 }),
+      ],
+    });
+
+    const result = await queryEarningsGaps(env, { startDate: "2026-01-01", includeOtc: true, sort: "qualifyingGapPct", sortDir: "desc" });
+    const exported = await exportEarningsGapTickers(env, { startDate: "2026-01-01", includeOtc: true, sort: "qualifyingGapPct", sortDir: "desc" });
+
+    expect(result.rows.map((row) => row.id)).toEqual([
+      "id-AAPL-2026-07-01",
+      "id-AAPL-2026-04-01",
+      "id-MSFT-2026-06-01",
+    ]);
+    expect(exported).toEqual(["AAPL", "AAPL", "MSFT"]);
+    expect(env.__queries.filter((sql) => sql.includes("ORDER BY qualifying_gap_pct DESC")).every((sql) => (
+      sql.includes("ORDER BY qualifying_gap_pct DESC, ticker ASC, report_date DESC, id ASC")
+    ))).toBe(true);
   });
 
   it("excludes preferred issues from gap query, export, status, and supports limit zero", async () => {

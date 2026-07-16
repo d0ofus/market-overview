@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import {
+  buildTradingViewEarningsEventConfig,
+  type TradingViewEarningsEvents,
+  type TradingViewInitialRange,
+} from "@/lib/tradingview-widget-config";
 
 const DEFAULT_CHART_INTERVAL = "D";
 const DEFAULT_CHART_STYLE = "1";
@@ -64,6 +69,7 @@ export function TradingViewWidget({
   chartOnly = false,
   showStatusLine = false,
   showCorporateEvents = false,
+  earningsEvents = "off",
   baseSeriesColor,
   baseSeriesLineWidth,
   fillContainer = false,
@@ -83,11 +89,12 @@ export function TradingViewWidget({
   chartOnly?: boolean;
   showStatusLine?: boolean;
   showCorporateEvents?: boolean;
+  earningsEvents?: TradingViewEarningsEvents;
   baseSeriesColor?: string;
   baseSeriesLineWidth?: number;
   fillContainer?: boolean;
   heightMode?: "aspect" | "fill";
-  initialRange?: "1M" | "3M" | "6M" | "12M";
+  initialRange?: TradingViewInitialRange;
   studies?: TradingViewStudy[];
   studiesOverrides?: Record<string, boolean | number | string>;
   surface?: "card" | "plain";
@@ -159,7 +166,9 @@ export function TradingViewWidget({
     const height = heightMode === "fill"
       ? ref.current.clientHeight || Math.round(width * 0.75)
       : Math.round(width * 0.75);
+    const earningsEventConfig = buildTradingViewEarningsEventConfig(earningsEvents, initialRange);
     const overrides: Record<string, boolean | number | string> = {};
+    Object.assign(overrides, earningsEventConfig.overrides);
     if (showStatusLine) {
       Object.assign(overrides, {
         "paneProperties.legendProperties.showSeriesOHLC": true,
@@ -196,7 +205,7 @@ export function TradingViewWidget({
       height,
       symbol: ticker,
       interval: DEFAULT_CHART_INTERVAL,
-      timeframe: initialRange,
+      range: earningsEventConfig.range,
       timezone: DEFAULT_CHART_TIMEZONE,
       theme,
       style: chartStyle,
@@ -215,7 +224,7 @@ export function TradingViewWidget({
       container_id: containerId,
     });
     ref.current.appendChild(script);
-  }, [ticker, chartStyle, compareSymbolsKey, studiesKey, studiesOverridesKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
+  }, [ticker, chartStyle, compareSymbolsKey, studiesKey, studiesOverridesKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, earningsEvents, baseSeriesColor, baseSeriesLineWidth, initialRange, theme, shouldLoad, heightMode]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"

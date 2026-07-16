@@ -988,7 +988,7 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
        last_seen_at as lastSeenAt
      FROM earnings_surprise_events
      ${whereSql}
-     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ? OFFSET ?`,
   ).bind(...args, limit, offset).all<Record<string, unknown>>();
   const [seasons, sectors, industries, exchanges] = await Promise.all([
@@ -1019,7 +1019,7 @@ export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSur
     `SELECT ticker
      FROM earnings_surprise_events
      ${whereSql}
-     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC
+     ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ?`,
   ).bind(...args, limit).all<{ ticker: string }>();
   return (rows.results ?? []).map((row) => String(row.ticker ?? "").trim()).filter(Boolean);

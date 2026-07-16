@@ -140,8 +140,9 @@ export function EarningsMultiChartGrid({
                     {card.ticker}
                   </button>
                   <div className="flex min-w-0 items-center justify-end">
-                    <span className="shrink-0 rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
-                      {card.reportDate || "-"}
+                    <span className="inline-flex shrink-0 items-baseline gap-1.5 whitespace-nowrap rounded-full border border-accent/35 bg-accent/10 px-3 py-1 text-accent">
+                      <span className="text-[9px] font-medium uppercase tracking-[0.12em] text-accent/75">Report Date</span>
+                      <span className="text-[11px] font-semibold">{card.reportDate || "-"}</span>
                     </span>
                   </div>
                 </div>
@@ -157,7 +158,7 @@ export function EarningsMultiChartGrid({
                 </div>
               </div>
               <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
-                <TradingViewWidget ticker={card.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+                <TradingViewWidget ticker={card.ticker} chartOnly showStatusLine fillContainer earningsEvents="markers-and-breaks" initialRange="6M" surface="plain" />
               </div>
               <div className="mt-4 flex flex-wrap justify-between gap-2">
                 <div className="flex flex-wrap gap-2">
@@ -236,7 +237,7 @@ export function EarningsMultiChartGrid({
             </div>
             <div className="min-h-0 flex-1 overflow-hidden p-3">
               <div className="h-full min-h-0 rounded-[20px] bg-panelSoft/25 p-2">
-                <TradingViewWidget ticker={activeChart.ticker} chartOnly showStatusLine fillContainer heightMode="fill" initialRange="3M" surface="plain" />
+                <TradingViewWidget ticker={activeChart.ticker} chartOnly showStatusLine fillContainer heightMode="fill" earningsEvents="markers-and-breaks" initialRange="6M" surface="plain" />
               </div>
             </div>
           </div>
