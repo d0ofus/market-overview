@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Download, GripVertical, Loader2, Maximize2, RefreshCw, RotateCcw, Search } from "lucide-react";
 import {
   getEarningsGaps,
   getEarningsGapsExportUrl,
@@ -22,6 +22,15 @@ import {
   type EarningsSurprisesResponse,
   type EarningsSurprisesStatus,
 } from "@/lib/api";
+import {
+  GAP_COLUMN_WIDTH_SPECS,
+  defaultColumnWidths,
+  normalizeColumnWidths,
+  resizeAdjacentColumnWidths,
+  type ColumnWidthMap,
+  type ColumnWidthSpec,
+  type GapColumnWidthKey,
+} from "@/lib/earnings-column-widths";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 
 type SortKey =
@@ -115,27 +124,7 @@ type SurpriseColumnKey =
   | "industry"
   | "exchange";
 
-type GapColumnKey =
-  | "reportDate"
-  | "ticker"
-  | "companyName"
-  | "season"
-  | "epsSurprisePct"
-  | "epsSurprise"
-  | "epsActual"
-  | "epsEstimate"
-  | "gapSource"
-  | "qualifyingGapPct"
-  | "postmarketGapPct"
-  | "postmarketPrice"
-  | "postmarketVolume"
-  | "regularOpenGapPct"
-  | "reactionOpen"
-  | "avgDollarVolume30d"
-  | "marketCap"
-  | "sector"
-  | "industry"
-  | "exchange";
+type GapColumnKey = GapColumnWidthKey;
 
 const INPUT_CLASS =
   "h-10 w-full rounded border border-borderSoft/80 bg-panelSoft/85 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
@@ -150,6 +139,7 @@ const EXPORT_LIMIT_DEFAULT = 100;
 const EXPORT_LIMIT_MAX = 1000;
 const SURPRISE_COLUMNS_STORAGE_KEY = "earnings-surprises-column-order-v1";
 const GAP_COLUMNS_STORAGE_KEY = "earnings-gaps-column-order-v1";
+const GAP_COLUMN_WIDTHS_STORAGE_KEY = "earnings-gaps-column-widths-v1";
 const DEFAULT_SURPRISE_COLUMN_ORDER: SurpriseColumnKey[] = [
   "reportDate",
   "ticker",
@@ -187,6 +177,7 @@ const DEFAULT_GAP_COLUMN_ORDER: GapColumnKey[] = [
   "industry",
   "exchange",
 ];
+const GAP_CELL_CLASS = "whitespace-normal px-1.5 py-2 align-top text-[11px] leading-tight [overflow-wrap:anywhere]";
 
 function isoDateMonthsAgo(months: number): string {
   const now = new Date();
@@ -415,6 +406,35 @@ function usePersistedColumnOrder<Key extends string>(storageKey: string, default
   return [order, setOrder] as const;
 }
 
+function usePersistedColumnWidths<Key extends string>(
+  storageKey: string,
+  specs: Record<Key, ColumnWidthSpec>,
+) {
+  const defaults = useMemo(() => defaultColumnWidths(specs), [specs]);
+  const [widths, setWidths] = useState<ColumnWidthMap<Key>>(defaults);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      setWidths(normalizeColumnWidths(stored ? JSON.parse(stored) : null, specs));
+    } catch {
+      setWidths(defaults);
+    }
+  }, [defaults, specs, storageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const timeout = window.setTimeout(() => {
+      window.localStorage.setItem(storageKey, JSON.stringify(widths));
+    }, 120);
+    return () => window.clearTimeout(timeout);
+  }, [storageKey, widths]);
+
+  const reset = useCallback(() => setWidths(defaults), [defaults]);
+  return [widths, setWidths, reset] as const;
+}
+
 function ResultsPager({
   loading,
   limit,
@@ -491,36 +511,46 @@ function DraggableColumnHeader<Key extends string, Row, Sort extends string>({
   sortKey,
   sortDir,
   draggedKey,
+  compact = false,
+  canResize = false,
+  widthPct,
   onSort,
   onDragStart,
   onDrop,
   onDragEnd,
+  onResizeStart,
+  onResizeBy,
 }: {
   column: EarningsTableColumn<Key, Row, Sort>;
   sortKey: Sort;
   sortDir: "asc" | "desc";
   draggedKey: Key | null;
+  compact?: boolean;
+  canResize?: boolean;
+  widthPct?: number;
   onSort: (key: Sort) => void;
   onDragStart: (key: Key) => void;
   onDrop: (key: Key) => void;
   onDragEnd: () => void;
+  onResizeStart?: (key: Key, clientX: number) => void;
+  onResizeBy?: (key: Key, deltaPct: number) => void;
 }) {
   const align = column.align ?? "left";
   const isDragging = draggedKey === column.key;
   return (
     <th
-      className={`px-3 py-3 ${align === "right" ? "text-right" : "text-left"} ${isDragging ? "bg-accent/10" : ""}`}
+      className={`${compact ? "relative px-1.5 py-2 align-bottom" : "px-3 py-3"} ${align === "right" ? "text-right" : "text-left"} ${isDragging ? "bg-accent/10" : ""}`}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
       }}
       onDrop={() => onDrop(column.key)}
     >
-      <div className={`flex items-center gap-1.5 ${align === "right" ? "justify-end" : "justify-start"}`}>
+      <div className={`${compact ? "flex min-w-0 flex-wrap items-start gap-0.5" : "flex items-center gap-1.5"} ${align === "right" ? "justify-end" : "justify-start"}`}>
         <button
           type="button"
           draggable
-          className="inline-flex h-6 w-5 shrink-0 cursor-grab items-center justify-center rounded text-slate-500 transition hover:bg-panelSoft hover:text-slate-200 active:cursor-grabbing"
+          className={`inline-flex shrink-0 cursor-grab items-center justify-center rounded text-slate-500 transition hover:bg-panelSoft hover:text-slate-200 active:cursor-grabbing ${compact ? "h-4 w-4" : "h-6 w-5"}`}
           title={`Drag ${column.label} column`}
           aria-label={`Drag ${column.label} column`}
           onDragStart={(event) => {
@@ -535,16 +565,40 @@ function DraggableColumnHeader<Key extends string, Row, Sort extends string>({
         {column.sortKey ? (
           <button
             type="button"
-            className={`inline-flex min-w-max items-center gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
+            className={`${compact ? "inline-flex min-w-0 max-w-full flex-1 flex-wrap items-start gap-x-0.5 whitespace-normal break-words text-[10px] leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "inline-flex min-w-max items-center gap-1 text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500 hover:text-slate-200 ${align === "right" ? "justify-end" : "justify-start"}`}
             onClick={() => onSort(column.sortKey as Sort)}
           >
             {column.label}
-            {sortKey === column.sortKey ? <span className="text-accent">{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
+            {sortKey === column.sortKey ? <span className={`text-accent ${compact ? "text-[9px]" : ""}`}>{sortDir === "asc" ? "ASC" : "DESC"}</span> : null}
           </button>
         ) : (
-          <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{column.label}</span>
+          <span className={`${compact ? "min-w-0 flex-1 whitespace-normal break-words text-[10px] leading-tight tracking-[0.07em] [overflow-wrap:anywhere]" : "text-xs tracking-[0.12em]"} font-semibold uppercase text-slate-500`}>{column.label}</span>
         )}
       </div>
+      {compact && canResize && onResizeStart && onResizeBy ? (
+        <span
+          role="separator"
+          aria-label={`Resize ${column.label} column`}
+          aria-orientation="vertical"
+          aria-valuenow={Math.round(widthPct ?? 0)}
+          tabIndex={0}
+          className="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none outline-none"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onResizeStart(column.key, event.clientX);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            event.stopPropagation();
+            const step = event.shiftKey ? 2 : 0.5;
+            onResizeBy(column.key, event.key === "ArrowRight" ? step : -step);
+          }}
+        >
+          <span className="absolute left-1/2 top-1 h-[calc(100%-0.5rem)] w-px -translate-x-1/2 bg-borderSoft/80 transition group-hover:bg-accent group-focus:bg-accent" />
+        </span>
+      ) : null}
     </th>
   );
 }
@@ -565,13 +619,15 @@ function TickerHoverCell({
   ticker,
   hoverChart,
   onPinChart,
+  compact = false,
 }: {
   ticker: string;
   hoverChart: HoverChartController;
   onPinChart: (ticker: string) => void;
+  compact?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className={compact ? "flex min-w-0 flex-wrap items-center gap-1" : "flex items-center gap-2"}>
       <Link
         href={`/ticker/${encodeURIComponent(ticker)}`}
         className="font-mono font-semibold text-accent hover:underline"
@@ -582,7 +638,7 @@ function TickerHoverCell({
       </Link>
       <button
         type="button"
-        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-400 opacity-75 transition hover:bg-panelSoft/55 hover:text-accent focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/25"
+        className={`inline-flex shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-400 opacity-75 transition hover:bg-panelSoft/55 hover:text-accent focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/25 ${compact ? "h-5 w-5" : "h-6 w-6"}`}
         onClick={(event) => {
           event.stopPropagation();
           onPinChart(ticker);
@@ -590,7 +646,7 @@ function TickerHoverCell({
         title={`Pin chart for ${ticker}`}
         aria-label={`Pin chart for ${ticker}`}
       >
-        <Maximize2 className="h-3.5 w-3.5" />
+        <Maximize2 className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
       </button>
     </div>
   );
@@ -1069,10 +1125,16 @@ function EarningsGapsPanel() {
   const [syncing, setSyncing] = useState<"incremental" | "backfill" | null>(null);
   const [exportLimit, setExportLimit] = useState(String(EXPORT_LIMIT_DEFAULT));
   const [columnOrder, setColumnOrder] = usePersistedColumnOrder(GAP_COLUMNS_STORAGE_KEY, DEFAULT_GAP_COLUMN_ORDER);
+  const [columnWidths, setColumnWidths, resetColumnWidths] = usePersistedColumnWidths(
+    GAP_COLUMN_WIDTHS_STORAGE_KEY,
+    GAP_COLUMN_WIDTH_SPECS,
+  );
   const [draggedColumn, setDraggedColumn] = useState<GapColumnKey | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
+  const gapTableRef = useRef<HTMLTableElement | null>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker) });
 
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
@@ -1237,21 +1299,21 @@ function EarningsGapsPanel() {
       key: "reportDate",
       label: "Report",
       sortKey: "reportDate",
-      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} font-mono text-slate-300`,
       render: (row) => row.reportDate,
     },
     {
       key: "ticker",
       label: "Ticker",
       sortKey: "ticker",
-      cellClassName: "whitespace-nowrap px-3 py-3",
-      render: (row) => <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} />,
+      cellClassName: GAP_CELL_CLASS,
+      render: (row) => <TickerHoverCell ticker={row.ticker} hoverChart={hoverChart} onPinChart={openExpandedChart} compact />,
     },
     {
       key: "companyName",
       label: "Company",
       sortKey: "companyName",
-      cellClassName: "max-w-[16rem] truncate px-3 py-3 text-slate-200",
+      cellClassName: `${GAP_CELL_CLASS} text-slate-200`,
       title: (row) => row.companyName ?? undefined,
       render: (row) => row.companyName ?? "-",
     },
@@ -1259,7 +1321,7 @@ function EarningsGapsPanel() {
       key: "season",
       label: "Season",
       sortKey: "season",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-slate-300`,
       render: (row) => row.season,
     },
     {
@@ -1267,7 +1329,7 @@ function EarningsGapsPanel() {
       label: "EPS %",
       sortKey: "epsSurprisePct",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono font-semibold`,
       render: (row) => <span className={pctClass(row.epsSurprisePct)}>{formatPct(row.epsSurprisePct)}</span>,
     },
     {
@@ -1275,28 +1337,28 @@ function EarningsGapsPanel() {
       label: "EPS Diff",
       sortKey: "epsSurprise",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono`,
       render: (row) => <span className={pctClass(row.epsSurprise)}>{formatNumber(row.epsSurprise, 3)}</span>,
     },
     {
       key: "epsActual",
       label: "Actual",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatNumber(row.epsActual, 3),
     },
     {
       key: "epsEstimate",
       label: "Estimate",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatNumber(row.epsEstimate, 3),
     },
     {
       key: "gapSource",
       label: "Source",
       sortKey: "gapSource",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-slate-300`,
       render: (row) => gapSourceLabel(row.gapSource),
     },
     {
@@ -1304,7 +1366,7 @@ function EarningsGapsPanel() {
       label: "Best Gap",
       sortKey: "qualifyingGapPct",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono font-semibold`,
       render: (row) => <span className={pctClass(row.qualifyingGapPct)}>{formatPct(row.qualifyingGapPct)}</span>,
     },
     {
@@ -1312,21 +1374,21 @@ function EarningsGapsPanel() {
       label: "Post %",
       sortKey: "postmarketGapPct",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono`,
       render: (row) => <span className={pctClass(row.postmarketGapPct)}>{formatPct(row.postmarketGapPct)}</span>,
     },
     {
       key: "postmarketPrice",
       label: "Post Price",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatNumber(row.postmarketPrice, 2),
     },
     {
       key: "postmarketVolume",
       label: "Post Vol",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatCompact(row.postmarketVolume),
     },
     {
@@ -1334,14 +1396,14 @@ function EarningsGapsPanel() {
       label: "Open %",
       sortKey: "regularOpenGapPct",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono`,
       render: (row) => <span className={pctClass(row.regularOpenGapPct)}>{formatPct(row.regularOpenGapPct)}</span>,
     },
     {
       key: "reactionOpen",
       label: "Reaction Open",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => row.reactionDate ? `${row.reactionDate} @ ${formatNumber(row.reactionOpen, 2)}` : "-",
     },
     {
@@ -1349,7 +1411,7 @@ function EarningsGapsPanel() {
       label: "$ Volume",
       sortKey: "avgDollarVolume30d",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatCompact(row.avgDollarVolume30d),
     },
     {
@@ -1357,14 +1419,14 @@ function EarningsGapsPanel() {
       label: "Market Cap",
       sortKey: "marketCap",
       align: "right",
-      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-right font-mono text-slate-300`,
       render: (row) => formatCompact(row.marketCap),
     },
     {
       key: "sector",
       label: "Sector",
       sortKey: "sector",
-      cellClassName: "max-w-[12rem] truncate px-3 py-3 text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-slate-300`,
       title: (row) => row.sector ?? undefined,
       render: (row) => row.sector ?? "-",
     },
@@ -1372,7 +1434,7 @@ function EarningsGapsPanel() {
       key: "industry",
       label: "Industry",
       sortKey: "industry",
-      cellClassName: "max-w-[14rem] truncate px-3 py-3 text-slate-300",
+      cellClassName: `${GAP_CELL_CLASS} text-slate-300`,
       title: (row) => row.industry ?? undefined,
       render: (row) => row.industry ?? "-",
     },
@@ -1380,12 +1442,60 @@ function EarningsGapsPanel() {
       key: "exchange",
       label: "Exchange",
       sortKey: "exchange",
-      cellClassName: "whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-400",
+      cellClassName: `${GAP_CELL_CLASS} font-mono text-slate-400`,
       render: (row) => row.exchange ?? "-",
     },
   ];
   const gapColumnsByKey = new Map(gapColumns.map((column) => [column.key, column]));
   const orderedColumns = columnOrder.map((key) => gapColumnsByKey.get(key)).filter((column): column is EarningsTableColumn<GapColumnKey, EarningsGapRow, GapSortKey> => Boolean(column));
+  const resizeGapColumnBy = useCallback((key: GapColumnKey, deltaPct: number) => {
+    setColumnWidths((current) => resizeAdjacentColumnWidths(
+      current,
+      columnOrder,
+      key,
+      deltaPct,
+      GAP_COLUMN_WIDTH_SPECS,
+    ));
+  }, [columnOrder, setColumnWidths]);
+
+  const startGapColumnResize = useCallback((key: GapColumnKey, startClientX: number) => {
+    resizeCleanupRef.current?.();
+    const tableWidth = gapTableRef.current?.getBoundingClientRect().width ?? 0;
+    if (tableWidth <= 0) return;
+
+    const startWidths = columnWidths;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMove = (event: PointerEvent) => {
+      const deltaPct = ((event.clientX - startClientX) / tableWidth) * 100;
+      setColumnWidths(resizeAdjacentColumnWidths(
+        startWidths,
+        columnOrder,
+        key,
+        deltaPct,
+        GAP_COLUMN_WIDTH_SPECS,
+      ));
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      resizeCleanupRef.current = null;
+    };
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
+    resizeCleanupRef.current = cleanup;
+  }, [columnOrder, columnWidths, setColumnWidths]);
+
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
+
   const dropColumn = (targetKey: GapColumnKey) => {
     if (!draggedColumn) return;
     setColumnOrder((current) => moveColumn(current, draggedColumn, targetKey));
@@ -1394,7 +1504,7 @@ function EarningsGapsPanel() {
 
   return (
     <>
-      <section className="space-y-5">
+      <section className="min-w-0 space-y-5">
       {error ? (
         <div className="rounded border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div>
       ) : null}
@@ -1523,32 +1633,51 @@ function EarningsGapsPanel() {
         </div>
       </div>
 
-      <div className="rounded border border-borderSoft/70 bg-panel/80">
+      <div className="min-w-0 max-w-full rounded border border-borderSoft/70 bg-panel/80">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderSoft/70 px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">Release Gap-Ups</h3>
             <p className="text-xs text-slate-500">{data?.generatedAt ? `Generated ${formatDateTime(data.generatedAt)}` : "Waiting for data"}</p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              type="button"
+              className={BUTTON_CLASS}
+              onClick={resetColumnWidths}
+              title="Restore the default Release Gap-Ups column widths"
+            >
+              <RotateCcw className="h-4 w-4" />
+              Reset widths
+            </button>
             <ExportTickersControl href={exportUrl} value={exportLimit} onChange={setExportLimit} />
             <ResultsPager loading={loading} limit={limit} offset={offset} total={total} pageStart={pageStart} pageEnd={pageEnd} onPage={goPage} />
           </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[112rem] text-left text-sm">
+        <div className="max-w-full overflow-x-auto min-[1440px]:overflow-x-hidden">
+          <table ref={gapTableRef} className="w-full min-w-[70rem] table-fixed text-left text-[11px] min-[1440px]:min-w-0">
+            <colgroup>
+              {orderedColumns.map((column) => (
+                <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />
+              ))}
+            </colgroup>
             <thead className="border-b border-borderSoft/70 bg-panelSoft/35">
               <tr>
-                {orderedColumns.map((column) => (
+                {orderedColumns.map((column, index) => (
                   <DraggableColumnHeader
                     key={column.key}
                     column={column}
                     sortKey={sortKey}
                     sortDir={sortDir}
                     draggedKey={draggedColumn}
+                    compact
+                    canResize={index < orderedColumns.length - 1}
+                    widthPct={columnWidths[column.key]}
                     onSort={changeSort}
                     onDragStart={setDraggedColumn}
                     onDrop={dropColumn}
                     onDragEnd={() => setDraggedColumn(null)}
+                    onResizeStart={startGapColumnResize}
+                    onResizeBy={resizeGapColumnBy}
                   />
                 ))}
               </tr>
