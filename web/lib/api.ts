@@ -803,6 +803,11 @@ export type EarningsGapRow = {
   avgDollarVolume30d: number | null;
   reportDate: string;
   season: string;
+  epsProvider: string | null;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  epsSurprisePct: number | null;
   reportTimestamp: number | null;
   reportTime: string | null;
   reactionDate: string | null;

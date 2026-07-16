@@ -32,6 +32,15 @@ type StoredSync = {
 
 type StoredEvent = EarningsGapEventInput & { id: string };
 type StoredBar = { ticker: string; date: string; o: number; c: number };
+type StoredSurprise = {
+  provider: string;
+  ticker: string;
+  reportDate: string;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  epsSurprisePct: number | null;
+};
 
 function unix(iso: string): number {
   return Math.floor(Date.parse(iso) / 1000);
@@ -51,6 +60,10 @@ function tvRow(input: {
   reportTime?: -1 | 0 | 1;
   postmarketPrice?: number | null;
   postmarketVolume?: number | null;
+  epsActual?: number | null;
+  epsEstimate?: number | null;
+  epsSurprise?: number | null;
+  epsSurprisePct?: number | null;
 }) {
   return {
     s: `${input.exchange}:${input.symbol}`,
@@ -72,6 +85,10 @@ function tvRow(input: {
       null,
       null,
       input.postmarketVolume ?? null,
+      input.epsActual ?? null,
+      input.epsEstimate ?? null,
+      input.epsSurprise ?? null,
+      input.epsSurprisePct ?? null,
     ],
   };
 }
@@ -91,6 +108,11 @@ function release(input: Partial<EarningsGapReleaseInput> & { ticker: string; rep
     avgDollarVolume30d: input.avgDollarVolume30d ?? 50_000_000,
     reportDate: input.reportDate,
     season: input.season ?? `${input.reportDate.slice(0, 4)} Q${Math.ceil(Number(input.reportDate.slice(5, 7)) / 3)}`,
+    epsProvider: input.epsProvider ?? null,
+    epsActual: input.epsActual ?? null,
+    epsEstimate: input.epsEstimate ?? null,
+    epsSurprise: input.epsSurprise ?? null,
+    epsSurprisePct: input.epsSurprisePct ?? null,
     reportTimestamp: input.reportTimestamp ?? null,
     reportTime: input.reportTime ?? "after-market",
     postmarketPrice: input.postmarketPrice ?? null,
@@ -116,7 +138,14 @@ function storedEvent(input: Partial<EarningsGapEventInput> & { ticker: string; r
   };
 }
 
-function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: StoredEvent[]; hasSeasonColumn?: boolean } = {}): Env & {
+function createEnv(input: {
+  bars?: StoredBar[];
+  syncs?: StoredSync[];
+  events?: StoredEvent[];
+  surprises?: StoredSurprise[];
+  hasSeasonColumn?: boolean;
+  hasEpsColumns?: boolean;
+} = {}): Env & {
   __events: StoredEvent[];
   __syncs: StoredSync[];
   __metrics: { cleanupRuns: number; dailyBarQueries: number };
@@ -124,7 +153,9 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
   const bars = input.bars ?? [];
   const syncs = [...(input.syncs ?? [])];
   const events: StoredEvent[] = [...(input.events ?? [])];
+  const surprises = [...(input.surprises ?? [])];
   const hasSeasonColumn = input.hasSeasonColumn ?? true;
+  const hasEpsColumns = input.hasEpsColumns ?? true;
   const metrics = { cleanupRuns: 0, dailyBarQueries: 0 };
 
   const countPlaceholders = (sql: string, field: string) => {
@@ -171,6 +202,8 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
       const [, column, direction] = sortMatch;
       const map: Record<string, keyof StoredEvent> = {
         season: "season",
+        eps_surprise: "epsSurprise",
+        eps_surprise_pct: "epsSurprisePct",
         qualifying_gap_pct: "qualifyingGapPct",
         ticker: "ticker",
       };
@@ -194,7 +227,12 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
         __args: args,
         async first<T>() {
           if (sql.includes("sqlite_master")) return { count: 1 } as T;
-          if (sql.includes("pragma_table_info")) return { count: hasSeasonColumn ? 1 : 0 } as T;
+          if (sql.includes("pragma_table_info")) {
+            const column = String(args[0] ?? "");
+            if (column === "season") return { count: hasSeasonColumn ? 1 : 0 } as T;
+            if (column.startsWith("eps_")) return { count: hasEpsColumns ? 1 : 0 } as T;
+            return { count: 1 } as T;
+          }
           if (sql.includes("FROM earnings_gap_syncs WHERE scheduled_local_date")) {
             const localDate = String(args[0] ?? "");
             return (syncs.find((row) => row.scheduledLocalDate === localDate && row.status === "ok") ?? null) as T;
@@ -216,6 +254,21 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
           return null as T;
         },
         async all<T>() {
+          if (sql.includes("FROM earnings_surprise_events")) {
+            const startDate = String(args.at(-2) ?? "1900-01-01");
+            const endDate = String(args.at(-1) ?? "9999-12-31");
+            const tickers = new Set(args.slice(0, -2).map((value) => String(value)));
+            const providerRank: Record<string, number> = { tradingview: 0, fmp: 1, finnhub: 2 };
+            const rows = surprises
+              .filter((row) => tickers.has(row.ticker) && row.reportDate >= startDate && row.reportDate <= endDate)
+              .sort((left, right) => (
+                left.ticker.localeCompare(right.ticker)
+                || left.reportDate.localeCompare(right.reportDate)
+                || (providerRank[left.provider] ?? 3) - (providerRank[right.provider] ?? 3)
+              ))
+              .map((row) => ({ ...row, epsProvider: row.provider }));
+            return { results: rows as T[] };
+          }
           if (sql.includes("FROM daily_bars")) {
             metrics.dailyBarQueries += 1;
             const startDate = String(args.at(-2) ?? "1900-01-01");
@@ -320,6 +373,11 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
           avgDollarVolume30d,
           reportDate,
           season,
+          epsProvider,
+          epsActual,
+          epsEstimate,
+          epsSurprise,
+          epsSurprisePct,
           reportTimestamp,
           reportTime,
           reactionDate,
@@ -348,6 +406,11 @@ function createEnv(input: { bars?: StoredBar[]; syncs?: StoredSync[]; events?: S
           avgDollarVolume30d: avgDollarVolume30d == null ? null : Number(avgDollarVolume30d),
           reportDate: String(reportDate),
           season: String(season),
+          epsProvider: epsProvider == null ? null : String(epsProvider),
+          epsActual: epsActual == null ? null : Number(epsActual),
+          epsEstimate: epsEstimate == null ? null : Number(epsEstimate),
+          epsSurprise: epsSurprise == null ? null : Number(epsSurprise),
+          epsSurprisePct: epsSurprisePct == null ? null : Number(epsSurprisePct),
           reportTimestamp: reportTimestamp == null ? null : Number(reportTimestamp),
           reportTime: reportTime == null ? null : String(reportTime),
           reactionDate: reactionDate == null ? null : String(reactionDate),
@@ -387,6 +450,10 @@ describe("earnings gap service", () => {
     expect(payload.range).toEqual([500, 750]);
     expect(payload.columns).toContain("postmarket_close");
     expect(payload.columns).toContain("AvgValue.Traded_30d");
+    expect(payload.columns).toContain("earnings_per_share_fq");
+    expect(payload.columns).toContain("earnings_per_share_forecast_fq");
+    expect(payload.columns).toContain("eps_surprise_fq");
+    expect(payload.columns).toContain("eps_surprise_percent_fq");
 
     const rows = parseTradingViewEarningsGapRows({
       data: [
@@ -401,6 +468,10 @@ describe("earnings gap service", () => {
           reportTime: 1,
           postmarketPrice: 106,
           postmarketVolume: 900_000,
+          epsActual: 1.5,
+          epsEstimate: 1.2,
+          epsSurprise: 0.3,
+          epsSurprisePct: 25,
         }),
       ],
     });
@@ -413,6 +484,11 @@ describe("earnings gap service", () => {
       postmarketPrice: 106,
       postmarketVolume: 900_000,
       avgDollarVolume30d: 100_000_000,
+      epsProvider: "tradingview",
+      epsActual: 1.5,
+      epsEstimate: 1.2,
+      epsSurprise: 0.3,
+      epsSurprisePct: 25,
     });
   });
 
@@ -592,6 +668,65 @@ describe("earnings gap service", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("stores direct TradingView EPS values and falls back to the preferred Surprises snapshot", async () => {
+    const env = createEnv({
+      surprises: [
+        { provider: "fmp", ticker: "DIRECT", reportDate: "2026-05-21", epsActual: 9, epsEstimate: 8, epsSurprise: 1, epsSurprisePct: 12.5 },
+        { provider: "finnhub", ticker: "FALL", reportDate: "2026-05-21", epsActual: 4, epsEstimate: 2, epsSurprise: 2, epsSurprisePct: 100 },
+        { provider: "fmp", ticker: "FALL", reportDate: "2026-05-21", epsActual: 1, epsEstimate: 0.8, epsSurprise: 0.2, epsSurprisePct: 25 },
+      ],
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        totalCount: 2,
+        data: [
+          tvRow({
+            symbol: "DIRECT",
+            name: "Direct EPS Inc.",
+            exchange: "NASDAQ",
+            price: 100,
+            reportIso: "2026-05-21T21:00:00Z",
+            postmarketPrice: 106,
+            epsActual: 2,
+            epsEstimate: 1.5,
+            epsSurprise: 0.5,
+            epsSurprisePct: 33.333,
+          }),
+          tvRow({
+            symbol: "FALL",
+            name: "Fallback EPS Inc.",
+            exchange: "NASDAQ",
+            price: 100,
+            reportIso: "2026-05-21T21:00:00Z",
+            postmarketPrice: 105,
+          }),
+        ],
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await syncEarningsGaps(env, { mode: "incremental", now: new Date("2026-05-22T00:00:00Z") });
+    const byTicker = new Map(env.__events.map((row) => [row.ticker, row]));
+
+    expect(result.rowsUpserted).toBe(2);
+    expect(byTicker.get("DIRECT")).toMatchObject({
+      epsProvider: "tradingview",
+      epsActual: 2,
+      epsEstimate: 1.5,
+      epsSurprise: 0.5,
+      epsSurprisePct: 33.333,
+    });
+    expect(byTicker.get("FALL")).toMatchObject({
+      epsProvider: "fmp",
+      epsActual: 1,
+      epsEstimate: 0.8,
+      epsSurprise: 0.2,
+      epsSurprisePct: 25,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("filters, sorts, and facets gap rows by season", async () => {
     const env = createEnv({
       events: [
@@ -613,6 +748,32 @@ describe("earnings gap service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["B", "C"]);
     expect(result.rows.every((row) => row.season === "2026 Q2")).toBe(true);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q2", count: 2 });
+  });
+
+  it("returns EPS fields and sorts gap rows by EPS percentage and difference", async () => {
+    const env = createEnv({
+      events: [
+        storedEvent({ ticker: "LOW", reportDate: "2026-05-10", epsProvider: "fmp", epsActual: 1.1, epsEstimate: 1, epsSurprise: 0.1, epsSurprisePct: 10 }),
+        storedEvent({ ticker: "HIGH", reportDate: "2026-05-11", epsProvider: "tradingview", epsActual: 1.8, epsEstimate: 1, epsSurprise: 0.8, epsSurprisePct: 80 }),
+      ],
+    });
+
+    const byPct = await queryEarningsGaps(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "epsSurprisePct",
+      sortDir: "desc",
+    });
+    const byDiff = await queryEarningsGaps(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "epsSurprise",
+      sortDir: "asc",
+    });
+
+    expect(byPct.rows.map((row) => row.ticker)).toEqual(["HIGH", "LOW"]);
+    expect(byPct.rows[0]).toMatchObject({ epsProvider: "tradingview", epsActual: 1.8, epsEstimate: 1, epsSurprisePct: 80 });
+    expect(byDiff.rows.map((row) => row.ticker)).toEqual(["LOW", "HIGH"]);
   });
 
   it("excludes preferred issues from gap query, export, status, and supports limit zero", async () => {
@@ -685,6 +846,15 @@ describe("earnings gap service", () => {
 
     expect(result.schemaReady).toBe(false);
     expect(result.warning).toContain("0054_earnings_gap_season.sql");
+  });
+
+  it("reports the EPS migration when gap tables exist without the EPS columns", async () => {
+    const env = createEnv({ hasEpsColumns: false });
+
+    const result = await queryEarningsGaps(env);
+
+    expect(result.schemaReady).toBe(false);
+    expect(result.warning).toContain("0088_earnings_gap_eps.sql");
   });
 
   it("uses New York time across standard-time and daylight-time offsets", async () => {

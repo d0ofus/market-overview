@@ -65,6 +65,11 @@ export type EarningsGapReleaseInput = {
   avgDollarVolume30d: number | null;
   reportDate: string;
   season: string;
+  epsProvider: string | null;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  epsSurprisePct: number | null;
   reportTimestamp: number | null;
   reportTime: string | null;
   postmarketPrice: number | null;
@@ -97,6 +102,11 @@ export type EarningsGapRow = {
   avgDollarVolume30d: number | null;
   reportDate: string;
   season: string;
+  epsProvider: string | null;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  epsSurprisePct: number | null;
   reportTimestamp: number | null;
   reportTime: string | null;
   reactionDate: string | null;
@@ -220,6 +230,10 @@ const TV_COLUMNS = [
   "postmarket_change",
   "postmarket_change_abs",
   "postmarket_volume",
+  "earnings_per_share_fq",
+  "earnings_per_share_forecast_fq",
+  "eps_surprise_fq",
+  "eps_surprise_percent_fq",
 ];
 
 const SORT_COLUMNS: Record<string, string> = {
@@ -227,6 +241,8 @@ const SORT_COLUMNS: Record<string, string> = {
   ticker: "ticker",
   companyName: "company_name",
   season: "season",
+  epsSurprise: "eps_surprise",
+  epsSurprisePct: "eps_surprise_pct",
   marketCap: "market_cap",
   avgDollarVolume30d: "avg_dollar_volume_30d",
   regularOpenGapPct: "regular_open_gap_pct",
@@ -396,6 +412,11 @@ async function earningsGapSchemaWarning(env: Env): Promise<string | null> {
   if (!(await columnExists(env, "earnings_gap_events", "season"))) {
     return "Earnings gap season schema is missing. Apply worker/migrations/0054_earnings_gap_season.sql.";
   }
+  const epsColumns = ["eps_provider", "eps_actual", "eps_estimate", "eps_surprise", "eps_surprise_pct"];
+  const epsColumnsReady = await Promise.all(epsColumns.map((column) => columnExists(env, "earnings_gap_events", column)));
+  if (epsColumnsReady.some((ready) => !ready)) {
+    return "Earnings gap EPS schema is missing. Apply worker/migrations/0088_earnings_gap_eps.sql.";
+  }
   return null;
 }
 
@@ -460,6 +481,13 @@ export function parseTradingViewEarningsGapRows(response: TradingViewScanRespons
         avgDollarVolume30d,
         reportDate,
         season: deriveEarningsGapSeason(reportDate),
+        epsProvider: [data[17], data[18], data[19], data[20]].some((value) => parseMaybeNumber(value) != null)
+          ? PRIMARY_PROVIDER
+          : null,
+        epsActual: parseMaybeNumber(data[17]),
+        epsEstimate: parseMaybeNumber(data[18]),
+        epsSurprise: parseMaybeNumber(data[19]),
+        epsSurprisePct: parseMaybeNumber(data[20]),
         reportTimestamp,
         reportTime: normalizeReportTime(data[11]),
         postmarketPrice: parseMaybeNumber(data[13]),
@@ -489,6 +517,11 @@ function dedupeReleases(rows: EarningsGapReleaseInput[]): EarningsGapReleaseInpu
       avgVolume30d: existing.avgVolume30d ?? row.avgVolume30d,
       avgDollarVolume30d: existing.avgDollarVolume30d ?? row.avgDollarVolume30d,
       season: existing.season || row.season,
+      epsProvider: existing.epsProvider ?? row.epsProvider,
+      epsActual: existing.epsActual ?? row.epsActual,
+      epsEstimate: existing.epsEstimate ?? row.epsEstimate,
+      epsSurprise: existing.epsSurprise ?? row.epsSurprise,
+      epsSurprisePct: existing.epsSurprisePct ?? row.epsSurprisePct,
       reportTimestamp: existing.reportTimestamp ?? row.reportTimestamp,
       reportTime: existing.reportTime ?? row.reportTime,
       postmarketPrice: existing.postmarketPrice ?? row.postmarketPrice,
@@ -538,6 +571,70 @@ async function fetchTradingViewEarningsReleases(env: Env, startDate: string, end
     if (pageCount < TV_PAGE_SIZE) break;
   }
   return dedupeReleases(allRows);
+}
+
+type StoredEpsSnapshot = Pick<
+  EarningsGapReleaseInput,
+  "ticker" | "reportDate" | "epsProvider" | "epsActual" | "epsEstimate" | "epsSurprise" | "epsSurprisePct"
+>;
+
+function hasEpsSnapshot(row: Pick<EarningsGapReleaseInput, "epsActual" | "epsEstimate" | "epsSurprise" | "epsSurprisePct">): boolean {
+  return row.epsActual != null || row.epsEstimate != null || row.epsSurprise != null || row.epsSurprisePct != null;
+}
+
+async function enrichReleasesWithStoredEps(env: Env, releases: EarningsGapReleaseInput[]): Promise<EarningsGapReleaseInput[]> {
+  const missing = releases.filter((row) => !hasEpsSnapshot(row));
+  if (missing.length === 0 || !(await tableExists(env, "earnings_surprise_events"))) return releases;
+
+  const minDate = missing.map((row) => row.reportDate).sort()[0];
+  const maxDate = missing.map((row) => row.reportDate).sort().at(-1);
+  if (!minDate || !maxDate) return releases;
+
+  const snapshots = new Map<string, StoredEpsSnapshot>();
+  const tickers = Array.from(new Set(missing.map((row) => row.ticker)));
+  for (let index = 0; index < tickers.length; index += 80) {
+    const chunk = tickers.slice(index, index + 80);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT
+         provider as epsProvider, ticker, report_date as reportDate,
+         eps_actual as epsActual, eps_estimate as epsEstimate,
+         eps_surprise as epsSurprise, eps_surprise_pct as epsSurprisePct
+       FROM earnings_surprise_events
+       WHERE ticker IN (${placeholders}) AND report_date >= ? AND report_date <= ?
+       ORDER BY
+         ticker ASC,
+         report_date ASC,
+         CASE provider
+           WHEN 'tradingview' THEN 0
+           WHEN 'fmp' THEN 1
+           WHEN 'finnhub' THEN 2
+           ELSE 3
+         END ASC,
+         COALESCE(last_seen_at, '') DESC,
+         COALESCE(fiscal_period_end, '') DESC`,
+    ).bind(...chunk, minDate, maxDate).all<Record<string, unknown>>();
+    for (const row of rows.results ?? []) {
+      const snapshot: StoredEpsSnapshot = {
+        ticker: normalizeTicker(row.ticker),
+        reportDate: String(row.reportDate ?? ""),
+        epsProvider: row.epsProvider == null ? null : String(row.epsProvider),
+        epsActual: parseMaybeNumber(row.epsActual),
+        epsEstimate: parseMaybeNumber(row.epsEstimate),
+        epsSurprise: parseMaybeNumber(row.epsSurprise),
+        epsSurprisePct: parseMaybeNumber(row.epsSurprisePct),
+      };
+      const key = `${snapshot.ticker}|${snapshot.reportDate}`;
+      if (!snapshots.has(key)) snapshots.set(key, snapshot);
+    }
+  }
+
+  return releases.map((release) => {
+    if (hasEpsSnapshot(release)) return release;
+    const snapshot = snapshots.get(`${release.ticker}|${release.reportDate}`);
+    return snapshot ? { ...release, ...snapshot } : release;
+  });
 }
 
 async function loadDailyBarsByTicker(
@@ -700,12 +797,13 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     `INSERT INTO earnings_gap_events (
        id, provider, source_symbol, ticker, exchange, company_name, sector, industry,
        market_cap, price, avg_volume_30d, avg_dollar_volume_30d,
-       report_date, season, report_timestamp, report_time, reaction_date, previous_close,
+       report_date, season, eps_provider, eps_actual, eps_estimate, eps_surprise, eps_surprise_pct,
+       report_timestamp, report_time, reaction_date, previous_close,
        reaction_open, regular_open_gap_pct, postmarket_price, postmarket_gap_pct,
        postmarket_volume, qualifying_gap_pct, gap_source, raw_json,
        first_seen_at, last_seen_at, created_at, updated_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(ticker, report_date) DO UPDATE SET
        provider = excluded.provider,
        source_symbol = COALESCE(excluded.source_symbol, earnings_gap_events.source_symbol),
@@ -718,6 +816,11 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
        avg_volume_30d = COALESCE(excluded.avg_volume_30d, earnings_gap_events.avg_volume_30d),
        avg_dollar_volume_30d = COALESCE(excluded.avg_dollar_volume_30d, earnings_gap_events.avg_dollar_volume_30d),
        season = COALESCE(excluded.season, earnings_gap_events.season),
+       eps_provider = COALESCE(excluded.eps_provider, earnings_gap_events.eps_provider),
+       eps_actual = COALESCE(excluded.eps_actual, earnings_gap_events.eps_actual),
+       eps_estimate = COALESCE(excluded.eps_estimate, earnings_gap_events.eps_estimate),
+       eps_surprise = COALESCE(excluded.eps_surprise, earnings_gap_events.eps_surprise),
+       eps_surprise_pct = COALESCE(excluded.eps_surprise_pct, earnings_gap_events.eps_surprise_pct),
        report_timestamp = COALESCE(excluded.report_timestamp, earnings_gap_events.report_timestamp),
        report_time = COALESCE(excluded.report_time, earnings_gap_events.report_time),
        reaction_date = COALESCE(excluded.reaction_date, earnings_gap_events.reaction_date),
@@ -747,6 +850,11 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     row.avgDollarVolume30d,
     row.reportDate,
     row.season,
+    row.epsProvider,
+    row.epsActual,
+    row.epsEstimate,
+    row.epsSurprise,
+    row.epsSurprisePct,
     row.reportTimestamp,
     row.reportTime,
     row.reactionDate,
@@ -830,7 +938,8 @@ export async function syncEarningsGaps(
   });
   try {
     const releases = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsReleases(env, windowStart, windowEnd));
-    const rows = await computeEarningsGapEvents(env, releases, now);
+    const enrichedReleases = await enrichReleasesWithStoredEps(env, releases);
+    const rows = await computeEarningsGapEvents(env, enrichedReleases, now);
     const rowsUpserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
     if (mode !== "backfill" || done) {
       await cleanupOldEarningsGapEvents(env, RETENTION_DAYS, now);
@@ -946,6 +1055,11 @@ function mapRow(row: Record<string, unknown>): EarningsGapRow {
     avgDollarVolume30d: parseMaybeNumber(row.avgDollarVolume30d),
     reportDate: String(row.reportDate ?? ""),
     season: String(row.season ?? ""),
+    epsProvider: row.epsProvider == null ? null : String(row.epsProvider),
+    epsActual: parseMaybeNumber(row.epsActual),
+    epsEstimate: parseMaybeNumber(row.epsEstimate),
+    epsSurprise: parseMaybeNumber(row.epsSurprise),
+    epsSurprisePct: parseMaybeNumber(row.epsSurprisePct),
     reportTimestamp: parseMaybeNumber(row.reportTimestamp),
     reportTime: row.reportTime == null ? null : String(row.reportTime),
     reactionDate: row.reactionDate == null ? null : String(row.reactionDate),
@@ -1002,7 +1116,9 @@ export async function queryEarningsGaps(env: Env, query: EarningsGapsQuery = {})
        id, provider, source_symbol as sourceSymbol, ticker, exchange, company_name as companyName,
        sector, industry, market_cap as marketCap, price, avg_volume_30d as avgVolume30d,
        avg_dollar_volume_30d as avgDollarVolume30d, report_date as reportDate,
-       season, report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
+       season, eps_provider as epsProvider, eps_actual as epsActual, eps_estimate as epsEstimate,
+       eps_surprise as epsSurprise, eps_surprise_pct as epsSurprisePct,
+       report_timestamp as reportTimestamp, report_time as reportTime, reaction_date as reactionDate,
        previous_close as previousClose, reaction_open as reactionOpen,
        regular_open_gap_pct as regularOpenGapPct, postmarket_price as postmarketPrice,
        postmarket_gap_pct as postmarketGapPct, postmarket_volume as postmarketVolume,

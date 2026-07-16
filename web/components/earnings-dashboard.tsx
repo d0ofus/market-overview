@@ -44,6 +44,8 @@ type GapSortKey =
   | "ticker"
   | "companyName"
   | "season"
+  | "epsSurprisePct"
+  | "epsSurprise"
   | "qualifyingGapPct"
   | "postmarketGapPct"
   | "regularOpenGapPct"
@@ -118,6 +120,10 @@ type GapColumnKey =
   | "ticker"
   | "companyName"
   | "season"
+  | "epsSurprisePct"
+  | "epsSurprise"
+  | "epsActual"
+  | "epsEstimate"
   | "gapSource"
   | "qualifyingGapPct"
   | "postmarketGapPct"
@@ -164,6 +170,10 @@ const DEFAULT_GAP_COLUMN_ORDER: GapColumnKey[] = [
   "ticker",
   "companyName",
   "season",
+  "epsSurprisePct",
+  "epsSurprise",
+  "epsActual",
+  "epsEstimate",
   "gapSource",
   "qualifyingGapPct",
   "postmarketGapPct",
@@ -1253,6 +1263,36 @@ function EarningsGapsPanel() {
       render: (row) => row.season,
     },
     {
+      key: "epsSurprisePct",
+      label: "EPS %",
+      sortKey: "epsSurprisePct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      render: (row) => <span className={pctClass(row.epsSurprisePct)}>{formatPct(row.epsSurprisePct)}</span>,
+    },
+    {
+      key: "epsSurprise",
+      label: "EPS Diff",
+      sortKey: "epsSurprise",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.epsSurprise)}>{formatNumber(row.epsSurprise, 3)}</span>,
+    },
+    {
+      key: "epsActual",
+      label: "Actual",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatNumber(row.epsActual, 3),
+    },
+    {
+      key: "epsEstimate",
+      label: "Estimate",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono text-slate-300",
+      render: (row) => formatNumber(row.epsEstimate, 3),
+    },
+    {
       key: "gapSource",
       label: "Source",
       sortKey: "gapSource",
@@ -1495,7 +1535,7 @@ function EarningsGapsPanel() {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[96rem] text-left text-sm">
+          <table className="w-full min-w-[112rem] text-left text-sm">
             <thead className="border-b border-borderSoft/70 bg-panelSoft/35">
               <tr>
                 {orderedColumns.map((column) => (
