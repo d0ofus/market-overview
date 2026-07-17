@@ -1,7 +1,13 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
-import { cleanupMarketDataOperationalState, getMarketDataDb, marketDataFeed, withDatabase } from "./market-data-db";
+import {
+  assertMarketDataBackgroundWriteBudget,
+  cleanupMarketDataOperationalState,
+  getMarketDataDb,
+  marketDataFeed,
+  withDatabase,
+} from "./market-data-db";
 import {
   clearProviderSymbolBackoff,
 } from "./provider-backoff";
@@ -1021,6 +1027,11 @@ export async function processPostCloseDailyBarRefreshJob(
       await clearProviderSymbolBackoff(env, providerKey, Array.from(preCurrentTickers));
       let refresh = { fetchedRows: 0, writtenRows: 0, currentDateTickers: 0 };
       if (refreshStartDate < job.tradingDate || preCurrentTickers.size < batchTickers.length) {
+        const estimatedDays = Math.max(
+          1,
+          Math.floor((Date.parse(`${job.tradingDate}T00:00:00Z`) - Date.parse(`${refreshStartDate}T00:00:00Z`)) / 86_400_000) + 1,
+        );
+        await assertMarketDataBackgroundWriteBudget(env, batchTickers.length * estimatedDays);
         refresh = await refreshDailyBarsIncremental(env, {
           provider,
           tickers: batchTickers,

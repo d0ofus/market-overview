@@ -2,6 +2,7 @@ import type { Env } from "./types";
 
 const DEFAULT_RETENTION_DAYS = 450;
 const DEFAULT_DAILY_WRITE_BUDGET = 75_000;
+const DEFAULT_CRITICAL_WRITE_RESERVE = 15_000;
 const DEFAULT_WARN_BYTES = 300_000_000;
 const DEFAULT_HALT_BYTES = 375_000_000;
 
@@ -44,14 +45,46 @@ function nextUtcReset(now = new Date()): string {
 export async function assertMarketDataWriteBudget(env: Env, now = new Date()): Promise<void> {
   const budget = positiveInteger(env.MARKET_DATA_DAILY_WRITE_BUDGET, DEFAULT_DAILY_WRITE_BUDGET);
   if (budget === 0) return;
+  await assertMarketDataWriteLimit(env, budget, "daily rate limit", now);
+}
+
+export async function assertMarketDataBackgroundWriteBudget(
+  env: Env,
+  estimatedWrites = 0,
+  now = new Date(),
+): Promise<void> {
+  const budget = positiveInteger(env.MARKET_DATA_DAILY_WRITE_BUDGET, DEFAULT_DAILY_WRITE_BUDGET);
+  if (budget === 0) return;
+  const reserve = Math.min(
+    budget,
+    positiveInteger(env.MARKET_DATA_CRITICAL_WRITE_RESERVE, DEFAULT_CRITICAL_WRITE_RESERVE),
+  );
+  await assertMarketDataWriteLimit(
+    env,
+    Math.max(0, budget - reserve),
+    "background rate limit (critical write reserve)",
+    now,
+    Math.max(0, Math.trunc(estimatedWrites)),
+  );
+}
+
+async function assertMarketDataWriteLimit(
+  env: Env,
+  limit: number,
+  reason: string,
+  now: Date,
+  estimatedWrites = 0,
+): Promise<void> {
   const usageDate = now.toISOString().slice(0, 10);
   const row = await getMarketDataDb(env).prepare(
     "SELECT bars_written as barsWritten FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
   ).bind(usageDate).first<{ barsWritten: number | null }>();
-  if (Number(row?.barsWritten ?? 0) >= budget) {
+  const used = Number(row?.barsWritten ?? 0);
+  const exhausted = estimatedWrites > 0 ? used + estimatedWrites > limit : used >= limit;
+  if (exhausted) {
     const retryAt = nextUtcReset(now);
     const retryAfterSeconds = Math.max(1, Math.ceil((Date.parse(retryAt) - now.getTime()) / 1000));
-    throw new Error(`Market-data daily rate limit reached; retry-after=${retryAfterSeconds}; reset=${retryAt}`);
+    throw new Error(`Market-data ${reason} reached; retry-after=${retryAfterSeconds}; reset=${retryAt}`);
   }
 }
 

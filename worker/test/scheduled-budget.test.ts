@@ -59,7 +59,7 @@ describe("scheduled budget and lane helpers", () => {
     const env = {
       SCHEDULED_REPORTS_BUDGET: "50",
       SCHEDULED_SUBREQUEST_RESERVE: "12",
-    } as Env;
+    } as unknown as Env;
     const budget = createScheduledBudget(env, "reports");
     expect(budget.snapshot()).toMatchObject({ lane: "reports", maxUnits: 50, reserveUnits: 12, availableUnits: 38 });
   });
@@ -71,11 +71,25 @@ describe("scheduled budget and lane helpers", () => {
       reserveUnits: 10,
       availableUnits: 25,
     });
-    expect(createScheduledBudget({ SCHEDULED_REPORTS_BUDGET: " ", SCHEDULED_SUBREQUEST_RESERVE: "" } as Env, "reports").snapshot()).toMatchObject({
+    expect(createScheduledBudget({ SCHEDULED_REPORTS_BUDGET: " ", SCHEDULED_SUBREQUEST_RESERVE: "" } as unknown as Env, "reports").snapshot()).toMatchObject({
       lane: "reports",
       maxUnits: 35,
       reserveUnits: 10,
       availableUnits: 25,
+    });
+  });
+
+  it("admits the complete market-data lane while preserving its subrequest reserve", () => {
+    const budget = createScheduledBudget({} as Env, "market-data");
+    expect(budget.claim("overview-current-data", 12)).toBe(true);
+    expect(budget.claim("post-close-daily-bars", 24)).toBe(true);
+    expect(budget.claim("symbol-catalog-sync", 6)).toBe(true);
+    expect(budget.claim("etf-constituent-slice", 10)).toBe(true);
+    expect(budget.snapshot()).toMatchObject({
+      maxUnits: 70,
+      reserveUnits: 10,
+      usedUnits: 52,
+      availableUnits: 8,
     });
   });
 

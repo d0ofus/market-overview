@@ -1756,12 +1756,25 @@ function EarningsGapsPanel() {
       {data?.warning || status?.warning ? (
         <div className="rounded border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{data?.warning ?? status?.warning}</div>
       ) : null}
+      {latestSync?.warning ? (
+        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          Latest gap calculation: {latestSync.warning}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-4">
         <StatCard label="Gap Rows" value={formatCompact(status?.counts.total ?? total)} helper={`${formatCompact(status?.counts.postmarket ?? 0)} postmarket / ${formatCompact(status?.counts.regularOpen ?? 0)} regular open`} />
         <StatCard label="Latest Report" value={status?.counts.latestReportDate ?? "-"} helper={`Earliest stored: ${status?.counts.earliestReportDate ?? "-"}`} />
         <StatCard label="Current View" value={formatCompact(total)} helper={data ? `Showing ${pageStart}-${pageEnd}` : "Loading rows"} />
-        <StatCard label="Daily Gap Scan" value={latestScheduledSync?.status ?? latestSync?.status ?? "-"} helper={latestScheduledSync?.scheduledLocalDate ? `${latestScheduledSync.scheduledLocalDate} after 8:00pm ET` : "Runs daily after 8:00pm ET"} />
+        <StatCard
+          label="Daily Gap Scan"
+          value={latestScheduledSync?.status ?? latestSync?.status ?? "-"}
+          helper={latestSync
+            ? `${formatCompact(latestSync.barsReady ?? 0)}/${formatCompact(latestSync.barsRequested ?? 0)} bars ready; ${formatCompact(latestSync.rowsDeferred ?? 0)} deferred`
+            : latestScheduledSync?.scheduledLocalDate
+              ? `${latestScheduledSync.scheduledLocalDate} after 8:00pm ET`
+              : "Runs daily after 8:00pm ET"}
+        />
       </div>
 
       <div className="rounded border border-borderSoft/70 bg-panel/80 p-4">

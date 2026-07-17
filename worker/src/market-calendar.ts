@@ -115,6 +115,18 @@ export function previousUsMarketTradingDay(isoDate: string): string {
   return cursor;
 }
 
+export function nextUsMarketTradingDay(isoDate: string): string {
+  let cursor = addDaysIso(isoDate, 1);
+  while (!isUsMarketTradingDay(cursor)) {
+    cursor = addDaysIso(cursor, 1);
+  }
+  return cursor;
+}
+
+export function onOrAfterUsMarketTradingDay(isoDate: string): string {
+  return isUsMarketTradingDay(isoDate) ? isoDate : nextUsMarketTradingDay(isoDate);
+}
+
 export function getUsMarketSessionContext(now = new Date()): UsMarketSessionContext {
   const ny = zonedParts(now, "America/New_York");
   const hour = Math.floor(ny.minutesOfDay / 60);

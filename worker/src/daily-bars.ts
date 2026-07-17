@@ -168,6 +168,20 @@ function dedupeMarketBars(
   return Array.from(byTickerDate.values());
 }
 
+function dedupeMarketRepairBars(
+  bars: DailyBar[],
+  desiredStartDate: string,
+  endDate: string,
+): DailyBar[] {
+  const byTickerDate = new Map<string, DailyBar>();
+  for (const bar of bars) {
+    const ticker = bar.ticker.toUpperCase();
+    if (bar.date < desiredStartDate || bar.date > endDate) continue;
+    byTickerDate.set(`${ticker}|${bar.date}`, { ...bar, ticker });
+  }
+  return Array.from(byTickerDate.values());
+}
+
 async function writeFetchedDailyBars(
   env: Env,
   bars: DailyBar[],
@@ -178,6 +192,7 @@ async function writeFetchedDailyBars(
   sourceProvider: string,
   sourceFeed: string | null,
   target: DailyBarStorageTarget,
+  repairMissingMarketDates = false,
 ): Promise<number> {
   const strictProviderRequired = /^(1|true|yes|on)$/i.test(String(env.MARKET_DATA_DB_REQUIRED ?? "").trim());
   if (target === "market" && strictProviderRequired && sourceProvider !== "alpaca") {
@@ -190,7 +205,9 @@ async function writeFetchedDailyBars(
     throw new Error(`The strict market-data store rejected ${unexpectedProvider} fallback bars.`);
   }
   const barsToWrite = target === "market"
-    ? dedupeMarketBars(bars, latestByTicker, startDate, endDate)
+    ? repairMissingMarketDates
+      ? dedupeMarketRepairBars(bars, startDate, endDate)
+      : dedupeMarketBars(bars, latestByTicker, startDate, endDate)
     : dedupeFetchedBars(bars, latestByTicker, startDate, endDate, replaceExisting);
   if (barsToWrite.length === 0) return 0;
   const db = target === "market" ? getMarketDataDb(env) : env.DB;
@@ -306,6 +323,7 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   continueOnError?: boolean;
   target?: DailyBarStorageTarget;
   mirrorLatestToLegacy?: boolean;
+  repairMissingMarketDates?: boolean;
 }): Promise<{
   requestedTickers: number;
   fetchedRows: number;
@@ -368,6 +386,7 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
           sourceProvider,
           sourceFeed,
           target,
+          input.repairMissingMarketDates ?? false,
         );
       } catch (error) {
         if (!input.continueOnError) throw error;
