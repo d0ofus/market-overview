@@ -112,18 +112,62 @@ describe("scheduled market-data lane", () => {
     );
   });
 
-  it("keeps overview-current running when post-close work is not actionable", async () => {
+  it("keeps overview-current running when the lane cannot afford post-close bars", async () => {
     scheduledMocks.planPostClose.mockResolvedValue({
-      protect: false,
+      protect: true,
       expectedTradingDate: "2026-07-16",
-      reason: "completed",
+      reason: "missing-job",
     });
 
-    await runMarketDataLane();
+    await runMarketDataLane(scheduledEnv({
+      SCHEDULED_MARKET_DATA_BUDGET: "30",
+      SCHEDULED_SUBREQUEST_RESERVE: "10",
+    }));
 
     expect(scheduledMocks.overviewCurrent).toHaveBeenCalledOnce();
     expect(scheduledMocks.postClose).not.toHaveBeenCalled();
+    expect(scheduledMocks.finishAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      "audit-post-close-daily-bars",
+      "skipped",
+      "Skipped by scheduled budget.",
+      expect.objectContaining({ postCloseReason: "missing-job", estimatedUnits: 24 }),
+    );
   });
+
+  it.each(["completed", "auth-blocked", "retry-not-due"] as const)(
+    "does not charge budget for non-actionable post-close work (%s)",
+    async (reason) => {
+      scheduledMocks.planPostClose.mockResolvedValue({
+        protect: false,
+        expectedTradingDate: "2026-07-16",
+        reason,
+      });
+
+      await runMarketDataLane(scheduledEnv({
+        SCHEDULED_MARKET_DATA_BUDGET: "46",
+        SCHEDULED_SUBREQUEST_RESERVE: "10",
+      }));
+
+      expect(scheduledMocks.overviewCurrent).toHaveBeenCalledOnce();
+      expect(scheduledMocks.postClose).not.toHaveBeenCalled();
+      expect(scheduledMocks.symbolCatalog).toHaveBeenCalledOnce();
+      expect(scheduledMocks.finishAudit).toHaveBeenCalledWith(
+        expect.anything(),
+        "audit-post-close-daily-bars",
+        "skipped",
+        "Skipped because post-close daily bars are not actionable.",
+        expect.objectContaining({ postCloseReason: reason }),
+      );
+      expect(scheduledMocks.finishAudit).toHaveBeenCalledWith(
+        expect.anything(),
+        "audit-etf-constituent-slice",
+        "completed",
+        null,
+        expect.objectContaining({ budget: expect.objectContaining({ usedUnits: 28 }) }),
+      );
+    },
+  );
 
   it("runs both critical jobs when the configured budget can fit both", async () => {
     scheduledMocks.planPostClose.mockResolvedValue({
