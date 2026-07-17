@@ -538,6 +538,48 @@ export function isPostCloseBarsWindowOpen(
   return ny.localDate === expectedTradingDate && ny.minutesOfDay >= closeMinutesWithOffset;
 }
 
+export type PostCloseBudgetProtectionDecision = {
+  protect: boolean;
+  expectedTradingDate: string;
+  reason:
+    | "disabled"
+    | "before-window"
+    | "missing-job"
+    | "actionable-job"
+    | "completed"
+    | "auth-blocked"
+    | "retry-not-due"
+    | "diagnostic-failed";
+};
+
+export function resolvePostCloseBudgetProtection(input: {
+  now: Date;
+  expectedTradingDate: string;
+  settings: WorkerScheduleSettings;
+  job: PostCloseDailyBarRefreshJob | null;
+}): PostCloseBudgetProtectionDecision {
+  const { now, expectedTradingDate, settings, job } = input;
+  if (!settings.postCloseBarsEnabled) {
+    return { protect: false, expectedTradingDate, reason: "disabled" };
+  }
+  if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) {
+    return { protect: false, expectedTradingDate, reason: "before-window" };
+  }
+  if (!job) {
+    return { protect: true, expectedTradingDate, reason: "missing-job" };
+  }
+  if (job.status === "completed") {
+    return { protect: false, expectedTradingDate, reason: "completed" };
+  }
+  if (job.status === "failed" && job.errorCode === "auth-blocked") {
+    return { protect: false, expectedTradingDate, reason: "auth-blocked" };
+  }
+  if (job.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()) {
+    return { protect: false, expectedTradingDate, reason: "retry-not-due" };
+  }
+  return { protect: true, expectedTradingDate, reason: "actionable-job" };
+}
+
 function mapPostCloseDailyBarRefreshJobRecord(
   record: PostCloseDailyBarRefreshJobRecord,
 ): PostCloseDailyBarRefreshJob {
@@ -1193,4 +1235,28 @@ export async function loadLatestPostCloseDailyBarRefreshJobForDate(
   await ensurePostCloseRetrySchema(stateEnv);
   const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate);
   return record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
+}
+
+export async function planPostCloseBudgetProtection(
+  env: Env,
+  now: Date,
+  settings: WorkerScheduleSettings,
+): Promise<PostCloseBudgetProtectionDecision> {
+  const expectedTradingDate = latestUsMarketSessionAsOfDate(now);
+  if (!settings.postCloseBarsEnabled) {
+    return { protect: false, expectedTradingDate, reason: "disabled" };
+  }
+  if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) {
+    return { protect: false, expectedTradingDate, reason: "before-window" };
+  }
+
+  try {
+    const stateEnv = postCloseStateEnv(env);
+    const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, expectedTradingDate);
+    const job = record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
+    return resolvePostCloseBudgetProtection({ now, expectedTradingDate, settings, job });
+  } catch (error) {
+    console.warn("post-close budget protection diagnostic failed", { expectedTradingDate, error });
+    return { protect: true, expectedTradingDate, reason: "diagnostic-failed" };
+  }
 }

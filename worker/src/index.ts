@@ -249,6 +249,7 @@ import {
   loadLatestPostCloseDailyBarRefreshJobForDate,
   loadWorkerScheduleSettings,
   maybeRunScheduledPostCloseDailyBarRefresh,
+  planPostCloseBudgetProtection,
   updateWorkerScheduleSettings,
 } from "./worker-schedule-service";
 import {
@@ -7476,10 +7477,39 @@ export default {
     };
 
     const runMarketDataLane = async (): Promise<void> => {
-      const { runBudgeted } = runnerForLane("market-data");
+      const runner = runnerForLane("market-data");
+      const { runBudgeted, auditSkipped, budget } = runner;
       const workerSchedule = await loadWorkerScheduleSettings(env);
-      await runBudgeted("overview-current-data", 12, () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined));
-      await runBudgeted("post-close-daily-bars", 24, () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined));
+      const postClosePlan = await planPostCloseBudgetProtection(env, now, workerSchedule);
+      const overviewCurrentBudgetUnits = 12;
+      const postCloseDailyBarsBudgetUnits = 24;
+      const canFitBothCriticalJobs = budget.canClaim(overviewCurrentBudgetUnits + postCloseDailyBarsBudgetUnits);
+
+      if (postClosePlan.protect && !canFitBothCriticalJobs) {
+        await auditSkipped(
+          "overview-current-data",
+          "Skipped to preserve market-data budget for actionable post-close daily bars.",
+          {
+            expectedTradingDate: postClosePlan.expectedTradingDate,
+            postCloseReason: postClosePlan.reason,
+          },
+        );
+      } else {
+        await runBudgeted(
+          "overview-current-data",
+          overviewCurrentBudgetUnits,
+          () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
+        );
+      }
+      await runBudgeted(
+        "post-close-daily-bars",
+        postCloseDailyBarsBudgetUnits,
+        () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined),
+        {
+          expectedTradingDate: postClosePlan.expectedTradingDate,
+          postCloseReason: postClosePlan.reason,
+        },
+      );
       await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now));
       await runBudgeted("etf-constituent-slice", 10, () => syncMonthlyEtfSlice(env, cron("etf-constituent-slice")));
     };
