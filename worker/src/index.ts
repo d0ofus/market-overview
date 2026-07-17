@@ -137,6 +137,11 @@ import { loadProviderUsageDaily } from "./provider-usage";
 import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, type ScheduledBudget, type ScheduledLane } from "./scheduled-budget";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
+  deriveFocusNarrativeName,
+  FocusNarrativeValidationError,
+  normalizeFocusTickers,
+} from "./sector-focus-narratives-service";
+import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
   maybeRunScheduledMarketCommentary,
@@ -3019,74 +3024,256 @@ app.get("/api/sectors/focus-narratives", async (c) => {
        f.sector_name as sectorName,
        f.sort_order as sortOrder,
        COALESCE(f.comment_text, '') as comment,
+       f.source_narrative_name as sourceNarrativeName,
+       f.source_peer_group_id as sourcePeerGroupId,
+       pg.name as sourcePeerGroupName,
+       f.manual_name as manualName,
        f.created_at as createdAt,
        f.updated_at as updatedAt
      FROM sector_focus_narratives f
-     INNER JOIN (SELECT DISTINCT sector_name FROM sector_tracker_entries WHERE TRIM(sector_name) <> '') e
-       ON e.sector_name = f.sector_name
+     LEFT JOIN peer_groups pg ON pg.id = f.source_peer_group_id
      ORDER BY f.sort_order ASC, f.created_at ASC, f.sector_name ASC`,
-  ).all();
-  return c.json({ rows: rows.results ?? [] });
+  ).all<Record<string, unknown>>();
+  const links = await c.env.DB.prepare(
+    `SELECT fs.focus_narrative_id as focusNarrativeId,
+       fs.ticker,
+       s.name
+     FROM sector_focus_narrative_symbols fs
+     LEFT JOIN symbols s ON s.ticker = fs.ticker
+     ORDER BY fs.focus_narrative_id, fs.sort_order ASC, fs.ticker ASC`,
+  ).all<{ focusNarrativeId: string; ticker: string; name: string | null }>();
+  const symbolsByFocusId = new Map<string, Array<{ ticker: string; name: string | null }>>();
+  for (const link of links.results ?? []) {
+    const values = symbolsByFocusId.get(link.focusNarrativeId) ?? [];
+    values.push({ ticker: link.ticker, name: link.name });
+    symbolsByFocusId.set(link.focusNarrativeId, values);
+  }
+  return c.json({
+    rows: (rows.results ?? []).map((row) => ({
+      ...row,
+      selectedTickers: symbolsByFocusId.get(String(row.id)) ?? [],
+    })),
+  });
 });
 
 app.put("/api/sectors/focus-narratives", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const body = (await c.req.json()) as { sectorNames?: unknown; focusNarratives?: unknown };
-  const commentBySectorName = new Map<string, string>();
-  const hasFocusNarrativesPayload = body.focusNarratives !== undefined;
-
-  const existingFocusRows = await c.env.DB.prepare(
-    "SELECT sector_name as sectorName, COALESCE(comment_text, '') as comment FROM sector_focus_narratives",
-  ).all<{ sectorName: string; comment: string }>();
-  for (const row of existingFocusRows.results ?? []) {
-    commentBySectorName.set(row.sectorName, row.comment ?? "");
+  if (body.focusNarratives !== undefined && !Array.isArray(body.focusNarratives)) {
+    return c.json({ error: "focusNarratives must be an array" }, 400);
+  }
+  if (body.focusNarratives === undefined && !Array.isArray(body.sectorNames)) {
+    return c.json({ error: "sectorNames must be an array" }, 400);
   }
 
-  let requestedNames: string[];
-  if (hasFocusNarrativesPayload) {
-    if (!Array.isArray(body.focusNarratives)) return c.json({ error: "focusNarratives must be an array" }, 400);
-    requestedNames = [];
-    for (const value of body.focusNarratives) {
-      if (!value || typeof value !== "object") continue;
-      const payload = value as { sectorName?: unknown; comment?: unknown };
-      const sectorName = typeof payload.sectorName === "string" ? payload.sectorName.trim() : "";
-      if (!sectorName || requestedNames.includes(sectorName)) continue;
-      requestedNames.push(sectorName);
-      const existingComment = commentBySectorName.get(sectorName) ?? "";
-      const comment = payload.comment === undefined
-        ? existingComment
-        : typeof payload.comment === "string"
-          ? payload.comment.trim()
-          : "";
-      commentBySectorName.set(sectorName, comment.slice(0, 1000));
-    }
-  } else {
-    if (!Array.isArray(body.sectorNames)) return c.json({ error: "sectorNames must be an array" }, 400);
-    requestedNames = Array.from(new Set(
-      body.sectorNames
-        .map((value) => (typeof value === "string" ? value.trim() : ""))
-        .filter(Boolean),
-    ));
+  const narrativeRows = await c.env.DB.prepare(
+    `SELECT e.sector_name as sectorName, es.ticker
+     FROM sector_tracker_entries e
+     LEFT JOIN sector_tracker_entry_symbols es ON es.entry_id = e.id
+     WHERE TRIM(e.sector_name) <> ''`,
+  ).all<{ sectorName: string; ticker: string | null }>();
+  const narrativeTickersByName = new Map<string, string[]>();
+  for (const row of narrativeRows.results ?? []) {
+    const values = narrativeTickersByName.get(row.sectorName) ?? [];
+    if (row.ticker) values.push(row.ticker);
+    narrativeTickersByName.set(row.sectorName, normalizeFocusTickers(values));
+  }
+
+  const peerRows = await c.env.DB.prepare(
+    `SELECT pg.id, pg.name, tpg.ticker
+     FROM peer_groups pg
+     LEFT JOIN ticker_peer_groups tpg ON tpg.peer_group_id = pg.id
+     WHERE pg.is_active = 1`,
+  ).all<{ id: string; name: string; ticker: string | null }>();
+  const peersById = new Map<string, { name: string; tickers: string[] }>();
+  for (const row of peerRows.results ?? []) {
+    const current = peersById.get(row.id) ?? { name: row.name, tickers: [] };
+    if (row.ticker) current.tickers.push(row.ticker);
+    current.tickers = normalizeFocusTickers(current.tickers);
+    peersById.set(row.id, current);
   }
 
   const existingRows = await c.env.DB.prepare(
-    "SELECT DISTINCT sector_name as sectorName FROM sector_tracker_entries WHERE TRIM(sector_name) <> '' ORDER BY sector_name ASC",
-  ).all<{ sectorName: string }>();
-  const existingNames = new Set((existingRows.results ?? []).map((row) => row.sectorName));
-  const sectorNames = requestedNames.filter((name) => existingNames.has(name));
+    `SELECT f.id,
+       f.sector_name as sectorName,
+       COALESCE(f.comment_text, '') as comment,
+       f.source_narrative_name as sourceNarrativeName,
+       f.source_peer_group_id as sourcePeerGroupId,
+       f.manual_name as manualName,
+       fs.ticker
+     FROM sector_focus_narratives f
+     LEFT JOIN sector_focus_narrative_symbols fs ON fs.focus_narrative_id = f.id
+     ORDER BY fs.sort_order ASC, fs.ticker ASC`,
+  ).all<{
+    id: string;
+    sectorName: string;
+    comment: string;
+    sourceNarrativeName: string | null;
+    sourcePeerGroupId: string | null;
+    manualName: string | null;
+    ticker: string | null;
+  }>();
+  const existingByName = new Map<string, {
+    id: string;
+    comment: string;
+    sourceNarrativeName: string | null;
+    sourcePeerGroupId: string | null;
+    manualName: string | null;
+    selectedTickers: string[];
+  }>();
+  for (const row of existingRows.results ?? []) {
+    const current = existingByName.get(row.sectorName) ?? {
+      id: row.id,
+      comment: row.comment,
+      sourceNarrativeName: row.sourceNarrativeName,
+      sourcePeerGroupId: row.sourcePeerGroupId,
+      manualName: row.manualName,
+      selectedTickers: [],
+    };
+    if (row.ticker) current.selectedTickers.push(row.ticker);
+    existingByName.set(row.sectorName, current);
+  }
 
-  const deleteExisting = c.env.DB.prepare("DELETE FROM sector_focus_narratives");
-  const insertFocusRows = sectorNames.map((sectorName, index) =>
-    c.env.DB.prepare(
-      "INSERT INTO sector_focus_narratives (id, sector_name, sort_order, comment_text, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-    ).bind(crypto.randomUUID(), sectorName, index, commentBySectorName.get(sectorName) ?? ""),
-  );
-  await c.env.DB.batch([deleteExisting, ...insertFocusRows]);
+  const rawItems: unknown[] = Array.isArray(body.focusNarratives)
+    ? body.focusNarratives
+    : Array.from(new Set(
+      (body.sectorNames as unknown[])
+        .map((sectorName) => typeof sectorName === "string" ? sectorName.trim() : "")
+        .filter((sectorName) => sectorName && narrativeTickersByName.has(sectorName)),
+    )).map((sectorName) => ({ sectorName }));
 
-  const rows = await c.env.DB.prepare(
-    "SELECT id, sector_name as sectorName, sort_order as sortOrder, COALESCE(comment_text, '') as comment, created_at as createdAt, updated_at as updatedAt FROM sector_focus_narratives ORDER BY sort_order ASC, created_at ASC, sector_name ASC",
-  ).all();
-  return c.json({ rows: rows.results ?? [] });
+  try {
+    const resolved: Array<{
+      id: string;
+      sectorName: string;
+      comment: string;
+      sourceNarrativeName: string | null;
+      sourcePeerGroupId: string | null;
+      manualName: string | null;
+      selectedTickers: string[];
+    }> = [];
+    const displayNames = new Set<string>();
+
+    for (const value of rawItems) {
+      if (!value || typeof value !== "object") continue;
+      const payload = value as Record<string, unknown>;
+      const legacySectorName = typeof payload.sectorName === "string" ? payload.sectorName.trim() : "";
+      if (!legacySectorName && payload.sourceNarrativeName == null && payload.sourcePeerGroupId == null && payload.manualName == null) continue;
+      const existing = legacySectorName ? existingByName.get(legacySectorName) : undefined;
+      const sourceNarrativeName = typeof payload.sourceNarrativeName === "string"
+        ? payload.sourceNarrativeName.trim() || null
+        : payload.sourceNarrativeName === null
+          ? null
+          : (existing?.sourceNarrativeName ?? legacySectorName) || null;
+      const sourcePeerGroupId = typeof payload.sourcePeerGroupId === "string"
+        ? payload.sourcePeerGroupId.trim() || null
+        : payload.sourcePeerGroupId === null
+          ? null
+          : existing?.sourcePeerGroupId ?? null;
+      const manualName = typeof payload.manualName === "string"
+        ? payload.manualName.trim() || null
+        : payload.manualName === null
+          ? null
+          : existing?.manualName ?? null;
+      const comment = payload.comment === undefined
+        ? existing?.comment ?? ""
+        : typeof payload.comment === "string"
+          ? payload.comment.trim().slice(0, 1000)
+          : "";
+
+      if (sourceNarrativeName && !narrativeTickersByName.has(sourceNarrativeName)) {
+        throw new FocusNarrativeValidationError(`Narrative not found: ${sourceNarrativeName}`, 404);
+      }
+      const peerGroup = sourcePeerGroupId ? peersById.get(sourcePeerGroupId) : undefined;
+      if (sourcePeerGroupId && !peerGroup) {
+        throw new FocusNarrativeValidationError(`Peer group not found: ${sourcePeerGroupId}`, 404);
+      }
+
+      const selectedTickers = payload.selectedTickers === undefined
+        ? normalizeFocusTickers(existing?.selectedTickers.length
+          ? existing.selectedTickers
+          : sourceNarrativeName
+            ? narrativeTickersByName.get(sourceNarrativeName) ?? []
+            : [])
+        : normalizeFocusTickers(payload.selectedTickers);
+      const named = deriveFocusNarrativeName({
+        narrativeName: sourceNarrativeName,
+        narrativeTickers: sourceNarrativeName ? narrativeTickersByName.get(sourceNarrativeName) ?? [] : [],
+        peerGroupId: sourcePeerGroupId,
+        peerGroupName: peerGroup?.name ?? null,
+        peerGroupTickers: peerGroup?.tickers ?? [],
+        manualName,
+        selectedTickers,
+      });
+      const nameKey = named.sectorName.toLocaleLowerCase();
+      if (displayNames.has(nameKey)) {
+        throw new FocusNarrativeValidationError(`Focus Now already contains an entry named ${named.sectorName}.`, 409);
+      }
+      displayNames.add(nameKey);
+      resolved.push({
+        id: typeof payload.id === "string" && payload.id.trim() ? payload.id.trim() : existing?.id ?? crypto.randomUUID(),
+        sectorName: named.sectorName,
+        comment,
+        sourceNarrativeName,
+        sourcePeerGroupId,
+        manualName: named.manualName,
+        selectedTickers: named.selectedTickers,
+      });
+    }
+
+    const allTickers = Array.from(new Set(resolved.flatMap((row) => row.selectedTickers)));
+    const focusRowsJson = JSON.stringify(resolved.map((row, sortOrder) => ({ ...row, sortOrder })));
+    const focusLinksJson = JSON.stringify(resolved.flatMap((row) => row.selectedTickers.map((ticker, sortOrder) => ({
+      focusNarrativeId: row.id,
+      ticker,
+      sortOrder,
+    }))));
+    const statements = [
+      c.env.DB.prepare("DELETE FROM sector_focus_narrative_symbols"),
+      c.env.DB.prepare("DELETE FROM sector_focus_narratives"),
+      c.env.DB.prepare(
+        `INSERT OR IGNORE INTO symbols (ticker, name, asset_class)
+         SELECT CAST(value AS TEXT), CAST(value AS TEXT), 'stock'
+         FROM json_each(?)`,
+      ).bind(JSON.stringify(allTickers)),
+      c.env.DB.prepare(
+        `INSERT INTO sector_focus_narratives
+          (id, sector_name, sort_order, comment_text, source_narrative_name, source_peer_group_id, manual_name, updated_at)
+         SELECT
+           json_extract(value, '$.id'),
+           json_extract(value, '$.sectorName'),
+           CAST(json_extract(value, '$.sortOrder') AS INTEGER),
+           COALESCE(json_extract(value, '$.comment'), ''),
+           json_extract(value, '$.sourceNarrativeName'),
+           json_extract(value, '$.sourcePeerGroupId'),
+           json_extract(value, '$.manualName'),
+           CURRENT_TIMESTAMP
+         FROM json_each(?)`,
+      ).bind(focusRowsJson),
+      c.env.DB.prepare(
+        `INSERT INTO sector_focus_narrative_symbols (focus_narrative_id, ticker, sort_order)
+         SELECT
+           json_extract(value, '$.focusNarrativeId'),
+           json_extract(value, '$.ticker'),
+           CAST(json_extract(value, '$.sortOrder') AS INTEGER)
+         FROM json_each(?)`,
+      ).bind(focusLinksJson),
+    ];
+    await c.env.DB.batch(statements);
+
+    const rows = resolved.map((row, index) => ({
+      ...row,
+      sortOrder: index,
+      sourcePeerGroupName: row.sourcePeerGroupId ? peersById.get(row.sourcePeerGroupId)?.name ?? null : null,
+      selectedTickers: row.selectedTickers.map((ticker) => ({ ticker, name: ticker })),
+    }));
+    return c.json({ rows });
+  } catch (error) {
+    if (error instanceof FocusNarrativeValidationError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    throw error;
+  }
 });
 
 app.get("/api/sectors/market-leaders", async (c) => {

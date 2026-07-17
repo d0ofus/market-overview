@@ -2961,13 +2961,23 @@ export type SectorFocusNarrative = {
   sectorName: string;
   sortOrder: number;
   comment: string;
+  sourceNarrativeName: string | null;
+  sourcePeerGroupId: string | null;
+  sourcePeerGroupName: string | null;
+  manualName: string | null;
+  selectedTickers: Array<{ ticker: string; name: string | null }>;
   createdAt: string;
   updatedAt: string;
 };
 
 export type SectorFocusNarrativeUpdate = {
+  id?: string;
   sectorName: string;
-  comment?: string | null;
+  sourceNarrativeName: string | null;
+  sourcePeerGroupId: string | null;
+  manualName: string | null;
+  selectedTickers: string[];
+  comment: string;
 };
 
 export type SectorMarketLeaderRow = {
