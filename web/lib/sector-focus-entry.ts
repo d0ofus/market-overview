@@ -12,6 +12,60 @@ export type FocusNamePreview = {
   valid: boolean;
 };
 
+export type FocusChartMode = "selected" | "narrative" | "peer";
+
+export type FocusChartModeOption = {
+  mode: FocusChartMode;
+  categoryLabel: "Selection" | "Narrative" | "Peer group";
+  buttonLabel: string;
+  tickerCount: number | null;
+  disabled: boolean;
+};
+
+export function buildFocusChartModeOptions(input: {
+  selectedCount: number;
+  narrativeName: string | null;
+  narrativeCount: number;
+  peerGroupName: string | null;
+  peerGroupCount: number | null;
+  peerGroupLoading: boolean;
+  peerGroupError: boolean;
+}): FocusChartModeOption[] {
+  const options: FocusChartModeOption[] = [{
+    mode: "selected",
+    categoryLabel: "Selection",
+    buttonLabel: `Selected (${input.selectedCount})`,
+    tickerCount: input.selectedCount,
+    disabled: false,
+  }];
+  const narrativeName = input.narrativeName?.trim();
+  if (narrativeName) {
+    options.push({
+      mode: "narrative",
+      categoryLabel: "Narrative",
+      buttonLabel: `All ${narrativeName} (${input.narrativeCount})`,
+      tickerCount: input.narrativeCount,
+      disabled: false,
+    });
+  }
+  const peerGroupName = input.peerGroupName?.trim();
+  if (peerGroupName) {
+    const unavailable = input.peerGroupError || input.peerGroupCount === null;
+    options.push({
+      mode: "peer",
+      categoryLabel: "Peer group",
+      buttonLabel: input.peerGroupLoading
+        ? `All ${peerGroupName} (loading…)`
+        : unavailable
+          ? `All ${peerGroupName} (unavailable)`
+          : `All ${peerGroupName} (${input.peerGroupCount})`,
+      tickerCount: unavailable ? null : input.peerGroupCount,
+      disabled: input.peerGroupLoading || unavailable,
+    });
+  }
+  return options;
+}
+
 export const FOCUS_TICKER_PATTERN = /^[A-Z.\-^]{1,20}$/;
 
 export function normalizeFocusTickers(values: string[]): string[] {

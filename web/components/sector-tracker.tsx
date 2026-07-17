@@ -28,6 +28,7 @@ import {
   type SectorFocusNarrativeUpdate,
   type SectorMarketLeaderRow,
 } from "@/lib/api";
+import { buildFocusChartModeOptions, type FocusChartMode } from "@/lib/sector-focus-entry";
 import type { QuoteFreshnessStatus } from "@/types/dashboard";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -447,7 +448,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [activeNarrativeCollection, setActiveNarrativeCollection] = useState<NarrativeChartCollection | null>(null);
-  const [focusChartMode, setFocusChartMode] = useState<"selected" | "narrative" | "peer">("selected");
+  const [focusChartMode, setFocusChartMode] = useState<FocusChartMode>("selected");
   const [focusPeerGroupSymbols, setFocusPeerGroupSymbols] = useState<EntrySymbol[]>([]);
   const [focusPeerGroupSymbolsLoading, setFocusPeerGroupSymbolsLoading] = useState(false);
   const [focusPeerGroupSymbolsError, setFocusPeerGroupSymbolsError] = useState<string | null>(null);
@@ -1114,6 +1115,33 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
         : null,
     [activeNarrativeCollection?.id, activeNarrativeCollection?.mode, focusNarrativeRows],
   );
+  const activeFocusNarrativeSymbols = useMemo(
+    () => activeFocusNarrativeRow?.sourceNarrativeName
+      ? narrativeTickerSuggestionsByName.get(activeFocusNarrativeRow.sourceNarrativeName) ?? []
+      : [],
+    [activeFocusNarrativeRow?.sourceNarrativeName, narrativeTickerSuggestionsByName],
+  );
+  const focusChartModeOptions = useMemo(() => activeFocusNarrativeRow
+    ? buildFocusChartModeOptions({
+      selectedCount: activeFocusNarrativeRow.selectedTickers.length,
+      narrativeName: activeFocusNarrativeRow.sourceNarrativeName,
+      narrativeCount: activeFocusNarrativeSymbols.length,
+      peerGroupName: activeFocusNarrativeRow.sourcePeerGroupId
+        ? activeFocusNarrativeRow.sourcePeerGroupName ?? "peer group"
+        : null,
+      peerGroupCount: focusPeerGroupSymbolsLoading || focusPeerGroupSymbolsError
+        ? null
+        : focusPeerGroupSymbols.length,
+      peerGroupLoading: focusPeerGroupSymbolsLoading,
+      peerGroupError: Boolean(focusPeerGroupSymbolsError),
+    })
+    : [], [
+    activeFocusNarrativeRow,
+    activeFocusNarrativeSymbols.length,
+    focusPeerGroupSymbols.length,
+    focusPeerGroupSymbolsError,
+    focusPeerGroupSymbolsLoading,
+  ]);
   const focusNarrativeSourceOptions = useMemo(() => sectorNarrativeOptions.map((name) => ({
     id: name,
     name,
@@ -1241,6 +1269,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     hoverChart.clearPreview();
     setFocusChartMode("selected");
     setFocusPeerGroupSymbols([]);
+    setFocusPeerGroupSymbolsLoading(Boolean(row.sourcePeerGroupId));
     setFocusPeerGroupSymbolsError(null);
     setActiveNarrativeCollection({
       id: row.id,
@@ -1260,6 +1289,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     setActiveNarrativeCollection(null);
     setFocusChartMode("selected");
     setFocusPeerGroupSymbols([]);
+    setFocusPeerGroupSymbolsLoading(false);
     setFocusPeerGroupSymbolsError(null);
   };
 
@@ -1306,13 +1336,10 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
 
   useEffect(() => {
     if (!activeFocusNarrativeRow || activeNarrativeCollection?.mode !== "focus") return;
-    const sourceNarrativeSymbols = activeFocusNarrativeRow.sourceNarrativeName
-      ? narrativeTickerSuggestionsByName.get(activeFocusNarrativeRow.sourceNarrativeName) ?? []
-      : [];
     const symbols = focusChartMode === "peer"
       ? focusPeerGroupSymbols
       : focusChartMode === "narrative"
-        ? sourceNarrativeSymbols
+        ? activeFocusNarrativeSymbols
         : activeFocusNarrativeRow.selectedTickers;
     setActiveNarrativeCollection((current) => current?.mode === "focus" && current.id === activeFocusNarrativeRow.id
       ? { ...current, symbols }
@@ -1320,10 +1347,10 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     setNarrativePage(1);
   }, [
     activeFocusNarrativeRow,
+    activeFocusNarrativeSymbols,
     activeNarrativeCollection?.mode,
     focusChartMode,
     focusPeerGroupSymbols,
-    narrativeTickerSuggestionsByName,
   ]);
 
   const renderFocusNarrativePopupComment = (row: SectorFocusNarrative) => {
@@ -2650,34 +2677,25 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
           itemLabel="tickers"
           headerMiddleSlot={activeFocusNarrativeRow ? renderFocusNarrativePopupComment(activeFocusNarrativeRow) : undefined}
           controls={activeFocusNarrativeRow ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
-              <span className="mr-1 text-slate-400">Show:</span>
-              <button
-                type="button"
-                className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(focusChartMode === "selected")}`}
-                onClick={() => setFocusChartMode("selected")}
-              >
-                Selected ({activeFocusNarrativeRow.selectedTickers.length})
-              </button>
-              {activeFocusNarrativeRow.sourceNarrativeName ? (
-                <button
-                  type="button"
-                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(focusChartMode === "narrative")}`}
-                  onClick={() => setFocusChartMode("narrative")}
-                >
-                  All {activeFocusNarrativeRow.sourceNarrativeName}
-                </button>
-              ) : null}
-              {activeFocusNarrativeRow.sourcePeerGroupId ? (
-                <button
-                  type="button"
-                  className={`rounded-xl px-3 py-2 text-sm transition ${segmentedButtonClass(focusChartMode === "peer")}`}
-                  onClick={() => setFocusChartMode("peer")}
-                  disabled={focusPeerGroupSymbolsLoading}
-                >
-                  {focusPeerGroupSymbolsLoading ? "Loading peer group…" : `All ${activeFocusNarrativeRow.sourcePeerGroupName ?? "peer group"}`}
-                </button>
-              ) : null}
+            <div className="flex flex-wrap items-end gap-3 rounded-[22px] border border-borderSoft/60 bg-panelSoft/30 px-3 py-3 text-sm text-slate-300">
+              <span className="self-end pb-2 text-slate-400">Show:</span>
+              {focusChartModeOptions.map((option) => (
+                <div key={option.mode} className="flex min-w-0 flex-col gap-1">
+                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+                    {option.categoryLabel}
+                  </span>
+                  <button
+                    type="button"
+                    className={`rounded-xl px-3 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-50 ${segmentedButtonClass(focusChartMode === option.mode)}`}
+                    onClick={() => setFocusChartMode(option.mode)}
+                    disabled={option.disabled}
+                    aria-label={`${option.categoryLabel}: ${option.buttonLabel}`}
+                    aria-pressed={focusChartMode === option.mode}
+                  >
+                    {option.buttonLabel}
+                  </button>
+                </div>
+              ))}
             </div>
           ) : undefined}
           maxColumns={3}
