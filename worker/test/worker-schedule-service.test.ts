@@ -1,15 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   boundPostCloseProviderWork,
   buildPostCloseDailyBarUniverseQuery,
   classifyPostCloseError,
   isPostCloseBarsWindowOpen,
   loadWorkerScheduleSettings,
+  planPostCloseBudgetProtection,
   planPostCloseProviderBatch,
   POST_CLOSE_SCOPE,
+  resolvePostCloseBudgetProtection,
   updateWorkerScheduleSettings,
 } from "../src/worker-schedule-service";
-import type { Env } from "../src/types";
+import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "../src/types";
 
 type WorkerScheduleRowState = {
   id: string;
@@ -115,9 +117,179 @@ function createWorkerScheduleEnv(initial?: Partial<WorkerScheduleRowState>): Env
       async batch() {
         return [];
       },
-    } as D1Database,
+    } as unknown as D1Database,
   } as Env;
 }
+
+function workerScheduleSettings(overrides: Partial<WorkerScheduleSettings> = {}): WorkerScheduleSettings {
+  return {
+    id: "default",
+    cronExpression: "*/15 * * * *",
+    rsBackgroundEnabled: true,
+    rsBackgroundBatchSize: 50,
+    rsBackgroundMaxBatchesPerTick: 20,
+    rsBackgroundTimeBudgetMs: 15_000,
+    rsManualCacheReuseEnabled: true,
+    rsSharedConfigSnapshotFanoutEnabled: true,
+    postCloseBarsEnabled: true,
+    postCloseBarsOffsetMinutes: 60,
+    postCloseBarsBatchSize: 80,
+    postCloseBarsMaxBatchesPerTick: 4,
+    patternScanEnabled: true,
+    patternScanOffsetMinutes: 75,
+    patternScanBatchSize: 40,
+    patternScanMaxBatchesPerTick: 4,
+    ...overrides,
+  };
+}
+
+function postCloseJob(overrides: Partial<PostCloseDailyBarRefreshJob> = {}): PostCloseDailyBarRefreshJob {
+  return {
+    id: "post-close-2026-07-16",
+    tradingDate: "2026-07-16",
+    scope: POST_CLOSE_SCOPE,
+    status: "queued",
+    startedAt: "2026-07-16T21:00:00.000Z",
+    updatedAt: "2026-07-16T21:00:00.000Z",
+    completedAt: null,
+    error: null,
+    totalTickers: 500,
+    processedTickers: 0,
+    cursorOffset: 0,
+    fetchedRows: 0,
+    writtenRows: 0,
+    currentDateTickers: 0,
+    missingCurrentDateTickers: 500,
+    currentDateCoveragePct: 0,
+    attemptCount: 0,
+    nextAttemptAt: null,
+    errorCode: null,
+    ...overrides,
+  };
+}
+
+describe("post-close budget protection", () => {
+  const now = new Date("2026-07-16T21:17:00.000Z");
+  const expectedTradingDate = "2026-07-16";
+
+  it("protects missing, queued, running, and retryable post-close work", () => {
+    const settings = workerScheduleSettings();
+
+    expect(resolvePostCloseBudgetProtection({ now, expectedTradingDate, settings, job: null })).toMatchObject({
+      protect: true,
+      reason: "missing-job",
+    });
+    expect(resolvePostCloseBudgetProtection({ now, expectedTradingDate, settings, job: postCloseJob() })).toMatchObject({
+      protect: true,
+      reason: "actionable-job",
+    });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings,
+      job: postCloseJob({ status: "running" }),
+    })).toMatchObject({ protect: true, reason: "actionable-job" });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings,
+      job: postCloseJob({ status: "failed", errorCode: "provider-error", nextAttemptAt: "2026-07-16T21:16:00.000Z" }),
+    })).toMatchObject({ protect: true, reason: "actionable-job" });
+  });
+
+  it("does not protect disabled, pre-window, completed, auth-blocked, or delayed work", () => {
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings: workerScheduleSettings({ postCloseBarsEnabled: false }),
+      job: null,
+    })).toMatchObject({ protect: false, reason: "disabled" });
+    expect(resolvePostCloseBudgetProtection({
+      now: new Date("2026-07-16T20:45:00.000Z"),
+      expectedTradingDate,
+      settings: workerScheduleSettings(),
+      job: null,
+    })).toMatchObject({ protect: false, reason: "before-window" });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings: workerScheduleSettings(),
+      job: postCloseJob({ status: "completed", completedAt: "2026-07-16T21:10:00.000Z" }),
+    })).toMatchObject({ protect: false, reason: "completed" });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings: workerScheduleSettings(),
+      job: postCloseJob({ status: "failed", errorCode: "auth-blocked" }),
+    })).toMatchObject({ protect: false, reason: "auth-blocked" });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings: workerScheduleSettings(),
+      job: postCloseJob({ nextAttemptAt: "2026-07-16T21:30:00.000Z" }),
+    })).toMatchObject({ protect: false, reason: "retry-not-due" });
+  });
+
+  it("reads post-close state from the market-data binding without schema writes", async () => {
+    const completed = postCloseJob({ status: "completed", completedAt: "2026-07-16T21:10:00.000Z" });
+    let primaryPrepareCalls = 0;
+    let marketPrepareCalls = 0;
+    const primaryDb = {
+      prepare() {
+        primaryPrepareCalls += 1;
+        throw new Error("primary DB should not be queried");
+      },
+    } as unknown as D1Database;
+    const marketDataDb = {
+      prepare() {
+        marketPrepareCalls += 1;
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          async first<T>() {
+            return { ...completed, leaseExpiresAt: null } as T;
+          },
+        };
+        return statement;
+      },
+    } as unknown as D1Database;
+
+    const decision = await planPostCloseBudgetProtection(
+      { DB: primaryDb, MARKET_DATA_DB: marketDataDb } as Env,
+      now,
+      workerScheduleSettings(),
+    );
+
+    expect(decision).toMatchObject({ protect: false, reason: "completed" });
+    expect(primaryPrepareCalls).toBe(0);
+    expect(marketPrepareCalls).toBe(1);
+  });
+
+  it("protects post-close budget when the state diagnostic fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const brokenDb = {
+      prepare() {
+        throw new Error("D1 unavailable");
+      },
+    } as unknown as D1Database;
+
+    const decision = await planPostCloseBudgetProtection(
+      { DB: brokenDb, MARKET_DATA_DB: brokenDb } as Env,
+      now,
+      workerScheduleSettings(),
+    );
+
+    expect(decision).toMatchObject({
+      protect: true,
+      expectedTradingDate,
+      reason: "diagnostic-failed",
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "post-close budget protection diagnostic failed",
+      expect.objectContaining({ expectedTradingDate }),
+    );
+    warn.mockRestore();
+  });
+});
 
 describe("worker schedule service", () => {
   it("returns default worker schedule values when no row exists yet", async () => {
@@ -145,6 +317,10 @@ describe("worker schedule service", () => {
       postCloseBarsOffsetMinutes: 75,
       postCloseBarsBatchSize: 600,
       postCloseBarsMaxBatchesPerTick: 6,
+      patternScanEnabled: true,
+      patternScanOffsetMinutes: 75,
+      patternScanBatchSize: 40,
+      patternScanMaxBatchesPerTick: 4,
     });
 
     expect(updated.rsBackgroundEnabled).toBe(false);
