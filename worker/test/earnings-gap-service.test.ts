@@ -9,10 +9,12 @@ import {
   parseTradingViewEarningsGapRows,
   queryEarningsGaps,
   syncEarningsGaps,
+  type EarningsGapCalculationStatus,
   type EarningsGapEventInput,
   type EarningsGapReleaseInput,
 } from "../src/earnings-gap-service";
 import { isExcludedEarningsIssue } from "../src/earnings-issue-filter";
+import type { MarketDataProvider } from "../src/provider";
 import type { Env } from "../src/types";
 
 type StoredSync = {
@@ -28,10 +30,20 @@ type StoredSync = {
   lastError: string | null;
   rowsSeen: number;
   rowsUpserted: number;
+  barsRequested: number;
+  barsReady: number;
+  barsFetched: number;
+  rowsDeferred: number;
+  warning: string | null;
   updatedAt: string;
 };
 
-type StoredEvent = EarningsGapEventInput & { id: string };
+type StoredEvent = Omit<EarningsGapEventInput, "calculationStatus"> & {
+  calculationStatus: EarningsGapCalculationStatus;
+  id: string;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+};
 type StoredBar = { ticker: string; date: string; o: number; c: number };
 type StoredSurprise = {
   provider: string;
@@ -114,8 +126,8 @@ function release(input: Partial<EarningsGapReleaseInput> & { ticker: string; rep
     epsEstimate: input.epsEstimate ?? null,
     epsSurprise: input.epsSurprise ?? null,
     epsSurprisePct: input.epsSurprisePct ?? null,
-    reportTimestamp: input.reportTimestamp ?? null,
-    reportTime: input.reportTime ?? "after-market",
+    reportTimestamp: "reportTimestamp" in input ? input.reportTimestamp ?? null : null,
+    reportTime: "reportTime" in input ? input.reportTime ?? null : "after-market",
     postmarketPrice: input.postmarketPrice ?? null,
     postmarketVolume: input.postmarketVolume ?? null,
     rawJson: input.rawJson ?? null,
@@ -134,6 +146,9 @@ function storedEvent(input: Partial<EarningsGapEventInput> & { ticker: string; r
     postmarketGapPct: input.postmarketGapPct ?? null,
     qualifyingGapPct: input.qualifyingGapPct ?? 10,
     gapSource: input.gapSource ?? "regular_open",
+    calculationStatus: input.calculationStatus ?? "complete",
+    barProvider: input.barProvider ?? "alpaca",
+    calculatedAt: input.calculatedAt ?? "2026-05-22T00:00:00.000Z",
     firstSeenAt: null,
     lastSeenAt: null,
   };
@@ -146,6 +161,7 @@ function createEnv(input: {
   surprises?: StoredSurprise[];
   hasSeasonColumn?: boolean;
   hasEpsColumns?: boolean;
+  hasReliabilityColumns?: boolean;
 } = {}): Env & {
   __events: StoredEvent[];
   __syncs: StoredSync[];
@@ -158,6 +174,7 @@ function createEnv(input: {
   const surprises = [...(input.surprises ?? [])];
   const hasSeasonColumn = input.hasSeasonColumn ?? true;
   const hasEpsColumns = input.hasEpsColumns ?? true;
+  const hasReliabilityColumns = input.hasReliabilityColumns ?? true;
   const metrics = { cleanupRuns: 0, dailyBarQueries: 0 };
   const queries: string[] = [];
 
@@ -167,7 +184,10 @@ function createEnv(input: {
   };
   const applyEventFilters = (sql: string, args: unknown[]) => {
     let cursor = 0;
-    let rows = events.filter((row) => !isExcludedEarningsIssue(row));
+    let rows = events.filter((row) => (
+      !isExcludedEarningsIssue(row)
+      && (!sql.includes("calculation_status IN") || row.calculationStatus !== "deferred")
+    ));
     if (sql.includes("report_date >= ?")) {
       const startDate = String(args[cursor++] ?? "1900-01-01");
       rows = rows.filter((row) => row.reportDate >= startDate);
@@ -241,6 +261,16 @@ function createEnv(input: {
             const column = String(args[0] ?? "");
             if (column === "season") return { count: hasSeasonColumn ? 1 : 0 } as T;
             if (column.startsWith("eps_")) return { count: hasEpsColumns ? 1 : 0 } as T;
+            if ([
+              "calculation_status",
+              "bar_provider",
+              "calculated_at",
+              "bars_requested",
+              "bars_ready",
+              "bars_fetched",
+              "rows_deferred",
+              "warning",
+            ].includes(column)) return { count: hasReliabilityColumns ? 1 : 0 } as T;
             return { count: 1 } as T;
           }
           if (sql.includes("FROM earnings_gap_syncs WHERE scheduled_local_date")) {
@@ -279,15 +309,53 @@ function createEnv(input: {
               .map((row) => ({ ...row, epsProvider: row.provider }));
             return { results: rows as T[] };
           }
-          if (sql.includes("FROM daily_bars")) {
+          if (sql.includes("FROM earnings_gap_syncs")) {
+            return { results: [...syncs].reverse() as T[] };
+          }
+          if (sql.includes("MAX(date) as lastDate") && sql.includes("FROM alpaca_daily_bars")) {
+            const tickers = new Set(args.slice(1).map((value) => String(value)));
+            const rows = Array.from(tickers, (ticker) => ({
+              ticker,
+              lastDate: bars.filter((bar) => bar.ticker === ticker).map((bar) => bar.date).sort().at(-1) ?? null,
+            }));
+            return { results: rows as T[] };
+          }
+          if (sql.includes("FROM alpaca_daily_bars") && sql.includes("date = ?")) {
+            const selectsBarData = sql.includes("date, o, h, l, c");
+            const date = String(selectsBarData ? args[1] : args.at(-1));
+            const tickerArgs = selectsBarData ? args.slice(2) : args.slice(1, -1);
+            const tickers = new Set(tickerArgs.map((value) => String(value)));
+            const rows = bars
+              .filter((bar) => tickers.has(bar.ticker) && bar.date === date)
+              .map((bar) => ({ ...bar, h: Math.max(bar.o, bar.c), l: Math.min(bar.o, bar.c), volume: 1_000 }));
+            return { results: rows as T[] };
+          }
+          if (sql.includes("FROM alpaca_daily_bars")) {
             metrics.dailyBarQueries += 1;
             const startDate = String(args.at(-2) ?? "1900-01-01");
             const endDate = String(args.at(-1) ?? "9999-12-31");
-            const tickers = new Set(args.slice(0, -2).map((value) => String(value)));
+            const tickers = new Set(args.slice(1, -2).map((value) => String(value)));
             const rows = bars
               .filter((bar) => tickers.has(bar.ticker) && bar.date >= startDate && bar.date <= endDate)
               .sort((left, right) => left.ticker.localeCompare(right.ticker) || left.date.localeCompare(right.date));
             return { results: rows as T[] };
+          }
+          if (sql.includes("SELECT ticker, report_date as reportDate, report_time as reportTime")) {
+            const startDate = String(args.at(-2) ?? "1900-01-01");
+            const endDate = String(args.at(-1) ?? "9999-12-31");
+            const tickers = new Set(args.slice(0, -2).map((value) => String(value)));
+            return {
+              results: events
+                .filter((row) => tickers.has(row.ticker) && row.reportDate >= startDate && row.reportDate <= endDate)
+                .map((row) => ({
+                  ticker: row.ticker,
+                  reportDate: row.reportDate,
+                  reportTime: row.reportTime,
+                  postmarketPrice: row.postmarketPrice,
+                  postmarketGapPct: row.postmarketGapPct,
+                  postmarketVolume: row.postmarketVolume,
+                })) as T[],
+            };
           }
           if (sql.includes("FROM earnings_gap_events") && sql.includes("GROUP BY")) {
             const rawField = sql.match(/SELECT ([a-z_]+) as value/)?.[1] ?? "season";
@@ -326,11 +394,29 @@ function createEnv(input: {
               lastError: null,
               rowsSeen: 0,
               rowsUpserted: 0,
+              barsRequested: 0,
+              barsReady: 0,
+              barsFetched: 0,
+              rowsDeferred: 0,
+              warning: null,
               updatedAt: new Date().toISOString(),
             });
           }
           if (sql.includes("UPDATE earnings_gap_syncs")) {
-            const [status, , successAt, error, rowsSeen, rowsUpserted, id] = args;
+            const [
+              status,
+              ,
+              successAt,
+              error,
+              rowsSeen,
+              rowsUpserted,
+              barsRequested,
+              barsReady,
+              barsFetched,
+              rowsDeferred,
+              warning,
+              id,
+            ] = args;
             const row = syncs.find((item) => item.id === id);
             if (row) {
               row.status = String(status);
@@ -338,12 +424,33 @@ function createEnv(input: {
               row.lastError = error == null ? null : String(error);
               row.rowsSeen = Number(rowsSeen ?? 0);
               row.rowsUpserted = Number(rowsUpserted ?? 0);
+              row.barsRequested = Number(barsRequested ?? 0);
+              row.barsReady = Number(barsReady ?? 0);
+              row.barsFetched = Number(barsFetched ?? 0);
+              row.rowsDeferred = Number(rowsDeferred ?? 0);
+              row.warning = warning == null ? null : String(warning);
               row.updatedAt = new Date().toISOString();
             }
           }
-          if (sql.includes("DELETE FROM earnings_gap_events")) {
+          if (sql.includes("DELETE FROM earnings_gap_events") && sql.includes("report_date < ?")) {
             metrics.cleanupRuns += 1;
             return { meta: { changes: 0 } };
+          }
+          if (sql.includes("DELETE FROM earnings_gap_events") && sql.includes("ticker = ?")) {
+            const [ticker, reportDate] = args;
+            const index = events.findIndex((row) => row.ticker === ticker && row.reportDate === reportDate);
+            if (index >= 0) events.splice(index, 1);
+            return { meta: { changes: index >= 0 ? 1 : 0 } };
+          }
+          if (sql.includes("UPDATE earnings_gap_events") && sql.includes("calculation_status = 'deferred'")) {
+            const [calculatedAt, ticker, reportDate] = args;
+            const row = events.find((item) => item.ticker === ticker && item.reportDate === reportDate);
+            if (row) {
+              row.calculationStatus = "deferred";
+              row.barProvider = null;
+              row.calculatedAt = String(calculatedAt);
+            }
+            return { meta: { changes: row ? 1 : 0 } };
           }
           return { meta: { changes: 0 } };
         },
@@ -367,6 +474,30 @@ function createEnv(input: {
       for (const statement of statements) {
         const sql = statement.__sql ?? "";
         const args = statement.__args ?? [];
+        if (sql.includes("UPDATE earnings_gap_events") && sql.includes("calculation_status = 'deferred'")) {
+          const [calculatedAt, ticker, reportDate] = args;
+          const row = events.find((item) => item.ticker === ticker && item.reportDate === reportDate);
+          if (row) {
+            row.calculationStatus = "deferred";
+            row.barProvider = null;
+            row.calculatedAt = String(calculatedAt);
+          }
+          continue;
+        }
+        if (sql.includes("DELETE FROM earnings_gap_events") && sql.includes("ticker = ?")) {
+          const [ticker, reportDate] = args;
+          const index = events.findIndex((row) => row.ticker === ticker && row.reportDate === reportDate);
+          if (index >= 0) events.splice(index, 1);
+          continue;
+        }
+        if (sql.includes("INSERT INTO alpaca_daily_bars")) {
+          const [, ticker, date, o, , , c] = args;
+          const next = { ticker: String(ticker), date: String(date), o: Number(o), c: Number(c) };
+          const index = bars.findIndex((bar) => bar.ticker === next.ticker && bar.date === next.date);
+          if (index >= 0) bars[index] = next;
+          else bars.push(next);
+          continue;
+        }
         if (!sql.includes("INSERT INTO earnings_gap_events")) continue;
         const [
           id,
@@ -399,9 +530,12 @@ function createEnv(input: {
           postmarketVolume,
           qualifyingGapPct,
           gapSource,
+          calculationStatus,
+          barProvider,
+          calculatedAt,
           rawJson,
         ] = args;
-        events.push({
+        const next: StoredEvent = {
           id: String(id),
           provider: String(provider),
           sourceSymbol: String(sourceSymbol),
@@ -432,16 +566,29 @@ function createEnv(input: {
           postmarketVolume: postmarketVolume == null ? null : Number(postmarketVolume),
           qualifyingGapPct: Number(qualifyingGapPct),
           gapSource: String(gapSource) as "postmarket" | "regular_open" | "both",
+          calculationStatus: String(calculationStatus) as "complete" | "provisional",
+          barProvider: barProvider == null ? null : String(barProvider),
+          calculatedAt: String(calculatedAt),
           rawJson: rawJson == null ? null : String(rawJson),
           firstSeenAt: null,
           lastSeenAt: null,
-        });
+        };
+        const existingIndex = events.findIndex((row) => row.ticker === next.ticker && row.reportDate === next.reportDate);
+        if (existingIndex >= 0) events[existingIndex] = next;
+        else events.push(next);
       }
       return [];
     },
   };
 
-  return { DB: db as unknown as D1Database, __events: events, __syncs: syncs, __metrics: metrics, __queries: queries };
+  return {
+    DB: db as unknown as D1Database,
+    MARKET_DATA_DB: db as unknown as D1Database,
+    __events: events,
+    __syncs: syncs,
+    __metrics: metrics,
+    __queries: queries,
+  };
 }
 
 describe("earnings gap service", () => {
@@ -517,7 +664,7 @@ describe("earnings gap service", () => {
     expect(rows.map((row) => row.ticker)).toEqual(["AAPL", "BABA"]);
   });
 
-  it("qualifies postmarket, regular-open, and both gap sources while excluding non-positive gaps", async () => {
+  it("uses after-market postmarket gaps and ignores unrelated postmarket moves for before-market releases", async () => {
     const env = createEnv({
       bars: [
         { ticker: "REG", date: "2026-05-19", o: 98, c: 100 },
@@ -541,14 +688,165 @@ describe("earnings gap service", () => {
     expect(byTicker.get("PM")?.postmarketGapPct).toBeCloseTo(6);
     expect(byTicker.get("REG")?.gapSource).toBe("regular_open");
     expect(byTicker.get("REG")?.regularOpenGapPct).toBeCloseTo(10);
-    expect(byTicker.get("BOTH")?.gapSource).toBe("both");
+    expect(byTicker.get("BOTH")?.gapSource).toBe("regular_open");
+    expect(byTicker.get("BOTH")?.postmarketGapPct).toBeNull();
     expect(byTicker.get("BOTH")?.qualifyingGapPct).toBeCloseTo(11.111, 3);
     expect(byTicker.has("NOPE")).toBe(false);
   });
 
+  it("reproduces MAN's July 16 regular-open earnings gap from exact Alpaca sessions", async () => {
+    const env = createEnv({
+      bars: [
+        { ticker: "MAN", date: "2026-07-15", o: 39.5, c: 39.02 },
+        { ticker: "MAN", date: "2026-07-16", o: 46.99, c: 51.65 },
+      ],
+    });
+
+    const rows = await computeEarningsGapEvents(env, [
+      release({
+        ticker: "MAN",
+        reportDate: "2026-07-16",
+        reportTime: "before-market",
+        price: 51.65,
+        postmarketPrice: 52,
+      }),
+    ], new Date("2026-07-16T21:00:00Z"));
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      ticker: "MAN",
+      reactionDate: "2026-07-16",
+      previousClose: 39.02,
+      reactionOpen: 46.99,
+      gapSource: "regular_open",
+      postmarketGapPct: null,
+      calculationStatus: "complete",
+      barProvider: "alpaca",
+    });
+    expect(rows[0].regularOpenGapPct).toBeCloseTo(20.4254, 4);
+    expect(rows[0].qualifyingGapPct).toBeCloseTo(20.4254, 4);
+  });
+
+  it("keeps after-market gaps provisional until the next session and then combines the stored postmarket snapshot", async () => {
+    const provisionalEnv = createEnv();
+    const provisional = await computeEarningsGapEvents(provisionalEnv, [
+      release({
+        ticker: "AMC",
+        reportDate: "2026-07-16",
+        reportTime: "after-market",
+        price: 100,
+        postmarketPrice: 110,
+      }),
+    ], new Date("2026-07-16T21:00:00Z"));
+
+    expect(provisional[0]).toMatchObject({
+      calculationStatus: "provisional",
+      reactionDate: null,
+      regularOpenGapPct: null,
+      postmarketGapPct: 10,
+      gapSource: "postmarket",
+    });
+
+    const completeEnv = createEnv({
+      events: [storedEvent({
+        ticker: "AMC",
+        reportDate: "2026-07-16",
+        reportTime: "after-market",
+        reactionDate: null,
+        previousClose: null,
+        reactionOpen: null,
+        regularOpenGapPct: null,
+        postmarketPrice: 110,
+        postmarketGapPct: 10,
+        postmarketVolume: 250_000,
+        qualifyingGapPct: 10,
+        gapSource: "postmarket",
+        calculationStatus: "provisional",
+        barProvider: "tradingview",
+      })],
+      bars: [
+        { ticker: "AMC", date: "2026-07-16", o: 100, c: 105 },
+        { ticker: "AMC", date: "2026-07-17", o: 115, c: 116 },
+      ],
+    });
+    const complete = await computeEarningsGapEvents(completeEnv, [
+      release({ ticker: "AMC", reportDate: "2026-07-16", reportTime: "after-market", price: 105 }),
+    ], new Date("2026-07-17T21:00:00Z"));
+
+    expect(complete[0]).toMatchObject({
+      calculationStatus: "complete",
+      reactionDate: "2026-07-17",
+      previousClose: 105,
+      reactionOpen: 115,
+      postmarketGapPct: 10,
+      gapSource: "both",
+      barProvider: "alpaca+tradingview",
+    });
+    expect(complete[0].regularOpenGapPct).toBeCloseTo(9.5238, 4);
+  });
+
+  it("uses the next trading session for intraday and unknown releases across a market holiday", async () => {
+    const env = createEnv({
+      bars: [
+        { ticker: "INTRA", date: "2026-07-02", o: 100, c: 100 },
+        { ticker: "INTRA", date: "2026-07-06", o: 108, c: 109 },
+        { ticker: "UNKNOWN", date: "2026-07-02", o: 50, c: 50 },
+        { ticker: "UNKNOWN", date: "2026-07-06", o: 55, c: 56 },
+      ],
+    });
+    const rows = await computeEarningsGapEvents(env, [
+      release({
+        ticker: "INTRA",
+        reportDate: "2026-07-02",
+        reportTime: null,
+        reportTimestamp: unix("2026-07-02T17:00:00Z"),
+        price: 100,
+        postmarketPrice: 120,
+      }),
+      release({
+        ticker: "UNKNOWN",
+        reportDate: "2026-07-02",
+        reportTime: null,
+        reportTimestamp: null,
+        price: 50,
+        postmarketPrice: 80,
+      }),
+    ], new Date("2026-07-06T21:00:00Z"));
+
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.reactionDate === "2026-07-06")).toBe(true);
+    expect(rows.every((row) => row.postmarketGapPct == null && row.gapSource === "regular_open")).toBe(true);
+  });
+
+  it("reuses complete market-store bars without calling a provider and fetches only missing release tickers", async () => {
+    const provider = {
+      label: "Test Alpaca",
+      getDailyBars: vi.fn(async (tickers: string[]) => tickers.flatMap((ticker) => [
+        { ticker, date: "2026-07-15", o: 20, h: 21, l: 19, c: 20, volume: 1_000, sourceProvider: "alpaca", sourceFeed: "iex" },
+        { ticker, date: "2026-07-16", o: 24, h: 25, l: 23, c: 24, volume: 1_000, sourceProvider: "alpaca", sourceFeed: "iex" },
+      ])),
+    } satisfies MarketDataProvider;
+    const env = createEnv({
+      bars: [
+        { ticker: "CACHED", date: "2026-07-15", o: 10, c: 10 },
+        { ticker: "CACHED", date: "2026-07-16", o: 12, c: 12 },
+        { ticker: "MISSING", date: "2026-07-16", o: 24, c: 24 },
+      ],
+    });
+
+    const rows = await computeEarningsGapEvents(env, [
+      release({ ticker: "CACHED", reportDate: "2026-07-16", reportTime: "before-market" }),
+      release({ ticker: "MISSING", reportDate: "2026-07-16", reportTime: "before-market" }),
+    ], new Date("2026-07-16T21:00:00Z"), provider);
+
+    expect(provider.getDailyBars).toHaveBeenCalledTimes(1);
+    expect(provider.getDailyBars).toHaveBeenCalledWith(["MISSING"], "2026-07-15", "2026-07-16");
+    expect(rows.map((row) => row.ticker).sort()).toEqual(["CACHED", "MISSING"]);
+  });
+
   it("runs backfills as a 90-day window split into 7-day batches", async () => {
     const env = createEnv();
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (_input?: unknown, _init?: RequestInit) => ({
       ok: true,
       json: async () => ({ totalCount: 0, data: [] }),
     }));
@@ -686,7 +984,7 @@ describe("earnings gap service", () => {
         { provider: "fmp", ticker: "FALL", reportDate: "2026-05-21", epsActual: 1, epsEstimate: 0.8, epsSurprise: 0.2, epsSurprisePct: 25 },
       ],
     });
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (_input?: unknown, _init?: RequestInit) => ({
       ok: true,
       json: async () => ({
         totalCount: 2,
@@ -735,6 +1033,145 @@ describe("earnings gap service", () => {
       epsSurprisePct: 25,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes a previously stored event only when complete bars prove it no longer qualifies", async () => {
+    const env = createEnv({
+      events: [storedEvent({
+        ticker: "STALE",
+        reportDate: "2026-07-16",
+        reportTime: "before-market",
+        qualifyingGapPct: 8,
+      })],
+      bars: [
+        { ticker: "STALE", date: "2026-07-15", o: 100, c: 100 },
+        { ticker: "STALE", date: "2026-07-16", o: 95, c: 96 },
+      ],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        totalCount: 1,
+        data: [tvRow({
+          symbol: "STALE",
+          name: "Stale Gap Inc.",
+          exchange: "NYSE",
+          reportIso: "2026-07-16T12:00:00Z",
+          reportTime: -1,
+          price: 96,
+          postmarketPrice: 110,
+        })],
+      }),
+    })));
+
+    const result = await syncEarningsGaps(env, {
+      mode: "incremental",
+      now: new Date("2026-07-16T21:00:00Z"),
+    });
+
+    expect(result.rowsUpserted).toBe(0);
+    expect(result.rowsDeferred).toBe(0);
+    expect(env.__events).toHaveLength(0);
+  });
+
+  it("preserves but hides a prior event when required bars remain unavailable", async () => {
+    const env = createEnv({
+      events: [storedEvent({
+        ticker: "DEFER",
+        reportDate: "2026-07-16",
+        reportTime: "before-market",
+        qualifyingGapPct: 8,
+      })],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        totalCount: 1,
+        data: [tvRow({
+          symbol: "DEFER",
+          name: "Deferred Gap Inc.",
+          exchange: "NASDAQ",
+          reportIso: "2026-07-16T12:00:00Z",
+          reportTime: -1,
+          price: 100,
+        })],
+      }),
+    })));
+
+    const result = await syncEarningsGaps(env, {
+      mode: "incremental",
+      now: new Date("2026-07-16T21:00:00Z"),
+    });
+    const snapshot = await loadEarningsGapsSnapshot(env, {
+      startDate: "2026-07-01",
+      includeOtc: true,
+    });
+    const status = await loadEarningsGapsStatus(env);
+
+    expect(result).toMatchObject({
+      rowsUpserted: 0,
+      rowsDeferred: 1,
+      barsRequested: 2,
+      barsReady: 0,
+      barsFetched: 0,
+    });
+    expect(result.warning).toContain("Alpaca credentials are unavailable");
+    expect(env.__events).toHaveLength(1);
+    expect(env.__events[0].calculationStatus).toBe("deferred");
+    expect(snapshot.rows).toHaveLength(0);
+    expect(status.syncs[0]).toMatchObject({
+      rowsDeferred: 1,
+      barsRequested: 2,
+      barsReady: 0,
+      barsFetched: 0,
+    });
+  });
+
+  it("authoritatively clears stale regular-session fields when an after-market row becomes provisional", async () => {
+    const env = createEnv({
+      events: [storedEvent({
+        ticker: "CLEAR",
+        reportDate: "2026-07-16",
+        reportTime: "after-market",
+        reactionDate: "2026-07-16",
+        previousClose: 90,
+        reactionOpen: 100,
+        regularOpenGapPct: 11.111,
+        qualifyingGapPct: 11.111,
+        gapSource: "regular_open",
+      })],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        totalCount: 1,
+        data: [tvRow({
+          symbol: "CLEAR",
+          name: "Clear Fields Inc.",
+          exchange: "NASDAQ",
+          reportIso: "2026-07-16T21:00:00Z",
+          reportTime: 1,
+          price: 100,
+          postmarketPrice: 106,
+        })],
+      }),
+    })));
+
+    const result = await syncEarningsGaps(env, {
+      mode: "incremental",
+      now: new Date("2026-07-16T22:00:00Z"),
+    });
+
+    expect(result.rowsUpserted).toBe(1);
+    expect(env.__events[0]).toMatchObject({
+      calculationStatus: "provisional",
+      reactionDate: null,
+      previousClose: null,
+      reactionOpen: null,
+      regularOpenGapPct: null,
+      postmarketGapPct: 6,
+      gapSource: "postmarket",
+    });
   });
 
   it("filters, sorts, and facets gap rows by season", async () => {
@@ -941,6 +1378,15 @@ describe("earnings gap service", () => {
 
     expect(result.schemaReady).toBe(false);
     expect(result.warning).toContain("0088_earnings_gap_eps.sql");
+  });
+
+  it("reports the reliability migration when gap tables lack calculation diagnostics", async () => {
+    const env = createEnv({ hasReliabilityColumns: false });
+
+    const result = await queryEarningsGaps(env);
+
+    expect(result.schemaReady).toBe(false);
+    expect(result.warning).toContain("0091_earnings_gap_reliability.sql");
   });
 
   it("uses New York time across standard-time and daylight-time offsets", async () => {

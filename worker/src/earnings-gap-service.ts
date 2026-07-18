@@ -1,6 +1,15 @@
 import { zonedParts } from "./refresh-timing";
 import { meteredFetch } from "./provider-usage";
 import type { Env } from "./types";
+import { refreshDailyBarsIncremental } from "./daily-bars";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import {
+  latestUsMarketSessionAsOfDate,
+  nextUsMarketTradingDay,
+  onOrAfterUsMarketTradingDay,
+  previousUsMarketTradingDay,
+} from "./market-calendar";
+import { getProvider, type MarketDataProvider } from "./provider";
 import { shouldRunCentralCronLocalTime, type CronJobValues } from "./cron-jobs-service";
 import {
   canUseEarningsSymbolCatalog,
@@ -29,6 +38,7 @@ const DAILY_SCAN_MINUTES_ET = 20 * 60;
 
 type EarningsGapSyncMode = "incremental" | "backfill";
 export type EarningsGapSource = "postmarket" | "regular_open" | "both";
+export type EarningsGapCalculationStatus = "complete" | "provisional" | "deferred";
 
 type TradingViewFilter = {
   left: string;
@@ -85,6 +95,9 @@ export type EarningsGapEventInput = EarningsGapReleaseInput & {
   postmarketGapPct: number | null;
   qualifyingGapPct: number;
   gapSource: EarningsGapSource;
+  calculationStatus: Exclude<EarningsGapCalculationStatus, "deferred">;
+  barProvider: string | null;
+  calculatedAt: string;
 };
 
 export type EarningsGapRow = {
@@ -174,6 +187,10 @@ export type EarningsGapSyncResult = {
   provider: string;
   rowsSeen: number;
   rowsUpserted: number;
+  barsRequested: number;
+  barsReady: number;
+  barsFetched: number;
+  rowsDeferred: number;
   scheduledLocalDate: string | null;
   warning: string | null;
 };
@@ -202,6 +219,11 @@ export type EarningsGapsStatus = {
     lastError: string | null;
     rowsSeen: number | null;
     rowsUpserted: number | null;
+    barsRequested: number | null;
+    barsReady: number | null;
+    barsFetched: number | null;
+    rowsDeferred: number | null;
+    warning: string | null;
     updatedAt: string | null;
   }>;
   latestRows: EarningsGapRow[];
@@ -212,6 +234,25 @@ type DailyBar = {
   date: string;
   o: number;
   c: number;
+};
+
+type ExistingGapSnapshot = {
+  ticker: string;
+  reportDate: string;
+  reportTime: string | null;
+  postmarketPrice: number | null;
+  postmarketGapPct: number | null;
+  postmarketVolume: number | null;
+};
+
+type GapCalculationBatch = {
+  qualifiedRows: EarningsGapEventInput[];
+  completeNonQualifiers: Array<{ ticker: string; reportDate: string }>;
+  deferredRows: Array<{ ticker: string; reportDate: string }>;
+  barsRequested: number;
+  barsReady: number;
+  barsFetched: number;
+  warning: string | null;
 };
 
 const TV_COLUMNS = [
@@ -418,6 +459,15 @@ async function earningsGapSchemaWarning(env: Env): Promise<string | null> {
   const epsColumnsReady = await Promise.all(epsColumns.map((column) => columnExists(env, "earnings_gap_events", column)));
   if (epsColumnsReady.some((ready) => !ready)) {
     return "Earnings gap EPS schema is missing. Apply worker/migrations/0088_earnings_gap_eps.sql.";
+  }
+  const reliabilityEventColumns = ["calculation_status", "bar_provider", "calculated_at"];
+  const reliabilitySyncColumns = ["bars_requested", "bars_ready", "bars_fetched", "rows_deferred", "warning"];
+  const [eventColumnsReady, syncColumnsReady] = await Promise.all([
+    Promise.all(reliabilityEventColumns.map((column) => columnExists(env, "earnings_gap_events", column))),
+    Promise.all(reliabilitySyncColumns.map((column) => columnExists(env, "earnings_gap_syncs", column))),
+  ]);
+  if (eventColumnsReady.some((ready) => !ready) || syncColumnsReady.some((ready) => !ready)) {
+    return "Earnings gap reliability schema is missing. Apply worker/migrations/0091_earnings_gap_reliability.sql.";
   }
   return null;
 }
@@ -647,16 +697,18 @@ async function loadDailyBarsByTicker(
 ): Promise<Map<string, DailyBar[]>> {
   const uniqueTickers = Array.from(new Set(tickers.map(normalizeTicker).filter(Boolean)));
   const byTicker = new Map<string, DailyBar[]>();
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += 80) {
     const chunk = uniqueTickers.slice(index, index + 80);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, date, o, c
-       FROM daily_bars
-       WHERE ticker IN (${placeholders}) AND date >= ? AND date <= ?
+       FROM alpaca_daily_bars
+       WHERE feed = ? AND ticker IN (${placeholders}) AND date >= ? AND date <= ?
        ORDER BY ticker ASC, date ASC`,
-    ).bind(...chunk, startDate, endDate).all<DailyBar>();
+    ).bind(feed, ...chunk, startDate, endDate).all<DailyBar>();
     for (const row of rows.results ?? []) {
       const ticker = normalizeTicker(row.ticker);
       const current = byTicker.get(ticker) ?? [];
@@ -672,25 +724,249 @@ async function loadDailyBarsByTicker(
   return byTicker;
 }
 
-function findRegularOpenGap(release: EarningsGapReleaseInput, bars: DailyBar[]): {
-  reactionDate: string | null;
-  previousClose: number | null;
-  reactionOpen: number | null;
-  regularOpenGapPct: number | null;
-} {
-  const strictAfterReportDate = release.reportTime === "after-market";
-  const reactionBar = bars.find((bar) => strictAfterReportDate ? bar.date > release.reportDate : bar.date >= release.reportDate) ?? null;
-  if (!reactionBar) {
-    return { reactionDate: null, previousClose: null, reactionOpen: null, regularOpenGapPct: null };
+async function loadExistingGapSnapshots(
+  env: Env,
+  releases: EarningsGapReleaseInput[],
+): Promise<Map<string, ExistingGapSnapshot>> {
+  const snapshots = new Map<string, ExistingGapSnapshot>();
+  if (releases.length === 0) return snapshots;
+  const minDate = releases.map((row) => row.reportDate).sort()[0];
+  const maxDate = releases.map((row) => row.reportDate).sort().at(-1);
+  if (!minDate || !maxDate) return snapshots;
+  const tickers = Array.from(new Set(releases.map((row) => row.ticker)));
+  for (let index = 0; index < tickers.length; index += 80) {
+    const chunk = tickers.slice(index, index + 80);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT ticker, report_date as reportDate, report_time as reportTime,
+        postmarket_price as postmarketPrice, postmarket_gap_pct as postmarketGapPct,
+        postmarket_volume as postmarketVolume
+       FROM earnings_gap_events
+       WHERE ticker IN (${placeholders}) AND report_date >= ? AND report_date <= ?`,
+    ).bind(...chunk, minDate, maxDate).all<Record<string, unknown>>();
+    for (const row of rows.results ?? []) {
+      const snapshot: ExistingGapSnapshot = {
+        ticker: normalizeTicker(row.ticker),
+        reportDate: String(row.reportDate ?? ""),
+        reportTime: row.reportTime == null ? null : String(row.reportTime),
+        postmarketPrice: parseMaybeNumber(row.postmarketPrice),
+        postmarketGapPct: parseMaybeNumber(row.postmarketGapPct),
+        postmarketVolume: parseMaybeNumber(row.postmarketVolume),
+      };
+      snapshots.set(`${snapshot.ticker}|${snapshot.reportDate}`, snapshot);
+    }
   }
-  const previousBar = [...bars].reverse().find((bar) => bar.date < reactionBar.date) ?? null;
-  const previousClose = previousBar?.c ?? null;
-  const reactionOpen = Number.isFinite(reactionBar.o) ? reactionBar.o : null;
+  return snapshots;
+}
+
+type ReleaseTiming = "before-market" | "after-market" | "intraday" | "unknown";
+
+function classifyReleaseTiming(release: EarningsGapReleaseInput): ReleaseTiming {
+  const explicit = String(release.reportTime ?? "").trim().toLowerCase();
+  if (/before|pre.?market|\bbmo\b/.test(explicit)) return "before-market";
+  if (/after|post.?market|\bamc\b/.test(explicit)) return "after-market";
+  if (/intra|during/.test(explicit)) return "intraday";
+  if (release.reportTimestamp == null || !Number.isFinite(release.reportTimestamp)) return "unknown";
+  const parts = zonedParts(new Date(release.reportTimestamp * 1000), "America/New_York");
+  if (parts.minutesOfDay < 9 * 60 + 30) return "before-market";
+  if (parts.minutesOfDay >= 16 * 60) return "after-market";
+  return "intraday";
+}
+
+function requiredRegularSessions(release: EarningsGapReleaseInput, timing: ReleaseTiming): {
+  previousDate: string;
+  reactionDate: string;
+} {
+  const reactionDate = timing === "before-market"
+    ? onOrAfterUsMarketTradingDay(release.reportDate)
+    : nextUsMarketTradingDay(release.reportDate);
   return {
-    reactionDate: reactionBar.date,
-    previousClose,
-    reactionOpen,
-    regularOpenGapPct: pctChange(reactionOpen, previousClose),
+    previousDate: previousUsMarketTradingDay(reactionDate),
+    reactionDate,
+  };
+}
+
+function barMap(barsByTicker: Map<string, DailyBar[]>): Map<string, DailyBar> {
+  const rows = new Map<string, DailyBar>();
+  for (const bars of barsByTicker.values()) {
+    for (const bar of bars) rows.set(`${bar.ticker}|${bar.date}`, bar);
+  }
+  return rows;
+}
+
+async function calculateEarningsGapBatch(
+  env: Env,
+  releases: EarningsGapReleaseInput[],
+  now = new Date(),
+  provider?: MarketDataProvider,
+): Promise<GapCalculationBatch> {
+  const ny = zonedParts(now, "America/New_York");
+  const normalized = dedupeReleases(releases);
+  if (normalized.length === 0) {
+    return {
+      qualifiedRows: [],
+      completeNonQualifiers: [],
+      deferredRows: [],
+      barsRequested: 0,
+      barsReady: 0,
+      barsFetched: 0,
+      warning: null,
+    };
+  }
+
+  const latestCompletedSession = latestUsMarketSessionAsOfDate(now);
+  const requirements = normalized.map((release) => {
+    const timing = classifyReleaseTiming(release);
+    return { release, timing, ...requiredRegularSessions(release, timing) };
+  });
+  const readyRequirements = requirements.filter((row) => row.reactionDate <= latestCompletedSession);
+  const requiredPairs = new Set<string>();
+  for (const row of readyRequirements) {
+    requiredPairs.add(`${row.release.ticker}|${row.previousDate}`);
+    requiredPairs.add(`${row.release.ticker}|${row.reactionDate}`);
+  }
+  const requiredDates = Array.from(requiredPairs, (key) => key.split("|")[1] ?? "").filter(Boolean).sort();
+  const minDate = requiredDates[0] ?? latestCompletedSession;
+  const maxDate = requiredDates.at(-1) ?? latestCompletedSession;
+  let barsByTicker = await loadDailyBarsByTicker(
+    env,
+    readyRequirements.map((row) => row.release.ticker),
+    minDate,
+    maxDate,
+  );
+  let bars = barMap(barsByTicker);
+  const missingPairs = Array.from(requiredPairs).filter((key) => !bars.has(key));
+  const missingTickers = Array.from(new Set(missingPairs.map((key) => key.split("|")[0] ?? "").filter(Boolean)));
+  let barsFetched = 0;
+  let warning: string | null = null;
+  if (missingTickers.length > 0) {
+    try {
+      const configuredProvider = provider ?? (
+        (env.DATA_PROVIDER ?? "alpaca").toLowerCase() === "alpaca"
+          && (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET)
+          ? null
+          : getProvider(env, { fallbackEnabled: false })
+      );
+      if (!configuredProvider) {
+        throw new Error("Alpaca credentials are unavailable for earnings-priority daily-bar recovery.");
+      }
+      const refresh = await refreshDailyBarsIncremental(env, {
+        provider: configuredProvider,
+        tickers: missingTickers,
+        startDate: minDate,
+        endDate: maxDate,
+        replaceExisting: true,
+        providerBatchSize: SYNC_BATCH_SIZE,
+        continueOnError: true,
+        target: "market",
+        mirrorLatestToLegacy: true,
+        repairMissingMarketDates: true,
+      });
+      barsFetched = refresh.fetchedRows;
+      barsByTicker = await loadDailyBarsByTicker(env, missingTickers, minDate, maxDate);
+      for (const [ticker, tickerBars] of barsByTicker) {
+        for (const bar of tickerBars) bars.set(`${ticker}|${bar.date}`, bar);
+      }
+    } catch (error) {
+      warning = error instanceof Error ? error.message : "Earnings-priority daily-bar recovery failed.";
+    }
+  }
+
+  const existing = await loadExistingGapSnapshots(env, normalized);
+  const calculatedAt = now.toISOString();
+  const qualifiedRows: EarningsGapEventInput[] = [];
+  const completeNonQualifiers: Array<{ ticker: string; reportDate: string }> = [];
+  const deferredRows: Array<{ ticker: string; reportDate: string }> = [];
+
+  for (const requirement of requirements) {
+    const { release, timing, previousDate, reactionDate } = requirement;
+    const existingSnapshot = existing.get(`${release.ticker}|${release.reportDate}`);
+    const currentPostmarketIsValid = timing === "after-market"
+      && release.reportDate === ny.localDate
+      && ny.minutesOfDay >= 16 * 60
+      && release.postmarketPrice != null
+      && release.price != null;
+    const postmarketPrice = timing === "after-market"
+      ? currentPostmarketIsValid
+        ? release.postmarketPrice
+        : existingSnapshot?.postmarketPrice ?? null
+      : null;
+    const postmarketGapPct = timing === "after-market"
+      ? currentPostmarketIsValid
+        ? pctChange(release.postmarketPrice, release.price)
+        : existingSnapshot?.postmarketGapPct ?? null
+      : null;
+    const postmarketVolume = timing === "after-market"
+      ? currentPostmarketIsValid
+        ? release.postmarketVolume
+        : existingSnapshot?.postmarketVolume ?? null
+      : null;
+    const postmarketQualifies = postmarketGapPct != null && postmarketGapPct > 0;
+    const sessionCompleted = reactionDate <= latestCompletedSession;
+    const previousBar = sessionCompleted ? bars.get(`${release.ticker}|${previousDate}`) ?? null : null;
+    const reactionBar = sessionCompleted ? bars.get(`${release.ticker}|${reactionDate}`) ?? null : null;
+    const regularReady = Boolean(previousBar && reactionBar);
+    const previousClose = regularReady && Number.isFinite(previousBar?.c) ? previousBar?.c ?? null : null;
+    const reactionOpen = regularReady && Number.isFinite(reactionBar?.o) ? reactionBar?.o ?? null : null;
+    const regularOpenGapPct = regularReady ? pctChange(reactionOpen, previousClose) : null;
+    const regularQualifies = regularOpenGapPct != null && regularOpenGapPct > 0;
+    const calculationStatus: EarningsGapCalculationStatus = regularReady
+      ? "complete"
+      : !sessionCompleted && timing === "after-market" && postmarketQualifies
+        ? "provisional"
+        : "deferred";
+
+    if (calculationStatus === "deferred") {
+      deferredRows.push({ ticker: release.ticker, reportDate: release.reportDate });
+      continue;
+    }
+    if (!postmarketQualifies && !regularQualifies) {
+      completeNonQualifiers.push({ ticker: release.ticker, reportDate: release.reportDate });
+      continue;
+    }
+    const qualifyingGapPct = Math.max(
+      postmarketQualifies ? postmarketGapPct : Number.NEGATIVE_INFINITY,
+      regularQualifies ? regularOpenGapPct ?? Number.NEGATIVE_INFINITY : Number.NEGATIVE_INFINITY,
+    );
+    const gapSource: EarningsGapSource = postmarketQualifies && regularQualifies
+      ? "both"
+      : postmarketQualifies
+        ? "postmarket"
+        : "regular_open";
+    qualifiedRows.push({
+      ...release,
+      reportTime: timing === "unknown" ? release.reportTime : timing,
+      reactionDate: regularReady ? reactionDate : null,
+      previousClose,
+      reactionOpen,
+      regularOpenGapPct,
+      postmarketPrice,
+      postmarketGapPct,
+      postmarketVolume,
+      qualifyingGapPct,
+      gapSource,
+      calculationStatus,
+      barProvider: regularReady
+        ? postmarketGapPct != null ? "alpaca+tradingview" : "alpaca"
+        : "tradingview",
+      calculatedAt,
+    });
+  }
+
+  const barsReady = Array.from(requiredPairs).filter((key) => bars.has(key)).length;
+  const unresolvedPairs = Math.max(0, requiredPairs.size - barsReady);
+  if (unresolvedPairs > 0) {
+    const missingWarning = `${unresolvedPairs} required Alpaca daily bar${unresolvedPairs === 1 ? "" : "s"} remain unavailable.`;
+    warning = warning ? `${warning} ${missingWarning}` : missingWarning;
+  }
+  return {
+    qualifiedRows,
+    completeNonQualifiers,
+    deferredRows,
+    barsRequested: requiredPairs.size,
+    barsReady,
+    barsFetched,
+    warning,
   };
 }
 
@@ -698,40 +974,9 @@ export async function computeEarningsGapEvents(
   env: Env,
   releases: EarningsGapReleaseInput[],
   now = new Date(),
+  provider?: MarketDataProvider,
 ): Promise<EarningsGapEventInput[]> {
-  const ny = zonedParts(now, "America/New_York");
-  const normalized = dedupeReleases(releases);
-  if (normalized.length === 0) return [];
-  const minDate = normalized.map((row) => row.reportDate).sort()[0] ?? todayIso(now);
-  const maxDate = normalized.map((row) => row.reportDate).sort().at(-1) ?? todayIso(now);
-  const barsByTicker = await loadDailyBarsByTicker(env, normalized.map((row) => row.ticker), addDaysIso(minDate, -14), addDaysIso(maxDate, 14));
-  return normalized
-    .map((release) => {
-      const regular = findRegularOpenGap(release, barsByTicker.get(release.ticker) ?? []);
-      const postmarketGapPct = release.reportDate === ny.localDate
-        ? pctChange(release.postmarketPrice, release.price)
-        : null;
-      const postmarketQualifies = postmarketGapPct != null && postmarketGapPct > 0;
-      const regularQualifies = regular.regularOpenGapPct != null && regular.regularOpenGapPct > 0;
-      if (!postmarketQualifies && !regularQualifies) return null;
-      const qualifyingGapPct = Math.max(
-        postmarketQualifies ? postmarketGapPct : Number.NEGATIVE_INFINITY,
-        regularQualifies ? regular.regularOpenGapPct ?? Number.NEGATIVE_INFINITY : Number.NEGATIVE_INFINITY,
-      );
-      const gapSource: EarningsGapSource = postmarketQualifies && regularQualifies
-        ? "both"
-        : postmarketQualifies
-          ? "postmarket"
-          : "regular_open";
-      return {
-        ...release,
-        ...regular,
-        postmarketGapPct,
-        qualifyingGapPct,
-        gapSource,
-      } satisfies EarningsGapEventInput;
-    })
-    .filter((row): row is EarningsGapEventInput => Boolean(row));
+  return (await calculateEarningsGapBatch(env, releases, now, provider)).qualifiedRows;
 }
 
 async function recordSyncStart(
@@ -771,6 +1016,11 @@ async function recordSyncDone(
     error?: string | null;
     rowsSeen?: number;
     rowsUpserted?: number;
+    barsRequested?: number;
+    barsReady?: number;
+    barsFetched?: number;
+    rowsDeferred?: number;
+    warning?: string | null;
   },
 ): Promise<void> {
   await env.DB.prepare(
@@ -780,6 +1030,11 @@ async function recordSyncDone(
          last_error = ?,
          rows_seen = ?,
          rows_upserted = ?,
+         bars_requested = ?,
+         bars_ready = ?,
+         bars_fetched = ?,
+         rows_deferred = ?,
+         warning = ?,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
   ).bind(
@@ -789,6 +1044,11 @@ async function recordSyncDone(
     input.error ?? null,
     input.rowsSeen ?? 0,
     input.rowsUpserted ?? 0,
+    input.barsRequested ?? 0,
+    input.barsReady ?? 0,
+    input.barsFetched ?? 0,
+    input.rowsDeferred ?? 0,
+    input.warning ?? null,
     id,
   ).run();
 }
@@ -802,10 +1062,11 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
        report_date, season, eps_provider, eps_actual, eps_estimate, eps_surprise, eps_surprise_pct,
        report_timestamp, report_time, reaction_date, previous_close,
        reaction_open, regular_open_gap_pct, postmarket_price, postmarket_gap_pct,
-       postmarket_volume, qualifying_gap_pct, gap_source, raw_json,
+       postmarket_volume, qualifying_gap_pct, gap_source,
+       calculation_status, bar_provider, calculated_at, raw_json,
        first_seen_at, last_seen_at, created_at, updated_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(ticker, report_date) DO UPDATE SET
        provider = excluded.provider,
        source_symbol = COALESCE(excluded.source_symbol, earnings_gap_events.source_symbol),
@@ -824,16 +1085,19 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
        eps_surprise = COALESCE(excluded.eps_surprise, earnings_gap_events.eps_surprise),
        eps_surprise_pct = COALESCE(excluded.eps_surprise_pct, earnings_gap_events.eps_surprise_pct),
        report_timestamp = COALESCE(excluded.report_timestamp, earnings_gap_events.report_timestamp),
-       report_time = COALESCE(excluded.report_time, earnings_gap_events.report_time),
-       reaction_date = COALESCE(excluded.reaction_date, earnings_gap_events.reaction_date),
-       previous_close = COALESCE(excluded.previous_close, earnings_gap_events.previous_close),
-       reaction_open = COALESCE(excluded.reaction_open, earnings_gap_events.reaction_open),
-       regular_open_gap_pct = COALESCE(excluded.regular_open_gap_pct, earnings_gap_events.regular_open_gap_pct),
-       postmarket_price = COALESCE(excluded.postmarket_price, earnings_gap_events.postmarket_price),
-       postmarket_gap_pct = COALESCE(excluded.postmarket_gap_pct, earnings_gap_events.postmarket_gap_pct),
-       postmarket_volume = COALESCE(excluded.postmarket_volume, earnings_gap_events.postmarket_volume),
+       report_time = excluded.report_time,
+       reaction_date = excluded.reaction_date,
+       previous_close = excluded.previous_close,
+       reaction_open = excluded.reaction_open,
+       regular_open_gap_pct = excluded.regular_open_gap_pct,
+       postmarket_price = excluded.postmarket_price,
+       postmarket_gap_pct = excluded.postmarket_gap_pct,
+       postmarket_volume = excluded.postmarket_volume,
        qualifying_gap_pct = excluded.qualifying_gap_pct,
        gap_source = excluded.gap_source,
+       calculation_status = excluded.calculation_status,
+       bar_provider = excluded.bar_provider,
+       calculated_at = excluded.calculated_at,
        raw_json = COALESCE(excluded.raw_json, earnings_gap_events.raw_json),
        last_seen_at = excluded.last_seen_at,
        updated_at = CURRENT_TIMESTAMP`,
@@ -868,6 +1132,9 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     row.postmarketVolume,
     row.qualifyingGapPct,
     row.gapSource,
+    row.calculationStatus,
+    row.barProvider,
+    row.calculatedAt,
     row.rawJson,
     now,
     now,
@@ -877,6 +1144,38 @@ async function upsertEvents(env: Env, rows: EarningsGapEventInput[]): Promise<nu
     if (chunk.length > 0) await env.DB.batch(chunk);
   }
   return statements.length;
+}
+
+async function markDeferredEvents(
+  env: Env,
+  rows: Array<{ ticker: string; reportDate: string }>,
+  calculatedAt: string,
+): Promise<void> {
+  const statements = rows.map((row) => env.DB.prepare(
+    `UPDATE earnings_gap_events
+     SET calculation_status = 'deferred',
+         bar_provider = NULL,
+         calculated_at = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE ticker = ? AND report_date = ?`,
+  ).bind(calculatedAt, row.ticker, row.reportDate));
+  for (let index = 0; index < statements.length; index += SYNC_BATCH_SIZE) {
+    const chunk = statements.slice(index, index + SYNC_BATCH_SIZE);
+    if (chunk.length > 0) await env.DB.batch(chunk);
+  }
+}
+
+async function deleteCompleteNonQualifiers(
+  env: Env,
+  rows: Array<{ ticker: string; reportDate: string }>,
+): Promise<void> {
+  const statements = rows.map((row) => env.DB.prepare(
+    "DELETE FROM earnings_gap_events WHERE ticker = ? AND report_date = ?",
+  ).bind(row.ticker, row.reportDate));
+  for (let index = 0; index < statements.length; index += SYNC_BATCH_SIZE) {
+    const chunk = statements.slice(index, index + SYNC_BATCH_SIZE);
+    if (chunk.length > 0) await env.DB.batch(chunk);
+  }
 }
 
 export async function cleanupOldEarningsGapEvents(env: Env, retentionDays = RETENTION_DAYS, now = new Date()): Promise<number> {
@@ -941,16 +1240,34 @@ export async function syncEarningsGaps(
   try {
     const releases = await filterRowsByEarningsSymbolCatalog(env, await fetchTradingViewEarningsReleases(env, windowStart, windowEnd));
     const enrichedReleases = await enrichReleasesWithStoredEps(env, releases);
-    const rows = await computeEarningsGapEvents(env, enrichedReleases, now);
-    const rowsUpserted = rows.length > 0 ? await upsertEvents(env, rows) : 0;
+    const calculation = await calculateEarningsGapBatch(env, enrichedReleases, now);
+    const rowsUpserted = calculation.qualifiedRows.length > 0
+      ? await upsertEvents(env, calculation.qualifiedRows)
+      : 0;
+    await Promise.all([
+      markDeferredEvents(env, calculation.deferredRows, now.toISOString()),
+      deleteCompleteNonQualifiers(env, calculation.completeNonQualifiers),
+    ]);
     if (mode !== "backfill" || done) {
       await cleanupOldEarningsGapEvents(env, RETENTION_DAYS, now);
     }
+    const deferredWarning = calculation.deferredRows.length > 0
+      ? `${calculation.deferredRows.length} release row${calculation.deferredRows.length === 1 ? "" : "s"} deferred until required Alpaca bars are available or the reaction session completes.`
+      : null;
+    const noQualifiersWarning = calculation.qualifiedRows.length === 0 && calculation.deferredRows.length === 0
+      ? "No earnings release rows had a positive timing-valid postmarket or regular-open gap."
+      : null;
+    const warning = [calculation.warning, deferredWarning, noQualifiersWarning].filter(Boolean).join(" ") || null;
     await recordSyncDone(env, syncId, {
       status: "ok",
       successAt: new Date().toISOString(),
       rowsSeen: releases.length,
       rowsUpserted,
+      barsRequested: calculation.barsRequested,
+      barsReady: calculation.barsReady,
+      barsFetched: calculation.barsFetched,
+      rowsDeferred: calculation.deferredRows.length,
+      warning,
     });
     return {
       ok: true,
@@ -966,12 +1283,16 @@ export async function syncEarningsGaps(
       provider: PRIMARY_PROVIDER,
       rowsSeen: releases.length,
       rowsUpserted,
+      barsRequested: calculation.barsRequested,
+      barsReady: calculation.barsReady,
+      barsFetched: calculation.barsFetched,
+      rowsDeferred: calculation.deferredRows.length,
       scheduledLocalDate: options.scheduledLocalDate ?? null,
-      warning: rows.length === 0 ? "No earnings release rows had a positive postmarket or regular-open gap." : null,
+      warning,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Earnings gap sync failed.";
-    await recordSyncDone(env, syncId, { status: "error", error: message });
+    await recordSyncDone(env, syncId, { status: "error", error: message, warning: message });
     throw error;
   }
 }
@@ -985,7 +1306,11 @@ function normalizeArrayFilter(value: string | string[] | null | undefined): stri
 }
 
 function buildWhereClause(query: EarningsGapsQuery, options: { includeCatalog?: boolean } = {}): { sql: string; args: unknown[] } {
-  const clauses = ["report_date >= ?", earningsEligibleSecuritySql("earnings_gap_events", { includeCatalog: options.includeCatalog })];
+  const clauses = [
+    "calculation_status IN ('complete', 'provisional')",
+    "report_date >= ?",
+    earningsEligibleSecuritySql("earnings_gap_events", { includeCatalog: options.includeCatalog }),
+  ];
   const args: unknown[] = [query.startDate ? normalizeDate(query.startDate) ?? isoDateDaysAgo(RETENTION_DAYS) : isoDateDaysAgo(RETENTION_DAYS)];
   if (query.endDate && normalizeDate(query.endDate)) {
     clauses.push("report_date <= ?");
@@ -1242,7 +1567,10 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
     };
   }
   const includeCatalog = await canUseEarningsSymbolCatalog(env);
-  const defaultEligibilitySql = earningsDefaultEligibleListedEquitySql("earnings_gap_events", { includeCatalog });
+  const defaultEligibilitySql = [
+    "calculation_status IN ('complete', 'provisional')",
+    earningsDefaultEligibleListedEquitySql("earnings_gap_events", { includeCatalog }),
+  ].join(" AND ");
   const [counts, syncs, latest] = await Promise.all([
     env.DB.prepare(
       `SELECT
@@ -1260,6 +1588,8 @@ export async function loadEarningsGapsStatus(env: Env): Promise<EarningsGapsStat
         window_start as windowStart, window_end as windowEnd,
         last_started_at as lastStartedAt, last_success_at as lastSuccessAt,
         last_error as lastError, rows_seen as rowsSeen, rows_upserted as rowsUpserted,
+        bars_requested as barsRequested, bars_ready as barsReady,
+        bars_fetched as barsFetched, rows_deferred as rowsDeferred, warning,
         updated_at as updatedAt
        FROM earnings_gap_syncs
        ORDER BY datetime(updated_at) DESC

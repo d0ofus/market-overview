@@ -3,6 +3,8 @@ import {
   getUsMarketSessionContext,
   isUsMarketTradingDay,
   latestUsMarketSessionAsOfDate,
+  nextUsMarketTradingDay,
+  onOrAfterUsMarketTradingDay,
   previousUsMarketTradingDay,
   usMarketHolidayName,
 } from "../src/market-calendar";
@@ -22,6 +24,12 @@ describe("US market calendar", () => {
   it("walks back through holidays and weekends to the prior trading day", () => {
     expect(previousUsMarketTradingDay("2026-05-26")).toBe("2026-05-22");
     expect(previousUsMarketTradingDay("2026-05-31")).toBe("2026-05-29");
+  });
+
+  it("walks forward through holidays and weekends to the exact next trading session", () => {
+    expect(nextUsMarketTradingDay("2026-07-02")).toBe("2026-07-06");
+    expect(onOrAfterUsMarketTradingDay("2026-07-03")).toBe("2026-07-06");
+    expect(onOrAfterUsMarketTradingDay("2026-07-06")).toBe("2026-07-06");
   });
 
   it("uses the previous trading day for Juneteenth instead of a weekday-only date", () => {

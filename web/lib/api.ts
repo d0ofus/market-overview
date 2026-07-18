@@ -888,6 +888,11 @@ export type EarningsGapsStatus = {
     lastError: string | null;
     rowsSeen: number | null;
     rowsUpserted: number | null;
+    barsRequested: number | null;
+    barsReady: number | null;
+    barsFetched: number | null;
+    rowsDeferred: number | null;
+    warning: string | null;
     updatedAt: string | null;
   }>;
   latestRows: EarningsGapRow[];
@@ -907,6 +912,10 @@ export type EarningsGapSyncResponse = {
   provider: string;
   rowsSeen: number;
   rowsUpserted: number;
+  barsRequested: number;
+  barsReady: number;
+  barsFetched: number;
+  rowsDeferred: number;
   scheduledLocalDate: string | null;
   warning: string | null;
 };

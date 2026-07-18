@@ -50,7 +50,7 @@ export function scheduledLanesForCron(cron: string | null | undefined): Schedule
 
 const DEFAULT_BUDGETS: Record<ScheduledLane, number> = {
   core: 70,
-  "market-data": 35,
+  "market-data": 70,
   scans: 30,
   maintenance: 20,
   reports: 35,
