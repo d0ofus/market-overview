@@ -92,14 +92,17 @@ describe("scheduled market-data lane", () => {
     vi.clearAllMocks();
   });
 
-  it("reserves the default lane budget for actionable post-close bars", async () => {
+  it("reserves a constrained lane budget for actionable post-close bars", async () => {
     scheduledMocks.planPostClose.mockResolvedValue({
       protect: true,
       expectedTradingDate: "2026-07-16",
       reason: "missing-job",
     });
 
-    await runMarketDataLane();
+    await runMarketDataLane(scheduledEnv({
+      SCHEDULED_MARKET_DATA_BUDGET: "35",
+      SCHEDULED_SUBREQUEST_RESERVE: "10",
+    }));
 
     expect(scheduledMocks.overviewCurrent).not.toHaveBeenCalled();
     expect(scheduledMocks.postClose).toHaveBeenCalledOnce();
