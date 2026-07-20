@@ -5,6 +5,7 @@ const DEFAULT_DAILY_WRITE_BUDGET = 75_000;
 const DEFAULT_CRITICAL_WRITE_RESERVE = 15_000;
 const DEFAULT_WARN_BYTES = 300_000_000;
 const DEFAULT_HALT_BYTES = 375_000_000;
+const MARKET_DATA_TICKER_QUERY_CHUNK_SIZE = 1000;
 
 function enabled(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(String(value ?? "").trim());
@@ -29,6 +30,36 @@ export function withDatabase(env: Env, db: D1Database): Env {
 
 export function marketDataFeed(env: Env): string {
   return (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+}
+
+export async function loadMarketDataTickersWithBarOnDate(
+  env: Env,
+  tickers: string[],
+  date: string,
+): Promise<Set<string>> {
+  const unique = Array.from(
+    new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)),
+  );
+  const found = new Set<string>();
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
+
+  for (let offset = 0; offset < unique.length; offset += MARKET_DATA_TICKER_QUERY_CHUNK_SIZE) {
+    const chunk = unique.slice(offset, offset + MARKET_DATA_TICKER_QUERY_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const rows = await db.prepare(
+      `SELECT ticker
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+         AND date = ?`,
+    )
+      .bind(feed, JSON.stringify(chunk), date)
+      .all<{ ticker: string }>();
+    for (const row of rows.results ?? []) found.add(row.ticker.toUpperCase());
+  }
+
+  return found;
 }
 
 export function marketDataRetentionCutoff(env: Env, asOfDate: string): string {
