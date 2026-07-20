@@ -796,7 +796,7 @@ export function WatchlistCompilerDashboard() {
               {visibleTickers.slice(0, 4).map((ticker, index) => (
                 <div key={`${ticker}-${index}`} className="rounded border border-borderSoft/60 p-2">
                   <div className="mb-2 text-sm font-semibold text-accent">{ticker}</div>
-                  <TradingViewWidget ticker={ticker} size="small" chartOnly initialRange="3M" className="!border-0 !bg-transparent !shadow-none !p-0" />
+                  <TradingViewWidget ticker={ticker} size="small" chartOnly className="!border-0 !bg-transparent !shadow-none !p-0" />
                 </div>
               ))}
             </div>

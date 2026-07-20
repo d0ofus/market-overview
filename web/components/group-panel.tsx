@@ -503,7 +503,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                         chartOnly
                         showStatusLine
                         fillContainer
-                        initialRange="3M"
                         className="!border-0 !bg-transparent !shadow-none !p-0"
                       />
                       <button

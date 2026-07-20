@@ -158,7 +158,7 @@ export function EarningsMultiChartGrid({
                 </div>
               </div>
               <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
-                <TradingViewWidget ticker={card.ticker} chartOnly showStatusLine fillContainer earningsEvents="markers-and-breaks" initialRange="6M" surface="plain" />
+                <TradingViewWidget ticker={card.ticker} chartOnly showStatusLine fillContainer earningsEvents="markers-and-breaks" surface="plain" />
               </div>
               <div className="mt-4 flex flex-wrap justify-between gap-2">
                 <div className="flex flex-wrap gap-2">
@@ -237,7 +237,7 @@ export function EarningsMultiChartGrid({
             </div>
             <div className="min-h-0 flex-1 overflow-hidden p-3">
               <div className="h-full min-h-0 rounded-[20px] bg-panelSoft/25 p-2">
-                <TradingViewWidget ticker={activeChart.ticker} chartOnly showStatusLine fillContainer heightMode="fill" earningsEvents="markers-and-breaks" initialRange="6M" surface="plain" />
+                <TradingViewWidget ticker={activeChart.ticker} chartOnly showStatusLine fillContainer heightMode="fill" earningsEvents="markers-and-breaks" surface="plain" />
               </div>
             </div>
           </div>

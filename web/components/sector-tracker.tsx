@@ -381,7 +381,7 @@ function EtfTile({
         </div>
       </div>
       <div className="bg-slate-950/20 p-2.5">
-        <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine initialRange="3M" surface="plain" />
+        <TradingViewWidget ticker={etf.ticker} size="small" chartOnly showStatusLine surface="plain" />
       </div>
       <div className="flex items-center justify-end gap-3">
         <button className={SECONDARY_BUTTON_CLASS} onClick={onExpandChart}>

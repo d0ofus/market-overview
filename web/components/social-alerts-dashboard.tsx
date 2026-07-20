@@ -882,7 +882,7 @@ export function SocialAlertsDashboard({ adminAuthenticated, adminConfigured, adm
                       </div>
                     </div>
                     <div className="rounded-[22px] bg-panelSoft/25 p-2.5">
-                      <TradingViewWidget ticker={summary.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+                      <TradingViewWidget ticker={summary.ticker} chartOnly showStatusLine fillContainer surface="plain" />
                     </div>
                     <div className="mt-4 flex flex-wrap justify-between gap-2">
                       <button
@@ -946,7 +946,7 @@ export function SocialAlertsDashboard({ adminAuthenticated, adminConfigured, adm
             </div>
             <div className="flex-1 overflow-y-auto p-5">
               <div className="rounded-[24px] bg-panelSoft/25 p-3">
-                <TradingViewWidget ticker={activeChartSummary.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+                <TradingViewWidget ticker={activeChartSummary.ticker} chartOnly showStatusLine fillContainer surface="plain" />
               </div>
               <div className="mt-4 rounded-[18px] border border-borderSoft/60 bg-panelSoft/25 p-3">
                 <h4 className="mb-2 text-sm font-semibold text-slate-100">X Mentions</h4>

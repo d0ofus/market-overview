@@ -460,7 +460,7 @@ export function AlertsDashboard() {
                   )}
                 </div>
                 {selectedTickerDay ? (
-                  <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly showStatusLine initialRange="3M" />
+                  <TradingViewWidget ticker={selectedTickerDay.ticker} chartOnly showStatusLine />
                 ) : (
                   <div className="rounded border border-borderSoft/60 bg-panelSoft/20 p-4 text-sm text-slate-400">No ticker selected.</div>
                 )}
@@ -575,7 +575,6 @@ export function AlertsDashboard() {
                           chartOnly
                           showStatusLine
                           fillContainer
-                          initialRange="3M"
                           surface="plain"
                         />
                       </div>
@@ -766,7 +765,6 @@ export function AlertsDashboard() {
                   showStatusLine
                   fillContainer
                   heightMode="fill"
-                  initialRange="3M"
                   surface="plain"
                 />
               </div>

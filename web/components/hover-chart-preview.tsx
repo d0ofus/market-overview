@@ -229,7 +229,7 @@ export function HoverChartPreviewPanel({
       </div>
       <div className="p-4">
         <div className="rounded-[24px] bg-panelSoft/25 p-3">
-          <TradingViewWidget ticker={preview.ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+          <TradingViewWidget ticker={preview.ticker} chartOnly showStatusLine fillContainer surface="plain" />
         </div>
       </div>
     </div>
@@ -253,7 +253,7 @@ export function ExpandedTradingViewChartModal({ ticker, onClose }: { ticker: str
         </div>
         <div className="p-4">
           <div className="rounded-[24px] bg-panelSoft/25 p-3">
-            <TradingViewWidget ticker={ticker} chartOnly showStatusLine fillContainer initialRange="3M" surface="plain" />
+            <TradingViewWidget ticker={ticker} chartOnly showStatusLine fillContainer surface="plain" />
           </div>
         </div>
       </div>

@@ -138,7 +138,6 @@ export function TickerMultiGrid({
                   chartOnly
                   showStatusLine={showChartStatusLine}
                   fillContainer
-                  initialRange="3M"
                   className="!border-0 !bg-transparent !shadow-none !p-0"
                 />
                 {enableChartPopup ? (
@@ -212,7 +211,6 @@ export function TickerMultiGrid({
                   chartOnly
                   showStatusLine
                   fillContainer
-                  initialRange="3M"
                   surface="plain"
                 />
               </div>

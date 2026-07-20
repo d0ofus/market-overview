@@ -1075,7 +1075,6 @@ function CandidateCard({ candidate, saving, actionsDisabled, onAction, onNote }:
               showStatusLine
               fillContainer
               heightMode="fill"
-              initialRange="3M"
               surface="plain"
               studies={WATCHLIST_REVIEW_CHART_STUDIES}
               className="!border-0 !bg-transparent !p-0 !shadow-none"

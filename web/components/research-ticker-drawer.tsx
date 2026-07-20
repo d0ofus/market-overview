@@ -101,7 +101,7 @@ export function ResearchTickerDrawer({ open, result, detail, history, compare, b
         </div>
 
         <div className="mt-4">
-          <TradingViewWidget ticker={result.ticker} chartOnly showStatusLine initialRange="3M" fillContainer className="!p-2" />
+          <TradingViewWidget ticker={result.ticker} chartOnly showStatusLine fillContainer className="!p-2" />
         </div>
 
         <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.45fr),minmax(20rem,0.95fr)]">

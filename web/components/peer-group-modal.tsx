@@ -204,7 +204,6 @@ export function PeerGroupModal({
                           chartOnly
                           showStatusLine
                           fillContainer
-                          initialRange="3M"
                           surface="plain"
                         />
                       </div>
@@ -292,7 +291,6 @@ export function PeerGroupModal({
                   chartOnly
                   showStatusLine
                   fillContainer
-                  initialRange="3M"
                   surface="plain"
                 />
               </div>

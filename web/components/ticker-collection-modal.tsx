@@ -131,7 +131,6 @@ export function TickerCollectionModal({
                       chartOnly
                       showStatusLine
                       fillContainer
-                      initialRange="3M"
                       surface="plain"
                     />
                   </div>

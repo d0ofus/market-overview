@@ -19,7 +19,7 @@ export function EqualWeightComps() {
         {pairs.map((pair) => (
           <div key={pair.title} className="card p-3">
             <div className="mb-2 text-sm font-medium text-slate-200">{pair.title}</div>
-            <TradingViewWidget ticker={pair.base} compareSymbol={pair.compare} compact initialRange="12M" />
+            <TradingViewWidget ticker={pair.base} compareSymbol={pair.compare} compact />
           </div>
         ))}
       </div>

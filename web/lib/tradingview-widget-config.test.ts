@@ -1,24 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTradingViewEarningsEventConfig } from "./tradingview-widget-config";
+import {
+  buildTradingViewEarningsEventConfig,
+  buildTradingViewTimingConfig,
+} from "./tradingview-widget-config";
+
+test("TradingView timing is daily and does not serialize an adaptive range", () => {
+  const config = buildTradingViewTimingConfig();
+  assert.deepEqual(config, { interval: "D" });
+  assert.equal("range" in config, false);
+});
 
 test("TradingView earnings events remain off unless requested", () => {
-  assert.deepEqual(buildTradingViewEarningsEventConfig("off", "3M"), {
-    range: "3M",
+  assert.deepEqual(buildTradingViewEarningsEventConfig("off"), {
     overrides: {},
   });
 });
 
 test("TradingView earnings markers and break lines are configured independently", () => {
-  assert.deepEqual(buildTradingViewEarningsEventConfig("markers", "6M"), {
-    range: "6M",
+  assert.deepEqual(buildTradingViewEarningsEventConfig("markers"), {
     overrides: {
       "mainSeriesProperties.esdShowEarnings": true,
       "mainSeriesProperties.esdShowBreaks": false,
     },
   });
-  assert.deepEqual(buildTradingViewEarningsEventConfig("markers-and-breaks", "6M"), {
-    range: "6M",
+  assert.deepEqual(buildTradingViewEarningsEventConfig("markers-and-breaks"), {
     overrides: {
       "mainSeriesProperties.esdShowEarnings": true,
       "mainSeriesProperties.esdShowBreaks": true,

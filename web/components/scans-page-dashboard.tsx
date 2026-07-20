@@ -1591,7 +1591,7 @@ export function ScansPageDashboard() {
                                 </div>
                                 <div className="rounded-xl border border-borderSoft/70 bg-panelSoft/70 p-3">
                                   <h4 className="mb-2 text-sm font-semibold text-slate-100">Chart</h4>
-                                  <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine initialRange="3M" />
+                                  <TradingViewWidget ticker={row.ticker} compact chartOnly showStatusLine />
                                 </div>
                               </div>
                             </td>
