@@ -2113,11 +2113,45 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
   const diagnostics: BreadthStatusDiagnostic[] = [];
   const unavailableWarning = "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.";
   const membershipByUniverse = new Map<string, Set<string>>();
+  const latestSnapshotByUniverse = new Map<
+    string,
+    { asOfDate: string | null; generatedAt: string | null } | null
+  >();
+  const snapshotQueryFailures = new Set<string>();
   for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
     membershipByUniverse.set(universeId, new Set<string>());
   }
 
-  let currentDateTickerSet: Set<string>;
+  await Promise.all(CORE_BREADTH_UNIVERSE_IDS.map(async (universeId) => {
+    try {
+      const latestRow = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+      ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>();
+      latestSnapshotByUniverse.set(universeId, latestRow);
+    } catch (error) {
+      console.error("breadth status diagnostic query failed", { universeId, error });
+      snapshotQueryFailures.add(universeId);
+      latestSnapshotByUniverse.set(universeId, null);
+    }
+  }));
+
+  const unavailableDiagnostics = (): BreadthStatusDiagnostic[] => CORE_BREADTH_UNIVERSE_IDS.map((universeId) => {
+    const latestRow = latestSnapshotByUniverse.get(universeId) ?? null;
+    return {
+      universeId,
+      expectedAsOfDate,
+      latestAsOfDate: latestRow?.asOfDate ?? null,
+      latestGeneratedAt: latestRow?.generatedAt ?? null,
+      memberCount: membershipByUniverse.get(universeId)?.size ?? 0,
+      currentDateTickers: 0,
+      coveragePct: 0,
+      minCoveragePct: breadthMinCoveragePct(universeId),
+      status: "stale",
+      reason: unavailableWarning,
+    };
+  });
+
+  const allTickers = new Set<string>();
   try {
     const membershipRows = await env.DB.prepare(
       `SELECT universe_id as universeId, ticker
@@ -2127,7 +2161,6 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
     )
       .bind(JSON.stringify(CORE_BREADTH_UNIVERSE_IDS))
       .all<{ universeId: string; ticker: string }>();
-    const allTickers = new Set<string>();
     for (const row of membershipRows.results ?? []) {
       const ticker = row.ticker.trim().toUpperCase();
       const universeTickers = membershipByUniverse.get(row.universeId);
@@ -2135,24 +2168,24 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
       universeTickers.add(ticker);
       allTickers.add(ticker);
     }
+  } catch (error) {
+    console.error("breadth status membership query failed", { error });
+    return {
+      status: "stale",
+      warning: unavailableWarning,
+      diagnostics: unavailableDiagnostics(),
+    };
+  }
+
+  let currentDateTickerSet: Set<string>;
+  try {
     currentDateTickerSet = await loadMarketDataTickersWithBarOnDate(env, Array.from(allTickers), expectedAsOfDate);
   } catch (error) {
     console.error("breadth status coverage query failed", { error });
     return {
       status: "stale",
       warning: unavailableWarning,
-      diagnostics: CORE_BREADTH_UNIVERSE_IDS.map((universeId) => ({
-        universeId,
-        expectedAsOfDate,
-        latestAsOfDate: null,
-        latestGeneratedAt: null,
-        memberCount: membershipByUniverse.get(universeId)?.size ?? 0,
-        currentDateTickers: 0,
-        coveragePct: 0,
-        minCoveragePct: breadthMinCoveragePct(universeId),
-        status: "stale",
-        reason: unavailableWarning,
-      })),
+      diagnostics: unavailableDiagnostics(),
     };
   }
 
@@ -2164,13 +2197,8 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
       if (currentDateTickerSet.has(ticker)) currentDateTickers += 1;
     }
     const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
-    let latestRow: { asOfDate: string | null; generatedAt: string | null } | null;
-    try {
-      latestRow = await env.DB.prepare(
-        "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-      ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>();
-    } catch (error) {
-      console.error("breadth status diagnostic query failed", { universeId, error });
+    const latestRow = latestSnapshotByUniverse.get(universeId) ?? null;
+    if (snapshotQueryFailures.has(universeId)) {
       diagnostics.push({
         universeId,
         expectedAsOfDate,
@@ -2185,6 +2213,7 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
       });
       continue;
     }
+
     const minCoveragePct = breadthMinCoveragePct(universeId);
     const latestAsOfDate = latestRow?.asOfDate ?? null;
     let status: BreadthStatusDiagnostic["status"] = "fresh";
