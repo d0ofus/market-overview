@@ -70,9 +70,7 @@
 > Add in filter for min EPS % 
 
 ## EARNINGS
-> Add multi-chart view
 > ranked by distance of close from highs + volume multiple of average + % gain
-> Add preset to sort by Report date
 
 ## WATCHLIST COMPILER
 > Make a function to rank by factors (e.g. price contraction, volume expansion, price > SMA200, increasing rev/NI trend etc.)
