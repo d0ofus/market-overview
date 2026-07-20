@@ -94,7 +94,11 @@ import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
-import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import {
+  getMarketDataDb,
+  loadMarketDataTickersWithBarOnDate,
+  marketDataFeed,
+} from "./market-data-db";
 import {
   CENTRAL_CRON_JOB_DEFINITIONS,
   CRON_TIMEZONE_OPTIONS,
@@ -2107,53 +2111,109 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
   diagnostics: BreadthStatusDiagnostic[];
 }> {
   const diagnostics: BreadthStatusDiagnostic[] = [];
+  const unavailableWarning = "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.";
+  const membershipByUniverse = new Map<string, Set<string>>();
+  const latestSnapshotByUniverse = new Map<
+    string,
+    { asOfDate: string | null; generatedAt: string | null } | null
+  >();
+  const snapshotQueryFailures = new Set<string>();
   for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
-    let latestRow: { asOfDate: string | null; generatedAt: string | null } | null;
-    let memberCountRow: { count: number | null } | null;
-    let currentDateCountRow: { count: number | null } | null;
+    membershipByUniverse.set(universeId, new Set<string>());
+  }
+
+  await Promise.all(CORE_BREADTH_UNIVERSE_IDS.map(async (universeId) => {
     try {
-      [latestRow, memberCountRow, currentDateCountRow] = await Promise.all([
-        env.DB.prepare(
-          "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-        ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>(),
-        env.DB.prepare(
-          "SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?",
-        ).bind(universeId).first<{ count: number | null }>(),
-        env.DB.prepare(
-          `SELECT COUNT(*) as count
-             FROM universe_symbols us
-            WHERE us.universe_id = ?
-              AND EXISTS (
-                SELECT 1
-                  FROM daily_bars db
-                 WHERE db.ticker = us.ticker
-                   AND db.date = ?
-              )`,
-        ).bind(universeId, expectedAsOfDate).first<{ count: number | null }>(),
-      ]);
+      const latestRow = await env.DB.prepare(
+        "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
+      ).bind(universeId).first<{ asOfDate: string | null; generatedAt: string | null }>();
+      latestSnapshotByUniverse.set(universeId, latestRow);
     } catch (error) {
       console.error("breadth status diagnostic query failed", { universeId, error });
+      snapshotQueryFailures.add(universeId);
+      latestSnapshotByUniverse.set(universeId, null);
+    }
+  }));
+
+  const unavailableDiagnostics = (): BreadthStatusDiagnostic[] => CORE_BREADTH_UNIVERSE_IDS.map((universeId) => {
+    const latestRow = latestSnapshotByUniverse.get(universeId) ?? null;
+    return {
+      universeId,
+      expectedAsOfDate,
+      latestAsOfDate: latestRow?.asOfDate ?? null,
+      latestGeneratedAt: latestRow?.generatedAt ?? null,
+      memberCount: membershipByUniverse.get(universeId)?.size ?? 0,
+      currentDateTickers: 0,
+      coveragePct: 0,
+      minCoveragePct: breadthMinCoveragePct(universeId),
+      status: "stale",
+      reason: unavailableWarning,
+    };
+  });
+
+  const allTickers = new Set<string>();
+  try {
+    const membershipRows = await env.DB.prepare(
+      `SELECT universe_id as universeId, ticker
+       FROM universe_symbols
+       WHERE universe_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+       ORDER BY universe_id, ticker`,
+    )
+      .bind(JSON.stringify(CORE_BREADTH_UNIVERSE_IDS))
+      .all<{ universeId: string; ticker: string }>();
+    for (const row of membershipRows.results ?? []) {
+      const ticker = row.ticker.trim().toUpperCase();
+      const universeTickers = membershipByUniverse.get(row.universeId);
+      if (!universeTickers || !ticker) continue;
+      universeTickers.add(ticker);
+      allTickers.add(ticker);
+    }
+  } catch (error) {
+    console.error("breadth status membership query failed", { error });
+    return {
+      status: "stale",
+      warning: unavailableWarning,
+      diagnostics: unavailableDiagnostics(),
+    };
+  }
+
+  let currentDateTickerSet: Set<string>;
+  try {
+    currentDateTickerSet = await loadMarketDataTickersWithBarOnDate(env, Array.from(allTickers), expectedAsOfDate);
+  } catch (error) {
+    console.error("breadth status coverage query failed", { error });
+    return {
+      status: "stale",
+      warning: unavailableWarning,
+      diagnostics: unavailableDiagnostics(),
+    };
+  }
+
+  for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
+    const members = membershipByUniverse.get(universeId) ?? new Set<string>();
+    const memberCount = members.size;
+    let currentDateTickers = 0;
+    for (const ticker of members) {
+      if (currentDateTickerSet.has(ticker)) currentDateTickers += 1;
+    }
+    const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
+    const latestRow = latestSnapshotByUniverse.get(universeId) ?? null;
+    if (snapshotQueryFailures.has(universeId)) {
       diagnostics.push({
         universeId,
         expectedAsOfDate,
         latestAsOfDate: null,
         latestGeneratedAt: null,
-        memberCount: 0,
-        currentDateTickers: 0,
-        coveragePct: 0,
+        memberCount,
+        currentDateTickers,
+        coveragePct,
         minCoveragePct: breadthMinCoveragePct(universeId),
         status: "stale",
-        reason: "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.",
+        reason: unavailableWarning,
       });
-      return {
-        status: "stale",
-        warning: "Breadth freshness could not be verified quickly; latest stored breadth data may be stale.",
-        diagnostics,
-      };
+      continue;
     }
-    const memberCount = Number(memberCountRow?.count ?? 0);
-    const currentDateTickers = Number(currentDateCountRow?.count ?? 0);
-    const coveragePct = memberCount > 0 ? (currentDateTickers / memberCount) * 100 : 0;
+
     const minCoveragePct = breadthMinCoveragePct(universeId);
     const latestAsOfDate = latestRow?.asOfDate ?? null;
     let status: BreadthStatusDiagnostic["status"] = "fresh";

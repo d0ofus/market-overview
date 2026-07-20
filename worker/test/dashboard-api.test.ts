@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, SnapshotEmptyResponse, SnapshotReadyResponse } from "../src/types";
 
 const eodMocks = vi.hoisted(() => ({
-  CORE_BREADTH_UNIVERSE_IDS: ["sp500-core", "nasdaq-core"],
+  CORE_BREADTH_UNIVERSE_IDS: [
+    "sp500-core",
+    "nasdaq-core",
+    "nyse-core",
+    "russell2000-core",
+    "overall-market-proxy",
+  ],
   computeAndStoreSnapshot: vi.fn(),
   computeOverviewFreshnessDiagnostics: vi.fn(),
   emptySnapshotResponse: vi.fn((warning = "No stored overview snapshot is available. Use Refresh Overview Data to generate one.") => ({
@@ -325,10 +331,45 @@ describe("dashboard API", () => {
   it("includes read-only breadth diagnostics when breadth is behind overview", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-13T12:00:00.000Z"));
-    const preparedSql: string[] = [];
-    const db = {
+    const primaryPreparedSql: string[] = [];
+    const marketDataPreparedSql: string[] = [];
+    const sharedTicker = "SHARED";
+    const sp500Tickers = [
+      ...Array.from({ length: 99 }, (_, index) => `SP${index}`),
+      sharedTicker,
+    ];
+    const nasdaqTickers = [
+      ...Array.from({ length: 9 }, (_, index) => `ND${index}`),
+      sharedTicker,
+    ];
+    const nyseTickers = ["NYSE0", sharedTicker];
+    const russellTickers = ["R2K0"];
+    const overallTickers = [sharedTicker, "OVERALL0"];
+    const membershipRows = [
+      ...sp500Tickers.map((ticker) => ({ universeId: "sp500-core", ticker })),
+      ...nasdaqTickers.map((ticker) => ({ universeId: "nasdaq-core", ticker })),
+      ...nyseTickers.map((ticker) => ({ universeId: "nyse-core", ticker })),
+      ...russellTickers.map((ticker) => ({ universeId: "russell2000-core", ticker })),
+      ...overallTickers.map((ticker) => ({ universeId: "overall-market-proxy", ticker })),
+    ];
+    const expectedMarketDataTickers = [
+      ...sp500Tickers,
+      ...nasdaqTickers.filter((ticker) => ticker !== sharedTicker),
+      "NYSE0",
+      "R2K0",
+      "OVERALL0",
+    ];
+    const marketDataTickersWithBars = [
+      ...sp500Tickers.slice(0, 40),
+      sharedTicker,
+      "R2K0",
+    ];
+    const primaryDb = {
       prepare: vi.fn((sql: string) => {
-        preparedSql.push(sql);
+        primaryPreparedSql.push(sql);
+        if (sql.includes("daily_bars") || sql.includes("alpaca_daily_bars")) {
+          throw new Error("primary DB must not be queried for breadth bars");
+        }
         const statement = {
           bind: (..._args: unknown[]) => statement,
           first: async <T>() => {
@@ -360,14 +401,31 @@ describe("dashboard API", () => {
             if (sql.includes("FROM breadth_snapshots")) {
               return { asOfDate: "2026-06-10", generatedAt: "2026-06-11T03:27:00.000Z" } as T;
             }
-            if (sql.includes("EXISTS") && sql.includes("FROM daily_bars")) {
-              return { count: 40 } as T;
-            }
-            if (sql.includes("FROM universe_symbols")) {
-              return { count: 100 } as T;
-            }
             return null as T;
           },
+          all: async <T>() => ({
+            results: sql.includes("FROM universe_symbols") ? membershipRows as T[] : [],
+          }),
+        };
+        return statement;
+      }),
+    };
+    const marketDataDb = {
+      prepare: vi.fn((sql: string) => {
+        marketDataPreparedSql.push(sql);
+        if (!sql.includes("FROM alpaca_daily_bars")) {
+          throw new Error("market-data DB must only be queried for breadth bars");
+        }
+        const statement = {
+          bind: (feed: string, tickersJson: string, date: string) => {
+            expect(feed).toBe("iex");
+            expect(JSON.parse(tickersJson)).toEqual(expectedMarketDataTickers);
+            expect(date).toBe("2026-06-12");
+            return statement;
+          },
+          all: async <T>() => ({
+            results: marketDataTickersWithBars.map((ticker) => ({ ticker })) as T[],
+          }),
         };
         return statement;
       }),
@@ -375,7 +433,9 @@ describe("dashboard API", () => {
 
     const env = {
       ...createEnv(),
-      DB: db,
+      DB: primaryDb,
+      MARKET_DATA_DB: marketDataDb,
+      MARKET_DATA_DB_REQUIRED: "true",
     } as unknown as Env;
     const response = await worker.fetch(new Request("https://example.com/api/status?page=overview"), env, createContext());
     const body = await response.json() as {
@@ -383,7 +443,14 @@ describe("dashboard API", () => {
       breadthStatus: string;
       breadthLatestAsOfDate: string | null;
       breadthWarning: string | null;
-      breadthDiagnostics: Array<{ universeId: string; status: string; latestAsOfDate: string | null; coveragePct: number }>;
+      breadthDiagnostics: Array<{
+        universeId: string;
+        status: string;
+        latestAsOfDate: string | null;
+        memberCount: number;
+        currentDateTickers: number;
+        coveragePct: number;
+      }>;
     };
 
     expect(response.status).toBe(200);
@@ -391,16 +458,144 @@ describe("dashboard API", () => {
     expect(body.breadthStatus).toBe("stale");
     expect(body.breadthLatestAsOfDate).toBe("2026-06-10");
     expect(body.breadthWarning).toContain("Breadth history is not current");
-    expect(body.breadthDiagnostics[0]).toMatchObject({
-      universeId: "sp500-core",
-      status: "low_coverage",
-      latestAsOfDate: "2026-06-10",
-      coveragePct: 40,
-    });
-    expect(preparedSql.join("\n")).toContain("EXISTS");
-    expect(preparedSql.join("\n")).toContain("db.ticker = us.ticker");
-    expect(preparedSql.join("\n")).not.toContain("UPPER(db.ticker) = UPPER(us.ticker)");
-    expect(preparedSql.join("\n")).not.toContain("JOIN daily_bars db ON");
+    expect(body.breadthDiagnostics).toMatchObject([
+      {
+        universeId: "sp500-core",
+        status: "low_coverage",
+        latestAsOfDate: "2026-06-10",
+        memberCount: 100,
+        currentDateTickers: 41,
+        coveragePct: 41,
+      },
+      {
+        universeId: "nasdaq-core",
+        status: "low_coverage",
+        latestAsOfDate: "2026-06-10",
+        memberCount: 10,
+        currentDateTickers: 1,
+        coveragePct: 10,
+      },
+      {
+        universeId: "nyse-core",
+        status: "low_coverage",
+        latestAsOfDate: "2026-06-10",
+        memberCount: 2,
+        currentDateTickers: 1,
+        coveragePct: 50,
+      },
+      {
+        universeId: "russell2000-core",
+        status: "stale",
+        latestAsOfDate: "2026-06-10",
+        memberCount: 1,
+        currentDateTickers: 1,
+        coveragePct: 100,
+      },
+      {
+        universeId: "overall-market-proxy",
+        status: "low_coverage",
+        latestAsOfDate: "2026-06-10",
+        memberCount: 2,
+        currentDateTickers: 1,
+        coveragePct: 50,
+      },
+    ]);
+    expect(primaryPreparedSql.join("\n")).toContain("FROM universe_symbols");
+    expect(primaryPreparedSql.join("\n")).not.toContain("daily_bars");
+    expect(primaryPreparedSql.join("\n")).not.toContain("alpaca_daily_bars");
+    expect(marketDataPreparedSql.join("\n")).toContain("FROM alpaca_daily_bars");
+  });
+
+  it("fails breadth coverage diagnostics safely when MARKET_DATA_DB is unavailable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T12:00:00.000Z"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const primaryDb = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => {
+            if (sql.includes("FROM dashboard_configs WHERE is_default = 1")) {
+              return {
+                id: "default",
+                name: "Default Swing Dashboard",
+                timezone: "Australia/Melbourne",
+                eodRunLocalTime: "08:15",
+                eodRunTimeLabel: "08:15 Australia/Melbourne (prev US close)",
+              } as T;
+            }
+            if (sql.includes("FROM snapshots_meta")) {
+              return {
+                asOfDate: "2026-06-12",
+                generatedAt: "2026-06-12T22:16:17.521Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: "2026-06-12",
+                freshnessStatus: "fresh",
+                freshnessCoveragePct: 100,
+                freshnessCurrentCount: 2,
+                freshnessEligibleCount: 2,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: "2026-06-12",
+                freshnessMaxBarDate: "2026-06-12",
+                freshnessWarning: null,
+              } as T;
+            }
+            if (sql.includes("FROM breadth_snapshots")) {
+              return { asOfDate: "2026-06-11", generatedAt: "2026-06-12T03:27:00.000Z" } as T;
+            }
+            return null as T;
+          },
+          all: async <T>() => ({
+            results: sql.includes("FROM universe_symbols")
+              ? [
+                  { universeId: "sp500-core", ticker: "SPY" },
+                  { universeId: "nasdaq-core", ticker: "QQQ" },
+                ] as T[]
+              : [],
+          }),
+        };
+        return statement;
+      }),
+    };
+    const unavailableBindings = [
+      undefined,
+      {
+        prepare: vi.fn(() => {
+          throw new Error("market-data unavailable");
+        }),
+      },
+    ];
+
+    for (const marketDataDb of unavailableBindings) {
+      const env = {
+        ...createEnv(),
+        DB: primaryDb,
+        MARKET_DATA_DB: marketDataDb,
+        MARKET_DATA_DB_REQUIRED: "true",
+      } as unknown as Env;
+
+      const response = await worker.fetch(new Request("https://example.com/api/status?page=breadth"), env, createContext());
+      const body = await response.json() as {
+        breadthStatus: string;
+        breadthWarning: string | null;
+        breadthDiagnostics: Array<{
+          status: string;
+          latestAsOfDate: string | null;
+          latestGeneratedAt: string | null;
+        }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.breadthStatus).toBe("stale");
+      expect(body.breadthWarning).toContain("could not be verified");
+      expect(body.breadthDiagnostics).toHaveLength(5);
+      expect(body.breadthDiagnostics.every((row) => row.status !== "fresh")).toBe(true);
+      expect(body.breadthDiagnostics.every((row) => row.latestAsOfDate === "2026-06-11")).toBe(true);
+      expect(body.breadthDiagnostics.every((row) => row.latestGeneratedAt === "2026-06-12T03:27:00.000Z")).toBe(true);
+    }
+
+    expect(primaryDb.prepare.mock.calls.map(([sql]) => sql).join("\n")).not.toContain("alpaca_daily_bars");
+    errorSpy.mockRestore();
   });
 
   it("returns a recoverable overview refresh response when D1 resets during the refresh request", async () => {
