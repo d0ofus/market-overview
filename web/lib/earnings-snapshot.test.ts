@@ -32,6 +32,8 @@ function row(overrides: Partial<EarningsSurpriseRow>): EarningsSurpriseRow {
     revenueEstimate: null,
     revenueSurprise: null,
     revenueSurprisePct: null,
+    qualifyingGapPct: null,
+    regularOpenGapPct: null,
     firstSeenAt: null,
     lastSeenAt: null,
     ...overrides,
@@ -46,6 +48,17 @@ test("sorts the complete snapshot with SQL-compatible null placement", () => {
   ];
   assert.deepEqual(sortEarningsSnapshotRows(rows, "epsSurprisePct", "asc").map((item) => item.id), ["null", "negative", "positive"]);
   assert.deepEqual(sortEarningsSnapshotRows(rows, "epsSurprisePct", "desc").map((item) => item.id), ["positive", "negative", "null"]);
+});
+
+test("sorts nullable Surprise gap enrichment with SQL-compatible null placement", () => {
+  const rows = [
+    row({ id: "missing", ticker: "MISS", qualifyingGapPct: null, regularOpenGapPct: null }),
+    row({ id: "small", ticker: "SMALL", qualifyingGapPct: 2, regularOpenGapPct: 1 }),
+    row({ id: "large", ticker: "LARGE", qualifyingGapPct: 8, regularOpenGapPct: 6 }),
+  ];
+  assert.deepEqual(sortEarningsSnapshotRows(rows, "qualifyingGapPct", "asc").map((item) => item.id), ["missing", "small", "large"]);
+  assert.deepEqual(sortEarningsSnapshotRows(rows, "qualifyingGapPct", "desc").map((item) => item.id), ["large", "small", "missing"]);
+  assert.deepEqual(sortEarningsSnapshotRows(rows, "regularOpenGapPct", "desc").map((item) => item.id), ["large", "small", "missing"]);
 });
 
 test("uses ticker, report date, and id as deterministic tie-breakers", () => {

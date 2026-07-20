@@ -32,6 +32,8 @@ const surpriseRow: EarningsSurpriseRow = {
   revenueEstimate: 105,
   revenueSurprise: -5,
   revenueSurprisePct: -4.7619,
+  qualifyingGapPct: 4,
+  regularOpenGapPct: 3,
   firstSeenAt: null,
   lastSeenAt: null,
 };

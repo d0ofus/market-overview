@@ -699,6 +699,8 @@ export type EarningsSurpriseRow = {
   revenueEstimate: number | null;
   revenueSurprise: number | null;
   revenueSurprisePct: number | null;
+  qualifyingGapPct: number | null;
+  regularOpenGapPct: number | null;
   firstSeenAt: string | null;
   lastSeenAt: string | null;
 };

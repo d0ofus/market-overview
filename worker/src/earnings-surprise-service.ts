@@ -101,6 +101,8 @@ export type EarningsSurpriseRow = {
   revenueEstimate: number | null;
   revenueSurprise: number | null;
   revenueSurprisePct: number | null;
+  qualifyingGapPct: number | null;
+  regularOpenGapPct: number | null;
   firstSeenAt: string | null;
   lastSeenAt: string | null;
 };
@@ -219,6 +221,8 @@ const SORT_COLUMNS: Record<string, string> = {
   epsSurprisePct: "eps_surprise_pct",
   revenueSurprise: "revenue_surprise",
   revenueSurprisePct: "revenue_surprise_pct",
+  qualifyingGapPct: "matchedGap.qualifyingGapPct",
+  regularOpenGapPct: "matchedGap.regularOpenGapPct",
   season: "season",
   sector: "sector",
   industry: "industry",
@@ -372,6 +376,19 @@ async function earningsSurpriseSchemaWarning(env: Env): Promise<string | null> {
     return "Earnings surprise liquidity schema is missing. Apply worker/migrations/0089_earnings_surprise_liquidity.sql.";
   }
   return null;
+}
+
+async function canEnrichEarningsSurprisesWithGaps(env: Env): Promise<boolean> {
+  if (!(await tableExists(env, "earnings_gap_events"))) return false;
+  const requiredColumns = [
+    "calculation_status",
+    "qualifying_gap_pct",
+    "regular_open_gap_pct",
+  ];
+  const ready = await Promise.all(
+    requiredColumns.map((column) => columnExists(env, "earnings_gap_events", column)),
+  );
+  return ready.every(Boolean);
 }
 
 export async function hasEarningsSurpriseSchema(env: Env): Promise<boolean> {
@@ -936,6 +953,8 @@ function mapRow(row: Record<string, unknown>): EarningsSurpriseRow {
     revenueEstimate: parseMaybeNumber(row.revenueEstimate),
     revenueSurprise: parseMaybeNumber(row.revenueSurprise),
     revenueSurprisePct: parseMaybeNumber(row.revenueSurprisePct),
+    qualifyingGapPct: parseMaybeNumber(row.qualifyingGapPct),
+    regularOpenGapPct: parseMaybeNumber(row.regularOpenGapPct),
     firstSeenAt: row.firstSeenAt == null ? null : String(row.firstSeenAt),
     lastSeenAt: row.lastSeenAt == null ? null : String(row.lastSeenAt),
   };
@@ -952,6 +971,35 @@ const EARNINGS_SURPRISE_SELECT_COLUMNS = `
   revenue_estimate as revenueEstimate, revenue_surprise as revenueSurprise,
   revenue_surprise_pct as revenueSurprisePct, first_seen_at as firstSeenAt,
   last_seen_at as lastSeenAt`;
+
+const EARNINGS_SURPRISE_GAP_JOIN = `
+  LEFT JOIN (
+    SELECT ticker as gapTicker, report_date as gapReportDate,
+      qualifying_gap_pct as qualifyingGapPct,
+      regular_open_gap_pct as regularOpenGapPct
+    FROM earnings_gap_events
+    WHERE calculation_status IN ('complete', 'provisional')
+  ) matchedGap
+    ON matchedGap.gapTicker = earnings_surprise_events.ticker
+   AND matchedGap.gapReportDate = earnings_surprise_events.report_date`;
+
+function earningsSurpriseSelectColumns(includeGapEnrichment: boolean): string {
+  return `${EARNINGS_SURPRISE_SELECT_COLUMNS},
+    ${includeGapEnrichment ? "matchedGap.qualifyingGapPct" : "NULL"} as qualifyingGapPct,
+    ${includeGapEnrichment ? "matchedGap.regularOpenGapPct" : "NULL"} as regularOpenGapPct`;
+}
+
+function earningsSurpriseGapJoin(includeGapEnrichment: boolean): string {
+  return includeGapEnrichment ? EARNINGS_SURPRISE_GAP_JOIN : "";
+}
+
+function earningsSurpriseSortColumn(sort: string | null | undefined, includeGapEnrichment: boolean): string {
+  const requested = String(sort ?? "reportDate");
+  if (!includeGapEnrichment && (requested === "qualifyingGapPct" || requested === "regularOpenGapPct")) {
+    return "NULL";
+  }
+  return SORT_COLUMNS[requested] ?? SORT_COLUMNS.reportDate;
+}
 
 function compareFacetValues(left: string, right: string): number {
   if (left === right) return 0;
@@ -1008,17 +1056,19 @@ export async function queryEarningsSurprises(env: Env, query: EarningsSurprisesQ
       facets: { seasons: [], sectors: [], industries: [], exchanges: [] },
     };
   }
+  const includeGapEnrichment = await canEnrichEarningsSurprisesWithGaps(env);
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = normalizeEarningsQueryOffset(query.offset, query.limit);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
+  const sortColumn = earningsSurpriseSortColumn(query.sort, includeGapEnrichment);
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const count = await env.DB.prepare(
     `SELECT COUNT(*) as count FROM earnings_surprise_events ${whereSql}`,
   ).bind(...args).first<{ count: number }>();
   const rows = await env.DB.prepare(
-    `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
+    `SELECT ${earningsSurpriseSelectColumns(includeGapEnrichment)}
      FROM earnings_surprise_events
+     ${earningsSurpriseGapJoin(includeGapEnrichment)}
      ${whereSql}
      ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ? OFFSET ?`,
@@ -1056,10 +1106,12 @@ export async function loadEarningsSurprisesSnapshot(
       facets: { seasons: [], sectors: [], industries: [], exchanges: [] },
     };
   }
+  const includeGapEnrichment = await canEnrichEarningsSurprisesWithGaps(env);
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const result = await env.DB.prepare(
-    `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
+    `SELECT ${earningsSurpriseSelectColumns(includeGapEnrichment)}
      FROM earnings_surprise_events
+     ${earningsSurpriseGapJoin(includeGapEnrichment)}
      ${whereSql}
      ORDER BY report_date DESC, ticker ASC, id ASC`,
   ).bind(...args).all<Record<string, unknown>>();
@@ -1076,13 +1128,15 @@ export async function loadEarningsSurprisesSnapshot(
 
 export async function exportEarningsSurpriseTickers(env: Env, query: EarningsSurprisesQuery = {}): Promise<string[]> {
   if (!(await hasEarningsSurpriseSchema(env))) return [];
+  const includeGapEnrichment = await canEnrichEarningsSurprisesWithGaps(env);
   const limit = normalizeEarningsQueryLimit(query.limit, DEFAULT_QUERY_LIMIT, EXPORT_MAX_LIMIT);
-  const sortColumn = SORT_COLUMNS[String(query.sort ?? "reportDate")] ?? SORT_COLUMNS.reportDate;
+  const sortColumn = earningsSurpriseSortColumn(query.sort, includeGapEnrichment);
   const sortDir = query.sortDir === "asc" ? "asc" : "desc";
   const { sql: whereSql, args } = buildWhereClause(query, { includeCatalog: await canUseEarningsSymbolCatalog(env) });
   const rows = await env.DB.prepare(
     `SELECT ticker
      FROM earnings_surprise_events
+     ${earningsSurpriseGapJoin(includeGapEnrichment)}
      ${whereSql}
      ORDER BY ${sortColumn} ${sortDir.toUpperCase()}, ticker ASC, report_date DESC, id ASC
      LIMIT ?`,
@@ -1101,6 +1155,7 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
       latestRows: [],
     };
   }
+  const includeGapEnrichment = await canEnrichEarningsSurprisesWithGaps(env);
   const includeCatalog = await canUseEarningsSymbolCatalog(env);
   const defaultEligibilitySql = earningsDefaultEligibleListedEquitySql("earnings_surprise_events", { includeCatalog });
   const [counts, syncs, latest] = await Promise.all([
@@ -1123,8 +1178,9 @@ export async function loadEarningsSurprisesStatus(env: Env): Promise<EarningsSur
        ORDER BY updated_at DESC`,
     ).all<EarningsSurprisesStatus["syncs"][number]>(),
     env.DB.prepare(
-      `SELECT ${EARNINGS_SURPRISE_SELECT_COLUMNS}
+      `SELECT ${earningsSurpriseSelectColumns(includeGapEnrichment)}
        FROM earnings_surprise_events
+       ${earningsSurpriseGapJoin(includeGapEnrichment)}
        WHERE ${defaultEligibilitySql}
        ORDER BY report_date DESC, ticker ASC, id ASC
        LIMIT 12`,

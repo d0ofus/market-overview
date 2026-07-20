@@ -13,8 +13,17 @@ import {
 import { isExcludedEarningsIssue } from "../src/earnings-issue-filter";
 import type { Env } from "../src/types";
 
-type StoredEvent = EarningsSurpriseRow & {
+type StoredEvent = Omit<EarningsSurpriseRow, "qualifyingGapPct" | "regularOpenGapPct"> &
+  Partial<Pick<EarningsSurpriseRow, "qualifyingGapPct" | "regularOpenGapPct">> & {
   rawJson: string | null;
+};
+
+type StoredGapEvent = {
+  ticker: string;
+  reportDate: string;
+  calculationStatus: "complete" | "provisional" | "deferred";
+  qualifyingGapPct: number;
+  regularOpenGapPct: number | null;
 };
 
 type StoredSync = {
@@ -80,14 +89,34 @@ function tvRow(input: {
   };
 }
 
-function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; __syncs: Map<string, StoredSync>; __queries: string[] } {
+function createEnv(
+  seed: StoredEvent[] = [],
+  gapSeed: StoredGapEvent[] = [],
+  options: { gapSchemaReady?: boolean } = {},
+): Env & { __events: StoredEvent[]; __syncs: Map<string, StoredSync>; __queries: string[] } {
   const events = [...seed];
+  const gapEvents = [...gapSeed];
+  const gapSchemaReady = options.gapSchemaReady ?? true;
   const syncs = new Map<string, StoredSync>();
   const queries: string[] = [];
 
   const applyFilters = (sql: string, args: unknown[]): StoredEvent[] => {
     let cursor = 0;
-    let rows = events.filter((row) => !isExcludedEarningsIssue(row));
+    const gapJoinEnabled = sql.includes("matchedGap.gapTicker");
+    let rows = events.filter((row) => !isExcludedEarningsIssue(row)).map((row) => {
+      const gap = gapJoinEnabled
+        ? gapEvents.find((item) => (
+            item.ticker === row.ticker
+            && item.reportDate === row.reportDate
+            && (item.calculationStatus === "complete" || item.calculationStatus === "provisional")
+          ))
+        : null;
+      return {
+        ...row,
+        qualifyingGapPct: gap?.qualifyingGapPct ?? null,
+        regularOpenGapPct: gap?.regularOpenGapPct ?? null,
+      };
+    });
     if (sql.includes("report_date >= ?")) {
       const startDate = String(args[cursor++] ?? "1900-01-01");
       rows = rows.filter((row) => row.reportDate >= startDate);
@@ -134,7 +163,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
     }
     if (/(?:WHERE|AND)\s+eps_surprise_pct > 0/.test(sql)) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) > 0);
     if (/(?:WHERE|AND)\s+eps_surprise_pct < 0/.test(sql)) rows = rows.filter((row) => Number(row.epsSurprisePct ?? 0) < 0);
-    const sortMatch = sql.match(/ORDER BY ([a-z_]+) (ASC|DESC)/);
+    const sortMatch = sql.match(/ORDER BY ([A-Za-z0-9_.]+) (ASC|DESC)/);
     if (sortMatch) {
       const [, column, direction] = sortMatch;
       const map: Record<string, keyof StoredEvent> = {
@@ -142,15 +171,25 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
         ticker: "ticker",
         eps_surprise_pct: "epsSurprisePct",
         market_cap: "marketCap",
+        "matchedGap.qualifyingGapPct": "qualifyingGapPct",
+        "matchedGap.regularOpenGapPct": "regularOpenGapPct",
       };
       const key = map[column] ?? "ticker";
       rows.sort((left, right) => {
-        const a = left[key] ?? "";
-        const b = right[key] ?? "";
-        const result = typeof a === "number" && typeof b === "number"
-          ? a - b
-          : String(a).localeCompare(String(b));
-        if (result !== 0) return direction === "ASC" ? result : -result;
+        const a = left[key] ?? null;
+        const b = right[key] ?? null;
+        const result = a == null && b == null
+          ? 0
+          : a == null
+            ? direction === "ASC" ? -1 : 1
+            : b == null
+              ? direction === "ASC" ? 1 : -1
+              : typeof a === "number" && typeof b === "number"
+                ? direction === "ASC" ? a - b : b - a
+                : direction === "ASC"
+                  ? String(a).localeCompare(String(b))
+                  : String(b).localeCompare(String(a));
+        if (result !== 0) return result;
         const tickerResult = left.ticker.localeCompare(right.ticker);
         if (tickerResult !== 0) return tickerResult;
         const reportDateResult = right.reportDate.localeCompare(left.reportDate);
@@ -168,8 +207,13 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
         __sql: sql,
         __args: args,
         async first<T>() {
-          if (sql.includes("sqlite_master")) return { count: 1 } as T;
-          if (sql.includes("pragma_table_info")) return { count: 1 } as T;
+          if (sql.includes("sqlite_master")) {
+            const tableName = String(args[0] ?? "");
+            return { count: tableName === "earnings_gap_events" && !gapSchemaReady ? 0 : 1 } as T;
+          }
+          if (sql.includes("pragma_table_info")) {
+            return { count: sql.includes("earnings_gap_events") && !gapSchemaReady ? 0 : 1 } as T;
+          }
           if (sql.includes("SELECT COUNT(*) as count FROM earnings_surprise_events")) {
             return { count: applyFilters(sql, args).length } as T;
           }
@@ -201,7 +245,7 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
             return { results: Array.from(counts.entries()).map(([value, count]) => ({ value, count })) as T[] };
           }
           if (sql.includes("FROM earnings_surprise_events")) {
-            if (sql.includes("SELECT ticker")) {
+            if (sql.trimStart().startsWith("SELECT ticker")) {
               const limit = Number(args.at(-1) ?? 100);
               return { results: applyFilters(sql, args.slice(0, -1)).slice(0, limit).map((row) => ({ ticker: row.ticker })) as T[] };
             }
@@ -316,6 +360,8 @@ function createEnv(seed: StoredEvent[] = []): Env & { __events: StoredEvent[]; _
           revenueEstimate: revenueEstimate == null ? null : Number(revenueEstimate),
           revenueSurprise: revenueSurprise == null ? null : Number(revenueSurprise),
           revenueSurprisePct: revenueSurprisePct == null ? null : Number(revenueSurprisePct),
+          qualifyingGapPct: null,
+          regularOpenGapPct: null,
           rawJson: rawJson == null ? null : String(rawJson),
           firstSeenAt: firstSeenAt == null ? null : String(firstSeenAt),
           lastSeenAt: lastSeenAt == null ? null : String(lastSeenAt),
@@ -511,6 +557,122 @@ describe("earnings surprise service", () => {
     expect(result.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
     expect(result.rows[0].avgDollarVolume30d).toBe(12_000_000_000);
     expect(result.facets.seasons).toContainEqual({ value: "2026 Q1", count: 1 });
+  });
+
+  it("enriches Surprise rows from visible gap snapshots without duplicating repeated events", async () => {
+    const base = {
+      provider: "tradingview",
+      exchange: "NASDAQ",
+      companyName: "Company",
+      sector: "Tech",
+      industry: "Software",
+      marketCap: 1_000_000_000,
+      avgDollarVolume30d: null,
+      reportTimestamp: null,
+      reportTime: null,
+      season: "2026 Q2",
+      epsActual: null,
+      epsEstimate: null,
+      epsSurprise: null,
+      epsSurprisePct: 10,
+      revenueActual: null,
+      revenueEstimate: null,
+      revenueSurprise: null,
+      revenueSurprisePct: null,
+      firstSeenAt: null,
+      lastSeenAt: null,
+      rawJson: null,
+    };
+    const env = createEnv([
+      { ...base, id: "aaa-q1", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", reportDate: "2026-07-16", fiscalPeriodEnd: "2026-03-31" },
+      { ...base, id: "aaa-q2", sourceSymbol: "NASDAQ:AAA", ticker: "AAA", reportDate: "2026-07-16", fiscalPeriodEnd: "2026-06-30" },
+      { ...base, id: "bbb", sourceSymbol: "NASDAQ:BBB", ticker: "BBB", reportDate: "2026-07-16", fiscalPeriodEnd: "2026-06-30" },
+      { ...base, id: "ccc", sourceSymbol: "NASDAQ:CCC", ticker: "CCC", reportDate: "2026-07-16", fiscalPeriodEnd: "2026-06-30" },
+      { ...base, id: "ddd", sourceSymbol: "NASDAQ:DDD", ticker: "DDD", reportDate: "2026-07-16", fiscalPeriodEnd: "2026-06-30" },
+    ], [
+      { ticker: "AAA", reportDate: "2026-07-16", calculationStatus: "complete", qualifyingGapPct: 12.5, regularOpenGapPct: 9.25 },
+      { ticker: "BBB", reportDate: "2026-07-16", calculationStatus: "provisional", qualifyingGapPct: 4.5, regularOpenGapPct: null },
+      { ticker: "CCC", reportDate: "2026-07-16", calculationStatus: "deferred", qualifyingGapPct: 20, regularOpenGapPct: 18 },
+    ]);
+
+    const snapshot = await loadEarningsSurprisesSnapshot(env, { startDate: "2026-01-01", includeOtc: true });
+    const sorted = await queryEarningsSurprises(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "qualifyingGapPct",
+      sortDir: "desc",
+    });
+    const status = await loadEarningsSurprisesStatus(env);
+    const exported = await exportEarningsSurpriseTickers(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+      sort: "regularOpenGapPct",
+      sortDir: "desc",
+    });
+
+    expect(snapshot.total).toBe(5);
+    expect(snapshot.rows.filter((row) => row.ticker === "AAA")).toHaveLength(2);
+    expect(snapshot.rows.find((row) => row.ticker === "AAA")).toMatchObject({
+      qualifyingGapPct: 12.5,
+      regularOpenGapPct: 9.25,
+    });
+    expect(snapshot.rows.find((row) => row.ticker === "BBB")).toMatchObject({
+      qualifyingGapPct: 4.5,
+      regularOpenGapPct: null,
+    });
+    expect(snapshot.rows.find((row) => row.ticker === "CCC")).toMatchObject({
+      qualifyingGapPct: null,
+      regularOpenGapPct: null,
+    });
+    expect(snapshot.rows.find((row) => row.ticker === "DDD")).toMatchObject({
+      qualifyingGapPct: null,
+      regularOpenGapPct: null,
+    });
+    expect(sorted.rows.map((row) => row.ticker)).toEqual(["AAA", "AAA", "BBB", "CCC", "DDD"]);
+    expect(status.latestRows.find((row) => row.ticker === "AAA")?.qualifyingGapPct).toBe(12.5);
+    expect(exported).toEqual(["AAA", "AAA", "BBB", "CCC", "DDD"]);
+  });
+
+  it("keeps Surprises available with null gap fields when the gap schema is unavailable", async () => {
+    const env = createEnv([{
+      id: "1",
+      provider: "tradingview",
+      sourceSymbol: "NASDAQ:AAA",
+      ticker: "AAA",
+      exchange: "NASDAQ",
+      companyName: "Company",
+      sector: "Tech",
+      industry: "Software",
+      marketCap: 1_000_000_000,
+      avgDollarVolume30d: null,
+      reportDate: "2026-07-16",
+      reportTimestamp: null,
+      reportTime: null,
+      fiscalPeriodEnd: "2026-06-30",
+      season: "2026 Q2",
+      epsActual: 1,
+      epsEstimate: 0.9,
+      epsSurprise: 0.1,
+      epsSurprisePct: 11.1,
+      revenueActual: null,
+      revenueEstimate: null,
+      revenueSurprise: null,
+      revenueSurprisePct: null,
+      firstSeenAt: null,
+      lastSeenAt: null,
+      rawJson: null,
+    }], [
+      { ticker: "AAA", reportDate: "2026-07-16", calculationStatus: "complete", qualifyingGapPct: 12.5, regularOpenGapPct: 9.25 },
+    ], { gapSchemaReady: false });
+
+    const result = await loadEarningsSurprisesSnapshot(env, {
+      startDate: "2026-01-01",
+      includeOtc: true,
+    });
+
+    expect(result.schemaReady).toBe(true);
+    expect(result.rows[0]).toMatchObject({ qualifyingGapPct: null, regularOpenGapPct: null });
+    expect(env.__queries.some((sql) => sql.includes("LEFT JOIN") && sql.includes("earnings_gap_events"))).toBe(false);
   });
 
   it("loads one unpaginated filtered snapshot and derives its facets", async () => {

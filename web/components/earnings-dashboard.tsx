@@ -60,6 +60,8 @@ type SortKey = Extract<EarningsSnapshotSortKey,
   | "epsSurprisePct"
   | "epsSurprise"
   | "revenueSurprisePct"
+  | "qualifyingGapPct"
+  | "regularOpenGapPct"
   | "marketCap"
   | "sector"
   | "industry"
@@ -138,6 +140,8 @@ type SurpriseColumnKey =
   | "epsActual"
   | "epsEstimate"
   | "revenueSurprisePct"
+  | "qualifyingGapPct"
+  | "regularOpenGapPct"
   | "marketCap"
   | "sector"
   | "industry"
@@ -173,6 +177,8 @@ const DEFAULT_SURPRISE_COLUMN_ORDER: SurpriseColumnKey[] = [
   "epsActual",
   "epsEstimate",
   "revenueSurprisePct",
+  "qualifyingGapPct",
+  "regularOpenGapPct",
   "marketCap",
   "sector",
   "industry",
@@ -1029,6 +1035,22 @@ function EarningsSurprisesPanel() {
       align: "right",
       cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
       render: (row) => <span className={pctClass(row.revenueSurprisePct)}>{formatPct(row.revenueSurprisePct)}</span>,
+    },
+    {
+      key: "qualifyingGapPct",
+      label: "Best Gap",
+      sortKey: "qualifyingGapPct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono font-semibold",
+      render: (row) => <span className={pctClass(row.qualifyingGapPct)}>{formatPct(row.qualifyingGapPct)}</span>,
+    },
+    {
+      key: "regularOpenGapPct",
+      label: "Open %",
+      sortKey: "regularOpenGapPct",
+      align: "right",
+      cellClassName: "whitespace-nowrap px-3 py-3 text-right font-mono",
+      render: (row) => <span className={pctClass(row.regularOpenGapPct)}>{formatPct(row.regularOpenGapPct)}</span>,
     },
     {
       key: "marketCap",
