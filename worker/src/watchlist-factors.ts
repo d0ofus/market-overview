@@ -523,8 +523,9 @@ function high52Week(bars: DailyBar[] | undefined): number | null {
 export function calculatePriorStrongMovePct(
   bars: Array<{ date: string; l: number; h: number }> | undefined,
   lookbackMonths: number,
+  asOfDate = new Date().toISOString().slice(0, 10),
 ): number | null {
-  const cutoff = addUtcDays(new Date().toISOString().slice(0, 10), -monthsToCalendarDays(lookbackMonths));
+  const cutoff = addUtcDays(asOfDate, -monthsToCalendarDays(lookbackMonths));
   const recent = (bars ?? []).filter((bar) => bar.date >= cutoff && Number.isFinite(bar.l) && Number.isFinite(bar.h));
   if (recent.length < 2) return null;
   let minLow = Number.POSITIVE_INFINITY;

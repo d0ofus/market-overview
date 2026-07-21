@@ -449,7 +449,7 @@ describe("watchlist compiler service helpers", () => {
       { date: "2026-04-01", l: 90, h: 100 },
       { date: "2026-04-02", l: 80, h: 85 },
       { date: "2026-04-03", l: 95, h: 120 },
-    ], 3);
+    ], 3, "2026-04-03");
 
     expect(move).toBe(50);
   });
