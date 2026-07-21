@@ -180,6 +180,7 @@ describe("loadSnapshot read-only mode", () => {
       asOfDate: null,
       generatedAt: null,
       providerLabel: null,
+      generationId: null,
       expectedAsOfDate: expect.any(String),
       freshnessStatus: "stale",
       freshnessCoveragePct: 0,
@@ -226,7 +227,7 @@ describe("loadSnapshot read-only mode", () => {
 
       expect(snapshot.expectedAsOfDate).toBe("2026-07-10");
       expect(snapshot.freshnessStatus).toBe("stale");
-      expect(row?.price).toBeNull();
+      expect(row?.price).toBe(500);
       expect(row?.sparkline).toBeNull();
       expect(row?.quoteFreshnessStatus).toBe("unavailable");
       expect(row?.barFreshnessStatus).toBe("stale");

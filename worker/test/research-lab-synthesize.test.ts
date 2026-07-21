@@ -10,6 +10,7 @@ vi.mock("../src/research-lab/providers", () => ({
 
 import { RESEARCH_LAB_ANTHROPIC_MAX_TOKENS, RESEARCH_LAB_SYNTHESIS_MAX_PROMPT_CHARS } from "../src/research-lab/constants";
 import { synthesizeResearchLabOutput } from "../src/research-lab/synthesize";
+import type { ResearchLabOutputRecord } from "../src/research-lab/types";
 
 function buildMockResponse() {
   return {
@@ -141,7 +142,7 @@ function buildEvidence() {
   ];
 }
 
-function buildPriorOutput() {
+function buildPriorOutput(): ResearchLabOutputRecord {
   const longText = "A".repeat(2_400);
   return {
     id: "prior-1",

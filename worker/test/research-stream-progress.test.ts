@@ -23,7 +23,8 @@ describe("research stream progress pump", () => {
     expect(work).toHaveBeenCalledTimes(1);
     expect(pump.isInFlight()).toBe(true);
 
-    resolveWork?.();
+    expect(resolveWork).not.toBeNull();
+    (resolveWork as unknown as () => void)();
     await first;
 
     expect(pump.isInFlight()).toBe(false);

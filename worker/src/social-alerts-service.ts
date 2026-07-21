@@ -264,7 +264,7 @@ export function summarizeSocialAlertMetrics(rows: Array<{ cashtags: string[] }>,
   };
 }
 
-function base64ToBytes(value: string): Uint8Array {
+function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -820,7 +820,11 @@ async function upsertRunPost(env: Env, runId: string, row: SocialAlertResultRow 
     .run();
 }
 
-export async function runSocialAlertScrape(env: Env, body: unknown): Promise<{
+export async function runSocialAlertScrape(env: Env, body: unknown, options?: {
+  trigger?: "manual" | "scheduled";
+  scheduledLocalDate?: string | null;
+  scheduledLocalSlot?: string | null;
+}): Promise<{
   ok: boolean;
   run: { id: string; status: string; startDate: string; limitPerHandle: number };
   metrics: SocialAlertMetrics;

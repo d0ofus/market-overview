@@ -285,13 +285,13 @@ describe("options service", () => {
       IBKR_OPTIONS_CF_ACCESS_CLIENT_ID: "access-id",
       IBKR_OPTIONS_CF_ACCESS_CLIENT_SECRET: "access-secret",
     });
-    const fetchSpy = vi.fn(async () => jsonResponse({ ok: true }));
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ ok: true }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await loadOptionsStatus(env);
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
     const headers = init.headers as Headers;
     expect(headers.get("authorization")).toBe("Bearer secret");
     expect(headers.get("CF-Access-Client-Id")).toBe("access-id");

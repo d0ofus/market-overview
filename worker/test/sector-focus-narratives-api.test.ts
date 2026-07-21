@@ -51,18 +51,18 @@ function createEnv(input: {
       }
       if (sql.includes("FROM sector_tracker_entries e") && sql.includes("sector_tracker_entry_symbols")) {
         return {
-          results: Object.entries(input.narratives).flatMap(([sectorName, tickers]) =>
+          results: Object.entries(input.narratives).flatMap<{ sectorName: string; ticker: string | null }>(([sectorName, tickers]) =>
             tickers.length > 0
               ? tickers.map((ticker) => ({ sectorName, ticker }))
               : [{ sectorName, ticker: null }],
-          ) as T[],
+          ) as unknown as T[],
         };
       }
       if (sql.includes("FROM peer_groups pg") && sql.includes("ticker_peer_groups")) {
         return {
-          results: peers.flatMap((peer) => peer.tickers.length > 0
+          results: peers.flatMap<{ id: string; name: string; ticker: string | null }>((peer) => peer.tickers.length > 0
             ? peer.tickers.map((ticker) => ({ id: peer.id, name: peer.name, ticker }))
-            : [{ id: peer.id, name: peer.name, ticker: null }]) as T[],
+            : [{ id: peer.id, name: peer.name, ticker: null }]) as unknown as T[],
         };
       }
       if (sql.includes("FROM sector_focus_narratives f") && sql.includes("sector_focus_narrative_symbols fs")) {

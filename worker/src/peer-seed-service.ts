@@ -120,7 +120,7 @@ async function fetchFinnhubPeers(ticker: string, token: string): Promise<string[
   });
   if (!res.ok) throw new Error(`Finnhub peers request failed (${res.status})`);
   const json = await res.json() as unknown;
-  return Array.isArray(json) ? json.map((value) => normalizeTicker(value)).filter(Boolean) : [];
+  return Array.isArray(json) ? json.map((value) => normalizeTicker(String(value ?? ""))).filter(Boolean) : [];
 }
 
 async function fetchFmpPeers(ticker: string, apiKey: string): Promise<string[]> {
@@ -134,13 +134,13 @@ async function fetchFmpPeers(ticker: string, apiKey: string): Promise<string[]> 
     const json = await res.json() as unknown;
     if (Array.isArray(json)) {
       const first = json[0] as any;
-      if (typeof first === "string") return json.map((value) => normalizeTicker(value)).filter(Boolean);
+      if (typeof first === "string") return json.map((value) => normalizeTicker(String(value ?? ""))).filter(Boolean);
       if (first && typeof first === "object" && Array.isArray(first.peersList)) {
-        return first.peersList.map((value: unknown) => normalizeTicker(value)).filter(Boolean);
+        return first.peersList.map((value: unknown) => normalizeTicker(String(value ?? ""))).filter(Boolean);
       }
     }
     if (json && typeof json === "object" && Array.isArray((json as any).peersList)) {
-      return (json as any).peersList.map((value: unknown) => normalizeTicker(value)).filter(Boolean);
+      return (json as any).peersList.map((value: unknown) => normalizeTicker(String(value ?? ""))).filter(Boolean);
     }
   }
   return [];

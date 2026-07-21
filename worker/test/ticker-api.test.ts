@@ -29,14 +29,6 @@ vi.mock("../src/provider", async () => {
 const worker = (await import("../src/index")).default;
 
 type TestBar = { date: string; c: number };
-type BackfillStatusRow = {
-  status: string | null;
-  lastRequestedAt: string | null;
-  lastAttemptedAt: string | null;
-  lastCompletedAt: string | null;
-  updatedAt: string | null;
-  barCount: number;
-};
 
 function addUtcDays(isoDate: string, days: number): string {
   const date = new Date(`${isoDate}T00:00:00Z`);
@@ -67,48 +59,6 @@ function createTickerEnv(seed: Record<string, TestBar[]>) {
   const barsByTicker = new Map(
     Object.entries(seed).map(([ticker, bars]) => [ticker.toUpperCase(), [...bars]]),
   );
-  const backfillStatus = new Map<string, BackfillStatusRow>();
-
-  const runStatement = (sql: string, args: unknown[]) => {
-    if (sql.includes("INSERT INTO ticker_history_backfill_status")) {
-      const [tickerArg, timeframeArg, _targetBars, barCountArg, requestedAtArg, updatedAtArg] = args;
-      const ticker = String(tickerArg).toUpperCase();
-      const timeframe = String(timeframeArg).toUpperCase();
-      const key = `${ticker}|${timeframe}`;
-      const existing = backfillStatus.get(key);
-      backfillStatus.set(key, {
-        status: "queued",
-        barCount: Number(barCountArg ?? 0),
-        lastRequestedAt: String(requestedAtArg),
-        lastAttemptedAt: existing?.lastAttemptedAt ?? null,
-        lastCompletedAt: existing?.lastCompletedAt ?? null,
-        updatedAt: String(updatedAtArg),
-      });
-    }
-    if (sql.includes("UPDATE ticker_history_backfill_status")) {
-      const [statusArg, barCountArg, attemptedAtArg, completedAtArg, _lastErrorArg, updatedAtArg, tickerArg, timeframeArg] = args;
-      const ticker = String(tickerArg).toUpperCase();
-      const timeframe = String(timeframeArg).toUpperCase();
-      const key = `${ticker}|${timeframe}`;
-      const existing = backfillStatus.get(key) ?? {
-        status: null,
-        barCount: 0,
-        lastRequestedAt: null,
-        lastAttemptedAt: null,
-        lastCompletedAt: null,
-        updatedAt: null,
-      };
-      backfillStatus.set(key, {
-        ...existing,
-        status: String(statusArg),
-        barCount: Number(barCountArg ?? 0),
-        lastAttemptedAt: attemptedAtArg == null ? existing.lastAttemptedAt : String(attemptedAtArg),
-        lastCompletedAt: completedAtArg == null ? existing.lastCompletedAt : String(completedAtArg),
-        updatedAt: String(updatedAtArg),
-      });
-    }
-  };
-
   const env = {
     DB: {
       prepare(sql: string) {
@@ -125,29 +75,19 @@ function createTickerEnv(seed: Record<string, TestBar[]>) {
                 assetClass: "equity",
               } as T;
             }
-            if (sql.includes("FROM ticker_history_backfill_status")) {
-              const ticker = String(args[0]).toUpperCase();
-              const timeframe = String(args[1]).toUpperCase();
-              return (backfillStatus.get(`${ticker}|${timeframe}`) ?? null) as T | null;
-            }
-            if (sql.includes("COUNT(*) as barCount FROM daily_bars")) {
-              const ticker = String(args[0]).toUpperCase();
-              return { barCount: barsByTicker.get(ticker)?.length ?? 0 } as T;
-            }
             return null;
           },
           async all<T>() {
-            if (sql.includes("SELECT date, c FROM daily_bars")) {
-              const ticker = String(args[0]).toUpperCase();
+            if (sql.includes("SELECT date, c FROM alpaca_daily_bars")) {
+              const ticker = String(args[1]).toUpperCase();
               const rows = [...(barsByTicker.get(ticker) ?? [])]
                 .sort((left, right) => right.date.localeCompare(left.date));
-              const limit = sql.includes("LIMIT ?") ? Number(args[1]) : rows.length;
+              const limit = sql.includes("LIMIT ?") ? Number(args[2]) : rows.length;
               return { results: rows.slice(0, limit) as T[] };
             }
             return { results: [] as T[] };
           },
           async run() {
-            runStatement(sql, args);
             return {};
           },
         });
@@ -171,7 +111,7 @@ function createTickerEnv(seed: Record<string, TestBar[]>) {
     ALPACA_FEED: "iex",
   } as unknown as Env;
 
-  return { env, backfillStatus };
+  return { env };
 }
 
 describe("ticker API series timeframes", () => {
@@ -219,8 +159,8 @@ describe("ticker API series timeframes", () => {
     }
   });
 
-  it("queues 2Y background backfill for short history and respects the cooldown row", async () => {
-    const { env, backfillStatus } = createTickerEnv({ AAA: makeBars(120) });
+  it("keeps a short 2Y request stored-read only and directs refresh through admin", async () => {
+    const { env } = createTickerEnv({ AAA: makeBars(120) });
     const firstContext = createContext();
     const firstResponse = await worker.fetch(
       new Request("https://example.com/api/ticker/AAA?timeframe=2Y"),
@@ -236,30 +176,9 @@ describe("ticker API series timeframes", () => {
 
     expect(firstResponse.status).toBe(200);
     expect(firstBody.historyStatus.complete).toBe(false);
-    expect(firstBody.historyStatus.backfill.status).toBe("queued");
-    expect(firstContext.ctx.waitUntil).toHaveBeenCalledTimes(1);
-
-    await Promise.all(firstContext.waitUntilPromises);
-
-    expect(providerMocks.getProvider).toHaveBeenCalled();
-    expect(dailyBarsMocks.refreshDailyBarsIncremental).toHaveBeenCalledWith(env, expect.objectContaining({
-      tickers: ["AAA"],
-      replaceExisting: true,
-    }));
-    expect(backfillStatus.get("AAA|2Y")?.status).toBe("partial");
-
-    dailyBarsMocks.refreshDailyBarsIncremental.mockClear();
-    const secondContext = createContext();
-    const secondResponse = await worker.fetch(
-      new Request("https://example.com/api/ticker/AAA?timeframe=2Y"),
-      env,
-      secondContext.ctx,
-    );
-    const secondBody = await secondResponse.json() as { historyStatus: { backfill: { status: string } } };
-
-    expect(secondResponse.status).toBe(200);
-    expect(secondBody.historyStatus.backfill.status).toBe("recently_requested");
-    expect(secondContext.ctx.waitUntil).not.toHaveBeenCalled();
+    expect(firstBody.historyStatus.backfill.status).toBe("unavailable");
+    expect(firstContext.ctx.waitUntil).not.toHaveBeenCalled();
+    expect(providerMocks.getProvider).not.toHaveBeenCalled();
     expect(dailyBarsMocks.refreshDailyBarsIncremental).not.toHaveBeenCalled();
   });
 });

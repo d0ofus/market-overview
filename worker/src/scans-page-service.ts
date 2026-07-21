@@ -1,8 +1,9 @@
 import { getProvider } from "./provider";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
-import { meteredFetch } from "./provider-usage";
+import { meteredFetchWithRetry } from "./provider-usage";
 import {
   advanceRelativeStrengthState,
   bootstrapRelativeStrengthStateFromRatioRows,
@@ -1113,8 +1114,15 @@ function normalizeScanRule(rule: ScanPresetRule): ScanPresetRule {
     };
   }
   if (rule.operator === "in" || rule.operator === "not_in") {
-    const values = (Array.isArray(rule.value) ? rule.value : [rule.value])
-      .flatMap((value) => typeof value === "string" ? splitListRuleText(value) : [value])
+    const rawValues: ScanRuleScalar[] = Array.isArray(rule.value)
+      ? rule.value
+      : [rule.value as ScanRuleScalar];
+    const expandedValues: ScanRuleScalar[] = [];
+    for (const value of rawValues) {
+      if (typeof value === "string") expandedValues.push(...splitListRuleText(value));
+      else expandedValues.push(value);
+    }
+    const values = expandedValues
       .map((value) => normalizeScalarValue(value))
       .filter((value) => typeof value !== "string" || value.length > 0);
     return { ...rule, field, value: values };
@@ -1892,12 +1900,12 @@ async function fetchTradingViewScanRowsInternal(
       body: JSON.stringify(payload),
     };
     const response = env
-      ? await meteredFetch(env, TV_SCAN_URL, requestInit, {
+      ? await meteredFetchWithRetry(env, TV_SCAN_URL, requestInit, {
         providerKey: "tradingview",
         endpointKey: "scanner-america",
         caller: "scans-page",
         symbolCount: rangeLimit,
-      })
+      }, 8_000)
       : await fetch(TV_SCAN_URL, requestInit);
     if (!response.ok) {
       const body = await response.text();
@@ -2480,7 +2488,7 @@ async function loadRelativeStrengthRatioCoverage(
     if (
       !current
       || (row.lastDate ?? "") > (current.lastDate ?? "")
-      || (row.lastDate === current.lastDate && row.rowCount > current.rowCount)
+      || (row.lastDate === current.lastDate && Number(row.rowCount ?? 0) > Number(current.rowCount ?? 0))
     ) {
       rowsByTicker.set(ticker, row);
     }
@@ -2770,18 +2778,21 @@ async function loadStoredDailyBarsInRange(
   ));
   if (uniqueTickers.length === 0) return [];
   const out: RelativeStrengthDailyBar[] = [];
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, date, o, h, l, c, volume
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date >= ?
          AND date <= ?
        ORDER BY ticker ASC, date ASC`,
     )
-      .bind(...chunk, startDate, endDate)
+      .bind(feed, ...chunk, startDate, endDate)
       .all<RelativeStrengthDailyBar>();
     out.push(
       ...(rows.results ?? []).map((row) => ({
@@ -2810,17 +2821,20 @@ async function loadDailyBarCoverage(
   ));
   const out = new Map<string, DailyBarCoverageRow>();
   if (uniqueTickers.length === 0) return out;
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, MAX(date) as lastDate, COUNT(*) as barCount
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date <= ?
        GROUP BY ticker`,
     )
-      .bind(...chunk, endDate)
+      .bind(feed, ...chunk, endDate)
       .all<DailyBarCoverageRow>();
     for (const row of rows.results ?? []) {
       out.set(row.ticker.toUpperCase(), {
@@ -2846,10 +2860,12 @@ async function loadStoredDailyBarsByCount(
   ));
   if (uniqueTickers.length === 0 || barLimit <= 0) return [];
   const out: RelativeStrengthDailyBar[] = [];
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + RS_STORED_BAR_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, date, o, h, l, c, volume
        FROM (
          SELECT
@@ -2861,14 +2877,15 @@ async function loadStoredDailyBarsByCount(
            c,
            volume,
            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as row_num
-         FROM daily_bars
-         WHERE ticker IN (${placeholders})
+         FROM alpaca_daily_bars
+         WHERE feed = ?
+           AND ticker IN (${placeholders})
            AND date <= ?
        )
        WHERE row_num <= ?
        ORDER BY ticker ASC, date ASC`,
     )
-      .bind(...chunk, endDate, barLimit)
+      .bind(feed, ...chunk, endDate, barLimit)
       .all<RelativeStrengthDailyBar>();
     out.push(
       ...(rows.results ?? []).map((row) => ({
@@ -3701,17 +3718,10 @@ async function loadManualRelativeStrengthUniverseCandidates(
      FROM symbols s
      WHERE COALESCE(s.is_active, 1) = 1
        AND LOWER(COALESCE(s.asset_class, 'equity')) IN ('equity', 'stock', 'stocks', 'common_stock', 'common stock')
-       AND EXISTS (
-         SELECT 1
-         FROM daily_bars d
-         WHERE d.ticker = s.ticker
-           AND d.date <= ?
-         LIMIT 1
-       )
      ORDER BY s.ticker ASC
      LIMIT ?`,
   )
-    .bind(expectedTradingDate, MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE)
+    .bind(MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE)
     .all<{
       ticker: string;
       name: string | null;
@@ -4544,6 +4554,7 @@ async function refreshManualRelativeStrengthCandidatesOnce(
       provider: getProvider(env, { fallbackEnabled: false }),
       providerBatchSize: MANUAL_RS_SCAN_REFRESH_CHUNK_SIZE,
       continueOnError: true,
+      target: "market",
     });
   } catch (error) {
     console.warn("manual relative strength bounded daily-bar refresh failed", {
@@ -6353,31 +6364,6 @@ export async function advanceScannerCacheScanRuns(
   };
 }
 
-async function storeDailyBars(env: Env, bars: RelativeStrengthDailyBar[]): Promise<void> {
-  if (bars.length === 0) return;
-  const statements = bars.map((bar) =>
-    env.DB.prepare(
-      `INSERT INTO daily_bars
-         (ticker, date, o, h, l, c, volume, source_provider, source_feed, fetched_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'scanner-fallback', NULL, CURRENT_TIMESTAMP)
-       ON CONFLICT(ticker, date) DO UPDATE SET
-         o = excluded.o,
-         h = excluded.h,
-         l = excluded.l,
-         c = excluded.c,
-         volume = excluded.volume,
-         source_provider = excluded.source_provider,
-         source_feed = NULL,
-         fetched_at = excluded.fetched_at
-       WHERE COALESCE(daily_bars.source_provider, '') <> 'alpaca'`,
-    ).bind(bar.ticker.toUpperCase(), bar.date, bar.o, bar.h, bar.l, bar.c, (bar as { volume?: number }).volume ?? 0),
-  );
-  for (let index = 0; index < statements.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
-    const chunk = statements.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.DB.batch(chunk);
-  }
-}
-
 async function ensureStoredDailyBarsCurrent(
   env: Env,
   tickers: string[],
@@ -6406,6 +6392,7 @@ async function ensureStoredDailyBarsCurrent(
       provider: getProvider(env, { fallbackEnabled: options.fallbackEnabled }),
       providerBatchSize: options.providerBatchSize,
       continueOnError: options.continueOnError,
+      target: "market",
     });
   }
   const sparseTickers = uniqueTickers.filter((ticker) => {
@@ -6421,6 +6408,7 @@ async function ensureStoredDailyBarsCurrent(
       replaceExisting: true,
       providerBatchSize: options.providerBatchSize,
       continueOnError: options.continueOnError,
+      target: "market",
     });
   }
 }
@@ -6448,6 +6436,7 @@ async function ensureRelativeStrengthBenchmarkBarsCurrent(
         endDate: expectedTradingDate,
         maxTickers: 1,
         provider: fallbackProvider,
+        target: "market",
       });
       coverage = await loadCoverage();
     }
@@ -6459,6 +6448,7 @@ async function ensureRelativeStrengthBenchmarkBarsCurrent(
         maxTickers: 1,
         provider: fallbackProvider,
         replaceExisting: true,
+        target: "market",
       });
     }
   }
@@ -7793,7 +7783,7 @@ async function buildRelativeStrengthSnapshotResult(
     tradingDate,
   );
   const scaleFactor = preset.verticalOffset * 100;
-  const mergedRows = Array.from(cacheRowsByTicker.values())
+  const mergedRows: ScanSnapshotRow[] = Array.from(cacheRowsByTicker.values())
     .filter((row) => cachedRowMatchesOutputMode(row, preset.outputMode))
     .map((row) => {
       const metadata = metadataByTicker.get(row.ticker);
@@ -7832,7 +7822,7 @@ async function buildRelativeStrengthSnapshotResult(
         }),
       } satisfies ScanSnapshotRow;
     })
-    .filter((row): row is ScanSnapshotRow => Boolean(row));
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
   const rows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
   return {
@@ -8136,23 +8126,6 @@ async function ensureRelativeStrengthJobBenchmarkBars(
     identity.requiredBarCount,
   );
 
-  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length < identity.requiredBarCount) {
-    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
-    await refreshDailyBarsIncremental(env, {
-      tickers: [identity.benchmarkDataTicker],
-      startDate,
-      endDate: identity.expectedTradingDate,
-      maxTickers: 1,
-      provider: fallbackProvider,
-    });
-    benchmarkBars = await loadStoredDailyBarsByCount(
-      env,
-      [identity.benchmarkDataTicker],
-      identity.expectedTradingDate,
-      identity.requiredBarCount,
-    );
-  }
-
   if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
     const fallbackBars = await fetchBenchmarkBarsWithFallback(
       env,
@@ -8161,7 +8134,6 @@ async function ensureRelativeStrengthJobBenchmarkBars(
       identity.expectedTradingDate,
     );
     if (fallbackBars.length > 0) {
-      await storeDailyBars(env, fallbackBars);
       benchmarkBars = chooseFresherBars(benchmarkBars, fallbackBars);
     }
   }
@@ -8199,23 +8171,6 @@ async function ensureRelativeStrengthRunBenchmarkBars(
     identity.requiredBarCount,
   );
 
-  if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length < identity.requiredBarCount) {
-    const fallbackProvider = getProvider({ ...env, DATA_PROVIDER: "stooq" } as Env);
-    await refreshDailyBarsIncremental(env, {
-      tickers: [identity.benchmarkDataTicker],
-      startDate,
-      endDate: identity.expectedTradingDate,
-      maxTickers: 1,
-      provider: fallbackProvider,
-    });
-    benchmarkBars = await loadStoredDailyBarsByCount(
-      env,
-      [identity.benchmarkDataTicker],
-      identity.expectedTradingDate,
-      identity.requiredBarCount,
-    );
-  }
-
   if (latestBarDate(benchmarkBars) !== identity.expectedTradingDate || benchmarkBars.length === 0) {
     const fallbackBars = await fetchBenchmarkBarsWithFallback(
       env,
@@ -8224,7 +8179,6 @@ async function ensureRelativeStrengthRunBenchmarkBars(
       identity.expectedTradingDate,
     );
     if (fallbackBars.length > 0) {
-      await storeDailyBars(env, fallbackBars);
       benchmarkBars = chooseFresherBars(benchmarkBars, fallbackBars);
     }
   }
@@ -8598,7 +8552,7 @@ async function ensureRelativeStrengthSnapshotCurrent(
   completedJob: ScanRefreshJobRecord,
 ): Promise<ScanSnapshot> {
   const usableSnapshot = await loadLatestUsableScansSnapshot(env, preset.id);
-  if (snapshotIsFreshForCompletedJob(usableSnapshot, completedJob)) {
+  if (usableSnapshot && snapshotIsFreshForCompletedJob(usableSnapshot, completedJob)) {
     return usableSnapshot;
   }
   const result = await refreshRelativeStrengthSnapshot(env, preset, completedJob);
@@ -9398,8 +9352,8 @@ export async function processQueuedRelativeStrengthRefreshJobs(
     }
     const refreshedQueue = await listQueuedRelativeStrengthMaterializationRuns(env);
     const runsToProcess = refreshedQueue
-      .map((row) => activeRunsById.get(row.runId))
-      .filter((run): run is RelativeStrengthMaterializationRunRecord => Boolean(run) && !isRelativeStrengthRunLeaseActive(run));
+      .flatMap((row) => row.runId ? [activeRunsById.get(row.runId)] : [])
+      .filter((run): run is RelativeStrengthMaterializationRunRecord => run != null && !isRelativeStrengthRunLeaseActive(run));
     if (runsToProcess.length === 0) break;
 
     let advancedAny = false;
@@ -9761,6 +9715,48 @@ export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTIO
     ).bind(window),
     env.DB.prepare("DELETE FROM scan_snapshots WHERE datetime(generated_at) < datetime('now', ?)").bind(window),
   ]);
+  if (env.SCANNER_CACHE_DB) {
+    const deletableRsRuns = `
+      SELECT id
+      FROM rs_scan_runs
+      WHERE status NOT IN ('queued', 'running')
+        AND datetime(updated_at) < datetime('now', ?)
+        AND id NOT IN (
+          SELECT id
+          FROM (
+            SELECT id, ROW_NUMBER() OVER (
+              PARTITION BY preset_id
+              ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC
+            ) AS row_number
+            FROM rs_scan_runs
+            WHERE status = 'completed'
+          )
+          WHERE row_number = 1
+        )`;
+    const deletableVcpRuns = `
+      SELECT id
+      FROM vcp_scan_runs
+      WHERE status NOT IN ('queued', 'running')
+        AND datetime(updated_at) < datetime('now', ?)
+        AND id NOT IN (
+          SELECT id
+          FROM (
+            SELECT id, ROW_NUMBER() OVER (
+              PARTITION BY preset_id
+              ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC
+            ) AS row_number
+            FROM vcp_scan_runs
+            WHERE status = 'completed'
+          )
+          WHERE row_number = 1
+        )`;
+    await env.SCANNER_CACHE_DB.batch([
+      env.SCANNER_CACHE_DB.prepare(`DELETE FROM rs_scan_run_tickers WHERE run_id IN (${deletableRsRuns})`).bind(window),
+      env.SCANNER_CACHE_DB.prepare(`DELETE FROM rs_scan_runs WHERE id IN (${deletableRsRuns})`).bind(window),
+      env.SCANNER_CACHE_DB.prepare(`DELETE FROM vcp_scan_run_tickers WHERE run_id IN (${deletableVcpRuns})`).bind(window),
+      env.SCANNER_CACHE_DB.prepare(`DELETE FROM vcp_scan_runs WHERE id IN (${deletableVcpRuns})`).bind(window),
+    ]);
+  }
 }
 
 export { buildTradingViewScanPayload, fetchTradingViewScanRows };

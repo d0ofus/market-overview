@@ -39,7 +39,7 @@ export function buildTickerSearchQueries(input: {
     if (family.key === "analyst_commentary") return input.settings.sourceFamilies.analystCommentary;
     return true;
   });
-  const rendered = filtered.map((family) => ({
+  const rendered = filtered.map<PerplexitySearchQuery>((family) => ({
     key: family.key,
     label: family.label,
     query: renderTemplate(family.queryTemplate, {

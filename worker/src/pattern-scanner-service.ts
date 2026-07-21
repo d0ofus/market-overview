@@ -1,5 +1,6 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, WorkerScheduleSettings } from "./types";
 
@@ -558,18 +559,19 @@ async function loadPatternBarCoverage(
   for (let index = 0; index < unique.length; index += PATTERN_UNIVERSE_QUERY_CHUNK_SIZE) {
     const chunk = unique.slice(index, index + PATTERN_UNIVERSE_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT
          ticker,
          MAX(date) as latestBarDate,
          COUNT(*) as barCount
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date >= ?
          AND date <= ?
        GROUP BY ticker`,
     )
-      .bind(...chunk, startDate, endDate)
+      .bind(marketDataFeed(env), ...chunk, startDate, endDate)
       .all<{ ticker: string; latestBarDate: string | null; barCount: number | string | null }>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
@@ -615,6 +617,7 @@ async function ensurePatternBarsHydrated(
       endDate: input.endDate,
       provider: getProvider(env, { yahooPreferredTickers: uniqueTickers }),
       replaceExisting: true,
+      target: "market",
     });
   } catch (error) {
     console.error("pattern scanner history hydration failed; stored bars will be used", {
@@ -1020,7 +1023,7 @@ async function loadBarsByCount(
   for (let index = 0; index < uniqueTickers.length; index += PATTERN_UNIVERSE_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + PATTERN_UNIVERSE_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT ticker, date, o, h, l, c, volume
        FROM (
          SELECT
@@ -1032,14 +1035,15 @@ async function loadBarsByCount(
            c,
            volume,
            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as row_num
-         FROM daily_bars
-         WHERE ticker IN (${placeholders})
+         FROM alpaca_daily_bars
+         WHERE feed = ?
+           AND ticker IN (${placeholders})
            AND date <= ?
        )
        WHERE row_num <= ?
        ORDER BY ticker ASC, date ASC`,
     )
-      .bind(...chunk, endDate, barLimit)
+      .bind(marketDataFeed(env), ...chunk, endDate, barLimit)
       .all<PatternDailyBar>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
@@ -1345,11 +1349,6 @@ export async function loadPatternChartData(
   const benchmarkTicker = profile?.benchmarkTickers[0] ?? DEFAULT_BENCHMARK_TICKER;
   const ticker = input.ticker.trim().toUpperCase();
   const contextWindowBars = Math.max(MIN_EXTRACT_BARS, Math.min(520, Math.trunc(input.contextBars ?? profile?.settings.contextWindowBars ?? DEFAULT_CONTEXT_WINDOW_BARS)));
-  await ensurePatternBarsHydrated(env, {
-    tickers: [ticker, benchmarkTicker],
-    endDate: input.endDate,
-    contextWindowBars,
-  });
   const barsByTicker = await loadBarsByCount(env, [ticker, benchmarkTicker], input.endDate, contextWindowBars);
   const tickerBars = barsByTicker.get(ticker) ?? [];
   const benchmarkBars = barsByTicker.get(benchmarkTicker) ?? [];
@@ -2316,48 +2315,104 @@ export async function loadPatternModelHistory(env: Env, profileId = DEFAULT_PATT
   return (rows.results ?? []).map(mapModelRow);
 }
 
+type PatternUniverseSymbol = {
+  ticker: string;
+  name: string | null;
+  exchange: string | null;
+  assetClass: string | null;
+  sector: string | null;
+  industry: string | null;
+};
+
+type PatternUniverseStats = {
+  ticker: string;
+  price: number;
+  latestBarDate: string;
+  avgDollarVolume20d: number;
+  barCount: number;
+};
+
+async function loadActivePatternSymbols(env: Env): Promise<Map<string, PatternUniverseSymbol>> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       UPPER(ticker) as ticker,
+       name,
+       exchange,
+       asset_class as assetClass,
+       sector,
+       industry
+     FROM symbols
+     WHERE COALESCE(is_active, 1) = 1
+       AND COALESCE(catalog_managed, 0) = 1
+       AND lower(COALESCE(asset_class, '')) IN ('equity', 'stock')
+     ORDER BY ticker ASC`,
+  ).all<PatternUniverseSymbol>();
+  return new Map((rows.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
+}
+
+async function loadCanonicalPatternUniverseStats(
+  env: Env,
+  profile: PatternProfile,
+  tradingDate: string,
+  tickers: string[],
+  offset: number | null,
+  limit: number | null,
+): Promise<PatternUniverseStats[] | { count: number | string | null }> {
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
+  const eligibleSql = `
+    WITH ranked AS (
+      SELECT
+        ticker,
+        date,
+        c,
+        volume,
+        ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as row_number
+      FROM alpaca_daily_bars
+      WHERE feed = ?
+        AND date <= ?
+        AND ticker IN (SELECT UPPER(CAST(value AS TEXT)) FROM json_each(?))
+    ),
+    stats AS (
+      SELECT
+        ticker,
+        MAX(CASE WHEN row_number = 1 THEN date END) as latestBarDate,
+        MAX(CASE WHEN row_number = 1 THEN c END) as price,
+        AVG(CASE WHEN row_number <= 20 THEN c * COALESCE(volume, 0) END) as avgDollarVolume20d,
+        COUNT(*) as barCount
+      FROM ranked
+      GROUP BY ticker
+    )
+    SELECT ticker, latestBarDate, price, avgDollarVolume20d, barCount
+    FROM stats
+    WHERE price >= ?
+      AND avgDollarVolume20d >= ?
+      AND barCount >= ?`;
+  const bindings: unknown[] = [
+    feed,
+    tradingDate,
+    JSON.stringify(tickers),
+    profile.prefilterConfig.minPrice,
+    profile.prefilterConfig.minDollarVolume20d,
+    profile.prefilterConfig.minBars,
+  ];
+  if (offset == null || limit == null) {
+    return (await db.prepare(`SELECT COUNT(*) as count FROM (${eligibleSql})`)
+      .bind(...bindings)
+      .first<{ count: number | string | null }>()) ?? { count: 0 };
+  }
+  return (await db.prepare(`${eligibleSql} ORDER BY ticker ASC LIMIT ? OFFSET ?`)
+    .bind(...bindings, limit, offset)
+    .all<PatternUniverseStats>()).results ?? [];
+}
+
 async function countEligibleUniverse(env: Env, profile: PatternProfile, tradingDate: string): Promise<number> {
-  const row = await env.DB.prepare(
-    `WITH latest AS (
-       SELECT ticker, c as price
-       FROM (
-         SELECT ticker, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
-         FROM daily_bars
-         WHERE date <= ?
-       )
-       WHERE rn = 1
-     ),
-     avg20 AS (
-       SELECT ticker, AVG(c * COALESCE(volume, 0)) as avgDollarVolume20d
-       FROM (
-         SELECT ticker, c, volume, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
-         FROM daily_bars
-         WHERE date <= ?
-       )
-       WHERE rn <= 20
-       GROUP BY ticker
-     ),
-     coverage AS (
-       SELECT ticker, COUNT(*) as barCount
-       FROM daily_bars
-       WHERE date <= ?
-       GROUP BY ticker
-     )
-     SELECT COUNT(*) as count
-     FROM symbols s
-     JOIN latest l ON l.ticker = s.ticker
-     JOIN avg20 a ON a.ticker = s.ticker
-     JOIN coverage c ON c.ticker = s.ticker
-     WHERE COALESCE(s.is_active, 1) = 1
-       AND COALESCE(s.catalog_managed, 0) = 1
-       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
-       AND l.price >= ?
-       AND a.avgDollarVolume20d >= ?
-       AND c.barCount >= ?`,
-  )
-    .bind(tradingDate, tradingDate, tradingDate, profile.prefilterConfig.minPrice, profile.prefilterConfig.minDollarVolume20d, profile.prefilterConfig.minBars)
-    .first<{ count: number | string | null }>();
-  return Math.max(0, Number(row?.count ?? 0) || 0);
+  const symbols = await loadActivePatternSymbols(env);
+  if (symbols.size === 0) return 0;
+  const row = await loadCanonicalPatternUniverseStats(env, profile, tradingDate, Array.from(symbols.keys()), null, null) as {
+    count: number | string | null;
+  };
+  return Math.max(0, Number(row.count ?? 0) || 0);
 }
 
 async function loadEligibleUniverseBatch(
@@ -2367,80 +2422,31 @@ async function loadEligibleUniverseBatch(
   offset: number,
   limit: number,
 ): Promise<UniverseCandidate[]> {
-  const rows = await env.DB.prepare(
-    `WITH latest AS (
-       SELECT ticker, date as latestBarDate, c as price
-       FROM (
-         SELECT ticker, date, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
-         FROM daily_bars
-         WHERE date <= ?
-       )
-       WHERE rn = 1
-     ),
-     avg20 AS (
-       SELECT ticker, AVG(c * COALESCE(volume, 0)) as avgDollarVolume20d
-       FROM (
-         SELECT ticker, c, volume, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
-         FROM daily_bars
-         WHERE date <= ?
-       )
-       WHERE rn <= 20
-       GROUP BY ticker
-     ),
-     coverage AS (
-       SELECT ticker, COUNT(*) as barCount
-       FROM daily_bars
-       WHERE date <= ?
-       GROUP BY ticker
-     )
-     SELECT
-       s.ticker,
-       s.name,
-       s.exchange,
-       s.asset_class as assetClass,
-       s.sector,
-       s.industry,
-       l.price,
-       l.latestBarDate,
-       a.avgDollarVolume20d,
-       c.barCount
-     FROM symbols s
-     JOIN latest l ON l.ticker = s.ticker
-     JOIN avg20 a ON a.ticker = s.ticker
-     JOIN coverage c ON c.ticker = s.ticker
-     WHERE COALESCE(s.is_active, 1) = 1
-       AND COALESCE(s.catalog_managed, 0) = 1
-       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
-       AND l.price >= ?
-       AND a.avgDollarVolume20d >= ?
-       AND c.barCount >= ?
-     ORDER BY s.ticker ASC
-     LIMIT ?
-     OFFSET ?`,
-  )
-    .bind(
-      tradingDate,
-      tradingDate,
-      tradingDate,
-      profile.prefilterConfig.minPrice,
-      profile.prefilterConfig.minDollarVolume20d,
-      profile.prefilterConfig.minBars,
-      limit,
-      offset,
-    )
-    .all<UniverseCandidate>();
-  return (rows.results ?? []).map((row) => ({
+  const symbols = await loadActivePatternSymbols(env);
+  if (symbols.size === 0) return [];
+  const rows = await loadCanonicalPatternUniverseStats(
+    env,
+    profile,
+    tradingDate,
+    Array.from(symbols.keys()),
+    Math.max(0, Math.trunc(offset)),
+    Math.max(1, Math.trunc(limit)),
+  ) as PatternUniverseStats[];
+  return rows.map((row) => {
+    const symbol = symbols.get(row.ticker.toUpperCase());
+    return {
     ticker: row.ticker.toUpperCase(),
-    name: row.name,
-    exchange: row.exchange,
-    assetClass: row.assetClass,
-    sector: row.sector,
-    industry: row.industry,
+    name: symbol?.name ?? null,
+    exchange: symbol?.exchange ?? null,
+    assetClass: symbol?.assetClass ?? null,
+    sector: symbol?.sector ?? null,
+    industry: symbol?.industry ?? null,
     price: asNumber(row.price),
     avgDollarVolume20d: asNumber(row.avgDollarVolume20d),
     barCount: Number(row.barCount ?? 0),
     latestBarDate: row.latestBarDate,
-  }));
+  };
+  });
 }
 
 export async function createPatternRun(env: Env, input: PatternRunCreateInput = {}): Promise<PatternRun> {
@@ -2456,13 +2462,6 @@ export async function createPatternRun(env: Env, input: PatternRunCreateInput = 
     return existing;
   }
   if (existing && !input.force && existing.status === "completed") return existing;
-  if (existing && input.force) {
-    await db.batch([
-      db.prepare("DELETE FROM pattern_run_candidates WHERE run_id IN (SELECT id FROM pattern_runs WHERE profile_id = ? AND trading_date = ?)").bind(profile.id, tradingDate),
-      db.prepare("DELETE FROM pattern_scores_latest WHERE profile_id = ? AND trading_date = ?").bind(profile.id, tradingDate),
-      db.prepare("DELETE FROM pattern_runs WHERE profile_id = ? AND trading_date = ?").bind(profile.id, tradingDate),
-    ]);
-  }
   const totalCount = await countEligibleUniverse(env, profile, tradingDate);
   const runId = crypto.randomUUID();
   await db.prepare(
@@ -2808,6 +2807,63 @@ async function clearLatestPatternScoresForRun(env: Env, runId: string): Promise<
   await db.prepare("DELETE FROM pattern_scores_latest WHERE run_id = ?").bind(runId).run();
 }
 
+async function publishCompletedPatternRun(
+  env: Env,
+  run: PatternRun,
+  progress: { processedCount: number; matchedCount: number; cursorOffset: number; warning: string | null },
+): Promise<void> {
+  const db = requirePatternDb(env);
+  const completedAt = new Date().toISOString();
+  await db.batch([
+    db.prepare("DELETE FROM pattern_scores_latest WHERE profile_id = ?").bind(run.profileId),
+    db.prepare(
+      `INSERT INTO pattern_scores_latest
+        (profile_id, ticker, run_id, candidate_id, trading_date, rank, score, reasons_json,
+         nearest_approved_json, nearest_rejected_json, feature_json, shape_json,
+         source_metadata_json, updated_at)
+       SELECT
+         c.profile_id, c.ticker, c.run_id, c.id, r.trading_date, c.rank, c.score,
+         c.reasons_json, c.nearest_approved_json, c.nearest_rejected_json,
+         c.feature_json, c.shape_json, c.source_metadata_json, ?
+       FROM pattern_run_candidates c
+       JOIN pattern_runs r ON r.id = c.run_id
+       WHERE c.run_id = ?`,
+    ).bind(completedAt, run.id),
+    db.prepare(
+      `INSERT INTO pattern_completed_run_pointer (profile_id, run_id, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET
+         run_id = excluded.run_id,
+         updated_at = excluded.updated_at`,
+    ).bind(run.profileId, run.id, completedAt),
+    db.prepare(
+      `UPDATE pattern_runs
+       SET status = 'completed',
+           phase = 'completed',
+           processed_count = ?,
+           matched_count = ?,
+           cursor_offset = ?,
+           auto_continue = 0,
+           last_advanced_at = ?,
+           lease_owner = NULL,
+           lease_expires_at = NULL,
+           completed_at = ?,
+           warning = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    ).bind(
+      progress.processedCount,
+      progress.matchedCount,
+      progress.cursorOffset,
+      completedAt,
+      completedAt,
+      progress.warning,
+      completedAt,
+      run.id,
+    ),
+  ]);
+}
+
 export async function processPatternScanRun(
   env: Env,
   runId: string,
@@ -2945,39 +3001,6 @@ export async function processPatternScanRun(
               JSON.stringify(snapshot.shapeJson),
               JSON.stringify(sourceMetadata),
             ),
-          db.prepare(
-            `INSERT INTO pattern_scores_latest
-              (profile_id, ticker, run_id, candidate_id, trading_date, rank, score, reasons_json, nearest_approved_json, nearest_rejected_json, feature_json, shape_json, source_metadata_json, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-             ON CONFLICT(profile_id, ticker) DO UPDATE SET
-               run_id = excluded.run_id,
-               candidate_id = excluded.candidate_id,
-               trading_date = excluded.trading_date,
-               rank = excluded.rank,
-               score = excluded.score,
-               reasons_json = excluded.reasons_json,
-               nearest_approved_json = excluded.nearest_approved_json,
-               nearest_rejected_json = excluded.nearest_rejected_json,
-               feature_json = excluded.feature_json,
-               shape_json = excluded.shape_json,
-               source_metadata_json = excluded.source_metadata_json,
-               updated_at = CURRENT_TIMESTAMP`,
-          )
-            .bind(
-              profile.id,
-              row.ticker,
-              run.id,
-              candidateId,
-              run.tradingDate,
-              rank,
-              reasons.score,
-              JSON.stringify(reasons),
-              JSON.stringify(nearestApproved),
-              JSON.stringify(nearestRejected),
-              JSON.stringify(snapshot.featureJson),
-              JSON.stringify(snapshot.shapeJson),
-              JSON.stringify(sourceMetadata),
-            ),
         );
       }
       if (statements.length > 0) await db.batch(statements);
@@ -3009,17 +3032,10 @@ export async function processPatternScanRun(
     }
     if (cursorOffset >= run.totalCount) {
       await rerankRunCandidates(env, run.id);
-      await updatePatternRun(env, run.id, {
-        status: "completed",
-        phase: "completed",
+      await publishCompletedPatternRun(env, run, {
         processedCount,
         matchedCount,
         cursorOffset,
-        autoContinue: false,
-        lastAdvancedAt: new Date().toISOString(),
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        completedAt: new Date().toISOString(),
         warning,
       });
     } else {
@@ -3056,10 +3072,9 @@ async function rerankRunCandidates(env: Env, runId: string): Promise<void> {
   )
     .bind(runId)
     .all<{ id: string; profileId: string; ticker: string }>();
-  const statements = (rows.results ?? []).map((row, index) => [
+  const statements = (rows.results ?? []).map((row, index) =>
     db.prepare("UPDATE pattern_run_candidates SET rank = ? WHERE id = ?").bind(index + 1, row.id),
-    db.prepare("UPDATE pattern_scores_latest SET rank = ? WHERE profile_id = ? AND ticker = ? AND run_id = ?").bind(index + 1, row.profileId, row.ticker, runId),
-  ]).flat();
+  );
   for (let index = 0; index < statements.length; index += 100) {
     const chunk = statements.slice(index, index + 100);
     if (chunk.length > 0) await db.batch(chunk);
@@ -3235,10 +3250,15 @@ export async function listLatestPatternCandidates(env: Env, profileId = DEFAULT_
        ) as reviewedAt
      FROM pattern_scores_latest
      WHERE profile_id = ?
+       AND run_id = (
+         SELECT run_id
+         FROM pattern_completed_run_pointer
+         WHERE profile_id = ?
+       )
      ORDER BY score DESC, ticker ASC
      LIMIT ?`,
   )
-    .bind(profileId, Math.max(1, Math.min(500, limit)))
+    .bind(profileId, profileId, Math.max(1, Math.min(500, limit)))
     .all<PatternCandidateRow>();
   return (rows.results ?? []).map(mapCandidateRow);
 }

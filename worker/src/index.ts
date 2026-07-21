@@ -7,7 +7,6 @@ import {
   computeAndStoreSnapshot,
   computeOverviewFreshnessDiagnostics,
   emptySnapshotResponse,
-  isOverviewFreshnessSufficientForScheduledSnapshot,
   loadSnapshot,
   OverviewFreshnessError,
   recomputeBreadthFromStoredBars,
@@ -92,7 +91,7 @@ import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
-import { parseLocalTime, shouldRunScheduledEod } from "./refresh-timing";
+import { parseLocalTime, zonedParts } from "./refresh-timing";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import {
   getMarketDataDb,
@@ -129,7 +128,7 @@ import {
 } from "./scanning-service";
 import {
   cleanupOldGappersData,
-  getGappersSnapshot,
+  loadStoredGappersSnapshot,
   refreshGappersSnapshot,
 } from "./gappers-service";
 import { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, envFlagEnabled } from "./auth";
@@ -137,7 +136,7 @@ export { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, shouldAll
 import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
-import { loadProviderUsageDaily } from "./provider-usage";
+import { cleanupProviderUsage, loadProviderUsageDaily } from "./provider-usage";
 import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, type ScheduledBudget, type ScheduledLane } from "./scheduled-budget";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
@@ -207,7 +206,17 @@ import {
   updatePeerGroup,
   upsertTickerPeerMembership,
 } from "./peer-groups-service";
-import { loadPeerMetrics } from "./peer-metrics-service";
+import { loadPeerMetrics, refreshPeerMetrics } from "./peer-metrics-service";
+import { getFedWatchSnapshot } from "./fedwatch-service";
+import {
+  claimNextRefreshJob,
+  cleanupRefreshJobs,
+  completeRefreshJob,
+  failRefreshJob,
+  loadRefreshJob,
+  requestRefreshJob,
+} from "./refresh-jobs-service";
+import { approveUniverseVersion, listUniverseVersions } from "./universe-version-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
 import { loadFundamentalsTrends, loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
 import {
@@ -593,21 +602,10 @@ const TICKER_SERIES_TIMEFRAMES = {
   MAX: { limit: null },
 } as const;
 type TickerSeriesTimeframe = keyof typeof TICKER_SERIES_TIMEFRAMES;
-type TickerHistoryBackfillResponse =
-  | { status: "queued"; lastRequestedAt: string }
-  | { status: "recently_requested"; lastRequestedAt: string | null }
-  | { status: "unavailable"; message: string };
-type TickerHistoryBackfillStatusRow = {
-  status: string | null;
-  lastRequestedAt: string | null;
-  lastAttemptedAt: string | null;
-  lastCompletedAt: string | null;
-  updatedAt: string | null;
-};
+type TickerHistoryBackfillResponse = { status: "unavailable"; message: string };
 const DEFAULT_TICKER_SERIES_TIMEFRAME: TickerSeriesTimeframe = "6M";
 const TICKER_SERIES_2Y_COMPLETE_BARS = 500;
 const TICKER_SERIES_2Y_LOOKBACK_DAYS = 760;
-const TICKER_HISTORY_BACKFILL_COOLDOWN_MS = 6 * 60 * 60_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -617,161 +615,6 @@ function normalizeTickerSeriesTimeframe(raw: string | null | undefined): TickerS
   const normalized = raw?.trim().toUpperCase();
   if (normalized && normalized in TICKER_SERIES_TIMEFRAMES) return normalized as TickerSeriesTimeframe;
   return DEFAULT_TICKER_SERIES_TIMEFRAME;
-}
-
-function parseStoredTimestamp(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const parsed = Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function latestBackfillTimestamp(row: TickerHistoryBackfillStatusRow): number | null {
-  return Math.max(
-    parseStoredTimestamp(row.lastRequestedAt) ?? 0,
-    parseStoredTimestamp(row.lastAttemptedAt) ?? 0,
-    parseStoredTimestamp(row.lastCompletedAt) ?? 0,
-    parseStoredTimestamp(row.updatedAt) ?? 0,
-  ) || null;
-}
-
-async function loadTickerHistoryBackfillRow(env: Env, ticker: string, timeframe: TickerSeriesTimeframe): Promise<TickerHistoryBackfillStatusRow | null> {
-  try {
-    return await env.DB.prepare(
-      `SELECT status,
-              last_requested_at as lastRequestedAt,
-              last_attempted_at as lastAttemptedAt,
-              last_completed_at as lastCompletedAt,
-              updated_at as updatedAt
-         FROM ticker_history_backfill_status
-        WHERE ticker = ? AND timeframe = ?
-        LIMIT 1`,
-    )
-      .bind(ticker, timeframe)
-      .first<TickerHistoryBackfillStatusRow>();
-  } catch (error) {
-    console.warn("ticker history backfill status load failed", { ticker, timeframe, error });
-    return null;
-  }
-}
-
-async function upsertTickerHistoryBackfillQueued(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, barCount: number, requestedAt: string): Promise<boolean> {
-  try {
-    await env.DB.prepare(
-      `INSERT INTO ticker_history_backfill_status
-        (ticker, timeframe, target_bars, bar_count, status, last_requested_at, updated_at, last_error)
-       VALUES (?, ?, ?, ?, 'queued', ?, ?, NULL)
-       ON CONFLICT(ticker, timeframe) DO UPDATE SET
-         target_bars = excluded.target_bars,
-         bar_count = excluded.bar_count,
-         status = 'queued',
-         last_requested_at = excluded.last_requested_at,
-         updated_at = excluded.updated_at,
-         last_error = NULL`,
-    )
-      .bind(ticker, timeframe, TICKER_SERIES_2Y_COMPLETE_BARS, barCount, requestedAt, requestedAt)
-      .run();
-    return true;
-  } catch (error) {
-    console.warn("ticker history backfill status queue failed", { ticker, timeframe, error });
-    return false;
-  }
-}
-
-async function updateTickerHistoryBackfillStatus(
-  env: Env,
-  ticker: string,
-  timeframe: TickerSeriesTimeframe,
-  input: {
-    status: string;
-    barCount: number;
-    now: string;
-    lastError?: string | null;
-    markAttempted?: boolean;
-    markCompleted?: boolean;
-  },
-): Promise<void> {
-  const attemptedAt = input.markAttempted ? input.now : null;
-  const completedAt = input.markCompleted ? input.now : null;
-  try {
-    await env.DB.prepare(
-      `UPDATE ticker_history_backfill_status
-          SET status = ?,
-              bar_count = ?,
-              last_attempted_at = COALESCE(?, last_attempted_at),
-              last_completed_at = COALESCE(?, last_completed_at),
-              last_error = ?,
-              updated_at = ?
-        WHERE ticker = ? AND timeframe = ?`,
-    )
-      .bind(input.status, input.barCount, attemptedAt, completedAt, input.lastError ?? null, input.now, ticker, timeframe)
-      .run();
-  } catch (error) {
-    console.warn("ticker history backfill status update failed", { ticker, timeframe, error });
-  }
-}
-
-async function countStoredTickerBars(env: Env, ticker: string): Promise<number> {
-  const row = await env.DB.prepare("SELECT COUNT(*) as barCount FROM daily_bars WHERE ticker = ?")
-    .bind(ticker)
-    .first<{ barCount: number }>();
-  return Number(row?.barCount ?? 0);
-}
-
-async function runTickerHistoryBackfill(env: Env, ticker: string, timeframe: TickerSeriesTimeframe, currentBarCount: number): Promise<void> {
-  const startedAt = new Date().toISOString();
-  try {
-    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
-      status: "running",
-      barCount: currentBarCount,
-      now: startedAt,
-      markAttempted: true,
-    });
-    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true, { fallbackScope: "all" });
-    const nextBarCount = await countStoredTickerBars(env, ticker);
-    const completedAt = new Date().toISOString();
-    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
-      status: nextBarCount >= TICKER_SERIES_2Y_COMPLETE_BARS ? "completed" : "partial",
-      barCount: nextBarCount,
-      now: completedAt,
-      markCompleted: true,
-    });
-  } catch (error) {
-    const failedAt = new Date().toISOString();
-    await updateTickerHistoryBackfillStatus(env, ticker, timeframe, {
-      status: "failed",
-      barCount: currentBarCount,
-      now: failedAt,
-      lastError: error instanceof Error ? error.message : "Ticker history backfill failed.",
-      markCompleted: true,
-    });
-  }
-}
-
-async function maybeQueueTickerHistoryBackfill(
-  c: { env: Env; executionCtx: ExecutionContext },
-  ticker: string,
-  timeframe: TickerSeriesTimeframe,
-  currentBarCount: number,
-): Promise<TickerHistoryBackfillResponse> {
-  const existing = await loadTickerHistoryBackfillRow(c.env, ticker, timeframe);
-  const latestTimestamp = existing ? latestBackfillTimestamp(existing) : null;
-  if (latestTimestamp && Date.now() - latestTimestamp < TICKER_HISTORY_BACKFILL_COOLDOWN_MS) {
-    return {
-      status: "recently_requested",
-      lastRequestedAt: existing?.lastRequestedAt ?? existing?.updatedAt ?? null,
-    };
-  }
-
-  const requestedAt = new Date().toISOString();
-  const queued = await upsertTickerHistoryBackfillQueued(c.env, ticker, timeframe, currentBarCount, requestedAt);
-  if (!queued) {
-    return {
-      status: "unavailable",
-      message: "History backfill status storage is unavailable.",
-    };
-  }
-  c.executionCtx.waitUntil(runTickerHistoryBackfill(c.env, ticker, timeframe, currentBarCount));
-  return { status: "queued", lastRequestedAt: requestedAt };
 }
 
 function scannerCachePulseHeaders(env: Env): Headers {
@@ -1217,8 +1060,10 @@ async function ensureOverviewCatalogCoverage(env: Env, options: { respectThrottl
   ).all<{ ticker: string; fundName: string | null }>();
   const thematicSeedRows = industryWatchlistRows.results ?? [];
   const thematicTickers = thematicSeedRows.map((row) => row.ticker.toUpperCase()).filter(Boolean);
-  const thematicNameByTicker = new Map(
-    thematicSeedRows.map((row) => [row.ticker.toUpperCase(), (row.fundName ?? "").trim()]).filter((entry) => Boolean(entry[0])),
+  const thematicNameByTicker = new Map<string, string>(
+    thematicSeedRows
+      .map((row) => [row.ticker.toUpperCase(), (row.fundName ?? "").trim()] as const)
+      .filter((entry) => Boolean(entry[0])),
   );
   const equalWeightNameByTicker = new Map(EQUAL_WEIGHT_SECTOR_ETFS.map((row) => [row.ticker.toUpperCase(), row.instrumentName]));
   const equalWeightTickers = uniqueTickers(Array.from(equalWeightNameByTicker.keys()));
@@ -1475,6 +1320,8 @@ type RefreshPage =
   | "gappers"
   | "earnings";
 
+const MAX_MARKET_LANE_REFRESH_TICKERS = 4 * 80;
+
 async function refreshPageScopedData(
   env: Env,
   page: RefreshPage,
@@ -1488,8 +1335,8 @@ async function refreshPageScopedData(
   }
   if (page === "breadth") {
     const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
-      maxTickers: 1600,
-      maxPasses: 2,
+      maxTickers: MAX_MARKET_LANE_REFRESH_TICKERS,
+      maxPasses: 1,
     });
     const recompute = await recomputeBreadthFromStoredBars(env);
     const sp500CountRow = await env.DB.prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
@@ -1506,28 +1353,55 @@ async function refreshPageScopedData(
   }
   if (page === "sectors") {
     const tickers = await loadSectorPageTickers(env);
-    await refreshRecentBarsForTickers(env, tickers);
-    return { page, refreshedTickers: tickers.length };
+    await refreshRecentBarsForTickers(env, tickers, MAX_MARKET_LANE_REFRESH_TICKERS, 21, false, {
+      target: "market",
+      throwOnError: true,
+    });
+    return {
+      page,
+      refreshedTickers: Math.min(tickers.length, MAX_MARKET_LANE_REFRESH_TICKERS),
+      notes: tickers.length > MAX_MARKET_LANE_REFRESH_TICKERS
+        ? `Refreshed the first ${MAX_MARKET_LANE_REFRESH_TICKERS} tickers; remaining canonical catch-up continues in scheduled slices.`
+        : undefined,
+    };
   }
   if (page === "thirteenf") {
     const tickers = await load13fTickers(env);
-    await refreshRecentBarsForTickers(env, tickers);
-    return { page, refreshedTickers: tickers.length };
+    await refreshRecentBarsForTickers(env, tickers, MAX_MARKET_LANE_REFRESH_TICKERS, 21, false, {
+      target: "market",
+      throwOnError: true,
+    });
+    return {
+      page,
+      refreshedTickers: Math.min(tickers.length, MAX_MARKET_LANE_REFRESH_TICKERS),
+      notes: tickers.length > MAX_MARKET_LANE_REFRESH_TICKERS
+        ? `Refreshed the first ${MAX_MARKET_LANE_REFRESH_TICKERS} tickers; remaining canonical catch-up continues in scheduled slices.`
+        : undefined,
+    };
   }
   if (page === "admin") {
     const tickers = await loadAdminTickers(env);
     try {
-      await refreshRecentBarsForTickers(env, tickers);
+      await refreshRecentBarsForTickers(env, tickers, MAX_MARKET_LANE_REFRESH_TICKERS, 21, false, {
+        target: "market",
+        throwOnError: true,
+      });
       await recomputeDashboardFromStoredBars(env);
       await recomputeBreadthFromStoredBars(env);
-      return { page, refreshedTickers: tickers.length };
+      return {
+        page,
+        refreshedTickers: Math.min(tickers.length, MAX_MARKET_LANE_REFRESH_TICKERS),
+        notes: tickers.length > MAX_MARKET_LANE_REFRESH_TICKERS
+          ? `Refreshed the first ${MAX_MARKET_LANE_REFRESH_TICKERS} tickers; remaining canonical catch-up continues in scheduled slices.`
+          : undefined,
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Live admin refresh failed.";
       await recomputeDashboardFromStoredBars(env);
       await recomputeBreadthFromStoredBars(env);
       return {
         page,
-        refreshedTickers: tickers.length,
+        refreshedTickers: Math.min(tickers.length, MAX_MARKET_LANE_REFRESH_TICKERS),
         notes: `Live admin refresh failed (${message}). Rebuilt dashboard and breadth from stored bars instead.`,
       };
     }
@@ -1537,7 +1411,10 @@ async function refreshPageScopedData(
     if (!/^[A-Z.\-^]{1,20}$/.test(ticker)) {
       throw new Error("Valid ticker is required for ticker page refresh.");
     }
-    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true, { fallbackScope: "all" });
+    await refreshRecentBarsForTickers(env, [ticker], 1, TICKER_SERIES_2Y_LOOKBACK_DAYS, true, {
+      target: "market",
+      throwOnError: true,
+    });
     return { page, refreshedTickers: 1 };
   }
   if (page === "alerts") {
@@ -1591,6 +1468,17 @@ async function refreshPageScopedData(
     };
   }
   return { page, refreshedTickers: 0, notes: "No market tickers are tracked on this page." };
+}
+
+async function processNextRefreshJob(env: Env): Promise<void> {
+  const job = await claimNextRefreshJob(env);
+  if (!job) return;
+  try {
+    const result = await refreshPageScopedData(env, job.page as RefreshPage, job.ticker);
+    await completeRefreshJob(env, job, result);
+  } catch (error) {
+    await failRefreshJob(env, job, error);
+  }
 }
 
 async function maybeRunAlertsHousekeeping(env: Env, settings?: CronJobValues): Promise<void> {
@@ -2264,42 +2152,6 @@ function parseBreadthSentiment(raw: unknown): BreadthSentiment {
   }
 }
 
-async function getTicker1dStats(db: D1Database, ticker: string): Promise<{ change1d: number; lastPrice: number }> {
-  const bars = await db.prepare("SELECT c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 2")
-    .bind(ticker)
-    .all<{ c: number }>();
-  const rows = bars.results ?? [];
-  const lastPrice = rows[0]?.c ?? 0;
-  const prev = rows[1]?.c ?? 0;
-  if (!lastPrice || !prev) return { change1d: 0, lastPrice };
-  return { change1d: ((lastPrice - prev) / prev) * 100, lastPrice };
-}
-
-async function get1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; source: string }>> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const map = new Map<string, { change1d: number; lastPrice: number; source: string }>();
-  for (const ticker of unique) {
-    const fallback = await getTicker1dStats(env.DB, ticker);
-    map.set(ticker, { change1d: fallback.change1d, lastPrice: fallback.lastPrice, source: "daily-bars" });
-  }
-  try {
-    const provider = getProvider(env);
-    const snapshots = provider.getQuoteSnapshot ? await provider.getQuoteSnapshot(unique) : {};
-    for (const ticker of unique) {
-      const snap = snapshots[ticker];
-      if (!snap?.prevClose || !snap?.price) continue;
-      map.set(ticker, {
-        change1d: ((snap.price - snap.prevClose) / snap.prevClose) * 100,
-        lastPrice: snap.price,
-        source: "provider-snapshot",
-      });
-    }
-  } catch (error) {
-    console.error("get quote snapshots failed, using daily bars fallback", error);
-  }
-  return map;
-}
-
 function deriveStoredQuoteFreshness(input: {
   ticker: string;
   barDate: string | null | undefined;
@@ -2336,16 +2188,16 @@ async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<str
   for (let index = 0; index < unique.length; index += 80) {
     const batch = unique.slice(index, index + 80);
     if (batch.length === 0) continue;
-    const rows = await env.DB.prepare(
+    const rows = await getMarketDataDb(env).prepare(
       `SELECT ticker, date, c, rowNumber FROM (
          SELECT ticker, date, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rowNumber
-         FROM daily_bars
-         WHERE ticker IN (${batch.map(() => "?").join(",")})
+         FROM alpaca_daily_bars
+         WHERE feed = ? AND ticker IN (${batch.map(() => "?").join(",")})
        )
        WHERE rowNumber <= 2
        ORDER BY ticker ASC, rowNumber ASC`,
     )
-      .bind(...batch)
+      .bind(marketDataFeed(env), ...batch)
       .all<{ ticker: string; date: string; c: number; rowNumber: number }>();
     const barsByTicker = new Map<string, Array<{ date: string; c: number }>>();
     for (const row of rows.results ?? []) {
@@ -2398,6 +2250,7 @@ async function loadYahooPreferredDailyBarTickers(env: Env, tickers: string[]): P
 type RefreshRecentBarsOptions = {
   fallbackScope?: "preferred" | "all";
   target?: DailyBarStorageTarget;
+  throwOnError?: boolean;
 };
 
 async function refreshRecentBarsForTickers(
@@ -2423,6 +2276,7 @@ async function refreshRecentBarsForTickers(
     }
   } catch (error) {
     console.error("market data provider unavailable for recent bar refresh", error);
+    if (options.throwOnError) throw error;
     return;
   }
   try {
@@ -2439,6 +2293,7 @@ async function refreshRecentBarsForTickers(
     });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);
+    if (options.throwOnError) throw error;
   }
 }
 
@@ -2473,8 +2328,7 @@ app.get("/api/status", async (c) => {
   }
 
   const latestAllowedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
-  let overviewLatest:
-    | {
+  type OverviewLatestRow = {
         asOfDate?: string;
         generatedAt?: string;
         providerLabel?: string;
@@ -2494,20 +2348,20 @@ app.get("/api/status", async (c) => {
         as_of_date?: string;
         generated_at?: string;
         provider_label?: string;
-      }
-    | null = null;
+      };
+  let overviewLatest: OverviewLatestRow | null = null;
   try {
     overviewLatest = await c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning, quote_overlay_requested_count as quoteOverlayRequestedCount, quote_overlay_returned_count as quoteOverlayReturnedCount, quote_overlay_error as quoteOverlayError, quote_overlay_missing_sample_json as quoteOverlayMissingSampleJson FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
     )
       .bind(config?.id ?? "default", latestAllowedAsOfDate)
-      .first<typeof overviewLatest>();
+      .first<OverviewLatestRow>();
   } catch {
     overviewLatest = await c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
     )
       .bind(config?.id ?? "default", latestAllowedAsOfDate)
-      .first<typeof overviewLatest>();
+      .first<OverviewLatestRow>();
   }
   const breadthLatest = await c.env.DB.prepare(
     "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
@@ -2768,9 +2622,6 @@ app.get("/api/overview/focus/history", async (c) => {
 app.get("/api/breadth", async (c) => {
   const requestedUniverseId = c.req.query("universeId") ?? "sp500-core";
   const limit = Number(c.req.query("limit") ?? 60);
-  if (requestedUniverseId === "sp500-core") {
-    await ensureFreshSp500BreadthSafe(c.env);
-  }
   const loadRows = async (universeId: string) =>
     c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, universe_id as universeId, advancers, decliners, unchanged, pct_above_20ma as pctAbove20MA, pct_above_50ma as pctAbove50MA, pct_above_200ma as pctAbove200MA, new_20d_highs as new20DHighs, new_20d_lows as new20DLows, median_return_1d as medianReturn1D, median_return_5d as medianReturn5D, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC LIMIT ?",
@@ -2790,10 +2641,6 @@ app.get("/api/breadth", async (c) => {
 
   let universeId = requestedUniverseId;
   let rows = await loadRows(universeId);
-  if ((rows.results ?? []).length === 0) {
-    await ensureBreadthRowsSafe(c.env);
-    rows = await loadRows(universeId);
-  }
 
   let parsedRowsDesc = parseRows(rows.results ?? []);
   let usableRowsDesc = parsedRowsDesc.filter((row) => hasUsableBreadthRow(row));
@@ -2811,9 +2658,6 @@ app.get("/api/breadth", async (c) => {
 
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
-  if (!requestedDate) {
-    await ensureFreshSp500BreadthSafe(c.env);
-  }
   const selectCols =
     "b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson";
 
@@ -2856,10 +2700,6 @@ app.get("/api/breadth/summary", async (c) => {
   }
 
   let rows = await loadLatestRows();
-  if ((rows.results ?? []).length === 0) {
-    await ensureBreadthRowsSafe(c.env);
-    rows = await loadLatestRows();
-  }
   if ((rows.results ?? []).length === 0) {
     return c.json({
       asOfDate: null,
@@ -3025,14 +2865,31 @@ app.get("/api/13f/manager/:id", async (c) => {
 
 app.get("/api/sectors/trending", async (c) => {
   const days = Math.max(5, Math.min(90, Number(c.req.query("days") ?? 30)));
-  const rows = await c.env.DB.prepare(
-    "SELECT s.sector, s.name, d.ticker, d.date, d.c FROM daily_bars d JOIN symbols s ON s.ticker = d.ticker WHERE s.sector IS NOT NULL AND d.date >= date('now', ?) ORDER BY s.sector, d.ticker, d.date",
-  )
-    .bind(`-${days + 7} day`)
-    .all<{ sector: string; name: string | null; ticker: string; date: string; c: number }>();
+  const symbols = await c.env.DB.prepare(
+    "SELECT ticker, name, sector FROM symbols WHERE sector IS NOT NULL ORDER BY ticker",
+  ).all<{ ticker: string; name: string | null; sector: string }>();
+  const symbolByTicker = new Map((symbols.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
+  const tickers = Array.from(symbolByTicker.keys());
+  const marketRows: Array<{ ticker: string; date: string; c: number }> = [];
+  for (let offset = 0; offset < tickers.length; offset += 80) {
+    const chunk = tickers.slice(offset, offset + 80);
+    const result = await getMarketDataDb(c.env).prepare(
+      `SELECT ticker, date, c
+         FROM alpaca_daily_bars
+        WHERE feed = ?
+          AND ticker IN (${chunk.map(() => "?").join(",")})
+          AND date >= date('now', ?)
+        ORDER BY ticker, date`,
+    ).bind(marketDataFeed(c.env), ...chunk, `-${days + 7} day`).all<{ ticker: string; date: string; c: number }>();
+    marketRows.push(...(result.results ?? []));
+  }
+  const rows = marketRows.flatMap((row) => {
+    const symbol = symbolByTicker.get(row.ticker.toUpperCase());
+    return symbol ? [{ ...row, sector: symbol.sector, name: symbol.name }] : [];
+  });
 
   const bySector = new Map<string, Map<string, { name: string | null; closes: number[] }>>();
-  for (const r of rows.results ?? []) {
+  for (const r of rows) {
     const sectorMap = bySector.get(r.sector) ?? new Map<string, { name: string | null; closes: number[] }>();
     const tickerRow = sectorMap.get(r.ticker) ?? { name: r.name ?? null, closes: [] };
     tickerRow.closes.push(r.c);
@@ -3579,12 +3436,10 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   const hasNoRecords = baseRows.length === 0;
   const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
   const hasCachedRows = baseRows.length > 0;
-  const shouldSync =
-    forceSync ||
-    (hasNoRecords && !isRecentError) ||
-    (hasCachedRows && isStaleDate(status?.lastSyncedAt, 45)) ||
-    (hasKnownError && !isRecentError && hasCachedRows);
-  let warning: string | null = null;
+  const shouldSync = false;
+  let warning: string | null = forceSync
+    ? "Public constituent reads are stored-only; queue an authenticated ETF refresh instead."
+    : null;
   if (shouldSync) {
     try {
       await syncEtfConstituents(c.env, ticker);
@@ -3611,8 +3466,7 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
 
   // Limit per-request quote/bar fanout to avoid worker subrequest caps on large constituent sets.
   const pricedTickers = finalRows.slice(0, 80).map((r: any) => r.ticker);
-  await refreshRecentBarsForTickers(c.env, pricedTickers, 80);
-  const statsMap = await get1dStatsMap(c.env, pricedTickers);
+  const statsMap = await getStored1dStatsMap(c.env, pricedTickers);
   const rowsWithStats = finalRows.map((row: any) => {
     const stats = statsMap.get(String(row.ticker).toUpperCase());
     return {
@@ -4002,11 +3856,15 @@ app.get("/api/ticker/:ticker", async (c) => {
   if (!symbol) return c.json({ error: "Ticker not found" }, 404);
 
   const bars = timeframeConfig.limit == null
-    ? await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC")
-      .bind(ticker)
+    ? await getMarketDataDb(c.env).prepare(
+      "SELECT date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC",
+    )
+      .bind(marketDataFeed(c.env), ticker)
       .all<{ date: string; c: number }>()
-    : await c.env.DB.prepare("SELECT date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT ?")
-      .bind(ticker, timeframeConfig.limit)
+    : await getMarketDataDb(c.env).prepare(
+      "SELECT date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC LIMIT ?",
+    )
+      .bind(marketDataFeed(c.env), ticker, timeframeConfig.limit)
       .all<{ date: string; c: number }>();
   const asc = [...(bars.results ?? [])].reverse();
   const historyStatus: {
@@ -4023,7 +3881,10 @@ app.get("/api/ticker/:ticker", async (c) => {
     backfill: null,
   };
   if (timeframe === "2Y" && asc.length < TICKER_SERIES_2Y_COMPLETE_BARS) {
-    historyStatus.backfill = await maybeQueueTickerHistoryBackfill(c, ticker, timeframe, asc.length);
+    historyStatus.backfill = {
+      status: "unavailable",
+      message: "Stored canonical history is incomplete; use the authenticated page refresh to queue backfill.",
+    };
   }
   return c.json({
     symbol,
@@ -4066,13 +3927,9 @@ app.get("/api/correlation/pair", async (c) => {
 });
 
 app.get("/api/gappers", async (c) => {
-  await maybeRunGappersHousekeeping(c.env);
   const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
-  const force = c.req.query("force") === "1";
-  const llmConfig = readGappersLlmOverride(c.req.raw);
-  const filters = readGappersFilters(c.req.raw);
   try {
-    const snapshot = await getGappersSnapshot(c.env, { force, limit, llmConfig, filters });
+    const snapshot = await loadStoredGappersSnapshot(c.env, limit);
     return c.json(snapshot);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to build gappers snapshot.";
@@ -6475,10 +6332,10 @@ app.post("/api/admin/weekly-market-review/generate", async (c) => {
 app.get("/api/admin/provider-check", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const ticker = (c.req.query("ticker") ?? "SPY").toUpperCase();
-  const latestBar = await c.env.DB.prepare(
-    "SELECT ticker, date, c FROM daily_bars WHERE ticker = ? ORDER BY date DESC LIMIT 1",
+  const latestBar = await getMarketDataDb(c.env).prepare(
+    "SELECT ticker, date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC LIMIT 1",
   )
-    .bind(ticker)
+    .bind(marketDataFeed(c.env), ticker)
     .first<{ ticker: string; date: string; c: number }>();
   let providerLabel = "unknown";
   let providerSampleCount = 0;
@@ -6995,25 +6852,67 @@ app.post("/api/admin/refresh-page", async (c) => {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
-    const result = await refreshPageScopedData(c.env, page, body.ticker ?? null);
+    const job = await requestRefreshJob(c.env, {
+      page,
+      ticker: body.ticker ?? null,
+      requestedBy: "admin",
+    });
+    return c.json({
+      ok: true,
+      page,
+      refreshedTickers: job.result?.refreshedTickers ?? 0,
+      notes: job.status === "completed"
+        ? job.result?.notes ?? "Refresh completed."
+        : "Refresh queued; work will continue in the market-data lane.",
+      jobId: job.id,
+      status: job.status,
+      pollAfterMs: 1500,
+    }, 202);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Refresh queue is temporarily unavailable.";
+    console.error("admin refresh queue request failed", { page, error });
+    return c.json({
+      ok: false,
+      page,
+      refreshedTickers: 0,
+      notes: `Refresh could not be queued (${message}). Existing ${page} data remains available.`,
+      jobId: null,
+      status: "failed",
+      pollAfterMs: 0,
+    }, 200);
+  }
+});
+
+app.get("/api/admin/refresh-jobs/:jobId", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const job = await loadRefreshJob(c.env, c.req.param("jobId"));
+  if (!job) return c.json({ error: "Refresh job not found." }, 404);
+  return c.json({
+    ok: job.status !== "failed",
+    page: job.page,
+    refreshedTickers: job.result?.refreshedTickers ?? 0,
+    notes: job.result?.notes ?? (job.error ? `Refresh failed: ${job.error}` : "Refresh work continues in the background."),
+    jobId: job.id,
+    status: job.status,
+    pollAfterMs: job.status === "queued" || job.status === "running" ? 1500 : 0,
+  });
+});
+
+app.get("/api/admin/universe-versions", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const universeId = c.req.query("universeId")?.trim() || null;
+  const limit = Number(c.req.query("limit") ?? 100);
+  return c.json({ rows: await listUniverseVersions(c.env, universeId, limit) });
+});
+
+app.post("/api/admin/universe-versions/:versionId/approve", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const result = await approveUniverseVersion(c.env, c.req.param("versionId"));
     return c.json({ ok: true, ...result });
   } catch (error) {
-    if (error instanceof OverviewFreshnessError) {
-      return c.json({ error: error.message, freshness: error.diagnostics }, 409);
-    }
-    if (page === "overview" && isD1CpuResetError(error)) {
-      const note = "Overview refresh hit D1 CPU limits before a new snapshot could be written. Existing overview data remains available; broad post-close daily-bar catch-up will continue through the scheduled worker job.";
-      console.error("admin overview refresh hit D1 CPU limit", { page, error });
-      return c.json({
-        ok: false,
-        page,
-        refreshedTickers: 0,
-        notes: note,
-      }, 200);
-    }
-    const message = error instanceof Error ? error.message : "page refresh failed";
-    console.error("admin refresh-page failed", { page, error });
-    return c.json({ error: message }, 500);
+    const message = error instanceof Error ? error.message : "Universe version approval failed.";
+    return c.json({ error: message }, /not found/i.test(message) ? 404 : 409);
   }
 });
 
@@ -7339,12 +7238,32 @@ app.post("/api/admin/upload-bars", async (c) => {
   const body = (await c.req.json()) as { rows: Array<{ ticker: string; date: string; o: number; h: number; l: number; c: number; volume?: number }> };
   const rows = body.rows ?? [];
   if (rows.length === 0) return c.json({ ok: true, upserted: 0 });
+  const db = getMarketDataDb(c.env);
+  const feed = marketDataFeed(c.env);
   const statements = rows.map((r) =>
-    c.env.DB.prepare(
-      "INSERT OR REPLACE INTO daily_bars (ticker, date, o, h, l, c, volume, source_provider, source_feed, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual-upload', NULL, CURRENT_TIMESTAMP)",
-    ).bind(r.ticker.toUpperCase(), r.date, r.o, r.h, r.l, r.c, r.volume ?? 0),
+    db.prepare(
+      `INSERT INTO alpaca_daily_bars
+         (feed, ticker, date, o, h, l, c, volume, source_provider, adjustment, observed_at, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual-upload', 'split', NULL, CURRENT_TIMESTAMP)
+       ON CONFLICT(feed, ticker, date) DO UPDATE SET
+         o = excluded.o,
+         h = excluded.h,
+         l = excluded.l,
+         c = excluded.c,
+         volume = excluded.volume,
+         source_provider = excluded.source_provider,
+         adjustment = excluded.adjustment,
+         observed_at = NULL,
+         fetched_at = CURRENT_TIMESTAMP
+       WHERE alpaca_daily_bars.o IS NOT excluded.o
+          OR alpaca_daily_bars.h IS NOT excluded.h
+          OR alpaca_daily_bars.l IS NOT excluded.l
+          OR alpaca_daily_bars.c IS NOT excluded.c
+          OR alpaca_daily_bars.volume IS NOT excluded.volume
+          OR alpaca_daily_bars.source_provider IS NOT excluded.source_provider`,
+    ).bind(feed, r.ticker.toUpperCase(), r.date, r.o, r.h, r.l, r.c, r.volume ?? 0),
   );
-  await c.env.DB.batch(statements);
+  await db.batch(statements);
   await refreshSnapshotSafe(c.env);
   return c.json({ ok: true, upserted: rows.length });
 });
@@ -7414,12 +7333,65 @@ async function syncMonthlyEtfSlice(env: Env, settings?: CronJobValues): Promise<
   }
 }
 
+function isOverviewGenerationSlot(now: Date): boolean {
+  const ny = zonedParts(now, "America/New_York");
+  return ny.minutesOfDay >= 4 * 60
+    && ny.minutesOfDay <= 16 * 60 + 30
+    && ny.minutesOfDay % 15 === 0;
+}
+
+function isPremarketGappersSlot(now: Date): boolean {
+  const ny = zonedParts(now, "America/New_York");
+  return ny.minutesOfDay >= 4 * 60
+    && ny.minutesOfDay <= 9 * 60 + 30
+    && ny.minutesOfDay % 10 === 0;
+}
+
+function isPeerMetricSlot(now: Date): boolean {
+  return zonedParts(now, "America/New_York").minutesOfDay % 30 === 0;
+}
+
+async function refreshScheduledPeerMetricSlice(env: Env): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT s.ticker, s.exchange
+       FROM ticker_peer_groups tpg
+       JOIN peer_groups pg ON pg.id = tpg.peer_group_id AND pg.is_active = 1
+       JOIN symbols s ON s.ticker = tpg.ticker
+       LEFT JOIN peer_metric_cache pmc ON pmc.ticker = s.ticker
+      ORDER BY CASE WHEN pmc.as_of IS NULL THEN 0 ELSE 1 END,
+               datetime(COALESCE(pmc.as_of, '1970-01-01')) ASC,
+               s.ticker ASC
+      LIMIT 80`,
+  ).all<{ ticker: string; exchange: string | null }>();
+  if ((rows.results ?? []).length > 0) await refreshPeerMetrics(env, rows.results ?? []);
+}
+
+async function publishScheduledBreadthIfReady(env: Env, asOfDate: string): Promise<void> {
+  const postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, asOfDate);
+  if (postCloseJob?.status !== "completed") return;
+  const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
+  const trackedUniverseCount = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT universe_id) as count
+       FROM universe_symbols
+      WHERE universe_id IN (${trackedUniversePlaceholders})`,
+  ).bind(...CORE_BREADTH_UNIVERSE_IDS).first<{ count: number | null }>();
+  const currentBreadthCount = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT universe_id) as count
+       FROM breadth_snapshots
+      WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
+  ).bind(asOfDate, ...CORE_BREADTH_UNIVERSE_IDS).first<{ count: number | null }>();
+  const expectedCount = trackedUniverseCount?.count ?? 0;
+  if (expectedCount > 0 && (currentBreadthCount?.count ?? 0) < expectedCount) {
+    await recomputeBreadthFromStoredBars(env, asOfDate);
+  }
+}
+
 export default {
   fetch: app.fetch,
   email: async (message: any, env: Env): Promise<void> => {
     await handleInboundTradingViewEmail(message, env);
   },
-  scheduled: async (event: ScheduledEvent, env: Env): Promise<void> => {
+  scheduled: async (event: ScheduledEvent, env: Env, _ctx?: ExecutionContext): Promise<void> => {
     const cronSettings = await loadCentralCronJobSettingsMap(env).catch((error) => {
       console.error("scheduled cron settings load failed; using defaults", error);
       return new Map<string, CronJobValues>();
@@ -7508,6 +7480,12 @@ export default {
       await runBudgeted("scanning-housekeeping", 4, () => maybeRunScanningHousekeeping(env, cron("scanning-housekeeping")));
       await runBudgeted("gappers-housekeeping", 4, () => maybeRunGappersHousekeeping(env, cron("gappers-housekeeping")));
       await runBudgeted("options-housekeeping", 4, () => maybeRunOptionsHousekeeping(env, cron("options-housekeeping")).then(() => undefined));
+      if (now.getUTCHours() === 0 && now.getUTCMinutes() < 15) {
+        await runBudgeted("freshness-housekeeping", 2, async () => {
+          await cleanupProviderUsage(env, now);
+          await cleanupRefreshJobs(env, now);
+        });
+      }
     };
 
     const runCoreLane = async (): Promise<void> => {
@@ -7518,7 +7496,7 @@ export default {
           await advanceResearchQueue(env, cronNumber(settings ?? {}, "batchLimit", 2));
         }
       });
-      await runBudgeted("watchlist-compiles", 8, () => runDueWatchlistCompiles(env, now));
+      await runBudgeted("watchlist-compiles", 8, () => runDueWatchlistCompiles(env, now).then(() => undefined));
       await runBudgeted("earnings-calendar", 8, () => maybeRunScheduledEarningsCalendarSync(env, now, cron("earnings-calendar")).then(() => undefined));
       await runBudgeted("earnings-surprises", 8, () => maybeRunScheduledEarningsSurpriseSync(env, now, cron("earnings-surprises")).then(() => undefined));
       await runBudgeted("earnings-gaps", 8, () => maybeRunScheduledEarningsGapSync(env, now, cron("earnings-gaps")).then(() => undefined));
@@ -7550,19 +7528,6 @@ export default {
         postCloseReason: postClosePlan.reason,
       };
 
-      if (postClosePlan.protect && canFitPostCloseDailyBars && !canFitBothCriticalJobs) {
-        await auditSkipped(
-          "overview-current-data",
-          "Skipped to preserve market-data budget for actionable post-close daily bars.",
-          postCloseMetadata,
-        );
-      } else {
-        await runBudgeted(
-          "overview-current-data",
-          overviewCurrentBudgetUnits,
-          () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
-        );
-      }
       if (postClosePlan.protect) {
         await runBudgeted(
           "post-close-daily-bars",
@@ -7577,7 +7542,52 @@ export default {
           postCloseMetadata,
         );
       }
-      await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now));
+      if (postClosePlan.protect && canFitPostCloseDailyBars && !canFitBothCriticalJobs) {
+        await auditSkipped(
+          "overview-current-data",
+          "Skipped to preserve market-data budget for actionable post-close daily bars.",
+          postCloseMetadata,
+        );
+      } else {
+        await runBudgeted(
+          "overview-current-data",
+          overviewCurrentBudgetUnits,
+          () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
+        );
+      }
+      if (postClosePlan.protect) {
+        await auditSkipped(
+          "refresh-job",
+          "Deferred while exact-session post-close bars are actionable.",
+          postCloseMetadata,
+        );
+      } else {
+        await runBudgeted("refresh-job", 8, () => processNextRefreshJob(env).then(() => undefined));
+      }
+      await runBudgeted(
+        "breadth-publication",
+        6,
+        () => publishScheduledBreadthIfReady(env, latestUsMarketSessionAsOfDate(now)).then(() => undefined),
+      );
+      if (isOverviewGenerationSlot(now)) {
+        await runBudgeted("overview-snapshot", 10, async () => {
+          try {
+            await computeAndStoreSnapshot(env, latestUsMarketSessionAsOfDate(now), "default", {
+              includeBreadth: false,
+            });
+          } catch (error) {
+            if (!(error instanceof OverviewFreshnessError)) throw error;
+            console.warn("scheduled overview candidate retained last-ready generation", error.diagnostics);
+          }
+        });
+      }
+      if (isPeerMetricSlot(now)) {
+        await runBudgeted("peer-metric-slice", 6, () => refreshScheduledPeerMetricSlice(env).then(() => undefined));
+      }
+      if (isPremarketGappersSlot(now)) {
+        await runBudgeted("gappers-snapshot", 8, () => refreshGappersSnapshot(env, 50).then(() => undefined));
+      }
+      await runBudgeted("symbol-catalog-sync", 6, () => maybeRunScheduledSymbolCatalogSync(env, now).then(() => undefined));
       await runBudgeted("etf-constituent-slice", 10, () => syncMonthlyEtfSlice(env, cron("etf-constituent-slice")));
     };
 
@@ -7589,15 +7599,15 @@ export default {
         maxRuns: 2,
         batchSize: workerSchedule.rsBackgroundBatchSize,
         timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-      }));
+      }).then(() => undefined));
       if (workerSchedule.rsBackgroundEnabled) {
         await runBudgeted("relative-strength-background", 14, () => refreshActiveRelativeStrengthPresets(env, {
           batchSize: workerSchedule.rsBackgroundBatchSize,
           maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
           timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        }));
+        }).then(() => undefined));
       }
-      await runBudgeted("pattern-scan", 12, () => maybeRunScheduledPatternScan(env, now, workerSchedule));
+      await runBudgeted("pattern-scan", 12, () => maybeRunScheduledPatternScan(env, now, workerSchedule).then(() => undefined));
     };
 
     const runReportsLane = async (): Promise<void> => {
@@ -7609,73 +7619,8 @@ export default {
         });
       }
 
-      const defaultConfig = await loadDefaultConfigRow(env);
-      const overviewSettings = cron("overview-eod");
-      const overviewEnabled = !overviewSettings || isCentralCronEnabled(overviewSettings);
-      const timezone = defaultConfig?.timezone ?? env.APP_TIMEZONE ?? "Australia/Melbourne";
-      const refreshTime = defaultConfig?.eodRunLocalTime ?? "08:15";
-      const expectedAsOf = latestUsMarketSessionAsOfDate(now);
-      const shouldRunEod = overviewEnabled && shouldRunScheduledEod(now, timezone, refreshTime);
-
-      if (shouldRunEod) {
-        await runBudgeted("overview-snapshot", 7, async () => {
-          let latestOverview: { asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null } | null = null;
-          try {
-            latestOverview = await env.DB.prepare(
-              "SELECT as_of_date as asOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-            )
-              .bind(defaultConfig?.id ?? "default")
-              .first<{ asOfDate: string | null; freshnessStatus?: string | null; freshnessCoveragePct?: number | null }>();
-          } catch {
-            latestOverview = await env.DB.prepare(
-              "SELECT as_of_date as asOfDate FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
-            )
-              .bind(defaultConfig?.id ?? "default")
-              .first<{ asOfDate: string | null }>();
-          }
-          const overviewIsUsable = latestOverview?.asOfDate === expectedAsOf
-            && isOverviewFreshnessSufficientForScheduledSnapshot(
-              latestOverview.freshnessStatus,
-              latestOverview.freshnessCoveragePct ?? null,
-            );
-          if (!overviewIsUsable) {
-            try {
-              await computeAndStoreSnapshot(env, expectedAsOf, defaultConfig?.id ?? "default", {
-                includeBreadth: false,
-              });
-            } catch (error) {
-              if (error instanceof OverviewFreshnessError) {
-                console.error("scheduled overview refresh blocked by stale market data", error.diagnostics);
-              } else {
-                throw error;
-              }
-            }
-          }
-        });
-      }
-
+      await runBudgeted("fedwatch-snapshot", 4, () => getFedWatchSnapshot(env).then(() => undefined));
       await runBudgeted("market-commentary", 6, () => maybeRunScheduledMarketCommentary(env, now).then(() => undefined));
-
-      if (shouldRunEod) {
-        await runBudgeted("breadth-recompute", 3, async () => {
-          const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
-          const trackedUniverseCount = await env.DB.prepare(
-            `SELECT COUNT(DISTINCT universe_id) as count FROM universe_symbols WHERE universe_id IN (${trackedUniversePlaceholders})`,
-          )
-            .bind(...CORE_BREADTH_UNIVERSE_IDS)
-            .first<{ count: number | null }>();
-          const currentBreadthCount = await env.DB.prepare(
-            `SELECT COUNT(DISTINCT universe_id) as count FROM breadth_snapshots WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
-          )
-            .bind(expectedAsOf, ...CORE_BREADTH_UNIVERSE_IDS)
-            .first<{ count: number | null }>();
-          const expectedBreadthCount = trackedUniverseCount?.count ?? 0;
-          const breadthIsComplete = expectedBreadthCount > 0 && (currentBreadthCount?.count ?? 0) >= expectedBreadthCount;
-          if (!breadthIsComplete) {
-            await recomputeBreadthFromStoredBars(env, expectedAsOf);
-          }
-        });
-      }
 
       await runBudgeted("weekly-market-review", 5, () => maybeRunScheduledWeeklyMarketReview(env, now).then(() => undefined));
     };

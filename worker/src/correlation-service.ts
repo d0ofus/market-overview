@@ -1,8 +1,6 @@
 import { sanitizeBarSeries } from "./metrics";
-import { refreshDailyBarsIncremental } from "./daily-bars";
-import { getProvider } from "./provider";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
-import { resolveTickerMeta, type ResolvedSymbol } from "./symbol-resolver";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import type { Env } from "./types";
 
 export const CORRELATION_LOOKBACKS = {
@@ -468,35 +466,8 @@ function compareIsoDates(left: string | null, right: string | null): number {
   return left.localeCompare(right);
 }
 
-function addUtcDays(isoDate: string, days: number): string {
-  const parsed = new Date(`${isoDate}T00:00:00Z`);
-  parsed.setUTCDate(parsed.getUTCDate() + days);
-  return parsed.toISOString().slice(0, 10);
-}
-
 function normalizeRequestedTickers(tickers: string[]): string[] {
   return Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean)));
-}
-
-function correlationHistoryStartDate(expectedAsOfDate: string, lookback: CorrelationLookback): string {
-  const closePeriods = closePeriodsForLookback(lookback);
-  const bufferDays = Math.ceil(closePeriods * 1.6) + BAR_FETCH_BUFFER;
-  return addUtcDays(expectedAsOfDate, -bufferDays);
-}
-
-async function upsertResolvedSymbols(env: Env, symbols: ResolvedSymbol[]): Promise<void> {
-  if (symbols.length === 0) return;
-  const statements = symbols.map((symbol) =>
-    env.DB.prepare(
-      `INSERT INTO symbols (ticker, name, exchange, asset_class)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(ticker) DO UPDATE SET
-         name = COALESCE(excluded.name, symbols.name),
-         exchange = COALESCE(excluded.exchange, symbols.exchange),
-         asset_class = COALESCE(excluded.asset_class, symbols.asset_class)`,
-    ).bind(symbol.ticker, symbol.name, symbol.exchange, symbol.assetClass),
-  );
-  await env.DB.batch(statements);
 }
 
 async function loadTickerMetadata(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
@@ -508,67 +479,6 @@ async function loadTickerMetadata(env: Env, tickers: string[]): Promise<Map<stri
     .bind(...tickers)
     .all<TickerMetaRow>();
   return new Map((result.results ?? []).map((row) => [row.ticker.toUpperCase(), row.displayName ?? null]));
-}
-
-async function loadLatestBarDates(env: Env, tickers: string[]): Promise<Map<string, string | null>> {
-  if (tickers.length === 0) return new Map();
-  const placeholders = tickers.map(() => "?").join(", ");
-  const result = await env.DB.prepare(
-    `SELECT ticker, MAX(date) as lastBarDate FROM daily_bars WHERE ticker IN (${placeholders}) GROUP BY ticker`,
-  )
-    .bind(...tickers)
-    .all<{ ticker: string; lastBarDate: string | null }>();
-  return new Map((result.results ?? []).map((row) => [row.ticker.toUpperCase(), row.lastBarDate ?? null]));
-}
-
-async function hydrateCorrelationHistory(
-  env: Env,
-  requestedTickers: string[],
-  lookback: CorrelationLookback,
-  expectedAsOfDate: string,
-): Promise<string[]> {
-  const metadataByTicker = await loadTickerMetadata(env, requestedTickers);
-  const unresolvedMetadataTickers = requestedTickers.filter((ticker) => !metadataByTicker.has(ticker));
-  if (unresolvedMetadataTickers.length > 0) {
-    const resolvedSymbols = (await Promise.all(unresolvedMetadataTickers.map(async (ticker) => {
-      try {
-        return await resolveTickerMeta(ticker, env);
-      } catch (error) {
-        console.error("correlation symbol resolution failed", { ticker, error });
-        return null;
-      }
-    }))).filter((value): value is ResolvedSymbol => value != null);
-    await upsertResolvedSymbols(env, resolvedSymbols);
-  }
-
-  const hydratedMetadataByTicker = await loadTickerMetadata(env, requestedTickers);
-  const latestBarDates = await loadLatestBarDates(env, requestedTickers);
-  const hydrationTickers = requestedTickers.filter((ticker) => {
-    if (!hydratedMetadataByTicker.has(ticker)) return false;
-    const lastBarDate = latestBarDates.get(ticker.toUpperCase());
-    return lastBarDate == null || lastBarDate < expectedAsOfDate;
-  });
-  if (hydrationTickers.length === 0) return [];
-
-  const startDate = correlationHistoryStartDate(expectedAsOfDate, lookback);
-
-  try {
-    const provider = getProvider(env, { yahooPreferredTickers: requestedTickers });
-    const refresh = await refreshDailyBarsIncremental(env, {
-      provider,
-      tickers: hydrationTickers,
-      startDate,
-      endDate: expectedAsOfDate,
-    });
-    if (refresh.writtenRows > 0) {
-      return [];
-    }
-    return [`Correlation history hydration attempted for ${hydrationTickers.join(", ")}, but no bars were stored.`];
-  } catch (error) {
-    console.error("correlation history hydration failed; stored bars used", { requestedTickers: hydrationTickers, error });
-    const message = error instanceof Error ? error.message : "unknown provider error";
-    return [`Live correlation history hydration failed; stored bars were used instead (${message}).`];
-  }
 }
 
 function buildUnresolvedTickerMessage(unresolvedTickers: CorrelationUnresolvedTicker[]): string {
@@ -586,7 +496,7 @@ async function loadTickerBars(env: Env, tickers: string[], closePeriods: number)
   if (tickers.length === 0) return new Map();
   const placeholders = tickers.map(() => "?").join(", ");
   const perTickerLimit = closePeriods + BAR_FETCH_BUFFER;
-  const result = await env.DB.prepare(
+  const result = await getMarketDataDb(env).prepare(
     `SELECT ticker, date, c
      FROM (
        SELECT
@@ -594,13 +504,13 @@ async function loadTickerBars(env: Env, tickers: string[], closePeriods: number)
          date,
          c,
          ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS row_num
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ? AND ticker IN (${placeholders})
      )
      WHERE row_num <= ?
      ORDER BY ticker, date`,
   )
-    .bind(...tickers, perTickerLimit)
+    .bind(marketDataFeed(env), ...tickers, perTickerLimit)
     .all<RawBarRow>();
   const grouped = new Map<string, PriceSeries>();
   for (const row of result.results ?? []) {
@@ -629,7 +539,7 @@ async function loadPreparedSeries(
   const uniqueTickers = normalizeRequestedTickers(requestedTickers);
   const closePeriods = closePeriodsForLookback(lookback);
   const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-  const backfillWarnings = await hydrateCorrelationHistory(env, uniqueTickers, lookback, expectedAsOfDate);
+  const backfillWarnings: string[] = [];
   const [metadataByTicker, rawBarsByTicker] = await Promise.all([
     loadTickerMetadata(env, uniqueTickers),
     loadTickerBars(env, uniqueTickers, closePeriods),

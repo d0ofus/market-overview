@@ -5,8 +5,7 @@ import {
   getMarketDataDb,
   inspectMarketDataSize,
   marketDataFeed,
-  marketDataRetentionCutoff,
-  recordMarketDataBarsWritten,
+  recordMarketDataD1Usage,
 } from "./market-data-db";
 import type { Env } from "./types";
 
@@ -33,15 +32,20 @@ async function runStatementsInChunks(
   statements: D1PreparedStatement[],
   chunkSize = BAR_WRITE_CHUNK_SIZE,
   inspectCapacity = false,
-): Promise<void> {
+): Promise<{ changes: number; rowsRead: number; rowsWritten: number }> {
+  const usage = { changes: 0, rowsRead: 0, rowsWritten: 0 };
   for (let index = 0; index < statements.length; index += chunkSize) {
     const chunk = statements.slice(index, index + chunkSize);
     if (chunk.length === 0) continue;
     const results = await db.batch(chunk);
-    if (inspectCapacity) {
-      for (const result of results) inspectMarketDataSize(env, result.meta?.size_after);
+    for (const result of results) {
+      usage.changes += Number(result.meta?.changes ?? 0);
+      usage.rowsRead += Number(result.meta?.rows_read ?? 0);
+      usage.rowsWritten += Number(result.meta?.rows_written ?? result.meta?.changes ?? 0);
+      if (inspectCapacity) inspectMarketDataSize(env, result.meta?.size_after);
     }
   }
+  return usage;
 }
 
 async function ensureSymbolsExist(env: Env, tickers: string[]): Promise<void> {
@@ -153,16 +157,14 @@ function dedupeFetchedBars(
 
 function dedupeMarketBars(
   bars: DailyBar[],
-  latestByTicker: Map<string, string | null>,
+  _latestByTicker: Map<string, string | null>,
   desiredStartDate: string,
   endDate: string,
 ): DailyBar[] {
   const byTickerDate = new Map<string, DailyBar>();
   for (const bar of bars) {
     const ticker = bar.ticker.toUpperCase();
-    const latest = latestByTicker.get(ticker) ?? null;
     if (bar.date < desiredStartDate || bar.date > endDate) continue;
-    if (latest && bar.date <= latest && bar.date !== endDate) continue;
     byTickerDate.set(`${ticker}|${bar.date}`, { ...bar, ticker });
   }
   return Array.from(byTickerDate.values());
@@ -198,11 +200,12 @@ async function writeFetchedDailyBars(
   if (target === "market" && strictProviderRequired && sourceProvider !== "alpaca") {
     throw new Error(`The strict market-data store only accepts Alpaca bars, not ${sourceProvider}.`);
   }
-  const unexpectedProvider = target === "market"
-    ? bars.find((bar) => bar.sourceProvider && bar.sourceProvider !== "alpaca")?.sourceProvider
-    : null;
-  if (unexpectedProvider && strictProviderRequired) {
-    throw new Error(`The strict market-data store rejected ${unexpectedProvider} fallback bars.`);
+  const unexpectedProviders = target === "market"
+    ? Array.from(new Set(bars.map((bar) => bar.sourceProvider).filter((provider): provider is string => Boolean(provider && provider !== "alpaca"))))
+    : [];
+  const invalidRepairProvider = unexpectedProviders.find((provider) => !repairMissingMarketDates || provider !== "yahoo");
+  if (invalidRepairProvider && strictProviderRequired) {
+    throw new Error(`The strict market-data store rejected ${invalidRepairProvider} fallback bars.`);
   }
   const barsToWrite = target === "market"
     ? repairMissingMarketDates
@@ -212,22 +215,38 @@ async function writeFetchedDailyBars(
   if (barsToWrite.length === 0) return 0;
   const db = target === "market" ? getMarketDataDb(env) : env.DB;
   if (target === "legacy") await ensureSymbolsExist(env, barsToWrite.map((bar) => bar.ticker));
-  await runStatementsInChunks(
+  const writeUsage = await runStatementsInChunks(
     env,
     db,
     barsToWrite.map((bar) =>
       target === "market"
         ? db.prepare(
-          `INSERT INTO alpaca_daily_bars
-             (feed, ticker, date, o, h, l, c, volume, fetched_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           `INSERT INTO alpaca_daily_bars
+             (feed, ticker, date, o, h, l, c, volume, fetched_at, source_provider, adjustment, observed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
            ON CONFLICT(feed, ticker, date) DO UPDATE SET
              o = excluded.o,
              h = excluded.h,
              l = excluded.l,
              c = excluded.c,
              volume = excluded.volume,
-             fetched_at = excluded.fetched_at`,
+             fetched_at = excluded.fetched_at,
+             source_provider = excluded.source_provider,
+             adjustment = excluded.adjustment,
+             observed_at = excluded.observed_at
+           WHERE NOT (
+             alpaca_daily_bars.source_provider = 'alpaca'
+             AND excluded.source_provider <> 'alpaca'
+           )
+             AND (
+               alpaca_daily_bars.o IS NOT excluded.o
+               OR alpaca_daily_bars.h IS NOT excluded.h
+               OR alpaca_daily_bars.l IS NOT excluded.l
+               OR alpaca_daily_bars.c IS NOT excluded.c
+               OR alpaca_daily_bars.volume IS NOT excluded.volume
+               OR alpaca_daily_bars.source_provider IS NOT excluded.source_provider
+               OR alpaca_daily_bars.adjustment IS NOT excluded.adjustment
+             )`,
         ).bind(
           bar.sourceFeed ?? sourceFeed ?? marketDataFeed(env),
           bar.ticker.toUpperCase(),
@@ -237,6 +256,9 @@ async function writeFetchedDailyBars(
           bar.l,
           bar.c,
           bar.volume ?? 0,
+          bar.sourceProvider ?? sourceProvider,
+          env.ALPACA_DAILY_ADJUSTMENT ?? "split",
+          bar.observedAt ?? `${bar.date}T23:59:59Z`,
         )
         : db.prepare(
           `INSERT INTO daily_bars
@@ -277,21 +299,14 @@ async function writeFetchedDailyBars(
     const latest = latestByTicker.get(ticker);
     if (!latest || bar.date > latest) latestByTicker.set(ticker, bar.date);
   }
-  if (target === "market") await recordMarketDataBarsWritten(env, barsToWrite.length);
-  return barsToWrite.length;
-}
-
-async function pruneMarketBars(env: Env, tickers: string[], feed: string, asOfDate: string): Promise<void> {
-  const db = getMarketDataDb(env);
-  const cutoff = marketDataRetentionCutoff(env, asOfDate);
-  for (const tickerChunk of chunkTickers(normalizeTickers(tickers), BAR_QUERY_TICKER_CHUNK_SIZE)) {
-    const placeholders = tickerChunk.map(() => "?").join(",");
-    const result = await db.prepare(
-      `DELETE FROM alpaca_daily_bars WHERE feed = ? AND ticker IN (${placeholders}) AND date < ?`,
-    ).bind(feed, ...tickerChunk, cutoff).run();
-    inspectMarketDataSize(env, result.meta?.size_after);
-    await recordMarketDataBarsWritten(env, Number(result.meta?.changes ?? 0));
+  if (target === "market") {
+    await recordMarketDataD1Usage(env, {
+      barsChanged: writeUsage.changes,
+      rowsRead: writeUsage.rowsRead,
+      rowsWritten: writeUsage.rowsWritten,
+    });
   }
+  return target === "market" ? writeUsage.changes : barsToWrite.length;
 }
 
 async function loadMarketBarsOnDate(env: Env, tickers: string[], feed: string, date: string): Promise<DailyBar[]> {
@@ -351,12 +366,12 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   const provider = input.provider ?? getProvider(env);
   const sourceProvider = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
   const sourceFeed = sourceProvider === "alpaca"
-    ? (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex"
+    ? (env.ALPACA_DAILY_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex"
     : null;
   const target = input.target ?? "legacy";
   const feed = sourceFeed ?? marketDataFeed(env);
   const latestByTicker = await loadLatestBarDates(env, tickers, target, feed);
-  const grouped = input.replaceExisting
+  const grouped = input.replaceExisting || input.repairMissingMarketDates
     ? new Map([[input.startDate, tickers]])
     : groupTickersByRefreshStart(tickers, latestByTicker, input.startDate, input.endDate);
   const skippedCurrentTickers = input.replaceExisting
@@ -414,7 +429,6 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
       "legacy",
     );
   }
-  if (target === "market") await pruneMarketBars(env, tickers, feed, input.endDate);
   const tickersWithEndDateBar = await loadTickersWithBarOnDate(env, tickers, input.endDate, target, feed);
   const currentDateTickers = tickersWithEndDateBar.size;
   const missingCurrentDateTickers = Math.max(0, tickers.length - currentDateTickers);

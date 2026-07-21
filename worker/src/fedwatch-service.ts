@@ -1,6 +1,10 @@
 import type { Env } from "./types";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
-import { loadOrRefreshLatestFomcCommentary, type FomcCommentaryItem } from "./fomc-commentary-service";
+import {
+  loadLatestFomcCommentary,
+  loadOrRefreshLatestFomcCommentary,
+  type FomcCommentaryItem,
+} from "./fomc-commentary-service";
 
 const RATE_PROBABILITY_API_URL = "https://rateprobability.com/api/latest";
 const RATE_PROBABILITY_SOURCE_URL = "https://rateprobability.com/fed";
@@ -261,6 +265,28 @@ async function cleanupOldSnapshots(env: Env, retentionDays = SNAPSHOT_RETENTION_
 async function withFomcCommentary(env: Env, data: FedWatchData): Promise<FedWatchData> {
   const fomcCommentary = await loadOrRefreshLatestFomcCommentary(env, 4).catch(() => []);
   return { ...data, fomcCommentary };
+}
+
+export async function loadStoredFedWatchSnapshot(env: Env): Promise<FedWatchResponse> {
+  const stored = await loadLatestStoredSnapshot(env);
+  if (!stored) {
+    return {
+      status: "unavailable",
+      warning: "No stored FedWatch snapshot is available; the reports scheduler will retry.",
+      data: null,
+    };
+  }
+  const data = {
+    ...stored,
+    fomcCommentary: await loadLatestFomcCommentary(env, 4).catch(() => []),
+  };
+  return isSnapshotFresh(data.generatedAt)
+    ? { status: "ok", warning: null, data }
+    : {
+      status: "stale",
+      warning: "Showing the last stored FedWatch snapshot while refresh continues in the reports lane.",
+      data,
+    };
 }
 
 export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean }): Promise<FedWatchResponse> {

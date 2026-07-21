@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractLsegConstituentFileUrl, parseNasdaqTradedCommonStocks, parseSp500Csv } from "../src/universe-constituents";
+import {
+  extractLsegConstituentFileUrl,
+  parseIsharesHoldingsCsv,
+  parseNasdaqTradedCommonStocks,
+  parseSp500Csv,
+} from "../src/universe-constituents";
 
 describe("universe constituent parsers", () => {
   it("applies NasdaqTrader common-stock filters", () => {
@@ -47,5 +52,18 @@ describe("universe constituent parsers", () => {
 
     const url = extractLsegConstituentFileUrl(payload, /russell\s+2000/i);
     expect(url).toBe("https://www.lseg.com/content/dam/ftse-russell/en_us/documents/constituents/ftse-us-russell-2000-index.csv");
+  });
+
+  it("parses the iShares IWM holdings export used as the Russell proxy", () => {
+    const csv = [
+      "iShares Russell 2000 ETF",
+      "Fund Holdings as of,Jul 20, 2026",
+      "Ticker,Name,Sector,Asset Class,Market Value",
+      "AA,ALCOA CORP,Materials,Equity,100",
+      "BRK.B,BERKSHIRE HATHAWAY,Financials,Equity,200",
+      "USD,USD CASH,Cash and/or Derivatives,Cash,50",
+      "FUT1,RUSSELL FUTURE,Cash and/or Derivatives,Futures,25",
+    ].join("\n");
+    expect(parseIsharesHoldingsCsv(csv)).toEqual(["AA", "BRK.B"]);
   });
 });

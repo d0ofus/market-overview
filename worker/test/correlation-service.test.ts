@@ -55,7 +55,9 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
               __args: args,
               async all<T>() {
                 if (sql.includes("FROM symbols")) {
-                  const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
+                  const requested = new Set(
+                    (args as string[]).map((value) => value.toUpperCase()).filter((value) => value !== "IEX" && value !== "SIP"),
+                  );
                   return {
                     results: storedSymbols
                       .filter((row) => requested.has(row.ticker.toUpperCase()))
@@ -76,7 +78,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                     }) as T[],
                   };
                 }
-                if (sql.includes("FROM daily_bars")) {
+                if (sql.includes("FROM alpaca_daily_bars")) {
                   const perTickerLimit = typeof args[args.length - 1] === "number"
                     ? Number(args[args.length - 1])
                     : Number.POSITIVE_INFINITY;
@@ -85,6 +87,8 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                       .filter((value): value is string => typeof value === "string")
                       .map((value) => value.toUpperCase()),
                   );
+                  requested.delete("IEX");
+                  requested.delete("SIP");
                   const limitedRows = Array.from(requested).flatMap((ticker) =>
                     storedBars
                       .filter((row) => row.ticker.toUpperCase() === ticker)
@@ -138,7 +142,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
         }
         return [];
       },
-    } as D1Database,
+    } as unknown as D1Database,
   };
 }
 
@@ -230,11 +234,11 @@ describe("correlation service", () => {
     expect(result.dynamics.rollingCorrelation.some((row) => row.value != null)).toBe(true);
   });
 
-  it("backfills stale correlation bars before analysis when newer provider data is available", async () => {
+  it("uses stale stored bars without calling a provider", async () => {
     const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
     const latestStoredDate = addDays(expectedAsOfDate, -2);
     const previousStoredDate = addDays(expectedAsOfDate, -3);
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async () => [
         { ticker: "AAPL", date: addDays(expectedAsOfDate, -1), o: 111, h: 111, l: 111, c: 111, volume: 1 },
@@ -258,15 +262,16 @@ describe("correlation service", () => {
 
     const result = await loadCorrelationMatrix(env, ["AAPL", "MSFT"], "60D");
 
-    expect(result.latestAvailableDate).toBe(expectedAsOfDate);
-    expect(result.warnings.some((warning) => warning.includes("Stored bar history is behind"))).toBe(false);
+    expect(result.latestAvailableDate).toBe(latestStoredDate);
+    expect(result.warnings.some((warning) => warning.includes("Stored bar history is behind"))).toBe(true);
     expect(result.resolvedTickers.every((ticker) => ticker.status === "ok")).toBe(true);
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 
-  it("falls back to stale stored bars when correlation backfill fails", async () => {
+  it("does not invoke a failing provider from a correlation read", async () => {
     const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
     const latestStoredDate = addDays(expectedAsOfDate, -2);
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async () => {
         throw new Error("provider unavailable");
@@ -288,19 +293,20 @@ describe("correlation service", () => {
     const result = await loadCorrelationMatrix(env, ["AAPL", "MSFT"], "60D");
 
     expect(result.latestAvailableDate).toBe(latestStoredDate);
-    expect(result.warnings.some((warning) => warning.includes("Live correlation history hydration failed"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("Live correlation history hydration failed"))).toBe(false);
     expect(result.warnings.some((warning) => warning.includes("Stored bar history is behind"))).toBe(true);
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 
-  it("hydrates cold-start correlation tickers when they resolve successfully", async () => {
+  it("keeps cold-start correlation reads provider-free", async () => {
     const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
+    const resolverSpy = vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
       ticker,
       name: `${ticker} Inc.`,
       exchange: "NYSE",
       assetClass: "equity",
     }));
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async (tickers) => {
         const dates = buildRecentDates(40, expectedAsOfDate);
@@ -318,11 +324,11 @@ describe("correlation service", () => {
     });
     const env = createCorrelationEnv([], []);
 
-    const result = await loadCorrelationMatrix(env, ["AVT", "ARW"], "60D");
-
-    expect(result.resolvedTickers.map((ticker) => ticker.ticker)).toEqual(["AVT", "ARW"]);
-    expect(result.unresolvedTickers).toEqual([]);
-    expect(result.latestAvailableDate).toBe(result.expectedAsOfDate);
+    await expect(loadCorrelationMatrix(env, ["AVT", "ARW"], "60D")).rejects.toThrow(
+      "AVT (unknown ticker), ARW (unknown ticker)",
+    );
+    expect(resolverSpy).not.toHaveBeenCalled();
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 
   it("keeps unresolved cold-start tickers visible when the rest of the matrix hydrates", async () => {
@@ -352,7 +358,17 @@ describe("correlation service", () => {
           })));
       },
     });
-    const env = createCorrelationEnv([], []);
+    const dates = buildRecentDates(35, expectedAsOfDate);
+    const env = createCorrelationEnv(
+      [
+        { ticker: "AVT", displayName: "Avnet Inc." },
+        { ticker: "ARW", displayName: "Arrow Electronics" },
+      ],
+      [
+        ...dates.map((date, index) => ({ ticker: "AVT", date, c: 80 + index })),
+        ...dates.map((date, index) => ({ ticker: "ARW", date, c: 90 + index })),
+      ],
+    );
 
     const result = await loadCorrelationMatrix(env, ["AVT", "ARW", "BAD"], "60D");
 
@@ -360,8 +376,8 @@ describe("correlation service", () => {
     expect(result.unresolvedTickers).toContainEqual({ ticker: "BAD", reason: "unknown_ticker" });
   });
 
-  it("leaves symbols with insufficient hydrated history marked as missing_history", async () => {
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+  it("leaves symbols with insufficient stored history marked as missing_history", async () => {
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async (tickers) =>
         tickers.flatMap((ticker) => {
@@ -389,6 +405,7 @@ describe("correlation service", () => {
       [
         ...dates.map((date, index) => ({ ticker: "AAPL", date, c: 150 + index })),
         ...dates.map((date, index) => ({ ticker: "MSFT", date, c: 250 + index })),
+        { ticker: "AVT", date: latestUsSessionAsOfDate(new Date()), c: 101 },
       ],
     );
 
@@ -396,5 +413,6 @@ describe("correlation service", () => {
 
     expect(result.resolvedTickers.map((ticker) => ticker.ticker)).toEqual(["AAPL", "MSFT"]);
     expect(result.unresolvedTickers).toContainEqual({ ticker: "AVT", reason: "missing_history" });
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 });

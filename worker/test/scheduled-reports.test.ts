@@ -116,7 +116,7 @@ function createEnv(): Env {
 }
 
 describe("scheduled reports lane", () => {
-  it("runs commentary before breadth and still advances weekly when breadth fails", async () => {
+  it("runs commentary before weekly while breadth remains in the market lane", async () => {
     scheduledMocks.calls.length = 0;
     scheduledMocks.eod.recomputeBreadthFromStoredBars.mockClear();
     scheduledMocks.commentary.maybeRunScheduledMarketCommentary.mockClear();
@@ -128,7 +128,8 @@ describe("scheduled reports lane", () => {
       { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext,
     );
 
-    expect(scheduledMocks.calls).toEqual(["commentary", "breadth", "weekly"]);
+    expect(scheduledMocks.calls).toEqual(["commentary", "weekly"]);
+    expect(scheduledMocks.eod.recomputeBreadthFromStoredBars).not.toHaveBeenCalled();
     expect(scheduledMocks.weekly.maybeRunScheduledWeeklyMarketReview).toHaveBeenCalled();
   });
 });

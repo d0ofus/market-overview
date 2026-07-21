@@ -21,6 +21,7 @@ export type RelativeStrengthDailyBar = {
   h: number;
   l: number;
   c: number;
+  volume?: number | null;
 };
 
 export type RelativeStrengthCacheRow = {

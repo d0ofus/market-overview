@@ -97,7 +97,12 @@ describe("research lab gather", () => {
         publishedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
         sourceDomain: "example.com",
       },
-    ];
+    ].map((item) => ({
+      ...item,
+      sourceKind: "news" as const,
+      scopeKind: "ticker" as const,
+      ticker: "ZM",
+    }));
 
     const provider = await import("../src/research-lab/providers");
     vi.mocked(provider.runResearchLabPerplexityQuery).mockImplementationOnce(async (_env: unknown, query: any) => {
@@ -180,7 +185,12 @@ describe("research lab gather", () => {
           publishedAt: "2025-10-01T09:00:00.000Z",
           sourceDomain: "example.com",
         },
-      ],
+      ].map((item) => ({
+        ...item,
+        sourceKind: "news" as const,
+        scopeKind: "ticker" as const,
+        ticker: "ZM",
+      })),
       usage: { total_tokens: 10 },
       raw: { model: "sonar-pro" },
       };

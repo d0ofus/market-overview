@@ -4828,11 +4828,35 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
   return (await res.json()) as T;
 }
 
-export function refreshPageData(page: string, ticker?: string | null) {
-  return adminFetch<{ ok: boolean; page: string; refreshedTickers: number; notes?: string }>("/api/admin/refresh-page", {
-    method: "POST",
-    body: JSON.stringify({ page, ticker: ticker ?? null }),
-  }).catch(async (error) => {
+export type RefreshPageJobResponse = {
+  ok: boolean;
+  page: string;
+  refreshedTickers: number;
+  notes?: string;
+  jobId?: string;
+  status?: "queued" | "running" | "completed" | "failed";
+  pollAfterMs?: number;
+};
+
+export async function refreshPageData(page: string, ticker?: string | null): Promise<RefreshPageJobResponse> {
+  try {
+    let response = await adminFetch<RefreshPageJobResponse>("/api/admin/refresh-page", {
+      method: "POST",
+      body: JSON.stringify({ page, ticker: ticker ?? null }),
+    });
+    if (!response.jobId || response.status === "completed" || response.status === "failed") return response;
+    const jobId = response.jobId;
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.max(500, response.pollAfterMs ?? 1500)));
+      response = await adminFetch<RefreshPageJobResponse>(`/api/admin/refresh-jobs/${encodeURIComponent(jobId)}`);
+      if (response.status === "completed" || response.status === "failed") return response;
+    }
+    return {
+      ...response,
+      notes: "Refresh work continues in the background. This page will use the last-ready data until publication completes.",
+    };
+  } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "");
     if (!message.includes("API /api/admin/refresh-page failed: 404")) throw error;
 
@@ -4862,7 +4886,7 @@ export function refreshPageData(page: string, ticker?: string | null) {
 
     await adminFetch<{ ok: boolean; snapshotId: string; asOfDate: string }>("/api/admin/run-eod", { method: "POST" });
     return { ok: true, page, refreshedTickers: 0, notes: "Fallback refresh completed (legacy API)." };
-  });
+  }
 }
 
 export function updateSectorEntry(

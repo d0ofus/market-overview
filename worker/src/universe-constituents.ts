@@ -2,6 +2,8 @@ import { SP500_TICKERS } from "./sp500-tickers";
 
 const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
 const SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv";
+const IWM_HOLDINGS_CSV_URL =
+  "https://www.ishares.com/us/products/239710/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund";
 const LSEG_CONSTITUENT_TABLE_URL =
   "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/index-spotlights/data_table.constituentsandweights.json";
 
@@ -182,6 +184,28 @@ export async function loadNasdaqTraderUniverses(): Promise<{
   return { nasdaqTickers, nyseTickers, allCommonTickers };
 }
 
+export function parseIsharesHoldingsCsv(raw: string): string[] {
+  const lines = raw.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => {
+    const normalized = csvSplit(line).map((cell) => cell.toLowerCase());
+    return normalized.includes("ticker") && normalized.includes("asset class");
+  });
+  if (headerIndex < 0) return [];
+  const header = csvSplit(lines[headerIndex] ?? "").map((cell) => cell.trim().toLowerCase());
+  const tickerIndex = header.indexOf("ticker");
+  const assetClassIndex = header.indexOf("asset class");
+  if (tickerIndex < 0 || assetClassIndex < 0) return [];
+  const tickers: string[] = [];
+  for (const line of lines.slice(headerIndex + 1)) {
+    const cells = csvSplit(line);
+    if ((cells[assetClassIndex] ?? "").trim().toLowerCase() !== "equity") continue;
+    const ticker = normalizeTicker(cells[tickerIndex] ?? "");
+    if (!ticker || !SAFE_TICKER_RE.test(ticker)) continue;
+    tickers.push(ticker);
+  }
+  return dedupeSorted(tickers);
+}
+
 export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
   try {
     const raw = await fetchText(SP500_CSV_URL);
@@ -199,20 +223,15 @@ export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Pr
 }
 
 export async function loadRussell2000Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
-  const tableRaw = await fetchText(LSEG_CONSTITUENT_TABLE_URL);
-  const constituentUrl = extractLsegConstituentFileUrl(tableRaw, /russell\s+2000/i);
-  if (!constituentUrl) {
-    throw new Error("Could not resolve Russell 2000 constituent file URL from LSEG table");
-  }
-  const csvRaw = await fetchText(constituentUrl);
-  let tickers = parseTickerCsv(csvRaw, ["Ticker", "Symbol"]);
+  const csvRaw = await fetchText(IWM_HOLDINGS_CSV_URL);
+  let tickers = parseIsharesHoldingsCsv(csvRaw);
   if (allCommonUniverse && allCommonUniverse.size > 0) {
     const filtered = tickers.filter((ticker) => allCommonUniverse.has(ticker));
     // Keep the raw scrape if the intersection loses too many symbols due naming mismatches.
     tickers = filtered.length >= tickers.length * 0.95 ? filtered : tickers;
   }
-  if (tickers.length < 1400) {
-    throw new Error(`Russell 2000 constituent scrape returned too few symbols (${tickers.length})`);
+  if (tickers.length < 1800 || tickers.length > 2100) {
+    throw new Error(`IWM holdings proxy returned an invalid member count (${tickers.length})`);
   }
   return tickers;
 }

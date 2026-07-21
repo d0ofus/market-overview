@@ -4,6 +4,7 @@ import {
   cancelPatternRun,
   continuePatternRun,
   extractPatternFeatures,
+  loadPatternChartData,
   listPatternCandidatesForReview,
   pausePatternRun,
   resumePatternRun,
@@ -409,6 +410,29 @@ describe("pattern scanner service", () => {
     });
 
     expect(snapshot).toBeNull();
+  });
+
+  it("loads public chart data from canonical stored bars without hydration", async () => {
+    const tickerBars = makeBars("CHRT", 90, 30);
+    const benchmarkBars = makeBars("SPY", 90, 100);
+    const env = makePatternHydrationEnv([...tickerBars, ...benchmarkBars]);
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network should not be called");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    refreshDailyBarsIncrementalMock.mockClear();
+
+    const chart = await loadPatternChartData(env, {
+      ticker: "CHRT",
+      endDate: tickerBars.at(-1)!.date,
+      contextBars: 80,
+    });
+
+    expect(chart.bars).toHaveLength(80);
+    expect(chart.availableEndDate).toBe(tickerBars.at(-1)!.date);
+    expect(refreshDailyBarsIncrementalMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("hydrates missing stored bars before extracting selected pattern features", async () => {

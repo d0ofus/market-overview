@@ -12,6 +12,9 @@ export type Env = {
   ALPACA_API_KEY?: string;
   ALPACA_API_SECRET?: string;
   ALPACA_FEED?: string;
+  ALPACA_LIVE_FEED?: string;
+  ALPACA_DAILY_FEED?: string;
+  ALPACA_DAILY_ADJUSTMENT?: string;
   ALPACA_TRADING_BASE_URL?: string;
   APP_TIMEZONE?: string;
   TRADINGVIEW_WIDGET_ENABLED?: string;
@@ -21,6 +24,8 @@ export type Env = {
   MARKET_DATA_RETENTION_DAYS?: string;
   MARKET_DATA_DAILY_WRITE_BUDGET?: string;
   MARKET_DATA_CRITICAL_WRITE_RESERVE?: string;
+  MARKET_DATA_DAILY_READ_BUDGET?: string;
+  MARKET_DATA_CRITICAL_READ_RESERVE?: string;
   MARKET_DATA_WARN_BYTES?: string;
   MARKET_DATA_HALT_BYTES?: string;
   ALERTS_RECONCILE_ENABLED?: string;
@@ -88,6 +93,10 @@ export type Env = {
   MAX_FALLBACK_REQUESTS_PER_INVOCATION?: string;
   ALPACA_REQUESTS_PER_MINUTE_WARN?: string;
   ALPACA_REQUESTS_PER_MINUTE_HARD?: string;
+  TRADINGVIEW_REQUESTS_PER_MINUTE_WARN?: string;
+  TRADINGVIEW_REQUESTS_PER_MINUTE_HARD?: string;
+  TRADINGVIEW_REQUESTS_PER_DAY_HARD?: string;
+  YAHOO_REQUESTS_PER_DAY_HARD?: string;
   FMP_REQUESTS_PER_DAY_WARN?: string;
   FMP_REQUESTS_PER_DAY_HARD?: string;
   ALPHA_VANTAGE_REQUESTS_PER_DAY_WARN?: string;
@@ -228,6 +237,7 @@ export type PostCloseDailyBarRefreshJob = {
 export type SnapshotReadyResponse = {
   status?: "ready";
   warning?: null;
+  generationId?: string | null;
   asOfDate: string;
   generatedAt: string;
   providerLabel: string;
@@ -299,6 +309,7 @@ export type SnapshotEmptyResponse = {
   asOfDate: null;
   generatedAt: null;
   providerLabel: null;
+  generationId?: null;
   expectedAsOfDate?: string | null;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;

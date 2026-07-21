@@ -221,7 +221,7 @@ describe("refreshDailyBarsIncremental", () => {
             args: statement.__args ?? [],
           });
         }
-        return statements.map(() => ({ meta: { size_after: 1024 } }));
+        return statements.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
       },
     }) as unknown as D1Database;
     const env = {
@@ -255,6 +255,81 @@ describe("refreshDailyBarsIncremental", () => {
     expect(marketBarWrites.map((statement) => statement.args[2])).toEqual(["2026-06-01", "2026-06-02"]);
     expect(legacyBarWrites.map((statement) => statement.args[1])).toEqual(["2026-06-02"]);
     expect(result).toMatchObject({ writtenRows: 2, mirroredRows: 1, currentDateTickers: 1 });
+  });
+
+  it("requests and writes older missing sessions even when a newer market bar exists", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const marketDb = {
+      prepare(sql: string) {
+        const bind = (...args: unknown[]) => ({
+          __sql: sql,
+          __args: args,
+          async first<T>() {
+            if (sql.includes("market_data_daily_usage")) return { rowsWritten: 0 } as T;
+            return null as T;
+          },
+          async all<T>() {
+            if (sql.includes("MAX(date)")) {
+              return { results: [{ ticker: "AAA", lastDate: "2026-06-05" }] as T[], meta: { rows_read: 1 } };
+            }
+            if (sql.includes("SELECT ticker FROM alpaca_daily_bars")) {
+              return { results: [{ ticker: "AAA" }] as T[], meta: { rows_read: 1 } };
+            }
+            if (sql.includes("SELECT 1 as ok")) return { results: [{ ok: 1 }] as T[], meta: { size_after: 1024 } };
+            return { results: [] as T[] };
+          },
+          async run() {
+            statements.push({ sql, args });
+            return { meta: { changes: 1, rows_written: 1, size_after: 1024 } };
+          },
+        });
+        return {
+          bind,
+          async first<T>() { return bind().first<T>(); },
+          async all<T>() { return bind().all<T>(); },
+          async run() { return bind().run(); },
+        };
+      },
+      async batch(rows: Array<{ __sql?: string; __args?: unknown[] }>) {
+        statements.push(...rows.map((row) => ({ sql: row.__sql ?? "", args: row.__args ?? [] })));
+        return rows.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
+      },
+    } as unknown as D1Database;
+    const provider: MarketDataProvider = {
+      label: "Alpaca test",
+      getDailyBars: vi.fn(async () => [{
+        ticker: "AAA",
+        date: "2026-06-02",
+        o: 10,
+        h: 11,
+        l: 9,
+        c: 10.5,
+        volume: 1_000,
+        sourceProvider: "alpaca",
+        sourceFeed: "sip",
+      }]),
+    };
+    const env = {
+      DB: marketDb,
+      MARKET_DATA_DB: marketDb,
+      MARKET_DATA_DB_REQUIRED: "true",
+      DATA_PROVIDER: "alpaca",
+      ALPACA_DAILY_FEED: "sip",
+      MARKET_DATA_DAILY_WRITE_BUDGET: "75000",
+    } as any;
+
+    const result = await refreshDailyBarsIncremental(env, {
+      tickers: ["AAA"],
+      startDate: "2026-06-01",
+      endDate: "2026-06-05",
+      provider,
+      target: "market",
+      repairMissingMarketDates: true,
+    });
+
+    expect(provider.getDailyBars).toHaveBeenCalledWith(["AAA"], "2026-06-01", "2026-06-05");
+    expect(statements.some((row) => row.sql.includes("INSERT INTO alpaca_daily_bars") && row.args[2] === "2026-06-02")).toBe(true);
+    expect(result.writtenRows).toBe(1);
   });
 });
 

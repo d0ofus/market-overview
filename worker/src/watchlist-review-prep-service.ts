@@ -1,5 +1,6 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getUsMarketSessionContext } from "./market-calendar";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { getProvider } from "./provider";
 import type { Env } from "./types";
 
@@ -263,16 +264,19 @@ async function loadLatestBars(
   expectedAsOfDate: string,
 ): Promise<Map<string, { latestDate: string | null; barCount: number }>> {
   const latest = new Map<string, { latestDate: string | null; barCount: number }>();
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (const group of chunk(tickers)) {
     const placeholders = group.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, MAX(date) as latestDate, COUNT(*) as barCount
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date >= ?
          AND date <= ?
        GROUP BY ticker`,
-    ).bind(...group, startDate, expectedAsOfDate).all<LatestBarRow>();
+    ).bind(feed, ...group, startDate, expectedAsOfDate).all<LatestBarRow>();
     for (const row of rows.results ?? []) {
       latest.set(row.ticker.toUpperCase(), {
         latestDate: row.latestDate ?? null,
@@ -405,12 +409,13 @@ export async function createWatchlistReviewPrep(
     const refreshStartedAt = Date.now();
     try {
       await refreshDailyBarsIncremental(env, {
-        provider: getProvider(env, { fallbackEnabled: true, yahooPreferredTickers: symbols }),
+        provider: getProvider(env, { fallbackEnabled: false }),
         tickers: toRefresh,
         startDate,
         endDate: expectedAsOfDate,
         providerBatchSize: 80,
         continueOnError: true,
+        target: "market",
       });
       refreshedSymbols = toRefresh.length;
     } finally {
@@ -480,16 +485,19 @@ async function loadOhlcvBars(
 ): Promise<Map<string, WatchlistReviewPrepBarsResponse["symbols"][number]["bars"]>> {
   const byTicker = new Map<string, WatchlistReviewPrepBarsResponse["symbols"][number]["bars"]>();
   const startDate = startDateForLookback(expectedAsOfDate, lookbackBars);
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (const group of chunk(tickers)) {
     const placeholders = group.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, date, o, h, l, c, volume
-       FROM daily_bars
-       WHERE ticker IN (${placeholders})
+       FROM alpaca_daily_bars
+       WHERE feed = ?
+         AND ticker IN (${placeholders})
          AND date >= ?
          AND date <= ?
        ORDER BY ticker ASC, date ASC`,
-    ).bind(...group, startDate, expectedAsOfDate).all<OhlcvRow>();
+    ).bind(feed, ...group, startDate, expectedAsOfDate).all<OhlcvRow>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
       const current = byTicker.get(ticker) ?? [];

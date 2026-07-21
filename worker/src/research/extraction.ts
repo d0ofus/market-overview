@@ -104,20 +104,20 @@ function confidenceLabel(score: number): ResearchConfidenceLabel {
 }
 
 function deriveCompatibilityFields(card: any): StandardizedResearchCard {
-  const catalysts = card.catalystAssessment.map((item) => ({
+  const catalysts = card.catalystAssessment.map((item: any) => ({
     title: item.title,
     summary: item.summary,
     freshness: item.timing === "immediate" ? "fresh" : item.timing === "next_1_2_quarters" ? "recent" : item.timing === "longer_term" ? "stale" : "unclear",
     direction: item.direction,
     evidenceIds: item.evidenceIds,
   }));
-  const risks = card.riskAssessment.map((item) => ({
+  const risks = card.riskAssessment.map((item: any) => ({
     title: item.title,
     summary: item.summary,
     severity: item.severity,
     evidenceIds: item.evidenceIds,
   }));
-  const contradictions = card.contradictionsDetailed.map((item) => item.tension);
+  const contradictions = card.contradictionsDetailed.map((item: any) => item.tension);
   const confidenceScore = clamp(card.overallConclusion.confidenceScore, 0, 1);
   const catalystFreshnessLabel = catalysts[0]?.freshness ?? "unclear";
   const valuationScore =
@@ -131,7 +131,7 @@ function deriveCompatibilityFields(card: any): StandardizedResearchCard {
       : card.earningsQualityDetailed.evidenceIds.length >= 1 ? 58
         : 45;
   const catalystQualityScore = clamp(
-    Math.round(card.catalystAssessment.reduce((sum, item) => sum + (
+    Math.round(card.catalystAssessment.reduce((sum: number, item: any) => sum + (
       item.strength === "high" ? 85
         : item.strength === "medium_high" ? 72
           : item.strength === "medium" ? 58
@@ -143,7 +143,7 @@ function deriveCompatibilityFields(card: any): StandardizedResearchCard {
   );
   const catalystFreshnessScore = catalystFreshnessLabel === "fresh" ? 82 : catalystFreshnessLabel === "recent" ? 66 : catalystFreshnessLabel === "stale" ? 38 : 30;
   const riskScore = clamp(
-    100 - Math.round(card.riskAssessment.reduce((sum, item) => sum + (item.severity === "high" ? 70 : item.severity === "medium" ? 50 : 28), 0) / Math.max(card.riskAssessment.length, 1)),
+    100 - Math.round(card.riskAssessment.reduce((sum: number, item: any) => sum + (item.severity === "high" ? 70 : item.severity === "medium" ? 50 : 28), 0) / Math.max(card.riskAssessment.length, 1)),
     0,
     100,
   );

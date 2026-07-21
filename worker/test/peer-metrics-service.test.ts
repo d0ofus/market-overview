@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildPeerMetricRows, loadPeerMetrics, loadSharesOutstandingMap } from "../src/peer-metrics-service";
+import { buildPeerMetricRows, loadSharesOutstandingMap, refreshPeerMetrics } from "../src/peer-metrics-service";
 
 describe("peer metrics service", () => {
   afterEach(() => {
@@ -149,7 +149,26 @@ describe("peer metrics service", () => {
       });
     });
 
-    const result = await loadPeerMetrics({} as never, [{ ticker: "AAPL", exchange: "NASDAQ" }]);
+    const db = {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async first() {
+                return { requestCount: 1 };
+              },
+              async run() {
+                return { success: true, meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      },
+      async batch() {
+        return [];
+      },
+    };
+    const result = await refreshPeerMetrics({ DB: db } as never, [{ ticker: "AAPL", exchange: "NASDAQ" }]);
 
     expect(requestedColumns).toContain("Perf.W");
     expect(result.rows[0]).toMatchObject({

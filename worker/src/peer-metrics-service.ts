@@ -1,5 +1,5 @@
 import { hasSharesOutstandingColumn } from "./peer-groups-service";
-import { meteredFetch } from "./provider-usage";
+import { meteredFetchWithRetry } from "./provider-usage";
 import type { Env } from "./types";
 
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -229,7 +229,7 @@ async function fetchTradingViewPeerMetricMap(env: Env, inputs: PeerMetricInput[]
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
-    const response = await meteredFetch(env, TV_SCAN_URL, {
+    const response = await meteredFetchWithRetry(env, TV_SCAN_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -241,7 +241,7 @@ async function fetchTradingViewPeerMetricMap(env: Env, inputs: PeerMetricInput[]
       endpointKey: "peer-metrics",
       caller: "peer-metrics",
       symbolCount: symbolChunk.length,
-    });
+    }, 8_000);
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`TradingView peer metrics request failed (${response.status}): ${body.slice(0, 180)}`);
@@ -259,7 +259,7 @@ async function fetchTradingViewPeerMetricMap(env: Env, inputs: PeerMetricInput[]
   return merged;
 }
 
-export async function loadPeerMetrics(
+export async function refreshPeerMetrics(
   env: Env,
   inputs: PeerMetricInput[],
 ): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
@@ -290,19 +290,22 @@ export async function loadPeerMetrics(
       source: TV_PROVIDER_LABEL,
     });
     const missingTickers = rows.filter((row) => row.price == null && row.change1d == null && row.marketCap == null && row.avgVolume == null);
-    return {
+    const result = {
       rows,
       error: missingTickers.length > 0
         ? `TradingView did not return live metrics for ${missingTickers.length} ticker${missingTickers.length === 1 ? "" : "s"}.`
         : null,
     };
+    await persistPeerMetrics(env, result.rows);
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load TradingView peer metrics.";
-    return {
+    const result = {
       rows: dedupedInputs.map(({ ticker }) => ({
         ticker,
         price: null,
         change1d: null,
+        change1w: null,
         marketCap: null,
         avgVolume: null,
         asOf,
@@ -310,5 +313,73 @@ export async function loadPeerMetrics(
       })),
       error: message,
     };
+    await persistPeerMetrics(env, result.rows);
+    return result;
   }
+}
+
+async function persistPeerMetrics(env: Env, rows: PeerMetricRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const statements = rows.map((row) => env.DB.prepare(
+    `INSERT INTO peer_metric_cache
+       (ticker, price, change_1d, change_1w, market_cap, avg_volume, as_of, source, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(ticker) DO UPDATE SET
+       price = excluded.price,
+       change_1d = excluded.change_1d,
+       change_1w = excluded.change_1w,
+       market_cap = excluded.market_cap,
+       avg_volume = excluded.avg_volume,
+       as_of = excluded.as_of,
+       source = excluded.source,
+       updated_at = CURRENT_TIMESTAMP`,
+  ).bind(
+    row.ticker,
+    row.price,
+    row.change1d,
+    row.change1w,
+    row.marketCap,
+    row.avgVolume,
+    row.asOf,
+    row.source,
+  ));
+  for (let offset = 0; offset < statements.length; offset += 100) {
+    await env.DB.batch(statements.slice(offset, offset + 100));
+  }
+}
+
+export async function loadPeerMetrics(
+  env: Env,
+  inputs: PeerMetricInput[],
+): Promise<{ rows: PeerMetricRow[]; error: string | null }> {
+  const tickers = Array.from(new Set(inputs.map((input) => normalizeTicker(input.ticker)).filter((ticker): ticker is string => Boolean(ticker))));
+  if (tickers.length === 0) return { rows: [], error: null };
+  const rowsByTicker = new Map<string, PeerMetricRow>();
+  for (const tickerChunk of chunk(tickers, REQUEST_CHUNK_SIZE)) {
+    const rows = await env.DB.prepare(
+      `SELECT ticker, price, change_1d as change1d, change_1w as change1w,
+              market_cap as marketCap, avg_volume as avgVolume, as_of as asOf, source
+         FROM peer_metric_cache
+        WHERE ticker IN (${tickerChunk.map(() => "?").join(",")})`,
+    ).bind(...tickerChunk).all<PeerMetricRow>();
+    for (const row of rows.results ?? []) rowsByTicker.set(row.ticker.toUpperCase(), row);
+  }
+  const asOf = new Date().toISOString();
+  const rows = tickers.map((ticker) => rowsByTicker.get(ticker) ?? {
+    ticker,
+    price: null,
+    change1d: null,
+    change1w: null,
+    marketCap: null,
+    avgVolume: null,
+    asOf,
+    source: "stored-peer-metrics",
+  });
+  const missing = rows.filter((row) => !rowsByTicker.has(row.ticker));
+  return {
+    rows,
+    error: missing.length > 0
+      ? `${missing.length} ticker${missing.length === 1 ? " has" : "s have"} no stored metrics; a scheduled or manual refresh is required.`
+      : null,
+  };
 }

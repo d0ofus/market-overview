@@ -3,7 +3,7 @@ import type { Env } from "./types";
 export type ScheduledLane = "core" | "market-data" | "scans" | "maintenance" | "reports";
 
 export const SCHEDULED_CORE_CRON = "*/15 * * * *";
-export const SCHEDULED_MARKET_DATA_CRON = "2,17,32,47 * * * *";
+export const SCHEDULED_MARKET_DATA_CRON = "*/5 * * * *";
 export const SCHEDULED_SCANS_CRON = "5,20,35,50 * * * *";
 export const SCHEDULED_MAINTENANCE_CRON = "8,23,38,53 * * * *";
 export const SCHEDULED_REPORTS_CRON = "11,26,41,56 * * * *";

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/types";
 
 const fedwatchMocks = vi.hoisted(() => ({
-  getFedWatchSnapshot: vi.fn(),
+  loadStoredFedWatchSnapshot: vi.fn(),
 }));
 
 vi.mock("../src/fedwatch-service", () => fedwatchMocks);
@@ -24,7 +24,7 @@ function context(): ExecutionContext {
 describe("FedWatch API route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    fedwatchMocks.getFedWatchSnapshot.mockResolvedValue({
+    fedwatchMocks.loadStoredFedWatchSnapshot.mockResolvedValue({
       status: "ok",
       meetings: [],
     });
@@ -36,22 +36,22 @@ describe("FedWatch API route", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("public, max-age=300");
-    expect(fedwatchMocks.getFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object), { force: false });
+    expect(fedwatchMocks.loadStoredFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object));
   });
 
   it("does not force refresh for public force=1 requests without admin auth", async () => {
     const request = new Request("https://example.com/api/fedwatch?force=1");
     await worker.fetch(request, env(), context());
 
-    expect(fedwatchMocks.getFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object), { force: false });
+    expect(fedwatchMocks.loadStoredFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object));
   });
 
-  it("allows force refresh when force=1 request is admin authenticated", async () => {
+  it("keeps authenticated force requests stored-read only", async () => {
     const request = new Request("https://example.com/api/fedwatch?force=1", {
       headers: { authorization: "Bearer secret" },
     });
     await worker.fetch(request, env({ ADMIN_SECRET: "secret" }), context());
 
-    expect(fedwatchMocks.getFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object), { force: true });
+    expect(fedwatchMocks.loadStoredFedWatchSnapshot).toHaveBeenCalledWith(expect.any(Object));
   });
 });

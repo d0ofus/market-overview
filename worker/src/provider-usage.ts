@@ -104,7 +104,15 @@ export class ProviderBudgetExceededError extends Error {
 
 const DEFAULT_BUDGETS = {
   alpacaMinuteWarn: 150,
-  alpacaMinuteHard: 190,
+  alpacaMinuteHard: 160,
+  // TradingView and Yahoo limits are deployment-profile choices. Production
+  // config sets the approved 6/minute, 400/day, and 250/day ceilings; keeping
+  // the library defaults disabled avoids silently imposing that profile on
+  // tests and alternate deployments that have not opted in.
+  tradingViewMinuteWarn: 0,
+  tradingViewMinuteHard: 0,
+  tradingViewDayHard: 0,
+  yahooDayHard: 0,
   fmpDayWarn: 200,
   fmpDayHard: 240,
   alphaVantageDayWarn: 20,
@@ -113,7 +121,48 @@ const DEFAULT_BUDGETS = {
   finnhubMinuteHard: 55,
 };
 
-const minuteCounters = new Map<string, number>();
+const minuteCountersByEnv = new WeakMap<object, Map<string, number>>();
+const providerCircuitsByEnv = new WeakMap<object, Map<string, { failures: number; openUntil: number }>>();
+const PROVIDER_CIRCUIT_FAILURE_THRESHOLD = 3;
+const PROVIDER_CIRCUIT_OPEN_MS = 2 * 60_000;
+
+function minuteCountersFor(env: Env): Map<string, number> {
+  const key = env as object;
+  let counters = minuteCountersByEnv.get(key);
+  if (!counters) {
+    counters = new Map<string, number>();
+    minuteCountersByEnv.set(key, counters);
+  }
+  return counters;
+}
+
+function providerCircuitFor(env: Env, providerKey: string): { failures: number; openUntil: number } {
+  const envKey = env as object;
+  let circuits = providerCircuitsByEnv.get(envKey);
+  if (!circuits) {
+    circuits = new Map();
+    providerCircuitsByEnv.set(envKey, circuits);
+  }
+  const key = normalizeKey(providerKey);
+  let circuit = circuits.get(key);
+  if (!circuit) {
+    circuit = { failures: 0, openUntil: 0 };
+    circuits.set(key, circuit);
+  }
+  return circuit;
+}
+
+function updateProviderCircuit(circuit: { failures: number; openUntil: number }, failed: boolean, now: number): void {
+  if (!failed) {
+    circuit.failures = 0;
+    circuit.openUntil = 0;
+    return;
+  }
+  circuit.failures += 1;
+  if (circuit.failures >= PROVIDER_CIRCUIT_FAILURE_THRESHOLD) {
+    circuit.openUntil = now + PROVIDER_CIRCUIT_OPEN_MS;
+  }
+}
 
 function normalizeKey(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9._/-]+/g, "-") || "unknown";
@@ -155,6 +204,17 @@ function providerBudget(env: Env, providerKey: string): { warn: number; hard: nu
       window: "minute",
     };
   }
+  if (key === "tradingview" || key === "trading-view") {
+    return {
+      warn: envInt(env.TRADINGVIEW_REQUESTS_PER_MINUTE_WARN, DEFAULT_BUDGETS.tradingViewMinuteWarn),
+      hard: envInt(env.TRADINGVIEW_REQUESTS_PER_MINUTE_HARD, DEFAULT_BUDGETS.tradingViewMinuteHard),
+      window: "minute",
+    };
+  }
+  if (key === "yahoo") {
+    const hard = envInt(env.YAHOO_REQUESTS_PER_DAY_HARD, DEFAULT_BUDGETS.yahooDayHard);
+    return { warn: Math.max(0, Math.floor(hard * 0.8)), hard, window: "day" };
+  }
   return null;
 }
 
@@ -164,7 +224,7 @@ function canUseD1(env: Env): boolean {
 
 function isMissingUsageTable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /provider_usage_daily|no such table|\.run is not a function/i.test(message);
+  return /provider_usage_(?:daily|minute)|no such table|\.prepare is not a function|\.run is not a function|\.first is not a function/i.test(message);
 }
 
 function classifyTimeout(error: unknown): boolean {
@@ -201,10 +261,44 @@ async function checkBudgetBeforeFetch(env: Env, providerKey: string, now: Date):
   if (!budget || budget.hard <= 0) return;
   const key = normalizeKey(providerKey);
   if (budget.window === "minute") {
-    const minuteKey = `${key}|${now.toISOString().slice(0, 16)}`;
-    const used = minuteCounters.get(minuteKey) ?? 0;
-    if (used >= budget.hard) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
-    minuteCounters.set(minuteKey, used + 1);
+    const minuteBucket = now.toISOString().slice(0, 16);
+    let reservedPersistently = false;
+    if (canUseD1(env)) {
+      try {
+        const reservation = await env.DB.prepare(
+        `INSERT INTO provider_usage_minute
+           (minute_bucket, provider_key, request_count, updated_at)
+         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+         ON CONFLICT(minute_bucket, provider_key) DO UPDATE SET
+           request_count = provider_usage_minute.request_count + 1,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE provider_usage_minute.request_count < ?`,
+        ).bind(minuteBucket, key, budget.hard).run();
+        const changes = reservation.meta?.changes;
+        if (typeof changes === "number") {
+          if (changes <= 0) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
+          reservedPersistently = true;
+        }
+      } catch (error) {
+        if (error instanceof ProviderBudgetExceededError) throw error;
+        if (!isMissingUsageTable(error)) throw error;
+      }
+    }
+    if (!reservedPersistently) {
+      const minuteKey = `${key}|${minuteBucket}`;
+      const counters = minuteCountersFor(env);
+      const used = counters.get(minuteKey) ?? 0;
+      if (used >= budget.hard) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
+      counters.set(minuteKey, used + 1);
+    }
+    if (key === "tradingview" || key === "trading-view") {
+      const day = now.toISOString().slice(0, 10);
+      const dailyHard = envInt(env.TRADINGVIEW_REQUESTS_PER_DAY_HARD, DEFAULT_BUDGETS.tradingViewDayHard);
+      const used = await loadProviderRequestCountForDay(env, key, day);
+      if (dailyHard > 0 && used >= dailyHard) {
+        throw new ProviderBudgetExceededError(key, dailyHard, "day");
+      }
+    }
     return;
   }
   const day = now.toISOString().slice(0, 10);
@@ -281,6 +375,20 @@ export async function recordProviderUsage(
   }
 }
 
+export async function cleanupProviderUsage(env: Env, now = new Date()): Promise<void> {
+  if (!canUseD1(env)) return;
+  const minuteCutoff = new Date(now.getTime() - 2 * 24 * 60 * 60_000).toISOString().slice(0, 16);
+  const dailyCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+  try {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM provider_usage_minute WHERE minute_bucket < ?").bind(minuteCutoff),
+      env.DB.prepare("DELETE FROM provider_usage_daily WHERE usage_day < ?").bind(dailyCutoff),
+    ]);
+  } catch (error) {
+    if (!isMissingUsageTable(error)) throw error;
+  }
+}
+
 export async function meteredFetch(
   env: Env,
   input: RequestInfo | URL,
@@ -289,6 +397,12 @@ export async function meteredFetch(
   timeoutMs?: number,
 ): Promise<Response> {
   const startedAt = Date.now();
+  const providerKey = normalizeKey(meta.providerKey);
+  const circuit = providerCircuitFor(env, providerKey);
+  if (circuit.openUntil > startedAt) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((circuit.openUntil - startedAt) / 1000));
+    throw new Error(`Provider circuit open for ${providerKey}; retry-after=${retryAfterSeconds}`);
+  }
   await checkBudgetBeforeFetch(env, meta.providerKey, new Date(startedAt));
   const controller = timeoutMs ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -302,6 +416,11 @@ export async function meteredFetch(
       status: response.status,
       durationMs: Date.now() - startedAt,
     });
+    updateProviderCircuit(
+      circuit,
+      response.status === 403 || response.status === 429 || response.status >= 500,
+      Date.now(),
+    );
     return response;
   } catch (error) {
     const mapped = controller && classifyTimeout(error)
@@ -313,10 +432,55 @@ export async function meteredFetch(
       durationMs: Date.now() - startedAt,
       error: mapped,
     });
+    updateProviderCircuit(circuit, true, Date.now());
     throw mapped;
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+function providerRetryDelayMs(response: Response | null, attempt: number): number {
+  const retryAfter = response?.headers?.get?.("Retry-After")?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.min(15_000, Math.max(0, seconds * 1000));
+    const timestamp = Date.parse(retryAfter);
+    if (Number.isFinite(timestamp)) return Math.min(15_000, Math.max(0, timestamp - Date.now()));
+  }
+  return Math.min(8_000, 500 * 2 ** Math.max(0, attempt - 1) + Math.floor(Math.random() * 250));
+}
+
+export async function meteredFetchWithRetry(
+  env: Env,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  meta: ProviderUsageMeta,
+  timeoutMs = 8_000,
+  maxAttempts = 3,
+): Promise<Response> {
+  const attempts = Math.max(1, Math.min(3, Math.trunc(maxAttempts)));
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response: Response | null = null;
+    try {
+      response = await meteredFetch(env, input, init, meta, timeoutMs);
+      const status = Number(response.status);
+      const retryable = Number.isFinite(status)
+        ? status === 403 || status === 429 || status >= 500
+        : response.ok === false;
+      if (!retryable) return response;
+      if (attempt === attempts) return response;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      if (/provider budget exceeded|provider circuit open/i.test(message) || attempt === attempts) throw error;
+    }
+    const delayMs = providerRetryDelayMs(response, attempt);
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Provider request failed after bounded retries.");
 }
 
 function emptyTotals() {

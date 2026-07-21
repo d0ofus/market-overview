@@ -1,5 +1,6 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
+import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import type { Env } from "./types";
 
 export type WatchlistFactorStatus = "pass" | "fail" | "unknown";
@@ -353,16 +354,18 @@ function requiredCalendarDays(config: WatchlistFactorConfig, keys: WatchlistFact
 async function loadDailyBars(env: Env, tickers: string[], startDate: string): Promise<Map<string, DailyBar[]>> {
   const barsByTicker = new Map<string, DailyBar[]>();
   const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean)));
+  const db = getMarketDataDb(env);
+  const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += 80) {
     const chunk = uniqueTickers.slice(index, index + 80);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT ticker, date, o, h, l, c, volume
-       FROM daily_bars
-       WHERE ticker IN (${placeholders}) AND date >= ?
+       FROM alpaca_daily_bars
+       WHERE feed = ? AND ticker IN (${placeholders}) AND date >= ?
        ORDER BY ticker ASC, date ASC`,
-    ).bind(...chunk, startDate).all<DailyBar>();
+    ).bind(feed, ...chunk, startDate).all<DailyBar>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
       const current = barsByTicker.get(ticker) ?? [];
@@ -397,6 +400,7 @@ async function refreshAndLoadBars(
       startDate,
       endDate,
       continueOnError: true,
+      target: "market",
     });
   } catch (error) {
     sourceErrors.push(error instanceof Error ? error.message.slice(0, 240) : "Daily bars refresh failed.");
@@ -524,8 +528,13 @@ export function calculatePriorStrongMovePct(
   bars: Array<{ date: string; l: number; h: number }> | undefined,
   lookbackMonths: number,
 ): number | null {
-  const cutoff = addUtcDays(new Date().toISOString().slice(0, 10), -monthsToCalendarDays(lookbackMonths));
-  const recent = (bars ?? []).filter((bar) => bar.date >= cutoff && Number.isFinite(bar.l) && Number.isFinite(bar.h));
+  const valid = (bars ?? [])
+    .filter((bar) => /^\d{4}-\d{2}-\d{2}$/.test(bar.date) && Number.isFinite(bar.l) && Number.isFinite(bar.h))
+    .sort((left, right) => left.date.localeCompare(right.date));
+  const latestDate = valid.at(-1)?.date;
+  if (!latestDate) return null;
+  const cutoff = addUtcDays(latestDate, -monthsToCalendarDays(lookbackMonths));
+  const recent = valid.filter((bar) => bar.date >= cutoff);
   if (recent.length < 2) return null;
   let minLow = Number.POSITIVE_INFINITY;
   let maxMove = Number.NEGATIVE_INFINITY;

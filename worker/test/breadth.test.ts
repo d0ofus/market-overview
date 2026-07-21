@@ -19,12 +19,20 @@ function createBreadthEnv(tickers: string[], bars: DailyBar[]) {
             }
             if (sql.includes("SELECT ticker, date, c, volume") && sql.includes("FROM alpaca_daily_bars")) {
               const asOfDate = String(args.at(-1));
-              const requested = new Set(args.slice(1, -1).map((arg) => String(arg).toUpperCase()));
+              const requested = sql.includes("json_each")
+                ? new Set((JSON.parse(String(args[1])) as string[]).map((ticker) => ticker.toUpperCase()))
+                : new Set(args.slice(1, -1).map((arg) => String(arg).toUpperCase()));
               return {
                 results: normalizedBars
                   .filter((bar) => requested.has(bar.ticker) && bar.date <= asOfDate)
                   .sort((left, right) => left.ticker.localeCompare(right.ticker) || left.date.localeCompare(right.date))
-                  .map((bar) => ({ ticker: bar.ticker, date: bar.date, c: bar.c, volume: bar.volume })) as T[],
+                  .map((bar) => ({
+                    ticker: bar.ticker,
+                    date: bar.date,
+                    c: bar.c,
+                    volume: bar.volume,
+                    sourceProvider: "alpaca",
+                  })) as T[],
               };
             }
             return { results: [] as T[] };
@@ -33,10 +41,13 @@ function createBreadthEnv(tickers: string[], bars: DailyBar[]) {
             if (sql.includes("DELETE FROM breadth_snapshots")) {
               deletedIds.push(String(args[0]));
             }
-            if (sql.includes("INSERT OR REPLACE INTO breadth_snapshots")) {
+            if (sql.includes("INSERT INTO breadth_snapshots")) {
               snapshots.set(String(args[0]), args);
             }
             return {};
+          },
+          async first<T>() {
+            return null as T;
           },
         });
         return {
@@ -49,7 +60,14 @@ function createBreadthEnv(tickers: string[], bars: DailyBar[]) {
           async run() {
             return makeBound([]).run();
           },
+          async first<T>() {
+            return null as T;
+          },
         };
+      },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        await Promise.all(statements.map((statement) => statement.run()));
+        return statements.map(() => ({ meta: { changes: 1, rows_written: 1 } }));
       },
     },
   } as any;
@@ -92,27 +110,27 @@ describe("breadth computations", () => {
       stored: false,
       reason: "low-current-date-coverage",
       coveragePct: 90,
-      minCoveragePct: 95,
+      minCoveragePct: 98,
       memberCount: 9,
       totalUniverseMembers: 10,
     });
     expect(snapshots.size).toBe(0);
-    expect(deletedIds).toEqual(["2026-06-02:sp500-core"]);
+    expect(deletedIds).toEqual([]);
   });
 
   it("stores S&P 500 breadth rows when current-session coverage meets the gate", async () => {
-    const tickers = Array.from({ length: 20 }, (_, index) => `T${index}`);
-    const bars = tickers.slice(0, 19).flatMap((ticker) => twoDayBar(ticker));
+    const tickers = Array.from({ length: 50 }, (_, index) => `T${index}`);
+    const bars = tickers.slice(0, 49).flatMap((ticker) => twoDayBar(ticker));
     const { env, snapshots } = createBreadthEnv(tickers, bars);
 
     const result = await computeAndStoreBreadth(env, "2026-06-02", "sp500-core");
 
     expect(result).toMatchObject({
       stored: true,
-      coveragePct: 95,
-      minCoveragePct: 95,
-      memberCount: 19,
-      totalUniverseMembers: 20,
+      coveragePct: 98,
+      minCoveragePct: 98,
+      memberCount: 49,
+      totalUniverseMembers: 50,
     });
     expect(snapshots.has("2026-06-02:sp500-core")).toBe(true);
   });

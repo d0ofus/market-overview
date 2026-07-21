@@ -7,6 +7,7 @@ import {
   loadWorkerScheduleSettings,
   planPostCloseBudgetProtection,
   planPostCloseProviderBatch,
+  shouldUseYahooRepair,
   POST_CLOSE_SCOPE,
   resolvePostCloseBudgetProtection,
   updateWorkerScheduleSettings,
@@ -261,7 +262,7 @@ describe("post-close budget protection", () => {
 
     expect(decision).toMatchObject({ protect: false, reason: "completed" });
     expect(primaryPrepareCalls).toBe(0);
-    expect(marketPrepareCalls).toBe(1);
+    expect(marketPrepareCalls).toBe(2);
   });
 
   it("protects post-close budget when the state diagnostic fails", async () => {
@@ -300,7 +301,7 @@ describe("worker schedule service", () => {
     expect(settings.cronExpression).toBe("*/15 * * * *");
     expect(settings.rsBackgroundEnabled).toBe(true);
     expect(settings.rsBackgroundBatchSize).toBe(50);
-    expect(settings.postCloseBarsOffsetMinutes).toBe(60);
+    expect(settings.postCloseBarsOffsetMinutes).toBe(20);
   });
 
   it("persists worker schedule updates", async () => {
@@ -377,7 +378,29 @@ describe("post-close daily bar universe", () => {
     });
 
     expect(plan.items).toHaveLength(25);
-    expect(plan.refreshStartDate).toBe("2025-05-16");
+    expect(plan.refreshStartDate).toBe("2025-03-27");
+  });
+
+  it("always fills the exact completed session before repairing older history", () => {
+    const items = [
+      { ticker: "SPY", historyRequired: 1 },
+      { ticker: "QQQ", historyRequired: 1 },
+    ];
+    const plan = planPostCloseProviderBatch({
+      items,
+      historyStates: new Map([["SPY", {
+        ticker: "SPY",
+        lookbackStart: "2025-01-01",
+        throughDate: "2026-07-09",
+      }]]),
+      currentTickers: new Set(["SPY"]),
+      tradingDate: "2026-07-10",
+      batchSize: 80,
+    });
+
+    expect(plan.mode).toBe("exact");
+    expect(plan.items).toEqual([{ ticker: "QQQ", historyRequired: 1 }]);
+    expect(plan.refreshStartDate).toBe("2026-07-10");
   });
 
   it("uses incremental catch-up after overview history is verified", () => {
@@ -394,6 +417,13 @@ describe("post-close daily bar universe", () => {
 
     expect(plan.items).toEqual(items);
     expect(plan.refreshStartDate).toBe("2026-07-09");
+  });
+
+  it("permits a bounded Yahoo repair only after three Alpaca attempts", () => {
+    expect(shouldUseYahooRepair({ attemptCount: 2, hasCurrentSession: false, mode: "exact" })).toBe(false);
+    expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: false, mode: "exact" })).toBe(true);
+    expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: true, mode: "history" })).toBe(true);
+    expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: true, mode: "current" })).toBe(false);
   });
 
   it("classifies transient limits separately from authentication failures", () => {

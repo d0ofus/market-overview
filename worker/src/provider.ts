@@ -13,6 +13,7 @@ export type DailyBar = {
   volume: number;
   sourceProvider?: string;
   sourceFeed?: string | null;
+  observedAt?: string | null;
 };
 
 export type PremarketSnapshot = {
@@ -49,7 +50,23 @@ export type ProviderOptions = {
 };
 
 const PROVIDER_FETCH_TIMEOUT_MS = 8_000;
+const PROVIDER_HISTORY_TIMEOUT_MS = 15_000;
 const DEFAULT_FALLBACK_REQUESTS_PER_INVOCATION = 8;
+
+function retryDelayMs(response: Response | null, attempt: number): number {
+  const retryAfter = response?.headers.get("Retry-After")?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.min(15_000, Math.max(0, seconds * 1000));
+    const timestamp = Date.parse(retryAfter);
+    if (Number.isFinite(timestamp)) return Math.min(15_000, Math.max(0, timestamp - Date.now()));
+  }
+  return Math.min(8_000, 500 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250));
+}
+
+function delayProviderRetry(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function isAbortLikeError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -801,20 +818,26 @@ class StooqProvider implements MarketDataProvider {
 }
 
 class AlpacaProvider implements MarketDataProvider {
-  label = "Alpaca (IEX Delayed Daily Bars)";
+  label: string;
   private readonly baseUrl = "https://data.alpaca.markets/v2/stocks/bars";
   private readonly key: string;
   private readonly secret: string;
-  private readonly feed: string;
+  private readonly liveFeed: string;
+  private readonly dailyFeed: string;
+  private readonly dailyAdjustment: string;
   private readonly fallbackEnabled: boolean;
   private readonly fallbackPreferredTickers: Set<string>;
   private readonly fallbackScope: "preferred" | "all";
   private readonly stooqFallback: StooqProvider;
+  private readonly circuit = { failures: 0, openUntil: 0 };
 
   constructor(private readonly env: Env, options: ProviderOptions = {}) {
     this.key = env.ALPACA_API_KEY ?? "";
     this.secret = env.ALPACA_API_SECRET ?? "";
-    this.feed = env.ALPACA_FEED ?? "iex";
+    this.liveFeed = (env.ALPACA_LIVE_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+    this.dailyFeed = (env.ALPACA_DAILY_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+    this.dailyAdjustment = (env.ALPACA_DAILY_ADJUSTMENT ?? "split").trim().toLowerCase() || "split";
+    this.label = `Alpaca (${this.dailyFeed.toUpperCase()} completed daily bars)`;
     this.fallbackEnabled = options.fallbackEnabled ?? true;
     this.fallbackScope = options.fallbackScope ?? "preferred";
     this.fallbackPreferredTickers = buildFallbackPreferredTickers(options.yahooPreferredTickers);
@@ -841,12 +864,51 @@ class AlpacaProvider implements MarketDataProvider {
     return ts.slice(0, 10);
   }
 
-  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
+  private async requestWithRetry(
+    input: RequestInfo | URL,
+    init: RequestInit,
+    timeoutMs: number,
+    meta: ProviderUsageMeta,
+  ): Promise<Response> {
+    if (this.circuit.openUntil > Date.now()) {
+      throw new Error(`Alpaca provider circuit is open until ${new Date(this.circuit.openUntil).toISOString()}.`);
+    }
+    let lastError: unknown = null;
+    let lastResponse: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      let response: Response | null = null;
+      try {
+        response = await fetchWithTimeout(input, init, timeoutMs, this.env, meta);
+        lastResponse = response;
+        if (response.ok) {
+          this.circuit.failures = 0;
+          this.circuit.openUntil = 0;
+          return response;
+        }
+        if (response.status === 403) {
+          this.circuit.failures += 1;
+          if (this.circuit.failures >= 3) this.circuit.openUntil = Date.now() + 2 * 60_000;
+          return response;
+        }
+        if (response.status !== 429 && response.status < 500) return response;
+        lastError = new Error(`Alpaca request failed (${response.status}).`);
+      } catch (error) {
+        lastError = error;
+      }
+      this.circuit.failures += 1;
+      if (attempt < 3) await delayProviderRetry(retryDelayMs(response, attempt));
+    }
+    if (this.circuit.failures >= 3) this.circuit.openUntil = Date.now() + 2 * 60_000;
+    if (lastResponse) return lastResponse;
+    throw lastError instanceof Error ? lastError : new Error("Alpaca provider request failed after retries.");
+  }
+
+  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string, feed = this.dailyFeed): Promise<DailyBar[]> {
     if (tickers.length === 0) return [];
     return await this.fetchChunk(tickers, startDate, endDate, feed);
   }
 
-  private async fetchChunk(tickers: string[], startDate: string, endDate: string, feed = this.feed): Promise<DailyBar[]> {
+  private async fetchChunk(tickers: string[], startDate: string, endDate: string, feed = this.dailyFeed): Promise<DailyBar[]> {
     const out: DailyBar[] = [];
     let pageToken: string | undefined;
     do {
@@ -855,19 +917,19 @@ class AlpacaProvider implements MarketDataProvider {
         symbols: tickers.join(","),
         start: `${startDate}T00:00:00Z`,
         end: `${endDate}T23:59:59Z`,
-        adjustment: "all",
+        adjustment: this.dailyAdjustment,
         sort: "asc",
         limit: "10000",
         feed,
       });
       if (pageToken) params.set("page_token", pageToken);
-      const res = await fetchWithTimeout(`${this.baseUrl}?${params.toString()}`, {
+      const res = await this.requestWithRetry(`${this.baseUrl}?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
           "APCA-API-SECRET-KEY": this.secret,
           "User-Agent": "market-command-centre/1.0",
         },
-      }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+      }, PROVIDER_HISTORY_TIMEOUT_MS, {
         providerKey: "alpaca",
         endpointKey: `daily-bars-${feed}`,
         caller: "daily-bars",
@@ -896,6 +958,7 @@ class AlpacaProvider implements MarketDataProvider {
             volume: b.v ?? 0,
             sourceProvider: "alpaca",
             sourceFeed: feed,
+            observedAt: b.t,
           });
         }
       }
@@ -923,7 +986,7 @@ class AlpacaProvider implements MarketDataProvider {
         const latest = latestByTicker.get(normalized);
         return !latest || latest < endDate;
       };
-      if (this.fallbackEnabled && this.feed === "iex") {
+      if (this.fallbackEnabled && this.dailyFeed === "iex") {
         const preferredBatch = batch.filter((ticker) => (
           this.fallbackPreferredTickers.has(ticker.toUpperCase()) && isMissingOrStale(ticker)
         ));
@@ -960,19 +1023,19 @@ class AlpacaProvider implements MarketDataProvider {
     return all;
   }
 
-  private async fetchQuoteSnapshotChunk(tickers: string[], feed = this.feed): Promise<Record<string, QuoteSnapshot>> {
+  private async fetchQuoteSnapshotChunk(tickers: string[], feed = this.liveFeed): Promise<Record<string, QuoteSnapshot>> {
     const params = new URLSearchParams({
       symbols: tickers.join(","),
       feed,
     });
     const fetchedAt = new Date().toISOString();
-    const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+    const res = await this.requestWithRetry(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
       headers: {
         "APCA-API-KEY-ID": this.key,
         "APCA-API-SECRET-KEY": this.secret,
         "User-Agent": "market-command-centre/1.0",
       },
-    }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+    }, PROVIDER_FETCH_TIMEOUT_MS, {
       providerKey: "alpaca",
       endpointKey: `quote-snapshots-${feed}`,
       caller: "quote-overlay",
@@ -1008,7 +1071,7 @@ class AlpacaProvider implements MarketDataProvider {
 
   private async fetchQuoteSnapshotChunkWithIsolation(
     tickers: string[],
-    feed = this.feed,
+    feed = this.liveFeed,
     errors: string[] = [],
   ): Promise<Record<string, QuoteSnapshot>> {
     try {
@@ -1032,10 +1095,10 @@ class AlpacaProvider implements MarketDataProvider {
     const chunks = this.chunk(unique, 80);
     const errors: string[] = [];
     for (const chunk of chunks) {
-      const chunkSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(chunk, this.feed, errors);
+      const chunkSnapshots = await this.fetchQuoteSnapshotChunkWithIsolation(chunk, this.liveFeed, errors);
       Object.assign(out, chunkSnapshots);
 
-      if (this.fallbackEnabled && this.feed === "iex") {
+      if (this.fallbackEnabled && this.liveFeed === "iex") {
         const missingPreferredTickers = chunk.filter((ticker) => (
           this.fallbackPreferredTickers.has(ticker.toUpperCase()) && !out[ticker.toUpperCase()]
         ));
@@ -1066,17 +1129,17 @@ class AlpacaProvider implements MarketDataProvider {
     for (const chunk of chunks) {
       const params = new URLSearchParams({
         symbols: chunk.join(","),
-        feed: this.feed,
+        feed: this.liveFeed,
       });
-      const res = await fetchWithTimeout(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
+      const res = await this.requestWithRetry(`https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`, {
         headers: {
           "APCA-API-KEY-ID": this.key,
           "APCA-API-SECRET-KEY": this.secret,
           "User-Agent": "market-command-centre/1.0",
         },
-      }, PROVIDER_FETCH_TIMEOUT_MS, this.env, {
+      }, PROVIDER_FETCH_TIMEOUT_MS, {
         providerKey: "alpaca",
-        endpointKey: `premarket-snapshots-${this.feed}`,
+        endpointKey: `premarket-snapshots-${this.liveFeed}`,
         caller: "premarket",
         symbolCount: chunk.length,
       });
@@ -1103,7 +1166,17 @@ export function getProvider(env: Env, options: ProviderOptions = {}): MarketData
     }
     return new AlpacaProvider(env, options);
   }
-  if (mode === "stooq") return new StooqProvider(new Set(), "", "", options.fallbackEnabled ?? true);
+  if (mode === "stooq") {
+    return new StooqProvider(
+      buildFallbackPreferredTickers(options.yahooPreferredTickers),
+      env.FMP_API_KEY ?? "",
+      env.ALPHA_VANTAGE_API_KEY ?? "",
+      options.fallbackEnabled ?? true,
+      env,
+      buildFallbackRequestBudget(env, options.fallbackRequestLimit),
+      "market-data-repair",
+    );
+  }
   if (mode === "synthetic" || mode === "csv") return new SyntheticProvider();
   if (!env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) {
     return new StooqProvider(new Set(), "", "", options.fallbackEnabled ?? true);

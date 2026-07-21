@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadProviderUsageDaily, meteredFetch, recordProviderUsage } from "../src/provider-usage";
+import { loadProviderUsageDaily, meteredFetch, meteredFetchWithRetry, recordProviderUsage } from "../src/provider-usage";
 import type { Env } from "../src/types";
 
 type UsageRow = {
@@ -24,6 +24,7 @@ type UsageRow = {
 
 class FakeProviderUsageDb {
   rows = new Map<string, UsageRow>();
+  minuteRows = new Map<string, number>();
 
   prepare(sql: string) {
     const db = this;
@@ -35,6 +36,17 @@ class FakeProviderUsageDb {
         return statement;
       },
       async first<T>() {
+        if (normalized.startsWith("INSERT INTO provider_usage_minute")) {
+          const minuteBucket = String(bound[0]);
+          const providerKey = String(bound[1]);
+          const hardLimit = Number(bound[2]);
+          const key = `${minuteBucket}|${providerKey}`;
+          const current = db.minuteRows.get(key) ?? 0;
+          if (current >= hardLimit) return null as T;
+          const requestCount = current + 1;
+          db.minuteRows.set(key, requestCount);
+          return { requestCount } as T;
+        }
         if (normalized.includes("SUM(request_count)")) {
           const day = String(bound[0]);
           const provider = String(bound[1]);
@@ -73,6 +85,16 @@ class FakeProviderUsageDb {
         };
       },
       async run() {
+        if (normalized.startsWith("INSERT INTO provider_usage_minute")) {
+          const minuteBucket = String(bound[0]);
+          const providerKey = String(bound[1]);
+          const hardLimit = Number(bound[2]);
+          const key = `${minuteBucket}|${providerKey}`;
+          const current = db.minuteRows.get(key) ?? 0;
+          if (current >= hardLimit) return { meta: { changes: 0 } };
+          db.minuteRows.set(key, current + 1);
+          return { meta: { changes: 1 } };
+        }
         if (!normalized.startsWith("INSERT INTO provider_usage_daily")) return {};
         const usageDay = String(bound[0]);
         const providerKey = String(bound[1]);
@@ -210,5 +232,65 @@ describe("provider usage metering", () => {
       caller: "fallback",
     })).rejects.toThrow("Provider budget exceeded");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reserves persistent minute capacity before calling Alpaca", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, { ALPACA_REQUESTS_PER_MINUTE_HARD: "1" });
+    const fetchMock = vi.fn(async () => Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await meteredFetch(env, "https://example.com/alpaca", {}, {
+      providerKey: "alpaca",
+      endpointKey: "daily-bars",
+      caller: "post-close",
+    });
+    await expect(meteredFetch(env, "https://example.com/alpaca", {}, {
+      providerKey: "alpaca",
+      endpointKey: "daily-bars",
+      caller: "post-close",
+    })).rejects.toThrow("Provider budget exceeded");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(Array.from(db.minuteRows.values())).toEqual([1]);
+  });
+
+  it("opens a short circuit after three repeated provider failures", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, { TRADINGVIEW_REQUESTS_PER_MINUTE_HARD: "10" });
+    const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const meta = {
+      providerKey: "tradingview",
+      endpointKey: "overview-current",
+      caller: "overview-current",
+    };
+
+    await meteredFetch(env, "https://example.com/tv", {}, meta);
+    await meteredFetch(env, "https://example.com/tv", {}, meta);
+    await meteredFetch(env, "https://example.com/tv", {}, meta);
+    await expect(meteredFetch(env, "https://example.com/tv", {}, meta)).rejects.toThrow(
+      /Provider circuit open/,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("honors Retry-After while keeping retries bounded", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, { TRADINGVIEW_REQUESTS_PER_MINUTE_HARD: "6" });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("busy", { status: 429, headers: { "Retry-After": "0" } }))
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await meteredFetchWithRetry(env, "https://example.com/tv-retry", {}, {
+      providerKey: "tradingview",
+      endpointKey: "overview-current",
+      caller: "overview-current",
+    });
+
+    expect(response.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

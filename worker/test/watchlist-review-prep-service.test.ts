@@ -54,10 +54,10 @@ function createPrepEnv(input: { bars?: Bar[]; symbols?: SymbolRow[] } = {}) {
                 const requested = new Set(args.map((arg) => String(arg).toUpperCase()));
                 return { results: Array.from(symbols.values()).filter((row) => requested.has(row.ticker)) };
               }
-              if (sql.includes("FROM daily_bars") && sql.includes("date >=")) {
+              if (sql.includes("FROM alpaca_daily_bars") && sql.includes("date >=")) {
                 const endDate = String(args.at(-1));
                 const startDate = String(args.at(-2));
-                const requested = new Set(args.slice(0, -2).map((arg) => String(arg).toUpperCase()));
+                const requested = new Set(args.slice(1, -2).map((arg) => String(arg).toUpperCase()));
                 return {
                   results: bars
                     .filter((bar) => requested.has(bar.ticker) && bar.date >= startDate && bar.date <= endDate)
@@ -103,6 +103,7 @@ function createPrepEnv(input: { bars?: Bar[]; symbols?: SymbolRow[] } = {}) {
   return {
     env: {
       DB: db,
+      MARKET_DATA_DB: db,
       DATA_PROVIDER: "alpaca",
       ALPACA_FEED: "iex",
       ALPACA_API_KEY: "do-not-leak-key",

@@ -4,6 +4,7 @@ import {
   fetchTradingViewGapCandidates,
   fallbackAnalysis,
   isSnapshotFresh,
+  loadStoredGappersSnapshot,
   normalizeGappersScanFilters,
   resolveLlmConfig,
 } from "../src/gappers-service";
@@ -91,6 +92,70 @@ describe("gappers service helpers", () => {
 
     expect(isSnapshotFresh(freshAt)).toBe(true);
     expect(isSnapshotFresh(staleAt)).toBe(false);
+  });
+
+  it("loads the public gappers payload from stored rows without providers or writes", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network should not be called");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const writeMock = vi.fn(async () => {
+      throw new Error("stored-read path must not write");
+    });
+    const db = {
+      prepare(sql: string) {
+        const statement = {
+          async first<T>() {
+            if (!sql.includes("FROM gappers_snapshots")) return null as T;
+            return {
+              id: "snapshot-1",
+              marketSession: "premarket",
+              providerLabel: "TradingView",
+              generatedAt: new Date().toISOString(),
+              rowCount: 1,
+              status: "ok",
+              error: null,
+            } as T;
+          },
+          async all<T>() {
+            return { results: [] as T[] };
+          },
+          bind() {
+            return {
+              ...statement,
+              async all<T>() {
+                return {
+                  results: [{
+                    ticker: "AAPL",
+                    name: "Apple",
+                    sector: "Technology",
+                    industry: "Consumer Electronics",
+                    marketCap: 3_000_000_000_000,
+                    price: 200,
+                    prevClose: 190,
+                    premarketPrice: 202,
+                    gapPct: 6.3,
+                    premarketVolume: 1_000_000,
+                    newsJson: "[]",
+                    analysisJson: null,
+                    compositeScore: 75,
+                  }] as T[],
+                };
+              },
+            };
+          },
+          run: writeMock,
+        };
+        return statement;
+      },
+    } as unknown as D1Database;
+
+    const snapshot = await loadStoredGappersSnapshot({ DB: db }, 25);
+
+    expect(snapshot.rows.map((row) => row.ticker)).toEqual(["AAPL"]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(writeMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("resolves anthropic and openai llm settings from overrides and env", () => {

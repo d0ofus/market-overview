@@ -48,7 +48,9 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
               __args: args,
               async all<T>() {
                 if (sql.includes("FROM symbols")) {
-                  const requested = new Set((args as string[]).map((value) => value.toUpperCase()));
+                  const requested = new Set(
+                    (args as string[]).map((value) => value.toUpperCase()).filter((value) => value !== "IEX" && value !== "SIP"),
+                  );
                   return {
                     results: storedSymbols
                       .filter((row) => requested.has(row.ticker.toUpperCase()))
@@ -69,7 +71,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                     }) as T[],
                   };
                 }
-                if (sql.includes("FROM daily_bars")) {
+                if (sql.includes("FROM alpaca_daily_bars")) {
                   const perTickerLimit = typeof args[args.length - 1] === "number"
                     ? Number(args[args.length - 1])
                     : Number.POSITIVE_INFINITY;
@@ -78,6 +80,8 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
                       .filter((value): value is string => typeof value === "string")
                       .map((value) => value.toUpperCase()),
                   );
+                  requested.delete("IEX");
+                  requested.delete("SIP");
                   const limitedRows = Array.from(requested).flatMap((ticker) =>
                     storedBars
                       .filter((row) => row.ticker.toUpperCase() === ticker)
@@ -126,7 +130,7 @@ function createCorrelationEnv(symbols: SymbolRow[], dailyBars: BarRow[]): Env {
         }
         return [];
       },
-    } as D1Database,
+    } as unknown as D1Database,
   };
 }
 
@@ -225,15 +229,15 @@ describe("correlation API", () => {
     expect(body.error).toContain("Rolling window cannot be larger than the selected lookback.");
   });
 
-  it("hydrates cold-start matrix requests before returning data", async () => {
+  it("keeps cold-start matrix requests provider-free", async () => {
     const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
+    const resolverSpy = vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
       ticker,
       name: `${ticker} Inc.`,
       exchange: "NYSE",
       assetClass: "equity",
     }));
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async (tickers) => {
         const dates = buildRecentDates(35, expectedAsOfDate);
@@ -256,21 +260,22 @@ describe("correlation API", () => {
       env as never,
     );
 
-    expect(response.status).toBe(200);
-    const body = await response.json() as { resolvedTickers: Array<{ ticker: string }>; unresolvedTickers: unknown[] };
-    expect(body.resolvedTickers.map((ticker) => ticker.ticker)).toEqual(["AVT", "ARW"]);
-    expect(body.unresolvedTickers).toEqual([]);
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: string };
+    expect(body.error).toContain("AVT (unknown ticker), ARW (unknown ticker)");
+    expect(resolverSpy).not.toHaveBeenCalled();
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 
-  it("hydrates cold-start pair requests before returning data", async () => {
+  it("keeps cold-start pair requests provider-free", async () => {
     const expectedAsOfDate = latestUsSessionAsOfDate(new Date());
-    vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
+    const resolverSpy = vi.spyOn(symbolResolverModule, "resolveTickerMeta").mockImplementation(async (ticker) => ({
       ticker,
       name: `${ticker} Inc.`,
       exchange: "NYSE",
       assetClass: "equity",
     }));
-    vi.spyOn(providerModule, "getProvider").mockReturnValue({
+    const providerSpy = vi.spyOn(providerModule, "getProvider").mockReturnValue({
       label: "test-provider",
       getDailyBars: async (tickers) => {
         const dates = buildRecentDates(40, expectedAsOfDate);
@@ -293,10 +298,11 @@ describe("correlation API", () => {
       env as never,
     );
 
-    expect(response.status).toBe(200);
-    const body = await response.json() as { pair: { left: { ticker: string }; right: { ticker: string } } };
-    expect(body.pair.left.ticker).toBe("AVT");
-    expect(body.pair.right.ticker).toBe("ARW");
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: string };
+    expect(body.error).toContain("AVT (unknown ticker), ARW (unknown ticker)");
+    expect(resolverSpy).not.toHaveBeenCalled();
+    expect(providerSpy).not.toHaveBeenCalled();
   });
 
   it("includes unresolved ticker reasons when hydration still leaves fewer than two usable series", async () => {
@@ -325,7 +331,10 @@ describe("correlation API", () => {
           }];
         }),
     });
-    const env = createCorrelationEnv([], []);
+    const env = createCorrelationEnv(
+      [{ ticker: "AVT", displayName: "Avnet Inc." }],
+      [{ ticker: "AVT", date: buildDates(1).at(0)!, c: 101 }],
+    );
 
     const response = await (worker as { fetch: typeof fetch }).fetch(
       new Request("http://localhost/api/correlation/matrix?tickers=AVT,BAD&lookback=60D"),

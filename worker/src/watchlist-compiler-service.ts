@@ -1,5 +1,5 @@
 import { TradingViewPublicLinkProvider } from "./scanning-providers";
-import { meteredFetch } from "./provider-usage";
+import { meteredFetchWithRetry } from "./provider-usage";
 import { loadRunCompiledRows, loadRunUniqueTickers } from "./scanning-service";
 import type { ScanCompiledRow, ScanRunSummary, ScanUniqueTickerRow } from "./scanning-types";
 import type { Env } from "./types";
@@ -299,7 +299,7 @@ async function fetchTradingViewMetricMap(env: Env, rows: WatchlistCandidate[]): 
       sort: { sortBy: "change", sortOrder: "desc" as const },
       range: [0, symbolChunk.length],
     };
-    const response = await meteredFetch(env, TV_METRICS_URL, {
+    const response = await meteredFetchWithRetry(env, TV_METRICS_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -311,7 +311,7 @@ async function fetchTradingViewMetricMap(env: Env, rows: WatchlistCandidate[]): 
       endpointKey: "watchlist-metrics",
       caller: "watchlist-compiler",
       symbolCount: symbolChunk.length,
-    });
+    }, 8_000);
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`TradingView metrics request failed (${response.status}): ${body.slice(0, 180)}`);

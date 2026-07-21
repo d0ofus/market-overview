@@ -2,7 +2,7 @@ import { computeMetrics, isPriceAboveSma, sanitizeBarSeries } from "./metrics";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { getMarketDataDb } from "./market-data-db";
 import { getProvider, type QuoteSnapshot } from "./provider";
-import { meteredFetch } from "./provider-usage";
+import { meteredFetch, meteredFetchWithRetry } from "./provider-usage";
 import { zonedParts } from "./refresh-timing";
 import type { Env, OverviewCurrentProviderStatus as SharedOverviewCurrentProviderStatus } from "./types";
 
@@ -484,7 +484,7 @@ async function fetchTradingViewRows(
 
   for (const candidateChunk of candidateChunks) {
     try {
-      const response = await meteredFetch(env, TV_SCAN_URL, {
+      const response = await meteredFetchWithRetry(env, TV_SCAN_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -496,7 +496,7 @@ async function fetchTradingViewRows(
         endpointKey: "overview-current",
         caller: "overview-current",
         symbolCount: candidateChunk.length,
-      });
+      }, 8_000);
       if (!response.ok) {
         const body = await response.text();
         const retryAfter = response.headers.get("Retry-After");

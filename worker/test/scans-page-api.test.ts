@@ -47,6 +47,16 @@ type MutableCompilePreset = {
   members: Array<{ scanPresetId: string; scanPresetName: string; sortOrder: number }>;
 };
 
+type MutableCompilePresetRow = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  scanPresetId: string | null;
+  scanPresetName: string | null;
+  sortOrder: number | null;
+};
+
 function createApiScansEnv(input?: {
   presets?: MutablePreset[];
   compilePresets?: MutableCompilePreset[];
@@ -68,10 +78,10 @@ function createApiScansEnv(input?: {
     return `2026-03-18T${String(generatedCounter).padStart(2, "0")}:00:00.000Z`;
   };
 
-  const buildCompilePresetRows = (compilePresetId?: string) =>
+  const buildCompilePresetRows = (compilePresetId?: string): MutableCompilePresetRow[] =>
     compilePresets
       .filter((preset) => !compilePresetId || preset.id === compilePresetId)
-      .flatMap((preset) => (
+      .flatMap<MutableCompilePresetRow>((preset) => (
         preset.members.length > 0
           ? preset.members.map((member) => ({
             id: preset.id,
@@ -196,7 +206,7 @@ function createApiScansEnv(input?: {
         }
         return [];
       },
-    } as D1Database,
+    } as unknown as D1Database,
   } as Env;
 }
 

@@ -19,7 +19,7 @@ async function makeStateFile() {
   return path.join(root, "state.json");
 }
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },

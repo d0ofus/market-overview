@@ -1,6 +1,8 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
+import { coverageSatisfiesHistory, verifyMarketBarCoverage } from "./bar-coverage";
 import { getProvider } from "./provider";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import {
   assertMarketDataBackgroundWriteBudget,
   cleanupMarketDataOperationalState,
@@ -18,13 +20,13 @@ const DEFAULT_WORKER_SCHEDULE_ID = "default";
 const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 50;
 const DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK = 20;
 const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
-const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 60;
+const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 20;
 const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 80;
 const DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK = 4;
 const MAX_POST_CLOSE_PROVIDER_BATCH_SIZE = 80;
 const MAX_POST_CLOSE_PROVIDER_BATCHES_PER_TICK = 4;
 const OVERVIEW_HISTORY_BOOTSTRAP_BATCH_SIZE = 25;
-const OVERVIEW_HISTORY_LOOKBACK_DAYS = 420;
+const OVERVIEW_HISTORY_LOOKBACK_DAYS = 470;
 const POST_CLOSE_ITEM_LEASE_MS = 10 * 60_000;
 const POST_CLOSE_RETRY_MINUTES = 15;
 const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
@@ -53,15 +55,19 @@ const POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT = `
       AND di.enabled = 1
       AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
     UNION ALL
-    SELECT UPPER(TRIM(s.ticker)) as ticker, 1 as priority, 0 as history_required
+    SELECT UPPER(TRIM(us.ticker)) as ticker, 1 as priority, 1 as history_required
+    FROM universe_symbols us
+    WHERE us.universe_id = 'sp500-core'
+    UNION ALL
+    SELECT UPPER(TRIM(us.ticker)) as ticker, 2 as priority, 1 as history_required
+    FROM universe_symbols us
+    WHERE us.universe_id IN (${BREADTH_HISTORY_UNIVERSE_IDS.filter((id) => id !== "sp500-core").map((id) => `'${id}'`).join(", ")})
+    UNION ALL
+    SELECT UPPER(TRIM(s.ticker)) as ticker, 3 as priority, 0 as history_required
     FROM symbols s
     WHERE COALESCE(s.is_active, 1) = 1
       AND COALESCE(s.catalog_managed, 0) = 1
       AND lower(COALESCE(s.asset_class, '')) IN ('equity', 'stock')
-    UNION ALL
-    SELECT UPPER(TRIM(us.ticker)) as ticker, 1 as priority, 1 as history_required
-    FROM universe_symbols us
-    WHERE us.universe_id IN (${BREADTH_HISTORY_UNIVERSE_IDS.map((id) => `'${id}'`).join(", ")})
   ) post_close_universe_raw
   WHERE ticker IS NOT NULL AND ticker <> ''
   GROUP BY ticker
@@ -80,83 +86,9 @@ function postCloseStateEnv(env: Env): Env {
   return withDatabase(env, getMarketDataDb(env));
 }
 
-async function addPostCloseColumnIfMissing(env: Env, sql: string): Promise<void> {
-  try {
-    await env.DB.prepare(sql).run();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error ?? "");
-    if (!/duplicate column name/i.test(message)) throw error;
-  }
-}
-
 async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
   if (postCloseRetrySchemaReady) return;
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS post_close_daily_bar_refresh_jobs (
-       id TEXT PRIMARY KEY,
-       trading_date TEXT NOT NULL,
-       scope TEXT NOT NULL,
-       status TEXT NOT NULL,
-       started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       completed_at TEXT,
-       error TEXT,
-       total_tickers INTEGER NOT NULL DEFAULT 0,
-       processed_tickers INTEGER NOT NULL DEFAULT 0,
-       cursor_offset INTEGER NOT NULL DEFAULT 0,
-       fetched_rows INTEGER NOT NULL DEFAULT 0,
-       written_rows INTEGER NOT NULL DEFAULT 0,
-       current_date_tickers INTEGER NOT NULL DEFAULT 0,
-       missing_current_date_tickers INTEGER NOT NULL DEFAULT 0,
-       current_date_coverage_pct REAL NOT NULL DEFAULT 0,
-       attempt_count INTEGER NOT NULL DEFAULT 0,
-       next_attempt_at TEXT,
-       error_code TEXT,
-       lease_expires_at TEXT,
-       UNIQUE(scope, trading_date)
-     )`,
-  ).run();
-  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
-  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN next_attempt_at TEXT");
-  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN error_code TEXT");
-  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_jobs ADD COLUMN lease_expires_at TEXT");
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS post_close_daily_bar_refresh_job_items (
-       job_id TEXT NOT NULL,
-       ordinal INTEGER NOT NULL,
-       ticker TEXT NOT NULL,
-       history_required INTEGER NOT NULL DEFAULT 0,
-       status TEXT NOT NULL DEFAULT 'queued',
-       attempt_count INTEGER NOT NULL DEFAULT 0,
-       next_attempt_at TEXT,
-       lease_expires_at TEXT,
-       lease_token TEXT,
-       last_error TEXT,
-       bar_date TEXT,
-       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (job_id, ticker)
-     )`,
-  ).run();
-  await addPostCloseColumnIfMissing(
-    env,
-    "ALTER TABLE post_close_daily_bar_refresh_job_items ADD COLUMN history_required INTEGER NOT NULL DEFAULT 0",
-  );
-  await addPostCloseColumnIfMissing(env, "ALTER TABLE post_close_daily_bar_refresh_job_items ADD COLUMN lease_token TEXT");
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS overview_alpaca_history_state (
-       ticker TEXT NOT NULL,
-       source_feed TEXT NOT NULL,
-       lookback_start TEXT NOT NULL,
-       through_date TEXT NOT NULL,
-       status TEXT NOT NULL,
-       last_error TEXT,
-       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (ticker, source_feed)
-     )`,
-  ).run();
-  await env.DB.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_post_close_bar_items_due ON post_close_daily_bar_refresh_job_items (job_id, status, next_attempt_at, ordinal)",
-  ).run();
+  void env;
   postCloseRetrySchemaReady = true;
 }
 
@@ -185,6 +117,7 @@ async function loadPostCloseJobItemBatch(
   jobId: string,
   cursorOffset: number,
   limit: number,
+  phase: "exact" | "history",
 ): Promise<Array<{ ticker: string; ordinal: number; attemptCount: number; historyRequired: number }>> {
   const rows = await env.DB.prepare(
     `SELECT ticker, ordinal, attempt_count as attemptCount, history_required as historyRequired
@@ -192,6 +125,7 @@ async function loadPostCloseJobItemBatch(
      WHERE job_id = ?
        AND ordinal >= ?
        AND status NOT IN ('completed', 'unsupported')
+       AND ${phase === "exact" ? "bar_date IS NULL" : "bar_date IS NOT NULL"}
        AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
        AND (lease_expires_at IS NULL OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP)
      ORDER BY ordinal ASC
@@ -203,6 +137,18 @@ async function loadPostCloseJobItemBatch(
     historyRequired: number;
   }>();
   return rows.results ?? [];
+}
+
+async function hasIncompletePostCloseExactSession(env: Env, jobId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 as pending
+       FROM post_close_daily_bar_refresh_job_items
+      WHERE job_id = ?
+        AND bar_date IS NULL
+        AND status NOT IN ('completed', 'unsupported')
+      LIMIT 1`,
+  ).bind(jobId).first<{ pending: number }>();
+  return Boolean(row?.pending);
 }
 
 async function updatePostCloseJobItems(
@@ -286,6 +232,7 @@ async function leasePostCloseJobItems(
 
 async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
   completedCount: number;
+  currentCount: number;
   incompleteCount: number;
   readyCount: number;
   nextAttemptAt: string | null;
@@ -293,6 +240,7 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
   const row = await env.DB.prepare(
     `SELECT
        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completedCount,
+       SUM(CASE WHEN bar_date IS NOT NULL THEN 1 ELSE 0 END) as currentCount,
        SUM(CASE WHEN status NOT IN ('completed', 'unsupported') THEN 1 ELSE 0 END) as incompleteCount,
        SUM(CASE WHEN status NOT IN ('completed', 'unsupported')
                  AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
@@ -303,12 +251,14 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
      WHERE job_id = ?`,
   ).bind(jobId).first<{
     completedCount: number | null;
+    currentCount: number | null;
     incompleteCount: number | null;
     readyCount: number | null;
     nextAttemptAt: string | null;
   }>();
   return {
     completedCount: Number(row?.completedCount ?? 0),
+    currentCount: Number(row?.currentCount ?? 0),
     incompleteCount: Number(row?.incompleteCount ?? 0),
     readyCount: Number(row?.readyCount ?? 0),
     nextAttemptAt: row?.nextAttemptAt ?? null,
@@ -537,9 +487,14 @@ export function isPostCloseBarsWindowOpen(
   now: Date,
   expectedTradingDate: string,
   offsetMinutes: number,
+  marketCloseTime = "16:00",
 ): boolean {
   const ny = zonedParts(now, "America/New_York");
-  const closeMinutesWithOffset = 16 * 60 + Math.max(0, offsetMinutes);
+  const [closeHour, closeMinute] = marketCloseTime.split(":").map(Number);
+  const closeMinutes = Number.isFinite(closeHour) && Number.isFinite(closeMinute)
+    ? closeHour * 60 + closeMinute
+    : 16 * 60;
+  const closeMinutesWithOffset = closeMinutes + Math.max(0, offsetMinutes);
   if (ny.localDate > expectedTradingDate) return true;
   return ny.localDate === expectedTradingDate && ny.minutesOfDay >= closeMinutesWithOffset;
 }
@@ -563,12 +518,13 @@ export function resolvePostCloseBudgetProtection(input: {
   expectedTradingDate: string;
   settings: WorkerScheduleSettings;
   job: PostCloseDailyBarRefreshJob | null;
+  marketCloseTime?: string;
 }): PostCloseBudgetProtectionDecision {
-  const { now, expectedTradingDate, settings, job } = input;
+  const { now, expectedTradingDate, settings, job, marketCloseTime } = input;
   if (!settings.postCloseBarsEnabled) {
     return { protect: false, expectedTradingDate, reason: "disabled" };
   }
-  if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) {
+  if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes, marketCloseTime)) {
     return { protect: false, expectedTradingDate, reason: "before-window" };
   }
   if (!job) {
@@ -797,30 +753,6 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
   return out;
 }
 
-async function loadKnownUnsupportedAlpacaTickers(env: Env, tickers: string[]): Promise<Set<string>> {
-  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
-  const out = new Set<string>();
-  for (let index = 0; index < unique.length; index += 80) {
-    const tickerChunk = unique.slice(index, index + 80);
-    const placeholders = tickerChunk.map(() => "?").join(",");
-    try {
-      const rows = await getMarketDataDb(env).prepare(
-        `SELECT ticker
-         FROM overview_provider_symbols
-         WHERE provider_key = 'alpaca'
-           AND support_status = 'unsupported'
-           AND ticker IN (${placeholders})`,
-      ).bind(...tickerChunk).all<{ ticker: string }>();
-      for (const row of rows.results ?? []) out.add(row.ticker.toUpperCase());
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error ?? "");
-      if (!/no such table/i.test(message)) throw error;
-      return out;
-    }
-  }
-  return out;
-}
-
 type OverviewHistoryState = {
   ticker: string;
   lookbackStart: string;
@@ -833,11 +765,27 @@ export function planPostCloseProviderBatch<T extends {
 }>(input: {
   items: T[];
   historyStates: Map<string, OverviewHistoryState>;
+  currentTickers?: Set<string>;
   tradingDate: string;
   batchSize: number;
-}): { items: T[]; refreshStartDate: string; historyLookbackStart: string } {
+}): {
+  items: T[];
+  refreshStartDate: string;
+  historyLookbackStart: string;
+  mode: "exact" | "history" | "current";
+} {
   const historyLookbackStart = addUtcDays(input.tradingDate, -OVERVIEW_HISTORY_LOOKBACK_DAYS);
   const historyStaleBoundary = addUtcDays(input.tradingDate, -7);
+  const currentTickers = input.currentTickers ?? new Set<string>();
+  const exactItems = input.items.filter((item) => !currentTickers.has(item.ticker));
+  if (input.currentTickers && exactItems.length > 0) {
+    return {
+      items: exactItems.slice(0, input.batchSize),
+      refreshStartDate: input.tradingDate,
+      historyLookbackStart,
+      mode: "exact",
+    };
+  }
   const historyCandidates = input.items.filter((item) => Number(item.historyRequired) === 1);
   const bootstrapItems = historyCandidates.filter((item) => {
     const state = input.historyStates.get(item.ticker);
@@ -857,7 +805,20 @@ export function planPostCloseProviderBatch<T extends {
       const nextDate = addUtcDays(throughDate, 1);
       return nextDate < earliest ? nextDate : earliest;
     }, input.tradingDate);
-  return { items, refreshStartDate, historyLookbackStart };
+  return {
+    items,
+    refreshStartDate,
+    historyLookbackStart,
+    mode: historyCandidates.length > 0 ? "history" : "current",
+  };
+}
+
+export function shouldUseYahooRepair(input: {
+  attemptCount: number;
+  hasCurrentSession: boolean;
+  mode: "exact" | "history" | "current";
+}): boolean {
+  return input.attemptCount >= 3 && (!input.hasCurrentSession || input.mode === "history");
 }
 
 async function loadOverviewHistoryStates(
@@ -1004,7 +965,8 @@ export async function processPostCloseDailyBarRefreshJob(
 
     while (processedBatchCount < maxBatches) {
       if (cursorOffset >= job.totalTickers) cursorOffset = 0;
-      let candidateItems = await loadPostCloseJobItemBatch(stateEnv, job.id, cursorOffset, batchSize);
+      const phase = await hasIncompletePostCloseExactSession(stateEnv, job.id) ? "exact" : "history";
+      let candidateItems = await loadPostCloseJobItemBatch(stateEnv, job.id, cursorOffset, batchSize, phase);
       if (candidateItems.length === 0) {
         if (cursorOffset > 0) {
           cursorOffset = 0;
@@ -1012,27 +974,48 @@ export async function processPostCloseDailyBarRefreshJob(
         }
         break;
       }
-      const candidateEndOrdinal = candidateItems.at(-1)?.ordinal ?? cursorOffset;
-      const unsupportedTickers = await loadKnownUnsupportedAlpacaTickers(
+      const sourceFeed = marketDataFeed(env);
+      const candidateCurrentTickers = await loadTickersWithBarOnDate(
         env,
         candidateItems.map((item) => item.ticker),
+        job.tradingDate,
       );
-      if (unsupportedTickers.size > 0) {
-        await updatePostCloseJobItems(stateEnv, job.id, Array.from(unsupportedTickers), {
-          status: "unsupported",
-          nextAttemptAt: null,
-          leaseExpiresAt: null,
-          leaseToken: null,
-          lastError: "Ticker is not present in Alpaca's active US-equity asset catalog.",
-        });
-        candidateItems = candidateItems.filter((item) => !unsupportedTickers.has(item.ticker));
+      if (phase === "exact" && candidateCurrentTickers.size > 0) {
+        const alreadyCurrentItems = candidateItems.filter((item) => candidateCurrentTickers.has(item.ticker));
+        await updatePostCloseJobItems(
+          stateEnv,
+          job.id,
+          alreadyCurrentItems.filter((item) => Number(item.historyRequired) === 1).map((item) => item.ticker),
+          {
+            status: "current-complete",
+            barDate: job.tradingDate,
+            nextAttemptAt: null,
+            leaseExpiresAt: null,
+            leaseToken: null,
+            lastError: null,
+          },
+        );
+        await updatePostCloseJobItems(
+          stateEnv,
+          job.id,
+          alreadyCurrentItems.filter((item) => Number(item.historyRequired) !== 1).map((item) => item.ticker),
+          {
+            status: "completed",
+            barDate: job.tradingDate,
+            nextAttemptAt: null,
+            leaseExpiresAt: null,
+            leaseToken: null,
+            lastError: null,
+          },
+        );
+        const lastCandidateOrdinal = candidateItems.at(-1)?.ordinal ?? cursorOffset;
+        candidateItems = candidateItems.filter((item) => !candidateCurrentTickers.has(item.ticker));
+        if (candidateItems.length === 0) {
+          cursorOffset = lastCandidateOrdinal + 1;
+          processedBatchCount += 1;
+          continue;
+        }
       }
-      if (candidateItems.length === 0) {
-        cursorOffset = candidateEndOrdinal + 1;
-        processedBatchCount += 1;
-        continue;
-      }
-      const sourceFeed = (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
       const historyCandidates = candidateItems.filter((item) => Number(item.historyRequired) === 1);
       const historyStates = await loadOverviewHistoryStates(
         env,
@@ -1042,6 +1025,7 @@ export async function processPostCloseDailyBarRefreshJob(
       const batchPlan = planPostCloseProviderBatch({
         items: candidateItems,
         historyStates,
+        currentTickers: candidateCurrentTickers,
         tradingDate: job.tradingDate,
         batchSize,
       });
@@ -1085,20 +1069,89 @@ export async function processPostCloseDailyBarRefreshJob(
           mirrorLatestToLegacy: true,
         });
       }
-      const currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      let currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      const yahooRepairItem = batchItems.find((item) => shouldUseYahooRepair({
+        attemptCount: Number(item.attemptCount),
+        hasCurrentSession: currentTickers.has(item.ticker),
+        mode: batchPlan.mode,
+      }));
+      if (yahooRepairItem) {
+        const yahooProvider = getProvider(
+          {
+            ...env,
+            DATA_PROVIDER: "stooq",
+            FMP_API_KEY: undefined,
+            ALPHA_VANTAGE_API_KEY: undefined,
+          },
+          {
+            yahooPreferredTickers: [yahooRepairItem.ticker],
+            fallbackEnabled: true,
+            fallbackRequestLimit: 1,
+          },
+        );
+        const repairStartDate = currentTickers.has(yahooRepairItem.ticker)
+          ? refreshStartDate
+          : job.tradingDate;
+        await refreshDailyBarsIncremental(env, {
+          provider: yahooProvider,
+          tickers: [yahooRepairItem.ticker],
+          startDate: repairStartDate,
+          endDate: job.tradingDate,
+          replaceExisting: true,
+          providerBatchSize: 1,
+          target: "market",
+          repairMissingMarketDates: true,
+          continueOnError: true,
+        });
+        currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      }
       await clearProviderSymbolBackoff(env, providerKey, Array.from(currentTickers));
-      const completedTickers = batchTickers.filter((ticker) => currentTickers.has(ticker));
       const missingTickers = batchTickers.filter((ticker) => !currentTickers.has(ticker));
-      const completedHistoryTickers = batchItems
-        .filter((item) => Number(item.historyRequired) === 1 && currentTickers.has(item.ticker))
-        .map((item) => item.ticker);
-      await checkpointOverviewHistoryStates(
-        env,
-        completedHistoryTickers,
-        sourceFeed,
-        historyLookbackStart,
-        job.tradingDate,
-      );
+      const completedTickers: string[] = [];
+      const currentOnlyTickers: string[] = [];
+      const historyMissingTickers: string[] = [];
+
+      if (batchPlan.mode === "history") {
+        const historyItems = batchItems.filter((item) => (
+          Number(item.historyRequired) === 1 && currentTickers.has(item.ticker)
+        ));
+        const coverage = await verifyMarketBarCoverage(env, {
+          tickers: historyItems.map((item) => item.ticker),
+          requestedStart: historyLookbackStart,
+          throughDate: job.tradingDate,
+          feed: sourceFeed,
+        });
+        for (const item of historyItems) {
+          if (coverageSatisfiesHistory(coverage.get(item.ticker))) completedTickers.push(item.ticker);
+          else historyMissingTickers.push(item.ticker);
+        }
+        await checkpointOverviewHistoryStates(
+          env,
+          completedTickers,
+          sourceFeed,
+          historyLookbackStart,
+          job.tradingDate,
+        );
+      } else {
+        for (const item of batchItems) {
+          if (!currentTickers.has(item.ticker)) continue;
+          const state = historyStates.get(item.ticker);
+          const historyAlreadyComplete = Number(item.historyRequired) !== 1
+            || Boolean(
+              state
+              && state.lookbackStart <= historyLookbackStart
+              && state.throughDate >= job.tradingDate,
+            );
+          if (historyAlreadyComplete) completedTickers.push(item.ticker);
+          else currentOnlyTickers.push(item.ticker);
+        }
+      }
+      const unresolvedAfterYahooRepair = new Set([...missingTickers, ...historyMissingTickers]);
+      const unsupportedTickers = yahooRepairItem && unresolvedAfterYahooRepair.has(yahooRepairItem.ticker)
+        ? [yahooRepairItem.ticker]
+        : [];
+      const retryHistoryMissingTickers = historyMissingTickers.filter((ticker) => !unsupportedTickers.includes(ticker));
+
       await updatePostCloseJobItems(stateEnv, job.id, completedTickers, {
         status: "completed",
         barDate: job.tradingDate,
@@ -1108,9 +1161,36 @@ export async function processPostCloseDailyBarRefreshJob(
         expectedLeaseToken: activeLeaseToken,
         lastError: null,
       });
+      await updatePostCloseJobItems(stateEnv, job.id, currentOnlyTickers, {
+        status: "current-complete",
+        barDate: job.tradingDate,
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
+        leaseToken: null,
+        expectedLeaseToken: activeLeaseToken,
+        lastError: null,
+      });
+      await updatePostCloseJobItems(stateEnv, job.id, retryHistoryMissingTickers, {
+        status: "history-missing",
+        barDate: job.tradingDate,
+        nextAttemptAt: new Date(Date.now() + POST_CLOSE_RETRY_MINUTES * 60_000).toISOString(),
+        leaseExpiresAt: null,
+        leaseToken: null,
+        expectedLeaseToken: activeLeaseToken,
+        lastError: `Canonical ${sourceFeed} history still contains missing trading sessions.`,
+      });
+      await updatePostCloseJobItems(stateEnv, job.id, unsupportedTickers, {
+        status: "unsupported",
+        barDate: unsupportedTickers.some((ticker) => currentTickers.has(ticker)) ? job.tradingDate : null,
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
+        leaseToken: null,
+        expectedLeaseToken: activeLeaseToken,
+        lastError: "Alpaca returned no complete result after three attempts and the Yahoo repair attempt did not resolve the session.",
+      });
       const missingByAttempt = new Map<number, string[]>();
       for (const item of batchItems) {
-        if (!missingTickers.includes(item.ticker)) continue;
+        if (!missingTickers.includes(item.ticker) || unsupportedTickers.includes(item.ticker)) continue;
         const itemAttempt = Math.max(1, Number(item.attemptCount ?? 1));
         const rows = missingByAttempt.get(itemAttempt) ?? [];
         rows.push(item.ticker);
@@ -1123,7 +1203,7 @@ export async function processPostCloseDailyBarRefreshJob(
           leaseExpiresAt: null,
           leaseToken: null,
           expectedLeaseToken: activeLeaseToken,
-          lastError: `No Alpaca ${env.ALPACA_FEED ?? "iex"} bar was returned for ${job.tradingDate}.`,
+          lastError: `No Alpaca ${sourceFeed} bar was returned for ${job.tradingDate}.`,
         });
       }
       cursorOffset = (batchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
@@ -1133,7 +1213,7 @@ export async function processPostCloseDailyBarRefreshJob(
       leasedItems = [];
       activeLeaseToken = null;
       const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
-      const currentDateTickers = summary.completedCount;
+      const currentDateTickers = summary.currentCount;
       const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
       const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
       await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
@@ -1150,7 +1230,7 @@ export async function processPostCloseDailyBarRefreshJob(
     }
 
     const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
-    const currentDateTickers = summary.completedCount;
+    const currentDateTickers = summary.currentCount;
     const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
     const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
     if (summary.incompleteCount === 0) {
@@ -1229,7 +1309,16 @@ export async function maybeRunScheduledPostCloseDailyBarRefresh(
 ): Promise<PostCloseDailyBarRefreshJob | null> {
   if (!settings.postCloseBarsEnabled) return null;
   const expectedTradingDate = latestUsMarketSessionAsOfDate(now);
-  if (!isPostCloseBarsWindowOpen(now, expectedTradingDate, settings.postCloseBarsOffsetMinutes)) return null;
+  await ensureMarketCalendarCoverage(env, expectedTradingDate).catch((error) => {
+    console.warn("market calendar refresh failed; using built-in holiday fallback", error);
+  });
+  const storedSession = await loadStoredMarketSession(env, expectedTradingDate).catch(() => null);
+  if (!isPostCloseBarsWindowOpen(
+    now,
+    expectedTradingDate,
+    settings.postCloseBarsOffsetMinutes,
+    storedSession?.closeAt,
+  )) return null;
   await cleanupMarketDataOperationalState(env, expectedTradingDate);
   const jobRecord = await ensurePostCloseDailyBarRefreshJob(env, expectedTradingDate);
   return await processPostCloseDailyBarRefreshJob(env, jobRecord.id, {
@@ -1265,7 +1354,14 @@ export async function planPostCloseBudgetProtection(
     const stateEnv = postCloseStateEnv(env);
     const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, expectedTradingDate);
     const job = record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
-    return resolvePostCloseBudgetProtection({ now, expectedTradingDate, settings, job });
+    const storedSession = await loadStoredMarketSession(env, expectedTradingDate).catch(() => null);
+    return resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings,
+      job,
+      marketCloseTime: storedSession?.closeAt,
+    });
   } catch (error) {
     console.warn("post-close budget protection diagnostic failed", { expectedTradingDate, error });
     return { protect: true, expectedTradingDate, reason: "diagnostic-failed" };

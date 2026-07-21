@@ -1,5 +1,5 @@
 import { classifyUsMarketSession } from "./alerts-time";
-import { meteredFetch } from "./provider-usage";
+import { meteredFetchWithRetry } from "./provider-usage";
 import type { Env } from "./types";
 
 const GAPPERS_SESSION = "premarket";
@@ -259,12 +259,12 @@ async function fetchTradingViewGapCandidates(
     body: JSON.stringify(payload),
   };
   const response = env
-    ? await meteredFetch(env, TV_SCAN_URL, requestInit, {
+    ? await meteredFetchWithRetry(env, TV_SCAN_URL, requestInit, {
       providerKey: "tradingview",
       endpointKey: "premarket-gappers",
       caller: "gappers",
       symbolCount: filters.limit,
-    })
+    }, 8_000)
     : await fetch(TV_SCAN_URL, requestInit);
   if (!response.ok) {
     const body = await response.text();
@@ -588,6 +588,33 @@ async function latestStoredSnapshot(env: Env): Promise<GappersSnapshot | null> {
       analysis: parseJson<GapperAnalysis | null>(row.analysisJson, null),
       compositeScore: row.compositeScore ?? null,
     })),
+  };
+}
+
+export async function loadStoredGappersSnapshot(env: Env, limit = DEFAULT_LIMIT): Promise<GappersSnapshot> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const cached = await latestStoredSnapshot(env);
+  if (!cached) {
+    return {
+      id: "unavailable",
+      marketSession: GAPPERS_SESSION,
+      providerLabel: "Stored gappers snapshot",
+      generatedAt: new Date(0).toISOString(),
+      rowCount: 0,
+      status: "empty",
+      error: null,
+      warning: "No stored gappers snapshot is available; queue a refresh from the admin control.",
+      rows: [],
+    };
+  }
+  const rows = cached.rows.slice(0, boundedLimit);
+  return {
+    ...cached,
+    rows,
+    rowCount: rows.length,
+    warning: isSnapshotFresh(cached.generatedAt)
+      ? cached.warning
+      : [cached.warning, "Stored gappers snapshot is stale; a scheduled refresh is pending."].filter(Boolean).join(" "),
   };
 }
 

@@ -83,6 +83,16 @@ type MutableCompilePreset = {
   members: Array<{ scanPresetId: string; scanPresetName: string; sortOrder: number }>;
 };
 
+type MutableCompilePresetRow = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  scanPresetId: string | null;
+  scanPresetName: string | null;
+  sortOrder: number | null;
+};
+
 type MutableSnapshot = {
   id: string;
   presetId: string;
@@ -377,10 +387,10 @@ function createMutableScansEnv(input: {
     return `2026-03-18T${String(generatedCounter).padStart(2, "0")}:00:00.000Z`;
   };
 
-  const buildCompilePresetRows = (compilePresetId?: string) =>
+  const buildCompilePresetRows = (compilePresetId?: string): MutableCompilePresetRow[] =>
     compilePresets
       .filter((preset) => !compilePresetId || preset.id === compilePresetId)
-      .flatMap((preset) => (
+      .flatMap<MutableCompilePresetRow>((preset) => (
         preset.members.length > 0
           ? preset.members.map((member) => ({
             id: preset.id,
@@ -784,11 +794,11 @@ function createMutableScansEnv(input: {
               const requestedTickers = getRequestedTickers(args, 1);
               return { results: getCoverageRows(requestedTickers, endDate) as T[] };
             }
-            if (sql.includes("MAX(date) as lastDate FROM daily_bars")) {
+            if (sql.includes("MAX(date) as lastDate FROM alpaca_daily_bars")) {
               const requestedTickers = args.map((value) => String(value).toUpperCase());
               return { results: getLatestBarDates(requestedTickers) as T[] };
             }
-            if (sql.includes("FROM daily_bars")) {
+            if (sql.includes("FROM alpaca_daily_bars")) {
               const endDate = String(args[args.length - 1] ?? "");
               const startDate = String(args[args.length - 2] ?? "");
               const requestedTickers = getRequestedTickers(args, 2);
@@ -1256,8 +1266,8 @@ function createMutableScansEnv(input: {
             });
             continue;
           }
-          if (statement.__sql.includes("INTO daily_bars")) {
-            const [ticker, date, o, h, l, c, volume] = statement.__args ?? [];
+          if (statement.__sql.includes("INTO alpaca_daily_bars")) {
+            const [, ticker, date, o, h, l, c, volume] = statement.__args ?? [];
             const normalizedTicker = String(ticker).toUpperCase();
             const rows = dailyBarsByTicker.get(normalizedTicker) ?? [];
             const nextRow = {
@@ -1854,7 +1864,7 @@ describe("scans page service", () => {
     let fallbackBenchmarkCalls = 0;
     const fallbackProvider = {
       label: "fallback",
-      getDailyBars: vi.fn(async (tickers: string[]) => {
+      getDailyBars: vi.fn(async (tickers: string[], _startDate: string, _endDate: string) => {
         if (tickers[0] !== "SPY") return [];
         fallbackBenchmarkCalls += 1;
         return fallbackBenchmarkCalls >= 2 ? benchmarkBars : [];
@@ -2691,7 +2701,8 @@ describe("scans page service", () => {
     expect(reusedRun?.warning).toBeNull();
     expect(reusedRun?.deferredTickerCount).toBe(0);
     expect(reusedRun?.leaseOwner).toBeNull();
-    expect(Array.from(env.__testState.relativeStrengthMaterializationRunCandidates.values()).map((row: MutableRelativeStrengthMaterializationRunCandidate) => row.ticker)).toEqual(["NVDA"]);
+    const runCandidates = env.__testState.relativeStrengthMaterializationRunCandidates as Map<string, MutableRelativeStrengthMaterializationRunCandidate>;
+    expect(Array.from(runCandidates.values()).map((row) => row.ticker)).toEqual(["NVDA"]);
     expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(0);
 
     vi.unstubAllGlobals();
@@ -2897,8 +2908,9 @@ describe("scans page service", () => {
     expect(refreshed.status).toBe("warning");
     expect(refreshed.rows.map((row) => row.ticker)).toEqual(["GOOD"]);
     expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(1);
-    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.ticker).toBe("BAD");
-    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.deferredAt).toBeTruthy();
+    const deferredTickers = env.__testState.relativeStrengthDeferredTickers as Map<string, MutableRelativeStrengthDeferredTickerRow>;
+    expect(Array.from(deferredTickers.values())[0]?.ticker).toBe("BAD");
+    expect(Array.from(deferredTickers.values())[0]?.deferredAt).toBeTruthy();
 
     vi.unstubAllGlobals();
   });
@@ -2954,6 +2966,15 @@ describe("scans page service", () => {
       if (options.tickers.includes("BAD")) {
         throw new Error("BAD ticker prep failure");
       }
+      return {
+        requestedTickers: options.tickers.length,
+        fetchedRows: 0,
+        writtenRows: 0,
+        skippedCurrentTickers: options.tickers.length,
+        currentDateTickers: 0,
+        missingCurrentDateTickers: options.tickers.length,
+        currentDateCoveragePct: 0,
+      };
     });
 
     const response = await requestScansRefresh(env, preset.id, "test");
@@ -2975,7 +2996,8 @@ describe("scans page service", () => {
     expect(refreshed.status).toBe("warning");
     expect(refreshed.rows.map((row) => row.ticker)).toEqual(["GOOD"]);
     expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())).toHaveLength(1);
-    expect(Array.from(env.__testState.relativeStrengthDeferredTickers.values())[0]?.ticker).toBe("BAD");
+    const prepDeferredTickers = env.__testState.relativeStrengthDeferredTickers as Map<string, MutableRelativeStrengthDeferredTickerRow>;
+    expect(Array.from(prepDeferredTickers.values())[0]?.ticker).toBe("BAD");
 
     vi.unstubAllGlobals();
   });
@@ -3255,6 +3277,7 @@ describe("scans page service", () => {
       return {
         ok: false,
         status: 503,
+        headers: new Headers({ "Retry-After": "0" }),
         text: async () => "upstream unavailable",
       };
     });
@@ -3310,6 +3333,7 @@ describe("scans page service", () => {
       return {
         ok: false,
         status: 503,
+        headers: new Headers({ "Retry-After": "0" }),
         text: async () => "upstream unavailable",
       };
     });
@@ -3628,7 +3652,7 @@ describe("scans page service", () => {
       createdAt: "2026-04-24T00:00:00.000Z",
       updatedAt: "2026-04-24T00:00:00.000Z",
     };
-    const run = {
+    const run: any = {
       id: "run-active",
       presetId: "preset-rs-manual",
       presetName: "Manual RS",
@@ -3890,7 +3914,7 @@ describe("scans page service", () => {
             },
             async all() {
               if (sql.includes("FROM scan_presets ORDER BY")) return { results: [presetRow] };
-              if (sql.includes("FROM daily_bars")) {
+              if (sql.includes("FROM alpaca_daily_bars")) {
                 const tickers = args.filter((arg): arg is string => typeof arg === "string" && /^[A-Z]+$/.test(arg));
                 if (tickers.includes("SPY")) return { results: benchmarkBars };
                 tickerDailyBarLoads.push(tickers);
@@ -4230,7 +4254,7 @@ describe("scans page service", () => {
                   }),
                 };
               }
-              if (sql.includes("FROM daily_bars")) {
+              if (sql.includes("FROM alpaca_daily_bars")) {
                 const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
                 const endDate = args.map(String).find((arg) => /^\d{4}-\d{2}-\d{2}$/.test(arg)) ?? expectedTradingDate;
                 return {
@@ -4514,7 +4538,7 @@ describe("scans page service", () => {
                   })),
                 };
               }
-              if (sql.includes("FROM daily_bars")) {
+              if (sql.includes("FROM alpaca_daily_bars")) {
                 const tickers = args.map(String).filter((arg) => barsByTicker.has(arg));
                 return { results: tickers.flatMap((ticker) => barsByTicker.get(ticker) ?? []) };
               }

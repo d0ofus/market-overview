@@ -114,7 +114,7 @@ export function buildRelativeStrengthSeries(
   for (let index = 0; index < tickerSeries.dates.length; index += 1) {
     const tickerClose = tickerSeries.closes[index];
     const benchmarkClose = benchmarkByDate.get(tickerSeries.dates[index]);
-    if (!Number.isFinite(tickerClose) || tickerClose <= 0 || !Number.isFinite(benchmarkClose) || benchmarkClose <= 0) continue;
+    if (!Number.isFinite(tickerClose) || tickerClose <= 0 || typeof benchmarkClose !== "number" || !Number.isFinite(benchmarkClose) || benchmarkClose <= 0) continue;
     values.push(tickerClose / benchmarkClose);
   }
 

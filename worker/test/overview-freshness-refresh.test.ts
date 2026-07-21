@@ -12,6 +12,9 @@ type DailyBarSeed = Record<string, string[]>;
 class OverviewFreshnessDb {
   snapshotWrites = 0;
   snapshotRowWrites = 0;
+  pointerWrites = 0;
+  pointerGenerationId = "ready-generation";
+  failPromotionBatch = false;
   snapshotRowBarDates: Array<string | null> = [];
   queries: Array<{ sql: string; args: unknown[] }> = [];
   snapshotRows: Array<{
@@ -124,7 +127,10 @@ class OverviewFreshnessDb {
     return statement;
   }
 
-  async batch(statements: Array<{ run: () => Promise<unknown> }>) {
+  async batch(statements: Array<{ sql?: string; run: () => Promise<unknown> }>) {
+    if (this.failPromotionBatch && statements.some((statement) => statement.sql?.includes("overview_snapshot_pointer"))) {
+      throw new Error("simulated transactional promotion failure");
+    }
     for (const statement of statements) await statement.run();
     return [];
   }
@@ -186,11 +192,18 @@ class OverviewFreshnessDb {
 
   firstForSql<T>(sql: string): T | null {
     if (sql.includes("FROM dashboard_configs WHERE id = ?")) return this.config as T;
+    if (sql.includes("FROM overview_snapshot_pointer")) {
+      return { generationId: this.pointerGenerationId } as T;
+    }
     return null;
   }
 
   runSql(sql: string, args: unknown[]) {
     if (sql.includes("INSERT INTO snapshots_meta")) this.snapshotWrites += 1;
+    if (sql.includes("INSERT INTO overview_snapshot_pointer")) {
+      this.pointerWrites += 1;
+      this.pointerGenerationId = String(args[1]);
+    }
     if (sql.includes("INSERT OR REPLACE INTO snapshot_rows")) {
       this.snapshotRowWrites += 1;
       this.snapshotRows.push({
@@ -213,6 +226,7 @@ class OverviewFreshnessDb {
 
 function boundStatement(sql: string, args: unknown[], db: OverviewFreshnessDb) {
   return {
+    sql,
     async first<T>() {
       return db.firstForSql<T>(sql);
     },
@@ -242,7 +256,7 @@ describe("overview freshness refresh", () => {
     expect(isOverviewFreshnessSufficientForScheduledSnapshot("stale", 100)).toBe(false);
   });
 
-  it("writes a fail-closed snapshot when critical ticker bars are stale", async () => {
+  it("rejects a stale candidate without replacing the last-ready snapshot", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05"],
       QQQ: ["2026-06-05"],
@@ -256,19 +270,12 @@ describe("overview freshness refresh", () => {
       ARKK: ["2026-06-05"],
     });
 
-    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12");
+    await expect(refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12"))
+      .rejects.toThrow("last-ready generation retained");
 
-    expect(result.freshness).toMatchObject({
-      expectedAsOfDate: "2026-06-12",
-      status: "stale",
-      currentCount: 0,
-      eligibleCount: 10,
-      minBarDate: "2026-06-05",
-      maxBarDate: "2026-06-05",
-    });
-    expect(result.freshness.criticalMissingTickers).toEqual(["DIA", "IWM", "QQQ", "SPY", "XLF"]);
-    expect(result.freshness.warning).toContain("SPY (US Index Futures) last updated 2026-06-05");
-    expect(db.snapshotWrites).toBe(1);
+    expect(db.snapshotWrites).toBe(0);
+    expect(db.pointerWrites).toBe(0);
+    expect(db.pointerGenerationId).toBe("ready-generation");
     expect(db.snapshotRows.every((row) => row.price == null && row.change1d == null)).toBe(true);
   });
 
@@ -368,7 +375,7 @@ describe("overview freshness refresh", () => {
     expect(db.snapshotRows.find((row) => row.ticker === "SPY")?.price).not.toBe(100);
   });
 
-  it("writes a stale snapshot in best-effort mode instead of throwing a freshness error", async () => {
+  it("does not let best-effort mode bypass generation promotion gates", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05"],
       QQQ: ["2026-06-05"],
@@ -382,14 +389,39 @@ describe("overview freshness refresh", () => {
       ARKK: ["2026-06-05"],
     });
 
-    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12", "default", { requireFreshness: false });
+    await expect(refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12", "default", { requireFreshness: false }))
+      .rejects.toThrow("last-ready generation retained");
 
-    expect(result.freshness.status).toBe("stale");
-    expect(db.snapshotWrites).toBe(1);
-    expect(db.snapshotRowWrites).toBe(10);
+    expect(db.snapshotWrites).toBe(0);
+    expect(db.snapshotRowWrites).toBe(0);
   });
 
-  it("writes a partial snapshot when critical tickers are fresh and non-critical overview rows are stale", async () => {
+  it("leaves the last-ready pointer intact when the atomic promotion batch fails", async () => {
+    const current = ["2026-06-05", "2026-06-12"];
+    const db = new OverviewFreshnessDb({
+      SPY: current,
+      QQQ: current,
+      DIA: current,
+      IWM: current,
+      XLF: current,
+      XLK: current,
+      XBI: current,
+      SMH: current,
+      IBIT: current,
+      ARKK: current,
+    });
+    db.failPromotionBatch = true;
+
+    await expect(computeAndStoreSnapshot(createEnv(db), "2026-06-12", "default", {
+      includeBreadth: false,
+    })).rejects.toThrow("simulated transactional promotion failure");
+
+    expect(db.pointerGenerationId).toBe("ready-generation");
+    expect(db.pointerWrites).toBe(0);
+    expect(db.snapshotWrites).toBe(0);
+  });
+
+  it("rejects a below-bootstrap partial snapshot even when critical history is fresh", async () => {
     const db = new OverviewFreshnessDb({
       SPY: ["2026-06-05", "2026-06-12"],
       QQQ: ["2026-06-05", "2026-06-12"],
@@ -403,14 +435,11 @@ describe("overview freshness refresh", () => {
       ARKK: ["2026-06-05"],
     });
 
-    const result = await refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12");
+    await expect(refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12"))
+      .rejects.toThrow("last-ready generation retained");
 
-    expect(result.freshness.status).toBe("partial");
-    expect(result.freshness.currentCount).toBe(5);
-    expect(result.freshness.eligibleCount).toBe(10);
-    expect(db.snapshotWrites).toBe(1);
-    expect(db.snapshotRowWrites).toBe(10);
-    expect(db.snapshotRowBarDates).toContain("2026-06-12");
-    expect(db.snapshotRowBarDates).toContain("2026-06-05");
+    expect(db.snapshotWrites).toBe(0);
+    expect(db.snapshotRowWrites).toBe(0);
+    expect(db.snapshotRowBarDates).toEqual([]);
   });
 });

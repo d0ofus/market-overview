@@ -1,19 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   assertMarketDataBackgroundWriteBudget,
+  assertMarketDataCriticalWorkBudget,
   assertMarketDataWriteBudget,
   loadMarketDataTickersWithBarOnDate,
 } from "../src/market-data-db";
 import type { Env } from "../src/types";
 
-function envWithUsage(barsWritten: number): Env {
+function envWithUsage(barsWritten: number, rowsRead = 0): Env {
   const db = {
     prepare() {
       return {
         bind() {
           return {
             async first<T>() {
-              return { barsWritten } as T;
+              return { rowsWritten: barsWritten, rowsRead } as T;
             },
           };
         },
@@ -25,6 +26,7 @@ function envWithUsage(barsWritten: number): Env {
     MARKET_DATA_DB: db as unknown as D1Database,
     MARKET_DATA_DAILY_WRITE_BUDGET: "75000",
     MARKET_DATA_CRITICAL_WRITE_RESERVE: "15000",
+    MARKET_DATA_DAILY_READ_BUDGET: "4500000",
   };
 }
 
@@ -46,6 +48,20 @@ describe("market-data write budgets", () => {
     await expect(assertMarketDataWriteBudget(envWithUsage(75_000), now)).rejects.toThrow(
       /daily rate limit/,
     );
+  });
+
+  it("preflights estimated feature reads against the critical read ceiling", async () => {
+    const now = new Date("2026-07-17T12:00:00Z");
+    await expect(assertMarketDataCriticalWorkBudget(
+      envWithUsage(1_000, 4_000_000),
+      { rowsRead: 500_000, rowsWritten: 500 },
+      now,
+    )).resolves.toBeUndefined();
+    await expect(assertMarketDataCriticalWorkBudget(
+      envWithUsage(1_000, 4_000_000),
+      { rowsRead: 500_001, rowsWritten: 500 },
+      now,
+    )).rejects.toThrow(/daily read limit/);
   });
 });
 

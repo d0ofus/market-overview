@@ -54,8 +54,10 @@ function createEtfApiEnv(input: {
               };
             }
 
-            if (sql.includes("ROW_NUMBER() OVER") && sql.includes("FROM daily_bars")) {
-              const requested = new Set(args.map((value) => String(value).toUpperCase()));
+            if (sql.includes("ROW_NUMBER() OVER") && sql.includes("FROM alpaca_daily_bars")) {
+              const requested = new Set(
+                args.slice(1).map((value) => String(value).toUpperCase()),
+              );
               const results = Array.from(requested).flatMap((ticker) =>
                 dailyBars
                   .filter((row) => row.ticker.toUpperCase() === ticker)

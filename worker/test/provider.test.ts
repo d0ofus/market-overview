@@ -151,7 +151,7 @@ describe("provider fallback control", () => {
   });
 
   it("does not call SIP or external fallback when IEX has current preferred ETF bars", async () => {
-    const fetchMock = vi.fn(async () => Response.json({
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
       bars: {
         SPY: [{ t: "2026-06-18T04:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 1000 }],
       },
@@ -170,7 +170,7 @@ describe("provider fallback control", () => {
     expect(bars).toHaveLength(1);
     expect(bars[0]).toMatchObject({ sourceProvider: "alpaca", sourceFeed: "iex" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0][0])).toContain("feed=iex");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("feed=iex");
   });
 
   it("uses SIP for a preferred ETF only when IEX is stale", async () => {

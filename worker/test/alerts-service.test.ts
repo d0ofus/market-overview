@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, type MockInstance } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildAlertDedupeSeed, normalizeAlertFilters, queryUniqueTickerDaysByFilters } from "../src/alerts-service";
 
 type GroupedTickerDay = {
@@ -26,29 +26,12 @@ type SymbolIndustryRow = {
   industry: string | null;
 };
 
-function stubTradingViewMetrics(rowsByTicker: Record<string, { price: number; change1d: number; marketCap: number; avgVolume: number }>): MockInstance {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: string | URL | Request, init?: RequestInit) => {
-    const body = JSON.parse(String(init?.body ?? "{}")) as { symbols?: { tickers?: string[] } };
-    const data = (body.symbols?.tickers ?? [])
-      .map((symbol) => {
-        const ticker = String(symbol).split(":").pop()?.toUpperCase() ?? "";
-        const row = rowsByTicker[ticker];
-        if (!row) return null;
-        return {
-          s: symbol,
-          d: [row.price, row.change1d, row.marketCap, row.avgVolume],
-        };
-      })
-      .filter(Boolean);
-
-    return new Response(JSON.stringify({ data }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  });
-}
-
-function createAlertsQueryEnv(groupedRows: GroupedTickerDay[], newsRows: NewsRow[] = [], symbolRows: SymbolIndustryRow[] = []) {
+function createAlertsQueryEnv(
+  groupedRows: GroupedTickerDay[],
+  newsRows: NewsRow[] = [],
+  symbolRows: SymbolIndustryRow[] = [],
+  peerRows: Array<{ ticker: string; price: number; change1d: number; marketCap: number; avgVolume: number }> = [],
+) {
   const db = {
     prepare(sql: string) {
       return {
@@ -75,6 +58,14 @@ function createAlertsQueryEnv(groupedRows: GroupedTickerDay[], newsRows: NewsRow
                 const tickers = new Set(args.map((value) => String(value).toUpperCase()));
                 return Promise.resolve({
                   results: symbolRows.filter((row) => tickers.has(row.ticker.toUpperCase())) as T[],
+                });
+              }
+              if (sql.includes("FROM peer_metric_cache")) {
+                const tickers = new Set(args.map((value) => String(value).toUpperCase()));
+                return Promise.resolve({
+                  results: peerRows
+                    .filter((row) => tickers.has(row.ticker.toUpperCase()))
+                    .map((row) => ({ ...row, change1w: null, asOf: "2026-03-05", source: "stored-test" })) as T[],
                 });
               }
               throw new Error(`Unhandled all() query in alerts test: ${sql}`);
@@ -140,13 +131,7 @@ describe("alerts service helpers", () => {
       { ticker: "TSLA", tradingDay: "2026-03-04", latestReceivedAt: "2026-03-04T15:00:00.000Z", alertCount: 1, marketSession: "premarket" },
       { ticker: "META", tradingDay: "2026-03-03", latestReceivedAt: "2026-03-03T20:00:00.000Z", alertCount: 1, marketSession: "after-hours" },
     ];
-    const fetchMock = stubTradingViewMetrics({
-      MSFT: { price: 420, change1d: 1.25, marketCap: 3_100_000_000_000, avgVolume: 20_000_000 },
-      NVDA: { price: 900, change1d: 2.5, marketCap: 2_250_000_000_000, avgVolume: 40_000_000 },
-      AAPL: { price: 190, change1d: -0.5, marketCap: 2_900_000_000_000, avgVolume: 50_000_000 },
-      TSLA: { price: 250, change1d: 0.8, marketCap: 800_000_000_000, avgVolume: 100_000_000 },
-      META: { price: 530, change1d: 1.1, marketCap: 1_350_000_000_000, avgVolume: 12_000_000 },
-    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
     const env = createAlertsQueryEnv(groupedRows, [
       {
         id: "news-1",
@@ -165,6 +150,12 @@ describe("alerts service helpers", () => {
       { ticker: "AAPL", industry: "Consumer Electronics" },
       { ticker: "TSLA", industry: "Auto Manufacturers" },
       { ticker: "META", industry: "Internet Content & Information" },
+    ], [
+      { ticker: "MSFT", price: 420, change1d: 1.25, marketCap: 3_100_000_000_000, avgVolume: 20_000_000 },
+      { ticker: "NVDA", price: 900, change1d: 2.5, marketCap: 2_250_000_000_000, avgVolume: 40_000_000 },
+      { ticker: "AAPL", price: 190, change1d: -0.5, marketCap: 2_900_000_000_000, avgVolume: 50_000_000 },
+      { ticker: "TSLA", price: 250, change1d: 0.8, marketCap: 800_000_000_000, avgVolume: 100_000_000 },
+      { ticker: "META", price: 530, change1d: 1.1, marketCap: 1_350_000_000_000, avgVolume: 12_000_000 },
     ]);
 
     const page1 = await queryUniqueTickerDaysByFilters(env as never, {
@@ -181,6 +172,7 @@ describe("alerts service helpers", () => {
       limit: 2,
       offset: 2,
     });
+    expect(fetchMock).not.toHaveBeenCalled();
     fetchMock.mockRestore();
 
     expect(page1.total).toBe(5);

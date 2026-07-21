@@ -97,7 +97,7 @@ function createEnv(db: FakeBackoffDb): Env {
       };
     },
     batch(statements: Array<{ bindArgs?: unknown[] }>) {
-      return db.batch(statements);
+      return db.batch(statements as unknown as Array<{ __statement?: unknown }>);
     },
   };
   return { DB: wrappedDb as unknown as D1Database } as Env;

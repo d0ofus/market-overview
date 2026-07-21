@@ -21,7 +21,7 @@ const workerSchedule: WorkerScheduleSettings = {
   rsManualCacheReuseEnabled: true,
   rsSharedConfigSnapshotFanoutEnabled: true,
   postCloseBarsEnabled: true,
-  postCloseBarsOffsetMinutes: 60,
+  postCloseBarsOffsetMinutes: 20,
   postCloseBarsBatchSize: 80,
   postCloseBarsMaxBatchesPerTick: 4,
   patternScanEnabled: true,
@@ -80,7 +80,7 @@ function scheduledEnv(overrides: Record<string, unknown> = {}): Env {
 async function runMarketDataLane(env = scheduledEnv()): Promise<void> {
   await worker.scheduled(
     {
-      cron: "2,17,32,47 * * * *",
+      cron: "*/5 * * * *",
       scheduledTime: Date.parse("2026-07-16T21:00:00.000Z"),
     } as Parameters<typeof worker.scheduled>[0],
     env,
@@ -148,7 +148,7 @@ describe("scheduled market-data lane", () => {
       });
 
       await runMarketDataLane(scheduledEnv({
-        SCHEDULED_MARKET_DATA_BUDGET: "46",
+        SCHEDULED_MARKET_DATA_BUDGET: "70",
         SCHEDULED_SUBREQUEST_RESERVE: "10",
       }));
 
@@ -167,7 +167,7 @@ describe("scheduled market-data lane", () => {
         "audit-etf-constituent-slice",
         "completed",
         null,
-        expect.objectContaining({ budget: expect.objectContaining({ usedUnits: 28 }) }),
+        expect.objectContaining({ budget: expect.objectContaining({ usedUnits: 48 }) }),
       );
     },
   );
@@ -180,11 +180,21 @@ describe("scheduled market-data lane", () => {
     });
 
     await runMarketDataLane(scheduledEnv({
-      SCHEDULED_MARKET_DATA_BUDGET: "46",
+      SCHEDULED_MARKET_DATA_BUDGET: "70",
       SCHEDULED_SUBREQUEST_RESERVE: "10",
     }));
 
     expect(scheduledMocks.overviewCurrent).toHaveBeenCalledOnce();
     expect(scheduledMocks.postClose).toHaveBeenCalledOnce();
+    expect(scheduledMocks.postClose.mock.invocationCallOrder[0]).toBeLessThan(
+      scheduledMocks.overviewCurrent.mock.invocationCallOrder[0]!,
+    );
+    expect(scheduledMocks.finishAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      "audit-refresh-job",
+      "skipped",
+      "Deferred while exact-session post-close bars are actionable.",
+      expect.objectContaining({ postCloseReason: "actionable-job" }),
+    );
   });
 });
