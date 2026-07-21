@@ -15,6 +15,17 @@ test("overview charts remain visible when usable history is behind the expected 
   assert.match(groupPanel, /row\.relativeStrength30dVsSpy\?\.length/);
 });
 
+test("ticker freshness uses compact accessible icon tooltips", () => {
+  const groupPanel = source("../components/group-panel.tsx");
+  assert.doesNotMatch(groupPanel, /QuoteFreshnessBadge/);
+  assert.match(groupPanel, /<OverviewFreshnessIndicators row=\{row\} \/>\s*<button/);
+  assert.match(groupPanel, /className=\{`inline-flex h-5 w-5/);
+  assert.match(groupPanel, /className=\{`h-3 w-3/);
+  assert.match(groupPanel, /role="tooltip"/);
+  assert.match(groupPanel, /aria-describedby=\{position \? tooltipId : undefined\}/);
+  assert.match(groupPanel, /createPortal\(/);
+});
+
 test("overview diagnostics use one disclosure that is collapsed initially", () => {
   const disclosure = source("../components/overview-freshness-disclosure.tsx");
   const page = source("../app/page.tsx");

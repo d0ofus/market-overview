@@ -1,15 +1,37 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { ChevronDown, Loader2, Maximize2 } from "lucide-react";
+import {
+  ChartNoAxesCombined,
+  ChevronDown,
+  CircleSlash2,
+  Clock3,
+  History,
+  Loader2,
+  Maximize2,
+  RefreshCw,
+  WifiOff,
+  type LucideIcon,
+} from "lucide-react";
 import { HistogramSparkline } from "./histogram-sparkline";
 import { Sparkline } from "./sparkline";
 import { ChartGridPager } from "./chart-grid-pager";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
 import { TradingViewWidget } from "./tradingview-widget";
 import { getEtfConstituents } from "@/lib/api";
-import type { BarFreshnessStatus, OverviewCurrentData, QuoteFreshnessStatus } from "@/types/dashboard";
+import {
+  getOverviewFreshnessIndicators,
+  type OverviewFreshnessIndicatorKind,
+  type OverviewFreshnessIndicatorSpec,
+} from "@/lib/overview-freshness-indicators";
+import type {
+  BarFreshnessStatus,
+  OverviewCurrentData,
+  OverviewSeriesStatus,
+  QuoteFreshnessStatus,
+} from "@/types/dashboard";
 
 const CHARTS_PER_PAGE = 20;
 
@@ -38,7 +60,19 @@ type Row = {
   quoteFreshnessStatus?: QuoteFreshnessStatus;
   quoteFreshnessReason?: string | null;
   quoteSource?: string | null;
+  quoteFetchedAt?: string | null;
   currentData?: OverviewCurrentData;
+  historyData?: {
+    sessionDate: string;
+    status: BarFreshnessStatus;
+    reason: string;
+    barDate: string | null;
+    source: string | null;
+    seriesThroughDate?: string | null;
+    seriesStatus?: OverviewSeriesStatus;
+    seriesSource?: string | null;
+    seriesReason?: string | null;
+  };
   holdings: string[] | null;
 };
 
@@ -85,38 +119,98 @@ const hasCurrentField = (row: Row, field: string): boolean => {
   if (row.currentData) return Boolean(row.currentData.fieldSources[field]);
   return row.quoteFreshnessStatus === "fresh";
 };
-const quoteFreshnessLabel = (status: QuoteFreshnessStatus | undefined): string => {
-  if (status === "stale") return "Stale";
-  if (status === "unavailable") return "N/A";
-  if (status === "unsupported") return "Unsupported";
-  return "Fresh";
-};
-const quoteFreshnessClass = (status: QuoteFreshnessStatus | undefined): string => {
-  if (status === "stale") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
-  if (status === "unavailable") return "border-red-400/35 bg-red-500/10 text-red-200";
-  if (status === "unsupported") return "border-slate-500/45 bg-slate-700/40 text-slate-300";
-  return "border-emerald-400/25 bg-emerald-500/10 text-emerald-200";
+const freshnessIconByKind: Record<OverviewFreshnessIndicatorKind, LucideIcon> = {
+  "quote-retrying": RefreshCw,
+  "quote-stale": Clock3,
+  "quote-unavailable": WifiOff,
+  "history-lagging": History,
+  "history-unavailable": ChartNoAxesCombined,
+  unsupported: CircleSlash2,
 };
 
-function QuoteFreshnessBadge({ row }: { row: Row }) {
-  const status = row.quoteFreshnessStatus;
-  const retrying = row.currentData?.status === "retrying";
-  if ((!status || status === "fresh") && !retrying) return null;
-  const providerDetails = Object.entries(row.currentData?.providerStatuses ?? {})
-    .map(([provider, diagnostic]) => `${provider}: ${diagnostic.status} (${diagnostic.reason})`)
-    .join(" ");
-  const title = [
-    row.currentData?.reason ?? row.quoteFreshnessReason,
-    providerDetails || null,
-    row.barDate ? `Bar date: ${row.barDate}` : null,
-    row.quoteSource ? `Source: ${row.quoteSource}` : null,
-  ].filter(Boolean).join(" ");
+const freshnessToneClass = (tone: OverviewFreshnessIndicatorSpec["tone"]): string => {
+  if (tone === "danger") return "border-rose-400/40 bg-rose-500/10 text-rose-300";
+  if (tone === "warning") return "border-amber-400/35 bg-amber-500/10 text-amber-300";
+  return "border-slate-500/45 bg-slate-700/35 text-slate-400";
+};
+
+type TooltipPosition = { left: number; top: number; above: boolean };
+
+function FreshnessIndicator({ indicator }: { indicator: OverviewFreshnessIndicatorSpec }) {
+  const tooltipId = useId();
+  const [position, setPosition] = useState<TooltipPosition | null>(null);
+  const Icon = freshnessIconByKind[indicator.kind];
+
+  const showTooltip = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const halfTooltipWidth = Math.min(144, Math.max(0, window.innerWidth / 2 - 12));
+    const center = rect.left + rect.width / 2;
+    const left = Math.min(
+      window.innerWidth - halfTooltipWidth,
+      Math.max(halfTooltipWidth, center),
+    );
+    const above = rect.bottom + 110 > window.innerHeight;
+    setPosition({ left, top: above ? rect.top - 8 : rect.bottom + 8, above });
+  };
+
+  useEffect(() => {
+    if (!position) return;
+    const hideTooltip = () => setPosition(null);
+    window.addEventListener("scroll", hideTooltip, true);
+    window.addEventListener("resize", hideTooltip);
+    return () => {
+      window.removeEventListener("scroll", hideTooltip, true);
+      window.removeEventListener("resize", hideTooltip);
+    };
+  }, [position]);
+
   return (
-    <span
-      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(retrying ? "stale" : status)}`}
-      title={title || quoteFreshnessLabel(status)}
-    >
-      {retrying ? "Retrying" : quoteFreshnessLabel(status)}
+    <>
+      <span
+        role="img"
+        tabIndex={0}
+        aria-label={indicator.heading}
+        aria-describedby={position ? tooltipId : undefined}
+        className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border outline-none transition-colors focus:ring-2 focus:ring-accent/30 ${freshnessToneClass(indicator.tone)}`}
+        onMouseEnter={(event) => showTooltip(event.currentTarget)}
+        onMouseLeave={() => setPosition(null)}
+        onFocus={(event) => showTooltip(event.currentTarget)}
+        onBlur={() => setPosition(null)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setPosition(null);
+        }}
+      >
+        <Icon
+          className={`h-3 w-3 ${indicator.kind === "quote-retrying" ? "animate-spin [animation-duration:2s]" : ""}`}
+          aria-hidden="true"
+        />
+      </span>
+      {position && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              id={tooltipId}
+              role="tooltip"
+              className={`pointer-events-none fixed z-[2147483647] w-max max-w-[18rem] -translate-x-1/2 rounded-lg border border-borderSoft/80 bg-panelSoft px-3 py-2 text-left shadow-xl ${position.above ? "-translate-y-full" : ""}`}
+              style={{ left: position.left, top: position.top }}
+            >
+              <div className="text-xs font-semibold text-text">{indicator.heading}</div>
+              <div className="mt-1 text-[11px] leading-4 text-slate-300">{indicator.detail}</div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  );
+}
+
+function OverviewFreshnessIndicators({ row }: { row: Row }) {
+  const indicators = getOverviewFreshnessIndicators(row);
+  if (indicators.length === 0) return null;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      {indicators.map((indicator) => (
+        <FreshnessIndicator key={indicator.kind} indicator={indicator} />
+      ))}
     </span>
   );
 }
@@ -252,6 +346,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                 {row.ticker}
               </span>
             )}
+            <OverviewFreshnessIndicators row={row} />
             <button
               type="button"
               className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-borderSoft/60 bg-panelSoft/35 text-slate-400 opacity-75 transition hover:bg-panelSoft/55 hover:text-accent focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/25"
@@ -264,7 +359,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
             >
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
-            <QuoteFreshnessBadge row={row} />
           </div>
         </td>
       );
