@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTradingViewOverviewPayload,
+  currentRefreshWindowOpen,
   doesOverviewCurrentRowNeedRepair,
   isOverviewCurrentRowComplete,
+  isOverviewCurrentRowPublishable,
+  isOverviewCurrentRowStructurallyUnsupported,
   OVERVIEW_CURRENT_COLUMNS,
   parseTradingViewOverviewRow,
   resolveOverviewCurrentRow,
@@ -33,6 +36,15 @@ function tradingViewData(overrides: Record<string, unknown> = {}): unknown[] {
   return OVERVIEW_CURRENT_COLUMNS.map((column) => values[column]);
 }
 
+describe("overview current refresh cadence", () => {
+  it("opens only during the 04:00-16:30 New York snapshot window", () => {
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T07:59:00.000Z"))).toBe(false);
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T08:00:00.000Z"))).toBe(true);
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:30:00.000Z"))).toBe(true);
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:31:00.000Z"))).toBe(false);
+  });
+});
+
 describe("overview TradingView current data", () => {
   it("builds a point-symbol request with the strict scalar field contract", () => {
     const payload = buildTradingViewOverviewPayload(["NASDAQ:AAPL"]);
@@ -45,7 +57,7 @@ describe("overview TradingView current data", () => {
     });
   });
 
-  it("accepts a row only when a provider market timestamp matches the expected session", () => {
+  it("accepts a row when a provider market timestamp matches the expected session", () => {
     const row = parseTradingViewOverviewRow(
       "AAPL",
       "NASDAQ:AAPL",
@@ -67,6 +79,43 @@ describe("overview TradingView current data", () => {
       updateMode: "delayed_streaming_900",
       currentSession: "out_of_session",
     });
+  });
+
+  it("accepts a newer premarket observation after the latest completed session", () => {
+    const premarketTimestamp = Date.parse("2026-07-13T08:15:00.000Z") / 1000;
+    const row = parseTradingViewOverviewRow(
+      "EDOW",
+      "AMEX:EDOW",
+      tradingViewData({
+        time: premarketTimestamp,
+        last_bar_update_time: premarketTimestamp,
+        "last-price-update-time": premarketTimestamp,
+        current_session: "pre_market",
+      }),
+      "2026-07-10",
+      new Date("2026-07-13T08:20:00.000Z"),
+    );
+
+    expect(row.status).toBe("supported");
+    expect(row.reason).toContain("newer 2026-07-13 current-session observation");
+  });
+
+  it("rejects a provider timestamp that is ahead of the observation time", () => {
+    const futureTimestamp = Date.parse("2026-07-13T09:00:00.000Z") / 1000;
+    const row = parseTradingViewOverviewRow(
+      "AAPL",
+      "NASDAQ:AAPL",
+      tradingViewData({
+        time: futureTimestamp,
+        last_bar_update_time: futureTimestamp,
+        "last-price-update-time": futureTimestamp,
+      }),
+      "2026-07-10",
+      new Date("2026-07-13T08:20:00.000Z"),
+    );
+
+    expect(row.status).toBe("stale");
+    expect(row.reason).toContain("future market timestamp");
   });
 
   it("marks a prior-session row stale even when it was fetched today", () => {
@@ -245,6 +294,8 @@ describe("overview TradingView current data", () => {
     expect(row.price).toBe(105);
     expect(row.above200Sma).toBeNull();
     expect(isOverviewCurrentRowComplete(row)).toBe(false);
+    expect(isOverviewCurrentRowPublishable(row)).toBe(true);
+    expect(isOverviewCurrentRowPublishable(row, new Date("2026-07-10T21:21:00.000Z"))).toBe(false);
     expect(doesOverviewCurrentRowNeedRepair(row)).toBe(true);
   });
 
@@ -324,6 +375,8 @@ describe("overview TradingView current data", () => {
 
     expect(row.status).toBe("unavailable");
     expect(row.price).toBeNull();
+    expect(isOverviewCurrentRowStructurallyUnsupported(row)).toBe(true);
+    expect(isOverviewCurrentRowPublishable(row)).toBe(false);
     expect(doesOverviewCurrentRowNeedRepair(row)).toBe(false);
   });
 });

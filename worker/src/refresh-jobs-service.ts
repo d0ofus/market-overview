@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 
 const REFRESH_JOB_LEASE_MS = 2 * 60_000;
+const COMMENTARY_REFRESH_JOB_LEASE_MS = 4 * 60_000;
 const REFRESH_JOB_DEDUPE_MS = 5 * 60_000;
 const REFRESH_JOB_MAX_ATTEMPTS = 3;
 
@@ -15,7 +16,18 @@ export type RefreshJob = {
   leaseToken: string | null;
   leaseExpiresAt: string | null;
   nextAttemptAt: string | null;
-  result: { page: string; refreshedTickers: number; notes?: string } | null;
+  result: {
+    page: string;
+    refreshedTickers: number;
+    notes?: string;
+    generationId?: string;
+    publishedAt?: string;
+    currentCoveragePct?: number;
+    historyExactCoveragePct?: number;
+    historyUsableCoveragePct?: number;
+    reportId?: string;
+    sessionDate?: string;
+  } | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -66,6 +78,12 @@ export async function requestRefreshJob(env: Env, input: {
   const now = input.now ?? new Date();
   const page = input.page.trim().toLowerCase();
   const ticker = input.ticker?.trim().toUpperCase() || null;
+  if (page === "market-commentary") {
+    const active = await env.DB.prepare(
+      `${REFRESH_JOB_SELECT} WHERE page = ? AND ticker IS NULL AND status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 1`,
+    ).bind(page).first<RefreshJobRow>();
+    if (active) return mapRow(active);
+  }
   const idempotencyKey = refreshJobIdempotencyKey(page, ticker, now);
   await env.DB.prepare(
     `INSERT OR IGNORE INTO refresh_jobs
@@ -98,6 +116,7 @@ export async function loadRefreshJob(env: Env, jobId: string): Promise<RefreshJo
 export async function claimNextRefreshJob(env: Env, now = new Date()): Promise<RefreshJob | null> {
   const leaseToken = crypto.randomUUID();
   const leaseExpiresAt = new Date(now.getTime() + REFRESH_JOB_LEASE_MS).toISOString();
+  const commentaryLeaseExpiresAt = new Date(now.getTime() + COMMENTARY_REFRESH_JOB_LEASE_MS).toISOString();
   await env.DB.prepare(
     `UPDATE refresh_jobs
         SET status = 'failed',
@@ -114,13 +133,13 @@ export async function claimNextRefreshJob(env: Env, now = new Date()): Promise<R
         SET status = 'running',
             attempt_count = attempt_count + 1,
             lease_token = ?,
-            lease_expires_at = ?,
+            lease_expires_at = CASE WHEN page = 'market-commentary' THEN ? ELSE ? END,
             updated_at = ?
       WHERE id = (
         SELECT id FROM refresh_jobs
          WHERE (status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ? AND attempt_count < ?)
-         ORDER BY created_at ASC
+         ORDER BY CASE WHEN page = 'overview' THEN 0 ELSE 1 END, created_at ASC
          LIMIT 1
       )
       RETURNING id, page, ticker, status, attempt_count as attemptCount,
@@ -129,8 +148,52 @@ export async function claimNextRefreshJob(env: Env, now = new Date()): Promise<R
         created_at as createdAt, updated_at as updatedAt, completed_at as completedAt`,
   ).bind(
     leaseToken,
+    commentaryLeaseExpiresAt,
     leaseExpiresAt,
     now.toISOString(),
+    now.toISOString(),
+    now.toISOString(),
+    REFRESH_JOB_MAX_ATTEMPTS,
+  ).first<RefreshJobRow>();
+  return row ? mapRow(row) : null;
+}
+
+export async function hasClaimableRefreshJob(env: Env, now = new Date()): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT id
+       FROM refresh_jobs
+      WHERE (status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+         OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ? AND attempt_count < ?)
+      ORDER BY CASE WHEN page = 'overview' THEN 0 ELSE 1 END, created_at ASC
+      LIMIT 1`,
+  ).bind(now.toISOString(), now.toISOString(), REFRESH_JOB_MAX_ATTEMPTS).first<{ id: string }>();
+  return Boolean(row?.id);
+}
+
+export async function claimRefreshJobById(env: Env, jobId: string, now = new Date()): Promise<RefreshJob | null> {
+  const leaseToken = crypto.randomUUID();
+  const leaseExpiresAt = new Date(now.getTime() + REFRESH_JOB_LEASE_MS).toISOString();
+  const commentaryLeaseExpiresAt = new Date(now.getTime() + COMMENTARY_REFRESH_JOB_LEASE_MS).toISOString();
+  const row = await env.DB.prepare(
+    `UPDATE refresh_jobs
+        SET status = 'running',
+            attempt_count = attempt_count + 1,
+            lease_token = ?,
+            lease_expires_at = CASE WHEN page = 'market-commentary' THEN ? ELSE ? END,
+            updated_at = ?
+      WHERE id = ?
+        AND ((status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+          OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ? AND attempt_count < ?))
+      RETURNING id, page, ticker, status, attempt_count as attemptCount,
+        lease_token as leaseToken, lease_expires_at as leaseExpiresAt,
+        next_attempt_at as nextAttemptAt, result_json as resultJson, error,
+        created_at as createdAt, updated_at as updatedAt, completed_at as completedAt`,
+  ).bind(
+    leaseToken,
+    commentaryLeaseExpiresAt,
+    leaseExpiresAt,
+    now.toISOString(),
+    jobId,
     now.toISOString(),
     now.toISOString(),
     REFRESH_JOB_MAX_ATTEMPTS,

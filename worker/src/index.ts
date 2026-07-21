@@ -8,7 +8,9 @@ import {
   computeOverviewFreshnessDiagnostics,
   emptySnapshotResponse,
   loadSnapshot,
+  minBreadthCoveragePct,
   OverviewFreshnessError,
+  publishReadyBreadthUniverses,
   recomputeBreadthFromStoredBars,
   recomputeDashboardFromStoredBars,
   refreshAndStoreOverviewSnapshot,
@@ -210,12 +212,15 @@ import {
 import { loadPeerMetrics, refreshPeerMetrics } from "./peer-metrics-service";
 import { getFedWatchSnapshot } from "./fedwatch-service";
 import {
+  claimRefreshJobById,
   claimNextRefreshJob,
   cleanupRefreshJobs,
   completeRefreshJob,
   failRefreshJob,
+  hasClaimableRefreshJob,
   loadRefreshJob,
   requestRefreshJob,
+  type RefreshJob,
 } from "./refresh-jobs-service";
 import { approveUniverseVersion, listUniverseVersions } from "./universe-version-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
@@ -1319,7 +1324,8 @@ type RefreshPage =
   | "pattern-scanner"
   | "watchlist-compiler"
   | "gappers"
-  | "earnings";
+  | "earnings"
+  | "market-commentary";
 
 const MAX_MARKET_LANE_REFRESH_TICKERS = 4 * 80;
 
@@ -1327,12 +1333,37 @@ async function refreshPageScopedData(
   env: Env,
   page: RefreshPage,
   tickerInput?: string | null,
-): Promise<{ page: RefreshPage; refreshedTickers: number; notes?: string }> {
+): Promise<{
+  page: RefreshPage;
+  refreshedTickers: number;
+  notes?: string;
+  generationId?: string;
+  publishedAt?: string;
+  currentCoveragePct?: number;
+  historyExactCoveragePct?: number;
+  historyUsableCoveragePct?: number;
+  reportId?: string;
+  sessionDate?: string;
+}> {
   if (page === "overview") {
     return await refreshOverviewPageData(env, {
       loadOverviewTickers,
       refreshAndStoreOverviewSnapshot: (targetEnv, options) => refreshAndStoreOverviewSnapshot(targetEnv, undefined, "default", options),
     });
+  }
+  if (page === "market-commentary") {
+    const response = await refreshMarketCommentary(env, { force: true, trigger: "manual" });
+    if (response.status !== "ready" || !response.report) {
+      throw new Error("Market commentary generation did not publish a ready report.");
+    }
+    return {
+      page,
+      refreshedTickers: 0,
+      notes: `Published market commentary for ${response.report.sessionDate}.`,
+      reportId: response.report.id,
+      sessionDate: response.report.sessionDate,
+      publishedAt: response.report.generatedAt,
+    };
   }
   if (page === "breadth") {
     const catchUp = await refreshMissingBreadthBarsForCoverage(env, undefined, {
@@ -1474,6 +1505,19 @@ async function refreshPageScopedData(
 async function processNextRefreshJob(env: Env): Promise<void> {
   const job = await claimNextRefreshJob(env);
   if (!job) return;
+  await processClaimedRefreshJob(env, job);
+}
+
+async function processRefreshJobById(env: Env, jobId: string): Promise<void> {
+  const job = await claimRefreshJobById(env, jobId);
+  if (!job) return;
+  await processClaimedRefreshJob(env, job);
+}
+
+async function processClaimedRefreshJob(
+  env: Env,
+  job: RefreshJob,
+): Promise<void> {
   try {
     const result = await refreshPageScopedData(env, job.page as RefreshPage, job.ticker);
     await completeRefreshJob(env, job, result);
@@ -1990,8 +2034,7 @@ type BreadthStatusDiagnostic = {
 };
 
 function breadthMinCoveragePct(universeId: string): number {
-  if (universeId === "sp500-core") return 95;
-  return CORE_BREADTH_UNIVERSE_IDS.includes(universeId as (typeof CORE_BREADTH_UNIVERSE_IDS)[number]) ? 80 : 1;
+  return minBreadthCoveragePct(universeId);
 }
 
 async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string): Promise<{
@@ -6852,7 +6895,7 @@ app.post("/api/admin/refresh-page", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { page?: string; ticker?: string | null };
   const rawPage = String(body.page ?? "").trim().toLowerCase();
   const page = (rawPage || "overview") as RefreshPage;
-  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers", "earnings"].includes(page)) {
+  if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers", "earnings", "market-commentary"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
   try {
@@ -6861,6 +6904,9 @@ app.post("/api/admin/refresh-page", async (c) => {
       ticker: body.ticker ?? null,
       requestedBy: "admin",
     });
+    if ((page === "overview" || page === "market-commentary") && (job.status === "queued" || job.status === "running")) {
+      c.executionCtx.waitUntil(processRefreshJobById(c.env, job.id));
+    }
     return c.json({
       ok: true,
       page,
@@ -6870,7 +6916,14 @@ app.post("/api/admin/refresh-page", async (c) => {
         : "Refresh queued; work will continue in the market-data lane.",
       jobId: job.id,
       status: job.status,
-      pollAfterMs: 1500,
+      pollAfterMs: page === "market-commentary" ? 5000 : 1500,
+      generationId: job.result?.generationId,
+      publishedAt: job.result?.publishedAt,
+      currentCoveragePct: job.result?.currentCoveragePct,
+      historyExactCoveragePct: job.result?.historyExactCoveragePct,
+      historyUsableCoveragePct: job.result?.historyUsableCoveragePct,
+      reportId: job.result?.reportId,
+      sessionDate: job.result?.sessionDate,
     }, 202);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Refresh queue is temporarily unavailable.";
@@ -6895,10 +6948,21 @@ app.get("/api/admin/refresh-jobs/:jobId", async (c) => {
     ok: job.status !== "failed",
     page: job.page,
     refreshedTickers: job.result?.refreshedTickers ?? 0,
-    notes: job.result?.notes ?? (job.error ? `Refresh failed: ${job.error}` : "Refresh work continues in the background."),
+    notes: job.result?.notes ?? (job.error
+      ? job.page === "market-commentary"
+        ? "Commentary refresh did not complete; the last ready report remains available."
+        : `Refresh failed: ${job.error}`
+      : "Refresh work continues in the background."),
     jobId: job.id,
     status: job.status,
-    pollAfterMs: job.status === "queued" || job.status === "running" ? 1500 : 0,
+    pollAfterMs: job.status === "queued" || job.status === "running" ? (job.page === "market-commentary" ? 5000 : 1500) : 0,
+    generationId: job.result?.generationId,
+    publishedAt: job.result?.publishedAt,
+    currentCoveragePct: job.result?.currentCoveragePct,
+    historyExactCoveragePct: job.result?.historyExactCoveragePct,
+    historyUsableCoveragePct: job.result?.historyUsableCoveragePct,
+    reportId: job.result?.reportId,
+    sessionDate: job.result?.sessionDate,
   });
 });
 
@@ -7371,23 +7435,7 @@ async function refreshScheduledPeerMetricSlice(env: Env): Promise<void> {
 }
 
 async function publishScheduledBreadthIfReady(env: Env, asOfDate: string): Promise<void> {
-  const postCloseJob = await loadLatestPostCloseDailyBarRefreshJobForDate(env, asOfDate);
-  if (postCloseJob?.status !== "completed") return;
-  const trackedUniversePlaceholders = CORE_BREADTH_UNIVERSE_IDS.map(() => "?").join(", ");
-  const trackedUniverseCount = await env.DB.prepare(
-    `SELECT COUNT(DISTINCT universe_id) as count
-       FROM universe_symbols
-      WHERE universe_id IN (${trackedUniversePlaceholders})`,
-  ).bind(...CORE_BREADTH_UNIVERSE_IDS).first<{ count: number | null }>();
-  const currentBreadthCount = await env.DB.prepare(
-    `SELECT COUNT(DISTINCT universe_id) as count
-       FROM breadth_snapshots
-      WHERE as_of_date = ? AND universe_id IN (${trackedUniversePlaceholders})`,
-  ).bind(asOfDate, ...CORE_BREADTH_UNIVERSE_IDS).first<{ count: number | null }>();
-  const expectedCount = trackedUniverseCount?.count ?? 0;
-  if (expectedCount > 0 && (currentBreadthCount?.count ?? 0) < expectedCount) {
-    await recomputeBreadthFromStoredBars(env, asOfDate);
-  }
+  await publishReadyBreadthUniverses(env, asOfDate);
 }
 
 export default {
@@ -7532,6 +7580,12 @@ export default {
         postCloseReason: postClosePlan.reason,
       };
 
+      if (await hasClaimableRefreshJob(env, now)) {
+        await runBudgeted("refresh-job", 8, () => processNextRefreshJob(env).then(() => undefined));
+      } else {
+        await auditSkipped("refresh-job", "No refresh job is due.");
+      }
+
       if (postClosePlan.protect) {
         await runBudgeted(
           "post-close-daily-bars",
@@ -7558,15 +7612,6 @@ export default {
           overviewCurrentBudgetUnits,
           () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
         );
-      }
-      if (postClosePlan.protect) {
-        await auditSkipped(
-          "refresh-job",
-          "Deferred while exact-session post-close bars are actionable.",
-          postCloseMetadata,
-        );
-      } else {
-        await runBudgeted("refresh-job", 8, () => processNextRefreshJob(env).then(() => undefined));
       }
       await runBudgeted(
         "breadth-publication",

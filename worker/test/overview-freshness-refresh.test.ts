@@ -212,11 +212,11 @@ class OverviewFreshnessDb {
         change1d: args[6] == null ? null : Number(args[6]),
         change3m: args[9] == null ? null : Number(args[9]),
         change6m: args[10] == null ? null : Number(args[10]),
-        above20Sma: args[27] == null ? null : Number(args[27]),
-        above50Sma: args[28] == null ? null : Number(args[28]),
-        above200Sma: args[29] == null ? null : Number(args[29]),
+        above20Sma: args[31] == null ? null : Number(args[31]),
+        above50Sma: args[32] == null ? null : Number(args[32]),
+        above200Sma: args[33] == null ? null : Number(args[33]),
         rankKey: args[15] == null ? null : Number(args[15]),
-        relativeStrength30dVsSpyJson: args[30] == null ? null : String(args[30]),
+        relativeStrength30dVsSpyJson: args[34] == null ? null : String(args[34]),
       });
       this.snapshotRowBarDates.push(args[17] == null ? null : String(args[17]));
     }

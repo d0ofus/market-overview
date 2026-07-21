@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+function source(relativePath: string): string {
+  return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
+}
+
+test("overview charts remain visible when usable history is behind the expected session", () => {
+  const groupPanel = source("../components/group-panel.tsx");
+  assert.doesNotMatch(groupPanel, /HistoryFreshnessBadge/);
+  assert.doesNotMatch(groupPanel, /hasHistoricalMetrics/);
+  assert.match(groupPanel, /row\.sparkline\?\.length/);
+  assert.match(groupPanel, /row\.relativeStrength30dVsSpy\?\.length/);
+});
+
+test("overview diagnostics use one disclosure that is collapsed initially", () => {
+  const disclosure = source("../components/overview-freshness-disclosure.tsx");
+  const page = source("../app/page.tsx");
+  assert.match(disclosure, /defaultOpen=\{false\}/);
+  assert.match(disclosure, /QuoteFreshnessAudit/);
+  assert.match(page, /OverviewFreshnessDisclosure/);
+  assert.doesNotMatch(page, /OverviewFreshnessBanner/);
+});
+
+test("floating navigation remains horizontally scrollable without a visible scrollbar", () => {
+  const navigation = source("../components/floating-section-nav.tsx");
+  const styles = source("../app/globals.css");
+  assert.match(navigation, /scrollbar-none[^\"]*overflow-x-auto/);
+  assert.match(styles, /\.scrollbar-none/);
+  assert.match(styles, /scrollbar-width:\s*none/);
+  assert.match(styles, /::-webkit-scrollbar/);
+});
+
+test("commentary keeps provider failures out of the default report panel", () => {
+  const commentary = source("../components/market-commentary-panel.tsx");
+  assert.doesNotMatch(commentary, /activeStatus === "failed" && \(/);
+  assert.doesNotMatch(commentary, /activeWarning && activeStatus !== "failed"/);
+  assert.match(commentary, /Latest refresh attempt/);
+  assert.match(commentary, /queueRefreshPageData\("market-commentary"\)/);
+});

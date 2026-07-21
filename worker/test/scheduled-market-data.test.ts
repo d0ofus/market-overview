@@ -9,6 +9,7 @@ const scheduledMocks = vi.hoisted(() => ({
   symbolCatalog: vi.fn(async () => undefined),
   startAudit: vi.fn(async (_env: unknown, input: { jobKey: string }) => `audit-${input.jobKey}`),
   finishAudit: vi.fn(async () => undefined),
+  breadthPublication: vi.fn(async () => undefined),
 }));
 
 const workerSchedule: WorkerScheduleSettings = {
@@ -33,6 +34,11 @@ const workerSchedule: WorkerScheduleSettings = {
 vi.mock("../src/overview-current-data", async (importOriginal) => ({
   ...await importOriginal<typeof import("../src/overview-current-data")>(),
   maybeRunScheduledOverviewCurrentRefresh: scheduledMocks.overviewCurrent,
+}));
+
+vi.mock("../src/eod", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/eod")>(),
+  publishReadyBreadthUniverses: scheduledMocks.breadthPublication,
 }));
 
 vi.mock("../src/worker-schedule-service", async (importOriginal) => ({
@@ -167,7 +173,7 @@ describe("scheduled market-data lane", () => {
         "audit-etf-constituent-slice",
         "completed",
         null,
-        expect.objectContaining({ budget: expect.objectContaining({ usedUnits: 48 }) }),
+        expect.objectContaining({ budget: expect.objectContaining({ usedUnits: 40 }) }),
       );
     },
   );
@@ -193,8 +199,8 @@ describe("scheduled market-data lane", () => {
       expect.anything(),
       "audit-refresh-job",
       "skipped",
-      "Deferred while exact-session post-close bars are actionable.",
-      expect.objectContaining({ postCloseReason: "actionable-job" }),
+      "No refresh job is due.",
+      expect.anything(),
     );
   });
 });

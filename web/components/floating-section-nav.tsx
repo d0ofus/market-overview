@@ -102,7 +102,7 @@ export function FloatingSectionNav({ items, showHeading = true, stickyOffset = 1
                 <div className="h-8 w-px shrink-0 bg-borderSoft/70" aria-hidden="true" />
               </>
             ) : null}
-            <div className="min-w-0 flex-1 overflow-x-auto">
+            <div className="scrollbar-none min-w-0 flex-1 overflow-x-auto">
               <div className="flex min-w-max gap-2">
                 {items.map((item) => (
                   <button

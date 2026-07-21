@@ -1,6 +1,7 @@
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
 export type QuoteFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
 export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
+export type OverviewSeriesStatus = "fresh" | "fallback" | "stale" | "unavailable" | "unsupported";
 export type OverviewCurrentProviderStatus = "supported" | "unsupported" | "stale" | "missing" | "rate-limited" | "auth-blocked" | "provider-error";
 
 export type OverviewCurrentData = {
@@ -129,6 +130,10 @@ export type SnapshotReadyResponse = {
           reason: string;
           barDate: string | null;
           source: string | null;
+          seriesThroughDate?: string | null;
+          seriesStatus?: OverviewSeriesStatus;
+          seriesSource?: string | null;
+          seriesReason?: string | null;
         };
         rankKey: number | null;
         holdings: string[] | null;

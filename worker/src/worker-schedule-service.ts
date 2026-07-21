@@ -24,6 +24,7 @@ const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 20;
 const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 80;
 const DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK = 4;
 const MAX_POST_CLOSE_PROVIDER_BATCH_SIZE = 80;
+const MAX_POST_CLOSE_HISTORY_BATCH_SIZE = 12;
 const MAX_POST_CLOSE_PROVIDER_BATCHES_PER_TICK = 4;
 const OVERVIEW_HISTORY_BOOTSTRAP_BATCH_SIZE = 25;
 const OVERVIEW_HISTORY_LOOKBACK_DAYS = 470;
@@ -337,7 +338,10 @@ type PostCloseDailyBarRefreshJobRecord = {
   id: string;
   tradingDate: string;
   scope: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "superseded";
+  sourceProvider: string;
+  sourceFeed: string;
+  adjustment: string;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -355,6 +359,38 @@ type PostCloseDailyBarRefreshJobRecord = {
   errorCode: string | null;
   leaseExpiresAt: string | null;
 };
+
+export function postCloseJobIdentity(env: Pick<Env, "DATA_PROVIDER" | "ALPACA_DAILY_FEED" | "ALPACA_FEED" | "ALPACA_DAILY_ADJUSTMENT">): {
+  scope: string;
+  provider: string;
+  feed: string;
+  adjustment: string;
+} {
+  const provider = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
+  const feed = (env.ALPACA_DAILY_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+  const adjustment = (env.ALPACA_DAILY_ADJUSTMENT ?? "split").trim().toLowerCase() || "split";
+  return {
+    scope: `${POST_CLOSE_SCOPE}:${provider}:${feed}:${adjustment}`,
+    provider,
+    feed,
+    adjustment,
+  };
+}
+
+export function postCloseInvocationBatchPlan(input: { batchSize?: number; maxBatches?: number }): {
+  exactBatchSize: number;
+  exactBatches: number;
+  historyBatchSize: number;
+  historyBatches: 1;
+} {
+  const bounded = boundPostCloseProviderWork(input);
+  return {
+    exactBatchSize: bounded.batchSize,
+    exactBatches: bounded.maxBatches,
+    historyBatchSize: Math.min(bounded.batchSize, MAX_POST_CLOSE_HISTORY_BATCH_SIZE),
+    historyBatches: 1,
+  };
+}
 
 function asBooleanFlag(value: number | null | undefined, fallback: boolean): boolean {
   if (value == null) return fallback;
@@ -550,6 +586,9 @@ function mapPostCloseDailyBarRefreshJobRecord(
     tradingDate: record.tradingDate,
     scope: record.scope,
     status: record.status,
+    sourceProvider: record.sourceProvider,
+    sourceFeed: record.sourceFeed,
+    adjustment: record.adjustment,
     startedAt: record.startedAt,
     updatedAt: record.updatedAt,
     completedAt: record.completedAt,
@@ -578,6 +617,9 @@ async function loadPostCloseDailyBarRefreshJobRecord(
        trading_date as tradingDate,
        scope,
        status,
+       source_provider as sourceProvider,
+       source_feed as sourceFeed,
+       adjustment,
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
@@ -605,6 +647,7 @@ async function loadPostCloseDailyBarRefreshJobRecord(
 async function loadLatestPostCloseDailyBarRefreshJobRecordForDate(
   env: Env,
   tradingDate: string,
+  identity: ReturnType<typeof postCloseJobIdentity>,
 ): Promise<PostCloseDailyBarRefreshJobRecord | null> {
   return await env.DB.prepare(
     `SELECT
@@ -612,6 +655,9 @@ async function loadLatestPostCloseDailyBarRefreshJobRecordForDate(
        trading_date as tradingDate,
        scope,
        status,
+       source_provider as sourceProvider,
+       source_feed as sourceFeed,
+       adjustment,
        started_at as startedAt,
        updated_at as updatedAt,
        completed_at as completedAt,
@@ -634,7 +680,7 @@ async function loadLatestPostCloseDailyBarRefreshJobRecordForDate(
      ORDER BY datetime(started_at) DESC
      LIMIT 1`,
   )
-    .bind(POST_CLOSE_SCOPE, tradingDate)
+    .bind(identity.scope, tradingDate)
     .first<PostCloseDailyBarRefreshJobRecord>();
 }
 
@@ -879,7 +925,8 @@ async function ensurePostCloseDailyBarRefreshJob(
 ): Promise<PostCloseDailyBarRefreshJobRecord> {
   const stateEnv = postCloseStateEnv(env);
   await ensurePostCloseRetrySchema(stateEnv);
-  const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate);
+  const identity = postCloseJobIdentity(env);
+  const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate, identity);
   if (existing) {
     await materializePostCloseJobItems(env, stateEnv, existing.id);
     if (isStaleRunningPostCloseJob(existing)) {
@@ -911,11 +958,21 @@ async function ensurePostCloseDailyBarRefreshJob(
   const id = crypto.randomUUID();
   const totalTickers = await loadPostCloseDailyBarUniverseCount(env);
   await stateEnv.DB.prepare(
+    `UPDATE post_close_daily_bar_refresh_jobs
+        SET status = 'superseded', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+            error = 'Superseded because the configured canonical source changed.'
+      WHERE trading_date = ?
+        AND scope LIKE ?
+        AND scope <> ?
+        AND status IN ('queued', 'running', 'failed')`,
+  ).bind(tradingDate, `${POST_CLOSE_SCOPE}%`, identity.scope).run();
+  await stateEnv.DB.prepare(
     `INSERT INTO post_close_daily_bar_refresh_jobs
-      (id, trading_date, scope, status, started_at, updated_at, completed_at, error, total_tickers, processed_tickers, cursor_offset, missing_current_date_tickers)
-     VALUES (?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, ?)`,
+      (id, trading_date, scope, status, source_provider, source_feed, adjustment,
+       started_at, updated_at, completed_at, error, total_tickers, processed_tickers, cursor_offset, missing_current_date_tickers)
+     VALUES (?, ?, ?, 'queued', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, 0, 0, ?)`,
   )
-    .bind(id, tradingDate, POST_CLOSE_SCOPE, totalTickers, totalTickers)
+    .bind(id, tradingDate, identity.scope, identity.provider, identity.feed, identity.adjustment, totalTickers, totalTickers)
     .run();
   const created = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, id);
   if (!created) throw new Error("Failed to create post-close daily bar refresh job.");
@@ -932,7 +989,7 @@ export async function processPostCloseDailyBarRefreshJob(
   await ensurePostCloseRetrySchema(stateEnv);
   const job = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, jobId);
   if (!job) return null;
-  if (job.status === "completed" || job.status === "failed") {
+  if (job.status === "completed" || job.status === "failed" || job.status === "superseded") {
     return mapPostCloseDailyBarRefreshJobRecord(job);
   }
   if (job.nextAttemptAt && Date.parse(job.nextAttemptAt) > Date.now()) {
@@ -959,24 +1016,44 @@ export async function processPostCloseDailyBarRefreshJob(
     let cursorOffset = job.cursorOffset;
     let fetchedRows = Number(job.fetchedRows ?? 0);
     let writtenRows = Number(job.writtenRows ?? 0);
-    const { batchSize, maxBatches } = boundPostCloseProviderWork(options ?? {});
-    let processedBatchCount = 0;
-    const provider = getProvider(env, { fallbackEnabled: false });
+    const invocationPlan = postCloseInvocationBatchPlan(options ?? {});
+    const batchSize = invocationPlan.exactBatchSize;
+    const maxBatches = invocationPlan.exactBatches;
+    let exactBatchCount = 0;
+    let historyBatchCount = 0;
+    const pinnedEnv: Env = {
+      ...env,
+      DATA_PROVIDER: job.sourceProvider,
+      ALPACA_DAILY_FEED: job.sourceFeed,
+      ALPACA_DAILY_ADJUSTMENT: job.adjustment,
+    };
+    const provider = getProvider(pinnedEnv, { fallbackEnabled: false });
 
-    while (processedBatchCount < maxBatches) {
+    while (exactBatchCount < maxBatches || historyBatchCount < 1) {
       if (cursorOffset >= job.totalTickers) cursorOffset = 0;
-      const phase = await hasIncompletePostCloseExactSession(stateEnv, job.id) ? "exact" : "history";
-      let candidateItems = await loadPostCloseJobItemBatch(stateEnv, job.id, cursorOffset, batchSize, phase);
+      const hasIncompleteExactSession = await hasIncompletePostCloseExactSession(stateEnv, job.id);
+      const phase: "exact" | "history" = exactBatchCount < maxBatches && hasIncompleteExactSession
+        ? "exact"
+        : "history";
+      if (phase === "history" && historyBatchCount >= 1) break;
+      const phaseCursor = phase === "exact" ? cursorOffset : 0;
+      const phaseBatchSize = phase === "exact" ? batchSize : invocationPlan.historyBatchSize;
+      let candidateItems = await loadPostCloseJobItemBatch(stateEnv, job.id, phaseCursor, phaseBatchSize, phase);
       if (candidateItems.length === 0) {
-        if (cursorOffset > 0) {
+        if (phase === "exact" && cursorOffset > 0) {
           cursorOffset = 0;
           continue;
         }
+        if (phase === "exact") {
+          exactBatchCount = maxBatches;
+          continue;
+        }
+        historyBatchCount += 1;
         break;
       }
-      const sourceFeed = marketDataFeed(env);
+      const sourceFeed = job.sourceFeed;
       const candidateCurrentTickers = await loadTickersWithBarOnDate(
-        env,
+        pinnedEnv,
         candidateItems.map((item) => item.ticker),
         job.tradingDate,
       );
@@ -1012,13 +1089,13 @@ export async function processPostCloseDailyBarRefreshJob(
         candidateItems = candidateItems.filter((item) => !candidateCurrentTickers.has(item.ticker));
         if (candidateItems.length === 0) {
           cursorOffset = lastCandidateOrdinal + 1;
-          processedBatchCount += 1;
+          exactBatchCount += 1;
           continue;
         }
       }
       const historyCandidates = candidateItems.filter((item) => Number(item.historyRequired) === 1);
       const historyStates = await loadOverviewHistoryStates(
-        env,
+        pinnedEnv,
         historyCandidates.map((item) => item.ticker),
         sourceFeed,
       );
@@ -1027,7 +1104,7 @@ export async function processPostCloseDailyBarRefreshJob(
         historyStates,
         currentTickers: candidateCurrentTickers,
         tradingDate: job.tradingDate,
-        batchSize,
+        batchSize: phaseBatchSize,
       });
       const selectedBatchItems = batchPlan.items;
       const refreshStartDate = batchPlan.refreshStartDate;
@@ -1042,23 +1119,28 @@ export async function processPostCloseDailyBarRefreshJob(
         itemLeaseExpiresAt,
       );
       if (batchItems.length === 0) {
-        cursorOffset = (selectedBatchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
+        if (phase === "exact") {
+          cursorOffset = (selectedBatchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
+          exactBatchCount += 1;
+        } else {
+          historyBatchCount += 1;
+        }
         activeLeaseToken = null;
         continue;
       }
       const batchTickers = batchItems.map((item) => item.ticker);
       leasedItems = batchItems;
-      const providerKey = (env.DATA_PROVIDER ?? "alpaca").trim().toLowerCase() || "alpaca";
-      const preCurrentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
-      await clearProviderSymbolBackoff(env, providerKey, Array.from(preCurrentTickers));
+      const providerKey = job.sourceProvider;
+      const preCurrentTickers = await loadTickersWithBarOnDate(pinnedEnv, batchTickers, job.tradingDate);
+      await clearProviderSymbolBackoff(pinnedEnv, providerKey, Array.from(preCurrentTickers));
       let refresh = { fetchedRows: 0, writtenRows: 0, currentDateTickers: 0 };
       if (refreshStartDate < job.tradingDate || preCurrentTickers.size < batchTickers.length) {
         const estimatedDays = Math.max(
           1,
           Math.floor((Date.parse(`${job.tradingDate}T00:00:00Z`) - Date.parse(`${refreshStartDate}T00:00:00Z`)) / 86_400_000) + 1,
         );
-        await assertMarketDataBackgroundWriteBudget(env, batchTickers.length * estimatedDays);
-        refresh = await refreshDailyBarsIncremental(env, {
+        await assertMarketDataBackgroundWriteBudget(pinnedEnv, batchTickers.length * estimatedDays);
+        refresh = await refreshDailyBarsIncremental(pinnedEnv, {
           provider,
           tickers: batchTickers,
           startDate: refreshStartDate,
@@ -1069,7 +1151,7 @@ export async function processPostCloseDailyBarRefreshJob(
           mirrorLatestToLegacy: true,
         });
       }
-      let currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+      let currentTickers = await loadTickersWithBarOnDate(pinnedEnv, batchTickers, job.tradingDate);
       const yahooRepairItem = batchItems.find((item) => shouldUseYahooRepair({
         attemptCount: Number(item.attemptCount),
         hasCurrentSession: currentTickers.has(item.ticker),
@@ -1078,7 +1160,7 @@ export async function processPostCloseDailyBarRefreshJob(
       if (yahooRepairItem) {
         const yahooProvider = getProvider(
           {
-            ...env,
+            ...pinnedEnv,
             DATA_PROVIDER: "stooq",
             FMP_API_KEY: undefined,
             ALPHA_VANTAGE_API_KEY: undefined,
@@ -1092,7 +1174,7 @@ export async function processPostCloseDailyBarRefreshJob(
         const repairStartDate = currentTickers.has(yahooRepairItem.ticker)
           ? refreshStartDate
           : job.tradingDate;
-        await refreshDailyBarsIncremental(env, {
+        await refreshDailyBarsIncremental(pinnedEnv, {
           provider: yahooProvider,
           tickers: [yahooRepairItem.ticker],
           startDate: repairStartDate,
@@ -1103,9 +1185,9 @@ export async function processPostCloseDailyBarRefreshJob(
           repairMissingMarketDates: true,
           continueOnError: true,
         });
-        currentTickers = await loadTickersWithBarOnDate(env, batchTickers, job.tradingDate);
+        currentTickers = await loadTickersWithBarOnDate(pinnedEnv, batchTickers, job.tradingDate);
       }
-      await clearProviderSymbolBackoff(env, providerKey, Array.from(currentTickers));
+      await clearProviderSymbolBackoff(pinnedEnv, providerKey, Array.from(currentTickers));
       const missingTickers = batchTickers.filter((ticker) => !currentTickers.has(ticker));
       const completedTickers: string[] = [];
       const currentOnlyTickers: string[] = [];
@@ -1115,7 +1197,7 @@ export async function processPostCloseDailyBarRefreshJob(
         const historyItems = batchItems.filter((item) => (
           Number(item.historyRequired) === 1 && currentTickers.has(item.ticker)
         ));
-        const coverage = await verifyMarketBarCoverage(env, {
+        const coverage = await verifyMarketBarCoverage(pinnedEnv, {
           tickers: historyItems.map((item) => item.ticker),
           requestedStart: historyLookbackStart,
           throughDate: job.tradingDate,
@@ -1126,7 +1208,7 @@ export async function processPostCloseDailyBarRefreshJob(
           else historyMissingTickers.push(item.ticker);
         }
         await checkpointOverviewHistoryStates(
-          env,
+          pinnedEnv,
           completedTickers,
           sourceFeed,
           historyLookbackStart,
@@ -1206,10 +1288,14 @@ export async function processPostCloseDailyBarRefreshJob(
           lastError: `No Alpaca ${sourceFeed} bar was returned for ${job.tradingDate}.`,
         });
       }
-      cursorOffset = (batchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
+      if (phase === "exact") {
+        cursorOffset = (batchItems.at(-1)?.ordinal ?? cursorOffset) + 1;
+        exactBatchCount += 1;
+      } else {
+        historyBatchCount += 1;
+      }
       fetchedRows += refresh.fetchedRows;
       writtenRows += refresh.writtenRows;
-      processedBatchCount += 1;
       leasedItems = [];
       activeLeaseToken = null;
       const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
@@ -1333,7 +1419,7 @@ export async function loadLatestPostCloseDailyBarRefreshJobForDate(
 ): Promise<PostCloseDailyBarRefreshJob | null> {
   const stateEnv = postCloseStateEnv(env);
   await ensurePostCloseRetrySchema(stateEnv);
-  const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate);
+  const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate, postCloseJobIdentity(env));
   return record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
 }
 
@@ -1352,7 +1438,7 @@ export async function planPostCloseBudgetProtection(
 
   try {
     const stateEnv = postCloseStateEnv(env);
-    const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, expectedTradingDate);
+    const record = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, expectedTradingDate, postCloseJobIdentity(env));
     const job = record ? mapPostCloseDailyBarRefreshJobRecord(record) : null;
     const storedSession = await loadStoredMarketSession(env, expectedTradingDate).catch(() => null);
     return resolvePostCloseBudgetProtection({

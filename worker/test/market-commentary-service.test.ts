@@ -19,6 +19,7 @@ import type { Env } from "../src/types";
 
 
 type StoredAttempt = {
+  id: string;
   scheduledLocalDate: string;
   sessionDate: string;
   status: string;
@@ -124,6 +125,12 @@ class FakeMarketCommentaryDb {
         return null as T;
       },
       async all<T>() {
+        if (sql.includes("FROM market_commentary_schedule_attempts")) {
+          return { results: db.attempts.map((attempt) => ({
+            status: attempt.status,
+            updatedAt: "2026-05-27 00:00:00",
+          })) as T[] };
+        }
         return { results: [] as T[] };
       },
       async run() {
@@ -155,6 +162,7 @@ class FakeMarketCommentaryDb {
         }
         if (sql.startsWith("INSERT INTO market_commentary_schedule_attempts")) {
           db.attempts.push({
+            id: String(bound[0]),
             scheduledLocalDate: String(bound[1]),
             sessionDate: String(bound[2]),
             status: String(bound[3]),
@@ -164,6 +172,15 @@ class FakeMarketCommentaryDb {
             scheduledLocalTime: bound[7] == null ? null : String(bound[7]),
           });
           return { meta: { rows_written: 1 } };
+        }
+        if (sql.includes("UPDATE market_commentary_schedule_attempts")) {
+          const attempt = db.attempts.find((row) => row.id === String(bound[3]));
+          if (attempt) {
+            attempt.status = String(bound[0]);
+            attempt.reason = bound[1] == null ? null : String(bound[1]);
+            attempt.reportId = bound[2] == null ? null : String(bound[2]);
+          }
+          return { meta: { rows_written: attempt ? 1 : 0 } };
         }
         if (sql.startsWith("INSERT INTO market_commentary_reports")) {
           db.rows.push({
@@ -380,12 +397,6 @@ describe("market commentary service", () => {
       expect.objectContaining({
         scheduledLocalDate: "2026-05-27",
         sessionDate: "2026-05-26",
-        status: "running",
-        reason: "Scheduled report due; checking prerequisites.",
-      }),
-      expect.objectContaining({
-        scheduledLocalDate: "2026-05-27",
-        sessionDate: "2026-05-26",
         status: "skipped",
         reason: expect.stringContaining("Overview snapshot for 2026-05-26 is not ready"),
       }),
@@ -425,12 +436,6 @@ describe("market commentary service", () => {
     expect(response?.report?.error).toContain("GEMINI_API_KEY");
     expect(db.rows).toHaveLength(2);
     expect(db.attempts[0]).toMatchObject({
-      scheduledLocalDate: "2026-05-27",
-      sessionDate: "2026-05-26",
-      status: "running",
-      reason: "Scheduled report due; checking prerequisites.",
-    });
-    expect(db.attempts.at(-1)).toMatchObject({
       scheduledLocalDate: "2026-05-27",
       sessionDate: "2026-05-26",
       status: "failed",
@@ -508,8 +513,12 @@ describe("market commentary service", () => {
 
     expect(response.status).toBe("ready");
     expect(response.report?.id).toBe("ready");
-    expect(response.warning).toContain("Latest commentary attempt failed: Request timed out after 120000ms.");
-    expect(response.warning).toContain("Showing latest ready report from 2026-05-22.");
+    expect(response.warning).toBe("Latest commentary refresh did not complete. Showing the latest ready report from 2026-05-22.");
+    expect(response.latestAttempt).toMatchObject({
+      status: "failed",
+      reasonCode: "timeout",
+      message: "The commentary provider did not respond before the timeout.",
+    });
   });
 
   it("prunes reports older than the configured 30-day history", async () => {
@@ -568,6 +577,51 @@ describe("market commentary service", () => {
     expect(response.report?.marketSession).toBe("closed");
     expect(response.report?.error).toContain("GEMINI_API_KEY");
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("falls back to the stable commentary model after a transient primary failure", async () => {
+    const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-01" });
+    const validMarkdown = [
+      "# US Market State of Play - 2026-06-01",
+      "## Executive Summary",
+      "## Market Health Score",
+      "## Major Index Snapshot",
+      "## Final Market View",
+      "A".repeat(1_300),
+    ].join("\n\n");
+    const calls: string[] = [];
+    const geminiCalls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      calls.push(url);
+      if (!url.includes("generativelanguage.googleapis.com")) {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
+      geminiCalls.push(url);
+      if (url.includes("gemini-3.5-flash")) return new Response(null, { status: 503, headers: { "Retry-After": "0" } });
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: validMarkdown }] } }],
+      }), { status: 200 });
+    }));
+
+    try {
+      const response = await refreshMarketCommentary(createEnv(db, {
+        GEMINI_API_KEY: "test-key",
+        GEMINI_MODEL: "gemini-3.5-flash",
+        GEMINI_COMMENTARY_FALLBACK_MODEL: "gemini-3.1-flash-lite",
+      }), {
+        now: new Date("2026-06-01T23:00:00.000Z"),
+        force: true,
+      });
+
+      expect(response.status).toBe("ready");
+      expect(response.report?.model).toBe("gemini-3.1-flash-lite");
+      expect(geminiCalls).toHaveLength(2);
+      expect(geminiCalls[0]).toContain("gemini-3.5-flash");
+      expect(geminiCalls[1]).toContain("gemini-3.1-flash-lite");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("stores short or malformed Gemini output as a failed report", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadSnapshot } from "../src/eod";
+import { loadSnapshot, resolveOverviewSeriesFallback } from "../src/eod";
 
 function createEnv() {
   const dashboardConfig = {
@@ -445,8 +445,8 @@ function createEnv() {
     };
     return {
       ...row,
-      barDate: snapshotMeta.asOfDate,
-      barFreshnessStatus: "fresh",
+      barDate: row.ticker === "BITO" ? "2025-01-06" : snapshotMeta.asOfDate,
+      barFreshnessStatus: row.ticker === "BITO" ? "stale" : "fresh",
       relativeStrength30dVsSpyJson: ratios[row.ticker] ? JSON.stringify(ratios[row.ticker]) : null,
     };
   });
@@ -554,6 +554,26 @@ function createEnv() {
 }
 
 describe("loadSnapshot relative strength pilot", () => {
+  it("keeps the last valid chart series while canonical history catches up", () => {
+    expect(resolveOverviewSeriesFallback({
+      barDate: "2026-07-20",
+      sparkline: [101],
+      relativeStrength30dVsSpy: null,
+    }, {
+      barDate: "2026-07-17",
+      sparkline: [98, 99, 100],
+      relativeStrength30dVsSpy: [-0.2, 0.1, 0.4],
+    })).toEqual({
+      barDate: "2026-07-20",
+      sparkline: [98, 99, 100],
+      relativeStrength30dVsSpy: [-0.2, 0.1, 0.4],
+      seriesThroughDate: "2026-07-17",
+      seriesStatus: "fallback",
+      seriesSource: "last-ready-generation",
+      seriesReason: "Using the latest valid stored chart series through 2026-07-17 while canonical SIP history catches up.",
+    });
+  });
+
   it("populates configured overview groups with RS 30d vs SPY and leaves non-enabled rows empty", async () => {
     const snapshot = await loadSnapshot(createEnv() as never, "default", "2025-01-07");
     const macroSection = snapshot.sections[0];
@@ -587,6 +607,8 @@ describe("loadSnapshot relative strength pilot", () => {
     expect(sectorGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);
     expect(sectorEqGroup?.columns).toEqual(["ticker", "name", "sparkline", "relativeStrength30dVsSpy", "price", "1D", "1W", "3M", "6M", "YTD"]);
     expect(bitoRow?.relativeStrength30dVsSpy).toEqual([2, 2, 2, 2]);
+    expect(bitoRow?.sparkline).toEqual([20, 21, 22, 24]);
+    expect(bitoRow?.barFreshnessStatus).toBe("stale");
     expect(gldRow?.relativeStrength30dVsSpy).toEqual([3, 3, 3, 3]);
     expect(usoRow?.relativeStrength30dVsSpy).toEqual([1.5, 1.5, 1.5, 1.5]);
     expect(ewjRow?.relativeStrength30dVsSpy).toEqual([4, 4, 4, 4]);

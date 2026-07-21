@@ -33,11 +33,13 @@ const eodMocks = vi.hoisted(() => ({
     sections: [],
   })),
   loadSnapshot: vi.fn(),
+  minBreadthCoveragePct: vi.fn((universeId: string) => universeId === "sp500-core" ? 98 : 95),
   OverviewFreshnessError: class OverviewFreshnessError extends Error {},
   recomputeBreadthFromStoredBars: vi.fn(),
   recomputeDashboardFromStoredBars: vi.fn(),
   refreshAndStoreOverviewSnapshot: vi.fn(),
   refreshSp500CoreBreadth: vi.fn(),
+  publishReadyBreadthUniverses: vi.fn(),
 }));
 
 vi.mock("../src/eod", () => eodMocks);

@@ -72,6 +72,7 @@ export type Env = {
   PERPLEXITY_MODEL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
+  GEMINI_COMMENTARY_FALLBACK_MODEL?: string;
   GEMINI_SEARCH_GROUNDING_ENABLED?: string;
   BRAVE_SEARCH_API_KEY?: string;
   BRAVE_SEARCH_TIMEOUT_MS?: string;
@@ -111,6 +112,7 @@ export type Env = {
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";
 export type QuoteFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
 export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
+export type OverviewSeriesStatus = "fresh" | "fallback" | "stale" | "unavailable" | "unsupported";
 export type OverviewCurrentProviderStatus = "supported" | "unsupported" | "stale" | "missing" | "rate-limited" | "auth-blocked" | "provider-error";
 
 export type OverviewCurrentDataResponse = {
@@ -143,6 +145,10 @@ export type OverviewHistoryDataResponse = {
   reason: string;
   barDate: string | null;
   source: string | null;
+  seriesThroughDate?: string | null;
+  seriesStatus?: OverviewSeriesStatus;
+  seriesSource?: string | null;
+  seriesReason?: string | null;
 };
 
 export type MetricBundle = {
@@ -219,7 +225,10 @@ export type PostCloseDailyBarRefreshJob = {
   id: string;
   tradingDate: string;
   scope: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "superseded";
+  sourceProvider: string;
+  sourceFeed: string;
+  adjustment: string;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;

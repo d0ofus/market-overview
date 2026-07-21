@@ -3,6 +3,7 @@ import { getFedWatchSnapshot } from "./fedwatch-service";
 import {
   DEFAULT_GEMINI_MODEL,
   GEMINI_PROVIDER,
+  GeminiRequestError,
   cachedBraveSearch,
   generateMarkdownWithGemini,
   normalizeSourceAuditRows,
@@ -51,6 +52,15 @@ export type MarketCommentaryResponse = {
   status: "empty" | MarketCommentaryStatus;
   warning: string | null;
   report: MarketCommentaryReport | null;
+  latestAttempt?: MarketCommentaryAttemptSummary | null;
+};
+
+export type MarketCommentaryAttemptSummary = {
+  status: MarketCommentaryStatus;
+  attemptedAt: string;
+  model: string;
+  reasonCode: "provider_busy" | "timeout" | "overview_not_ready" | "configuration" | "authentication" | "incomplete" | "unknown" | null;
+  message: string | null;
 };
 
 type MarketCommentaryRow = {
@@ -124,7 +134,8 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 240_000;
+const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 90_000;
+const DEFAULT_COMMENTARY_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 16000;
 const MARKET_COMMENTARY_MIN_MARKDOWN_LENGTH = 1200;
 const MARKET_COMMENTARY_REPORT_SELECT =
@@ -329,6 +340,7 @@ async function ensureMarketCommentaryScheduleAttemptSchema(env: Env): Promise<vo
 async function recordMarketCommentaryScheduleAttempt(
   env: Env,
   input: {
+    attemptId?: string | null;
     scheduledLocalDate: string;
     sessionDate: string;
     status: MarketCommentaryScheduleAttemptStatus;
@@ -337,16 +349,25 @@ async function recordMarketCommentaryScheduleAttempt(
     scheduledTimezone?: string | null;
     scheduledLocalTime?: string | null;
   },
-): Promise<void> {
+): Promise<string | null> {
   try {
     await ensureMarketCommentaryScheduleAttemptSchema(env);
+    if (input.attemptId) {
+      await env.DB.prepare(
+        `UPDATE market_commentary_schedule_attempts
+            SET status = ?, reason = ?, report_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+      ).bind(input.status, input.reason ?? null, input.reportId ?? null, input.attemptId).run();
+      return input.attemptId;
+    }
+    const attemptId = crypto.randomUUID();
     await env.DB.prepare(
       `INSERT INTO market_commentary_schedule_attempts (
          id, scheduled_local_date, session_date, status, reason, report_id, scheduled_timezone, scheduled_local_time, created_at, updated_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     )
       .bind(
-        crypto.randomUUID(),
+        attemptId,
         input.scheduledLocalDate,
         input.sessionDate,
         input.status,
@@ -356,9 +377,46 @@ async function recordMarketCommentaryScheduleAttempt(
         input.scheduledLocalTime ?? null,
       )
       .run();
+    return attemptId;
   } catch (error) {
     console.error("scheduled market commentary attempt log failed", error);
+    return null;
   }
+}
+
+function scheduleAttemptTimestamp(value: string): number {
+  const normalized = value.includes("T") || value.endsWith("Z") ? value : `${value.replace(" ", "T")}Z`;
+  return Date.parse(normalized);
+}
+
+async function shouldDeferScheduledCommentaryAttempt(
+  env: Env,
+  scheduledLocalDate: string,
+  sessionDate: string,
+  now: Date,
+): Promise<boolean> {
+  await ensureMarketCommentaryScheduleAttemptSchema(env);
+  const rows = await env.DB.prepare(
+    `SELECT status, updated_at as updatedAt
+       FROM market_commentary_schedule_attempts
+      WHERE scheduled_local_date = ? AND session_date = ?
+      ORDER BY datetime(updated_at) DESC
+      LIMIT 4`,
+  ).bind(scheduledLocalDate, sessionDate).all<{ status: MarketCommentaryScheduleAttemptStatus; updatedAt: string }>();
+  const attempts = rows.results ?? [];
+  const latest = attempts[0];
+  if (!latest) return false;
+  const latestAt = scheduleAttemptTimestamp(latest.updatedAt);
+  if (!Number.isFinite(latestAt)) return false;
+  if (latest.status === "running") return now.getTime() - latestAt < 4 * 60_000;
+  if (latest.status !== "failed") return false;
+  let consecutiveFailures = 0;
+  for (const attempt of attempts) {
+    if (attempt.status !== "failed") break;
+    consecutiveFailures += 1;
+  }
+  const delayMinutes = [15, 30, 60][Math.min(2, Math.max(0, consecutiveFailures - 1))];
+  return now.getTime() - latestAt < delayMinutes * 60_000;
 }
 
 function normalizeBraveQueries(rows: string[]): string[] {
@@ -498,6 +556,7 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
       status: "empty",
       warning: "No market commentary report has been generated yet.",
       report: null,
+      latestAttempt: null,
     };
   }
 
@@ -506,6 +565,7 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
       status: row.status,
       warning: null,
       report: normalizeRow(row),
+      latestAttempt: publicAttempt(row),
     };
   }
 
@@ -515,16 +575,66 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
   if (!readyRow) {
     return {
       status: row.status,
-      warning: row.errorMessage,
-      report: normalizeRow(row),
+      warning: publicAttempt(row).message,
+      report: normalizePublicFailedRow(row),
+      latestAttempt: publicAttempt(row),
     };
   }
 
-  const failedReason = row.errorMessage?.trim() || "Unknown error";
   return {
     status: "ready",
-    warning: `Latest commentary attempt failed: ${failedReason}. Showing latest ready report from ${readyRow.sessionDate}.`,
+    warning: `Latest commentary refresh did not complete. Showing the latest ready report from ${readyRow.sessionDate}.`,
     report: normalizeRow(readyRow),
+    latestAttempt: publicAttempt(row),
+  };
+}
+
+function classifyCommentaryFailure(message: string | null | undefined): Pick<MarketCommentaryAttemptSummary, "reasonCode" | "message"> {
+  const normalized = String(message ?? "").toLowerCase();
+  if (/http (429|5\d\d)|provider.*(busy|unavailable)/.test(normalized)) {
+    return { reasonCode: "provider_busy", message: "The commentary provider is temporarily unavailable." };
+  }
+  if (/timeout|timed out|abort/.test(normalized)) {
+    return { reasonCode: "timeout", message: "The commentary provider did not respond before the timeout." };
+  }
+  if (/overview snapshot|overview market data/.test(normalized)) {
+    return { reasonCode: "overview_not_ready", message: "The current Overview snapshot was not ready for commentary generation." };
+  }
+  if (/not configured|missing.*key/.test(normalized)) {
+    return { reasonCode: "configuration", message: "Commentary generation is not fully configured." };
+  }
+  if (/http (401|403)|auth|permission/.test(normalized)) {
+    return { reasonCode: "authentication", message: "The commentary provider rejected authentication." };
+  }
+  if (/incomplete market commentary|empty report/.test(normalized)) {
+    return { reasonCode: "incomplete", message: "The provider returned an incomplete commentary report." };
+  }
+  return { reasonCode: "unknown", message: "The latest commentary refresh did not complete." };
+}
+
+function publicAttempt(row: MarketCommentaryRow): MarketCommentaryAttemptSummary {
+  const failure = row.status === "failed"
+    ? classifyCommentaryFailure(row.errorMessage)
+    : { reasonCode: null, message: null };
+  return {
+    status: row.status,
+    attemptedAt: row.updatedAt || row.createdAt,
+    model: row.model,
+    ...failure,
+  };
+}
+
+function normalizePublicFailedRow(row: MarketCommentaryRow): MarketCommentaryReport {
+  const attempt = publicAttempt(row);
+  return {
+    ...normalizeRow(row),
+    reportMarkdown: `# US Market State of Play - ${row.sessionDate}\n\n${attempt.message ?? "Commentary generation is temporarily unavailable."}`,
+    dataQuality: [{
+      metric: "Market commentary generation",
+      status: "unavailable",
+      note: attempt.message ?? "The latest commentary refresh did not complete.",
+    }],
+    error: attempt.message,
   };
 }
 
@@ -1000,6 +1110,53 @@ function assertCompleteMarketCommentaryMarkdown(markdown: string): void {
   }
 }
 
+function isRetryableGeminiFailure(error: unknown): boolean {
+  if (error instanceof GeminiRequestError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return /timeout|timed out|abort|network|fetch failed|incomplete market commentary|empty report/.test(message);
+}
+
+function commentaryTimeoutMs(env: Env): number {
+  const configured = Number(env.MARKET_COMMENTARY_GEMINI_TIMEOUT_MS ?? MARKET_COMMENTARY_GEMINI_TIMEOUT_MS);
+  if (!Number.isFinite(configured)) return MARKET_COMMENTARY_GEMINI_TIMEOUT_MS;
+  return Math.max(5_000, Math.min(MARKET_COMMENTARY_GEMINI_TIMEOUT_MS, Math.floor(configured)));
+}
+
+async function waitBeforeGeminiFallback(error: unknown): Promise<void> {
+  const retryAfterMs = error instanceof GeminiRequestError ? error.retryAfterMs : null;
+  if (!retryAfterMs || retryAfterMs <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, Math.min(retryAfterMs, 15_000)));
+}
+
+async function generateCompleteMarketCommentary(
+  env: Env,
+  prompt: string,
+  sourceAudit: MarketCommentarySourceAudit[],
+): Promise<Awaited<ReturnType<typeof generateMarkdownWithGemini>> & { reportMarkdown: string }> {
+  const primaryModel = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+  const fallbackModel = env.GEMINI_COMMENTARY_FALLBACK_MODEL?.trim() || DEFAULT_COMMENTARY_FALLBACK_MODEL;
+  const generate = async (model: string) => {
+    const result = await generateMarkdownWithGemini(env, prompt, {
+      model,
+      maxOutputTokens: MARKET_COMMENTARY_MAX_OUTPUT_TOKENS,
+      timeoutMs: commentaryTimeoutMs(env),
+    });
+    const reportMarkdown = sanitizeInternalSourceMarkdownLinks(result.text, sourceAudit);
+    assertCompleteMarketCommentaryMarkdown(reportMarkdown);
+    return { ...result, reportMarkdown };
+  };
+
+  try {
+    return await generate(primaryModel);
+  } catch (error) {
+    if (!isRetryableGeminiFailure(error)) throw error;
+    await waitBeforeGeminiFallback(error);
+    return await generate(fallbackModel);
+  }
+}
+
 function fallbackReport(session: UsMarketSessionContext, message: string): string {
   return [
     `# US Market State of Play - ${session.nyDate}`,
@@ -1043,14 +1200,6 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
   const decision = scheduledMarketCommentaryDecision(settings, now);
   if (!decision.due || !decision.localDate) return null;
   const session = getUsMarketSessionContext(now);
-  await recordMarketCommentaryScheduleAttempt(env, {
-    scheduledLocalDate: decision.localDate,
-    sessionDate: session.sessionDate,
-    status: "running",
-    reason: "Scheduled report due; checking prerequisites.",
-    scheduledTimezone: decision.timezone,
-    scheduledLocalTime: decision.localTime,
-  });
   const existingReadyReport = await loadReadyScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
   if (existingReadyReport) {
     await recordMarketCommentaryScheduleAttempt(env, {
@@ -1068,6 +1217,9 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
       report: existingReadyReport,
     };
   }
+  if (await shouldDeferScheduledCommentaryAttempt(env, decision.localDate, session.sessionDate, now)) {
+    return null;
+  }
   const requiredSnapshotDate = overviewSnapshotDateForSession(session);
   if (!(await overviewSnapshotReadyForSession(env, requiredSnapshotDate))) {
     await recordMarketCommentaryScheduleAttempt(env, {
@@ -1080,6 +1232,14 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
     });
     return null;
   }
+  const attemptId = await recordMarketCommentaryScheduleAttempt(env, {
+    scheduledLocalDate: decision.localDate,
+    sessionDate: session.sessionDate,
+    status: "running",
+    reason: "Scheduled report generation started.",
+    scheduledTimezone: decision.timezone,
+    scheduledLocalTime: decision.localTime,
+  });
   try {
     const response = await refreshMarketCommentary(env, {
       now,
@@ -1091,6 +1251,7 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
       scheduledLocalTime: decision.localTime,
     });
     await recordMarketCommentaryScheduleAttempt(env, {
+      attemptId,
       scheduledLocalDate: decision.localDate,
       sessionDate: session.sessionDate,
       status: response.status === "ready" ? "ready" : "failed",
@@ -1103,6 +1264,7 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
   } catch (error) {
     const message = error instanceof Error ? error.message : "Scheduled market commentary failed.";
     await recordMarketCommentaryScheduleAttempt(env, {
+      attemptId,
       scheduledLocalDate: decision.localDate,
       sessionDate: session.sessionDate,
       status: "failed",
@@ -1155,12 +1317,7 @@ export async function refreshMarketCommentary(env: Env, options?: {
       throw new Error("GEMINI_API_KEY is not configured.");
     }
     evidence = await gatherMarketEvidence(env, session, settings, overviewSnapshot);
-    const result = await generateMarkdownWithGemini(env, buildPrompt(evidence, settings), {
-      maxOutputTokens: MARKET_COMMENTARY_MAX_OUTPUT_TOKENS,
-      timeoutMs: env.MARKET_COMMENTARY_GEMINI_TIMEOUT_MS ?? MARKET_COMMENTARY_GEMINI_TIMEOUT_MS,
-    });
-    const reportMarkdown = sanitizeInternalSourceMarkdownLinks(result.text, evidence.sourceAudit);
-    assertCompleteMarketCommentaryMarkdown(reportMarkdown);
+    const result = await generateCompleteMarketCommentary(env, buildPrompt(evidence, settings), evidence.sourceAudit);
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,
       asOf: session.nowIso,
@@ -1168,9 +1325,9 @@ export async function refreshMarketCommentary(env: Env, options?: {
       marketSessionLabel: session.label,
       dataBasis: session.dataBasis,
       provider: GEMINI_PROVIDER,
-      model,
+      model: result.model,
       status: "ready",
-      reportMarkdown,
+      reportMarkdown: result.reportMarkdown,
       sourceAudit: [...evidence.sourceAudit, ...result.sources],
       dataQuality: evidence.dataQuality,
       error: null,

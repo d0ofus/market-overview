@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { claimNextRefreshJob, isRefreshJobClaimable, refreshJobIdempotencyKey } from "../src/refresh-jobs-service";
+import { claimNextRefreshJob, claimRefreshJobById, isRefreshJobClaimable, refreshJobIdempotencyKey } from "../src/refresh-jobs-service";
 import type { Env } from "../src/types";
 
 describe("refresh job leasing", () => {
@@ -41,5 +41,30 @@ describe("refresh job leasing", () => {
     expect(statements[1]?.sql).toContain("attempt_count < ?");
     expect(statements[1]?.args.at(-1)).toBe(3);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("can claim the just-created manual job directly instead of waiting for cron order", async () => {
+    let capturedSql = "";
+    let capturedArgs: unknown[] = [];
+    const db = {
+      prepare(sql: string) {
+        capturedSql = sql;
+        return {
+          bind(...args: unknown[]) {
+            capturedArgs = args;
+            return { async first<T>() { return null as T; } };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    await claimRefreshJobById({ DB: db } as Env, "overview-job", new Date("2026-07-21T01:05:00Z"));
+
+    expect(capturedSql).toContain("WHERE id = ?");
+    expect(capturedSql).toContain("attempt_count = attempt_count + 1");
+    expect(capturedSql).toContain("page = 'market-commentary'");
+    expect(capturedArgs[1]).toBe("2026-07-21T01:09:00.000Z");
+    expect(capturedArgs[2]).toBe("2026-07-21T01:07:00.000Z");
+    expect(capturedArgs).toContain("overview-job");
   });
 });

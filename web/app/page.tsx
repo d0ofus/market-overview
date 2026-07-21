@@ -2,8 +2,7 @@ import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { CurrentFocusPanel } from "@/components/current-focus-panel";
 import { OverviewRefreshMenu } from "@/components/overview-refresh-menu";
-import { OverviewFreshnessBanner } from "@/components/overview-freshness-banner";
-import { QuoteFreshnessAudit } from "@/components/quote-freshness-audit";
+import { OverviewFreshnessDisclosure } from "@/components/overview-freshness-disclosure";
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
@@ -64,7 +63,7 @@ export default async function HomePage() {
       autoRefreshLocalTime: "08:15",
       lastUpdated: null,
       asOfDate: null,
-      providerLabel: "TradingView scanner + Alpaca bars",
+      providerLabel: "TradingView/Alpaca current snapshots + Alpaca SIP daily history",
       expectedAsOfDate: null,
       freshnessStatus: "stale" as const,
       freshnessCoveragePct: 0,
@@ -177,7 +176,9 @@ export default async function HomePage() {
           </div>
         )}
       />
-      <OverviewFreshnessBanner summary={freshnessSummary} />
+      {dashboardValue ? (
+        <OverviewFreshnessDisclosure summary={freshnessSummary} sections={focusedSections} />
+      ) : null}
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] xl:items-start">
         <CurrentFocusPanel
           anchorId={currentFocusAnchorId}
@@ -194,7 +195,6 @@ export default async function HomePage() {
           <ManualRefreshButton page="overview" idleLabel="Refresh Overview Data" />
         </div>
       )}
-      {dashboardValue && <QuoteFreshnessAudit sections={focusedSections} />}
       <div className="grid gap-4">
         {sectionLayouts.map(({ section, base, usIndex, usIndexEq, sector, sectorEq, thematic }) => (
           <section key={section.id} className="space-y-3">

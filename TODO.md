@@ -73,6 +73,7 @@
 > ranked by distance of close from highs + volume multiple of average + % gain
 
 ## WATCHLIST COMPILER
+> Add compile + Export TXT button
 > Make a function to rank by factors (e.g. price contraction, volume expansion, price > SMA200, increasing rev/NI trend etc.)
 
 ## WATCHLIST REVIEW

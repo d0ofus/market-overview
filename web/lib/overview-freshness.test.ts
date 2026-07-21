@@ -3,13 +3,13 @@ import test from "node:test";
 import {
   deriveCommentaryFreshnessSummary,
   deriveOverviewFreshnessSummary,
+  countActionableOverviewRows,
   type OverviewFreshnessSection,
   type OverviewFreshnessContext,
 } from "./overview-freshness";
 import type { MarketCommentaryReport, MarketCommentaryDataQuality } from "./api";
-import type { BarFreshnessStatus, QuoteFreshnessStatus } from "../types/dashboard";
 
-function sections(rows: Array<{ ticker: string; barDate?: string | null; barFreshnessStatus?: BarFreshnessStatus; quoteFreshnessStatus?: QuoteFreshnessStatus }>): OverviewFreshnessSection[] {
+function sections(rows: OverviewFreshnessSection["groups"][number]["rows"]): OverviewFreshnessSection[] {
   return [
     {
       groups: [
@@ -20,6 +20,29 @@ function sections(rows: Array<{ ticker: string; barDate?: string | null; barFres
     },
   ];
 }
+
+test("production-shaped fallback data does not report every row as affected", () => {
+  const rows: OverviewFreshnessSection["groups"][number]["rows"] = Array.from({ length: 232 }, (_, index) => ({
+    ticker: `T${index}`,
+    barDate: "2026-07-20",
+    barFreshnessStatus: "fresh",
+    quoteFreshnessStatus: "fresh",
+    sparkline: index === 0 ? null : [98, 99, 100],
+    relativeStrength30dVsSpy: index < 11 ? null : [-0.2, 0.1, 0.4],
+    currentData: {
+      status: "fresh",
+      fieldSources: { price: "tradingview", change1d: "tradingview" },
+    },
+    historyData: { seriesStatus: index === 0 ? "unavailable" : "fallback" },
+  }));
+  rows.push(...Array.from({ length: 4 }, (_, index) => ({
+    ticker: `UNSUPPORTED${index}`,
+    quoteFreshnessStatus: "unsupported" as const,
+    historyData: { seriesStatus: "unsupported" as const },
+  })));
+
+  assert.equal(countActionableOverviewRows(sections(rows)), 1);
+});
 
 function status(overrides: Partial<OverviewFreshnessContext> = {}): OverviewFreshnessContext {
   return {
@@ -90,10 +113,10 @@ test("overview freshness marks stale critical symbols as danger", () => {
 
   assert.equal(summary?.tone, "danger");
   assert.equal(summary?.title, "Current-session data incomplete");
-  assert.ok(summary?.details.includes("Critical historical symbols: XOI, VIX"));
+  assert.ok(summary?.details.includes("Critical current-data symbols: XOI, VIX"));
 });
 
-test("overview freshness marks partial coverage as a warning", () => {
+test("overview freshness treats unsupported rows and optional coverage gaps as informational", () => {
   const summary = deriveOverviewFreshnessSummary({
     status: status({
       freshnessStatus: "partial",
@@ -110,9 +133,7 @@ test("overview freshness marks partial coverage as a warning", () => {
     auditHref: "#overview-quote-audit",
   });
 
-  assert.equal(summary?.tone, "warning");
-  assert.equal(summary?.title, "Historical overview data partial");
-  assert.ok(summary?.details.includes("Coverage 3/4 (75.0%)"));
+  assert.equal(summary, null);
 });
 
 test("overview freshness counts stale, unavailable, and unverified rows", () => {
@@ -127,14 +148,14 @@ test("overview freshness counts stale, unavailable, and unverified rows", () => 
     auditHref: "#overview-quote-audit",
   });
 
-  assert.equal(summary?.counts.needsReview, 3);
+  assert.equal(summary?.counts.needsReview, 2);
   assert.equal(summary?.counts.stale, 1);
   assert.equal(summary?.counts.unavailable, 1);
   assert.equal(summary?.counts.unverified, 1);
-  assert.ok(summary?.details.includes("3 current-data rows need review"));
+  assert.ok(summary?.details.includes("2 current-data rows need review"));
 });
 
-test("overview freshness separates fresh live quotes from stale history", () => {
+test("overview freshness does not open an error for usable lagging history", () => {
   const summary = deriveOverviewFreshnessSummary({
     status: status({
       freshnessStatus: "partial",
@@ -144,18 +165,21 @@ test("overview freshness separates fresh live quotes from stale history", () => 
       freshnessWarning: null,
     }),
     sections: sections([
-      { ticker: "EATZ", barDate: "2026-05-06", quoteFreshnessStatus: "fresh", barFreshnessStatus: "stale" },
+      {
+        ticker: "EATZ",
+        barDate: "2026-07-20",
+        quoteFreshnessStatus: "fresh",
+        barFreshnessStatus: "fresh",
+        sparkline: [98, 99, 100],
+        historyData: { seriesStatus: "fallback" },
+      },
       { ticker: "RSHO", barDate: "2026-06-12", quoteFreshnessStatus: "fresh", barFreshnessStatus: "fresh" },
     ]),
     dashboardAvailable: true,
     auditHref: "#overview-quote-audit",
   });
 
-  assert.equal(summary?.tone, "warning");
-  assert.equal(summary?.title, "Historical overview data stale");
-  assert.equal(summary?.counts.needsReview, 0);
-  assert.equal(summary?.counts.historyNeedsReview, 1);
-  assert.ok(summary?.message.includes("Current scalar values are available"));
+  assert.equal(summary, null);
 });
 
 test("overview freshness reports stale breadth separately from live quotes", () => {

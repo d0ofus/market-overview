@@ -19,12 +19,14 @@ import {
 import {
   doesOverviewCurrentRowNeedRepair,
   isOverviewCurrentRowComplete,
+  isOverviewCurrentRowPublishable,
+  isOverviewCurrentRowStructurallyUnsupported,
   loadOverviewCurrentData,
   isOverviewCurrentV2Enabled,
   refreshOverviewCurrentDataIfDue,
   type OverviewCurrentData,
 } from "./overview-current-data";
-import type { BarFreshnessStatus, Env, QuoteFreshnessStatus, RankingWindow, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
+import type { BarFreshnessStatus, Env, OverviewSeriesStatus, QuoteFreshnessStatus, RankingWindow, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
 
 const uid = () => crypto.randomUUID();
 
@@ -222,7 +224,7 @@ async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[]
   }
 }
 
-function minBreadthCoveragePct(universeId: string): number {
+export function minBreadthCoveragePct(universeId: string): number {
   if (universeId === "sp500-core") return SP500_CORE_BREADTH_MIN_COVERAGE_PCT;
   if (CORE_BREADTH_UNIVERSE_IDS.includes(universeId as (typeof CORE_BREADTH_UNIVERSE_IDS)[number])) {
     return CORE_BREADTH_MIN_COVERAGE_PCT;
@@ -256,6 +258,11 @@ function isBarFreshnessStatus(value: unknown): value is BarFreshnessStatus {
 
 function isQuoteFreshnessStatus(value: unknown): value is QuoteFreshnessStatus {
   return value === "fresh" || value === "stale" || value === "unavailable" || value === "unsupported";
+}
+
+function isOverviewSeriesStatus(value: unknown): value is OverviewSeriesStatus {
+  return value === "fresh" || value === "fallback" || value === "stale"
+    || value === "unavailable" || value === "unsupported";
 }
 
 function overviewFreshnessTickersFromConfig(config: Awaited<ReturnType<typeof loadConfig>>): OverviewFreshnessTicker[] {
@@ -317,13 +324,16 @@ function appendFreshnessWarning(base: string | null, extra: string): string {
 function criticalTickersWithoutLiveQuotes(
   rows: Array<{ ticker: string; groupTitle: string }>,
   currentRows: Map<string, OverviewCurrentData>,
+  now?: Date,
 ): string[] {
   const missing = new Set<string>();
   for (const row of rows) {
     const ticker = row.ticker.trim().toUpperCase();
     if (!OVERVIEW_FRESHNESS_CRITICAL_GROUP_TITLES.has(row.groupTitle)) continue;
     if (!isOverviewQuoteEligibleTicker(ticker, row.groupTitle)) continue;
-    if (currentRows.get(ticker)?.status === "fresh") continue;
+    const current = currentRows.get(ticker);
+    if (isOverviewCurrentRowStructurallyUnsupported(current)) continue;
+    if (current && isOverviewCurrentRowPublishable(current, now)) continue;
     missing.add(ticker);
   }
   return Array.from(missing).sort();
@@ -524,8 +534,22 @@ export async function refreshAndStoreOverviewSnapshot(
   env: Env,
   asOfDateInput?: string,
   configId = DEFAULT_CONFIG_ID,
-  _options: { requireFreshness?: boolean } = {},
-): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics; fetchedRows: number; writtenRows: number }> {
+  options: {
+    requireFreshness?: boolean;
+    forceCurrentData?: boolean;
+    refreshAllOverviewExactBars?: boolean;
+  } = {},
+): Promise<{
+  snapshotId: string;
+  asOfDate: string;
+  freshness: OverviewFreshnessDiagnostics;
+  fetchedRows: number;
+  writtenRows: number;
+  generatedAt: string;
+  currentCoveragePct: number;
+  historyExactCoveragePct: number;
+  historyUsableCoveragePct: number;
+}> {
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
   const criticalTickers = Array.from(new Set(overviewCriticalFreshnessTickers(config).map((ticker) => ticker.toUpperCase())));
@@ -535,17 +559,21 @@ export async function refreshAndStoreOverviewSnapshot(
   let writtenRows = 0;
   let freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
   const missingTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate);
-  const boundedRefreshTickers = Array.from(new Set([
-    ...missingTickers.filter((ticker) => criticalTickerSet.has(ticker.toUpperCase())),
-    ...missingTickers,
-  ])).slice(0, 80);
+  const boundedRefreshTickers = options.refreshAllOverviewExactBars
+    ? overviewConfigTickers(config)
+      .filter((ticker) => overviewFreshnessTickersFromConfig(config).some((row) => row.ticker === ticker && row.eligible))
+      .slice(0, 4 * 80)
+    : Array.from(new Set([
+      ...missingTickers.filter((ticker) => criticalTickerSet.has(ticker.toUpperCase())),
+      ...missingTickers,
+    ])).slice(0, 80);
   if (boundedRefreshTickers.length > 0) {
     try {
       const provider = getProvider(env, { fallbackEnabled: false });
       const refresh = await refreshDailyBarsIncremental(env, {
         provider,
         tickers: boundedRefreshTickers,
-        startDate,
+        startDate: options.refreshAllOverviewExactBars ? asOfDate : startDate,
         endDate: asOfDate,
         replaceExisting: true,
         providerBatchSize: 80,
@@ -564,10 +592,15 @@ export async function refreshAndStoreOverviewSnapshot(
   if (currentDataEnabled) {
     try {
       const storedCurrentRows = await loadOverviewCurrentData(env, configId, asOfDate);
-      await refreshOverviewCurrentDataIfDue(env, configId, asOfDate, new Date(), {
+      const currentRefresh = await refreshOverviewCurrentDataIfDue(env, configId, asOfDate, new Date(), {
+        force: options.forceCurrentData === true,
         forceCompleted: storedCurrentRows.size === 0,
       });
+      if (options.forceCurrentData && !currentRefresh) {
+        throw new Error("A forced overview current-data refresh could not be claimed.");
+      }
     } catch (error) {
+      if (options.forceCurrentData) throw error;
       console.error("overview current-data refresh failed; snapshot will fail closed", error);
     }
   }
@@ -1052,6 +1085,42 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
     }
   }
 
+  for (const [universeId, tickers] of Array.from(universeTickers.entries())) {
+    const active = await env.DB.prepare(
+      "SELECT active_version_id as activeVersionId FROM universes WHERE id = ? LIMIT 1",
+    ).bind(universeId).first<{ activeVersionId: string | null }>();
+    if (active?.activeVersionId) continue;
+    const source = sourceByUniverse.get(universeId) ?? "existing universe membership";
+    const sourceAsOfDate = new Date().toISOString().slice(0, 10);
+    const existingCandidate = await env.DB.prepare(
+      `SELECT id, status
+         FROM universe_versions
+        WHERE universe_id = ? AND source_as_of_date = ? AND member_count = ?
+        ORDER BY created_at DESC LIMIT 1`,
+    ).bind(universeId, sourceAsOfDate, tickers.length).first<{ id: string; status: string }>();
+    if (existingCandidate?.status === "rejected") {
+      universeTickers.delete(universeId);
+      sourceByUniverse.delete(universeId);
+      unavailable.push({
+        id: universeId,
+        name: universeId,
+        reason: "The current membership candidate failed validation and cannot publish breadth.",
+      });
+      continue;
+    }
+    try {
+      await ensureUniverseMembership(env, universeId, universeId, tickers, source);
+    } catch (error) {
+      universeTickers.delete(universeId);
+      sourceByUniverse.delete(universeId);
+      unavailable.push({
+        id: universeId,
+        name: universeId,
+        reason: error instanceof Error ? error.message : "Universe membership validation failed.",
+      });
+    }
+  }
+
   unavailable.push({
     id: "worden-common-stock-universe",
     name: "Overall Market (Worden Common Stock Universe)",
@@ -1065,6 +1134,95 @@ type SnapshotComputeOptions = {
   includeBreadth?: boolean;
   freshnessDiagnostics?: OverviewFreshnessDiagnostics | null;
 };
+
+type OverviewStoredSeries = {
+  barDate: string | null;
+  sparkline: number[];
+  relativeStrength30dVsSpy: number[] | null;
+  seriesThroughDate?: string | null;
+  seriesStatus?: OverviewSeriesStatus;
+  seriesSource?: string | null;
+  seriesReason?: string | null;
+};
+
+export function resolveOverviewSeriesFallback(
+  current: OverviewStoredSeries,
+  fallback: OverviewStoredSeries | null | undefined,
+): OverviewStoredSeries {
+  if (!fallback) return current;
+  const useFallbackSparkline = current.sparkline.length <= 1 && fallback.sparkline.length > 1;
+  const useFallbackRelativeStrength = (current.relativeStrength30dVsSpy?.length ?? 0) <= 1
+    && (fallback.relativeStrength30dVsSpy?.length ?? 0) > 1;
+  if (!useFallbackSparkline && !useFallbackRelativeStrength) return current;
+  const fallbackSeriesDate = fallback.seriesThroughDate ?? fallback.barDate;
+  return {
+    ...current,
+    barDate: current.barDate,
+    sparkline: useFallbackSparkline ? fallback.sparkline : current.sparkline,
+    relativeStrength30dVsSpy: useFallbackRelativeStrength
+      ? fallback.relativeStrength30dVsSpy
+      : current.relativeStrength30dVsSpy,
+    seriesThroughDate: fallbackSeriesDate ?? current.seriesThroughDate ?? current.barDate,
+    seriesStatus: "fallback",
+    seriesSource: fallback.seriesSource ?? "last-ready-generation",
+    seriesReason: fallbackSeriesDate
+      ? `Using the latest valid stored chart series through ${fallbackSeriesDate} while canonical SIP history catches up.`
+      : "Using the latest valid stored chart series while canonical SIP history catches up.",
+  };
+}
+
+async function loadLatestValidOverviewSeries(
+  env: Env,
+  configId: string,
+): Promise<Map<string, OverviewStoredSeries>> {
+  const rows = await env.DB.prepare(
+    `SELECT sr.group_id as groupId, sr.ticker, sr.bar_date as barDate,
+            sr.history_series_through_date as seriesThroughDate,
+            sr.history_series_source as seriesSource,
+            sr.sparkline_json as sparklineJson,
+            sr.relative_strength_30d_vs_spy_json as relativeStrengthJson
+       FROM snapshot_rows sr
+       JOIN snapshots_meta sm ON sm.id = sr.snapshot_id
+      WHERE sm.config_id = ?
+        AND ((sr.sparkline_json IS NOT NULL AND sr.sparkline_json <> '[]')
+          OR (sr.relative_strength_30d_vs_spy_json IS NOT NULL AND sr.relative_strength_30d_vs_spy_json <> '[]'))
+      ORDER BY datetime(sm.generated_at) DESC
+      LIMIT 5000`,
+  ).bind(configId).all<{
+    groupId: string;
+    ticker: string;
+    barDate: string | null;
+    seriesThroughDate: string | null;
+    seriesSource: string | null;
+    sparklineJson: string | null;
+    relativeStrengthJson: string | null;
+  }>();
+  const latest = new Map<string, OverviewStoredSeries>();
+  for (const row of rows.results ?? []) {
+    const key = `${row.groupId}\u0000${row.ticker.toUpperCase()}`;
+    const stored = latest.get(key) ?? {
+      barDate: null,
+      sparkline: [],
+      relativeStrength30dVsSpy: null,
+      seriesThroughDate: null,
+      seriesStatus: "unavailable",
+      seriesSource: null,
+      seriesReason: null,
+    };
+    const sparkline = parseStoredNumberArray(row.sparklineJson);
+    const relativeStrength = parseStoredNumberArrayOrNull(row.relativeStrengthJson);
+    if (stored.sparkline.length <= 1 && sparkline.length > 1) stored.sparkline = sparkline;
+    if ((stored.relativeStrength30dVsSpy?.length ?? 0) <= 1 && (relativeStrength?.length ?? 0) > 1) {
+      stored.relativeStrength30dVsSpy = relativeStrength;
+    }
+    if (!stored.seriesThroughDate && (sparkline.length > 1 || (relativeStrength?.length ?? 0) > 1)) {
+      stored.seriesThroughDate = row.seriesThroughDate ?? row.barDate;
+      stored.seriesSource = row.seriesSource ?? "last-ready-generation";
+    }
+    latest.set(key, stored);
+  }
+  return latest;
+}
 
 async function hasReadyOverviewGeneration(env: Env, configId: string): Promise<boolean> {
   try {
@@ -1131,13 +1289,22 @@ export async function computeAndStoreSnapshot(
   asOfDateInput?: string,
   configId = "default",
   options: SnapshotComputeOptions = {},
-): Promise<{ snapshotId: string; asOfDate: string; freshness: OverviewFreshnessDiagnostics }> {
+): Promise<{
+  snapshotId: string;
+  asOfDate: string;
+  freshness: OverviewFreshnessDiagnostics;
+  generatedAt: string;
+  currentCoveragePct: number;
+  historyExactCoveragePct: number;
+  historyUsableCoveragePct: number;
+}> {
   const includeBreadth = options.includeBreadth ?? true;
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const generatedAt = new Date().toISOString();
+  const generatedAtDate = new Date(generatedAt);
   await ensureOverviewFreshnessSchema(env);
   const config = await loadConfig(env, configId);
-  const providerLabel = `TradingView scanner + Alpaca ${(env.ALPACA_FEED ?? "iex").toLowerCase()} bars`;
+  const providerLabel = `TradingView/Alpaca current snapshots + Alpaca ${marketDataFeed(env).toUpperCase()} split-adjusted daily history`;
 
   const dashboardTickers = Array.from(
     new Set(
@@ -1216,6 +1383,10 @@ export async function computeAndStoreSnapshot(
     pctFrom52wHigh: number;
     sparkline: number[];
     relativeStrength30dVsSpy: number[] | null;
+    seriesThroughDate: string | null;
+    seriesStatus: OverviewSeriesStatus;
+    seriesSource: string | null;
+    seriesReason: string | null;
     above20Sma: boolean | null;
     above50Sma: boolean | null;
     above200Sma: boolean | null;
@@ -1237,6 +1408,14 @@ export async function computeAndStoreSnapshot(
               benchmarkBars.closes,
             )
             : null;
+          const hasUsableSeries = metrics.sparkline.length > 1
+            || (relativeStrength30dVsSpy?.length ?? 0) > 1;
+          const seriesThroughDate = hasUsableSeries ? cleaned.dates.at(-1) ?? null : null;
+          const seriesStatus: OverviewSeriesStatus = !hasUsableSeries
+            ? "unavailable"
+            : seriesThroughDate === asOfDate
+              ? "fresh"
+              : "stale";
           return {
             sectionId: section.id,
             groupId: group.id,
@@ -1248,6 +1427,12 @@ export async function computeAndStoreSnapshot(
             rankingWindowDefault: group.rankingWindowDefault,
             ...metrics,
             relativeStrength30dVsSpy,
+            seriesThroughDate,
+            seriesStatus,
+            seriesSource: hasUsableSeries ? `alpaca:${marketDataFeed(env)}-bars` : null,
+            seriesReason: hasUsableSeries
+              ? `Chart series is populated through ${seriesThroughDate}.`
+              : `Insufficient canonical history is available to build chart series for ${item.ticker}.`,
             above20Sma: isPriceAboveSma(cleaned.closes, 20),
             above50Sma: isPriceAboveSma(cleaned.closes, 50),
             above200Sma: isPriceAboveSma(cleaned.closes, 200),
@@ -1271,14 +1456,26 @@ export async function computeAndStoreSnapshot(
   }
   const uniqueSnapshotTickers = Array.from(new Set(snapshotRows.map((row) => row.ticker.toUpperCase())));
   const currentDataEnabled = isOverviewCurrentV2Enabled(env);
-  const freshCurrentTickers = uniqueSnapshotTickers.filter((ticker) => {
+  const quoteEligibleTickers = Array.from(new Set(snapshotRows
+    .filter((row) => isOverviewQuoteEligibleTicker(row.ticker, row.groupTitle))
+    .map((row) => row.ticker.toUpperCase())));
+  const publicationEligibleTickers = quoteEligibleTickers.filter(
+    (ticker) => !isOverviewCurrentRowStructurallyUnsupported(currentRows.get(ticker)),
+  );
+  const freshCurrentTickers = publicationEligibleTickers.filter((ticker) => {
     const row = currentRows.get(ticker);
-    return row?.status === "fresh" && isOverviewCurrentRowComplete(row);
+    return Boolean(row && isOverviewCurrentRowPublishable(row, generatedAtDate));
   });
   const missingCurrentTickers = currentDataEnabled
-    ? uniqueSnapshotTickers.filter((ticker) => {
+    ? publicationEligibleTickers.filter((ticker) => {
       const row = currentRows.get(ticker);
-      return row?.status !== "fresh" || !isOverviewCurrentRowComplete(row);
+      return !row || !isOverviewCurrentRowPublishable(row, generatedAtDate);
+    })
+    : [];
+  const optionalFieldMissingTickers = currentDataEnabled
+    ? publicationEligibleTickers.filter((ticker) => {
+      const row = currentRows.get(ticker);
+      return Boolean(row && isOverviewCurrentRowPublishable(row, generatedAtDate) && !isOverviewCurrentRowComplete(row));
     })
     : [];
   const repairableCurrentTickers = currentDataEnabled
@@ -1292,7 +1489,7 @@ export async function computeAndStoreSnapshot(
     .filter((diagnostic) => diagnostic.status === "provider-error" || diagnostic.status === "rate-limited" || diagnostic.status === "auth-blocked")
     .map((diagnostic) => diagnostic.reason);
   const quoteOverlayDiagnostics = {
-    eligibleTickers: uniqueSnapshotTickers.length,
+    eligibleTickers: publicationEligibleTickers.length,
     returnedSnapshots: freshCurrentTickers.length,
     providerError: currentDataError ?? currentProviderErrors[0] ?? null,
     sampleMissingTickers: missingCurrentTickers.slice(0, 20),
@@ -1301,10 +1498,16 @@ export async function computeAndStoreSnapshot(
   if (missingCurrentTickers.length > 0) {
     finalFreshnessWarning = appendFreshnessWarning(
       finalFreshnessWarning,
-      `${missingCurrentTickers.length} overview tickers have unavailable current-session fields; stale values were suppressed.`,
+      `${missingCurrentTickers.length} supported overview tickers are missing essential current price/change fields and are shown as N/A.`,
     );
   }
-  const missingLiveCriticalQuotes = criticalTickersWithoutLiveQuotes(snapshotRows, currentRows);
+  if (optionalFieldMissingTickers.length > 0) {
+    finalFreshnessWarning = appendFreshnessWarning(
+      finalFreshnessWarning,
+      `${optionalFieldMissingTickers.length} overview tickers have optional performance or SMA fields unavailable.`,
+    );
+  }
+  const missingLiveCriticalQuotes = criticalTickersWithoutLiveQuotes(snapshotRows, currentRows, generatedAtDate);
   if (missingLiveCriticalQuotes.length > 0) {
     finalFreshnessWarning = appendFreshnessWarning(
       finalFreshnessWarning,
@@ -1320,16 +1523,44 @@ export async function computeAndStoreSnapshot(
   };
   const hasReadyGeneration = await hasReadyOverviewGeneration(env, configId);
   const currentCoveragePct = currentDataEnabled
-    ? (uniqueSnapshotTickers.length > 0 ? (freshCurrentTickers.length / uniqueSnapshotTickers.length) * 100 : 0)
+    ? (publicationEligibleTickers.length > 0 ? (freshCurrentTickers.length / publicationEligibleTickers.length) * 100 : 0)
     : freshness.coveragePct;
-  const historyCurrentCount = snapshotRows.filter((row) => row.barDate === asOfDate).length;
+  const historyCurrentCount = new Set(snapshotRows
+    .filter((row) => row.barDate === asOfDate)
+    .map((row) => row.ticker.toUpperCase())).size;
   const historyCoveragePct = uniqueSnapshotTickers.length > 0
     ? (historyCurrentCount / uniqueSnapshotTickers.length) * 100
     : 0;
+  const latestValidSeries = await loadLatestValidOverviewSeries(env, configId);
+  for (const row of snapshotRows) {
+    const fallback = latestValidSeries.get(`${row.groupId}\u0000${row.ticker.toUpperCase()}`);
+    const resolved = resolveOverviewSeriesFallback({
+      barDate: row.barDate,
+      sparkline: row.sparkline,
+      relativeStrength30dVsSpy: row.relativeStrength30dVsSpy,
+      seriesThroughDate: row.seriesThroughDate,
+      seriesStatus: row.seriesStatus,
+      seriesSource: row.seriesSource,
+      seriesReason: row.seriesReason,
+    }, fallback);
+    row.sparkline = resolved.sparkline;
+    row.relativeStrength30dVsSpy = resolved.relativeStrength30dVsSpy;
+    row.seriesThroughDate = resolved.seriesThroughDate ?? null;
+    row.seriesStatus = resolved.seriesStatus ?? "unavailable";
+    row.seriesSource = resolved.seriesSource ?? null;
+    row.seriesReason = resolved.seriesReason ?? null;
+  }
+  const historyUsableTickers = new Set(snapshotRows
+    .filter((row) => row.sparkline.length > 1)
+    .map((row) => row.ticker.toUpperCase()));
+  const historyUsableCoveragePct = uniqueSnapshotTickers.length > 0
+    ? (historyUsableTickers.size / uniqueSnapshotTickers.length) * 100
+    : 0;
   const generationDecision = evaluateOverviewGeneration({
     hasReadyGeneration,
-    criticalTickersPresent: freshness.criticalMissingTickers.length === 0
-      && (!currentDataEnabled || missingLiveCriticalQuotes.length === 0),
+    criticalTickersPresent: currentDataEnabled
+      ? missingLiveCriticalQuotes.length === 0
+      : freshness.criticalMissingTickers.length === 0,
     currentCoveragePct,
     historyCoveragePct,
   });
@@ -1362,7 +1593,7 @@ export async function computeAndStoreSnapshot(
       expectedAsOfDate: asOfDate,
       sourceAsOfDate: asOfDate,
       status: "blocked",
-      coveragePct: Math.min(currentCoveragePct, historyCoveragePct),
+      coveragePct: currentCoveragePct,
       warning: generationWarning,
     });
     throw new OverviewFreshnessError(publishedFreshness);
@@ -1370,7 +1601,11 @@ export async function computeAndStoreSnapshot(
 
   const rowInserts = [];
   for (const row of snapshotRows) {
-    const current = currentRows.get(row.ticker.toUpperCase()) ?? null;
+    const storedCurrent = currentRows.get(row.ticker.toUpperCase()) ?? null;
+    const current = storedCurrent && (
+      isOverviewCurrentRowStructurallyUnsupported(storedCurrent)
+      || isOverviewCurrentRowPublishable(storedCurrent, generatedAtDate)
+    ) ? storedCurrent : null;
     const barIsFresh = row.barDate === asOfDate;
     const quotePrice = resolvedCurrentValue(current, "price", current?.price);
     const quoteChange1d = resolvedCurrentValue(current, "change1d", current?.change1d);
@@ -1387,7 +1622,7 @@ export async function computeAndStoreSnapshot(
         : `No stored daily bar is available for ${row.ticker}.`;
     rowInserts.push(
       env.DB.prepare(
-        "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_3m, change_6m, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json, bar_date, quote_price, quote_prev_close, quote_change_1d, quote_source, quote_fetched_at, quote_freshness_status, quote_freshness_reason, bar_freshness_status, bar_freshness_reason, above_20_sma, above_50_sma, above_200_sma, relative_strength_30d_vs_spy_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_3m, change_6m, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json, bar_date, quote_price, quote_prev_close, quote_change_1d, quote_source, quote_fetched_at, quote_freshness_status, quote_freshness_reason, bar_freshness_status, bar_freshness_reason, history_series_through_date, history_series_status, history_series_source, history_series_reason, above_20_sma, above_50_sma, above_200_sma, relative_strength_30d_vs_spy_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).bind(
         snapshotId,
         row.sectionId,
@@ -1400,10 +1635,10 @@ export async function computeAndStoreSnapshot(
         resolvedCurrentValue(current, "change5d", current?.change5d),
         resolvedCurrentValue(current, "change3m", current?.change3m),
         resolvedCurrentValue(current, "change6m", current?.change6m),
-        barIsFresh ? row.change21d : null,
+        row.change21d,
         resolvedCurrentValue(current, "ytd", current?.ytd),
         resolvedCurrentValue(current, "pctFrom52wHigh", current?.pctFrom52wHigh),
-        barIsFresh ? JSON.stringify(row.sparkline) : null,
+        row.sparkline.length > 0 ? JSON.stringify(row.sparkline) : null,
         currentRankKey,
         row.holdings ? JSON.stringify(row.holdings) : null,
         row.barDate,
@@ -1416,10 +1651,14 @@ export async function computeAndStoreSnapshot(
         current?.reason ?? `No exact-session current data is stored for ${row.ticker}.`,
         barFreshnessStatus,
         barFreshnessReason,
+        row.seriesThroughDate,
+        row.seriesStatus,
+        row.seriesSource,
+        row.seriesReason,
         booleanToDb(resolvedCurrentValue(current, "above20Sma", current?.above20Sma)),
         booleanToDb(resolvedCurrentValue(current, "above50Sma", current?.above50Sma)),
         booleanToDb(resolvedCurrentValue(current, "above200Sma", current?.above200Sma)),
-        barIsFresh && row.relativeStrength30dVsSpy ? JSON.stringify(row.relativeStrength30dVsSpy) : null,
+        row.relativeStrength30dVsSpy ? JSON.stringify(row.relativeStrength30dVsSpy) : null,
       ),
     );
   }
@@ -1500,8 +1739,8 @@ export async function computeAndStoreSnapshot(
     scope: configId,
     expectedAsOfDate: asOfDate,
     sourceAsOfDate: asOfDate,
-    status: generationDecision.bootstrap ? "bootstrap" : "ready",
-    coveragePct: Math.min(currentCoveragePct, historyCoveragePct),
+    status: generationDecision.degraded ? "degraded" : generationDecision.bootstrap ? "bootstrap" : "ready",
+    coveragePct: currentCoveragePct,
     warning: generationWarning,
   });
   if (includeBreadth) {
@@ -1528,7 +1767,15 @@ export async function computeAndStoreSnapshot(
   if (postCleanup.deletedSnapshots > 0 || postCleanup.deletedRows > 0) {
     console.log("overview snapshot cleanup removed old rows after refresh", postCleanup);
   }
-  return { snapshotId, asOfDate, freshness: publishedFreshness };
+  return {
+    snapshotId,
+    asOfDate,
+    freshness: publishedFreshness,
+    generatedAt,
+    currentCoveragePct,
+    historyExactCoveragePct: historyCoveragePct,
+    historyUsableCoveragePct,
+  };
 }
 
 export async function recomputeDashboardFromStoredBars(
@@ -1577,6 +1824,67 @@ export async function recomputeBreadthFromStoredBars(
     skipped: results.filter((result) => !result.stored),
     unavailable: breadthState.unavailable,
   };
+}
+
+export async function publishReadyBreadthUniverses(
+  env: Env,
+  asOfDateInput?: string,
+): Promise<{
+  asOfDate: string;
+  publishedUniverseIds: string[];
+  diagnostics: BreadthCoverageDiagnostic[];
+  unavailable: Array<{ id: string; name: string; reason: string }>;
+}> {
+  const asOfDate = resolveAsOfDate(asOfDateInput);
+  const breadthState = await ensureBreadthUniverseMemberships(env);
+  const diagnostics = await buildBreadthCoverageDiagnostics(env, breadthState, asOfDate);
+  for (const diagnostic of diagnostics.filter((row) => !row.ok)) {
+    await recordDataReadiness(env, {
+      domain: "breadth",
+      scope: diagnostic.universeId,
+      expectedAsOfDate: asOfDate,
+      sourceAsOfDate: asOfDate,
+      status: "blocked",
+      coveragePct: diagnostic.coveragePct,
+      warning: `Coverage ${diagnostic.coveragePct.toFixed(2)}% is below ${diagnostic.minCoveragePct}%; last valid row retained.`,
+    });
+  }
+  const readyUniverseIds = diagnostics.filter((diagnostic) => diagnostic.ok).map((diagnostic) => diagnostic.universeId);
+  if (readyUniverseIds.length === 0) {
+    return { asOfDate, publishedUniverseIds: [], diagnostics, unavailable: breadthState.unavailable };
+  }
+
+  const placeholders = buildPlaceholders(readyUniverseIds.length);
+  const existing = await env.DB.prepare(
+    `SELECT DISTINCT universe_id as universeId
+       FROM breadth_snapshots
+      WHERE as_of_date = ?
+        AND universe_id IN (${placeholders})`,
+  ).bind(asOfDate, ...readyUniverseIds).all<{ universeId: string }>();
+  const existingIds = new Set((existing.results ?? []).map((row) => row.universeId));
+  const pendingUniverseIds = readyUniverseIds.filter((universeId) => !existingIds.has(universeId));
+  if (pendingUniverseIds.length === 0) {
+    return { asOfDate, publishedUniverseIds: [], diagnostics, unavailable: breadthState.unavailable };
+  }
+
+  const pendingTickers = dedupeTickers(pendingUniverseIds.flatMap(
+    (universeId) => breadthState.universeTickers.get(universeId) ?? [],
+  ));
+  await computeAndStoreDailyMarketFeatures(env, pendingTickers, asOfDate);
+  const publishedUniverseIds: string[] = [];
+  const generatedAt = new Date().toISOString();
+  for (const universeId of pendingUniverseIds) {
+    const result = await computeAndStoreBreadth(
+      env,
+      asOfDate,
+      universeId,
+      breadthState.sourceByUniverse.get(universeId) ?? null,
+      generatedAt,
+      { featuresPrepared: true },
+    );
+    if (result.stored) publishedUniverseIds.push(universeId);
+  }
+  return { asOfDate, publishedUniverseIds, diagnostics, unavailable: breadthState.unavailable };
 }
 
 export async function refreshMissingBreadthBarsForCoverage(
@@ -1945,7 +2253,12 @@ async function recordDataReadiness(env: Env, input: {
          status = excluded.status,
          coverage_pct = excluded.coverage_pct,
          warning = excluded.warning,
-         updated_at = CURRENT_TIMESTAMP`,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE data_readiness.expected_as_of_date IS NOT excluded.expected_as_of_date
+          OR data_readiness.source_as_of_date IS NOT excluded.source_as_of_date
+          OR data_readiness.status IS NOT excluded.status
+          OR data_readiness.coverage_pct IS NOT excluded.coverage_pct
+          OR data_readiness.warning IS NOT excluded.warning`,
     ).bind(
       input.domain,
       input.scope,
@@ -2139,6 +2452,10 @@ type LoadedOverviewSnapshotRow = {
   quoteFreshnessReason?: string | null;
   barFreshnessStatus?: BarFreshnessStatus | null;
   barFreshnessReason?: string | null;
+  historySeriesThroughDate?: string | null;
+  historySeriesStatus?: OverviewSeriesStatus | null;
+  historySeriesSource?: string | null;
+  historySeriesReason?: string | null;
   above20Sma?: number | null;
   above50Sma?: number | null;
   above200Sma?: number | null;
@@ -2181,7 +2498,7 @@ export async function loadSnapshot(
   let derivedMetricsUnavailable = false;
   try {
     rows = await env.DB.prepare(
-      "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_3m as change3m, change_6m as change6m, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson, bar_date as barDate, quote_price as quotePrice, quote_prev_close as quotePrevClose, quote_change_1d as quoteChange1d, quote_source as quoteSource, quote_fetched_at as quoteFetchedAt, quote_freshness_status as quoteFreshnessStatus, quote_freshness_reason as quoteFreshnessReason, bar_freshness_status as barFreshnessStatus, bar_freshness_reason as barFreshnessReason, above_20_sma as above20Sma, above_50_sma as above50Sma, above_200_sma as above200Sma, relative_strength_30d_vs_spy_json as relativeStrength30dVsSpyJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
+      "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_3m as change3m, change_6m as change6m, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson, bar_date as barDate, quote_price as quotePrice, quote_prev_close as quotePrevClose, quote_change_1d as quoteChange1d, quote_source as quoteSource, quote_fetched_at as quoteFetchedAt, quote_freshness_status as quoteFreshnessStatus, quote_freshness_reason as quoteFreshnessReason, bar_freshness_status as barFreshnessStatus, bar_freshness_reason as barFreshnessReason, history_series_through_date as historySeriesThroughDate, history_series_status as historySeriesStatus, history_series_source as historySeriesSource, history_series_reason as historySeriesReason, above_20_sma as above20Sma, above_50_sma as above50Sma, above_200_sma as above200Sma, relative_strength_30d_vs_spy_json as relativeStrength30dVsSpyJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
     )
       .bind(meta.id)
       .all<{
@@ -2211,6 +2528,10 @@ export async function loadSnapshot(
       quoteFreshnessReason?: string | null;
       barFreshnessStatus?: BarFreshnessStatus | null;
       barFreshnessReason?: string | null;
+      historySeriesThroughDate?: string | null;
+      historySeriesStatus?: OverviewSeriesStatus | null;
+      historySeriesSource?: string | null;
+      historySeriesReason?: string | null;
       above20Sma?: number | null;
       above50Sma?: number | null;
       above200Sma?: number | null;
@@ -2227,6 +2548,7 @@ export async function loadSnapshot(
       && !lowerMessage.includes("change_6m")
       && !lowerMessage.includes("above_")
       && !lowerMessage.includes("relative_strength_")
+      && !lowerMessage.includes("history_series_")
     ) throw error;
     derivedMetricsUnavailable = true;
     rows = await env.DB.prepare(
@@ -2271,7 +2593,7 @@ export async function loadSnapshot(
   if (!snapshotMatchesExpectedSession) {
     freshnessWarning = appendFreshnessWarning(
       freshnessWarning,
-      `Stored overview snapshot is ${meta.asOfDate}; expected ${expectedAsOfDate}. Historical values were suppressed.`,
+      `Stored overview snapshot is ${meta.asOfDate}; expected ${expectedAsOfDate}. Latest valid historical series remain visible while catch-up continues.`,
     );
   }
   return {
@@ -2312,8 +2634,7 @@ export async function loadSnapshot(
             const storedBarFreshnessStatus = isBarFreshnessStatus(r.barFreshnessStatus)
               ? r.barFreshnessStatus
               : null;
-            const exactSessionHistory = meta.providerLabel.startsWith("TradingView scanner + Alpaca")
-              && barDate === expectedAsOfDate
+            const exactSessionHistory = barDate === expectedAsOfDate
               && storedBarFreshnessStatus !== "stale";
             const barFreshnessStatus: BarFreshnessStatus = exactSessionHistory
               ? "fresh"
@@ -2337,7 +2658,21 @@ export async function loadSnapshot(
               ["price", r.price], ["change1d", r.change1d], ["change1w", r.change1w],
               ["change5d", r.change5d], ["change3m", r.change3m], ["change6m", r.change6m],
               ["ytd", r.ytd], ["pctFrom52wHigh", r.pctFrom52wHigh],
+              ["above20Sma", r.above20Sma], ["above50Sma", r.above50Sma],
+              ["above200Sma", r.above200Sma],
             ].filter((entry) => entry[1] != null).map(([field]) => [String(field), quoteSource ?? "stored-generation"]));
+            const sparkline = parseStoredNumberArray(r.sparklineJson);
+            const relativeStrength30dVsSpy = parseStoredNumberArrayOrNull(r.relativeStrength30dVsSpyJson);
+            const hasUsableSeries = sparkline.length > 1 || (relativeStrength30dVsSpy?.length ?? 0) > 1;
+            const seriesThroughDate = r.historySeriesThroughDate
+              ?? (hasUsableSeries ? barDate : null);
+            const seriesStatus: OverviewSeriesStatus = isOverviewSeriesStatus(r.historySeriesStatus)
+              ? r.historySeriesStatus
+              : !hasUsableSeries
+                ? "unavailable"
+                : seriesThroughDate === expectedAsOfDate
+                  ? "fresh"
+                  : "fallback";
             return {
               ticker: r.ticker,
               displayName: r.displayName,
@@ -2347,11 +2682,11 @@ export async function loadSnapshot(
               change5d: numberOrNull(r.change5d),
               change3m: numberOrNull(r.change3m),
               change6m: numberOrNull(r.change6m),
-              change21d: exactSessionHistory ? r.change21d : null,
+              change21d: numberOrNull(r.change21d),
               ytd: numberOrNull(r.ytd),
               pctFrom52wHigh: numberOrNull(r.pctFrom52wHigh),
-              sparkline: exactSessionHistory ? parseStoredNumberArray(r.sparklineJson) : null,
-              relativeStrength30dVsSpy: exactSessionHistory ? parseStoredNumberArrayOrNull(r.relativeStrength30dVsSpyJson) : null,
+              sparkline,
+              relativeStrength30dVsSpy,
               above20Sma: dbBooleanOrNull(r.above20Sma),
               above50Sma: dbBooleanOrNull(r.above50Sma),
               above200Sma: dbBooleanOrNull(r.above200Sma),
@@ -2394,6 +2729,12 @@ export async function loadSnapshot(
                 reason: barFreshnessReason,
                 barDate,
                 source: exactSessionHistory ? `alpaca:${marketDataFeed(env)}-bars` : null,
+                seriesThroughDate,
+                seriesStatus,
+                seriesSource: r.historySeriesSource ?? (hasUsableSeries ? "stored-generation" : null),
+                seriesReason: r.historySeriesReason ?? (hasUsableSeries
+                  ? `Usable chart series is available through ${seriesThroughDate}.`
+                  : `Insufficient history is available to build chart series for ${r.ticker}.`),
               },
               rankKey: numberOrNull(r.rankKey),
               holdings: parseStoredStringArray(r.holdingsJson),

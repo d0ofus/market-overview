@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { BarFreshnessStatus, QuoteFreshnessStatus, SnapshotReadyResponse } from "@/types/dashboard";
+import type { BarFreshnessStatus, OverviewSeriesStatus, QuoteFreshnessStatus, SnapshotReadyResponse } from "@/types/dashboard";
 
 type SnapshotSection = SnapshotReadyResponse["sections"][number];
 type AuditFilter = "problem" | "history" | QuoteFreshnessStatus;
@@ -12,6 +12,8 @@ type AuditRow = {
   groupTitle: string;
   quoteStatus: QuoteFreshnessStatus;
   barStatus: BarFreshnessStatus;
+  seriesStatus: OverviewSeriesStatus;
+  seriesThroughDate: string | null;
   barDate: string | null;
   source: string | null;
   providerStatusSummary: string;
@@ -21,9 +23,7 @@ type AuditRow = {
   barReason: string | null;
 };
 
-const EXPECTED_CURRENT_FIELDS = [
-  "price",
-  "change1d",
+const OPTIONAL_CURRENT_FIELDS = [
   "change1w",
   "change5d",
   "change3m",
@@ -34,25 +34,28 @@ const EXPECTED_CURRENT_FIELDS = [
   "above50Sma",
   "above200Sma",
 ] as const;
+const ESSENTIAL_CURRENT_FIELDS = ["price", "change1d"] as const;
 
 const FILTERS: Array<{ key: AuditFilter; label: string }> = [
   { key: "problem", label: "Needs Review" },
-  { key: "history", label: "History Issues" },
+  { key: "history", label: "Chart History" },
   { key: "stale", label: "Stale" },
   { key: "unavailable", label: "Unavailable" },
   { key: "unsupported", label: "Unsupported" },
   { key: "fresh", label: "Fresh" },
 ];
 
-function statusLabel(status: QuoteFreshnessStatus): string {
+function statusLabel(status: QuoteFreshnessStatus | OverviewSeriesStatus): string {
   if (status === "fresh") return "Fresh";
+  if (status === "fallback") return "Fallback";
   if (status === "stale") return "Stale";
   if (status === "unavailable") return "Unavailable";
   return "Unsupported";
 }
 
-function statusClass(status: QuoteFreshnessStatus): string {
+function statusClass(status: QuoteFreshnessStatus | OverviewSeriesStatus): string {
   if (status === "fresh") return "border-emerald-400/25 bg-emerald-500/10 text-emerald-200";
+  if (status === "fallback") return "border-sky-400/30 bg-sky-500/10 text-sky-200";
   if (status === "stale") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
   if (status === "unavailable") return "border-red-400/35 bg-red-500/10 text-red-200";
   return "border-slate-500/45 bg-slate-700/40 text-slate-300";
@@ -60,27 +63,45 @@ function statusClass(status: QuoteFreshnessStatus): string {
 
 function includesFilter(row: AuditRow, filter: AuditFilter): boolean {
   if (filter === "problem") return row.needsReview;
-  if (filter === "history") return row.barStatus !== "fresh";
+  if (filter === "history") return row.seriesStatus !== "fresh";
   if (filter === "fresh") return !row.needsReview;
   return row.quoteStatus === filter;
 }
 
-export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] }) {
+export function QuoteFreshnessAudit({
+  sections,
+  embedded = false,
+  anchorId = "overview-quote-audit",
+}: {
+  sections: SnapshotSection[];
+  embedded?: boolean;
+  anchorId?: string;
+}) {
   const [filter, setFilter] = useState<AuditFilter>("problem");
   const rows = useMemo<AuditRow[]>(() => {
     return sections.flatMap((section) =>
       section.groups.flatMap((group) =>
         group.rows.map((row) => {
-          const missingCurrentFields = row.currentData
-            ? EXPECTED_CURRENT_FIELDS.filter((field) => !row.currentData?.fieldSources[field])
+          const missingEssentialFields = row.currentData
+            ? ESSENTIAL_CURRENT_FIELDS.filter((field) => !row.currentData?.fieldSources[field])
+            : [];
+          const missingOptionalFields = row.currentData
+            ? OPTIONAL_CURRENT_FIELDS.filter((field) => !row.currentData?.fieldSources[field])
             : [];
           const quoteStatus = row.quoteFreshnessStatus ?? "unavailable";
+          const unsupported = quoteStatus === "unsupported";
+          const seriesStatus = row.historyData?.seriesStatus
+            ?? (((row.sparkline?.length ?? 0) > 1 || (row.relativeStrength30dVsSpy?.length ?? 0) > 1)
+              ? "fallback"
+              : row.barFreshnessStatus ?? "unavailable");
           return {
             ticker: row.ticker,
             name: row.displayName,
             groupTitle: group.title,
             quoteStatus,
             barStatus: row.barFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable"),
+            seriesStatus,
+            seriesThroughDate: row.historyData?.seriesThroughDate ?? null,
             barDate: row.barDate ?? null,
             source: Array.from(new Set([
               row.currentData?.quoteSource,
@@ -90,18 +111,20 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
             providerStatusSummary: Object.entries(row.currentData?.providerStatuses ?? {})
               .map(([provider, diagnostic]) => `${provider}: ${diagnostic.status}`)
               .join(", ") || "unavailable",
-            missingCurrentFields,
-            needsReview: quoteStatus !== "fresh"
+            missingCurrentFields: [...missingEssentialFields, ...missingOptionalFields],
+            needsReview: (!unsupported && (quoteStatus === "stale" || quoteStatus === "unavailable"))
               || row.currentData?.status === "retrying"
-              || missingCurrentFields.length > 0,
+              || missingEssentialFields.length > 0
+              || (!unsupported && seriesStatus === "unavailable"),
             quoteReason: [
               row.currentData?.reason ?? row.quoteFreshnessReason,
-              missingCurrentFields.length > 0 ? `Missing fields: ${missingCurrentFields.join(", ")}.` : null,
+              missingEssentialFields.length > 0 ? `Missing essential fields: ${missingEssentialFields.join(", ")}.` : null,
+              missingOptionalFields.length > 0 ? `Optional fields unavailable: ${missingOptionalFields.join(", ")}.` : null,
               ...Object.entries(row.currentData?.providerStatuses ?? {}).map(
                 ([provider, diagnostic]) => `${provider}: ${diagnostic.status} - ${diagnostic.reason}`,
               ),
             ].filter(Boolean).join(" ") || null,
-            barReason: row.barFreshnessReason ?? null,
+            barReason: row.historyData?.seriesReason ?? row.barFreshnessReason ?? null,
           };
         }),
       ),
@@ -127,23 +150,24 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
     for (const row of rows) initial[row.quoteStatus] += 1;
     return initial;
   }, [rows]);
-  const historyProblemCount = rows.filter((row) => row.barStatus !== "fresh").length;
+  const historyProblemCount = rows.filter((row) => row.seriesStatus === "unavailable").length;
+  const historyInfoCount = rows.filter((row) => row.seriesStatus !== "fresh").length;
   const visibleRows = rows.filter((row) => includesFilter(row, filter));
   const problemCount = rows.filter((row) => row.needsReview).length;
 
   return (
-    <section id="overview-quote-audit" className="card scroll-mt-28 overflow-hidden md:scroll-mt-32">
+    <section id={anchorId} className={`${embedded ? "" : "card scroll-mt-28 md:scroll-mt-32"} overflow-hidden`}>
       <div className="flex flex-col gap-3 border-b border-borderSoft px-4 py-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h3 className="font-medium tracking-wide text-slate-100">Market Data Freshness Audit</h3>
-          <p className="mt-1 text-xs text-slate-400">{problemCount} current-data issues / {historyProblemCount} history rows need review / {rows.length} tracked rows</p>
+          <p className="mt-1 text-xs text-slate-400">{problemCount} actionable rows / {historyProblemCount} chart series unavailable / {counts.unsupported} unsupported / {rows.length} tracked rows</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {FILTERS.map((item) => {
             const count = item.key === "problem"
               ? problemCount
               : item.key === "history"
-                ? historyProblemCount
+                ? historyInfoCount
                 : item.key === "fresh"
                   ? rows.length - problemCount
                   : counts[item.key];
@@ -192,11 +216,11 @@ export function QuoteFreshnessAudit({ sections }: { sections: SnapshotSection[] 
                   ) : null}
                 </td>
                 <td className="px-3 py-2">
-                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusClass(row.barStatus)}`} title={row.barReason ?? statusLabel(row.barStatus)}>
-                    {statusLabel(row.barStatus)}
+                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusClass(row.seriesStatus)}`} title={row.barReason ?? statusLabel(row.seriesStatus)}>
+                    {statusLabel(row.seriesStatus)}
                   </span>
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-300">{row.barDate ?? "N/A"}</td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-300">{row.barDate ?? row.seriesThroughDate ?? "N/A"}</td>
                 <td className="px-3 py-2 text-slate-300">{row.groupTitle}</td>
                 <td className="px-3 py-2 text-slate-400">{row.source ?? "N/A"}</td>
                 <td className="max-w-80 px-3 py-2 text-xs text-slate-400">{row.providerStatusSummary}</td>

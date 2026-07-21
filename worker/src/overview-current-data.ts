@@ -31,6 +31,8 @@ export const OVERVIEW_REQUIRED_CURRENT_FIELDS = [
   "above200Sma",
 ] as const;
 
+export const OVERVIEW_PUBLICATION_ESSENTIAL_FIELDS = ["price", "change1d"] as const;
+
 export const OVERVIEW_CURRENT_COLUMNS = [
   "close",
   "change",
@@ -353,6 +355,7 @@ export function parseTradingViewOverviewRow(
   providerSymbol: string,
   data: unknown[],
   expectedSessionDate: string,
+  observedAt = new Date(),
 ): TradingViewScalarRow {
   const values = new Map<string, unknown>();
   OVERVIEW_CURRENT_COLUMNS.forEach((column, index) => values.set(column, data[index]));
@@ -364,15 +367,21 @@ export function parseTradingViewOverviewRow(
   const updateTime = toIsoTimestamp(values.get("update_time"));
   const proofTimestamp = lastBarUpdateTime ?? time ?? lastPriceUpdateTime;
   const proofDate = marketDate(proofTimestamp);
+  const proofTime = proofTimestamp ? Date.parse(proofTimestamp) : Number.NaN;
   const price = asFiniteNumber(values.get("close"));
   let status: OverviewCurrentProviderStatus = "supported";
-  let reason = `TradingView data is current for ${expectedSessionDate}.`;
+  let reason = proofDate === expectedSessionDate
+    ? `TradingView data is current for ${expectedSessionDate}.`
+    : `TradingView data includes a newer ${proofDate} current-session observation; latest completed session is ${expectedSessionDate}.`;
   if (!proofTimestamp) {
     status = "missing";
     reason = "TradingView returned no usable market timestamp.";
-  } else if (proofDate !== expectedSessionDate) {
+  } else if (!proofDate || proofDate < expectedSessionDate) {
     status = "stale";
     reason = `TradingView market timestamp is ${proofDate ?? "invalid"}; expected ${expectedSessionDate}.`;
+  } else if (!Number.isFinite(proofTime) || proofTime > observedAt.getTime() + 5 * 60_000) {
+    status = "stale";
+    reason = "TradingView returned an invalid or future market timestamp.";
   } else if (price == null || price <= 0) {
     status = "missing";
     reason = "TradingView returned no usable close value.";
@@ -446,6 +455,7 @@ async function fetchTradingViewRows(
   env: Env,
   inputs: OverviewTickerInput[],
   expectedSessionDate: string,
+  observedAt: Date,
 ): Promise<Map<string, TradingViewScalarRow>> {
   const enabled = !/^(0|false|off)$/i.test(String(env.OVERVIEW_TRADINGVIEW_SCANNER_ENABLED ?? "true").trim());
   if (!enabled) {
@@ -575,7 +585,13 @@ async function fetchTradingViewRows(
       continue;
     }
     if (matches.length === 1) {
-      out.set(input.ticker, parseTradingViewOverviewRow(input.ticker, matches[0].s, matches[0].d, expectedSessionDate));
+      out.set(input.ticker, parseTradingViewOverviewRow(
+        input.ticker,
+        matches[0].s,
+        matches[0].d,
+        expectedSessionDate,
+        observedAt,
+      ));
       continue;
     }
     const requestError = requestErrors.get(input.ticker) ?? terminalRequestError;
@@ -1027,6 +1043,28 @@ export function isOverviewCurrentRowComplete(row: OverviewCurrentData): boolean 
   return OVERVIEW_REQUIRED_CURRENT_FIELDS.every((field) => Boolean(row.fieldSources[field]));
 }
 
+export function isOverviewCurrentRowPublishable(
+  row: OverviewCurrentData,
+  now?: Date,
+  maxAgeMs = 20 * 60_000,
+): boolean {
+  const fetchedAt = Date.parse(row.fetchedAt);
+  const recentlyFetched = !now || (Number.isFinite(fetchedAt) && now.getTime() - fetchedAt <= maxAgeMs);
+  return recentlyFetched
+    && row.status === "fresh"
+    && OVERVIEW_PUBLICATION_ESSENTIAL_FIELDS.every((field) => Boolean(row.fieldSources[field]))
+    && typeof row.price === "number"
+    && Number.isFinite(row.price)
+    && typeof row.change1d === "number"
+    && Number.isFinite(row.change1d);
+}
+
+export function isOverviewCurrentRowStructurallyUnsupported(row: OverviewCurrentData | null | undefined): boolean {
+  if (!row) return false;
+  return row.providerStatuses.tradingview?.status === "unsupported"
+    && row.providerStatuses.alpacaAsset?.status === "unsupported";
+}
+
 export function doesOverviewCurrentRowNeedRepair(row: OverviewCurrentData): boolean {
   if (row.status === "retrying") return true;
   if (row.status === "unavailable" || isOverviewCurrentRowComplete(row)) return false;
@@ -1184,7 +1222,7 @@ export async function refreshOverviewCurrentData(
   const refreshAttempt = Math.max(1, Number(refreshJob?.attemptCount ?? 1));
 
   const [tvRows, barRows, alpacaAssetSupport] = await Promise.all([
-    fetchTradingViewRows(env, inputs, sessionDate),
+    fetchTradingViewRows(env, inputs, sessionDate, new Date(fetchedAt)),
     loadAlpacaBarMetrics(env, tickers, sessionDate, feed),
     syncAlpacaAssetSupport(env, tickers),
   ]);
@@ -1381,10 +1419,9 @@ export async function loadOverviewCurrentData(
   }]));
 }
 
-function currentRefreshWindowOpen(now: Date, sessionDate: string): boolean {
+export function currentRefreshWindowOpen(now: Date): boolean {
   const ny = zonedParts(now, "America/New_York");
-  if (ny.localDate > sessionDate) return true;
-  return ny.localDate === sessionDate && ny.minutesOfDay >= 16 * 60 + CURRENT_REFRESH_OFFSET_MINUTES;
+  return ny.minutesOfDay >= 4 * 60 && ny.minutesOfDay <= 16 * 60 + CURRENT_REFRESH_OFFSET_MINUTES;
 }
 
 export async function maybeRunScheduledOverviewCurrentRefresh(
@@ -1393,7 +1430,7 @@ export async function maybeRunScheduledOverviewCurrentRefresh(
   configId = "default",
 ): Promise<OverviewCurrentRefreshResult | null> {
   const sessionDate = latestUsMarketSessionAsOfDate(now);
-  if (!currentRefreshWindowOpen(now, sessionDate)) return null;
+  if (!currentRefreshWindowOpen(now)) return null;
   return await refreshOverviewCurrentDataIfDue(env, configId, sessionDate, now);
 }
 
@@ -1402,7 +1439,7 @@ export async function refreshOverviewCurrentDataIfDue(
   configId: string,
   sessionDate: string,
   now = new Date(),
-  options: { forceCompleted?: boolean } = {},
+  options: { forceCompleted?: boolean; force?: boolean; maxAgeMs?: number } = {},
 ): Promise<OverviewCurrentRefreshResult | null> {
   await ensureOverviewCurrentDataSchema(env);
   const job = await getMarketDataDb(env).prepare(
@@ -1412,11 +1449,16 @@ export async function refreshOverviewCurrentDataIfDue(
   )
     .bind(configId, sessionDate)
     .first<{ status: string; nextAttemptAt: string | null; updatedAt: string | null }>();
-  if (job?.status === "completed" && !options.forceCompleted) return null;
+  const force = options.force === true || options.forceCompleted === true;
+  const maxAgeMs = Math.max(60_000, options.maxAgeMs ?? CURRENT_RETRY_MINUTES * 60_000);
+  if (job?.status === "completed" && !force && job.updatedAt) {
+    const updatedAt = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
+    if (Number.isFinite(updatedAt) && now.getTime() - updatedAt < maxAgeMs) return null;
+  }
   if (job?.status === "running" && job.updatedAt) {
     const updatedAt = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
     if (Number.isFinite(updatedAt) && now.getTime() - updatedAt < 10 * 60_000) return null;
   }
-  if (job?.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()) return null;
+  if (!force && job?.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()) return null;
   return await refreshOverviewCurrentData(env, configId, sessionDate);
 }

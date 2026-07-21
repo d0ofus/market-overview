@@ -7,6 +7,8 @@ import {
   loadWorkerScheduleSettings,
   planPostCloseBudgetProtection,
   planPostCloseProviderBatch,
+  postCloseInvocationBatchPlan,
+  postCloseJobIdentity,
   shouldUseYahooRepair,
   POST_CLOSE_SCOPE,
   resolvePostCloseBudgetProtection,
@@ -150,6 +152,9 @@ function postCloseJob(overrides: Partial<PostCloseDailyBarRefreshJob> = {}): Pos
     tradingDate: "2026-07-16",
     scope: POST_CLOSE_SCOPE,
     status: "queued",
+    sourceProvider: "alpaca",
+    sourceFeed: "sip",
+    adjustment: "split",
     startedAt: "2026-07-16T21:00:00.000Z",
     updatedAt: "2026-07-16T21:00:00.000Z",
     completedAt: null,
@@ -292,6 +297,16 @@ describe("post-close budget protection", () => {
   });
 });
 
+describe("post-close source identity", () => {
+  it("creates a new resumable scope when the configured feed changes", () => {
+    const iex = postCloseJobIdentity({ DATA_PROVIDER: "alpaca", ALPACA_DAILY_FEED: "iex", ALPACA_DAILY_ADJUSTMENT: "split" });
+    const sip = postCloseJobIdentity({ DATA_PROVIDER: "alpaca", ALPACA_DAILY_FEED: "sip", ALPACA_DAILY_ADJUSTMENT: "split" });
+
+    expect(iex.scope).not.toBe(sip.scope);
+    expect(sip).toMatchObject({ provider: "alpaca", feed: "sip", adjustment: "split" });
+  });
+});
+
 describe("worker schedule service", () => {
   it("returns default worker schedule values when no row exists yet", async () => {
     const env = createWorkerScheduleEnv();
@@ -362,6 +377,15 @@ describe("post-close daily bar universe", () => {
     expect(boundPostCloseProviderWork({ batchSize: 2_000, maxBatches: 20 })).toEqual({
       batchSize: 80,
       maxBatches: 4,
+    });
+  });
+
+  it("reserves one bounded history slice alongside exact-session batches", () => {
+    expect(postCloseInvocationBatchPlan({ batchSize: 80, maxBatches: 4 })).toEqual({
+      exactBatchSize: 80,
+      exactBatches: 4,
+      historyBatchSize: 12,
+      historyBatches: 1,
     });
   });
 

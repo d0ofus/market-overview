@@ -38,6 +38,10 @@ class ReadOnlySnapshotDb {
 }
 
 class MalformedStoredSnapshotDb extends ReadOnlySnapshotDb {
+  constructor(private readonly completeDerived = false) {
+    super();
+  }
+
   prepare(sql: string) {
     this.statements.push(sql);
     const statement = {
@@ -130,6 +134,7 @@ class MalformedStoredSnapshotDb extends ReadOnlySnapshotDb {
               change1d: 1.25,
               change1w: 2,
               change5d: 2,
+              ...(this.completeDerived ? { change3m: 5, change6m: 8 } : {}),
               change21d: 4,
               ytd: 10,
               pctFrom52wHigh: -1,
@@ -140,12 +145,15 @@ class MalformedStoredSnapshotDb extends ReadOnlySnapshotDb {
               quotePrice: null,
               quotePrevClose: null,
               quoteChange1d: null,
-              quoteSource: null,
+              quoteSource: this.completeDerived ? "tradingview-scanner" : null,
               quoteFetchedAt: null,
-              quoteFreshnessStatus: null,
+              quoteFreshnessStatus: this.completeDerived ? "fresh" : null,
               quoteFreshnessReason: null,
               barFreshnessStatus: null,
               barFreshnessReason: null,
+              above20Sma: this.completeDerived ? 1 : null,
+              above50Sma: this.completeDerived ? 1 : null,
+              above200Sma: this.completeDerived ? 0 : null,
             }] as T[],
           };
         }
@@ -228,11 +236,25 @@ describe("loadSnapshot read-only mode", () => {
       expect(snapshot.expectedAsOfDate).toBe("2026-07-10");
       expect(snapshot.freshnessStatus).toBe("stale");
       expect(row?.price).toBe(500);
-      expect(row?.sparkline).toBeNull();
+      expect(row?.sparkline).toEqual([]);
       expect(row?.quoteFreshnessStatus).toBe("unavailable");
       expect(row?.barFreshnessStatus).toBe("stale");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reconstructs provenance for stored SMA fields", async () => {
+    const db = new MalformedStoredSnapshotDb(true);
+    const snapshot = await loadSnapshot(createEnv(db), "default", "2026-06-12", { allowComputeOnMissing: false });
+    const row = snapshot.sections[0]?.groups[0]?.rows[0];
+
+    expect(row?.above20Sma).toBe(true);
+    expect(row?.above200Sma).toBe(false);
+    expect(row?.currentData?.fieldSources).toMatchObject({
+      above20Sma: "tradingview-scanner",
+      above50Sma: "tradingview-scanner",
+      above200Sma: "tradingview-scanner",
+    });
   });
 });

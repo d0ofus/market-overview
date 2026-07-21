@@ -460,15 +460,35 @@ export async function loadBraveUsageDaily(env: Env, daysInput = 14, now = new Da
   }
 }
 
+export class GeminiRequestError extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number | null;
+
+  constructor(status: number, retryAfterMs: number | null) {
+    super(`Gemini request failed with HTTP ${status}.`);
+    this.name = "GeminiRequestError";
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function retryAfterMilliseconds(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
+}
+
 export async function generateMarkdownWithGemini(
   env: Env,
   prompt: string,
-  options?: { maxOutputTokens?: number; temperature?: number; topP?: number; responseMimeType?: string; timeoutMs?: string | number },
+  options?: { model?: string; maxOutputTokens?: number; temperature?: number; topP?: number; responseMimeType?: string; timeoutMs?: string | number },
 ): Promise<{ text: string; sources: MarketReportSourceAudit[]; model: string; provider: string }> {
   const apiKey = env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
 
-  const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+  const model = options?.model?.trim() || env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const groundingEnabled = env.GEMINI_SEARCH_GROUNDING_ENABLED?.trim().toLowerCase() === "true";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const timeoutMs = resolveFetchTimeoutMs(options?.timeoutMs ?? env.GEMINI_TIMEOUT_MS, 90_000, GEMINI_FETCH_TIMEOUT_MAX_MS);
@@ -491,8 +511,8 @@ export async function generateMarkdownWithGemini(
   }, timeoutMs);
 
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`Gemini request failed with HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+    await response.body?.cancel().catch(() => undefined);
+    throw new GeminiRequestError(response.status, retryAfterMilliseconds(response.headers.get("Retry-After")));
   }
 
   const payload = await response.json() as {

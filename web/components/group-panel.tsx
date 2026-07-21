@@ -85,7 +85,6 @@ const hasCurrentField = (row: Row, field: string): boolean => {
   if (row.currentData) return Boolean(row.currentData.fieldSources[field]);
   return row.quoteFreshnessStatus === "fresh";
 };
-const hasHistoricalMetrics = (row: Row) => row.barFreshnessStatus === "fresh";
 const quoteFreshnessLabel = (status: QuoteFreshnessStatus | undefined): string => {
   if (status === "stale") return "Stale";
   if (status === "unavailable") return "N/A";
@@ -118,23 +117,6 @@ function QuoteFreshnessBadge({ row }: { row: Row }) {
       title={title || quoteFreshnessLabel(status)}
     >
       {retrying ? "Retrying" : quoteFreshnessLabel(status)}
-    </span>
-  );
-}
-
-function HistoryFreshnessBadge({ row }: { row: Row }) {
-  const status = row.barFreshnessStatus;
-  if (!status || status === "fresh") return null;
-  const title = [
-    row.barFreshnessReason,
-    row.barDate ? `Bar date: ${row.barDate}` : null,
-  ].filter(Boolean).join(" ");
-  return (
-    <span
-      className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${quoteFreshnessClass(status)}`}
-      title={title || `History ${quoteFreshnessLabel(status)}`}
-    >
-      History
     </span>
   );
 }
@@ -187,7 +169,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
       if (key === "price") return hasCurrentField(row, "price") ? row.quotePrice ?? null : null;
       if (key === "1D") return hasCurrentField(row, "change1d") ? row.quoteChange1d ?? null : null;
       if (key === "sparkline" || key === "relativeStrength30dVsSpy") {
-        if (!hasHistoricalMetrics(row)) return null;
+        if (key === "sparkline" && !row.sparkline?.length) return null;
+        if (key === "relativeStrength30dVsSpy" && !row.relativeStrength30dVsSpy?.length) return null;
       }
       if (key === "1W") return hasCurrentField(row, "change1w") ? row.change1w ?? null : null;
       if (key === "5D") return hasCurrentField(row, "change5d") ? row.change5d ?? null : null;
@@ -282,7 +265,6 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
             <QuoteFreshnessBadge row={row} />
-            <HistoryFreshnessBadge row={row} />
           </div>
         </td>
       );
@@ -293,14 +275,14 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     if (column === "sparkline") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {hasHistoricalMetrics(row) && row.sparkline ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
+          {row.sparkline?.length ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "relativeStrength30dVsSpy") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {hasHistoricalMetrics(row) ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
+          {row.relativeStrength30dVsSpy?.length ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }

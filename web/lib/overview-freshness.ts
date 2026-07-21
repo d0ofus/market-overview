@@ -45,9 +45,19 @@ export type OverviewFreshnessContext = {
 export type OverviewFreshnessSection = {
   groups: Array<{
     rows: Array<{
+      ticker?: string;
       barDate?: string | null;
       barFreshnessStatus?: BarFreshnessStatus;
       quoteFreshnessStatus?: QuoteFreshnessStatus;
+      sparkline?: number[] | null;
+      relativeStrength30dVsSpy?: number[] | null;
+      currentData?: {
+        status: "fresh" | "unavailable" | "retrying";
+        fieldSources: Record<string, string>;
+      };
+      historyData?: {
+        seriesStatus?: "fresh" | "fallback" | "stale" | "unavailable" | "unsupported";
+      };
     }>;
   }>;
 };
@@ -95,6 +105,30 @@ function normalizeQuoteStatus(row: { quoteFreshnessStatus?: QuoteFreshnessStatus
 
 function normalizeBarStatus(row: { barFreshnessStatus?: BarFreshnessStatus; barDate?: string | null }): BarFreshnessStatus {
   return row.barFreshnessStatus ?? (row.barDate ? "fresh" : "unavailable");
+}
+
+type OverviewActionableRow = OverviewFreshnessSection["groups"][number]["rows"][number];
+
+export function isActionableOverviewRow(row: OverviewActionableRow): boolean {
+  const quoteStatus = normalizeQuoteStatus(row);
+  if (quoteStatus === "unsupported") return false;
+  const missingEssentialCurrent = Boolean(row.currentData)
+    && (!row.currentData?.fieldSources.price || !row.currentData?.fieldSources.change1d);
+  const hasUsableStoredSeries = (row.sparkline?.length ?? 0) > 1
+    || (row.relativeStrength30dVsSpy?.length ?? 0) > 1;
+  const seriesStatus = row.historyData?.seriesStatus
+    ?? (hasUsableStoredSeries ? "fallback" : normalizeBarStatus(row));
+  return quoteStatus === "stale" || quoteStatus === "unavailable"
+    || row.currentData?.status === "retrying"
+    || missingEssentialCurrent
+    || seriesStatus === "unavailable";
+}
+
+export function countActionableOverviewRows(sections: OverviewFreshnessSection[]): number {
+  return sections.reduce((total, section) => total + section.groups.reduce(
+    (sectionTotal, group) => sectionTotal + group.rows.filter(isActionableOverviewRow).length,
+    0,
+  ), 0);
 }
 
 function compactTickerList(tickers: string[] | undefined, limit = 6): string | null {
@@ -158,17 +192,24 @@ export function deriveOverviewFreshnessSummary({
       for (const row of group.rows) {
         counts.totalRows += 1;
         const quoteStatus = normalizeQuoteStatus(row);
-        if (quoteStatus !== "fresh") {
+        const missingEssentialCurrent = quoteStatus !== "unsupported" && Boolean(row.currentData)
+          && (!row.currentData?.fieldSources.price || !row.currentData?.fieldSources.change1d);
+        if (quoteStatus === "stale" || quoteStatus === "unavailable"
+          || row.currentData?.status === "retrying" || missingEssentialCurrent) {
           counts.needsReview += 1;
           if (quoteStatus === "stale") counts.stale += 1;
           if (quoteStatus === "unavailable") counts.unavailable += 1;
-          if (quoteStatus === "unsupported") counts.unverified += 1;
         }
-        const barStatus = normalizeBarStatus(row);
-        if (barStatus !== "fresh") {
+        if (quoteStatus === "unsupported") counts.unverified += 1;
+        const hasUsableStoredSeries = (row.sparkline?.length ?? 0) > 1
+          || (row.relativeStrength30dVsSpy?.length ?? 0) > 1;
+        const seriesStatus = row.historyData?.seriesStatus
+          ?? (hasUsableStoredSeries ? "fallback" : normalizeBarStatus(row));
+        if (quoteStatus !== "unsupported" && seriesStatus === "unavailable") {
           counts.historyNeedsReview += 1;
-          if (barStatus === "stale") counts.historyStale += 1;
-          if (barStatus === "unavailable") counts.historyUnavailable += 1;
+          counts.historyUnavailable += 1;
+        } else if (seriesStatus === "stale") {
+          counts.historyStale += 1;
         }
       }
     }
@@ -179,8 +220,8 @@ export function deriveOverviewFreshnessSummary({
   const overlay = quoteOverlayDetail(status);
   const missingFreshness = !status.freshnessStatus;
   const hasOverlayGap = Boolean(overlay);
-  const hasQuoteProblems = counts.needsReview > 0 || hasOverlayGap;
-  const hasHistoryProblems = status.freshnessStatus !== "fresh" || counts.historyNeedsReview > 0;
+  const hasQuoteProblems = counts.needsReview > 0 || hasOverlayGap || Boolean(criticalTickers);
+  const hasHistoryProblems = counts.historyNeedsReview > 0;
   const hasBreadthProblems = Boolean(status.breadthStatus && status.breadthStatus !== "fresh");
   const hasProblems = !dashboardAvailable
     || missingFreshness
@@ -203,10 +244,10 @@ export function deriveOverviewFreshnessSummary({
     counts.unavailable > 0 ? `${counts.unavailable} current-data rows unavailable` : null,
     counts.unverified > 0 ? `${counts.unverified} source unsupported` : null,
     counts.historyNeedsReview > 0 ? `${counts.historyNeedsReview} history rows need review` : null,
-    counts.historyStale > 0 ? `${counts.historyStale} history stale` : null,
+    counts.historyStale > 0 ? `${counts.historyStale} chart series stale (usable)` : null,
     counts.historyUnavailable > 0 ? `${counts.historyUnavailable} history unavailable` : null,
     coverage,
-    criticalTickers ? `Critical historical symbols: ${criticalTickers}` : null,
+    criticalTickers ? `Critical current-data symbols: ${criticalTickers}` : null,
     overlay,
     hasBreadthProblems ? status.breadthWarning ?? `Breadth data is ${status.breadthStatus}.` : null,
   ].filter((detail): detail is string => Boolean(detail));
@@ -217,9 +258,9 @@ export function deriveOverviewFreshnessSummary({
       ? "Overview freshness unknown"
       : hasDangerQuoteProblem
         ? "Current-session data incomplete"
-        : status.freshnessStatus === "stale" || counts.historyStale > 0 || counts.historyUnavailable > 0
+        : counts.historyUnavailable > 0
           ? "Historical overview data stale"
-          : status.freshnessStatus === "partial" || counts.historyNeedsReview > 0
+          : counts.historyNeedsReview > 0
             ? "Historical overview data partial"
             : hasBreadthProblems
               ? "Breadth data stale"

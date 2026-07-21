@@ -8,7 +8,7 @@
     "start": "next start -p 3000",
     "test": "npm run test:perplexity && npm run test:admin-auth && npm run test:freshness && npm run test:fields && npm run test:earnings-layout && npm run test:sector-focus",
     "test:admin-auth": "tsx --test lib/admin-auth-core.test.ts lib/admin-auth.test.ts",
-    "test:freshness": "tsx --test lib/overview-freshness.test.ts",
+    "test:freshness": "tsx --test lib/overview-freshness.test.ts lib/overview-ui-contract.test.ts",
     "test:fields": "tsx --test lib/tradingview-stock-field-search.test.ts lib/scan-rule-normalize.test.ts",
     "test:earnings-layout": "tsx --test lib/earnings-column-widths.test.ts lib/earnings-multi-chart.test.ts lib/earnings-snapshot.test.ts lib/tradingview-widget-config.test.ts",
     "test:perplexity": "tsx --test lib/perplexity-finance-parser.test.ts lib/perplexity-browser-provider.test.ts",
@@ -29,7 +29,8 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "recharts": "^2.15.1",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "vercel": "^56.4.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

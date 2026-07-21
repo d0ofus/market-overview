@@ -1,6 +1,7 @@
 export type OverviewGenerationDecision = {
   publish: boolean;
   bootstrap: boolean;
+  degraded: boolean;
   reason: string | null;
 };
 
@@ -11,27 +12,32 @@ export function evaluateOverviewGeneration(input: {
   historyCoveragePct: number;
 }): OverviewGenerationDecision {
   const fullReady = input.criticalTickersPresent
-    && input.currentCoveragePct >= 95
-    && input.historyCoveragePct >= 95;
-  if (fullReady) return { publish: true, bootstrap: false, reason: null };
-  const totalCoveragePct = Math.min(input.currentCoveragePct, input.historyCoveragePct);
-  const bootstrap = !input.hasReadyGeneration
-    && input.criticalTickersPresent
-    && totalCoveragePct >= 80;
-  if (bootstrap) {
+    && input.currentCoveragePct >= 95;
+  if (fullReady) {
     return {
       publish: true,
-      bootstrap: true,
-      reason: `First-generation bootstrap published at ${totalCoveragePct.toFixed(2)}% coverage.`,
+      bootstrap: !input.hasReadyGeneration,
+      degraded: false,
+      reason: null,
+    };
+  }
+  const degraded = input.criticalTickersPresent
+    && input.currentCoveragePct >= 90;
+  if (degraded) {
+    return {
+      publish: true,
+      bootstrap: !input.hasReadyGeneration,
+      degraded: true,
+      reason: `Degraded generation published at ${input.currentCoveragePct.toFixed(2)}% essential current-field coverage; latest valid history remains available (${input.historyCoveragePct.toFixed(2)}% exact-session).`,
     };
   }
   const reasons = [];
   if (!input.criticalTickersPresent) reasons.push("one or more critical tickers are missing");
-  if (input.currentCoveragePct < 95) reasons.push(`current coverage is ${input.currentCoveragePct.toFixed(2)}%`);
-  if (input.historyCoveragePct < 95) reasons.push(`history coverage is ${input.historyCoveragePct.toFixed(2)}%`);
+  if (input.currentCoveragePct < 90) reasons.push(`essential current-field coverage is ${input.currentCoveragePct.toFixed(2)}%`);
   return {
     publish: false,
     bootstrap: false,
+    degraded: false,
     reason: `${reasons.join("; ")}; last-ready generation retained.`,
   };
 }

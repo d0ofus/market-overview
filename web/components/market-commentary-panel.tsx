@@ -3,15 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { AlertTriangle, CheckCircle2, ChevronDown, Database, ExternalLink, FileText, RefreshCw } from "lucide-react";
+import { CheckCircle2, ChevronDown, Database, ExternalLink, FileText, RefreshCw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   generateWeeklyMarketReview,
   getMarketCommentary,
+  getRefreshPageJob,
   getWeeklyMarketReview,
-  refreshMarketCommentary,
+  queueRefreshPageData,
   type MarketCommentaryResponse,
   type WeeklyMarketReviewResponse,
 } from "@/lib/api";
@@ -30,6 +31,9 @@ type Props = {
 };
 
 const COMMENTARY_LOAD_TIMEOUT_MS = 10_000;
+const COMMENTARY_JOB_POLL_MS = 5_000;
+const COMMENTARY_BACKGROUND_AFTER_MS = 90_000;
+const COMMENTARY_JOB_POLL_LIMIT_MS = 10 * 60_000;
 
 const EMPTY_COMMENTARY: MarketCommentaryResponse = {
   status: "empty",
@@ -67,11 +71,6 @@ function freshnessBadgeClass(tone: FreshnessTone): string {
   if (tone === "ok") return "border-success/30 bg-success/10 text-success";
   if (tone === "danger") return "border-red-400/35 bg-red-500/10 text-red-200";
   return "border-warning/35 bg-warning/10 text-warning";
-}
-
-function freshnessPanelClass(tone: FreshnessTone): string {
-  if (tone === "danger") return "border-red-400/30 bg-red-500/10 text-red-200";
-  return "border-warning/30 bg-warning/10 text-warning";
 }
 
 function isAbortError(error: unknown): boolean {
@@ -179,6 +178,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   const [weeklyReview, setWeeklyReview] = useState<WeeklyMarketReviewResponse>(EMPTY_WEEKLY_REVIEW);
   const [cachedLoading, setCachedLoading] = useState(() => !initial);
   const [loading, setLoading] = useState(false);
+  const [commentaryBackground, setCommentaryBackground] = useState(false);
   const [weeklyCachedLoading, setWeeklyCachedLoading] = useState(false);
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -187,6 +187,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   const cachedLoadRequestRef = useRef(0);
   const weeklyLoadControllerRef = useRef<AbortController | null>(null);
   const weeklyLoadRequestRef = useRef(0);
+  const commentaryRefreshRequestRef = useRef(0);
   const dailyReport = commentary.report;
   const weeklyReport = weeklyReview.report;
   const activeStatus = mode === "daily" ? commentary.status : weeklyReview.status;
@@ -195,6 +196,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   const report = mode === "daily" ? dailyReport : weeklyReport;
   const sources = mode === "daily" ? dailyReport?.sourceAudit ?? [] : weeklyReport?.sourceAudit ?? [];
   const dataQuality = mode === "daily" ? dailyReport?.dataQuality ?? [] : weeklyReport?.dataQuality ?? [];
+  const latestAttempt = mode === "daily" ? commentary.latestAttempt ?? null : null;
   const hasReport = Boolean(report);
   const activeMarkdown = mode === "daily" ? dailyReport?.reportMarkdown : weeklyReport?.reviewMarkdown;
   const commentaryFreshness = deriveCommentaryFreshnessSummary({
@@ -236,6 +238,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
     return () => {
       if (messageTimerRef.current != null) window.clearTimeout(messageTimerRef.current);
       weeklyLoadControllerRef.current?.abort();
+      commentaryRefreshRequestRef.current += 1;
     };
   }, []);
 
@@ -329,6 +332,50 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
     messageTimerRef.current = window.setTimeout(() => setMessage(null), 5000);
   }
 
+  async function refreshDailyCommentary() {
+    const requestId = commentaryRefreshRequestRef.current + 1;
+    commentaryRefreshRequestRef.current = requestId;
+    cachedLoadRequestRef.current += 1;
+    cachedLoadControllerRef.current?.abort();
+    setCachedLoading(false);
+    setLoading(true);
+    setCommentaryBackground(false);
+    setMessage(null);
+    const startedAt = Date.now();
+    try {
+      let job = await queueRefreshPageData("market-commentary");
+      while (job.jobId && job.status !== "completed" && job.status !== "failed") {
+        if (commentaryRefreshRequestRef.current !== requestId) return;
+        if (!commentaryBackground && Date.now() - startedAt >= COMMENTARY_BACKGROUND_AFTER_MS) {
+          setCommentaryBackground(true);
+          setMessage("Commentary generation is continuing in the background. The last ready report remains visible.");
+        }
+        if (Date.now() - startedAt >= COMMENTARY_JOB_POLL_LIMIT_MS) return;
+        await new Promise((resolve) => window.setTimeout(resolve, COMMENTARY_JOB_POLL_MS));
+        if (commentaryRefreshRequestRef.current !== requestId) return;
+        job = await getRefreshPageJob(job.jobId);
+      }
+      if (commentaryRefreshRequestRef.current !== requestId) return;
+      const refreshed = await getMarketCommentary();
+      setCommentary(refreshed);
+      setOpen(true);
+      if (job.status === "completed") {
+        setTab("report");
+        showMessage(`Market commentary published for ${job.sessionDate ?? refreshed.report?.sessionDate ?? "the current session"}.`);
+      } else {
+        setTab("quality");
+        showMessage(job.notes ?? "Commentary refresh did not complete; the last ready report remains available.");
+      }
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "Commentary refresh failed.");
+    } finally {
+      if (commentaryRefreshRequestRef.current === requestId) {
+        setLoading(false);
+        setCommentaryBackground(false);
+      }
+    }
+  }
+
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className="card overflow-hidden">
       <div className="border-b border-borderSoft/70 bg-panel/50 px-4 py-3">
@@ -382,27 +429,10 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
                 type="button"
                 className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-3 py-2 text-sm font-medium text-accent disabled:opacity-60"
                 disabled={loading}
-                onClick={async () => {
-                  cachedLoadRequestRef.current += 1;
-                  cachedLoadControllerRef.current?.abort();
-                  setCachedLoading(false);
-                  setLoading(true);
-                  setMessage(null);
-                  try {
-                    const refreshed = await refreshMarketCommentary();
-                    setCommentary(refreshed);
-                    setOpen(true);
-                    setTab("report");
-                    showMessage(refreshed.warning ?? (refreshed.ok ? "Market commentary refreshed." : "Commentary refresh completed with warnings."));
-                  } catch (error) {
-                    showMessage(error instanceof Error ? error.message : "Commentary refresh failed.");
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
+                onClick={refreshDailyCommentary}
               >
                 <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-                {loading ? "Refreshing..." : "Refresh Commentary"}
+                {commentaryBackground ? "Continuing in background" : loading ? "Refreshing..." : "Refresh Commentary"}
               </button>
             ) : weeklyReview.status !== "ready" ? (
               <button
@@ -439,41 +469,6 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
 
       <Collapsible.Content>
         <div className="space-y-4 p-4">
-          {activeStatus === "failed" && (
-            <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{activeWarning ?? report?.error ?? (mode === "daily" ? "Commentary generation failed." : "Weekly review generation failed.")}</span>
-            </div>
-          )}
-
-          {activeWarning && activeStatus !== "failed" && (
-            <div className="flex gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{activeWarning}</span>
-            </div>
-          )}
-
-          {report && activeStatus !== "failed" && commentaryFreshness.tone !== "ok" && (
-            <div className={`rounded border p-3 text-sm ${freshnessPanelClass(commentaryFreshness.tone)}`}>
-              <div className="flex gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <div>
-                  <div className="font-medium">{commentaryFreshness.label}</div>
-                  {commentaryFreshness.message ? (
-                    <div className="mt-1 leading-5 text-current/85">{commentaryFreshness.message}</div>
-                  ) : null}
-                </div>
-              </div>
-              {commentaryFreshness.issues.length > 1 ? (
-                <ul className="mt-2 space-y-1 pl-10 text-xs leading-5 text-current/80">
-                  {commentaryFreshness.issues.slice(1, 4).map((issue) => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          )}
-
           {!hasReport && (
             <div className="rounded border border-borderSoft bg-panelSoft/55 p-4 text-sm text-text/75">
               {emptyText}
@@ -574,10 +569,24 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
 
               {tab === "quality" && (
                 <div className="max-h-[520px] overflow-auto rounded border border-borderSoft/70 bg-panel">
-                  {dataQuality.length === 0 ? (
+                  {dataQuality.length === 0 && !latestAttempt ? (
                     <p className="p-4 text-sm text-text/60">No data-quality notes were recorded for this report.</p>
                   ) : (
                     <div className="divide-y divide-borderSoft/60">
+                      {latestAttempt ? (
+                        <div className="flex gap-3 p-4 text-sm">
+                          <CheckCircle2 className={`mt-0.5 h-4 w-4 shrink-0 ${latestAttempt.status === "ready" ? "text-success" : "text-warning"}`} />
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-text">Latest refresh attempt</span>
+                              <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">{latestAttempt.status}</span>
+                            </div>
+                            <div className="mt-1 text-text/65">
+                              {latestAttempt.message ?? "Commentary was published successfully."} Model: {latestAttempt.model}. Attempted {formatDateTime(latestAttempt.attemptedAt)}.
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
                       {dataQuality.map((item, index) => (
                         <div key={`${item.metric}-${index}`} className="flex gap-3 p-4 text-sm">
                           <CheckCircle2 className={`mt-0.5 h-4 w-4 shrink-0 ${item.status === "ok" ? "text-success" : "text-warning"}`} />

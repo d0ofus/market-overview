@@ -118,6 +118,13 @@ export type MarketCommentaryResponse = {
   status: "empty" | "ready" | "failed";
   warning: string | null;
   report: MarketCommentaryReport | null;
+  latestAttempt?: {
+    status: "ready" | "failed";
+    attemptedAt: string;
+    model: string;
+    reasonCode: "provider_busy" | "timeout" | "overview_not_ready" | "configuration" | "authentication" | "incomplete" | "unknown" | null;
+    message: string | null;
+  } | null;
 };
 
 export type MarketCommentaryRefreshResponse = MarketCommentaryResponse & {
@@ -4836,20 +4843,35 @@ export type RefreshPageJobResponse = {
   jobId?: string;
   status?: "queued" | "running" | "completed" | "failed";
   pollAfterMs?: number;
+  generationId?: string;
+  publishedAt?: string;
+  currentCoveragePct?: number;
+  historyExactCoveragePct?: number;
+  historyUsableCoveragePct?: number;
+  reportId?: string;
+  sessionDate?: string;
 };
+
+export async function queueRefreshPageData(page: string, ticker?: string | null): Promise<RefreshPageJobResponse> {
+  return await adminFetch<RefreshPageJobResponse>("/api/admin/refresh-page", {
+    method: "POST",
+    body: JSON.stringify({ page, ticker: ticker ?? null }),
+  });
+}
+
+export async function getRefreshPageJob(jobId: string): Promise<RefreshPageJobResponse> {
+  return await adminFetch<RefreshPageJobResponse>(`/api/admin/refresh-jobs/${encodeURIComponent(jobId)}`);
+}
 
 export async function refreshPageData(page: string, ticker?: string | null): Promise<RefreshPageJobResponse> {
   try {
-    let response = await adminFetch<RefreshPageJobResponse>("/api/admin/refresh-page", {
-      method: "POST",
-      body: JSON.stringify({ page, ticker: ticker ?? null }),
-    });
+    let response = await queueRefreshPageData(page, ticker);
     if (!response.jobId || response.status === "completed" || response.status === "failed") return response;
     const jobId = response.jobId;
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, Math.max(500, response.pollAfterMs ?? 1500)));
-      response = await adminFetch<RefreshPageJobResponse>(`/api/admin/refresh-jobs/${encodeURIComponent(jobId)}`);
+      response = await getRefreshPageJob(jobId);
       if (response.status === "completed" || response.status === "failed") return response;
     }
     return {

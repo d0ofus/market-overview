@@ -7,10 +7,15 @@ describe("refreshOverviewPageData", () => {
     const refreshRecentBarsForTickers = vi.fn(async () => {
       calls.push("bars");
     });
-    const refreshAndStoreOverviewSnapshot = vi.fn(async (_env, _options?: { requireFreshness?: boolean }) => {
+    const refreshAndStoreOverviewSnapshot = vi.fn(async () => {
       calls.push("snapshot");
       return {
+        snapshotId: "generation-1",
         asOfDate: "2026-06-18",
+        generatedAt: "2026-06-18T21:00:00.000Z",
+        currentCoveragePct: 100,
+        historyExactCoveragePct: 90,
+        historyUsableCoveragePct: 100,
         fetchedRows: 12,
         writtenRows: 10,
         freshness: {
@@ -29,11 +34,20 @@ describe("refreshOverviewPageData", () => {
 
     expect(calls).toEqual(["snapshot"]);
     expect(refreshRecentBarsForTickers).not.toHaveBeenCalled();
-    expect(refreshAndStoreOverviewSnapshot).toHaveBeenCalledWith({} as never, { requireFreshness: false });
+    expect(refreshAndStoreOverviewSnapshot).toHaveBeenCalledWith({} as never, {
+      requireFreshness: false,
+      forceCurrentData: true,
+      refreshAllOverviewExactBars: true,
+    });
     expect(result).toEqual({
       page: "overview",
       refreshedTickers: 2,
-      notes: "Overview market data fresh: 2/2 tickers current for 2026-06-18 (100.0%). Fetched 12 rows; wrote 10.",
+      generationId: "generation-1",
+      publishedAt: "2026-06-18T21:00:00.000Z",
+      currentCoveragePct: 100,
+      historyExactCoveragePct: 90,
+      historyUsableCoveragePct: 100,
+      notes: "Published overview generation generation-1 with fresh current-data coverage (100.0%). Exact-session history is 90.0% and usable history is 100.0%. Broad post-close daily-bar catch-up will continue through the scheduled worker job. Fetched 12 rows; wrote 10.",
     });
   });
 
@@ -47,7 +61,12 @@ describe("refreshOverviewPageData", () => {
       .mockImplementationOnce(async () => {
         calls.push("snapshot-1");
         return {
+          snapshotId: "generation-2",
           asOfDate: "2026-06-18",
+          generatedAt: "2026-06-18T21:01:00.000Z",
+          currentCoveragePct: 95,
+          historyExactCoveragePct: 50,
+          historyUsableCoveragePct: 100,
           fetchedRows: 0,
           writtenRows: 0,
           freshness: {
@@ -67,11 +86,20 @@ describe("refreshOverviewPageData", () => {
     expect(calls).toEqual(["snapshot-1"]);
     expect(refreshRecentBarsForTickers).not.toHaveBeenCalled();
     expect(refreshAndStoreOverviewSnapshot).toHaveBeenCalledTimes(1);
-    expect(refreshAndStoreOverviewSnapshot).toHaveBeenNthCalledWith(1, {} as never, { requireFreshness: false });
+    expect(refreshAndStoreOverviewSnapshot).toHaveBeenNthCalledWith(1, {} as never, {
+      requireFreshness: false,
+      forceCurrentData: true,
+      refreshAllOverviewExactBars: true,
+    });
     expect(result).toEqual({
       page: "overview",
       refreshedTickers: 2,
-      notes: "Overview market data partial: 1/2 tickers current for 2026-06-18 (50.0%). Broad post-close daily-bar catch-up will continue through the scheduled worker job. Fetched 0 rows; wrote 0.",
+      generationId: "generation-2",
+      publishedAt: "2026-06-18T21:01:00.000Z",
+      currentCoveragePct: 95,
+      historyExactCoveragePct: 50,
+      historyUsableCoveragePct: 100,
+      notes: "Published overview generation generation-2 with fresh current-data coverage (95.0%). Exact-session history is 50.0% and usable history is 100.0%. Broad post-close daily-bar catch-up will continue through the scheduled worker job. Fetched 0 rows; wrote 0.",
     });
   });
 });
