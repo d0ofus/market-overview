@@ -824,4 +824,24 @@ describe("scans page API", () => {
     expect(secondBody).toMatchObject({ ok: true, copied: 1, done: true });
     expect(env.__scannerRatioRows).toHaveLength(1);
   });
+
+  it("retires the legacy RS cache backfill after v2 cutover", async () => {
+    const env = createScannerCacheAdminEnv({ adminSecret: "secret" });
+    env.RS_STATE_V2_READ_ENABLED = "true";
+    env.RS_LEGACY_CACHE_WRITE_ENABLED = "false";
+
+    const response = await (worker as { fetch: typeof fetch }).fetch(
+      new Request("http://localhost/api/admin/scanner-cache/rs-cache-backfill", {
+        method: "POST",
+        headers: { authorization: "Bearer secret", "content-type": "application/json" },
+        body: JSON.stringify({ table: "rs_ratio_cache", limit: 250 }),
+      }),
+      env as never,
+    );
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Legacy RS cache backfill has been retired after the RS state v2 cutover.",
+    });
+  });
 });

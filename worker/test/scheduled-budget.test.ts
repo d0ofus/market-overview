@@ -93,6 +93,19 @@ describe("scheduled budget and lane helpers", () => {
     });
   });
 
+  it("admits all six maintenance jobs while preserving the reserve", () => {
+    const budget = createScheduledBudget({} as Env, "maintenance");
+    for (const jobKey of ["alerts", "social-alerts", "scans-page", "scanning", "gappers", "options"]) {
+      expect(budget.claim(jobKey, 4)).toBe(true);
+    }
+    expect(budget.snapshot()).toMatchObject({
+      maxUnits: 34,
+      reserveUnits: 10,
+      usedUnits: 24,
+      availableUnits: 0,
+    });
+  });
+
   it("keeps fallback scan jobs on the scan budget after core work spends the core budget", () => {
     const coreBudget = createScheduledBudget({} as Env, "core");
     expect(coreBudget.claim("research-queue", 8)).toBe(true);

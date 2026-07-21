@@ -19,6 +19,15 @@ import {
   type RelativeStrengthRatioRow,
 } from "./relative-strength";
 import {
+  compareRsStateV2Parity,
+  legacyRsCacheRetired,
+  loadRsStateV2Features,
+  materializeRsStateV2,
+  recordRsStateV2Parity,
+  rsStateV2Rollout,
+  type RsStateV2Feature,
+} from "./rs-state-v2-service";
+import {
   buildVcpFeatureRow,
   normalizeVcpConfig,
   requiredVcpBarCount,
@@ -630,6 +639,13 @@ export type RsDerivedCacheBackfillResult = {
 
 export type RsDerivedCacheStatus = {
   scannerCacheDbAvailable: boolean;
+  storagePhase: "legacy" | "shadow" | "cutover" | "v2";
+  v2Ready: boolean;
+  legacyReadEnabled: boolean;
+  legacyWriteEnabled: boolean;
+  lastParityAt: string | null;
+  mismatchCount: number;
+  v2StateRowCount: number | null;
   tables: Array<{
     table: RsDerivedCacheTable;
     legacyRowCount: number;
@@ -2149,6 +2165,26 @@ async function loadRelativeStrengthEffectiveLatestCacheRows(
   tickers: string[],
   tradingDate: string,
 ): Promise<Map<string, RelativeStrengthLatestCacheRecord>> {
+  if (rsStateV2Rollout(env).readEnabled && hasScannerCacheStorage(env)) {
+    const rows = await loadRsStateV2Features(env, configKey, tickers, tradingDate);
+    return new Map(Array.from(rows.entries()).map(([ticker, row]) => [ticker, {
+      ticker: row.ticker,
+      benchmarkTicker: row.benchmarkTicker,
+      rsMaType: row.rsMaType,
+      rsMaLength: row.rsMaLength,
+      newHighLookback: row.newHighLookback,
+      tradingDate: row.tradingDate,
+      priceClose: row.priceClose,
+      change1d: row.change1d,
+      rsRatioClose: row.rsRatioClose,
+      rsRatioMa: row.rsRatioMa,
+      rsAboveMa: row.rsAboveMa,
+      rsNewHigh: row.rsNewHigh,
+      rsNewHighBeforePrice: row.rsNewHighBeforePrice,
+      bullCross: row.bullCross,
+      approxRsRating: row.approxRsRating,
+    }]));
+  }
   const rowsByTicker = await loadRelativeStrengthLatestCacheRows(env, configKey, tickers, tradingDate);
   const missingTickers = Array.from(new Set(
     tickers
@@ -3089,7 +3125,7 @@ function getRsDerivedCacheDb(env: Env): D1Database {
 }
 
 function shouldReadLegacyRsDerivedCache(env: Env): boolean {
-  return Boolean(env.SCANNER_CACHE_DB && env.SCANNER_CACHE_DB !== env.DB);
+  return Boolean(env.SCANNER_CACHE_DB && env.SCANNER_CACHE_DB !== env.DB && !legacyRsCacheRetired(env));
 }
 
 type RsBackfillCursor = {
@@ -3149,6 +3185,7 @@ async function countRows(db: D1Database, table: RsDerivedCacheTable): Promise<nu
 
 export async function loadScannerCacheRsCacheStatus(env: Env): Promise<RsDerivedCacheStatus> {
   const scannerDb = env.SCANNER_CACHE_DB ?? null;
+  const rollout = rsStateV2Rollout(env);
   const tables = [];
   for (const table of RS_DERIVED_CACHE_TABLES) {
     tables.push({
@@ -3157,8 +3194,36 @@ export async function loadScannerCacheRsCacheStatus(env: Env): Promise<RsDerived
       scannerCacheRowCount: scannerDb ? await countRows(scannerDb, table) : null,
     });
   }
+  let lastParityAt: string | null = null;
+  let mismatchCount = 0;
+  let v2StateRowCount: number | null = null;
+  if (scannerDb) {
+    try {
+      const [parity, stateCount] = await Promise.all([
+        scannerDb.prepare(
+          "SELECT last_parity_at as lastParityAt, mismatch_count as mismatchCount FROM rs_state_v2_status WHERE id = 1",
+        ).first<{ lastParityAt: string | null; mismatchCount: number }>(),
+        scannerDb.prepare("SELECT COUNT(*) as count FROM rs_state_latest").first<{ count: number }>(),
+      ]);
+      lastParityAt = parity?.lastParityAt ?? null;
+      mismatchCount = Math.max(0, Math.trunc(Number(parity?.mismatchCount ?? 0)));
+      v2StateRowCount = Math.max(0, Math.trunc(Number(stateCount?.count ?? 0)));
+    } catch (error) {
+      console.warn("RS state v2 status is unavailable; apply scanner cache migration 0008 before enabling rollout flags.", error);
+    }
+  }
+  const storagePhase = rollout.readEnabled
+    ? (rollout.legacyWriteEnabled ? "cutover" : "v2")
+    : (rollout.dualWriteEnabled ? "shadow" : "legacy");
   return {
     scannerCacheDbAvailable: Boolean(scannerDb),
+    storagePhase,
+    v2Ready: rollout.readEnabled && lastParityAt != null && mismatchCount === 0,
+    legacyReadEnabled: !rollout.readEnabled,
+    legacyWriteEnabled: rollout.legacyWriteEnabled,
+    lastParityAt,
+    mismatchCount,
+    v2StateRowCount,
     tables,
   };
 }
@@ -4498,8 +4563,11 @@ async function buildManualRelativeStrengthIncrementalResult(
   benchmarkBars: RelativeStrengthDailyBar[],
   identity: RelativeStrengthConfigIdentity,
 ): Promise<ManualRelativeStrengthBatchResult | null> {
-  await ensureRelativeStrengthRatioCacheCurrent(env, [candidate.ticker], benchmarkBars, identity);
-  await materializeRelativeStrengthTickers(env, identity, [candidate.ticker]);
+  const rollout = rsStateV2Rollout(env);
+  if (rollout.legacyWriteEnabled || !rollout.readEnabled) {
+    await ensureRelativeStrengthRatioCacheCurrent(env, [candidate.ticker], benchmarkBars, identity);
+  }
+  await materializeRelativeStrengthTickers(env, identity, [candidate.ticker], benchmarkBars);
   const feature = (await loadRelativeStrengthEffectiveLatestCacheRows(
     env,
     identity.configKey,
@@ -4738,37 +4806,6 @@ async function buildManualRelativeStrengthSnapshotResult(
     .filter((row): row is ScanSnapshotRow => Boolean(row));
 
   const sortedRows = sortSnapshotRows(mergedRows, preset.sortField, preset.sortDirection).slice(0, preset.rowLimit);
-  await env.SCANNER_CACHE_DB.prepare("DELETE FROM rs_scan_rows_latest WHERE preset_id = ?").bind(preset.id).run();
-  if (sortedRows.length > 0) {
-    await env.SCANNER_CACHE_DB.batch(sortedRows.map((row, index) =>
-      env.SCANNER_CACHE_DB.prepare(
-        `INSERT INTO rs_scan_rows_latest
-          (preset_id, config_key, ticker, rank, name, sector, industry, change_1d, market_cap, relative_volume, price, avg_volume, price_avg_volume, rs_close, rs_ma, rs_above_ma, rs_new_high, rs_new_high_before_price, bull_cross, approx_rs_rating, raw_json, computed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      ).bind(
-        preset.id,
-        run.configKey,
-        row.ticker,
-        index + 1,
-        row.name,
-        row.sector,
-        row.industry,
-        row.change1d,
-        row.marketCap,
-        row.relativeVolume,
-        row.price,
-        row.avgVolume,
-        row.priceAvgVolume,
-        row.rsClose,
-        row.rsMa,
-        row.rsAboveMa ? 1 : 0,
-        row.rsNewHigh ? 1 : 0,
-        row.rsNewHighBeforePrice ? 1 : 0,
-        row.bullCross ? 1 : 0,
-        row.approxRsRating,
-        row.rawJson,
-      )));
-  }
 
   return {
     providerLabel: RS_PROVIDER_LABEL,
@@ -8205,6 +8242,7 @@ async function materializeRelativeStrengthBatch(
     env,
     identity,
     tickers,
+    benchmarkBars,
   );
 }
 
@@ -8238,10 +8276,83 @@ async function prepareRelativeStrengthTickersForMaterialization(
     continueOnError: true,
     fallbackEnabled: false,
   });
-  await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
+  const rollout = rsStateV2Rollout(env);
+  if (rollout.legacyWriteEnabled || !rollout.readEnabled) {
+    await ensureRelativeStrengthRatioCacheCurrent(env, candidateTickers, benchmarkBars, identity);
+  }
 }
 
 async function materializeRelativeStrengthTickers(
+  env: Env,
+  identity: RelativeStrengthConfigIdentity,
+  tickers: string[],
+  benchmarkBars?: RelativeStrengthDailyBar[],
+): Promise<number> {
+  const candidateTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim().toUpperCase())
+      .filter((ticker) => ticker && ticker !== identity.benchmarkDataTicker && ticker !== identity.benchmarkTicker),
+  ));
+  if (candidateTickers.length === 0) return 0;
+  const rollout = rsStateV2Rollout(env);
+  const useV2 = rollout.dualWriteEnabled || rollout.readEnabled;
+  const useLegacy = rollout.legacyWriteEnabled || !rollout.readEnabled;
+  let v2Rows: RsStateV2Feature[] = [];
+  if (useV2) {
+    if (!hasScannerCacheStorage(env)) throw new Error("SCANNER_CACHE_DB is required for RS state v2.");
+    const result = await materializeRsStateV2(env, identity, candidateTickers, benchmarkBars);
+    v2Rows = result.features;
+  }
+
+  const legacyCount = useLegacy
+    ? await materializeRelativeStrengthTickersLegacy(env, identity, candidateTickers)
+    : 0;
+
+  if (rollout.dualWriteEnabled && useLegacy && hasScannerCacheStorage(env)) {
+    const legacyRows = await loadRelativeStrengthLatestCacheRows(
+      env,
+      identity.configKey,
+      candidateTickers,
+      identity.expectedTradingDate,
+    );
+    const legacyFeatures = new Map<string, RsStateV2Feature>();
+    for (const [ticker, row] of legacyRows.entries()) {
+      legacyFeatures.set(ticker, {
+        ticker,
+        benchmarkTicker: row.benchmarkTicker,
+        rsMaType: row.rsMaType,
+        rsMaLength: row.rsMaLength,
+        newHighLookback: row.newHighLookback,
+        tradingDate: row.tradingDate,
+        priceClose: row.priceClose,
+        change1d: row.change1d,
+        rsRatioClose: row.rsRatioClose,
+        rsRatioMa: row.rsRatioMa,
+        rsAboveMa: asBooleanFlag(row.rsAboveMa),
+        rsNewHigh: asBooleanFlag(row.rsNewHigh),
+        rsNewHighBeforePrice: asBooleanFlag(row.rsNewHighBeforePrice),
+        bullCross: asBooleanFlag(row.bullCross),
+        approxRsRating: row.approxRsRating,
+      });
+    }
+    const v2Features = new Map(v2Rows.map((row) => [row.ticker, row]));
+    const parity = compareRsStateV2Parity(candidateTickers, legacyFeatures, v2Features);
+    await recordRsStateV2Parity(env, parity);
+    if (parity.mismatchCount > 0) {
+      console.warn("RS state v2 shadow parity mismatch", {
+        configKey: identity.configKey,
+        expectedTradingDate: identity.expectedTradingDate,
+        checkedCount: parity.checkedCount,
+        mismatchCount: parity.mismatchCount,
+        mismatches: parity.mismatches.slice(0, 10),
+      });
+    }
+  }
+
+  return rollout.readEnabled ? v2Rows.length : legacyCount;
+}
+
+async function materializeRelativeStrengthTickersLegacy(
   env: Env,
   identity: RelativeStrengthConfigIdentity,
   tickers: string[],
@@ -9690,7 +9801,189 @@ export async function refreshScanCompilePreset(env: Env, compilePresetId: string
   };
 }
 
-export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<void> {
+export type ScannerCacheRetentionStats = {
+  examinedRuns: number;
+  childRowsDeleted: number;
+  completedRunsDeleted: number;
+  queueRowsDeleted: number;
+  compactRowsDeleted: number;
+  rowsWritten: number;
+  cursor: string | null;
+  stopReason: "complete" | "write_budget" | "safety_limit" | "scanner_cache_unavailable";
+  durationMs: number;
+};
+
+type DeletableScannerRun = {
+  id: string;
+  runType: "relative-strength" | "vcp";
+};
+
+function d1RowsWritten(result: D1Result<unknown>): number {
+  const meta = result.meta as unknown as { rows_written?: number; changes?: number } | undefined;
+  return Math.max(0, Math.trunc(Number(meta?.rows_written ?? meta?.changes ?? 0)));
+}
+
+async function loadOldestDeletableScannerRun(
+  db: D1Database,
+  window: string,
+): Promise<DeletableScannerRun | null> {
+  return db.prepare(
+    `SELECT id, run_type as runType
+     FROM (
+       SELECT r.id, 'relative-strength' as run_type, r.updated_at
+       FROM rs_scan_runs r
+       WHERE r.status IN ('completed', 'failed', 'cancelled')
+         AND datetime(r.updated_at) < datetime('now', ?)
+         AND r.id != COALESCE((
+           SELECT latest.id
+           FROM rs_scan_runs latest
+           WHERE latest.preset_id = r.preset_id AND latest.status = 'completed'
+           ORDER BY datetime(COALESCE(latest.completed_at, latest.updated_at)) DESC, latest.id DESC
+           LIMIT 1
+         ), '')
+       UNION ALL
+       SELECT r.id, 'vcp' as run_type, r.updated_at
+       FROM vcp_scan_runs r
+       WHERE r.status IN ('completed', 'failed', 'cancelled')
+         AND datetime(r.updated_at) < datetime('now', ?)
+         AND r.id != COALESCE((
+           SELECT latest.id
+           FROM vcp_scan_runs latest
+           WHERE latest.preset_id = r.preset_id AND latest.status = 'completed'
+           ORDER BY datetime(COALESCE(latest.completed_at, latest.updated_at)) DESC, latest.id DESC
+           LIMIT 1
+         ), '')
+     )
+     ORDER BY datetime(updated_at) ASC, id ASC
+     LIMIT 1`,
+  ).bind(window, window).first<DeletableScannerRun>();
+}
+
+async function pruneInactiveRsStateV2(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  window: string,
+  writeBudget: number,
+): Promise<number> {
+  if (!legacyRsCacheRetired(env) || writeBudget <= 0) return 0;
+  const activeConfigKeys = Array.from(new Set(
+    (await listScanPresets(env))
+      .filter((preset) => preset.isActive && preset.scanType === "relative-strength")
+      .map((preset) => buildRelativeStrengthConfigIdentity(preset).configKey),
+  ));
+  const activePredicate = activeConfigKeys.length > 0
+    ? `config_key NOT IN (${activeConfigKeys.map(() => "?").join(",")})`
+    : "1 = 1";
+  const bindPrefix = activeConfigKeys.length > 0 ? activeConfigKeys : [];
+  let rowsWritten = 0;
+  for (const target of [
+    { table: "rs_state_latest", timestamp: "updated_at" },
+    { table: "rs_features_latest", timestamp: "computed_at" },
+  ] as const) {
+    while (rowsWritten < writeBudget) {
+      const limit = Math.min(1_000, writeBudget - rowsWritten);
+      const result = await env.SCANNER_CACHE_DB.prepare(
+        `DELETE FROM ${target.table}
+         WHERE rowid IN (
+           SELECT rowid
+           FROM ${target.table}
+           WHERE datetime(${target.timestamp}) < datetime('now', ?)
+             AND ${activePredicate}
+             AND NOT EXISTS (
+               SELECT 1 FROM rs_scan_runs active
+               WHERE active.status IN ('queued', 'running')
+                 AND active.config_key = ${target.table}.config_key
+             )
+           ORDER BY datetime(${target.timestamp}) ASC
+           LIMIT ?
+         )`,
+      ).bind(window, ...bindPrefix, limit).run();
+      const changed = d1RowsWritten(result);
+      rowsWritten += changed;
+      if (changed === 0 || changed < limit) break;
+    }
+    if (rowsWritten >= writeBudget) break;
+  }
+  return rowsWritten;
+}
+
+export async function cleanupScannerCacheRunData(
+  env: Env,
+  retentionDays = RETENTION_DAYS,
+  writeBudget = 5_000,
+): Promise<ScannerCacheRetentionStats> {
+  const startedAt = Date.now();
+  const stats: ScannerCacheRetentionStats = {
+    examinedRuns: 0,
+    childRowsDeleted: 0,
+    completedRunsDeleted: 0,
+    queueRowsDeleted: 0,
+    compactRowsDeleted: 0,
+    rowsWritten: 0,
+    cursor: null,
+    stopReason: env.SCANNER_CACHE_DB ? "complete" : "scanner_cache_unavailable",
+    durationMs: 0,
+  };
+  if (!env.SCANNER_CACHE_DB) return { ...stats, durationMs: Date.now() - startedAt };
+  const scannerEnv = env as Env & { SCANNER_CACHE_DB: D1Database };
+  const window = `-${Math.max(1, retentionDays)} day`;
+  const examined = new Set<string>();
+  let iterations = 0;
+
+  while (stats.rowsWritten < writeBudget && iterations < 100) {
+    iterations += 1;
+    const run = await loadOldestDeletableScannerRun(scannerEnv.SCANNER_CACHE_DB, window);
+    if (!run) break;
+    stats.cursor = run.id;
+    examined.add(`${run.runType}:${run.id}`);
+    const remaining = writeBudget - stats.rowsWritten;
+    const deleteLimit = Math.min(1_000, remaining);
+    const childTable = run.runType === "relative-strength" ? "rs_scan_run_tickers" : "vcp_scan_run_tickers";
+    const runTable = run.runType === "relative-strength" ? "rs_scan_runs" : "vcp_scan_runs";
+    const childResult = await scannerEnv.SCANNER_CACHE_DB.prepare(
+      `DELETE FROM ${childTable}
+       WHERE rowid IN (
+         SELECT rowid FROM ${childTable} WHERE run_id = ? ORDER BY rowid ASC LIMIT ?
+       )`,
+    ).bind(run.id, deleteLimit).run();
+    const childWrites = d1RowsWritten(childResult);
+    stats.childRowsDeleted += childWrites;
+    stats.rowsWritten += childWrites;
+    if (childWrites > 0) continue;
+
+    const queueResult = await scannerEnv.SCANNER_CACHE_DB.prepare(
+      "DELETE FROM scanner_cache_scan_run_queue WHERE run_id = ?",
+    ).bind(run.id).run();
+    const queueWrites = d1RowsWritten(queueResult);
+    stats.queueRowsDeleted += queueWrites;
+    stats.rowsWritten += queueWrites;
+    if (stats.rowsWritten >= writeBudget) break;
+
+    const runResult = await scannerEnv.SCANNER_CACHE_DB.prepare(
+      `DELETE FROM ${runTable}
+       WHERE id = ? AND status IN ('completed', 'failed', 'cancelled')`,
+    ).bind(run.id).run();
+    const runWrites = d1RowsWritten(runResult);
+    stats.completedRunsDeleted += runWrites;
+    stats.rowsWritten += runWrites;
+    if (runWrites === 0) break;
+    stats.cursor = null;
+  }
+
+  stats.examinedRuns = examined.size;
+  if (stats.rowsWritten < writeBudget && iterations < 100) {
+    const compactWrites = await pruneInactiveRsStateV2(scannerEnv, window, writeBudget - stats.rowsWritten);
+    stats.compactRowsDeleted = compactWrites;
+    stats.rowsWritten += compactWrites;
+  }
+  stats.stopReason = stats.rowsWritten >= writeBudget
+    ? "write_budget"
+    : (iterations >= 100 ? "safety_limit" : "complete");
+  stats.durationMs = Date.now() - startedAt;
+  console.log("scanner cache retention completed", stats);
+  return stats;
+}
+
+export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<ScannerCacheRetentionStats> {
   const window = `-${Math.max(1, retentionDays)} day`;
   await env.DB.batch([
     env.DB.prepare(
@@ -9715,48 +10008,7 @@ export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTIO
     ).bind(window),
     env.DB.prepare("DELETE FROM scan_snapshots WHERE datetime(generated_at) < datetime('now', ?)").bind(window),
   ]);
-  if (env.SCANNER_CACHE_DB) {
-    const deletableRsRuns = `
-      SELECT id
-      FROM rs_scan_runs
-      WHERE status NOT IN ('queued', 'running')
-        AND datetime(updated_at) < datetime('now', ?)
-        AND id NOT IN (
-          SELECT id
-          FROM (
-            SELECT id, ROW_NUMBER() OVER (
-              PARTITION BY preset_id
-              ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC
-            ) AS row_number
-            FROM rs_scan_runs
-            WHERE status = 'completed'
-          )
-          WHERE row_number = 1
-        )`;
-    const deletableVcpRuns = `
-      SELECT id
-      FROM vcp_scan_runs
-      WHERE status NOT IN ('queued', 'running')
-        AND datetime(updated_at) < datetime('now', ?)
-        AND id NOT IN (
-          SELECT id
-          FROM (
-            SELECT id, ROW_NUMBER() OVER (
-              PARTITION BY preset_id
-              ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC
-            ) AS row_number
-            FROM vcp_scan_runs
-            WHERE status = 'completed'
-          )
-          WHERE row_number = 1
-        )`;
-    await env.SCANNER_CACHE_DB.batch([
-      env.SCANNER_CACHE_DB.prepare(`DELETE FROM rs_scan_run_tickers WHERE run_id IN (${deletableRsRuns})`).bind(window),
-      env.SCANNER_CACHE_DB.prepare(`DELETE FROM rs_scan_runs WHERE id IN (${deletableRsRuns})`).bind(window),
-      env.SCANNER_CACHE_DB.prepare(`DELETE FROM vcp_scan_run_tickers WHERE run_id IN (${deletableVcpRuns})`).bind(window),
-      env.SCANNER_CACHE_DB.prepare(`DELETE FROM vcp_scan_runs WHERE id IN (${deletableVcpRuns})`).bind(window),
-    ]);
-  }
+  return cleanupScannerCacheRunData(env, retentionDays);
 }
 
 export { buildTradingViewScanPayload, fetchTradingViewScanRows };

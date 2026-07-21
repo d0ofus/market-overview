@@ -3,6 +3,9 @@ export type Env = {
   MARKET_DATA_DB?: D1Database;
   FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
+  RS_STATE_V2_DUAL_WRITE_ENABLED?: string;
+  RS_STATE_V2_READ_ENABLED?: string;
+  RS_LEGACY_CACHE_WRITE_ENABLED?: string;
   PATTERN_DB?: D1Database;
   PERPLEXITY_CACHE_DB?: D1Database;
   ADMIN_SECRET?: string;

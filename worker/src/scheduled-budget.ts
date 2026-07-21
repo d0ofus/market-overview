@@ -52,7 +52,7 @@ const DEFAULT_BUDGETS: Record<ScheduledLane, number> = {
   core: 70,
   "market-data": 70,
   scans: 30,
-  maintenance: 20,
+  maintenance: 34,
   reports: 35,
 };
 

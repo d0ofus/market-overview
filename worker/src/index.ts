@@ -138,6 +138,7 @@ import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatest
 import { loadBraveUsageDaily } from "./market-report-common";
 import { cleanupProviderUsage, loadProviderUsageDaily } from "./provider-usage";
 import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, type ScheduledBudget, type ScheduledLane } from "./scheduled-budget";
+import { legacyRsCacheRetired } from "./rs-state-v2-service";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
   deriveFocusNarrativeName,
@@ -4756,6 +4757,9 @@ app.get("/api/admin/scanner-cache/rs-cache-status", async (c) => {
 
 app.post("/api/admin/scanner-cache/rs-cache-backfill", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (legacyRsCacheRetired(c.env)) {
+    return c.json({ error: "Legacy RS cache backfill has been retired after the RS state v2 cutover." }, 410);
+  }
   try {
     const payload = scannerCacheRsCacheBackfillSchema.parse(await c.req.json().catch(() => ({})));
     const result = await backfillScannerCacheRsCache(c.env, payload);
