@@ -4,6 +4,7 @@ import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
 import { isUsMarketTradingDay, latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
+import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import {
   aggregateDailyMarketFeatures,
@@ -27,6 +28,7 @@ import {
   type OverviewCurrentData,
 } from "./overview-current-data";
 import type { BarFreshnessStatus, Env, OverviewSeriesStatus, QuoteFreshnessStatus, RankingWindow, SnapshotEmptyResponse, SnapshotReadyResponse, SnapshotResponse } from "./types";
+import { classifyPostCloseError, isPostCloseBarsWindowOpen, loadWorkerScheduleSettings } from "./worker-schedule-service";
 
 const uid = () => crypto.randomUUID();
 
@@ -549,6 +551,10 @@ export async function refreshAndStoreOverviewSnapshot(
   currentCoveragePct: number;
   historyExactCoveragePct: number;
   historyUsableCoveragePct: number;
+  canonicalSession: string;
+  historyRefreshStatus: "not-needed" | "not-yet-eligible" | "completed" | "retrying" | "failed";
+  historyErrorCode: string | null;
+  historyNextAttemptAt: string | null;
 }> {
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
@@ -557,34 +563,59 @@ export async function refreshAndStoreOverviewSnapshot(
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - 21 * 86400_000));
   let fetchedRows = 0;
   let writtenRows = 0;
+  let historyRefreshStatus: "not-needed" | "not-yet-eligible" | "completed" | "retrying" | "failed" = "not-needed";
+  let historyErrorCode: string | null = null;
+  let historyNextAttemptAt: string | null = null;
   let freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
   const missingTickers = await loadOverviewFreshnessMissingTickers(env, config, asOfDate);
+  const missingTickerSet = new Set(missingTickers.map((ticker) => ticker.toUpperCase()));
   const boundedRefreshTickers = options.refreshAllOverviewExactBars
     ? overviewConfigTickers(config)
-      .filter((ticker) => overviewFreshnessTickersFromConfig(config).some((row) => row.ticker === ticker && row.eligible))
+      .filter((ticker) => (
+        missingTickerSet.has(ticker.toUpperCase())
+        && overviewFreshnessTickersFromConfig(config).some((row) => row.ticker === ticker && row.eligible)
+      ))
       .slice(0, 4 * 80)
     : Array.from(new Set([
       ...missingTickers.filter((ticker) => criticalTickerSet.has(ticker.toUpperCase())),
       ...missingTickers,
     ])).slice(0, 80);
   if (boundedRefreshTickers.length > 0) {
-    try {
-      const provider = getProvider(env, { fallbackEnabled: false });
-      const refresh = await refreshDailyBarsIncremental(env, {
-        provider,
-        tickers: boundedRefreshTickers,
-        startDate: options.refreshAllOverviewExactBars ? asOfDate : startDate,
-        endDate: asOfDate,
-        replaceExisting: true,
-        providerBatchSize: 80,
-        target: "market",
-        mirrorLatestToLegacy: true,
-      });
-      fetchedRows += refresh.fetchedRows;
-      writtenRows += refresh.writtenRows;
-      freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
-    } catch (error) {
-      console.error("overview bounded daily-bar refresh failed", { tickers: boundedRefreshTickers.length, error });
+    const now = new Date();
+    const settings = await loadWorkerScheduleSettings(env);
+    await ensureMarketCalendarCoverage(env, asOfDate).catch(() => undefined);
+    const storedSession = await loadStoredMarketSession(env, asOfDate).catch(() => null);
+    if (!isPostCloseBarsWindowOpen(now, asOfDate, settings.postCloseBarsOffsetMinutes, storedSession?.closeAt)) {
+      historyRefreshStatus = "not-yet-eligible";
+      historyNextAttemptAt = null;
+    } else {
+      try {
+        const provider = getProvider(env, { fallbackEnabled: false });
+        const refresh = await refreshDailyBarsIncremental(env, {
+          provider,
+          tickers: boundedRefreshTickers,
+          startDate: options.refreshAllOverviewExactBars ? asOfDate : startDate,
+          endDate: asOfDate,
+          replaceExisting: true,
+          providerBatchSize: 80,
+          target: "market",
+          mirrorLatestToLegacy: true,
+        });
+        fetchedRows += refresh.fetchedRows;
+        writtenRows += refresh.writtenRows;
+        freshness = await computeOverviewFreshnessDiagnosticsForConfig(env, config, asOfDate);
+        historyRefreshStatus = "completed";
+      } catch (error) {
+        historyErrorCode = classifyPostCloseError(error);
+        historyRefreshStatus = historyErrorCode === "auth-blocked" ? "failed" : "retrying";
+        historyNextAttemptAt = historyRefreshStatus === "retrying"
+          ? new Date(now.getTime() + (historyErrorCode === "data-not-ready" ? 5 : 15) * 60_000).toISOString()
+          : null;
+        console.error("overview bounded daily-bar refresh failed", {
+          tickers: boundedRefreshTickers.length,
+          errorCode: historyErrorCode,
+        });
+      }
     }
   }
 
@@ -596,6 +627,9 @@ export async function refreshAndStoreOverviewSnapshot(
         force: options.forceCurrentData === true,
         forceCompleted: storedCurrentRows.size === 0,
       });
+      if (options.forceCurrentData && currentRefresh?.status === "running") {
+        throw new OverviewCurrentRefreshPendingError();
+      }
       if (options.forceCurrentData && !currentRefresh) {
         throw new Error("A forced overview current-data refresh could not be claimed.");
       }
@@ -609,7 +643,15 @@ export async function refreshAndStoreOverviewSnapshot(
     includeBreadth: false,
     freshnessDiagnostics: freshness,
   });
-  return { ...result, fetchedRows, writtenRows };
+  return {
+    ...result,
+    fetchedRows,
+    writtenRows,
+    canonicalSession: asOfDate,
+    historyRefreshStatus,
+    historyErrorCode,
+    historyNextAttemptAt,
+  };
 }
 
 export function freshnessDiagnosticsFromSnapshotMeta(meta: SnapshotMetaRow | null | undefined, fallbackExpectedAsOfDate: string): OverviewFreshnessDiagnostics | null {
@@ -1169,6 +1211,15 @@ export function resolveOverviewSeriesFallback(
       ? `Using the latest valid stored chart series through ${fallbackSeriesDate} while canonical SIP history catches up.`
       : "Using the latest valid stored chart series while canonical SIP history catches up.",
   };
+}
+
+export class OverviewCurrentRefreshPendingError extends Error {
+  readonly retryAfterMs = 5_000;
+
+  constructor() {
+    super("Overview current-data refresh is continuing in bounded background slices.");
+    this.name = "OverviewCurrentRefreshPendingError";
+  }
 }
 
 async function loadLatestValidOverviewSeries(

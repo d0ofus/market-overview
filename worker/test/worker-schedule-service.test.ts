@@ -155,6 +155,7 @@ function postCloseJob(overrides: Partial<PostCloseDailyBarRefreshJob> = {}): Pos
     sourceProvider: "alpaca",
     sourceFeed: "sip",
     adjustment: "split",
+    requestEnd: null,
     startedAt: "2026-07-16T21:00:00.000Z",
     updatedAt: "2026-07-16T21:00:00.000Z",
     completedAt: null,
@@ -201,6 +202,16 @@ describe("post-close budget protection", () => {
       settings,
       job: postCloseJob({ status: "failed", errorCode: "provider-error", nextAttemptAt: "2026-07-16T21:16:00.000Z" }),
     })).toMatchObject({ protect: true, reason: "actionable-job" });
+    expect(resolvePostCloseBudgetProtection({
+      now,
+      expectedTradingDate,
+      settings,
+      job: postCloseJob({
+        status: "failed",
+        errorCode: "auth-blocked",
+        error: "subscription does not permit querying recent SIP data",
+      }),
+    })).toMatchObject({ protect: true, reason: "data-not-ready" });
   });
 
   it("does not protect disabled, pre-window, completed, auth-blocked, or delayed work", () => {
@@ -316,7 +327,7 @@ describe("worker schedule service", () => {
     expect(settings.cronExpression).toBe("*/15 * * * *");
     expect(settings.rsBackgroundEnabled).toBe(true);
     expect(settings.rsBackgroundBatchSize).toBe(50);
-    expect(settings.postCloseBarsOffsetMinutes).toBe(20);
+    expect(settings.postCloseBarsOffsetMinutes).toBe(35);
   });
 
   it("persists worker schedule updates", async () => {
@@ -378,6 +389,13 @@ describe("post-close daily bar universe", () => {
       batchSize: 80,
       maxBatches: 4,
     });
+  });
+
+  it("opens normal and early-close sessions 35 minutes after the exchange close", () => {
+    expect(isPostCloseBarsWindowOpen(new Date("2026-07-21T20:34:00Z"), "2026-07-21", 35)).toBe(false);
+    expect(isPostCloseBarsWindowOpen(new Date("2026-07-21T20:35:00Z"), "2026-07-21", 35)).toBe(true);
+    expect(isPostCloseBarsWindowOpen(new Date("2026-07-03T17:34:00Z"), "2026-07-03", 35, "13:00")).toBe(false);
+    expect(isPostCloseBarsWindowOpen(new Date("2026-07-03T17:35:00Z"), "2026-07-03", 35, "13:00")).toBe(true);
   });
 
   it("reserves one bounded history slice alongside exact-session batches", () => {
@@ -452,6 +470,9 @@ describe("post-close daily bar universe", () => {
 
   it("classifies transient limits separately from authentication failures", () => {
     expect(classifyPostCloseError(new Error("Alpaca bars fetch failed (429)"))).toBe("rate-limited");
+    expect(classifyPostCloseError(new Error(
+      'Alpaca bars fetch failed (403): {"message":"subscription does not permit querying recent SIP data"}',
+    ))).toBe("data-not-ready");
     expect(classifyPostCloseError(new Error("Alpaca bars fetch failed (403)"))).toBe("auth-blocked");
     expect(classifyPostCloseError(new Error("network timeout"))).toBe("provider-error");
   });

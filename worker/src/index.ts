@@ -9,6 +9,7 @@ import {
   emptySnapshotResponse,
   loadSnapshot,
   minBreadthCoveragePct,
+  OverviewCurrentRefreshPendingError,
   OverviewFreshnessError,
   publishReadyBreadthUniverses,
   recomputeBreadthFromStoredBars,
@@ -19,6 +20,7 @@ import {
 import { refreshOverviewPageData } from "./overview-refresh-service";
 import {
   doesOverviewCurrentRowNeedRepair,
+  isOverviewCurrentRefreshPublicationReady,
   isOverviewCurrentRowComplete,
   loadOverviewCurrentData,
   maybeRunScheduledOverviewCurrentRefresh,
@@ -216,6 +218,7 @@ import {
   claimNextRefreshJob,
   cleanupRefreshJobs,
   completeRefreshJob,
+  deferRefreshJob,
   failRefreshJob,
   hasClaimableRefreshJob,
   loadRefreshJob,
@@ -1342,6 +1345,10 @@ async function refreshPageScopedData(
   currentCoveragePct?: number;
   historyExactCoveragePct?: number;
   historyUsableCoveragePct?: number;
+  canonicalSession?: string;
+  historyRefreshStatus?: string;
+  historyErrorCode?: string | null;
+  historyNextAttemptAt?: string | null;
   reportId?: string;
   sessionDate?: string;
 }> {
@@ -1522,6 +1529,10 @@ async function processClaimedRefreshJob(
     const result = await refreshPageScopedData(env, job.page as RefreshPage, job.ticker);
     await completeRefreshJob(env, job, result);
   } catch (error) {
+    if (error instanceof OverviewCurrentRefreshPendingError) {
+      await deferRefreshJob(env, job, error.retryAfterMs);
+      return;
+    }
     await failRefreshJob(env, job, error);
   }
 }
@@ -6922,6 +6933,10 @@ app.post("/api/admin/refresh-page", async (c) => {
       currentCoveragePct: job.result?.currentCoveragePct,
       historyExactCoveragePct: job.result?.historyExactCoveragePct,
       historyUsableCoveragePct: job.result?.historyUsableCoveragePct,
+      canonicalSession: job.result?.canonicalSession,
+      historyRefreshStatus: job.result?.historyRefreshStatus,
+      historyErrorCode: job.result?.historyErrorCode,
+      historyNextAttemptAt: job.result?.historyNextAttemptAt,
       reportId: job.result?.reportId,
       sessionDate: job.result?.sessionDate,
     }, 202);
@@ -6961,6 +6976,10 @@ app.get("/api/admin/refresh-jobs/:jobId", async (c) => {
     currentCoveragePct: job.result?.currentCoveragePct,
     historyExactCoveragePct: job.result?.historyExactCoveragePct,
     historyUsableCoveragePct: job.result?.historyUsableCoveragePct,
+    canonicalSession: job.result?.canonicalSession,
+    historyRefreshStatus: job.result?.historyRefreshStatus,
+    historyErrorCode: job.result?.historyErrorCode,
+    historyNextAttemptAt: job.result?.historyNextAttemptAt,
     reportId: job.result?.reportId,
     sessionDate: job.result?.sessionDate,
   });
@@ -7404,7 +7423,7 @@ async function syncMonthlyEtfSlice(env: Env, settings?: CronJobValues): Promise<
 function isOverviewGenerationSlot(now: Date): boolean {
   const ny = zonedParts(now, "America/New_York");
   return ny.minutesOfDay >= 4 * 60
-    && ny.minutesOfDay <= 16 * 60 + 30
+    && ny.minutesOfDay <= 16 * 60 + 45
     && ny.minutesOfDay % 15 === 0;
 }
 
@@ -7575,7 +7594,7 @@ export default {
       const postCloseDailyBarsBudgetUnits = 24;
       const canFitPostCloseDailyBars = budget.canClaim(postCloseDailyBarsBudgetUnits);
       const canFitBothCriticalJobs = budget.canClaim(overviewCurrentBudgetUnits + postCloseDailyBarsBudgetUnits);
-      const postCloseMetadata = {
+      const postCloseMetadata: ScheduledJobMetadata = {
         expectedTradingDate: postClosePlan.expectedTradingDate,
         postCloseReason: postClosePlan.reason,
       };
@@ -7590,7 +7609,30 @@ export default {
         await runBudgeted(
           "post-close-daily-bars",
           postCloseDailyBarsBudgetUnits,
-          () => maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule).then(() => undefined),
+          async () => {
+            const result = await maybeRunScheduledPostCloseDailyBarRefresh(env, now, workerSchedule);
+            if (result) {
+              Object.assign(postCloseMetadata, {
+                jobId: result.id,
+                sessionDate: result.tradingDate,
+                feed: result.sourceFeed,
+                requestEnd: result.requestEnd,
+                exactProcessedTickers: result.currentDateTickers,
+                exactRemainingTickers: result.missingCurrentDateTickers,
+                exactCoveragePct: result.currentDateCoveragePct,
+                rowsFetched: result.fetchedRows,
+                rowsWritten: result.writtenRows,
+                errorCode: result.errorCode,
+                nextAttemptAt: result.nextAttemptAt,
+                stopReason: result.status,
+              });
+            }
+            if (result?.status === "failed") {
+              throw new Error(
+                `Post-close daily bars failed for ${result.tradingDate}: ${result.errorCode ?? "unknown-error"}.`,
+              );
+            }
+          },
           postCloseMetadata,
         );
       } else {
@@ -7619,16 +7661,25 @@ export default {
         () => publishScheduledBreadthIfReady(env, latestUsMarketSessionAsOfDate(now)).then(() => undefined),
       );
       if (isOverviewGenerationSlot(now)) {
-        await runBudgeted("overview-snapshot", 10, async () => {
-          try {
-            await computeAndStoreSnapshot(env, latestUsMarketSessionAsOfDate(now), "default", {
-              includeBreadth: false,
-            });
-          } catch (error) {
-            if (!(error instanceof OverviewFreshnessError)) throw error;
-            console.warn("scheduled overview candidate retained last-ready generation", error.diagnostics);
-          }
-        });
+        const overviewSessionDate = latestUsMarketSessionAsOfDate(now);
+        if (!await isOverviewCurrentRefreshPublicationReady(env, "default", overviewSessionDate)) {
+          await auditSkipped(
+            "overview-snapshot",
+            "Skipped until the bounded current-data refresh cycle completes.",
+            { sessionDate: overviewSessionDate },
+          );
+        } else {
+          await runBudgeted("overview-snapshot", 10, async () => {
+            try {
+              await computeAndStoreSnapshot(env, overviewSessionDate, "default", {
+                includeBreadth: false,
+              });
+            } catch (error) {
+              if (!(error instanceof OverviewFreshnessError)) throw error;
+              console.warn("scheduled overview candidate retained last-ready generation", error.diagnostics);
+            }
+          });
+        }
       }
       if (isPeerMetricSlot(now)) {
         await runBudgeted("peer-metric-slice", 6, () => refreshScheduledPeerMetricSlice(env).then(() => undefined));

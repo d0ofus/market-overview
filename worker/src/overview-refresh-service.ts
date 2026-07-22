@@ -9,6 +9,10 @@ export type OverviewPageRefreshResult = {
   currentCoveragePct?: number;
   historyExactCoveragePct?: number;
   historyUsableCoveragePct?: number;
+  canonicalSession?: string;
+  historyRefreshStatus?: string;
+  historyErrorCode?: string | null;
+  historyNextAttemptAt?: string | null;
 };
 
 export type OverviewPageRefreshDeps = {
@@ -26,6 +30,10 @@ export type OverviewPageRefreshDeps = {
     historyUsableCoveragePct: number;
     fetchedRows?: number;
     writtenRows?: number;
+    canonicalSession?: string;
+    historyRefreshStatus?: string;
+    historyErrorCode?: string | null;
+    historyNextAttemptAt?: string | null;
     freshness: {
       status: string;
       currentCount: number;
@@ -52,7 +60,7 @@ export async function refreshOverviewPageData(
     ? ""
     : " Broad post-close daily-bar catch-up will continue through the scheduled worker job.";
   const publicationStatus = result.currentCoveragePct >= 95 ? "fresh" : "degraded";
-  return {
+  const response: OverviewPageRefreshResult = {
     page: "overview",
     refreshedTickers: tickers.length,
     generationId: result.snapshotId,
@@ -60,6 +68,13 @@ export async function refreshOverviewPageData(
     currentCoveragePct: result.currentCoveragePct,
     historyExactCoveragePct: result.historyExactCoveragePct,
     historyUsableCoveragePct: result.historyUsableCoveragePct,
+    canonicalSession: result.canonicalSession ?? result.asOfDate,
     notes: `Published overview generation ${result.snapshotId} with ${publicationStatus} current-data coverage (${result.currentCoveragePct.toFixed(1)}%). Exact-session history is ${result.historyExactCoveragePct.toFixed(1)}% and usable history is ${result.historyUsableCoveragePct.toFixed(1)}%.${catchUpSummary}${rowSummary}`,
   };
+  if (result.historyRefreshStatus) {
+    response.historyRefreshStatus = result.historyRefreshStatus;
+    response.historyErrorCode = result.historyErrorCode ?? null;
+    response.historyNextAttemptAt = result.historyNextAttemptAt ?? null;
+  }
+  return response;
 }

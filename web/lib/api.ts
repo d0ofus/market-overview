@@ -4848,6 +4848,10 @@ export type RefreshPageJobResponse = {
   currentCoveragePct?: number;
   historyExactCoveragePct?: number;
   historyUsableCoveragePct?: number;
+  canonicalSession?: string;
+  historyRefreshStatus?: string;
+  historyErrorCode?: string | null;
+  historyNextAttemptAt?: string | null;
   reportId?: string;
   sessionDate?: string;
 };

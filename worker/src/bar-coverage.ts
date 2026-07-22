@@ -37,6 +37,13 @@ export function countExpectedUsMarketSessions(startDate: string, endDate: string
   return count;
 }
 
+export function firstExpectedUsMarketSession(startDate: string, endDate: string): string | null {
+  for (let cursor = startDate; cursor <= endDate; cursor = nextIsoDate(cursor)) {
+    if (isUsMarketTradingDay(cursor)) return cursor;
+  }
+  return null;
+}
+
 export function coverageSatisfiesHistory(coverage: BarCoverage | undefined): boolean {
   if (coverage?.status === "complete") return true;
   // A full-range provider request may legitimately begin after requestedStart
@@ -88,6 +95,7 @@ export async function verifyMarketBarCoverage(
       const observedEnd = row?.observedEnd ?? null;
       const observedSessions = Math.max(0, Number(row?.observedSessions ?? 0));
       const expectedSessions = countExpectedUsMarketSessions(input.requestedStart, input.throughDate);
+      const expectedStart = firstExpectedUsMarketSession(input.requestedStart, input.throughDate);
       const expectedObservedSessions = observedStart
         ? countExpectedUsMarketSessions(observedStart, input.throughDate)
         : expectedSessions;
@@ -96,7 +104,7 @@ export async function verifyMarketBarCoverage(
       let status: BarCoverageStatus = "complete";
       if (!observedStart || !observedEnd || observedEnd < input.throughDate) status = "missing";
       else if (internalMissingSessions > 0) status = "gaps";
-      else if (observedStart > input.requestedStart) status = "short-history";
+      else if (expectedStart && observedStart > expectedStart) status = "short-history";
 
       coverageByTicker.set(ticker, {
         ticker,

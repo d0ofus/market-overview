@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   countExpectedUsMarketSessions,
   coverageSatisfiesHistory,
+  firstExpectedUsMarketSession,
 } from "../src/bar-coverage";
 
 describe("canonical bar coverage", () => {
   it("counts market sessions rather than calendar days", () => {
     expect(countExpectedUsMarketSessions("2026-07-02", "2026-07-06")).toBe(2);
+  });
+
+  it("uses the first expected trading session when a requested range starts on a weekend", () => {
+    expect(firstExpectedUsMarketSession("2026-04-05", "2026-04-10")).toBe("2026-04-06");
   });
 
   it("does not treat internal gaps as complete history", () => {

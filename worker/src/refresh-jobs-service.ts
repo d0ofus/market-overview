@@ -27,6 +27,10 @@ export type RefreshJob = {
     historyUsableCoveragePct?: number;
     reportId?: string;
     sessionDate?: string;
+    canonicalSession?: string;
+    historyRefreshStatus?: string;
+    historyErrorCode?: string | null;
+    historyNextAttemptAt?: string | null;
   } | null;
   error: string | null;
   createdAt: string;
@@ -214,6 +218,22 @@ export async function completeRefreshJob(
             completed_at = ?, updated_at = ?
       WHERE id = ? AND status = 'running' AND lease_token = ?`,
   ).bind(JSON.stringify(result), now.toISOString(), now.toISOString(), job.id, job.leaseToken).run();
+}
+
+export async function deferRefreshJob(
+  env: Env,
+  job: RefreshJob,
+  delayMs = 5_000,
+  now = new Date(),
+): Promise<void> {
+  const nextAttemptAt = new Date(now.getTime() + Math.max(1_000, delayMs)).toISOString();
+  await env.DB.prepare(
+    `UPDATE refresh_jobs
+        SET status = 'queued', attempt_count = MAX(0, attempt_count - 1),
+            error = NULL, lease_token = NULL, lease_expires_at = NULL,
+            next_attempt_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'running' AND lease_token = ?`,
+  ).bind(nextAttemptAt, now.toISOString(), job.id, job.leaseToken).run();
 }
 
 export async function failRefreshJob(

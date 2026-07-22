@@ -7,7 +7,9 @@ import {
   isOverviewCurrentRowPublishable,
   isOverviewCurrentRowStructurallyUnsupported,
   OVERVIEW_CURRENT_COLUMNS,
+  overviewCurrentRefreshStateAllowsPublication,
   parseTradingViewOverviewRow,
+  planOverviewCurrentRefreshSlice,
   resolveOverviewCurrentRow,
 } from "../src/overview-current-data";
 
@@ -37,11 +39,40 @@ function tradingViewData(overrides: Record<string, unknown> = {}): unknown[] {
 }
 
 describe("overview current refresh cadence", () => {
-  it("opens only during the 04:00-16:30 New York snapshot window", () => {
+  it("opens only during the 04:00-16:45 New York snapshot window", () => {
     expect(currentRefreshWindowOpen(new Date("2026-07-21T07:59:00.000Z"))).toBe(false);
     expect(currentRefreshWindowOpen(new Date("2026-07-21T08:00:00.000Z"))).toBe(true);
     expect(currentRefreshWindowOpen(new Date("2026-07-21T20:30:00.000Z"))).toBe(true);
-    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:31:00.000Z"))).toBe(false);
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:45:00.000Z"))).toBe(true);
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:46:00.000Z"))).toBe(false);
+  });
+
+  it("advances a 225-ticker refresh in bounded 80-ticker slices", () => {
+    expect(planOverviewCurrentRefreshSlice(225, 0)).toEqual({ start: 0, end: 80, completeAfterSlice: false });
+    expect(planOverviewCurrentRefreshSlice(225, 80)).toEqual({ start: 80, end: 160, completeAfterSlice: false });
+    expect(planOverviewCurrentRefreshSlice(225, 160)).toEqual({ start: 160, end: 225, completeAfterSlice: true });
+  });
+
+  it("blocks publication only while a resumable current refresh cycle is incomplete", () => {
+    expect(overviewCurrentRefreshStateAllowsPublication(null)).toBe(true);
+    expect(overviewCurrentRefreshStateAllowsPublication({
+      status: "retrying",
+      cycleId: null,
+      processedTickers: 0,
+      requestedTickers: 225,
+    })).toBe(true);
+    expect(overviewCurrentRefreshStateAllowsPublication({
+      status: "running",
+      cycleId: "cycle-1",
+      processedTickers: 160,
+      requestedTickers: 225,
+    })).toBe(false);
+    expect(overviewCurrentRefreshStateAllowsPublication({
+      status: "retrying",
+      cycleId: "cycle-1",
+      processedTickers: 225,
+      requestedTickers: 225,
+    })).toBe(true);
   });
 });
 

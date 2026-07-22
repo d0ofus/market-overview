@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { claimNextRefreshJob, claimRefreshJobById, isRefreshJobClaimable, refreshJobIdempotencyKey } from "../src/refresh-jobs-service";
+import {
+  claimNextRefreshJob,
+  claimRefreshJobById,
+  deferRefreshJob,
+  isRefreshJobClaimable,
+  refreshJobIdempotencyKey,
+} from "../src/refresh-jobs-service";
 import type { Env } from "../src/types";
 
 describe("refresh job leasing", () => {
@@ -66,5 +72,42 @@ describe("refresh job leasing", () => {
     expect(capturedArgs[1]).toBe("2026-07-21T01:09:00.000Z");
     expect(capturedArgs[2]).toBe("2026-07-21T01:07:00.000Z");
     expect(capturedArgs).toContain("overview-job");
+  });
+
+  it("defers a bounded continuation without consuming the retry allowance", async () => {
+    let capturedSql = "";
+    let capturedArgs: unknown[] = [];
+    const db = {
+      prepare(sql: string) {
+        capturedSql = sql;
+        return {
+          bind(...args: unknown[]) {
+            capturedArgs = args;
+            return { async run() { return { meta: { changes: 1 } }; } };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    await deferRefreshJob({ DB: db } as Env, {
+      id: "overview-job",
+      page: "overview",
+      ticker: null,
+      status: "running",
+      attemptCount: 2,
+      nextAttemptAt: null,
+      leaseToken: "lease-token",
+      leaseExpiresAt: "2026-07-21T01:09:00.000Z",
+      result: null,
+      error: null,
+      createdAt: "2026-07-21T01:00:00.000Z",
+      completedAt: null,
+      updatedAt: "2026-07-21T01:05:00.000Z",
+    }, 5_000, new Date("2026-07-21T01:05:00.000Z"));
+
+    expect(capturedSql).toContain("attempt_count = MAX(0, attempt_count - 1)");
+    expect(capturedSql).toContain("status = 'queued'");
+    expect(capturedArgs[0]).toBe("2026-07-21T01:05:05.000Z");
+    expect(capturedArgs).toContain("lease-token");
   });
 });

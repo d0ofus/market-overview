@@ -229,6 +229,7 @@ export type PostCloseDailyBarRefreshJob = {
   sourceProvider: string;
   sourceFeed: string;
   adjustment: string;
+  requestEnd: string | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;

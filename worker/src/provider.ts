@@ -108,6 +108,23 @@ function latestBarDate(bars: DailyBar[]): string | null {
   return latest;
 }
 
+const ALPACA_BASIC_SIP_DELAY_MS = 16 * 60_000;
+
+export function alpacaHistoricalRequestEnd(
+  endDate: string,
+  feed: string,
+  now = new Date(),
+): string {
+  const requestedDayEnd = new Date(`${endDate}T23:59:59Z`);
+  if (feed.trim().toLowerCase() !== "sip" || requestedDayEnd.getTime() < now.getTime()) {
+    return requestedDayEnd.toISOString();
+  }
+  return new Date(Math.min(
+    requestedDayEnd.getTime(),
+    now.getTime() - ALPACA_BASIC_SIP_DELAY_MS,
+  )).toISOString();
+}
+
 const YAHOO_QUOTE_ALIASES: Record<string, string> = {
   VIX: "^VIX",
   VXN: "^VXN",
@@ -903,20 +920,33 @@ class AlpacaProvider implements MarketDataProvider {
     throw lastError instanceof Error ? lastError : new Error("Alpaca provider request failed after retries.");
   }
 
-  private async fetchChunkWithIsolation(tickers: string[], startDate: string, endDate: string, feed = this.dailyFeed): Promise<DailyBar[]> {
+  private async fetchChunkWithIsolation(
+    tickers: string[],
+    startDate: string,
+    endDate: string,
+    feed = this.dailyFeed,
+    requestEnd?: string,
+  ): Promise<DailyBar[]> {
     if (tickers.length === 0) return [];
-    return await this.fetchChunk(tickers, startDate, endDate, feed);
+    return await this.fetchChunk(tickers, startDate, endDate, feed, requestEnd);
   }
 
-  private async fetchChunk(tickers: string[], startDate: string, endDate: string, feed = this.dailyFeed): Promise<DailyBar[]> {
+  private async fetchChunk(
+    tickers: string[],
+    startDate: string,
+    endDate: string,
+    feed = this.dailyFeed,
+    fixedRequestEnd?: string,
+  ): Promise<DailyBar[]> {
     const out: DailyBar[] = [];
     let pageToken: string | undefined;
+    const requestEnd = fixedRequestEnd ?? alpacaHistoricalRequestEnd(endDate, feed);
     do {
       const params = new URLSearchParams({
         timeframe: "1Day",
         symbols: tickers.join(","),
         start: `${startDate}T00:00:00Z`,
-        end: `${endDate}T23:59:59Z`,
+        end: requestEnd,
         adjustment: this.dailyAdjustment,
         sort: "asc",
         limit: "10000",
@@ -971,8 +1001,9 @@ class AlpacaProvider implements MarketDataProvider {
     const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase())));
     const batches = this.chunk(unique, 80);
     const all: DailyBar[] = [];
+    const dailyRequestEnd = alpacaHistoricalRequestEnd(endDate, this.dailyFeed);
     for (const batch of batches) {
-      const rows = await this.fetchChunkWithIsolation(batch, startDate, endDate);
+      const rows = await this.fetchChunkWithIsolation(batch, startDate, endDate, this.dailyFeed, dailyRequestEnd);
       all.push(...rows);
 
       const latestByTicker = new Map<string, string>();

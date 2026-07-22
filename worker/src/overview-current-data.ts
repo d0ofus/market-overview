@@ -9,8 +9,10 @@ import type { Env, OverviewCurrentProviderStatus as SharedOverviewCurrentProvide
 const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 const TV_REQUEST_CHUNK_SIZE = 100;
 const DB_CHUNK_SIZE = 80;
-const CURRENT_REFRESH_OFFSET_MINUTES = 30;
+const CURRENT_REFRESH_OFFSET_MINUTES = 45;
 const CURRENT_RETRY_MINUTES = 15;
+const CURRENT_REFRESH_BATCH_SIZE = 80;
+const CURRENT_REFRESH_LEASE_MS = 4 * 60_000;
 const MAX_ALPACA_SNAPSHOT_BATCHES_PER_REFRESH = 4;
 const ALPACA_SNAPSHOT_BATCH_SIZE = 80;
 const TV_PREFIXES = ["NASDAQ", "NYSE", "AMEX", "CBOE", "INDEX", "TVC"] as const;
@@ -103,7 +105,7 @@ export type OverviewCurrentRefreshResult = {
   requestedTickers: number;
   freshTickers: number;
   unavailableTickers: number;
-  status: "completed" | "retrying";
+  status: "completed" | "retrying" | "running";
   nextAttemptAt: string | null;
   rows: OverviewCurrentData[];
 };
@@ -325,10 +327,26 @@ export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
        fresh_tickers INTEGER NOT NULL DEFAULT 0,
        unavailable_tickers INTEGER NOT NULL DEFAULT 0,
        last_error TEXT,
+       last_error_code TEXT,
+       cycle_id TEXT,
+       cycle_started_at TEXT,
+       cursor_offset INTEGER NOT NULL DEFAULT 0,
+       processed_tickers INTEGER NOT NULL DEFAULT 0,
+       lease_token TEXT,
+       lease_expires_at TEXT,
        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
        completed_at TEXT,
        PRIMARY KEY (config_id, session_date)
+     )`,
+  ).run();
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS overview_provider_catalog_cache (
+       provider_key TEXT NOT NULL,
+       catalog_date TEXT NOT NULL,
+       symbols_json TEXT NOT NULL,
+       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (provider_key, catalog_date)
      )`,
   ).run();
   await db.prepare(
@@ -691,33 +709,57 @@ async function syncAlpacaAssetSupport(
   if (diagnostics.size === tickers.length) return diagnostics;
 
   try {
-    const baseUrl = (env.ALPACA_TRADING_BASE_URL ?? "https://paper-api.alpaca.markets").replace(/\/$/, "");
-    const response = await meteredFetch(env, `${baseUrl}/v2/assets?status=active&asset_class=us_equity`, {
-      headers: {
-        "APCA-API-KEY-ID": env.ALPACA_API_KEY ?? "",
-        "APCA-API-SECRET-KEY": env.ALPACA_API_SECRET ?? "",
-        "User-Agent": "market-command-centre/1.0",
-      },
-    }, {
-      providerKey: "alpaca",
-      endpointKey: "active-assets",
-      caller: "overview-current",
-      symbolCount: tickers.length,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Alpaca asset catalog failed (${response.status}): ${body.slice(0, 180)}`);
+    const storedCatalog = await db.prepare(
+      `SELECT symbols_json as symbolsJson
+       FROM overview_provider_catalog_cache
+       WHERE provider_key = 'alpaca' AND catalog_date = ?
+       LIMIT 1`,
+    ).bind(today).first<{ symbolsJson: string }>();
+    let activeSymbols: Set<string> | null = null;
+    if (storedCatalog?.symbolsJson) {
+      try {
+        const parsed = JSON.parse(storedCatalog.symbolsJson) as unknown;
+        if (Array.isArray(parsed)) {
+          activeSymbols = new Set(parsed.map((value) => String(value).trim().toUpperCase()).filter(Boolean));
+        }
+      } catch {
+        activeSymbols = null;
+      }
     }
-    const assets = await response.json() as Array<{ symbol?: string; tradable?: boolean; status?: string }>;
-    if (!Array.isArray(assets)) throw new Error("Alpaca asset catalog returned an invalid response.");
-    const activeSymbols = new Set(
-      assets
+    if (!activeSymbols) {
+      const baseUrl = (env.ALPACA_TRADING_BASE_URL ?? "https://paper-api.alpaca.markets").replace(/\/$/, "");
+      const response = await meteredFetch(env, `${baseUrl}/v2/assets?status=active&asset_class=us_equity`, {
+        headers: {
+          "APCA-API-KEY-ID": env.ALPACA_API_KEY ?? "",
+          "APCA-API-SECRET-KEY": env.ALPACA_API_SECRET ?? "",
+          "User-Agent": "market-command-centre/1.0",
+        },
+      }, {
+        providerKey: "alpaca",
+        endpointKey: "active-assets",
+        caller: "overview-current",
+        symbolCount: tickers.length,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Alpaca asset catalog failed (${response.status}): ${body.slice(0, 180)}`);
+      }
+      const assets = await response.json() as Array<{ symbol?: string; tradable?: boolean; status?: string }>;
+      if (!Array.isArray(assets)) throw new Error("Alpaca asset catalog returned an invalid response.");
+      activeSymbols = new Set(assets
         .filter((asset) => asset.status === "active" && asset.tradable !== false)
         .map((asset) => String(asset.symbol ?? "").trim().toUpperCase())
-        .filter(Boolean),
-    );
+        .filter(Boolean));
+      await db.prepare(
+        `INSERT INTO overview_provider_catalog_cache (provider_key, catalog_date, symbols_json, fetched_at)
+         VALUES ('alpaca', ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(provider_key, catalog_date) DO UPDATE SET
+           symbols_json = excluded.symbols_json,
+           fetched_at = CURRENT_TIMESTAMP`,
+      ).bind(today, JSON.stringify(Array.from(activeSymbols).sort())).run();
+    }
     const statements = tickers.map((ticker) => {
-      const supported = activeSymbols.has(ticker);
+      const supported = activeSymbols?.has(ticker) === true;
       const diagnostic: OverviewProviderDiagnostic = {
         status: supported ? "supported" : "unsupported",
         reason: supported
@@ -1043,6 +1085,17 @@ export function isOverviewCurrentRowComplete(row: OverviewCurrentData): boolean 
   return OVERVIEW_REQUIRED_CURRENT_FIELDS.every((field) => Boolean(row.fieldSources[field]));
 }
 
+export function planOverviewCurrentRefreshSlice(totalTickers: number, cursorOffset: number): {
+  start: number;
+  end: number;
+  completeAfterSlice: boolean;
+} {
+  const total = Math.max(0, Math.trunc(totalTickers));
+  const start = Math.min(total, Math.max(0, Math.trunc(cursorOffset)));
+  const end = Math.min(total, start + CURRENT_REFRESH_BATCH_SIZE);
+  return { start, end, completeAfterSlice: end >= total };
+}
+
 export function isOverviewCurrentRowPublishable(
   row: OverviewCurrentData,
   now?: Date,
@@ -1192,57 +1245,183 @@ async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurr
   for (const statementChunk of chunk(symbolStatements, 100)) await db.batch(statementChunk);
 }
 
+type OverviewCurrentRefreshJobState = {
+  status: string;
+  attemptCount: number;
+  nextAttemptAt: string | null;
+  updatedAt: string | null;
+  cycleId: string | null;
+  cycleStartedAt: string | null;
+  cursorOffset: number;
+  processedTickers: number;
+  requestedTickers: number;
+  freshTickers: number;
+  unavailableTickers: number;
+  leaseExpiresAt: string | null;
+};
+
+async function loadOverviewCurrentRefreshJob(
+  env: Env,
+  configId: string,
+  sessionDate: string,
+): Promise<OverviewCurrentRefreshJobState | null> {
+  return await getMarketDataDb(env).prepare(
+    `SELECT status, attempt_count as attemptCount, next_attempt_at as nextAttemptAt,
+            updated_at as updatedAt, cycle_id as cycleId, cycle_started_at as cycleStartedAt,
+            cursor_offset as cursorOffset, processed_tickers as processedTickers,
+            requested_tickers as requestedTickers,
+            fresh_tickers as freshTickers, unavailable_tickers as unavailableTickers,
+            lease_expires_at as leaseExpiresAt
+     FROM overview_current_refresh_jobs
+     WHERE config_id = ? AND session_date = ?`,
+  ).bind(configId, sessionDate).first<OverviewCurrentRefreshJobState>();
+}
+
+export function overviewCurrentRefreshStateAllowsPublication(
+  state: Pick<OverviewCurrentRefreshJobState, "status" | "cycleId" | "processedTickers" | "requestedTickers"> | null,
+): boolean {
+  if (!state?.cycleId) return true;
+  if (state.status !== "running" && state.status !== "retrying") return true;
+  return Number(state.processedTickers ?? 0) >= Number(state.requestedTickers ?? 0);
+}
+
+export async function isOverviewCurrentRefreshPublicationReady(
+  env: Env,
+  configId: string,
+  sessionDate: string,
+): Promise<boolean> {
+  await ensureOverviewCurrentDataSchema(env);
+  return overviewCurrentRefreshStateAllowsPublication(
+    await loadOverviewCurrentRefreshJob(env, configId, sessionDate),
+  );
+}
+
 export async function refreshOverviewCurrentData(
   env: Env,
   configId = "default",
   sessionDate = latestUsMarketSessionAsOfDate(new Date()),
+  options: { now?: Date; startNewCycle?: boolean } = {},
 ): Promise<OverviewCurrentRefreshResult> {
   await ensureOverviewCurrentDataSchema(env);
   const db = getMarketDataDb(env);
   const inputs = await loadOverviewTickerInputs(env, configId);
   const tickers = inputs.map((input) => input.ticker);
-  const fetchedAt = new Date().toISOString();
-  const feed = (env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
-  await db.prepare(
-    `INSERT INTO overview_current_refresh_jobs
-       (config_id, session_date, status, attempt_count, requested_tickers, started_at, updated_at)
-     VALUES (?, ?, 'running', 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-     ON CONFLICT(config_id, session_date) DO UPDATE SET
-       status = 'running',
-       attempt_count = overview_current_refresh_jobs.attempt_count + 1,
-       requested_tickers = excluded.requested_tickers,
-       last_error = NULL,
-       updated_at = CURRENT_TIMESTAMP`,
-  ).bind(configId, sessionDate, tickers.length).run();
-  const refreshJob = await db.prepare(
-    `SELECT attempt_count as attemptCount
-     FROM overview_current_refresh_jobs
-     WHERE config_id = ? AND session_date = ?`,
-  ).bind(configId, sessionDate).first<{ attemptCount: number | null }>();
-  const refreshAttempt = Math.max(1, Number(refreshJob?.attemptCount ?? 1));
+  const now = options.now ?? new Date();
+  const fetchedAt = now.toISOString();
+  const feed = (env.ALPACA_DAILY_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+  const previousJob = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
+  const continuingCycle = (previousJob?.status === "running" || previousJob?.status === "retrying")
+    && Boolean(previousJob.cycleId)
+    && Boolean(previousJob.cycleStartedAt)
+    && Number(previousJob.cursorOffset ?? 0) < tickers.length
+    && Number(previousJob.processedTickers ?? 0) < tickers.length
+    && options.startNewCycle !== true;
+  const cycleId = continuingCycle ? previousJob?.cycleId as string : crypto.randomUUID();
+  const cycleStartedAt = continuingCycle ? previousJob?.cycleStartedAt as string : fetchedAt;
+  const cursorOffset = continuingCycle ? Math.max(0, Number(previousJob?.cursorOffset ?? 0)) : 0;
+  const leaseToken = crypto.randomUUID();
+  const leaseExpiresAt = new Date(now.getTime() + CURRENT_REFRESH_LEASE_MS).toISOString();
 
-  const [tvRows, barRows, alpacaAssetSupport] = await Promise.all([
-    fetchTradingViewRows(env, inputs, sessionDate, new Date(fetchedAt)),
-    loadAlpacaBarMetrics(env, tickers, sessionDate, feed),
-    syncAlpacaAssetSupport(env, tickers),
-  ]);
-  const quoteFallbackTickers = tickers.filter((ticker) => {
-    const row = tvRows.get(ticker);
-    return row?.status !== "supported" || row.price == null || row.change1d == null;
-  });
-  const maxSnapshotTickers = ALPACA_SNAPSHOT_BATCH_SIZE * MAX_ALPACA_SNAPSHOT_BATCHES_PER_REFRESH;
-  const snapshotOffset = quoteFallbackTickers.length > 0
-    ? ((refreshAttempt - 1) * maxSnapshotTickers) % quoteFallbackTickers.length
-    : 0;
-  const rotatedFallbackTickers = [
-    ...quoteFallbackTickers.slice(snapshotOffset),
-    ...quoteFallbackTickers.slice(0, snapshotOffset),
-  ];
-  const attemptedSnapshotTickers = rotatedFallbackTickers.slice(0, maxSnapshotTickers);
-  const attemptedSnapshotTickerSet = new Set(attemptedSnapshotTickers);
-  const quoteFallbackTickerSet = new Set(quoteFallbackTickers);
-  const alpacaSnapshots = await fetchAlpacaSnapshots(env, attemptedSnapshotTickers, sessionDate);
-  const rows = tickers.map((ticker) => resolveOverviewCurrentRow({
+  const insertedJob = await db.prepare(
+    `INSERT INTO overview_current_refresh_jobs
+       (config_id, session_date, status, attempt_count, requested_tickers,
+        cycle_id, cycle_started_at, cursor_offset, processed_tickers,
+        lease_token, lease_expires_at, started_at, updated_at)
+     VALUES (?, ?, 'running', 1, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+     ON CONFLICT(config_id, session_date) DO NOTHING`,
+  ).bind(
+    configId,
+    sessionDate,
+    tickers.length,
+    cycleId,
+    cycleStartedAt,
+    leaseToken,
+    leaseExpiresAt,
+    fetchedAt,
+    fetchedAt,
+  ).run();
+  if (!previousJob && Number(insertedJob.meta?.changes ?? 0) === 0) {
+    const active = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
+    return {
+      configId,
+      sessionDate,
+      requestedTickers: tickers.length,
+      freshTickers: Number(active?.freshTickers ?? 0),
+      unavailableTickers: Number(active?.unavailableTickers ?? 0),
+      status: "running",
+      nextAttemptAt: active?.leaseExpiresAt ?? null,
+      rows: [],
+    };
+  }
+  if (previousJob) {
+    const claim = continuingCycle
+      ? await db.prepare(
+        `UPDATE overview_current_refresh_jobs
+            SET status = 'running', attempt_count = attempt_count + 1,
+                requested_tickers = ?, lease_token = ?, lease_expires_at = ?,
+                last_error = NULL, last_error_code = NULL, next_attempt_at = NULL,
+                updated_at = ?
+          WHERE config_id = ? AND session_date = ?
+            AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`,
+      ).bind(tickers.length, leaseToken, leaseExpiresAt, fetchedAt, configId, sessionDate, fetchedAt).run()
+      : await db.prepare(
+        `UPDATE overview_current_refresh_jobs
+            SET status = 'running', attempt_count = attempt_count + 1,
+                requested_tickers = ?, fresh_tickers = 0, unavailable_tickers = 0,
+                cycle_id = ?, cycle_started_at = ?, cursor_offset = 0, processed_tickers = 0,
+                lease_token = ?, lease_expires_at = ?, last_error = NULL,
+                last_error_code = NULL, next_attempt_at = NULL, completed_at = NULL,
+                started_at = ?, updated_at = ?
+          WHERE config_id = ? AND session_date = ?
+            AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`,
+      ).bind(
+        tickers.length,
+        cycleId,
+        cycleStartedAt,
+        leaseToken,
+        leaseExpiresAt,
+        fetchedAt,
+        fetchedAt,
+        configId,
+        sessionDate,
+        fetchedAt,
+      ).run();
+    if (Number(claim.meta?.changes ?? 0) === 0) {
+      const active = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
+      return {
+        configId,
+        sessionDate,
+        requestedTickers: tickers.length,
+        freshTickers: Number(active?.freshTickers ?? 0),
+        unavailableTickers: Number(active?.unavailableTickers ?? 0),
+        status: "running",
+        nextAttemptAt: active?.leaseExpiresAt ?? null,
+        rows: [],
+      };
+    }
+  }
+
+  const slicePlan = planOverviewCurrentRefreshSlice(tickers.length, cursorOffset);
+  const sliceInputs = inputs.slice(slicePlan.start, slicePlan.end);
+  const sliceTickers = sliceInputs.map((input) => input.ticker);
+  try {
+    const [tvRows, barRows, alpacaAssetSupport] = await Promise.all([
+      fetchTradingViewRows(env, sliceInputs, sessionDate, new Date(fetchedAt)),
+      loadAlpacaBarMetrics(env, sliceTickers, sessionDate, feed),
+      syncAlpacaAssetSupport(env, sliceTickers),
+    ]);
+    const quoteFallbackTickers = sliceTickers.filter((ticker) => {
+      const row = tvRows.get(ticker);
+      return row?.status !== "supported" || row.price == null || row.change1d == null;
+    });
+    const attemptedSnapshotTickers = quoteFallbackTickers.slice(
+      0,
+      ALPACA_SNAPSHOT_BATCH_SIZE * MAX_ALPACA_SNAPSHOT_BATCHES_PER_REFRESH,
+    );
+    const attemptedSnapshotTickerSet = new Set(attemptedSnapshotTickers);
+    const quoteFallbackTickerSet = new Set(quoteFallbackTickers);
+    const alpacaSnapshots = await fetchAlpacaSnapshots(env, attemptedSnapshotTickers, sessionDate);
+    const rows = sliceTickers.map((ticker) => resolveOverviewCurrentRow({
     ticker,
     sessionDate,
     tv: tvRows.get(ticker) ?? {
@@ -1294,36 +1473,93 @@ export async function refreshOverviewCurrentData(
     },
     alpacaFeed: feed,
     fetchedAt,
-  }));
-  await persistCurrentRows(env, configId, rows);
-  const freshTickers = rows.filter((row) => row.status === "fresh").length;
-  const unavailableTickers = rows.length - freshTickers;
-  const retrying = rows.some(doesOverviewCurrentRowNeedRepair);
-  const nextAttemptAt = retrying ? nextCurrentRetryAt(rows) : null;
-  await db.prepare(
-    `UPDATE overview_current_refresh_jobs
-     SET status = ?, fresh_tickers = ?, unavailable_tickers = ?, next_attempt_at = ?,
-         completed_at = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE config_id = ? AND session_date = ?`,
-  ).bind(
-    retrying ? "retrying" : "completed",
-    freshTickers,
-    unavailableTickers,
-    nextAttemptAt,
-    retrying ? null : new Date().toISOString(),
-    configId,
-    sessionDate,
-  ).run();
-  return {
-    configId,
-    sessionDate,
-    requestedTickers: rows.length,
-    freshTickers,
-    unavailableTickers,
-    status: retrying ? "retrying" : "completed",
-    nextAttemptAt,
-    rows,
-  };
+    }));
+    await persistCurrentRows(env, configId, rows);
+    const nextCursor = slicePlan.end;
+    const cycleRows = Array.from((await loadOverviewCurrentData(env, configId, sessionDate)).values())
+      .filter((row) => row.fetchedAt >= cycleStartedAt);
+    const freshTickers = cycleRows.filter((row) => row.status === "fresh").length;
+    const unavailableTickers = cycleRows.length - freshTickers;
+    if (nextCursor < tickers.length) {
+      await db.prepare(
+        `UPDATE overview_current_refresh_jobs
+            SET status = 'running', cursor_offset = ?, processed_tickers = ?,
+                fresh_tickers = ?, unavailable_tickers = ?, next_attempt_at = ?,
+                lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+          WHERE config_id = ? AND session_date = ? AND lease_token = ?`,
+      ).bind(
+        nextCursor,
+        nextCursor,
+        freshTickers,
+        unavailableTickers,
+        fetchedAt,
+        fetchedAt,
+        configId,
+        sessionDate,
+        leaseToken,
+      ).run();
+      return {
+        configId,
+        sessionDate,
+        requestedTickers: tickers.length,
+        freshTickers,
+        unavailableTickers,
+        status: "running",
+        nextAttemptAt: fetchedAt,
+        rows,
+      };
+    }
+    const retrying = cycleRows.length < tickers.length || cycleRows.some(doesOverviewCurrentRowNeedRepair);
+    const cycleStartedAtMs = Date.parse(cycleStartedAt);
+    const nextAttemptAt = retrying
+      ? nextCurrentRetryAt(cycleRows, Number.isFinite(cycleStartedAtMs) ? cycleStartedAtMs : now.getTime())
+      : null;
+    await db.prepare(
+      `UPDATE overview_current_refresh_jobs
+          SET status = ?, cursor_offset = 0, processed_tickers = ?,
+              fresh_tickers = ?, unavailable_tickers = ?, next_attempt_at = ?,
+              lease_token = NULL, lease_expires_at = NULL, completed_at = ?, updated_at = ?
+        WHERE config_id = ? AND session_date = ? AND lease_token = ?`,
+    ).bind(
+      retrying ? "retrying" : "completed",
+      tickers.length,
+      freshTickers,
+      unavailableTickers,
+      nextAttemptAt,
+      retrying ? null : fetchedAt,
+      fetchedAt,
+      configId,
+      sessionDate,
+      leaseToken,
+    ).run();
+    return {
+      configId,
+      sessionDate,
+      requestedTickers: tickers.length,
+      freshTickers,
+      unavailableTickers,
+      status: retrying ? "retrying" : "completed",
+      nextAttemptAt,
+      rows: cycleRows,
+    };
+  } catch (error) {
+    const retryAt = new Date(now.getTime() + CURRENT_RETRY_MINUTES * 60_000).toISOString();
+    await db.prepare(
+      `UPDATE overview_current_refresh_jobs
+          SET status = 'retrying', next_attempt_at = ?, last_error = ?, last_error_code = ?,
+              lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE config_id = ? AND session_date = ? AND lease_token = ?`,
+    ).bind(
+      retryAt,
+      errorMessage(error),
+      statusFromError(error),
+      fetchedAt,
+      configId,
+      sessionDate,
+      leaseToken,
+    ).run();
+    throw error;
+  }
 }
 
 function parseJsonRecord<T>(value: string | null | undefined): Record<string, T> {
@@ -1442,23 +1678,25 @@ export async function refreshOverviewCurrentDataIfDue(
   options: { forceCompleted?: boolean; force?: boolean; maxAgeMs?: number } = {},
 ): Promise<OverviewCurrentRefreshResult | null> {
   await ensureOverviewCurrentDataSchema(env);
-  const job = await getMarketDataDb(env).prepare(
-    `SELECT status, next_attempt_at as nextAttemptAt, updated_at as updatedAt
-     FROM overview_current_refresh_jobs
-     WHERE config_id = ? AND session_date = ?`,
-  )
-    .bind(configId, sessionDate)
-    .first<{ status: string; nextAttemptAt: string | null; updatedAt: string | null }>();
+  const job = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
   const force = options.force === true || options.forceCompleted === true;
   const maxAgeMs = Math.max(60_000, options.maxAgeMs ?? CURRENT_RETRY_MINUTES * 60_000);
   if (job?.status === "completed" && !force && job.updatedAt) {
-    const updatedAt = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
-    if (Number.isFinite(updatedAt) && now.getTime() - updatedAt < maxAgeMs) return null;
+    const cadenceAnchor = job.cycleStartedAt ?? job.updatedAt;
+    const cadenceAnchorAt = Date.parse(cadenceAnchor.endsWith("Z") ? cadenceAnchor : `${cadenceAnchor.replace(" ", "T")}Z`);
+    if (Number.isFinite(cadenceAnchorAt) && now.getTime() - cadenceAnchorAt < maxAgeMs) return null;
   }
-  if (job?.status === "running" && job.updatedAt) {
-    const updatedAt = Date.parse(job.updatedAt.endsWith("Z") ? job.updatedAt : `${job.updatedAt.replace(" ", "T")}Z`);
-    if (Number.isFinite(updatedAt) && now.getTime() - updatedAt < 10 * 60_000) return null;
+  if (job?.leaseExpiresAt && Date.parse(job.leaseExpiresAt) > now.getTime()) {
+    return null;
   }
   if (!force && job?.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()) return null;
-  return await refreshOverviewCurrentData(env, configId, sessionDate);
+  const continueExistingCycle = (job?.status === "running" || job?.status === "retrying")
+    && Boolean(job.cycleId)
+    && Number(job.processedTickers ?? 0) < Number(job.requestedTickers ?? 0);
+  const ny = zonedParts(now, "America/New_York");
+  if (!force && !continueExistingCycle && ny.minutesOfDay > 16 * 60 + 30) return null;
+  return await refreshOverviewCurrentData(env, configId, sessionDate, {
+    now,
+    startNewCycle: !continueExistingCycle,
+  });
 }

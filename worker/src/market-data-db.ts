@@ -268,6 +268,7 @@ export async function cleanupMarketDataOperationalState(env: Env, asOfDate: stri
     ),
     db.prepare("DELETE FROM overview_current_data WHERE session_date < ?").bind(currentDataCutoff),
     db.prepare("DELETE FROM overview_current_refresh_jobs WHERE session_date < ?").bind(currentDataCutoff),
+    db.prepare("DELETE FROM overview_provider_catalog_cache WHERE catalog_date < ?").bind(subtractUtcDays(runDate, 7)),
     db.prepare(
       `DELETE FROM post_close_daily_bar_refresh_job_items
        WHERE job_id IN (

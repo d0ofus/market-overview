@@ -1,8 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractPremarketSnapshotFromAlpacaSnapshot, getProvider } from "../src/provider";
+import { alpacaHistoricalRequestEnd, extractPremarketSnapshotFromAlpacaSnapshot, getProvider } from "../src/provider";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("Alpaca historical request timing", () => {
+  it("caps a same-day SIP request sixteen minutes behind the observation time", () => {
+    expect(alpacaHistoricalRequestEnd(
+      "2026-07-21",
+      "sip",
+      new Date("2026-07-21T20:35:00.000Z"),
+    )).toBe("2026-07-21T20:19:00.000Z");
+  });
+
+  it("keeps the complete day end for an elapsed SIP session", () => {
+    expect(alpacaHistoricalRequestEnd(
+      "2026-07-20",
+      "sip",
+      new Date("2026-07-21T20:35:00.000Z"),
+    )).toBe("2026-07-20T23:59:59.000Z");
+  });
 });
 
 describe("extractPremarketSnapshotFromAlpacaSnapshot", () => {
