@@ -631,6 +631,28 @@ describe("FOMC commentary service helpers", () => {
     expect(fallback.tradingReadThrough).toContain("Held at 3.50%–3.75%");
   });
 
+  it("uses the statement-derived decision and avoids duplicate or generic vote transcript sentences", () => {
+    const fallback = testExports.buildExtractiveFomcSummary({
+      eventType: "press_conference",
+      meetingDate: "2026-06-17",
+      officialText: [
+        "Transcript of Chairman Warsh's Press Conference",
+        "CHAIRMAN WARSH. In this business, they all add up to one thing: getting monetary policy right.",
+        "Economic activity is expanding at a solid pace.",
+        "Inflation remains elevated and labor market conditions are stable.",
+        "That 19th voter was me, and I did not submit one.",
+        "Three participants dissented and preferred to raise the target range.",
+      ].join(" "),
+      rateDecision: "Held at 3.50%–3.75%",
+    });
+
+    expect(fallback.highlights[0]).toBe("Rate decision: Held at 3.50%–3.75%.");
+    expect(fallback.summaryMarkdown).not.toContain("getting monetary policy right");
+    expect(fallback.summaryMarkdown.match(/Inflation remains elevated/g)).toHaveLength(1);
+    expect(fallback.summaryMarkdown).toContain("Three participants dissented");
+    expect(fallback.summaryMarkdown).not.toContain("19th voter");
+  });
+
   it("fetches the linked statement and keeps an informative fallback when Gemini returns 503", async () => {
     const db = new FakeFomcDb();
     const fetchedUrls: string[] = [];
@@ -684,6 +706,7 @@ describe("FOMC commentary service helpers", () => {
     expect(db.rows[0]?.sourceMode).toBe("official");
     expect(db.rows[0]?.sourceText).toContain("CHAIRMAN WARSH");
     expect(db.rows[0]?.sourceText).not.toContain("Voting against");
+    expect(db.rows[0]?.summaryMarkdown).toContain("Held at 3.50%–3.75%");
     expect(db.rows[0]?.summaryMarkdown).toMatch(/inflation remains elevated/i);
     expect(db.rows[0]?.error).toContain("HTTP 503");
   });

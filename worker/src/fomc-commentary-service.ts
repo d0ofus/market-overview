@@ -906,22 +906,30 @@ function buildExtractiveFomcSummary(input: {
   const inflation = firstMatchingSentence(sentences, /inflation|price|prices|disinflation/i);
   const labor = firstMatchingSentence(sentences, /labor|employment|unemployment|job gains|wage/i);
   const dissent = firstMatchingSentence(sentences, /voting against|preferred to (?:raise|lower)|dissent/i)
-    ?? firstMatchingSentence(sentences, /(?:\d+\s+to\s+\d+|vot(?:e|ed|ing))/i);
+    ?? firstMatchingSentence(sentences, /(?:\d+\s+to\s+\d+\s+vote|voted\s+(?:to|against)|vote was)/i);
   const risks = firstMatchingSentence(sentences, /risk|uncertain|uncertainty|outlook|balance of risks/i);
   const balanceSheet = firstMatchingSentence(sentences, /balance sheet|securities holdings|treasury securities|agency debt|mortgage-backed/i);
-  const selected = [policy, activity, inflation, labor, dissent, risks, balanceSheet]
+  const policySignal = parsedDecision?.policySentence
+    ?? (decisionLabel ? `Rate decision: ${decisionLabel}.` : policy);
+  const selected = [policySignal, activity, inflation, labor, dissent, risks, balanceSheet]
     .filter((sentence): sentence is string => Boolean(sentence))
     .filter((sentence, index, array) => array.indexOf(sentence) === index);
   const highlights = selected.length ? selected.slice(0, 5).map((sentence) => truncateSentence(sentence)) : [
     `${input.eventType === "minutes" ? "FOMC minutes" : "Fed press conference"} official text is available for ${input.meetingDate}.`,
     "Gemini synthesis was unavailable, so this is an extractive official-source fallback.",
   ];
-  const policyLine = policy ? truncateSentence(policy, 500) : "No concise policy sentence was extracted from the official text.";
-  const inflationLine = inflation || labor || activity
-    ? [activity, inflation, labor].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ")
+  const policyLine = policySignal ? truncateSentence(policySignal, 500) : "No concise policy sentence was extracted from the official text.";
+  const inflationLines = [activity, inflation, labor]
+    .filter((sentence): sentence is string => Boolean(sentence))
+    .filter((sentence, index, array) => array.indexOf(sentence) === index);
+  const marketLines = [dissent, risks, balanceSheet]
+    .filter((sentence): sentence is string => Boolean(sentence))
+    .filter((sentence, index, array) => array.indexOf(sentence) === index);
+  const inflationLine = inflationLines.length
+    ? inflationLines.map((sentence) => truncateSentence(sentence, 300)).join(" ")
     : "No concise growth, inflation, or labor sentence was extracted from the official text.";
-  const marketLine = dissent || risks || balanceSheet
-    ? [dissent, risks, balanceSheet].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ")
+  const marketLine = marketLines.length
+    ? marketLines.map((sentence) => truncateSentence(sentence, 300)).join(" ")
     : "Use the official source link for full context; model synthesis was unavailable.";
   const officialLabel = input.eventType === "press_conference" ? "Official-transcript" : "Official-minutes";
   const tradingReadThrough = decisionLabel
