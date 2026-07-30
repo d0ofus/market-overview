@@ -706,7 +706,7 @@ describe("FOMC commentary service helpers", () => {
     expect(db.rows[0]?.sourceMode).toBe("official");
     expect(db.rows[0]?.sourceText).toContain("CHAIRMAN WARSH");
     expect(db.rows[0]?.sourceText).not.toContain("Voting against");
-    expect(db.rows[0]?.summaryMarkdown).toContain("Held at 3.50%–3.75%");
+    expect(db.rows[0]?.summaryMarkdown).toContain("target range for the federal funds rate");
     expect(db.rows[0]?.summaryMarkdown).toMatch(/inflation remains elevated/i);
     expect(db.rows[0]?.error).toContain("HTTP 503");
   });

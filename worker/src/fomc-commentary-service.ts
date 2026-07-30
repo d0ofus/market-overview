@@ -901,7 +901,13 @@ function buildExtractiveFomcSummary(input: {
   const sentences = extractSentences(analysisText);
   const parsedDecision = parseFomcRateDecision(input.officialText);
   const decisionLabel = input.rateDecision ?? parsedDecision?.label ?? null;
-  const policy = parsedDecision?.policySentence ?? firstMatchingSentence(sentences, /federal funds rate|fed funds rate|target range|monetary policy|policy stance|restrictive/i);
+  const explicitPolicy = firstMatchingSentence(
+    sentences,
+    /(?:(?:the|our)\s+Committee|we)\s+(?:decided|voted)\b.*(?:federal funds rate|fed funds rate|target range)/i,
+  );
+  const policy = parsedDecision?.policySentence
+    ?? explicitPolicy
+    ?? firstMatchingSentence(sentences, /monetary policy|policy stance|restrictive/i);
   const activity = firstMatchingSentence(sentences, /economic activity|gross domestic product|consumer spending|business investment|productivity/i);
   const inflation = firstMatchingSentence(sentences, /inflation|price|prices|disinflation/i);
   const labor = firstMatchingSentence(sentences, /labor|employment|unemployment|job gains|wage/i);
@@ -910,6 +916,7 @@ function buildExtractiveFomcSummary(input: {
   const risks = firstMatchingSentence(sentences, /risk|uncertain|uncertainty|outlook|balance of risks/i);
   const balanceSheet = firstMatchingSentence(sentences, /balance sheet|securities holdings|treasury securities|agency debt|mortgage-backed/i);
   const policySignal = parsedDecision?.policySentence
+    ?? explicitPolicy
     ?? (decisionLabel ? `Rate decision: ${decisionLabel}.` : policy);
   const selected = [policySignal, activity, inflation, labor, dissent, risks, balanceSheet]
     .filter((sentence): sentence is string => Boolean(sentence))
