@@ -30,6 +30,7 @@ export type FedFundsComparisonSeries = {
 export type FomcCommentaryEventType = "press_conference" | "minutes";
 
 export type FomcCommentarySourceMode = "official" | "official_plus_brave" | "fallback_context";
+export type FomcCommentaryTranscriptKind = "opening_statement" | "full_transcript";
 
 export type FomcCommentaryCitationSource = {
   sourceName: string;
@@ -47,6 +48,8 @@ export type FomcCommentaryItem = {
   sourceUrl: string;
   sourceTitle: string | null;
   statementUrl: string | null;
+  transcriptUrl: string | null;
+  transcriptKind: FomcCommentaryTranscriptKind | null;
   rateDecision: string | null;
   sourceMode?: FomcCommentarySourceMode;
   status: "pending_source" | "ready" | "failed";

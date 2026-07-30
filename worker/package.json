@@ -17,6 +17,7 @@
   "dependencies": {
     "hono": "^4.7.2",
     "postal-mime": "^2.4.3",
+    "unpdf": "^1.7.0",
     "xlsx": "^0.18.5",
     "zod": "^3.24.2"
   },

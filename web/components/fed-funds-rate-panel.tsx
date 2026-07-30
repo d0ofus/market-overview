@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse, FomcCommentaryItem } from "@/lib/api";
+import { groupFomcCommentaryItems } from "@/lib/fomc-commentary";
 
 const DECISION_TZ = "America/New_York";
 const DECISION_HOUR = 14;
@@ -174,9 +175,9 @@ function fomcEventLabel(eventType: FomcCommentaryItem["eventType"]): string {
   return eventType === "minutes" ? "Minutes" : "Press Conference";
 }
 
-function fomcStatusLabel(status: FomcCommentaryItem["status"]): string {
-  if (status === "ready") return "Ready";
-  if (status === "pending_source") return "Pending official source";
+function fomcStatusLabel(item: FomcCommentaryItem): string {
+  if (item.status === "ready") return "Ready";
+  if (item.status === "pending_source") return item.eventType === "press_conference" ? "Transcript pending" : "Pending official source";
   return "Gemini failed";
 }
 
@@ -194,7 +195,7 @@ function formatIsoDate(value: string | null | undefined): string {
 }
 
 function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
-  const visibleItems = items.slice(0, 4);
+  const meetingGroups = groupFomcCommentaryItems(items, 2);
   return (
     <div className="rounded-3xl border border-borderSoft/70 bg-panelSoft/75 p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -203,85 +204,106 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
           <div className="text-sm text-slate-400">Official Fed text first; Brave context only when cited.</div>
         </div>
       </div>
-      {visibleItems.length === 0 ? (
+      {meetingGroups.length === 0 ? (
         <p className="rounded-2xl border border-borderSoft/60 bg-panel/60 px-4 py-3 text-sm text-slate-400">
           No official FOMC transcript/minutes summary cached yet.
         </p>
       ) : (
-        <div className="space-y-3">
-          {visibleItems.map((item) => {
-            const citations = item.citationSources ?? [];
-            const sourceMode = item.sourceMode ?? "official";
-            return (
-              <article key={item.id} className="rounded-2xl border border-borderSoft/60 bg-panel/60 p-4">
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-1 font-semibold uppercase tracking-[0.12em] text-accent">
-                    {fomcEventLabel(item.eventType)}
-                  </span>
-                  <span className={`rounded-full border px-2 py-1 font-semibold ${fomcStatusClass(item.status)}`}>
-                    {fomcStatusLabel(item.status)}
-                  </span>
-                  {sourceMode === "official_plus_brave" && citations.some((source) => source.usedFor === "context" || source.usedFor === "fallback") && (
-                    <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 font-semibold text-sky-200">Includes Brave sources</span>
-                  )}
-                  {sourceMode === "fallback_context" && (
-                    <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-semibold text-amber-200">Secondary-source fallback</span>
-                  )}
-                  {item.provider === "extractive_fallback" && (
-                    <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 font-semibold text-violet-200">Official extractive fallback</span>
-                  )}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
-                  <span>Meeting: <span className="text-slate-200">{formatIsoDate(item.meetingDate)}</span></span>
-                  <span>Release: <span className="text-slate-200">{formatIsoDate(item.releaseDate)}</span></span>
-                  {item.rateDecision && <span>Decision: <span className="text-slate-200">{item.rateDecision}</span></span>}
-                  {item.generatedAt && <span>Generated: <span className="text-slate-200">{formatGeneratedAt(item.generatedAt)}</span></span>}
-                  {item.sourceFetchedAt && <span>Source fetched: <span className="text-slate-200">{formatGeneratedAt(item.sourceFetchedAt)}</span></span>}
-                  {item.lastCheckedAt && <span>Last checked: <span className="text-slate-200">{formatGeneratedAt(item.lastCheckedAt)}</span></span>}
-                  {item.status !== "ready" && item.refreshAttemptCount ? <span>Attempts: <span className="text-slate-200">{item.refreshAttemptCount}</span></span> : null}
-                </div>
-                {item.highlights.length > 0 && (
-                  <ul className="mt-3 space-y-2 text-sm text-slate-200">
-                    {item.highlights.map((highlight, index) => (
-                      <li key={`${item.id}-${index}`} className="flex gap-2">
-                        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                        <span>{highlight}</span>
-                      </li>
-                    ))}
-                  </ul>
+        <div className="space-y-4">
+          {meetingGroups.map((group) => (
+            <section key={group.meetingDate} className="rounded-2xl border border-borderSoft/70 bg-panel/45 p-3">
+              <div className="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-borderSoft/50 px-1 pb-3">
+                <h3 className="text-sm font-semibold text-text">FOMC Meeting — {formatIsoDate(group.meetingDate)}</h3>
+                {group.rateDecision && (
+                  <span className="text-xs text-slate-400">Decision: <span className="font-medium text-slate-200">{group.rateDecision}</span></span>
                 )}
-                {item.tradingReadThrough && (
-                  <p className="mt-3 rounded-xl border border-borderSoft/50 bg-panelSoft/70 px-3 py-2 text-sm text-slate-300">
-                    <span className="font-semibold text-text">Trading read-through: </span>{item.tradingReadThrough}
-                  </p>
-                )}
-                {item.status !== "ready" && item.error && (
-                  <p className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">{item.error}</p>
-                )}
-                <div className="mt-3 flex flex-wrap gap-3 text-xs">
-                  <a className="text-accent hover:underline" href={item.sourceUrl} target="_blank" rel="noreferrer">
-                    {item.sourceTitle || "Federal Reserve source"}
-                  </a>
-                  {item.statementUrl && item.statementUrl !== item.sourceUrl && (
-                    <a className="text-accent hover:underline" href={item.statementUrl} target="_blank" rel="noreferrer">
-                      Official FOMC statement
-                    </a>
-                  )}
-                  {citations.map((source) => (
-                    <a key={source.url} className="text-sky-300 hover:underline" href={source.url} target="_blank" rel="noreferrer">
-                      {source.sourceName}: {source.title || source.usedFor}
-                    </a>
-                  ))}
-                </div>
-                {item.summaryMarkdown && (
-                  <details className="mt-3 text-sm text-slate-400">
-                    <summary className="cursor-pointer text-slate-300 hover:text-text">Full compact summary</summary>
-                    <div className="mt-2 whitespace-pre-wrap rounded-xl border border-borderSoft/50 bg-panelSoft/70 p-3">{item.summaryMarkdown}</div>
-                  </details>
-                )}
-              </article>
-            );
-          })}
+              </div>
+              <div className="space-y-3">
+                {group.items.map((item) => {
+                  const citations = item.citationSources ?? [];
+                  const sourceMode = item.sourceMode ?? "official";
+                  return (
+                    <article key={item.id} className="rounded-xl border border-borderSoft/60 bg-panel/70 p-4">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-1 font-semibold uppercase tracking-[0.12em] text-accent">
+                          {fomcEventLabel(item.eventType)}
+                        </span>
+                        <span className={`rounded-full border px-2 py-1 font-semibold ${fomcStatusClass(item.status)}`}>
+                          {fomcStatusLabel(item)}
+                        </span>
+                        {item.transcriptKind === "opening_statement" && (
+                          <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-semibold text-amber-100">Official opening statement</span>
+                        )}
+                        {item.transcriptKind === "full_transcript" && (
+                          <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 font-semibold text-emerald-200">Official transcript</span>
+                        )}
+                        {sourceMode === "official_plus_brave" && citations.some((source) => source.usedFor === "context" || source.usedFor === "fallback") && (
+                          <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 font-semibold text-sky-200">Includes Brave sources</span>
+                        )}
+                        {sourceMode === "fallback_context" && (
+                          <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-semibold text-amber-200">Secondary-source fallback</span>
+                        )}
+                        {item.provider === "extractive_fallback" && (
+                          <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 font-semibold text-violet-200">Official extractive fallback</span>
+                        )}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                        <span>Release: <span className="text-slate-200">{formatIsoDate(item.releaseDate)}</span></span>
+                        {item.generatedAt && <span>Generated: <span className="text-slate-200">{formatGeneratedAt(item.generatedAt)}</span></span>}
+                        {item.sourceFetchedAt && <span>Source fetched: <span className="text-slate-200">{formatGeneratedAt(item.sourceFetchedAt)}</span></span>}
+                        {item.lastCheckedAt && <span>Last checked: <span className="text-slate-200">{formatGeneratedAt(item.lastCheckedAt)}</span></span>}
+                        {item.status !== "ready" && item.refreshAttemptCount ? <span>Attempts: <span className="text-slate-200">{item.refreshAttemptCount}</span></span> : null}
+                      </div>
+                      {item.highlights.length > 0 && (
+                        <ul className="mt-3 space-y-2 text-sm text-slate-200">
+                          {item.highlights.map((highlight, index) => (
+                            <li key={`${item.id}-${index}`} className="flex gap-2">
+                              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                              <span>{highlight}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {item.tradingReadThrough && (
+                        <p className="mt-3 rounded-xl border border-borderSoft/50 bg-panelSoft/70 px-3 py-2 text-sm text-slate-300">
+                          <span className="font-semibold text-text">Trading read-through: </span>{item.tradingReadThrough}
+                        </p>
+                      )}
+                      {item.status !== "ready" && item.error && (
+                        <p className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">{item.error}</p>
+                      )}
+                      <div className="mt-3 flex flex-wrap gap-3 text-xs">
+                        <a className="text-accent hover:underline" href={item.sourceUrl} target="_blank" rel="noreferrer">
+                          {item.eventType === "press_conference" ? "The Fed — FOMC meeting" : "Official FOMC minutes"}
+                        </a>
+                        {item.statementUrl && item.statementUrl !== item.sourceUrl && (
+                          <a className="text-accent hover:underline" href={item.statementUrl} target="_blank" rel="noreferrer">
+                            Official FOMC statement
+                          </a>
+                        )}
+                        {item.transcriptUrl && (
+                          <a className="text-accent hover:underline" href={item.transcriptUrl} target="_blank" rel="noreferrer">
+                            {item.transcriptKind === "opening_statement" ? "Official opening statement" : "Official press conference transcript"}
+                          </a>
+                        )}
+                        {citations.map((source) => (
+                          <a key={source.url} className="text-sky-300 hover:underline" href={source.url} target="_blank" rel="noreferrer">
+                            {source.sourceName}: {source.title || source.usedFor}
+                          </a>
+                        ))}
+                      </div>
+                      {item.summaryMarkdown && (
+                        <details className="mt-3 text-sm text-slate-400">
+                          <summary className="cursor-pointer text-slate-300 hover:text-text">Full compact summary</summary>
+                          <div className="mt-2 whitespace-pre-wrap rounded-xl border border-borderSoft/50 bg-panelSoft/70 p-3">{item.summaryMarkdown}</div>
+                        </details>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </div>

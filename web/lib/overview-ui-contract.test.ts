@@ -55,7 +55,10 @@ test("commentary keeps provider failures out of the default report panel", () =>
 test("FOMC commentary shows the official rate decision and only claims cited Brave context", () => {
   const fedFunds = source("../components/fed-funds-rate-panel.tsx");
   assert.match(fedFunds, /Decision:/);
-  assert.match(fedFunds, /item\.rateDecision/);
+  assert.match(fedFunds, /group\.rateDecision/);
+  assert.match(fedFunds, /groupFomcCommentaryItems\(items, 2\)/);
   assert.match(fedFunds, /Official FOMC statement/);
+  assert.match(fedFunds, /Official press conference transcript/);
+  assert.match(fedFunds, /Official opening statement/);
   assert.match(fedFunds, /citations\.some\(\(source\) => source\.usedFor === "context" \|\| source\.usedFor === "fallback"\)/);
 });
