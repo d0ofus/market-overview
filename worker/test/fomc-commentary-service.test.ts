@@ -551,6 +551,12 @@ describe("FOMC commentary service helpers", () => {
     }, latestMinutes, olderPress])).toBe(true);
     expect(testExports.hasVisibleLegacyPressConference([olderPress, latestMinutes])).toBe(false);
     expect(testExports.hasVisibleLegacyPressConference([{ ...olderPress, transcriptUrl: null, transcriptKind: null }, latestMinutes])).toBe(true);
+    expect(testExports.hasVisibleLegacyPressConference([{
+      ...olderPress,
+      status: "pending_source",
+      transcriptUrl: null,
+      transcriptKind: null,
+    }, latestMinutes])).toBe(true);
   });
 
   it("skips Gemini for ready official summaries when source hash is unchanged", () => {

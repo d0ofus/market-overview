@@ -684,9 +684,8 @@ async function loadLegacyPressConferenceSource(env: Env): Promise<OfficialFomcSo
       `SELECT event_type as eventType,
               meeting_date as meetingDate,
               source_url as sourceUrl
-         FROM fomc_commentary_items
+        FROM fomc_commentary_items
         WHERE event_type = 'press_conference'
-          AND status = 'ready'
           AND (transcript_url IS NULL OR transcript_kind IS NULL)
         ORDER BY meeting_date DESC
         LIMIT 1`,
@@ -959,7 +958,6 @@ function hasReadyLatestFomcTypes(items: FomcCommentaryItem[]): boolean {
 function hasVisibleLegacyPressConference(items: FomcCommentaryItem[]): boolean {
   return items.some((item) => (
     item.eventType === "press_conference"
-    && item.status === "ready"
     && (!item.transcriptUrl || !item.transcriptKind)
   ));
 }
