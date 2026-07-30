@@ -9,6 +9,8 @@ const DEFAULT_SOURCE_URL = "https://www.federalreserve.gov/monetarypolicy/fomcca
 const MIN_OFFICIAL_TEXT_CHARS = 1_000;
 const MAX_SOURCE_TEXT_CHARS = 80_000;
 const FOMC_AUTO_REFRESH_LIMIT = 4;
+const EXTRACTIVE_RETRY_INTERVAL_MS = 60 * 60_000;
+const MAX_EXTRACTIVE_REFRESH_ATTEMPTS = 3;
 const ALLOWED_BRAVE_DOMAINS = [
   "federalreserve.gov",
   "reuters.com",
@@ -40,6 +42,8 @@ export type FomcCommentaryItem = {
   releaseDate: string | null;
   sourceUrl: string;
   sourceTitle: string | null;
+  statementUrl: string | null;
+  rateDecision: string | null;
   sourceMode: FomcCommentarySourceMode;
   status: FomcCommentaryStatus;
   summaryMarkdown: string | null;
@@ -65,6 +69,8 @@ type StoredFomcCommentaryRow = {
   releaseDate: string | null;
   sourceUrl: string;
   sourceTitle: string | null;
+  statementUrl: string | null;
+  rateDecision: string | null;
   sourceMode: FomcCommentarySourceMode;
   status: FomcCommentaryStatus;
   summaryMarkdown: string | null;
@@ -136,15 +142,24 @@ async function sha256Hex(value: string): Promise<string> {
 export function shouldGenerateFomcSummary(input: {
   force?: boolean;
   existingStatus?: FomcCommentaryStatus | null;
+  existingProvider?: string | null;
   existingSourceTextHash?: string | null;
+  existingLastRefreshAttemptAt?: string | null;
+  existingRefreshAttemptCount?: number | null;
   nextSourceTextHash?: string | null;
   hasOfficialText: boolean;
   sourceMode: FomcCommentarySourceMode;
+  now?: Date;
 }): boolean {
   if (input.force) return true;
   if (input.existingStatus !== "ready") return true;
   if (!input.hasOfficialText || !input.nextSourceTextHash) return input.sourceMode === "fallback_context";
-  return input.existingSourceTextHash !== input.nextSourceTextHash;
+  if (input.existingSourceTextHash !== input.nextSourceTextHash) return true;
+  if (input.existingProvider !== "extractive_fallback") return false;
+  if (Number(input.existingRefreshAttemptCount ?? 0) >= MAX_EXTRACTIVE_REFRESH_ATTEMPTS) return false;
+  const lastAttemptMs = Date.parse(input.existingLastRefreshAttemptAt ?? "");
+  if (!Number.isFinite(lastAttemptMs)) return true;
+  return (input.now ?? new Date()).getTime() - lastAttemptMs >= EXTRACTIVE_RETRY_INTERVAL_MS;
 }
 
 export function normalizeFomcCommentaryRow(row: StoredFomcCommentaryRow): FomcCommentaryItem {
@@ -165,6 +180,8 @@ export function normalizeFomcCommentaryRow(row: StoredFomcCommentaryRow): FomcCo
     releaseDate: row.releaseDate ?? null,
     sourceUrl: row.sourceUrl,
     sourceTitle: row.sourceTitle ?? null,
+    statementUrl: row.statementUrl ?? null,
+    rateDecision: row.rateDecision ?? null,
     sourceMode: row.sourceMode,
     status: row.status,
     summaryMarkdown: row.summaryMarkdown ?? null,
@@ -193,6 +210,8 @@ export async function loadLatestFomcCommentary(env: Env, limit = 4): Promise<Fom
               release_date as releaseDate,
               source_url as sourceUrl,
               source_title as sourceTitle,
+              statement_url as statementUrl,
+              rate_decision as rateDecision,
               source_mode as sourceMode,
               status,
               summary_markdown as summaryMarkdown,
@@ -266,6 +285,10 @@ function stripHtml(html: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, value: string) => String.fromCodePoint(Number.parseInt(value, 16)))
+    .replace(/&#(\d+);/g, (_match, value: string) => String.fromCodePoint(Number.parseInt(value, 10)))
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -274,7 +297,24 @@ export function extractReadableTextFromHtml(html: string): string {
   return stripHtml(html);
 }
 
-export async function fetchOfficialFedText(env: Env, sourceUrl: string): Promise<{ text: string; title: string | null; fetchedAt: string }> {
+function extractOfficialArticleText(html: string): string {
+  const article = html.match(/<div[^>]+id=["']article["'][^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<!--)/i)?.[1];
+  if (article) return stripHtml(article);
+  const statementColumn = html.match(/<div[^>]+class=["'][^"']*\bcol-xs-12\s+col-sm-8\s+col-md-8\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
+  if (statementColumn) return stripHtml(statementColumn);
+  const mainStart = html.search(/<(?:main|div)[^>]+(?:id=["']content["']|role=["']main["'])[^>]*>/i);
+  if (mainStart >= 0) {
+    const footerStart = html.slice(mainStart).search(/<(?:footer|div)[^>]+(?:id=["']footer["']|class=["'][^"']*\bfooter\b)/i);
+    const mainHtml = footerStart >= 0 ? html.slice(mainStart, mainStart + footerStart) : html.slice(mainStart);
+    return stripHtml(mainHtml);
+  }
+  return stripHtml(html);
+}
+
+export async function fetchOfficialFedText(
+  env: Env,
+  sourceUrl: string,
+): Promise<{ text: string; title: string | null; fetchedAt: string; html: string }> {
   if (!isFedUrl(sourceUrl)) throw new Error("Official FOMC source URL must be on federalreserve.gov.");
   const timeoutMs = resolveFetchTimeoutMs(env.FOMC_COMMENTARY_TIMEOUT_MS, 20_000);
   const response = await fetchWithTimeout(sourceUrl, {
@@ -286,7 +326,120 @@ export async function fetchOfficialFedText(env: Env, sourceUrl: string): Promise
   if (!response.ok) throw new Error(`Federal Reserve source fetch failed with HTTP ${response.status}`);
   const raw = await response.text();
   const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() ?? null;
-  return { text: extractReadableTextFromHtml(raw).slice(0, MAX_SOURCE_TEXT_CHARS), title, fetchedAt: new Date().toISOString() };
+  return { text: extractOfficialArticleText(raw).slice(0, MAX_SOURCE_TEXT_CHARS), title, fetchedAt: new Date().toISOString(), html: raw };
+}
+
+type FomcRateDecision = {
+  label: string;
+  policySentence: string;
+};
+
+type OfficialFomcMaterial = {
+  text: string;
+  title: string | null;
+  fetchedAt: string;
+  statementUrl: string | null;
+  rateDecision: FomcRateDecision | null;
+};
+
+function parseFedPercent(value: string): number | null {
+  const compact = value.trim();
+  const mixed = compact.match(/^(\d+)-(\d+)\/(\d+)$/);
+  if (mixed) {
+    const denominator = Number(mixed[3]);
+    if (!denominator) return null;
+    return Number(mixed[1]) + Number(mixed[2]) / denominator;
+  }
+  const fraction = compact.match(/^(\d+)\/(\d+)$/);
+  if (fraction) {
+    const denominator = Number(fraction[2]);
+    if (!denominator) return null;
+    return Number(fraction[1]) / denominator;
+  }
+  const parsed = Number(compact);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatFedPercent(value: number): string {
+  return `${value.toFixed(2)}%`;
+}
+
+function parseFomcRateDecision(text: string): FomcRateDecision | null {
+  const compact = text.replace(/\s+/g, " ").trim();
+  const numberPattern = String.raw`\d+(?:-\d+\/\d+|\/\d+|\.\d+)?`;
+  const match = compact.match(new RegExp(
+    String.raw`((?:The\s+)?Committee decided to (maintain|keep|lower|reduce|raise|increase) the target range for the federal funds rate(?: by (${numberPattern}) percentage points?)? (?:at|to) (${numberPattern}) to (${numberPattern}) percent[^.]*\.)`,
+    "i",
+  ));
+  if (!match) return null;
+  const lower = parseFedPercent(match[4] ?? "");
+  const upper = parseFedPercent(match[5] ?? "");
+  if (lower == null || upper == null || lower > upper) return null;
+  const action = (match[2] ?? "").toLowerCase();
+  const range = `${formatFedPercent(lower)}–${formatFedPercent(upper)}`;
+  let label: string;
+  if (action === "maintain" || action === "keep") {
+    label = `Held at ${range}`;
+  } else {
+    const change = parseFedPercent(match[3] ?? "");
+    const changeLabel = change == null ? "" : ` ${Math.round(change * 100)} bp`;
+    label = `${action === "lower" || action === "reduce" ? "Cut" : "Hiked"}${changeLabel} to ${range}`;
+  }
+  return { label, policySentence: match[1].trim() };
+}
+
+function extractOfficialFomcMaterialLinks(
+  html: string,
+  meetingDate: string,
+): { statementUrl: string | null; transcriptUrl: string | null } {
+  const compactDate = meetingDate.replace(/-/g, "");
+  const links = Array.from(html.matchAll(/href=["']([^"']+)["']/gi)).map((match) => toAbsoluteFedUrl(match[1] ?? ""));
+  const statementUrl = links.find((url) => new RegExp(`/newsevents/pressreleases/monetary${compactDate}a\\.htm(?:[?#]|$)`, "i").test(url)) ?? null;
+  const transcriptUrl = links.find((url) => new RegExp(`/mediacenter/files/fomcpresconf${compactDate}\\.pdf(?:[?#]|$)`, "i").test(url)) ?? null;
+  return {
+    statementUrl: statementUrl && isFedUrl(statementUrl) ? canonicalUrl(statementUrl) : null,
+    transcriptUrl: transcriptUrl && isFedUrl(transcriptUrl) ? canonicalUrl(transcriptUrl) : null,
+  };
+}
+
+function isOfficialTextReady(eventType: FomcCommentaryEventType, text: string): boolean {
+  if (eventType === "press_conference") return parseFomcRateDecision(text) != null;
+  return text.length >= MIN_OFFICIAL_TEXT_CHARS && /Federal Open Market Committee|federal funds rate|monetary policy/i.test(text);
+}
+
+async function fetchOfficialFomcMaterial(
+  env: Env,
+  eventType: FomcCommentaryEventType,
+  meetingDate: string,
+  sourceUrl: string,
+): Promise<OfficialFomcMaterial> {
+  const source = await fetchOfficialFedText(env, sourceUrl);
+  if (eventType === "minutes") {
+    return {
+      text: source.text,
+      title: source.title,
+      fetchedAt: source.fetchedAt,
+      statementUrl: null,
+      rateDecision: parseFomcRateDecision(source.text),
+    };
+  }
+
+  const sourceIsStatement = /\/newsevents\/pressreleases\/monetary\d{8}a\.htm(?:[?#]|$)/i.test(sourceUrl);
+  const links = extractOfficialFomcMaterialLinks(source.html, meetingDate);
+  const statementUrl = sourceIsStatement ? canonicalUrl(sourceUrl) : links.statementUrl;
+  if (!statementUrl) throw new Error("Official FOMC statement link has not been published on the press conference page.");
+  const statement = sourceIsStatement ? source : await fetchOfficialFedText(env, statementUrl);
+  const rateDecision = parseFomcRateDecision(statement.text);
+  if (!isOfficialTextReady(eventType, statement.text) || !rateDecision) {
+    throw new Error("Official FOMC statement text is not yet substantive enough to summarize.");
+  }
+  return {
+    text: statement.text,
+    title: source.title,
+    fetchedAt: statement.fetchedAt,
+    statementUrl,
+    rateDecision,
+  };
 }
 
 function canonicalUrl(rawUrl: string): string {
@@ -514,12 +667,15 @@ function firstMatchingSentence(sentences: string[], pattern: RegExp): string | n
 
 function buildExtractiveFomcSummary(input: { eventType: FomcCommentaryEventType; meetingDate: string; officialText: string }): FomcSummaryJson {
   const sentences = extractSentences(input.officialText);
-  const policy = firstMatchingSentence(sentences, /federal funds rate|target range|monetary policy|policy stance|restrictive/i);
+  const decision = parseFomcRateDecision(input.officialText);
+  const policy = decision?.policySentence ?? firstMatchingSentence(sentences, /federal funds rate|target range|monetary policy|policy stance|restrictive/i);
+  const activity = firstMatchingSentence(sentences, /economic activity|gross domestic product|consumer spending|business investment|productivity/i);
   const inflation = firstMatchingSentence(sentences, /inflation|price|prices|disinflation/i);
   const labor = firstMatchingSentence(sentences, /labor|employment|unemployment|job gains|wage/i);
+  const dissent = firstMatchingSentence(sentences, /voting against|preferred to (?:raise|lower)|dissent/i);
   const risks = firstMatchingSentence(sentences, /risk|uncertain|uncertainty|outlook|balance of risks/i);
   const balanceSheet = firstMatchingSentence(sentences, /balance sheet|securities holdings|treasury securities|agency debt|mortgage-backed/i);
-  const selected = [policy, inflation, labor, risks, balanceSheet]
+  const selected = [policy, activity, inflation, labor, dissent, risks, balanceSheet]
     .filter((sentence): sentence is string => Boolean(sentence))
     .filter((sentence, index, array) => array.indexOf(sentence) === index);
   const highlights = selected.length ? selected.slice(0, 5).map((sentence) => truncateSentence(sentence)) : [
@@ -527,11 +683,18 @@ function buildExtractiveFomcSummary(input: { eventType: FomcCommentaryEventType;
     "Gemini synthesis was unavailable, so this is an extractive official-source fallback.",
   ];
   const policyLine = policy ? truncateSentence(policy, 500) : "No concise policy sentence was extracted from the official text.";
-  const inflationLine = inflation || labor ? [inflation, labor].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ") : "No concise inflation/labor sentence was extracted from the official text.";
-  const marketLine = risks || balanceSheet ? [risks, balanceSheet].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ") : "Use the official source link for full context; model synthesis was unavailable.";
+  const inflationLine = inflation || labor || activity
+    ? [activity, inflation, labor].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ")
+    : "No concise growth, inflation, or labor sentence was extracted from the official text.";
+  const marketLine = dissent || risks || balanceSheet
+    ? [dissent, risks, balanceSheet].filter(Boolean).map((sentence) => truncateSentence(sentence!, 300)).join(" ")
+    : "Use the official source link for full context; model synthesis was unavailable.";
+  const tradingReadThrough = decision
+    ? `${decision.label}. Official-statement extractive fallback; model-based market synthesis is unavailable.`
+    : "Official-source extractive fallback: review the cited Fed text directly; model synthesis was unavailable for this refresh.";
   return {
     highlights,
-    tradingReadThrough: "Official-source extractive fallback: review the cited Fed text directly; Gemini synthesis was unavailable for this refresh.",
+    tradingReadThrough,
     summaryMarkdown: [
       "## Policy signal",
       policyLine,
@@ -546,7 +709,23 @@ function buildExtractiveFomcSummary(input: { eventType: FomcCommentaryEventType;
   };
 }
 
-export const testExports = { buildFomcPrompt, extractOfficialFomcSourcesFromCalendar, normalizeSourceTextForHash, buildExtractiveFomcSummary };
+function hasReadyLatestFomcTypes(items: FomcCommentaryItem[]): boolean {
+  const latestByType = new Map<FomcCommentaryEventType, FomcCommentaryItem>();
+  for (const item of items) {
+    if (!latestByType.has(item.eventType)) latestByType.set(item.eventType, item);
+  }
+  return latestByType.get("press_conference")?.status === "ready" && latestByType.get("minutes")?.status === "ready";
+}
+
+export const testExports = {
+  buildFomcPrompt,
+  extractOfficialFomcMaterialLinks,
+  extractOfficialFomcSourcesFromCalendar,
+  hasReadyLatestFomcTypes,
+  normalizeSourceTextForHash,
+  parseFomcRateDecision,
+  buildExtractiveFomcSummary,
+};
 
 export function parseGeminiFomcJson(text: string): FomcSummaryJson {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
@@ -570,6 +749,8 @@ async function loadExisting(env: Env, eventType: FomcCommentaryEventType, meetin
               release_date as releaseDate,
               source_url as sourceUrl,
               source_title as sourceTitle,
+              statement_url as statementUrl,
+              rate_decision as rateDecision,
               source_text as sourceText,
               source_mode as sourceMode,
               brave_sources_json as braveSourcesJson,
@@ -604,6 +785,8 @@ async function upsertFomcCommentaryItem(env: Env, input: {
   releaseDate: string | null;
   sourceUrl: string;
   sourceTitle: string | null;
+  statementUrl: string | null;
+  rateDecision: string | null;
   sourceText: string | null;
   sourceFetchedAt: string | null;
   sourceMode: FomcCommentarySourceMode;
@@ -626,14 +809,16 @@ async function upsertFomcCommentaryItem(env: Env, input: {
 }): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO fomc_commentary_items
-      (id, event_type, meeting_date, release_date, source_url, source_title, source_text, source_fetched_at,
+      (id, event_type, meeting_date, release_date, source_url, source_title, statement_url, rate_decision, source_text, source_fetched_at,
        source_mode, brave_sources_json, citation_sources_json, summary_markdown, highlights_json,
        trading_read_through, provider, model, status, error, generated_at, source_text_hash, last_checked_at,
        last_unchanged_at, last_refresh_attempt_at, refresh_attempt_count, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_type, meeting_date, source_url) DO UPDATE SET
        release_date = excluded.release_date,
        source_title = excluded.source_title,
+       statement_url = excluded.statement_url,
+       rate_decision = excluded.rate_decision,
        source_text = excluded.source_text,
        source_fetched_at = excluded.source_fetched_at,
        source_mode = excluded.source_mode,
@@ -660,6 +845,8 @@ async function upsertFomcCommentaryItem(env: Env, input: {
     input.releaseDate,
     input.sourceUrl,
     input.sourceTitle,
+    input.statementUrl,
+    input.rateDecision,
     input.sourceText,
     input.sourceFetchedAt,
     input.sourceMode,
@@ -703,16 +890,20 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   let sourceUrl = explicitSourceUrl || DEFAULT_SOURCE_URL;
   let officialText: string | null = null;
   let sourceTitle: string | null = null;
+  let statementUrl: string | null = null;
+  let rateDecision: string | null = null;
   let fetchedAt: string | null = null;
   let sourceError: string | null = null;
 
   if (explicitSourceUrl && isFedUrl(sourceUrl)) {
     try {
-      const fetched = await fetchOfficialFedText(env, sourceUrl);
+      const fetched = await fetchOfficialFomcMaterial(env, eventType, meetingDate, sourceUrl);
       officialText = fetched.text;
       sourceTitle = fetched.title;
+      statementUrl = fetched.statementUrl;
+      rateDecision = fetched.rateDecision?.label ?? null;
       fetchedAt = fetched.fetchedAt;
-      if (officialText.length < MIN_OFFICIAL_TEXT_CHARS) sourceError = "Official Federal Reserve source text is not available yet or is too short to summarize.";
+      if (!isOfficialTextReady(eventType, officialText)) sourceError = "Official Federal Reserve source text is not available yet or is not substantive enough to summarize.";
     } catch (error) {
       sourceError = error instanceof Error ? error.message : "Official Federal Reserve source fetch failed.";
     }
@@ -720,17 +911,21 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     sourceError = "Official FOMC source URL must be on federalreserve.gov.";
   }
 
-  let hasOfficialText = Boolean(officialText && officialText.length >= MIN_OFFICIAL_TEXT_CHARS);
+  let hasOfficialText = Boolean(officialText && isOfficialTextReady(eventType, officialText));
   let sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
   let existing = explicitSourceUrl ? await loadExisting(env, eventType, meetingDate, sourceUrl) : null;
   if (explicitSourceUrl && existing?.status === "ready" && hasOfficialText && sourceTextHash) {
     const shouldGenerateOfficial = shouldGenerateFomcSummary({
       force: options.force,
       existingStatus: existing.status,
+      existingProvider: existing.provider,
       existingSourceTextHash: existing.sourceTextHash,
+      existingLastRefreshAttemptAt: existing.lastRefreshAttemptAt,
+      existingRefreshAttemptCount: existing.refreshAttemptCount,
       nextSourceTextHash: sourceTextHash,
       hasOfficialText,
       sourceMode: "official",
+      now,
     });
     if (!shouldGenerateOfficial) {
       await markFomcCommentaryUnchanged(env, existing.id, nowIso);
@@ -748,18 +943,20 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     sourceUrl = discoveredOfficial || DEFAULT_SOURCE_URL;
     if (discoveredOfficial && isFedUrl(sourceUrl)) {
       try {
-        const fetched = await fetchOfficialFedText(env, sourceUrl);
+        const fetched = await fetchOfficialFomcMaterial(env, eventType, meetingDate, sourceUrl);
         officialText = fetched.text;
         sourceTitle = fetched.title;
+        statementUrl = fetched.statementUrl;
+        rateDecision = fetched.rateDecision?.label ?? null;
         fetchedAt = fetched.fetchedAt;
-        if (officialText.length < MIN_OFFICIAL_TEXT_CHARS) sourceError = "Official Federal Reserve source text is not available yet or is too short to summarize.";
+        if (!isOfficialTextReady(eventType, officialText)) sourceError = "Official Federal Reserve source text is not available yet or is not substantive enough to summarize.";
       } catch (error) {
         sourceError = error instanceof Error ? error.message : "Official Federal Reserve source fetch failed.";
       }
     } else {
       sourceError = "Official Federal Reserve transcript/minutes URL has not been found yet.";
     }
-    hasOfficialText = Boolean(officialText && officialText.length >= MIN_OFFICIAL_TEXT_CHARS);
+    hasOfficialText = Boolean(officialText && isOfficialTextReady(eventType, officialText));
     sourceTextHash = hasOfficialText ? await sha256Hex(normalizeSourceTextForHash(officialText)) : null;
     existing = await loadExisting(env, eventType, meetingDate, sourceUrl);
   }
@@ -777,10 +974,14 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   const shouldGenerate = shouldGenerateFomcSummary({
     force: options.force,
     existingStatus: existing?.status ?? null,
+    existingProvider: existing?.provider ?? null,
     existingSourceTextHash: existing?.sourceTextHash ?? null,
+    existingLastRefreshAttemptAt: existing?.lastRefreshAttemptAt ?? null,
+    existingRefreshAttemptCount: existing?.refreshAttemptCount ?? 0,
     nextSourceTextHash: sourceTextHash,
     hasOfficialText,
     sourceMode,
+    now,
   });
   if (!shouldGenerate && existing?.status === "ready") {
     await markFomcCommentaryUnchanged(env, existing.id, nowIso);
@@ -788,7 +989,10 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   }
 
   const id = existing?.id ?? crypto.randomUUID();
-  const refreshAttemptCount = Number(existing?.refreshAttemptCount ?? 0) + (shouldGenerate && (hasOfficialText || sourceMode === "fallback_context") ? 1 : 0);
+  const sourceChanged = Boolean(existing && existing.sourceTextHash !== sourceTextHash);
+  const refreshAttemptCount = shouldGenerate && (hasOfficialText || sourceMode === "fallback_context")
+    ? (sourceChanged ? 1 : Number(existing?.refreshAttemptCount ?? 0) + 1)
+    : Number(existing?.refreshAttemptCount ?? 0);
   let stored: Parameters<typeof upsertFomcCommentaryItem>[1] = {
     id,
     eventType,
@@ -796,6 +1000,8 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     releaseDate: nowIso.slice(0, 10),
     sourceUrl,
     sourceTitle,
+    statementUrl,
+    rateDecision,
     sourceText: officialText,
     sourceFetchedAt: fetchedAt,
     sourceMode,
@@ -830,7 +1036,9 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
     const citationSources = citationsForPrompt.filter((source) => usedUrls.has(canonicalUrl(source.url)));
     stored = {
       ...stored,
-      citationSources: sourceMode === "official" ? [] : (citationSources.length ? citationSources : citationsForPrompt),
+      citationSources: sourceMode === "official"
+        ? []
+        : (sourceMode === "fallback_context" && citationSources.length === 0 ? citationsForPrompt : citationSources),
       summaryMarkdown: parsed.summaryMarkdown,
       highlights: parsed.highlights,
       tradingReadThrough: sourceMode === "fallback_context"
@@ -843,7 +1051,7 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
       generatedAt: nowIso,
     };
   } catch (error) {
-    if (existing?.status === "ready") {
+    if (existing?.status === "ready" && existing.provider !== "extractive_fallback" && !sourceChanged) {
       stored = {
         ...stored,
         citationSources: parseJsonArray<FomcCommentaryCitationSource>(existing.citationSourcesJson),
@@ -860,6 +1068,7 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
       const fallback = buildExtractiveFomcSummary({ eventType, meetingDate, officialText: synthesisText });
       stored = {
         ...stored,
+        sourceMode: "official",
         citationSources: [],
         summaryMarkdown: fallback.summaryMarkdown,
         highlights: fallback.highlights,
@@ -920,8 +1129,7 @@ export async function refreshLatestFomcCommentary(env: Env, options: { force?: b
 
 export async function loadOrRefreshLatestFomcCommentary(env: Env, limit = FOMC_AUTO_REFRESH_LIMIT): Promise<FomcCommentaryItem[]> {
   const existing = await loadLatestFomcCommentary(env, limit);
-  const readyTypes = new Set(existing.filter((item) => item.status === "ready").map((item) => item.eventType));
-  if (readyTypes.has("press_conference") && readyTypes.has("minutes")) return existing;
+  if (hasReadyLatestFomcTypes(existing)) return existing;
   const refreshed = await refreshLatestFomcCommentary(env).catch(() => null);
   return refreshed?.items?.length ? refreshed.items.slice(0, Math.max(1, Math.min(10, limit))) : existing;
 }

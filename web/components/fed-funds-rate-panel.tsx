@@ -221,7 +221,7 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
                   <span className={`rounded-full border px-2 py-1 font-semibold ${fomcStatusClass(item.status)}`}>
                     {fomcStatusLabel(item.status)}
                   </span>
-                  {sourceMode === "official_plus_brave" && (
+                  {sourceMode === "official_plus_brave" && citations.some((source) => source.usedFor === "context" || source.usedFor === "fallback") && (
                     <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 font-semibold text-sky-200">Includes Brave sources</span>
                   )}
                   {sourceMode === "fallback_context" && (
@@ -234,6 +234,7 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
                   <span>Meeting: <span className="text-slate-200">{formatIsoDate(item.meetingDate)}</span></span>
                   <span>Release: <span className="text-slate-200">{formatIsoDate(item.releaseDate)}</span></span>
+                  {item.rateDecision && <span>Decision: <span className="text-slate-200">{item.rateDecision}</span></span>}
                   {item.generatedAt && <span>Generated: <span className="text-slate-200">{formatGeneratedAt(item.generatedAt)}</span></span>}
                   {item.sourceFetchedAt && <span>Source fetched: <span className="text-slate-200">{formatGeneratedAt(item.sourceFetchedAt)}</span></span>}
                   {item.lastCheckedAt && <span>Last checked: <span className="text-slate-200">{formatGeneratedAt(item.lastCheckedAt)}</span></span>}
@@ -261,6 +262,11 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
                   <a className="text-accent hover:underline" href={item.sourceUrl} target="_blank" rel="noreferrer">
                     {item.sourceTitle || "Federal Reserve source"}
                   </a>
+                  {item.statementUrl && item.statementUrl !== item.sourceUrl && (
+                    <a className="text-accent hover:underline" href={item.statementUrl} target="_blank" rel="noreferrer">
+                      Official FOMC statement
+                    </a>
+                  )}
                   {citations.map((source) => (
                     <a key={source.url} className="text-sky-300 hover:underline" href={source.url} target="_blank" rel="noreferrer">
                       {source.sourceName}: {source.title || source.usedFor}

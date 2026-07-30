@@ -22,6 +22,8 @@ const row = {
   releaseDate: "2026-07-08",
   sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomcminutes20260617.htm",
   sourceTitle: "Minutes",
+  statementUrl: null,
+  rateDecision: "Held at 3.50%–3.75%",
   sourceMode: "official_plus_brave" as const,
   status: "ready" as const,
   summaryMarkdown: "## Policy signal",
@@ -43,6 +45,15 @@ const row = {
 };
 
 const OFFICIAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomcminutes20260617.htm";
+const PRESS_CONFERENCE_URL = "https://www.federalreserve.gov/monetarypolicy/fomcpresconf20260729.htm";
+const STATEMENT_URL = "https://www.federalreserve.gov/newsevents/pressreleases/monetary20260729a.htm";
+const JULY_STATEMENT = [
+  "The Federal Open Market Committee approved the following statement for release by a 9 – 3 vote.",
+  "The Committee decided to maintain the target range for the federal funds rate at 3-1/2 to 3-3/4 percent, in support of the Federal Reserve's dual mandate.",
+  "Economic activity is expanding at a solid pace. Job gains have kept pace with the workforce, and the unemployment rate has changed little.",
+  "Inflation remains elevated relative to the Committee's 2 percent goal.",
+  "Voting against the monetary policy action were three members, who preferred to raise the target range for the federal funds rate by 1/4 percentage point at this meeting.",
+].join(" ");
 const LONG_OFFICIAL_TEXT = Array.from({ length: 60 }, () => (
   "The Committee decided to maintain the target range for the federal funds rate. Inflation remains somewhat elevated and labor market conditions remained solid. The economic outlook is uncertain and the Committee remains attentive to risks."
 )).join(" ");
@@ -60,6 +71,8 @@ type FakeFomcStoredRow = {
   releaseDate: string | null;
   sourceUrl: string;
   sourceTitle: string | null;
+  statementUrl: string | null;
+  rateDecision: string | null;
   sourceText: string | null;
   sourceMode: FomcCommentarySourceMode;
   braveSourcesJson: string | null;
@@ -142,26 +155,28 @@ class FakeFomcDb {
             releaseDate: bound[3] == null ? null : String(bound[3]),
             sourceUrl: String(bound[4]),
             sourceTitle: bound[5] == null ? null : String(bound[5]),
-            sourceText: bound[6] == null ? null : String(bound[6]),
-            sourceFetchedAt: bound[7] == null ? null : String(bound[7]),
-            sourceMode: bound[8] as FakeFomcStoredRow["sourceMode"],
-            braveSourcesJson: String(bound[9]),
-            citationSourcesJson: String(bound[10]),
-            summaryMarkdown: bound[11] == null ? null : String(bound[11]),
-            highlightsJson: String(bound[12]),
-            tradingReadThrough: bound[13] == null ? null : String(bound[13]),
-            provider: bound[14] == null ? null : String(bound[14]),
-            model: bound[15] == null ? null : String(bound[15]),
-            status: bound[16] as FakeFomcStoredRow["status"],
-            error: bound[17] == null ? null : String(bound[17]),
-            generatedAt: bound[18] == null ? null : String(bound[18]),
-            sourceTextHash: bound[19] == null ? null : String(bound[19]),
-            lastCheckedAt: bound[20] == null ? null : String(bound[20]),
-            lastUnchangedAt: bound[21] == null ? null : String(bound[21]),
-            lastRefreshAttemptAt: bound[22] == null ? null : String(bound[22]),
-            refreshAttemptCount: Number(bound[23] ?? 0),
-            createdAt: String(bound[24]),
-            updatedAt: String(bound[25]),
+            statementUrl: bound[6] == null ? null : String(bound[6]),
+            rateDecision: bound[7] == null ? null : String(bound[7]),
+            sourceText: bound[8] == null ? null : String(bound[8]),
+            sourceFetchedAt: bound[9] == null ? null : String(bound[9]),
+            sourceMode: bound[10] as FakeFomcStoredRow["sourceMode"],
+            braveSourcesJson: String(bound[11]),
+            citationSourcesJson: String(bound[12]),
+            summaryMarkdown: bound[13] == null ? null : String(bound[13]),
+            highlightsJson: String(bound[14]),
+            tradingReadThrough: bound[15] == null ? null : String(bound[15]),
+            provider: bound[16] == null ? null : String(bound[16]),
+            model: bound[17] == null ? null : String(bound[17]),
+            status: bound[18] as FakeFomcStoredRow["status"],
+            error: bound[19] == null ? null : String(bound[19]),
+            generatedAt: bound[20] == null ? null : String(bound[20]),
+            sourceTextHash: bound[21] == null ? null : String(bound[21]),
+            lastCheckedAt: bound[22] == null ? null : String(bound[22]),
+            lastUnchangedAt: bound[23] == null ? null : String(bound[23]),
+            lastRefreshAttemptAt: bound[24] == null ? null : String(bound[24]),
+            refreshAttemptCount: Number(bound[25] ?? 0),
+            createdAt: String(bound[26]),
+            updatedAt: String(bound[27]),
           };
           const existingIndex = db.rows.findIndex((candidate) =>
             candidate.eventType === item.eventType
@@ -274,6 +289,8 @@ describe("FOMC commentary service helpers", () => {
     expect(item.highlights).toEqual(["Rates steady", "Inflation still elevated"]);
     expect(item.citationSources).toHaveLength(1);
     expect(item.sourceMode).toBe("official_plus_brave");
+    expect(item.rateDecision).toBe("Held at 3.50%–3.75%");
+    expect(item.statementUrl).toBeNull();
     expect(item.sourceTextHash).toBe("abc123");
     expect(item.lastCheckedAt).toBe("2026-07-08T18:05:00.000Z");
     expect(item.refreshAttemptCount).toBe(1);
@@ -337,8 +354,54 @@ describe("FOMC commentary service helpers", () => {
     ]);
   });
 
+  it("discovers the official statement and transcript links from a press conference landing page", () => {
+    const links = testExports.extractOfficialFomcMaterialLinks(`
+      <a href="/newsevents/pressreleases/monetary20260729a.htm">FOMC Meeting Statement</a>
+      <a href="/mediacenter/files/FOMCpresconf20260729.pdf">Press Conference Transcript (PDF)</a>
+    `, "2026-07-29");
+    expect(links).toEqual({
+      statementUrl: STATEMENT_URL,
+      transcriptUrl: "https://www.federalreserve.gov/mediacenter/files/FOMCpresconf20260729.pdf",
+    });
+  });
+
+  it.each([
+    ["The Committee decided to maintain the target range for the federal funds rate at 3-1/2 to 3-3/4 percent.", "Held at 3.50%–3.75%"],
+    ["The Committee decided to keep the target range for the federal funds rate at 4.25 to 4.50 percent.", "Held at 4.25%–4.50%"],
+    ["The Committee decided to lower the target range for the federal funds rate by 1/4 percentage point to 4-1/4 to 4-1/2 percent.", "Cut 25 bp to 4.25%–4.50%"],
+    ["The Committee decided to raise the target range for the federal funds rate by 1/2 percentage point to 5 to 5-1/4 percent.", "Hiked 50 bp to 5.00%–5.25%"],
+  ])("parses an official rate decision: %s", (policySentence, expectedLabel) => {
+    expect(testExports.parseFomcRateDecision(policySentence)?.label).toBe(expectedLabel);
+  });
+
+  it("does not guess a rate decision when the official sentence is malformed", () => {
+    expect(testExports.parseFomcRateDecision("The Committee discussed the federal funds rate.")).toBeNull();
+  });
+
   it("normalizes source text before hash comparison", () => {
     expect(testExports.normalizeSourceTextForHash("A\n\n  B\tC")).toBe("A B C");
+  });
+
+  it("requires the latest row of each FOMC event type to be ready", () => {
+    const currentPress = normalizeFomcCommentaryRow({
+      ...row,
+      id: "current-press",
+      eventType: "press_conference",
+      meetingDate: "2026-07-29",
+      releaseDate: "2026-07-29",
+      status: "pending_source",
+    });
+    const olderPress = normalizeFomcCommentaryRow({
+      ...row,
+      id: "older-press",
+      eventType: "press_conference",
+      meetingDate: "2026-06-17",
+      releaseDate: "2026-06-17",
+      status: "ready",
+    });
+    const latestMinutes = normalizeFomcCommentaryRow({ ...row, id: "latest-minutes", status: "ready" });
+    expect(testExports.hasReadyLatestFomcTypes([currentPress, latestMinutes, olderPress])).toBe(false);
+    expect(testExports.hasReadyLatestFomcTypes([{ ...currentPress, status: "ready" }, latestMinutes, olderPress])).toBe(true);
   });
 
   it("skips Gemini for ready official summaries when source hash is unchanged", () => {
@@ -373,15 +436,120 @@ describe("FOMC commentary service helpers", () => {
     })).toBe(true);
   });
 
+  it("retries unchanged extractive fallbacks hourly, capped at three attempts per source hash", () => {
+    const common = {
+      existingStatus: "ready" as const,
+      existingProvider: "extractive_fallback",
+      existingSourceTextHash: "hash-1",
+      nextSourceTextHash: "hash-1",
+      hasOfficialText: true,
+      sourceMode: "official" as const,
+      now: new Date("2026-07-30T03:00:00.000Z"),
+    };
+    expect(shouldGenerateFomcSummary({
+      ...common,
+      existingLastRefreshAttemptAt: "2026-07-30T01:59:59.000Z",
+      existingRefreshAttemptCount: 1,
+    })).toBe(true);
+    expect(shouldGenerateFomcSummary({
+      ...common,
+      existingLastRefreshAttemptAt: "2026-07-30T02:30:00.000Z",
+      existingRefreshAttemptCount: 1,
+    })).toBe(false);
+    expect(shouldGenerateFomcSummary({
+      ...common,
+      existingLastRefreshAttemptAt: "2026-07-30T01:00:00.000Z",
+      existingRefreshAttemptCount: 3,
+    })).toBe(false);
+  });
+
   it("can build an official-source extractive fallback when Gemini is unavailable", () => {
     const fallback = testExports.buildExtractiveFomcSummary({
-      eventType: "minutes",
-      meetingDate: "2026-04-29",
-      officialText: "The Committee decided to maintain the target range for the federal funds rate. Inflation remains somewhat elevated and the Committee remains attentive to inflation risks. Labor market conditions remained solid with low unemployment. The economic outlook is uncertain and risks are balanced.",
+      eventType: "press_conference",
+      meetingDate: "2026-07-29",
+      officialText: JULY_STATEMENT,
     });
     expect(fallback.highlights.length).toBeGreaterThan(0);
+    expect(fallback.highlights.join(" ")).toContain("3-1/2 to 3-3/4 percent");
+    expect(fallback.highlights.join(" ")).toContain("Voting against");
     expect(fallback.summaryMarkdown).toContain("Policy signal");
-    expect(fallback.tradingReadThrough).toContain("extractive fallback");
+    expect(fallback.tradingReadThrough).toContain("Held at 3.50%–3.75%");
+  });
+
+  it("fetches the linked statement and keeps an informative fallback when Gemini returns 503", async () => {
+    const db = new FakeFomcDb();
+    const fetchedUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchedUrls.push(url);
+      if (url.includes("api.search.brave.com")) {
+        return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+      }
+      if (url.includes("generativelanguage.googleapis.com")) {
+        return new Response("temporarily unavailable", { status: 503 });
+      }
+      if (url === PRESS_CONFERENCE_URL) {
+        return new Response(`
+          <html><title>July 28-29, 2026 FOMC Meeting</title><div id="content" role="main">
+            ${"Video instructions and navigation. ".repeat(80)}
+            <a href="/newsevents/pressreleases/monetary20260729a.htm">FOMC Meeting Statement</a>
+            <a href="/mediacenter/files/FOMCpresconf20260729.pdf">Press Conference Transcript (PDF)</a>
+          </div></html>
+        `, { status: 200 });
+      }
+      if (url === STATEMENT_URL) {
+        return new Response(`<html><title>Federal Reserve issues FOMC statement</title><div class="col-xs-12 col-sm-8 col-md-8"><p>${JULY_STATEMENT}</p></div></html>`, { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }));
+
+    const result = await refreshFomcCommentary(createFomcEnv(db), {
+      eventType: "press_conference",
+      meetingDate: "2026-07-29",
+      sourceUrl: PRESS_CONFERENCE_URL,
+      now: new Date("2026-07-29T21:11:47.000Z"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fetchedUrls).toContain(STATEMENT_URL);
+    expect(db.rows[0]?.sourceUrl).toBe(PRESS_CONFERENCE_URL);
+    expect(db.rows[0]?.statementUrl).toBe(STATEMENT_URL);
+    expect(db.rows[0]?.rateDecision).toBe("Held at 3.50%–3.75%");
+    expect(db.rows[0]?.provider).toBe("extractive_fallback");
+    expect(db.rows[0]?.sourceMode).toBe("official");
+    expect(db.rows[0]?.summaryMarkdown).toContain("Inflation remains elevated");
+    expect(db.rows[0]?.error).toContain("HTTP 503");
+  });
+
+  it("does not classify a long press conference landing page as substantive official text", async () => {
+    const db = new FakeFomcDb();
+    let geminiCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("api.search.brave.com")) {
+        return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+      }
+      if (url.includes("generativelanguage.googleapis.com")) {
+        geminiCalls += 1;
+        return new Response("unexpected", { status: 500 });
+      }
+      if (url === PRESS_CONFERENCE_URL) {
+        return new Response(`<html><div id="content" role="main">${"Video instructions and navigation. ".repeat(100)}</div></html>`, { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }));
+
+    const result = await refreshFomcCommentary(createFomcEnv(db), {
+      eventType: "press_conference",
+      meetingDate: "2026-07-29",
+      sourceUrl: PRESS_CONFERENCE_URL,
+      now: new Date("2026-07-29T20:00:00.000Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(geminiCalls).toBe(0);
+    expect(db.rows[0]?.status).toBe("pending_source");
+    expect(db.rows[0]?.error).toContain("statement link");
   });
 
   it("skips Brave collection when an explicit official source is ready and unchanged", async () => {
@@ -403,6 +571,32 @@ describe("FOMC commentary service helpers", () => {
     expect(db.rows[0]?.lastUnchangedAt).toBe("2026-06-18T12:00:00.000Z");
   });
 
+  it("retries an unchanged extractive fallback and replaces it after Gemini recovers", async () => {
+    const sourceTextHash = await sha256Hex(testExports.normalizeSourceTextForHash(LONG_OFFICIAL_TEXT));
+    const existing = {
+      ...createReadyFomcRow(sourceTextHash),
+      provider: "extractive_fallback",
+      model: "official-fed-text",
+      lastRefreshAttemptAt: "2026-07-30T00:00:00.000Z",
+      refreshAttemptCount: 1,
+    };
+    const db = new FakeFomcDb([existing]);
+    const counts = stubFomcFetches();
+
+    const result = await refreshFomcCommentary(createFomcEnv(db), {
+      eventType: "minutes",
+      meetingDate: "2026-06-17",
+      sourceUrl: OFFICIAL_URL,
+      now: new Date("2026-07-30T02:00:00.000Z"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(counts.brave).toBe(0);
+    expect(counts.gemini).toBe(1);
+    expect(db.rows[0]?.provider).toBe("gemini");
+    expect(db.rows[0]?.refreshAttemptCount).toBe(2);
+  });
+
   it("collects Brave context and regenerates when official source text changes", async () => {
     const db = new FakeFomcDb([createReadyFomcRow("old-hash")]);
     const counts = stubFomcFetches(`${LONG_OFFICIAL_TEXT} The Committee added a new sentence about balance sheet policy.`);
@@ -420,7 +614,7 @@ describe("FOMC commentary service helpers", () => {
     expect(counts.gemini).toBe(1);
     expect(db.rows[0]?.status).toBe("ready");
     expect(db.rows[0]?.sourceMode).toBe("official_plus_brave");
-    expect(db.rows[0]?.refreshAttemptCount).toBe(2);
+    expect(db.rows[0]?.refreshAttemptCount).toBe(1);
   });
 
   it("can still use Brave discovery when no explicit source URL is known", async () => {

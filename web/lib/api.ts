@@ -46,6 +46,8 @@ export type FomcCommentaryItem = {
   releaseDate: string | null;
   sourceUrl: string;
   sourceTitle: string | null;
+  statementUrl: string | null;
+  rateDecision: string | null;
   sourceMode?: FomcCommentarySourceMode;
   status: "pending_source" | "ready" | "failed";
   summaryMarkdown: string | null;
