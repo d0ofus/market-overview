@@ -506,6 +506,7 @@ describe("FOMC commentary service helpers", () => {
 
   it.each([
     ["The Committee decided to maintain the target range for the federal funds rate at 3-1/2 to 3-3/4 percent.", "Held at 3.50%–3.75%"],
+    ["The Committee decided to maintain the target range for the federal funds rate at 3‑1/2 to 3‑3/4 percent.", "Held at 3.50%–3.75%"],
     ["The Committee decided to keep the target range for the federal funds rate at 4.25 to 4.50 percent.", "Held at 4.25%–4.50%"],
     ["The Committee decided to lower the target range for the federal funds rate by 1/4 percentage point to 4-1/4 to 4-1/2 percent.", "Cut 25 bp to 4.25%–4.50%"],
     ["The Committee decided to raise the target range for the federal funds rate by 1/2 percentage point to 5 to 5-1/4 percent.", "Hiked 50 bp to 5.00%–5.25%"],

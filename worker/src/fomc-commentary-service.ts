@@ -521,7 +521,10 @@ function formatFedPercent(value: number): string {
 }
 
 function parseFomcRateDecision(text: string): FomcRateDecision | null {
-  const compact = text.replace(/\s+/g, " ").trim();
+  const compact = text
+    .replace(/[\u00ad\u2010-\u2015\u2212]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
   const numberPattern = String.raw`\d+(?:-\d+\/\d+|\/\d+|\.\d+)?`;
   const match = compact.match(new RegExp(
     String.raw`((?:The\s+)?Committee decided to (maintain|keep|lower|reduce|raise|increase) the target range for the federal funds rate(?: by (${numberPattern}) percentage points?)? (?:at|to) (${numberPattern}) to (${numberPattern}) percent[^.]*\.)`,
