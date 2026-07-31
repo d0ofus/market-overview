@@ -17,6 +17,7 @@ import {
   refreshAndStoreOverviewSnapshot,
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
+import { isBreadthUniverseMemberCountValid, isCurrentUsableBreadthRow, isUsableBreadthRow } from "./breadth-quality";
 import { refreshOverviewPageData } from "./overview-refresh-service";
 import {
   doesOverviewCurrentRowNeedRepair,
@@ -1948,19 +1949,10 @@ type BreadthSentiment = {
   putCall?: number | null;
   metrics?: Record<string, unknown>;
   dataSource?: string | null;
+  provenance?: Record<string, unknown> | null;
 };
 
-const hasUsableBreadthRow = (row: { advancers?: unknown; decliners?: unknown; unchanged?: unknown; metrics?: unknown }): boolean => {
-  const metrics = (row.metrics ?? {}) as Record<string, unknown>;
-  const memberCountRaw = metrics.memberCount;
-  if (typeof memberCountRaw === "number" && Number.isFinite(memberCountRaw)) {
-    return memberCountRaw > 0;
-  }
-  const adv = typeof row.advancers === "number" && Number.isFinite(row.advancers) ? row.advancers : 0;
-  const dec = typeof row.decliners === "number" && Number.isFinite(row.decliners) ? row.decliners : 0;
-  const unc = typeof row.unchanged === "number" && Number.isFinite(row.unchanged) ? row.unchanged : 0;
-  return adv + dec + unc > 0;
-};
+const hasUsableBreadthRow = isUsableBreadthRow;
 
 let lastSp500BreadthFreshnessAttemptAt = 0;
 const SP500_BREADTH_FRESHNESS_ATTEMPT_INTERVAL_MS = 15 * 60 * 1000;
@@ -2164,6 +2156,9 @@ async function loadBreadthStatusDiagnostics(env: Env, expectedAsOfDate: string):
     if (memberCount === 0) {
       status = "missing";
       reason = "No universe members are stored for this breadth universe.";
+    } else if (!isBreadthUniverseMemberCountValid(universeId, memberCount)) {
+      status = "low_coverage";
+      reason = `Stored universe membership is invalid (${memberCount} members); breadth health is fail-closed until a validated universe version is active.`;
     } else if (!latestAsOfDate) {
       status = "missing";
       reason = `No stored breadth snapshot exists; coverage for ${expectedAsOfDate} is ${coveragePct.toFixed(1)}%.`;
@@ -2691,6 +2686,7 @@ app.get("/api/breadth", async (c) => {
         ...row,
         metrics: sentiment.metrics ?? null,
         dataSource: sentiment.dataSource ?? null,
+        provenance: sentiment.provenance ?? null,
       };
     });
 
@@ -2706,13 +2702,43 @@ app.get("/api/breadth", async (c) => {
       ...row,
       metrics: sentiment.metrics ?? null,
       dataSource: sentiment.dataSource ?? null,
+      provenance: sentiment.provenance ?? null,
     };
   });
   return c.json({ requestedUniverseId, universeId, rows: parsedRows });
 });
 
+async function loadFreshBreadthUniverseIdsForCurrentSummary(env: Env, expectedAsOfDate: string): Promise<Set<string>> {
+  const health = await loadBreadthStatusDiagnostics(env, expectedAsOfDate).catch(() => ({
+    status: "stale" as const,
+    warning: "Breadth diagnostics could not be loaded.",
+    diagnostics: [] as BreadthStatusDiagnostic[],
+  }));
+  const freshUniverseIds = new Set(
+    health.diagnostics.filter((diagnostic) => diagnostic.status === "fresh").map((diagnostic) => diagnostic.universeId),
+  );
+  const russellSource = await env.DB.prepare(
+    `SELECT uv.source_as_of_date as sourceAsOfDate, sync.status as syncStatus
+       FROM universes u
+       JOIN universe_versions uv ON uv.id = u.active_version_id
+       LEFT JOIN etf_constituent_sync_status sync ON sync.etf_ticker = 'universe:russell2000-core'
+      WHERE u.id = 'russell2000-core' LIMIT 1`,
+  ).first<{ sourceAsOfDate: string | null; syncStatus: string | null }>().catch(() => null);
+  const russellSourceMs = russellSource?.sourceAsOfDate
+    ? Date.parse(`${russellSource.sourceAsOfDate}T00:00:00Z`)
+    : Number.NaN;
+  const russellSourceAgeDays = Number.isFinite(russellSourceMs)
+    ? Math.floor((Date.now() - russellSourceMs) / 86_400_000)
+    : Number.POSITIVE_INFINITY;
+  if (russellSource?.syncStatus !== "ok" || russellSourceAgeDays < -1 || russellSourceAgeDays > 14) {
+    freshUniverseIds.delete("russell2000-core");
+  }
+  return freshUniverseIds;
+}
+
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
+  const expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const selectCols =
     "b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson";
 
@@ -2733,9 +2759,16 @@ app.get("/api/breadth/summary", async (c) => {
         ...row,
         metrics: sentiment.metrics ?? null,
         dataSource: sentiment.dataSource ?? null,
+        provenance: sentiment.provenance ?? null,
       };
     });
-    const usableRequestedRows = parsedRequestedRows.filter((row) => hasUsableBreadthRow(row));
+    const currentFreshUniverseIds = requestedDate === expectedAsOfDate
+      ? await loadFreshBreadthUniverseIdsForCurrentSummary(c.env, expectedAsOfDate)
+      : null;
+    const usableRequestedRows = parsedRequestedRows.filter((row) =>
+      hasUsableBreadthRow(row)
+      && (!currentFreshUniverseIds || currentFreshUniverseIds.has(row.universeId)),
+    );
     const requestedRowById = new Map(usableRequestedRows.map((r: any) => [r.universeId, r]));
     const requestedOrderedRows = [
       requestedRowById.get("sp500-core"),
@@ -2745,12 +2778,24 @@ app.get("/api/breadth/summary", async (c) => {
       requestedRowById.get("overall-market-proxy"),
     ].filter(Boolean);
 
+    const unavailable = [
+      ...[
+        ["sp500-core", "S&P 500"],
+        ["nasdaq-core", "NASDAQ"],
+        ["nyse-core", "NYSE"],
+        ["russell2000-core", "Russell 2000 — IWM proxy"],
+        ["overall-market-proxy", "Overall Market Proxy"],
+      ].filter(([id]) => !requestedRowById.has(id)).map(([id, name]) => ({
+        id,
+        name,
+        reason: `${name} breadth is missing or failed universe coverage validation for ${requestedDate}.`,
+      })),
+      { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
+    ];
     return c.json({
       asOfDate: requestedDate,
       rows: requestedOrderedRows,
-      unavailable: [
-        { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
-      ],
+      unavailable,
     });
   }
 
@@ -2760,7 +2805,11 @@ app.get("/api/breadth/summary", async (c) => {
       asOfDate: null,
       rows: [],
       unavailable: [
-        { id: "nyse-core", name: "NYSE", reason: "NYSE breadth data is currently unavailable from configured free sources" },
+        { id: "sp500-core", name: "S&P 500", reason: "No validated breadth snapshot is available" },
+        { id: "nasdaq-core", name: "NASDAQ", reason: "No validated breadth snapshot is available" },
+        { id: "nyse-core", name: "NYSE", reason: "No validated breadth snapshot is available" },
+        { id: "russell2000-core", name: "Russell 2000 — IWM proxy", reason: "No validated breadth snapshot is available" },
+        { id: "overall-market-proxy", name: "Overall Market Proxy", reason: "No validated breadth snapshot is available" },
         { id: "worden-common-stock-universe", name: "Overall Market (Worden Common Stock Universe)", reason: "Proprietary universe; no free direct feed is available" },
       ],
     });
@@ -2772,11 +2821,14 @@ app.get("/api/breadth/summary", async (c) => {
       ...row,
       metrics: sentiment.metrics ?? null,
       dataSource: sentiment.dataSource ?? null,
+      provenance: sentiment.provenance ?? null,
     };
   });
+  const freshUniverseIds = await loadFreshBreadthUniverseIdsForCurrentSummary(c.env, expectedAsOfDate);
+  const latestDate = expectedAsOfDate;
   const rowById = new Map<string, any>();
   for (const row of parsedRows) {
-    if (!hasUsableBreadthRow(row)) continue;
+    if (!freshUniverseIds.has(row.universeId) || !isCurrentUsableBreadthRow(row, latestDate)) continue;
     if (!rowById.has(row.universeId)) {
       rowById.set(row.universeId, row);
     }
@@ -2810,7 +2862,21 @@ app.get("/api/breadth/summary", async (c) => {
     unavailable.push({
       id: "nyse-core",
       name: "NYSE",
-      reason: "NYSE breadth data is currently unavailable from configured free sources",
+      reason: "NYSE breadth data is unavailable for the current session or failed universe coverage validation",
+    });
+  }
+  if (!present.has("russell2000-core")) {
+    unavailable.push({
+      id: "russell2000-core",
+      name: "Russell 2000 — IWM holdings proxy",
+      reason: "Russell 2000 breadth data is unavailable: constituent membership is incomplete, stale, or below coverage thresholds",
+    });
+  }
+  if (!present.has("overall-market-proxy")) {
+    unavailable.push({
+      id: "overall-market-proxy",
+      name: "Overall Market",
+      reason: "Overall Market breadth data is unavailable for the current session or failed universe coverage validation",
     });
   }
   unavailable.push({
@@ -2820,11 +2886,7 @@ app.get("/api/breadth/summary", async (c) => {
   });
 
   return c.json({
-    asOfDate: orderedRows.reduce<string | null>((acc, row: any) => {
-      if (!row?.asOfDate) return acc;
-      if (!acc) return row.asOfDate;
-      return row.asOfDate > acc ? row.asOfDate : acc;
-    }, null),
+    asOfDate: latestDate,
     rows: orderedRows,
     unavailable,
   });

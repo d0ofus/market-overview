@@ -19,6 +19,16 @@ type BreadthRow = {
   medianReturn5D: number;
   metrics?: Record<string, unknown> | null;
   dataSource?: string | null;
+  provenance?: {
+    source?: string | null;
+    sourceType?: string | null;
+    sourceUrl?: string | null;
+    sourceAsOfDate?: string | null;
+    sourceMemberCount?: number | null;
+    resolvedMemberCount?: number | null;
+    unresolvedCount?: number | null;
+    unresolvedTickers?: string[];
+  } | null;
 };
 
 type SummaryRow = BreadthRow & {
@@ -46,7 +56,7 @@ const universeNames: Record<string, string> = {
   "sp500-core": "S&P 500",
   "nasdaq-core": "NASDAQ",
   "nyse-core": "NYSE",
-  "russell2000-core": "Russell 2000",
+  "russell2000-core": "Russell 2000 — IWM proxy",
   "overall-market-proxy": "Overall Market",
 };
 
@@ -54,13 +64,10 @@ const coreUniverseSource: Record<string, string> = {
   "sp500-core": "S&P 500 constituents CSV (datasets/s-and-p-500-companies) + provider daily bars.",
   "nasdaq-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NASDAQ listings + provider daily bars.",
   "nyse-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NYSE listings + provider daily bars.",
-  "russell2000-core": "Russell 2000 constituent list (LSEG table) filtered to NasdaqTrader common stocks + provider daily bars.",
+  "russell2000-core": "iShares IWM official ETF holdings proxy (not licensed FTSE Russell index constituents) + provider daily bars.",
   "overall-market-proxy": "NasdaqTrader filtered US common-stock universe + provider daily bars.",
 };
 
-function pickLatest(rows: BreadthRow[]): BreadthRow | null {
-  return rows.length > 0 ? rows[rows.length - 1] : null;
-}
 
 async function loadUniverse(universeId: string): Promise<BreadthRow[]> {
   try {
@@ -71,36 +78,6 @@ async function loadUniverse(universeId: string): Promise<BreadthRow[]> {
   }
 }
 
-function buildSummaryFromUniverseRows(allRows: Record<string, BreadthRow[]>, asOfDate: string | null): SummaryPayload {
-  const summaryRows: SummaryRow[] = [];
-  for (const universeId of universeOrder) {
-    const latest = pickLatest(allRows[universeId] ?? []);
-    if (!latest) continue;
-    summaryRows.push({
-      ...latest,
-      universeName: universeNames[latest.universeId] ?? latest.universeId,
-      dataSource: latest.dataSource ?? coreUniverseSource[latest.universeId] ?? null,
-    });
-  }
-
-  const present = new Set(summaryRows.map((r) => r.universeId));
-  const unavailable: Array<{ id: string; name: string; reason: string }> = [];
-  if (!present.has("sp500-core")) {
-    unavailable.push({ id: "sp500", name: "S&P 500", reason: "No breadth snapshots currently available from API host." });
-  }
-  if (!present.has("nasdaq-core")) {
-    unavailable.push({ id: "nasdaq-core", name: "NASDAQ", reason: "NASDAQ breadth snapshots are not available from the API host." });
-  }
-  if (!present.has("nyse-core")) {
-    unavailable.push({ id: "nyse-core", name: "NYSE", reason: "NYSE breadth snapshots are not available from the API host." });
-  }
-  if (!present.has("russell2000-core")) {
-    unavailable.push({ id: "russell2000-core", name: "Russell 2000", reason: "Russell 2000 breadth snapshots are not available from API host." });
-  }
-
-  const dated = summaryRows.find((r) => r.asOfDate)?.asOfDate ?? asOfDate;
-  return { asOfDate: dated, rows: summaryRows, unavailable };
-}
 
 export default async function BreadthPage() {
   const summaryPromise = getBreadthSummary().catch(() => null);
@@ -121,7 +98,7 @@ export default async function BreadthPage() {
   const historyByUniverse = Object.fromEntries(universeRowsPairs) as Record<string, BreadthRow[]>;
   const historyRows = historyByUniverse["sp500-core"] ?? [];
 
-  const summary = summaryApi
+  const summary: SummaryPayload = summaryApi
     ? {
         ...summaryApi,
         rows: (Array.isArray(summaryApi.rows) ? summaryApi.rows : []).filter(Boolean).map((row: any) => ({
@@ -131,7 +108,15 @@ export default async function BreadthPage() {
         })),
         unavailable: Array.isArray(summaryApi.unavailable) ? summaryApi.unavailable : [],
       }
-    : buildSummaryFromUniverseRows(historyByUniverse, status.asOfDate);
+    : {
+        asOfDate: null,
+        rows: [],
+        unavailable: universeOrder.map((id) => ({
+          id,
+          name: universeNames[id] ?? id,
+          reason: "Current breadth summary is unavailable because freshness or provenance validation failed.",
+        })),
+      };
   const statusAsOfDate = status.asOfDate ?? summary.asOfDate ?? null;
   const statusLastUpdated = status.lastUpdated ?? (summary.asOfDate ? `${summary.asOfDate}T00:00:00Z` : null);
 

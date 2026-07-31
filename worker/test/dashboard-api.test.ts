@@ -487,7 +487,7 @@ describe("dashboard API", () => {
       },
       {
         universeId: "russell2000-core",
-        status: "stale",
+        status: "low_coverage",
         latestAsOfDate: "2026-06-10",
         memberCount: 1,
         currentDateTickers: 1,

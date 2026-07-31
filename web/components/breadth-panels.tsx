@@ -6,10 +6,18 @@ import { ChevronDown } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { HistogramSparkline } from "./histogram-sparkline";
 
+type MetricCoverage = {
+  eligibleCount: number;
+  coveragePct: number;
+  thresholdPct: number;
+  status: "ready" | "suppressed";
+};
+
 type BreadthMetrics = {
   memberCount: number;
   totalUniverseMembers: number;
   dataCoveragePct: number;
+  metricCoverage: Record<string, MetricCoverage>;
   advancers: number;
   decliners: number;
   unchanged: number;
@@ -53,6 +61,17 @@ type HistoricalRow = {
   medianReturn5D: number;
   metrics?: Record<string, unknown> | null;
   dataSource?: string | null;
+  provenance?: {
+    source?: string | null;
+    sourceType?: string | null;
+    sourceUrl?: string | null;
+    sourceAsOfDate?: string | null;
+    sourceMemberCount?: number | null;
+    normalizedMemberCount?: number | null;
+    resolvedMemberCount?: number | null;
+    unresolvedCount?: number | null;
+    unresolvedTickers?: string[];
+  } | null;
 };
 
 type SummaryRow = HistoricalRow & {
@@ -158,6 +177,32 @@ function pct(value: number): string {
   return `${value.toFixed(1)}%`;
 }
 
+function normalizeMetricCoverage(value: unknown): Record<string, MetricCoverage> {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, raw]) => {
+      if (!raw || typeof raw !== "object") return [];
+      const item = raw as Record<string, unknown>;
+      const status = item.status === "suppressed" ? "suppressed" : "ready";
+      return [[key, {
+        eligibleCount: asNumber(item.eligibleCount, 0),
+        coveragePct: asNumber(item.coveragePct, 0),
+        thresholdPct: asNumber(item.thresholdPct, 95),
+        status,
+      } satisfies MetricCoverage]];
+    }),
+  );
+}
+
+function metricIsReady(metrics: BreadthMetrics, key: string): boolean {
+  return metrics.metricCoverage[key]?.status !== "suppressed";
+}
+
+function coveredText(metrics: BreadthMetrics, key: string, text: string): string {
+  const quality = metrics.metricCoverage[key];
+  return metricIsReady(metrics, key) ? text : `N/A (${quality?.coveragePct.toFixed(1) ?? "0.0"}% coverage)`;
+}
+
 function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
   const m = (row.metrics ?? {}) as Record<string, unknown>;
   const memberCount = asNumber(m.memberCount, row.advancers + row.decliners + row.unchanged);
@@ -176,6 +221,7 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
     memberCount,
     totalUniverseMembers,
     dataCoveragePct,
+    metricCoverage: normalizeMetricCoverage(m.metricCoverage),
     advancers,
     decliners,
     unchanged,
@@ -206,6 +252,7 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
 }
 
 function metricValue(metrics: BreadthMetrics, key: MetricKey): number {
+  if (!metricIsReady(metrics, key)) return Number.NaN;
   const value = metrics[key];
   return typeof value === "number" ? value : 0;
 }
@@ -355,7 +402,7 @@ export function BreadthPanels({
       .filter((column): column is HistoricalColumn & { key: MetricKey; getMetricValue: (metrics: BreadthMetrics) => number | null } => column.trendable && column.getMetricValue != null)
       .map((column) => {
         const points = recentRows.flatMap(({ row, metrics }) => {
-          const value = column.getMetricValue(metrics);
+          const value = metricIsReady(metrics, column.key) ? column.getMetricValue(metrics) : null;
           return value != null && Number.isFinite(value) ? [{ asOfDate: row.asOfDate, value }] : [];
         });
         const latestValue = points[points.length - 1]?.value ?? null;
@@ -404,15 +451,26 @@ export function BreadthPanels({
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">% &gt; 20MA</div>
-            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctAbove20MA, 50)}`}>{pct(headline.metrics.pctAbove20MA)}</div>
+            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctAbove20MA, 50)}`}>{coveredText(headline.metrics, "pctAbove20MA", pct(headline.metrics.pctAbove20MA))}</div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">% &gt; 200MA</div>
-            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctAbove200MA, 50)}`}>{pct(headline.metrics.pctAbove200MA)}</div>
+            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctAbove200MA, 50)}`}>{coveredText(headline.metrics, "pctAbove200MA", pct(headline.metrics.pctAbove200MA))}</div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">New 52W Highs</div>
-            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctNew52WHighs, 10)}`}>{highCell(headline.metrics.new52WHighs, headline.metrics.pctNew52WHighs)}</div>
+            <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctNew52WHighs, 10)}`}>{coveredText(headline.metrics, "new52WHighs", highCell(headline.metrics.new52WHighs, headline.metrics.pctNew52WHighs))}</div>
+          </div>
+        </div>
+      )}
+
+      {summary.unavailable.length > 0 && (
+        <div className="card border border-amber-500/30 bg-amber-500/5 p-4">
+          <div className="mb-2 text-sm font-semibold text-amber-200">Unavailable or suppressed universes</div>
+          <div className="space-y-1 text-sm text-amber-100/90">
+            {summary.unavailable.map((item) => (
+              <p key={item.id}><span className="font-medium">{item.name}:</span> {item.reason}</p>
+            ))}
           </div>
         </div>
       )}
@@ -436,11 +494,11 @@ export function BreadthPanels({
                 return (
                   <tr key={`ma-${row.universeId}`} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{row.universeName}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove5MA, prev?.pctAbove5MA)}`}>{pct(row.metrics.pctAbove5MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove20MA, prev?.pctAbove20MA)}`}>{pct(row.metrics.pctAbove20MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove50MA, prev?.pctAbove50MA)}`}>{pct(row.metrics.pctAbove50MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove100MA, prev?.pctAbove100MA)}`}>{pct(row.metrics.pctAbove100MA)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove200MA, prev?.pctAbove200MA)}`}>{pct(row.metrics.pctAbove200MA)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove5MA, prev?.pctAbove5MA)}`}>{coveredText(row.metrics, "pctAbove5MA", pct(row.metrics.pctAbove5MA))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove20MA, prev?.pctAbove20MA)}`}>{coveredText(row.metrics, "pctAbove20MA", pct(row.metrics.pctAbove20MA))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove50MA, prev?.pctAbove50MA)}`}>{coveredText(row.metrics, "pctAbove50MA", pct(row.metrics.pctAbove50MA))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove100MA, prev?.pctAbove100MA)}`}>{coveredText(row.metrics, "pctAbove100MA", pct(row.metrics.pctAbove100MA))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.pctAbove200MA, prev?.pctAbove200MA)}`}>{coveredText(row.metrics, "pctAbove200MA", pct(row.metrics.pctAbove200MA))}</td>
                   </tr>
                 );
               })}
@@ -468,11 +526,11 @@ export function BreadthPanels({
                 return (
                   <tr key={`highs-${row.universeId}`} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{row.universeName}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new5DHighs, prev?.new5DHighs)}`}>{highCell(row.metrics.new5DHighs, row.metrics.pctNew5DHighs)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new1MHighs, prev?.new1MHighs)}`}>{highCell(row.metrics.new1MHighs, row.metrics.pctNew1MHighs)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new3MHighs, prev?.new3MHighs)}`}>{highCell(row.metrics.new3MHighs, row.metrics.pctNew3MHighs)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new6MHighs, prev?.new6MHighs)}`}>{highCell(row.metrics.new6MHighs, row.metrics.pctNew6MHighs)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new52WHighs, prev?.new52WHighs)}`}>{highCell(row.metrics.new52WHighs, row.metrics.pctNew52WHighs)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new5DHighs, prev?.new5DHighs)}`}>{coveredText(row.metrics, "new5DHighs", highCell(row.metrics.new5DHighs, row.metrics.pctNew5DHighs))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new1MHighs, prev?.new1MHighs)}`}>{coveredText(row.metrics, "new1MHighs", highCell(row.metrics.new1MHighs, row.metrics.pctNew1MHighs))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new3MHighs, prev?.new3MHighs)}`}>{coveredText(row.metrics, "new3MHighs", highCell(row.metrics.new3MHighs, row.metrics.pctNew3MHighs))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new6MHighs, prev?.new6MHighs)}`}>{coveredText(row.metrics, "new6MHighs", highCell(row.metrics.new6MHighs, row.metrics.pctNew6MHighs))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.new52WHighs, prev?.new52WHighs)}`}>{coveredText(row.metrics, "new52WHighs", highCell(row.metrics.new52WHighs, row.metrics.pctNew52WHighs))}</td>
                   </tr>
                 );
               })}
@@ -534,8 +592,8 @@ export function BreadthPanels({
                     <td className="px-3 py-2">{row.universeName}</td>
                     <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos4Pct, prev?.stocksGtPos4Pct)}`}>{row.metrics.stocksGtPos4Pct}</td>
                     <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg4Pct, prev?.stocksLtNeg4Pct)}`}>{row.metrics.stocksLtNeg4Pct}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos25Q, prev?.stocksGtPos25Q)}`}>{row.metrics.stocksGtPos25Q}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg25Q, prev?.stocksLtNeg25Q)}`}>{row.metrics.stocksLtNeg25Q}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos25Q, prev?.stocksGtPos25Q)}`}>{coveredText(row.metrics, "return63D", String(row.metrics.stocksGtPos25Q))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg25Q, prev?.stocksLtNeg25Q)}`}>{coveredText(row.metrics, "return63D", String(row.metrics.stocksLtNeg25Q))}</td>
                   </tr>
                 );
               })}
@@ -687,8 +745,8 @@ export function BreadthPanels({
                           </td>
                         );
                       }
-                      const currentValue = column.getMetricValue(metrics);
-                      const previousValue = prevMetrics ? column.getMetricValue(prevMetrics) : null;
+                      const currentValue = metricIsReady(metrics, column.key) ? column.getMetricValue(metrics) : null;
+                      const previousValue = prevMetrics && metricIsReady(prevMetrics, column.key) ? column.getMetricValue(prevMetrics) : null;
                       return (
                         <td key={`${row.asOfDate}-${column.key}`} className={`px-3 py-2 ${colorVsPrevious(currentValue ?? 0, previousValue)}`}>
                           {column.formatValue(currentValue)}
@@ -709,11 +767,26 @@ export function BreadthPanels({
       {summaryRows.some((row) => row.dataSource) && (
         <CollapsibleInfoSection title="Data Sources">
           <div className="space-y-1 text-sm text-slate-300">
-            {summaryRows.map((row) => (
-              <p key={`src-${row.universeId}`}>
-                <span className="font-medium text-slate-200">{row.universeName}:</span> {row.dataSource ?? "Source metadata unavailable"}
-              </p>
-            ))}
+            {summaryRows.map((row) => {
+              const source = row.provenance;
+              const counts = source?.sourceMemberCount != null
+                ? `${numFmt.format(source.sourceMemberCount)} source; ${numFmt.format(source.normalizedMemberCount ?? source.resolvedMemberCount ?? row.metrics.totalUniverseMembers)} normalized; ${numFmt.format(source.resolvedMemberCount ?? row.metrics.totalUniverseMembers)} resolved${source.unresolvedCount ? `; ${numFmt.format(source.unresolvedCount)} unresolved` : ""}`
+                : null;
+              return (
+                <div key={`src-${row.universeId}`} className="rounded-lg border border-borderSoft/50 p-2">
+                  <p><span className="font-medium text-slate-200">{row.universeName}:</span> {row.dataSource ?? "Source metadata unavailable"}</p>
+                  {(source?.sourceAsOfDate || counts) && (
+                    <p className="text-xs text-slate-400">Source date {source?.sourceAsOfDate ?? "unknown"}{counts ? ` · ${counts}` : ""}</p>
+                  )}
+                  {(source?.unresolvedTickers?.length ?? 0) > 0 && (
+                    <p className="text-xs text-amber-300">Unresolved: {source?.unresolvedTickers?.join(", ")}</p>
+                  )}
+                  {source?.sourceUrl && (
+                    <a href={source.sourceUrl} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline">Open source holdings file</a>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </CollapsibleInfoSection>
       )}

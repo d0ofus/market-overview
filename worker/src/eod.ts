@@ -10,8 +10,9 @@ import {
   aggregateDailyMarketFeatures,
   computeAndStoreDailyMarketFeatures,
   loadDailyMarketFeatures,
+  suppressUnderCoveredBreadthMetrics,
 } from "./daily-market-features";
-import { loadNasdaqTraderUniverses, loadRussell2000Constituents, loadSp500Constituents } from "./universe-constituents";
+import { loadNasdaqTraderUniverses, loadRussell2000Universe, loadSp500Constituents } from "./universe-constituents";
 import { loadActiveUniverseTickers, stageAndPromoteUniverseVersion } from "./universe-version-service";
 import { evaluateOverviewGeneration } from "./overview-generation";
 import {
@@ -105,7 +106,7 @@ const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies
 const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
 const NYSE_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange N) + provider daily bars";
 const RUSSELL2000_SOURCE_LABEL =
-  "iShares IWM holdings proxy (official holdings CSV, filtered to NasdaqTrader common stocks) + provider daily bars";
+  "Russell 2000 — iShares IWM holdings proxy (official ETF holdings) + provider daily bars";
 const OVERALL_SOURCE_LABEL = "NasdaqTrader all US common stocks (same filter set) + provider daily bars";
 
 type BreadthUniverseState = {
@@ -928,15 +929,40 @@ async function ensureUniverseMembership(
   universeName: string,
   tickers: string[],
   source = "manual",
+  metadata: Omit<UniverseFetchResult, "tickers"> = {},
 ): Promise<void> {
   await stageAndPromoteUniverseVersion(env, {
     universeId,
     universeName,
     source,
-    sourceAsOfDate: new Date().toISOString().slice(0, 10),
+    sourceType: metadata.sourceType,
+    sourceUrl: metadata.sourceUrl,
+    sourceAsOfDate: metadata.sourceAsOfDate ?? null,
+    sourceMemberCount: metadata.sourceMemberCount,
+    normalizedMemberCount: metadata.normalizedMemberCount,
+    unresolvedCount: metadata.unresolvedCount,
+    unresolvedTickers: metadata.unresolvedTickers,
     tickers,
+    memberMetadata: metadata.memberMetadata,
   });
 }
+
+type UniverseFetchResult = {
+  tickers: string[];
+  sourceAsOfDate?: string | null;
+  sourceMemberCount?: number | null;
+  normalizedMemberCount?: number | null;
+  unresolvedCount?: number | null;
+  unresolvedTickers?: string[];
+  sourceType?: string | null;
+  sourceUrl?: string | null;
+  memberMetadata?: Record<string, {
+    sourceTicker: string;
+    issuerName: string | null;
+    exchange: string | null;
+    assetClass: string;
+  }>;
+};
 
 type UniverseSyncDef = {
   id: string;
@@ -945,7 +971,7 @@ type UniverseSyncDef = {
   sourceKey: string;
   staleAfterDays: number;
   unavailableReason: string;
-  fetchTickers: () => Promise<string[]>;
+  fetchTickers: () => Promise<string[] | UniverseFetchResult>;
 };
 
 function dedupeTickers(tickers: string[]): string[] {
@@ -961,29 +987,63 @@ async function syncUniverseFromSource(
 ): Promise<void> {
   const existing = await loadUniverseTickers(env, def.id);
   const status = await loadUniverseSourceStatus(env, def.sourceKey);
-  const shouldRefresh = existing.length === 0 || status?.status !== "ok" || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
+  const membershipIncomplete = def.id === "russell2000-core" && (existing.length < 1_800 || existing.length > 2_100);
+  const shouldRefresh = existing.length === 0 || membershipIncomplete || status?.status !== "ok" || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
 
   let tickers = existing;
   let sourceLabel = def.sourceLabel;
 
   if (shouldRefresh) {
     try {
-      const fetched = dedupeTickers(await def.fetchTickers());
+      const fetchedResult = await def.fetchTickers();
+      const fetchedTickers = Array.isArray(fetchedResult) ? fetchedResult : fetchedResult.tickers;
+      const fetchedMetadata: Omit<UniverseFetchResult, "tickers"> = Array.isArray(fetchedResult)
+        ? {}
+        : {
+            sourceAsOfDate: fetchedResult.sourceAsOfDate,
+            sourceMemberCount: fetchedResult.sourceMemberCount,
+            normalizedMemberCount: fetchedResult.normalizedMemberCount,
+            unresolvedCount: fetchedResult.unresolvedCount,
+            unresolvedTickers: fetchedResult.unresolvedTickers,
+            sourceType: fetchedResult.sourceType,
+            sourceUrl: fetchedResult.sourceUrl,
+            memberMetadata: fetchedResult.memberMetadata,
+          };
+      const fetched = dedupeTickers(fetchedTickers);
       if (fetched.length === 0) {
         throw new Error(`No tickers returned for ${def.id}`);
       }
-      await ensureUniverseMembership(env, def.id, def.name, fetched, def.sourceLabel);
+      if (def.id === "russell2000-core" && !fetchedMetadata.sourceAsOfDate) {
+        throw new Error(`${def.id} source date is missing or unparseable`);
+      }
+      if (fetchedMetadata.sourceAsOfDate) {
+        const sourceDateMs = Date.parse(`${fetchedMetadata.sourceAsOfDate}T00:00:00Z`);
+        const ageDays = Number.isFinite(sourceDateMs) ? Math.floor((Date.now() - sourceDateMs) / 86_400_000) : Number.POSITIVE_INFINITY;
+        if (ageDays < -1 || ageDays > def.staleAfterDays) {
+          throw new Error(`${def.id} source date ${fetchedMetadata.sourceAsOfDate} is stale or invalid (${ageDays} days old)`);
+        }
+      }
+      await ensureUniverseMembership(env, def.id, def.name, fetched, def.sourceLabel, fetchedMetadata);
       tickers = fetched;
-      await saveUniverseSourceStatus(env, def.sourceKey, "ok", def.sourceLabel, fetched.length, null);
+      await saveUniverseSourceStatus(
+        env,
+        def.sourceKey,
+        "ok",
+        def.sourceLabel,
+        fetchedMetadata.sourceMemberCount ?? fetched.length,
+        null,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "constituent sync failed";
       console.error("breadth universe source sync failed", { universeId: def.id, error: message });
       await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message);
-      if (existing.length === 0) {
+      if (existing.length === 0 || def.id === "russell2000-core") {
         unavailable.push({
           id: def.id,
           name: def.name,
-          reason: def.unavailableReason,
+          reason: def.id === "russell2000-core"
+            ? `Russell proxy unavailable: ${message}`
+            : def.unavailableReason,
         });
         return;
       }
@@ -1013,6 +1073,7 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
         nasdaqTickers: string[];
         nyseTickers: string[];
         allCommonTickers: string[];
+        allActiveEquityTickers: string[];
       }
     | null = null;
   const loadNasdaqUniverseCache = async () => {
@@ -1087,8 +1148,8 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       staleAfterDays: 14,
       unavailableReason: "Russell 2000 constituent source fetch failed and no cached Russell 2000 membership is available",
       fetchTickers: async () => {
-        const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
-        return await loadRussell2000Constituents(allCommon);
+        const activeEquities = new Set((await loadNasdaqUniverseCache()).allActiveEquityTickers);
+        return await loadRussell2000Universe(activeEquities);
       },
     },
     universeTickers,
@@ -2177,14 +2238,16 @@ export async function computeAndStoreBreadth(
       reason: "repair-source-limit",
     };
   }
-  const activeVersion = await loadActiveUniverseVersionId(env, universeId);
+  const activeVersion = await loadActiveUniverseVersion(env, universeId);
+  const publishedStats = suppressUnderCoveredBreadthMetrics(stats);
 
   const sentimentJson = JSON.stringify({
     fearGreed: null,
     putCall: null,
-    metrics: stats,
+    metrics: publishedStats,
     dataSource,
-    universeVersionId: activeVersion,
+    universeVersionId: activeVersion?.id ?? null,
+    provenance: activeVersion,
     sourceMix,
     repairedPct,
   });
@@ -2226,13 +2289,13 @@ export async function computeAndStoreBreadth(
       stats.advancers,
       stats.decliners,
       stats.unchanged,
-      stats.pctAbove20MA,
-      stats.pctAbove50MA,
-      stats.pctAbove200MA,
-      stats.new20DHighs,
-      stats.new20DLows,
+      publishedStats.pctAbove20MA,
+      publishedStats.pctAbove50MA,
+      publishedStats.pctAbove200MA,
+      publishedStats.new20DHighs,
+      publishedStats.new20DLows,
       stats.medianReturn1D,
-      stats.medianReturn5D,
+      publishedStats.medianReturn5D,
       sentimentJson,
       generatedAt,
     ),
@@ -2271,15 +2334,56 @@ export async function computeAndStoreBreadth(
   };
 }
 
-async function loadActiveUniverseVersionId(env: Env, universeId: string): Promise<string | null> {
+type ActiveUniverseVersion = {
+  id: string;
+  source: string;
+  sourceType: string | null;
+  sourceUrl: string | null;
+  sourceAsOfDate: string | null;
+  sourceMemberCount: number | null;
+  normalizedMemberCount: number | null;
+  resolvedMemberCount: number | null;
+  unresolvedCount: number | null;
+  unresolvedTickers: string[];
+};
+
+type ActiveUniverseVersionRow = Omit<ActiveUniverseVersion, "unresolvedTickers"> & { unresolvedSymbolsJson: string | null };
+
+async function loadActiveUniverseVersion(env: Env, universeId: string): Promise<ActiveUniverseVersion | null> {
   try {
     const row = await env.DB.prepare(
-      "SELECT active_version_id as activeVersionId FROM universes WHERE id = ? LIMIT 1",
-    ).bind(universeId).first<{ activeVersionId: string | null }>();
-    return row?.activeVersionId ?? null;
+      `SELECT uv.id, uv.source, uv.source_type as sourceType, uv.source_url as sourceUrl,
+              uv.source_as_of_date as sourceAsOfDate, uv.source_member_count as sourceMemberCount,
+              uv.normalized_member_count as normalizedMemberCount,
+              uv.resolved_member_count as resolvedMemberCount, uv.unresolved_count as unresolvedCount,
+              uv.unresolved_symbols_json as unresolvedSymbolsJson
+         FROM universes u
+         JOIN universe_versions uv ON uv.id = u.active_version_id
+        WHERE u.id = ? LIMIT 1`,
+    ).bind(universeId).first<ActiveUniverseVersionRow>();
+    if (!row) return null;
+    let unresolvedTickers: string[] = [];
+    try {
+      const parsed = JSON.parse(row.unresolvedSymbolsJson ?? "[]");
+      if (Array.isArray(parsed)) unresolvedTickers = parsed.filter((value): value is string => typeof value === "string");
+    } catch {
+      unresolvedTickers = [];
+    }
+    return {
+      id: row.id,
+      source: row.source,
+      sourceType: row.sourceType,
+      sourceUrl: row.sourceUrl,
+      sourceAsOfDate: row.sourceAsOfDate,
+      sourceMemberCount: row.sourceMemberCount,
+      normalizedMemberCount: row.normalizedMemberCount,
+      resolvedMemberCount: row.resolvedMemberCount,
+      unresolvedCount: row.unresolvedCount,
+      unresolvedTickers,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "");
-    if (/no such column/i.test(message)) return null;
+    if (/no such (?:table|column)/i.test(message)) return null;
     throw error;
   }
 }

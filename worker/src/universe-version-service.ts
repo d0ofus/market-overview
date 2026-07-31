@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 
 const VERSION_MEMBER_BATCH_SIZE = 100;
+const UNIVERSE_VERSION_RETENTION = 5;
 
 type UniverseRule = {
   minMembers: number;
@@ -43,9 +44,20 @@ function normalizeTickers(tickers: string[]): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
+function normalizeDiagnosticSymbols(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim().toUpperCase()).filter(Boolean))).sort();
+}
+
+export async function computeUniverseMembershipHash(tickers: string[]): Promise<string> {
+  const normalized = normalizeTickers(tickers).join("\n");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export function validateUniverseCandidate(input: {
   universeId: string;
   tickers: string[];
+  sourceMemberCount?: number | null;
   previousTickers?: string[];
   approveLargeChange?: boolean;
 }): UniverseCandidateValidation {
@@ -59,6 +71,8 @@ export function validateUniverseCandidate(input: {
     : candidate.filter((ticker) => !previousSet.has(ticker)).length
       + previous.filter((ticker) => !candidateSet.has(ticker)).length;
   const changePct = previous.length > 0 ? (changedMembers / previous.length) * 100 : null;
+  const sourceMemberCount = input.sourceMemberCount ?? candidate.length;
+  const resolutionCoveragePct = sourceMemberCount > 0 ? (candidate.length / sourceMemberCount) * 100 : 0;
 
   if (!rule) {
     return {
@@ -69,16 +83,35 @@ export function validateUniverseCandidate(input: {
       error: candidate.length > 0 ? null : "candidate universe is empty",
     };
   }
+  if (sourceMemberCount < rule.minMembers || sourceMemberCount > rule.maxMembers) {
+    return {
+      valid: false,
+      memberCount: candidate.length,
+      previousMemberCount: previous.length,
+      changePct,
+      error: `member count ${sourceMemberCount} is outside ${rule.minMembers}-${rule.maxMembers}`,
+    };
+  }
   if (candidate.length < rule.minMembers || candidate.length > rule.maxMembers) {
     return {
       valid: false,
       memberCount: candidate.length,
       previousMemberCount: previous.length,
       changePct,
-      error: `member count ${candidate.length} is outside ${rule.minMembers}-${rule.maxMembers}`,
+      error: `resolved member count ${candidate.length} is outside ${rule.minMembers}-${rule.maxMembers}`,
     };
   }
-  if (!input.approveLargeChange && changePct != null && changePct > rule.maxChangePct) {
+  if (input.universeId === "russell2000-core" && resolutionCoveragePct < 95) {
+    return {
+      valid: false,
+      memberCount: candidate.length,
+      previousMemberCount: previous.length,
+      changePct,
+      error: `symbol resolution coverage ${resolutionCoveragePct.toFixed(2)}% is below 95%`,
+    };
+  }
+  const previousWasValid = previous.length >= rule.minMembers && previous.length <= rule.maxMembers;
+  if (!input.approveLargeChange && previousWasValid && changePct != null && changePct > rule.maxChangePct) {
     return {
       valid: false,
       memberCount: candidate.length,
@@ -129,10 +162,11 @@ async function promoteUniverseVersion(
   versionId: string,
   tickers: string[],
 ): Promise<void> {
-  await runBatches(env.DB, tickers.map((ticker) => env.DB.prepare(
-    "INSERT OR IGNORE INTO symbols (ticker, name, asset_class) VALUES (?, ?, 'equity')",
-  ).bind(ticker, ticker)));
   await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO symbols (ticker, name, asset_class)
+       SELECT ticker, ticker, 'equity' FROM universe_version_members WHERE version_id = ?`,
+    ).bind(versionId),
     env.DB.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
     env.DB.prepare(
       `INSERT INTO universe_symbols (universe_id, ticker)
@@ -154,23 +188,92 @@ async function promoteUniverseVersion(
   ]);
 }
 
+async function pruneUniverseVersions(env: Env, universeId: string, retainedVersionId: string): Promise<void> {
+  const universe = await env.DB.prepare(
+    "SELECT active_version_id as activeVersionId FROM universes WHERE id = ?",
+  ).bind(universeId).first<{ activeVersionId?: string | null }>();
+  const protectedIds = new Set(
+    [retainedVersionId, universe?.activeVersionId].filter((id): id is string => Boolean(id)),
+  );
+  const rows = await env.DB.prepare(
+    `SELECT uv.id FROM universe_versions uv
+      WHERE uv.universe_id = ?
+      ORDER BY uv.created_at DESC, uv.id DESC`,
+  ).bind(universeId).all<{ id: string }>();
+  const unprotectedRows = (rows.results ?? []).filter((row) => !protectedIds.has(row.id));
+  const unprotectedRetention = Math.max(0, UNIVERSE_VERSION_RETENTION - protectedIds.size);
+  const staleIds = unprotectedRows.slice(unprotectedRetention).map((row) => row.id);
+  if (staleIds.length === 0) return;
+  await runBatches(env.DB, staleIds.map((id) => env.DB.prepare(
+    "DELETE FROM universe_version_members WHERE version_id = ?",
+  ).bind(id)));
+  await runBatches(env.DB, staleIds.map((id) => env.DB.prepare(
+    "DELETE FROM universe_versions WHERE id = ?",
+  ).bind(id)));
+}
+
 export async function stageAndPromoteUniverseVersion(env: Env, input: {
   universeId: string;
   universeName: string;
   source: string;
+  sourceType?: string | null;
+  sourceUrl?: string | null;
   sourceAsOfDate?: string | null;
+  sourceMemberCount?: number | null;
+  normalizedMemberCount?: number | null;
+  unresolvedCount?: number | null;
+  unresolvedTickers?: string[];
   tickers: string[];
+  memberMetadata?: Record<string, {
+    sourceTicker: string;
+    issuerName: string | null;
+    exchange: string | null;
+    assetClass: string;
+  }>;
   approveLargeChange?: boolean;
   versionId?: string;
-}): Promise<{ versionId: string; validation: UniverseCandidateValidation }> {
+}): Promise<{ versionId: string; validation: UniverseCandidateValidation; unchanged?: boolean }> {
   const tickers = normalizeTickers(input.tickers);
   const previousTickers = await loadActiveUniverseTickers(env, input.universeId);
   const validation = validateUniverseCandidate({
     universeId: input.universeId,
     tickers,
+    sourceMemberCount: input.sourceMemberCount,
     previousTickers,
     approveLargeChange: input.approveLargeChange,
   });
+  const membershipHash = await computeUniverseMembershipHash(tickers);
+  const activeVersion = await env.DB.prepare(
+    `SELECT uv.id, uv.membership_hash as membershipHash
+       FROM universes u
+       JOIN universe_versions uv ON uv.id = u.active_version_id
+      WHERE u.id = ? LIMIT 1`,
+  ).bind(input.universeId).first<{ id: string; membershipHash: string | null }>();
+  const sameMembership = Boolean(activeVersion)
+    && (activeVersion?.membershipHash === membershipHash
+      || (previousTickers.length === tickers.length && previousTickers.every((ticker, index) => ticker === tickers[index])));
+  if (validation.valid && sameMembership) {
+    await env.DB.prepare(
+      `UPDATE universe_versions
+          SET source = ?, source_type = ?, source_url = ?, source_as_of_date = ?,
+              source_member_count = ?, normalized_member_count = ?, resolved_member_count = ?, unresolved_count = ?,
+              unresolved_symbols_json = ?, membership_hash = ?
+        WHERE id = ?`,
+    ).bind(
+      input.source,
+      input.sourceType ?? null,
+      input.sourceUrl ?? null,
+      input.sourceAsOfDate ?? null,
+      input.sourceMemberCount ?? tickers.length,
+      input.normalizedMemberCount ?? tickers.length,
+      tickers.length,
+      input.unresolvedCount ?? Math.max(0, (input.sourceMemberCount ?? tickers.length) - tickers.length),
+      JSON.stringify(normalizeDiagnosticSymbols(input.unresolvedTickers ?? [])),
+      membershipHash,
+      activeVersion!.id,
+    ).run();
+    return { versionId: activeVersion!.id, validation, unchanged: true };
+  }
   const versionId = input.versionId ?? crypto.randomUUID();
 
   await env.DB.prepare(
@@ -179,31 +282,54 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
   ).bind(input.universeId, input.universeName).run();
   await env.DB.prepare(
     `INSERT INTO universe_versions
-       (id, universe_id, source, source_as_of_date, status, member_count,
+       (id, universe_id, source, source_type, source_url, source_as_of_date, status, member_count,
+        source_member_count, normalized_member_count, resolved_member_count, unresolved_count, unresolved_symbols_json, membership_hash,
         previous_member_count, change_pct, validation_error)
-     VALUES (?, ?, ?, ?, 'staging', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'staging', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     versionId,
     input.universeId,
     input.source,
+    input.sourceType ?? null,
+    input.sourceUrl ?? null,
     input.sourceAsOfDate ?? null,
     validation.memberCount,
+    input.sourceMemberCount ?? tickers.length,
+    input.normalizedMemberCount ?? tickers.length,
+    tickers.length,
+    input.unresolvedCount ?? Math.max(0, (input.sourceMemberCount ?? tickers.length) - tickers.length),
+    JSON.stringify(normalizeDiagnosticSymbols(input.unresolvedTickers ?? [])),
+    membershipHash,
     validation.previousMemberCount,
     validation.changePct,
     validation.error,
   ).run();
-  await runBatches(env.DB, tickers.map((ticker) => env.DB.prepare(
-    "INSERT OR IGNORE INTO universe_version_members (version_id, ticker) VALUES (?, ?)",
-  ).bind(versionId, ticker)));
+  await runBatches(env.DB, tickers.map((ticker) => {
+    const metadata = input.memberMetadata?.[ticker];
+    return env.DB.prepare(
+      `INSERT OR IGNORE INTO universe_version_members
+        (version_id, ticker, source_ticker, issuer_name, exchange, asset_class)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      versionId,
+      ticker,
+      metadata?.sourceTicker ?? ticker,
+      metadata?.issuerName ?? null,
+      metadata?.exchange ?? null,
+      metadata?.assetClass ?? null,
+    );
+  }));
 
   if (!validation.valid) {
     await env.DB.prepare(
       "UPDATE universe_versions SET status = 'rejected' WHERE id = ?",
     ).bind(versionId).run();
+    await pruneUniverseVersions(env, input.universeId, versionId);
     throw new Error(`Rejected ${input.universeId} universe candidate: ${validation.error}`);
   }
 
   await promoteUniverseVersion(env, input.universeId, versionId, tickers);
+  await pruneUniverseVersions(env, input.universeId, versionId);
   return { versionId, validation };
 }
 
@@ -231,11 +357,30 @@ export async function approveUniverseVersion(
   versionId: string,
 ): Promise<{ versionId: string; universeId: string; validation: UniverseCandidateValidation }> {
   const version = await env.DB.prepare(
-    `SELECT id, universe_id as universeId, status
+    `SELECT id, universe_id as universeId, status, source_member_count as sourceMemberCount,
+            source_as_of_date as sourceAsOfDate
        FROM universe_versions
       WHERE id = ? LIMIT 1`,
-  ).bind(versionId).first<{ id: string; universeId: string; status: string }>();
+  ).bind(versionId).first<{
+    id: string;
+    universeId: string;
+    status: string;
+    sourceMemberCount: number | null;
+    sourceAsOfDate: string | null;
+  }>();
   if (!version) throw new Error("Universe version not found.");
+  if (version.status !== "rejected") {
+    throw new Error(`Universe version is not reviewable (status: ${version.status}).`);
+  }
+  if (version.universeId === "russell2000-core") {
+    const sourceMs = version.sourceAsOfDate ? Date.parse(`${version.sourceAsOfDate}T00:00:00Z`) : Number.NaN;
+    const sourceAgeDays = Number.isFinite(sourceMs)
+      ? Math.floor((Date.now() - sourceMs) / 86_400_000)
+      : Number.POSITIVE_INFINITY;
+    if (sourceAgeDays < -1 || sourceAgeDays > 14) {
+      throw new Error("Universe candidate source date is missing or stale; refresh the source before approval.");
+    }
+  }
   const rows = await env.DB.prepare(
     "SELECT ticker FROM universe_version_members WHERE version_id = ? ORDER BY ticker",
   ).bind(versionId).all<{ ticker: string }>();
@@ -244,6 +389,7 @@ export async function approveUniverseVersion(
   const validation = validateUniverseCandidate({
     universeId: version.universeId,
     tickers,
+    sourceMemberCount: version.sourceMemberCount,
     previousTickers,
     approveLargeChange: true,
   });
@@ -251,5 +397,6 @@ export async function approveUniverseVersion(
     throw new Error(`Universe candidate still fails validation: ${validation.error}`);
   }
   await promoteUniverseVersion(env, version.universeId, versionId, tickers);
+  await pruneUniverseVersions(env, version.universeId, versionId);
   return { versionId, universeId: version.universeId, validation };
 }

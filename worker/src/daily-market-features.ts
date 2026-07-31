@@ -265,41 +265,115 @@ export function aggregateDailyMarketFeatures(
   const tickers = normalizeTickers(tickersInput);
   const rows = tickers.map((ticker) => features.get(ticker)).filter((row): row is DailyMarketFeature => Boolean(row));
   const total = rows.length;
-  const count = (predicate: (row: DailyMarketFeature) => boolean) => rows.filter(predicate).length;
-  const advancers = count((row) => row.return1d > 0);
-  const decliners = count((row) => row.return1d < 0);
+  const count = (values: DailyMarketFeature[], predicate: (row: DailyMarketFeature) => boolean) => values.filter(predicate).length;
+  const eligible = (sessions: number) => rows.filter((row) => row.sourceSessions >= sessions);
+  const coverage = (values: DailyMarketFeature[]) => {
+    const coveragePct = toPercent(values.length, tickers.length);
+    return {
+      eligibleCount: values.length,
+      coveragePct,
+      thresholdPct: 95,
+      status: coveragePct >= 95 ? "ready" as const : "suppressed" as const,
+    };
+  };
+  const ma5Rows = eligible(5);
+  const ma20Rows = eligible(20);
+  const ma50Rows = eligible(50);
+  const ma100Rows = eligible(100);
+  const ma200Rows = eligible(200);
+  const high21Rows = eligible(21);
+  const high63Rows = eligible(63);
+  const high126Rows = eligible(126);
+  const high252Rows = eligible(252);
+  const return5Rows = eligible(6).filter((row) => row.return5d != null);
+  const return63Rows = eligible(64).filter((row) => row.return63d != null);
+  const advancers = count(rows, (row) => row.return1d > 0);
+  const decliners = count(rows, (row) => row.return1d < 0);
   const unchanged = total - advancers - decliners;
   return {
     memberCount: total,
     totalUniverseMembers: tickers.length,
     dataCoveragePct: toPercent(total, tickers.length),
+    metricCoverage: {
+      pctAbove5MA: coverage(ma5Rows),
+      pctAbove20MA: coverage(ma20Rows),
+      pctAbove50MA: coverage(ma50Rows),
+      pctAbove100MA: coverage(ma100Rows),
+      pctAbove200MA: coverage(ma200Rows),
+      new5DHighs: coverage(ma5Rows),
+      new1MHighs: coverage(high21Rows),
+      new3MHighs: coverage(high63Rows),
+      new6MHighs: coverage(high126Rows),
+      new52WHighs: coverage(high252Rows),
+      new20DHighs: coverage(ma20Rows),
+      new20DLows: coverage(ma20Rows),
+      medianReturn5D: coverage(return5Rows),
+      return63D: coverage(return63Rows),
+      stocksGtPos25Q: coverage(return63Rows),
+      stocksLtNeg25Q: coverage(return63Rows),
+    },
     advancers,
     decliners,
     unchanged,
     advDecRatio: decliners > 0 ? advancers / decliners : advancers > 0 ? null : 0,
     totalVolume: rows.reduce((sum, row) => sum + row.volume, 0),
-    pctAbove5MA: toPercent(count((row) => row.close > row.sma5), total),
-    pctAbove20MA: toPercent(count((row) => row.close > row.sma20), total),
-    pctAbove50MA: toPercent(count((row) => row.close > row.sma50), total),
-    pctAbove100MA: toPercent(count((row) => row.close > row.sma100), total),
-    pctAbove200MA: toPercent(count((row) => row.close > row.sma200), total),
-    new5DHighs: count((row) => row.close >= row.high5),
-    new1MHighs: count((row) => row.close >= row.high21),
-    new3MHighs: count((row) => row.close >= row.high63),
-    new6MHighs: count((row) => row.close >= row.high126),
-    new52WHighs: count((row) => row.close >= row.high252),
-    pctNew5DHighs: toPercent(count((row) => row.close >= row.high5), total),
-    pctNew1MHighs: toPercent(count((row) => row.close >= row.high21), total),
-    pctNew3MHighs: toPercent(count((row) => row.close >= row.high63), total),
-    pctNew6MHighs: toPercent(count((row) => row.close >= row.high126), total),
-    pctNew52WHighs: toPercent(count((row) => row.close >= row.high252), total),
-    stocksGtPos4Pct: count((row) => row.return1d > 4),
-    stocksLtNeg4Pct: count((row) => row.return1d < -4),
-    stocksGtPos25Q: count((row) => row.return63d != null && row.return63d > 25),
-    stocksLtNeg25Q: count((row) => row.return63d != null && row.return63d < -25),
-    new20DHighs: count((row) => row.close >= row.high20),
-    new20DLows: count((row) => row.close <= row.low20),
+    pctAbove5MA: toPercent(count(ma5Rows, (row) => row.close > row.sma5), ma5Rows.length),
+    pctAbove20MA: toPercent(count(ma20Rows, (row) => row.close > row.sma20), ma20Rows.length),
+    pctAbove50MA: toPercent(count(ma50Rows, (row) => row.close > row.sma50), ma50Rows.length),
+    pctAbove100MA: toPercent(count(ma100Rows, (row) => row.close > row.sma100), ma100Rows.length),
+    pctAbove200MA: toPercent(count(ma200Rows, (row) => row.close > row.sma200), ma200Rows.length),
+    new5DHighs: count(ma5Rows, (row) => row.close >= row.high5),
+    new1MHighs: count(high21Rows, (row) => row.close >= row.high21),
+    new3MHighs: count(high63Rows, (row) => row.close >= row.high63),
+    new6MHighs: count(high126Rows, (row) => row.close >= row.high126),
+    new52WHighs: count(high252Rows, (row) => row.close >= row.high252),
+    pctNew5DHighs: toPercent(count(ma5Rows, (row) => row.close >= row.high5), ma5Rows.length),
+    pctNew1MHighs: toPercent(count(high21Rows, (row) => row.close >= row.high21), high21Rows.length),
+    pctNew3MHighs: toPercent(count(high63Rows, (row) => row.close >= row.high63), high63Rows.length),
+    pctNew6MHighs: toPercent(count(high126Rows, (row) => row.close >= row.high126), high126Rows.length),
+    pctNew52WHighs: toPercent(count(high252Rows, (row) => row.close >= row.high252), high252Rows.length),
+    stocksGtPos4Pct: count(rows, (row) => row.return1d > 4),
+    stocksLtNeg4Pct: count(rows, (row) => row.return1d < -4),
+    stocksGtPos25Q: count(return63Rows, (row) => row.return63d != null && row.return63d > 25),
+    stocksLtNeg25Q: count(return63Rows, (row) => row.return63d != null && row.return63d < -25),
+    new20DHighs: count(ma20Rows, (row) => row.close >= row.high20),
+    new20DLows: count(ma20Rows, (row) => row.close <= row.low20),
     medianReturn1D: median(rows.map((row) => row.return1d)),
-    medianReturn5D: median(rows.flatMap((row) => row.return5d == null ? [] : [row.return5d])),
+    medianReturn5D: median(return5Rows.map((row) => row.return5d as number)),
   };
+}
+
+const COVERAGE_GATED_BREADTH_FIELDS = {
+  pctAbove5MA: "pctAbove5MA",
+  pctAbove20MA: "pctAbove20MA",
+  pctAbove50MA: "pctAbove50MA",
+  pctAbove100MA: "pctAbove100MA",
+  pctAbove200MA: "pctAbove200MA",
+  new5DHighs: "new5DHighs",
+  pctNew5DHighs: "new5DHighs",
+  new1MHighs: "new1MHighs",
+  pctNew1MHighs: "new1MHighs",
+  new3MHighs: "new3MHighs",
+  pctNew3MHighs: "new3MHighs",
+  new6MHighs: "new6MHighs",
+  pctNew6MHighs: "new6MHighs",
+  new52WHighs: "new52WHighs",
+  pctNew52WHighs: "new52WHighs",
+  new20DHighs: "new20DHighs",
+  new20DLows: "new20DLows",
+  medianReturn5D: "medianReturn5D",
+  stocksGtPos25Q: "stocksGtPos25Q",
+  stocksLtNeg25Q: "stocksLtNeg25Q",
+} as const;
+
+export function suppressUnderCoveredBreadthMetrics(
+  stats: ReturnType<typeof aggregateDailyMarketFeatures>,
+): Record<string, unknown> {
+  const published: Record<string, unknown> = { ...stats };
+  for (const [field, coverageKey] of Object.entries(COVERAGE_GATED_BREADTH_FIELDS)) {
+    if (stats.metricCoverage[coverageKey as keyof typeof stats.metricCoverage].status !== "ready") {
+      published[field] = null;
+    }
+  }
+  return published;
 }

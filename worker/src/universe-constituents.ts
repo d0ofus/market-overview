@@ -2,10 +2,9 @@ import { SP500_TICKERS } from "./sp500-tickers";
 
 const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
 const SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv";
-const IWM_HOLDINGS_CSV_URL =
-  "https://www.ishares.com/us/products/239710/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund";
-const LSEG_CONSTITUENT_TABLE_URL =
-  "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/index-spotlights/data_table.constituentsandweights.json";
+const ISHARES_ORIGIN = "https://www.ishares.com";
+const IWM_PRODUCT_PAGE_URL = `${ISHARES_ORIGIN}/us/products/239710/ishares-russell-2000-etf`;
+const IWM_HOLDINGS_CSV_URL = `${IWM_PRODUCT_PAGE_URL}/latest-holdings.csv`;
 
 const SAFE_TICKER_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
 const BANNED_NAME_TERMS = ["warrant", "preferred", "interest", "acquisition", "leveraged"];
@@ -80,9 +79,6 @@ async function fetchText(url: string): Promise<string> {
     Accept: "text/plain,text/html,text/csv;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
   };
-  if (url.includes("lseg.com")) {
-    headers.Referer = "https://www.lseg.com/";
-  }
   const res = await fetch(url, { headers });
   if (!res.ok) {
     throw new Error(`Source fetch failed (${res.status}) for ${url}`);
@@ -118,6 +114,28 @@ export function parseNasdaqTradedCommonStocks(raw: string): NasdaqTraderCommonSt
   return out;
 }
 
+export function parseNasdaqTradedActiveEquities(raw: string): NasdaqTraderCommonStock[] {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const out: NasdaqTraderCommonStock[] = [];
+  for (const line of lines) {
+    if (line.startsWith("Nasdaq Traded|") || /^symbol\|/i.test(line)) continue;
+    if (line.startsWith("File Creation Time")) break;
+    const parts = line.split("|");
+    if (parts.length < 12) continue;
+    const symbol = normalizeTicker(parts[1] ?? "");
+    const securityName = String(parts[2] ?? "").trim();
+    const listingExchange = normalizeTicker(parts[3] ?? "");
+    const isEtf = normalizeTicker(parts[5] ?? "") === "Y";
+    const isTestIssue = normalizeTicker(parts[7] ?? "") === "Y";
+    if (!symbol || !securityName || isEtf || isTestIssue || !SAFE_TICKER_RE.test(symbol)) continue;
+    out.push({ symbol, securityName, listingExchange });
+  }
+  return out;
+}
+
 export async function loadNasdaqTraderCommonStocks(): Promise<NasdaqTraderCommonStock[]> {
   const raw = await fetchText(NASDAQ_TRADER_URL);
   return parseNasdaqTradedCommonStocks(raw);
@@ -150,60 +168,163 @@ function parseTickerCsv(raw: string, tickerColumnNames: string[]): string[] {
   return dedupeSorted(out);
 }
 
-export function extractLsegConstituentFileUrl(rawJson: string, indexNamePattern: RegExp): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawJson) as unknown;
-  } catch {
-    return null;
-  }
-
-  const data = (parsed as { data?: Array<Record<string, unknown>> })?.data ?? [];
-  for (const row of data) {
-    const indexName = String(row.Index_Name ?? "").trim();
-    if (!indexNamePattern.test(indexName)) continue;
-    const url = String(row.Constituent_file_url ?? "").trim();
-    if (!url) continue;
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    if (url.startsWith("/")) return `https://www.lseg.com${url}`;
-    return `https://www.lseg.com/${url}`;
-  }
-
-  return null;
-}
 
 export async function loadNasdaqTraderUniverses(): Promise<{
   nasdaqTickers: string[];
   nyseTickers: string[];
   allCommonTickers: string[];
+  allActiveEquityTickers: string[];
 }> {
-  const rows = await loadNasdaqTraderCommonStocks();
+  const raw = await fetchText(NASDAQ_TRADER_URL);
+  const rows = parseNasdaqTradedCommonStocks(raw);
+  const activeRows = parseNasdaqTradedActiveEquities(raw);
   const nasdaqTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "Q").map((r) => r.symbol));
   const nyseTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "N").map((r) => r.symbol));
   const allCommonTickers = dedupeSorted(rows.map((r) => r.symbol));
-  return { nasdaqTickers, nyseTickers, allCommonTickers };
+  const allActiveEquityTickers = dedupeSorted(activeRows.map((r) => r.symbol));
+  return { nasdaqTickers, nyseTickers, allCommonTickers, allActiveEquityTickers };
 }
 
 export function parseIsharesHoldingsCsv(raw: string): string[] {
-  const lines = raw.split(/\r?\n/);
+  return parseIsharesHoldingsCsvDetailed(raw).tickers;
+}
+
+export type IsharesHolding = {
+  sourceTicker: string;
+  issuerName: string | null;
+  exchange: string | null;
+  assetClass: string;
+};
+
+export type IsharesHoldingsParseResult = {
+  sourceAsOfDate: string | null;
+  sourceEquityCount: number;
+  duplicateTickerCount: number;
+  blankTickerCount: number;
+  excludedCount: number;
+  tickers: string[];
+  holdings: IsharesHolding[];
+  invalidSourceIdentifiers: string[];
+  duplicateSourceIdentifiers: string[];
+  excludedSourceIdentifiers: string[];
+};
+
+function parseIsharesAsOfDate(lines: string[]): string | null {
+  const months: Record<string, number> = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  };
+  for (const line of lines.slice(0, 20)) {
+    if (!/fund holdings as of/i.test(line)) continue;
+    const match = line.match(/([A-Za-z]{3})\s+(\d{1,2}),?\s*,?\s*(\d{4})/);
+    if (!match) continue;
+    const month = months[(match[1] ?? "").toLowerCase()];
+    if (!month) continue;
+    return `${match[3]}-${String(month).padStart(2, "0")}-${String(Number(match[2])).padStart(2, "0")}`;
+  }
+  return null;
+}
+
+function parseCsvNumber(raw: string): number | null {
+  const normalized = raw.replace(/,/g, "").trim();
+  if (!normalized || normalized === "-") return null;
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsParseResult {
+  const lines = raw.split(String.fromCharCode(10)).map((line) =>
+    line.endsWith(String.fromCharCode(13)) ? line.slice(0, -1) : line,
+  );
   const headerIndex = lines.findIndex((line) => {
     const normalized = csvSplit(line).map((cell) => cell.toLowerCase());
     return normalized.includes("ticker") && normalized.includes("asset class");
   });
-  if (headerIndex < 0) return [];
+  if (headerIndex < 0) return { sourceAsOfDate: null, sourceEquityCount: 0, duplicateTickerCount: 0, blankTickerCount: 0, excludedCount: 0, tickers: [], holdings: [], invalidSourceIdentifiers: [], duplicateSourceIdentifiers: [], excludedSourceIdentifiers: [] };
   const header = csvSplit(lines[headerIndex] ?? "").map((cell) => cell.trim().toLowerCase());
   const tickerIndex = header.indexOf("ticker");
   const assetClassIndex = header.indexOf("asset class");
-  if (tickerIndex < 0 || assetClassIndex < 0) return [];
-  const tickers: string[] = [];
-  for (const line of lines.slice(headerIndex + 1)) {
+  if (tickerIndex < 0 || assetClassIndex < 0) {
+    return { sourceAsOfDate: parseIsharesAsOfDate(lines), sourceEquityCount: 0, duplicateTickerCount: 0, blankTickerCount: 0, excludedCount: 0, tickers: [], holdings: [], invalidSourceIdentifiers: [], duplicateSourceIdentifiers: [], excludedSourceIdentifiers: [] };
+  }
+  const nameIndex = header.indexOf("name");
+  const exchangeIndex = header.indexOf("exchange");
+  const priceIndex = header.indexOf("price");
+  const seenRawTickers = new Set<string>();
+  let sourceEquityCount = 0;
+  let duplicateTickerCount = 0;
+  let blankTickerCount = 0;
+  const invalidSourceIdentifiers: string[] = [];
+  const duplicateSourceIdentifiers: string[] = [];
+  const excludedSourceIdentifiers: string[] = [];
+  const holdingsByTicker = new Map<string, IsharesHolding>();
+  for (const [rowOffset, line] of lines.slice(headerIndex + 1).entries()) {
     const cells = csvSplit(line);
     if ((cells[assetClassIndex] ?? "").trim().toLowerCase() !== "equity") continue;
-    const ticker = normalizeTicker(cells[tickerIndex] ?? "");
-    if (!ticker || !SAFE_TICKER_RE.test(ticker)) continue;
-    tickers.push(ticker);
+    const rawTicker = (cells[tickerIndex] ?? "").trim().toUpperCase();
+    sourceEquityCount += 1;
+    if (!rawTicker) {
+      blankTickerCount += 1;
+    } else if (seenRawTickers.has(rawTicker)) {
+      duplicateTickerCount += 1;
+      duplicateSourceIdentifiers.push(rawTicker);
+    }
+    if (rawTicker) seenRawTickers.add(rawTicker);
+    const ticker = normalizeTicker(rawTicker);
+    const sourceKey = rawTicker || `(blank row ${headerIndex + rowOffset + 2})`;
+    if (!ticker || !SAFE_TICKER_RE.test(ticker)) {
+      invalidSourceIdentifiers.push(sourceKey);
+      continue;
+    }
+    const name = (cells[nameIndex] ?? "").trim();
+    const exchange = (cells[exchangeIndex] ?? "").trim().toLowerCase();
+    const price = priceIndex >= 0 ? parseCsvNumber(cells[priceIndex] ?? "") : null;
+    const nonMarket = exchange.includes("no market") || exchange.includes("non-nms") || exchange.includes("unlisted");
+    const residual = /\b(?:cvr|escrow)\b/i.test(name) || (priceIndex >= 0 && (price == null || price <= 0));
+    if (nonMarket || residual) {
+      excludedSourceIdentifiers.push(`${nonMarket ? "non-market" : "residual"}:${rawTicker}`);
+      continue;
+    }
+    if (!holdingsByTicker.has(ticker)) {
+      holdingsByTicker.set(ticker, {
+        sourceTicker: ticker,
+        issuerName: name || null,
+        exchange: (cells[exchangeIndex] ?? "").trim() || null,
+        assetClass: "Equity",
+      });
+    }
   }
-  return dedupeSorted(tickers);
+  const holdings = Array.from(holdingsByTicker.values()).sort((a, b) => a.sourceTicker.localeCompare(b.sourceTicker));
+  const resolvedTickers = holdings.map((holding) => holding.sourceTicker);
+  return {
+    sourceAsOfDate: parseIsharesAsOfDate(lines),
+    sourceEquityCount,
+    duplicateTickerCount,
+    blankTickerCount,
+    excludedCount: sourceEquityCount - resolvedTickers.length,
+    tickers: resolvedTickers,
+    holdings,
+    invalidSourceIdentifiers: Array.from(new Set(invalidSourceIdentifiers)).sort(),
+    duplicateSourceIdentifiers: Array.from(new Set(duplicateSourceIdentifiers)).sort(),
+    excludedSourceIdentifiers: Array.from(new Set(excludedSourceIdentifiers)).sort(),
+  };
+}
+
+export function extractIsharesHoldingsCsvUrl(productPageHtml: string): string | null {
+  const hrefPattern = /href\s*=\s*["']([^"']+\.csv(?:\?[^"']*)?)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = hrefPattern.exec(productPageHtml)) !== null) {
+    try {
+      const url = new URL(match[1] ?? "", ISHARES_ORIGIN);
+      if (url.origin !== ISHARES_ORIGIN) continue;
+      if (!url.pathname.startsWith("/us/products/239710/")) continue;
+      if (!/holdings/i.test(url.pathname)) continue;
+      return url.toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
@@ -222,16 +343,93 @@ export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Pr
   return dedupeSorted(SP500_TICKERS);
 }
 
-export async function loadRussell2000Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
-  const csvRaw = await fetchText(IWM_HOLDINGS_CSV_URL);
-  let tickers = parseIsharesHoldingsCsv(csvRaw);
+export type Russell2000UniverseLoad = {
+  tickers: string[];
+  sourceAsOfDate: string | null;
+  sourceMemberCount: number;
+  normalizedMemberCount: number;
+  unresolvedCount: number;
+  unresolvedTickers: string[];
+  sourceType: "official-etf-holdings-proxy";
+  sourceUrl: string;
+  memberMetadata: Record<string, IsharesHolding>;
+};
+
+export async function loadRussell2000Universe(allCommonUniverse?: Set<string>): Promise<Russell2000UniverseLoad> {
+  let csvRaw: string;
+  let sourceUrl = IWM_HOLDINGS_CSV_URL;
+  try {
+    csvRaw = await fetchText(sourceUrl);
+  } catch (primaryError) {
+    const productPage = await fetchText(IWM_PRODUCT_PAGE_URL);
+    const discoveredUrl = extractIsharesHoldingsCsvUrl(productPage);
+    if (!discoveredUrl) throw primaryError;
+    sourceUrl = discoveredUrl;
+    csvRaw = await fetchText(sourceUrl);
+  }
+  const parsed = parseIsharesHoldingsCsvDetailed(csvRaw);
+  if (!parsed.sourceAsOfDate) {
+    throw new Error("IWM holdings source date is missing or unparseable");
+  }
+  if (parsed.blankTickerCount > 0 || parsed.duplicateTickerCount > 10) {
+    throw new Error(
+      `IWM holdings contains invalid source rows (blank tickers: ${parsed.blankTickerCount}, duplicate tickers: ${parsed.duplicateTickerCount}; maximum duplicates: 10)`,
+    );
+  }
+  let tickers = parsed.tickers;
+  let unresolvedTickers: string[] = [
+    ...parsed.invalidSourceIdentifiers,
+    ...parsed.duplicateSourceIdentifiers.map((ticker) => `duplicate:${ticker}`),
+    ...parsed.excludedSourceIdentifiers,
+  ];
+  const sourceToProvider = new Map(parsed.tickers.map((ticker) => [ticker, ticker]));
   if (allCommonUniverse && allCommonUniverse.size > 0) {
-    const filtered = tickers.filter((ticker) => allCommonUniverse.has(ticker));
-    // Keep the raw scrape if the intersection loses too many symbols due naming mismatches.
-    tickers = filtered.length >= tickers.length * 0.95 ? filtered : tickers;
+    const normalizedCandidates = new Map<string, string[]>();
+    for (const candidate of allCommonUniverse) {
+      const key = candidate.replace(/[^A-Z0-9]/g, "");
+      const matches = normalizedCandidates.get(key) ?? [];
+      matches.push(candidate);
+      normalizedCandidates.set(key, matches);
+    }
+    const resolved: string[] = [];
+    sourceToProvider.clear();
+    for (const sourceTicker of tickers) {
+      if (allCommonUniverse.has(sourceTicker)) {
+        resolved.push(sourceTicker);
+        sourceToProvider.set(sourceTicker, sourceTicker);
+        continue;
+      }
+      const aliases = normalizedCandidates.get(sourceTicker.replace(/[^A-Z0-9]/g, "")) ?? [];
+      if (aliases.length === 1) {
+        resolved.push(aliases[0]!);
+        sourceToProvider.set(sourceTicker, aliases[0]!);
+      } else {
+        unresolvedTickers.push(sourceTicker);
+      }
+    }
+    const coveragePct = parsed.tickers.length > 0 ? (resolved.length / parsed.tickers.length) * 100 : 0;
+    if (coveragePct < 95) {
+      throw new Error(`IWM symbol resolution coverage ${coveragePct.toFixed(2)}% is below 95%`);
+    }
+    tickers = resolved;
   }
-  if (tickers.length < 1800 || tickers.length > 2100) {
-    throw new Error(`IWM holdings proxy returned an invalid member count (${tickers.length})`);
-  }
-  return tickers;
+  const memberMetadata = Object.fromEntries(parsed.holdings.flatMap((holding) => {
+    const providerTicker = sourceToProvider.get(holding.sourceTicker);
+    return providerTicker ? [[providerTicker, holding] as const] : [];
+  }));
+  return {
+    tickers: dedupeSorted(tickers),
+    sourceAsOfDate: parsed.sourceAsOfDate,
+    sourceMemberCount: parsed.sourceEquityCount,
+    normalizedMemberCount: parsed.tickers.length,
+    unresolvedCount: Math.max(0, parsed.sourceEquityCount - dedupeSorted(tickers).length),
+    unresolvedTickers,
+    sourceType: "official-etf-holdings-proxy",
+    sourceUrl,
+    memberMetadata,
+  };
+}
+
+export async function loadRussell2000Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
+  return (await loadRussell2000Universe(allCommonUniverse)).tickers;
 }
