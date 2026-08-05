@@ -489,7 +489,7 @@ export function shouldRunCentralCronLocalTime(now: Date, values: CronJobValues, 
   const allowedDays = normalizeWeekdays(values.days, fallback.days ?? [...DEFAULT_ALL_DAYS]);
   if (!allowedDays.includes(weekdayLong(local.weekday))) return false;
   const targetMinutes = target.hour * 60 + target.minute;
-  return local.minutesOfDay >= targetMinutes && local.minutesOfDay < targetMinutes + 15;
+  return local.minutesOfDay >= targetMinutes;
 }
 
 export function isCentralCronWindowOpen(now: Date, values: CronJobValues, fallback: { timezone: string; start: string; end: string; days?: string[] }): boolean {

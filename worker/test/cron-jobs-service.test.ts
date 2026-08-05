@@ -83,15 +83,18 @@ describe("central cron job settings", () => {
     expect(map.get("social-alerts-housekeeping")).toMatchObject({ enabled: true, retentionDays: 10 });
   });
 
-  it("checks local-time schedules with the selected timezone and weekday list", () => {
-    const due = shouldRunCentralCronLocalTime(new Date("2026-05-22T00:00:00Z"), {
+  it("keeps local-time schedules due after the target time on the selected weekday", () => {
+    const values = {
       enabled: true,
       timezone: "America/New_York",
       localTime: "20:00",
       days: ["Thursday"],
-    }, { timezone: "America/New_York", localTime: "20:00" });
+    };
+    const fallback = { timezone: "America/New_York", localTime: "20:00" };
 
-    expect(due).toBe(true);
+    expect(shouldRunCentralCronLocalTime(new Date("2026-05-21T23:59:00Z"), values, fallback)).toBe(false);
+    expect(shouldRunCentralCronLocalTime(new Date("2026-05-22T00:00:00Z"), values, fallback)).toBe(true);
+    expect(shouldRunCentralCronLocalTime(new Date("2026-05-22T02:30:00Z"), values, fallback)).toBe(true);
   });
 });
 

@@ -95,21 +95,52 @@ async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
   postCloseRetrySchemaReady = true;
 }
 
-async function materializePostCloseJobItems(env: Env, stateEnv: Env, jobId: string): Promise<void> {
-  const existing = await stateEnv.DB.prepare(
+export function planPostCloseJobItemMaterialization(
+  universe: Array<{ ticker: string; historyRequired: number }>,
+  existingTickers: ReadonlySet<string>,
+): Array<{ ticker: string; historyRequired: number; ordinal: number }> {
+  return universe.flatMap((row, ordinal) => {
+    const ticker = row.ticker.trim().toUpperCase();
+    if (!ticker || existingTickers.has(ticker)) return [];
+    return [{ ticker, historyRequired: Number(row.historyRequired) === 1 ? 1 : 0, ordinal }];
+  });
+}
+
+export function isPostCloseJobComplete(
+  totalTickers: number,
+  itemCount: number,
+  incompleteCount: number,
+): boolean {
+  return itemCount >= totalTickers && incompleteCount === 0;
+}
+
+async function materializePostCloseJobItems(
+  env: Env,
+  stateEnv: Env,
+  jobId: string,
+  totalTickers: number,
+): Promise<void> {
+  const existingCount = await stateEnv.DB.prepare(
     "SELECT COUNT(*) as count FROM post_close_daily_bar_refresh_job_items WHERE job_id = ?",
   ).bind(jobId).first<{ count: number | null }>();
-  if (Number(existing?.count ?? 0) > 0) return;
+  if (Number(existingCount?.count ?? 0) >= totalTickers) return;
   const universe = await env.DB.prepare(
     `SELECT ticker, history_required as historyRequired
      FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe
      ORDER BY priority ASC, ticker ASC`,
   ).all<{ ticker: string; historyRequired: number }>();
-  const statements = (universe.results ?? []).map((row, ordinal) => stateEnv.DB.prepare(
+  const existing = await stateEnv.DB.prepare(
+    "SELECT ticker FROM post_close_daily_bar_refresh_job_items WHERE job_id = ?",
+  ).bind(jobId).all<{ ticker: string }>();
+  const existingTickers = new Set(
+    (existing.results ?? []).map((row) => row.ticker.trim().toUpperCase()).filter(Boolean),
+  );
+  const missingItems = planPostCloseJobItemMaterialization(universe.results ?? [], existingTickers);
+  const statements = missingItems.map((row) => stateEnv.DB.prepare(
     `INSERT OR IGNORE INTO post_close_daily_bar_refresh_job_items
        (job_id, ordinal, ticker, history_required, status, updated_at)
      VALUES (?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)`,
-  ).bind(jobId, ordinal, row.ticker, Number(row.historyRequired) === 1 ? 1 : 0));
+  ).bind(jobId, row.ordinal, row.ticker, row.historyRequired));
   for (let index = 0; index < statements.length; index += 500) {
     await stateEnv.DB.batch(statements.slice(index, index + 500));
   }
@@ -234,6 +265,7 @@ async function leasePostCloseJobItems(
 }
 
 async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
+  itemCount: number;
   completedCount: number;
   currentCount: number;
   incompleteCount: number;
@@ -242,6 +274,7 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
 }> {
   const row = await env.DB.prepare(
     `SELECT
+       COUNT(*) as itemCount,
        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completedCount,
        SUM(CASE WHEN bar_date IS NOT NULL THEN 1 ELSE 0 END) as currentCount,
        SUM(CASE WHEN status NOT IN ('completed', 'unsupported') THEN 1 ELSE 0 END) as incompleteCount,
@@ -253,6 +286,7 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
      FROM post_close_daily_bar_refresh_job_items
      WHERE job_id = ?`,
   ).bind(jobId).first<{
+    itemCount: number | null;
     completedCount: number | null;
     currentCount: number | null;
     incompleteCount: number | null;
@@ -260,6 +294,7 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
     nextAttemptAt: string | null;
   }>();
   return {
+    itemCount: Number(row?.itemCount ?? 0),
     completedCount: Number(row?.completedCount ?? 0),
     currentCount: Number(row?.currentCount ?? 0),
     incompleteCount: Number(row?.incompleteCount ?? 0),
@@ -1015,7 +1050,7 @@ async function ensurePostCloseDailyBarRefreshJob(
   const identity = postCloseJobIdentity(env);
   const existing = await loadLatestPostCloseDailyBarRefreshJobRecordForDate(stateEnv, tradingDate, identity);
   if (existing) {
-    await materializePostCloseJobItems(env, stateEnv, existing.id);
+    await materializePostCloseJobItems(env, stateEnv, existing.id, existing.totalTickers);
     const recoveredRecentSipJob = await requeueRecentSipRestrictionJob(stateEnv, existing);
     if (recoveredRecentSipJob) return recoveredRecentSipJob;
     if (isStaleRunningPostCloseJob(existing)) {
@@ -1065,7 +1100,7 @@ async function ensurePostCloseDailyBarRefreshJob(
     .run();
   const created = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, id);
   if (!created) throw new Error("Failed to create post-close daily bar refresh job.");
-  await materializePostCloseJobItems(env, stateEnv, id);
+  await materializePostCloseJobItems(env, stateEnv, id, created.totalTickers);
   return created;
 }
 
@@ -1076,9 +1111,22 @@ export async function processPostCloseDailyBarRefreshJob(
 ): Promise<PostCloseDailyBarRefreshJob | null> {
   const stateEnv = postCloseStateEnv(env);
   await ensurePostCloseRetrySchema(stateEnv);
-  const job = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, jobId);
+  let job = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, jobId);
   if (!job) return null;
-  if (job.status === "completed" || job.status === "failed" || job.status === "superseded") {
+  if (job.status === "completed") {
+    const summary = await loadPostCloseJobItemSummary(stateEnv, job.id);
+    if (isPostCloseJobComplete(job.totalTickers, summary.itemCount, summary.incompleteCount)) {
+      return mapPostCloseDailyBarRefreshJobRecord(job);
+    }
+    await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
+      status: "queued",
+      completedAt: null,
+      nextAttemptAt: null,
+    });
+    job = await loadPostCloseDailyBarRefreshJobRecord(stateEnv, job.id);
+    if (!job) return null;
+  }
+  if (job.status === "failed" || job.status === "superseded") {
     return mapPostCloseDailyBarRefreshJobRecord(job);
   }
   if (job.nextAttemptAt && Date.parse(job.nextAttemptAt) > Date.now()) {
@@ -1477,7 +1525,7 @@ export async function processPostCloseDailyBarRefreshJob(
     const currentDateTickers = summary.currentCount;
     const missingCurrentDateTickers = Math.max(0, job.totalTickers - currentDateTickers);
     const currentDateCoveragePct = job.totalTickers > 0 ? (currentDateTickers / job.totalTickers) * 100 : 0;
-    if (summary.incompleteCount === 0) {
+    if (isPostCloseJobComplete(job.totalTickers, summary.itemCount, summary.incompleteCount)) {
       await updatePostCloseDailyBarRefreshJobRecord(stateEnv, job.id, {
         status: "completed",
         processedTickers: currentDateTickers,

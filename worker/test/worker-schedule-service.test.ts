@@ -3,10 +3,12 @@ import {
   boundPostCloseProviderWork,
   buildPostCloseDailyBarUniverseQuery,
   classifyPostCloseError,
+  isPostCloseJobComplete,
   isPostCloseBarsWindowOpen,
   loadWorkerScheduleSettings,
   planPostCloseBudgetProtection,
   planPostCloseProviderBatch,
+  planPostCloseJobItemMaterialization,
   postCloseInvocationBatchPlan,
   postCloseJobIdentity,
   shouldUseYahooRepair,
@@ -389,6 +391,26 @@ describe("post-close daily bar universe", () => {
       batchSize: 80,
       maxBatches: 4,
     });
+  });
+
+  it("resumes partially materialized post-close job items", () => {
+    const universe = Array.from({ length: 750 }, (_, index) => ({
+      ticker: `T${index}`,
+      historyRequired: index < 25 ? 1 : 0,
+    }));
+    const existing = new Set(universe.slice(0, 500).map((row) => row.ticker));
+
+    const missing = planPostCloseJobItemMaterialization(universe, existing);
+
+    expect(missing).toHaveLength(250);
+    expect(missing[0]).toEqual({ ticker: "T500", historyRequired: 0, ordinal: 500 });
+    expect(missing.at(-1)).toEqual({ ticker: "T749", historyRequired: 0, ordinal: 749 });
+  });
+
+  it("requires the full materialized universe before completing a post-close job", () => {
+    expect(isPostCloseJobComplete(5_885, 500, 0)).toBe(false);
+    expect(isPostCloseJobComplete(5_885, 5_885, 1)).toBe(false);
+    expect(isPostCloseJobComplete(5_885, 5_885, 0)).toBe(true);
   });
 
   it("opens normal and early-close sessions 35 minutes after the exchange close", () => {

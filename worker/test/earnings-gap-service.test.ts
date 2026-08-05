@@ -976,6 +976,28 @@ describe("earnings gap service", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("retries a configured scheduled scan after its target slot until that local date succeeds", async () => {
+    const env = createEnv();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ totalCount: 0, data: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const settings = {
+      enabled: true,
+      timezone: "America/New_York",
+      localTime: "20:00",
+      days: ["Thursday"],
+    };
+
+    const first = await maybeRunScheduledEarningsGapSync(env, new Date("2026-05-22T00:30:00Z"), settings);
+    const second = await maybeRunScheduledEarningsGapSync(env, new Date("2026-05-22T00:45:00Z"), settings);
+
+    expect(first?.scheduledLocalDate).toBe("2026-05-21");
+    expect(second).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("stores direct TradingView EPS values and falls back to the preferred Surprises snapshot", async () => {
     const env = createEnv({
       surprises: [
