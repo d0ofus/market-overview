@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
   buildTradingViewEarningsEventConfig,
+  buildTradingViewSizingConfig,
   buildTradingViewTimingConfig,
   type TradingViewEarningsEvents,
 } from "@/lib/tradingview-widget-config";
@@ -97,19 +98,13 @@ export function TradingViewWidget({
   surface?: "card" | "plain";
   className?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const widgetHostRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<WidgetTheme>("dark");
   const [shouldLoad, setShouldLoad] = useState(false);
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const containerId = `tv-adv-${ticker.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}-${uid}`;
   const denseStatusLayout = chartOnly && showStatusLine;
-  const maxWidth = fillContainer
-    ? Number.POSITIVE_INFINITY
-    : size === "small"
-      ? (denseStatusLayout ? 560 : 420)
-      : compact
-        ? 640
-        : 880;
   const frameClass = heightMode === "fill"
     ? "h-full min-h-0 w-full"
     : fillContainer
@@ -139,7 +134,7 @@ export function TradingViewWidget({
   }, []);
 
   useEffect(() => {
-    if (!ref.current || shouldLoad) return;
+    if (!frameRef.current || shouldLoad) return;
     if (typeof IntersectionObserver === "undefined") {
       setShouldLoad(true);
       return;
@@ -152,17 +147,17 @@ export function TradingViewWidget({
       },
       { rootMargin: "300px 0px" },
     );
-    observer.observe(ref.current);
+    observer.observe(frameRef.current);
     return () => observer.disconnect();
   }, [shouldLoad]);
 
   useEffect(() => {
-    if (!ref.current || !shouldLoad) return;
-    const minWidth = fillContainer ? 1 : size === "small" ? 280 : 360;
-    const width = Math.max(minWidth, Math.min(ref.current.clientWidth, maxWidth));
-    const height = heightMode === "fill"
-      ? ref.current.clientHeight || Math.round(width * 0.75)
-      : Math.round(width * 0.75);
+    const widgetHost = widgetHostRef.current;
+    if (!widgetHost || !shouldLoad) return;
+    const widgetContainer = document.createElement("div");
+    widgetContainer.className = "tradingview-widget-container h-full min-w-0 w-full";
+    widgetHost.replaceChildren(widgetContainer);
+    const sizingConfig = buildTradingViewSizingConfig();
     const timingConfig = buildTradingViewTimingConfig();
     const earningsEventConfig = buildTradingViewEarningsEventConfig(earningsEvents);
     const overrides: Record<string, boolean | number | string> = {};
@@ -194,13 +189,12 @@ export function TradingViewWidget({
       ...(item.lineColor ? { lineColor: item.lineColor, color: item.lineColor } : {}),
       ...(typeof item.lineWidth === "number" && Number.isFinite(item.lineWidth) ? { lineWidth: item.lineWidth } : {}),
     }));
-    ref.current.innerHTML = "";
     const script = document.createElement("script");
     script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.type = "text/javascript";
     script.async = true;
     script.innerHTML = JSON.stringify({
-      width,
-      height,
+      ...sizingConfig,
       symbol: ticker,
       ...timingConfig,
       timezone: DEFAULT_CHART_TIMEZONE,
@@ -220,8 +214,13 @@ export function TradingViewWidget({
       compareSymbols: serializedCompareSymbols,
       container_id: containerId,
     });
-    ref.current.appendChild(script);
-  }, [ticker, chartStyle, compareSymbolsKey, studiesKey, studiesOverridesKey, containerId, maxWidth, size, chartOnly, showStatusLine, showCorporateEvents, earningsEvents, baseSeriesColor, baseSeriesLineWidth, theme, shouldLoad, heightMode]);
+    widgetContainer.appendChild(script);
+    return () => {
+      if (widgetHost.contains(widgetContainer)) {
+        widgetHost.removeChild(widgetContainer);
+      }
+    };
+  }, [ticker, chartStyle, compareSymbolsKey, studiesKey, studiesOverridesKey, containerId, chartOnly, showStatusLine, showCorporateEvents, earningsEvents, baseSeriesColor, baseSeriesLineWidth, theme, shouldLoad]);
 
   const heightClassName = heightMode === "fill" ? "h-full min-h-0" : "";
   const shellClassName = surface === "plain"
@@ -230,8 +229,9 @@ export function TradingViewWidget({
 
   return (
     <div className={shellClassName}>
-      <div className={`tradingview-widget-container ${fillContainer ? "" : "mx-auto"} ${frameClass}`} ref={ref}>
-        <div id={containerId} className={`h-full ${shouldLoad ? "" : "animate-pulse rounded bg-slate-900/30"}`} />
+      <div className={`relative min-w-0 ${fillContainer ? "" : "mx-auto"} ${frameClass}`} ref={frameRef}>
+        <div className="h-full min-w-0 w-full" ref={widgetHostRef} />
+        {!shouldLoad ? <div className="absolute inset-0 animate-pulse rounded bg-slate-900/30" /> : null}
       </div>
     </div>
   );

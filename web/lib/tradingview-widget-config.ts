@@ -2,6 +2,10 @@ export type TradingViewEarningsEvents = "off" | "markers" | "markers-and-breaks"
 
 type TradingViewOverrideValue = boolean | number | string;
 
+export function buildTradingViewSizingConfig(): { autosize: true } {
+  return { autosize: true };
+}
+
 export function buildTradingViewTimingConfig(): { interval: "D" } {
   return { interval: "D" };
 }
