@@ -28,7 +28,7 @@ import {
   type SectorFocusNarrativeUpdate,
   type SectorMarketLeaderRow,
 } from "@/lib/api";
-import { buildFocusChartModeOptions, type FocusChartMode } from "@/lib/sector-focus-entry";
+import { buildFocusChartModeOptions, getAdjacentFocusNarrativeIndex, type FocusChartMode } from "@/lib/sector-focus-entry";
 import type { QuoteFreshnessStatus } from "@/types/dashboard";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -1115,6 +1115,23 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
         : null,
     [activeNarrativeCollection?.id, activeNarrativeCollection?.mode, focusNarrativeRows],
   );
+  const focusNarrativeNavigation = useMemo(() => {
+    if (activeNarrativeCollection?.mode !== "focus") return null;
+    const ids = focusNarrativeRows.map((row) => row.id);
+    const currentIndex = ids.indexOf(activeNarrativeCollection.id);
+    const previousIndex = getAdjacentFocusNarrativeIndex({ ids, activeId: activeNarrativeCollection.id, offset: -1 });
+    const nextIndex = getAdjacentFocusNarrativeIndex({ ids, activeId: activeNarrativeCollection.id, offset: 1 });
+    if (currentIndex < 0 || previousIndex == null || nextIndex == null) return null;
+    const previous = focusNarrativeRows[previousIndex];
+    const next = focusNarrativeRows[nextIndex];
+    if (!previous || !next) return null;
+    return {
+      currentPosition: currentIndex + 1,
+      total: focusNarrativeRows.length,
+      previous,
+      next,
+    };
+  }, [activeNarrativeCollection?.id, activeNarrativeCollection?.mode, focusNarrativeRows]);
   const activeFocusNarrativeSymbols = useMemo(
     () => activeFocusNarrativeRow?.sourceNarrativeName
       ? narrativeTickerSuggestionsByName.get(activeFocusNarrativeRow.sourceNarrativeName) ?? []
@@ -1280,6 +1297,12 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
       mode: "focus",
     });
     setNarrativePage(1);
+  };
+
+  const navigateFocusNarrative = (offset: -1 | 1) => {
+    if (focusNarrativeSaving || !focusNarrativeNavigation || focusNarrativeNavigation.total <= 1) return;
+    cancelEditingFocusComment();
+    openFocusNarrative(offset === -1 ? focusNarrativeNavigation.previous : focusNarrativeNavigation.next);
   };
 
   const closeNarrativeCollection = () => {
@@ -2658,6 +2681,33 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
         <TickerCollectionModal
           eyebrow={activeNarrativeCollection.mode === "focus" ? "Focus Narrative" : "Sector / Narrative"}
           title={activeNarrativeCollection.sectorName}
+          titleActions={activeFocusNarrativeRow && focusNarrativeNavigation ? (
+            <div className="inline-flex items-center gap-1" role="group" aria-label="Focus Narrative navigation">
+              <button
+                type="button"
+                className={`${ICON_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                onClick={() => navigateFocusNarrative(-1)}
+                disabled={focusNarrativeSaving || focusNarrativeNavigation.total <= 1}
+                aria-label={`Previous focus narrative: ${focusNarrativeNavigation.previous.sectorName}`}
+                title={`Previous: ${focusNarrativeNavigation.previous.sectorName}`}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <span className="min-w-[3.75rem] text-center text-xs font-medium tabular-nums text-slate-400" aria-live="polite">
+                {focusNarrativeNavigation.currentPosition} of {focusNarrativeNavigation.total}
+              </span>
+              <button
+                type="button"
+                className={`${ICON_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                onClick={() => navigateFocusNarrative(1)}
+                disabled={focusNarrativeSaving || focusNarrativeNavigation.total <= 1}
+                aria-label={`Next focus narrative: ${focusNarrativeNavigation.next.sectorName}`}
+                title={`Next: ${focusNarrativeNavigation.next.sectorName}`}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          ) : undefined}
           description={
             <div className="space-y-1">
               {activeNarrativeCollection.mode === "focus" ? (

@@ -21,6 +21,7 @@ export type TickerCollectionModalItem = {
 export function TickerCollectionModal({
   eyebrow,
   title,
+  titleActions,
   description,
   items,
   totalItems,
@@ -40,6 +41,7 @@ export function TickerCollectionModal({
 }: {
   eyebrow: string;
   title: string;
+  titleActions?: ReactNode;
   description?: ReactNode;
   items: TickerCollectionModalItem[];
   totalItems: number;
@@ -70,7 +72,10 @@ export function TickerCollectionModal({
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-borderSoft/60 bg-panelSoft/35 px-5 py-4">
           <div className="min-w-0">
             <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{eyebrow}</p>
-            <h4 className="mt-1 text-base font-semibold text-slate-100">{title}</h4>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <h4 className="text-base font-semibold text-slate-100">{title}</h4>
+              {titleActions}
+            </div>
             {description ? <div className="mt-2 text-sm text-slate-400">{description}</div> : null}
           </div>
           {headerMiddleSlot ? <div className="min-w-[16rem] flex-1 md:max-w-3xl">{headerMiddleSlot}</div> : null}

@@ -22,6 +22,17 @@ export type FocusChartModeOption = {
   disabled: boolean;
 };
 
+export function getAdjacentFocusNarrativeIndex(input: {
+  ids: string[];
+  activeId: string;
+  offset: -1 | 1;
+}): number | null {
+  if (input.ids.length === 0) return null;
+  const currentIndex = input.ids.indexOf(input.activeId);
+  if (currentIndex < 0) return null;
+  return (currentIndex + input.offset + input.ids.length) % input.ids.length;
+}
+
 export function buildFocusChartModeOptions(input: {
   selectedCount: number;
   narrativeName: string | null;

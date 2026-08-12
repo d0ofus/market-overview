@@ -3,9 +3,24 @@ import test from "node:test";
 import {
   buildFocusChartModeOptions,
   buildFocusTickerOptions,
+  getAdjacentFocusNarrativeIndex,
   parseFocusTickerInput,
   previewFocusName,
 } from "./sector-focus-entry";
+
+test("focus narrative navigation moves in saved order and wraps at both ends", () => {
+  const ids = ["focus-1", "focus-2", "focus-3"];
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids, activeId: "focus-2", offset: 1 }), 2);
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids, activeId: "focus-2", offset: -1 }), 0);
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids, activeId: "focus-3", offset: 1 }), 0);
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids, activeId: "focus-1", offset: -1 }), 2);
+});
+
+test("focus narrative navigation handles singleton, empty, and missing active narratives", () => {
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids: ["focus-1"], activeId: "focus-1", offset: 1 }), 0);
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids: [], activeId: "focus-1", offset: 1 }), null);
+  assert.equal(getAdjacentFocusNarrativeIndex({ ids: ["focus-1"], activeId: "missing", offset: -1 }), null);
+});
 
 test("chart source options distinguish same-name sources and show all counts", () => {
   assert.deepEqual(buildFocusChartModeOptions({
