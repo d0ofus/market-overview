@@ -28,7 +28,7 @@ import {
   type SectorFocusNarrativeUpdate,
   type SectorMarketLeaderRow,
 } from "@/lib/api";
-import { buildFocusChartModeOptions, getAdjacentFocusNarrativeIndex, type FocusChartMode } from "@/lib/sector-focus-entry";
+import { buildFocusChartModeOptions, getAdjacentFocusNarrativeIndex, getFocusNarrativeKeyboardOffset, type FocusChartMode } from "@/lib/sector-focus-entry";
 import type { QuoteFreshnessStatus } from "@/types/dashboard";
 import { FloatingSectionNav } from "./floating-section-nav";
 import { ExpandedTradingViewChartModal, HoverChartPreviewPanel, useHoverChartPreview } from "./hover-chart-preview";
@@ -1304,6 +1304,41 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     cancelEditingFocusComment();
     openFocusNarrative(offset === -1 ? focusNarrativeNavigation.previous : focusNarrativeNavigation.next);
   };
+
+  useEffect(() => {
+    const handleFocusNarrativeKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const editableTarget = Boolean(target?.closest(
+        'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])',
+      ));
+      const offset = getFocusNarrativeKeyboardOffset({
+        key: event.key,
+        focusNarrativeOpen: activeNarrativeCollection?.mode === "focus",
+        expandedChartOpen: Boolean(activeChartTicker),
+        saving: focusNarrativeSaving,
+        total: focusNarrativeNavigation?.total ?? 0,
+        defaultPrevented: event.defaultPrevented,
+        isComposing: event.isComposing,
+        editableTarget,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+      });
+      if (offset == null) return;
+      event.preventDefault();
+      navigateFocusNarrative(offset);
+    };
+
+    window.addEventListener("keydown", handleFocusNarrativeKeyDown);
+    return () => window.removeEventListener("keydown", handleFocusNarrativeKeyDown);
+  }, [
+    activeChartTicker,
+    activeNarrativeCollection?.mode,
+    focusNarrativeNavigation,
+    focusNarrativeSaving,
+    navigateFocusNarrative,
+  ]);
 
   const closeNarrativeCollection = () => {
     if (activeNarrativeCollection?.mode === "focus" && editingFocusComment === activeNarrativeCollection.sectorName) {
@@ -2689,7 +2724,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                 onClick={() => navigateFocusNarrative(-1)}
                 disabled={focusNarrativeSaving || focusNarrativeNavigation.total <= 1}
                 aria-label={`Previous focus narrative: ${focusNarrativeNavigation.previous.sectorName}`}
-                title={`Previous: ${focusNarrativeNavigation.previous.sectorName}`}
+                aria-keyshortcuts="ArrowLeft"
+                title={`Previous: ${focusNarrativeNavigation.previous.sectorName} (Left arrow)`}
               >
                 <ChevronLeft className="h-4 w-4" />
               </button>
@@ -2702,7 +2738,8 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                 onClick={() => navigateFocusNarrative(1)}
                 disabled={focusNarrativeSaving || focusNarrativeNavigation.total <= 1}
                 aria-label={`Next focus narrative: ${focusNarrativeNavigation.next.sectorName}`}
-                title={`Next: ${focusNarrativeNavigation.next.sectorName}`}
+                aria-keyshortcuts="ArrowRight"
+                title={`Next: ${focusNarrativeNavigation.next.sectorName} (Right arrow)`}
               >
                 <ChevronRight className="h-4 w-4" />
               </button>

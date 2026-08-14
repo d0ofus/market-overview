@@ -33,6 +33,38 @@ export function getAdjacentFocusNarrativeIndex(input: {
   return (currentIndex + input.offset + input.ids.length) % input.ids.length;
 }
 
+export function getFocusNarrativeKeyboardOffset(input: {
+  key: string;
+  focusNarrativeOpen: boolean;
+  expandedChartOpen: boolean;
+  saving: boolean;
+  total: number;
+  defaultPrevented: boolean;
+  isComposing: boolean;
+  editableTarget: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}): -1 | 1 | null {
+  if (
+    !input.focusNarrativeOpen
+    || input.expandedChartOpen
+    || input.saving
+    || input.total <= 1
+    || input.defaultPrevented
+    || input.isComposing
+    || input.editableTarget
+    || input.altKey
+    || input.ctrlKey
+    || input.metaKey
+    || input.shiftKey
+  ) return null;
+  if (input.key === "ArrowLeft") return -1;
+  if (input.key === "ArrowRight") return 1;
+  return null;
+}
+
 export function buildFocusChartModeOptions(input: {
   selectedCount: number;
   narrativeName: string | null;

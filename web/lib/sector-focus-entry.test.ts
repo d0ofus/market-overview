@@ -4,6 +4,7 @@ import {
   buildFocusChartModeOptions,
   buildFocusTickerOptions,
   getAdjacentFocusNarrativeIndex,
+  getFocusNarrativeKeyboardOffset,
   parseFocusTickerInput,
   previewFocusName,
 } from "./sector-focus-entry";
@@ -20,6 +21,61 @@ test("focus narrative navigation handles singleton, empty, and missing active na
   assert.equal(getAdjacentFocusNarrativeIndex({ ids: ["focus-1"], activeId: "focus-1", offset: 1 }), 0);
   assert.equal(getAdjacentFocusNarrativeIndex({ ids: [], activeId: "focus-1", offset: 1 }), null);
   assert.equal(getAdjacentFocusNarrativeIndex({ ids: ["focus-1"], activeId: "missing", offset: -1 }), null);
+});
+
+test("focus narrative keyboard navigation maps plain arrow keys", () => {
+  const eligible = {
+    focusNarrativeOpen: true,
+    expandedChartOpen: false,
+    saving: false,
+    total: 3,
+    defaultPrevented: false,
+    isComposing: false,
+    editableTarget: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+  };
+
+  assert.equal(getFocusNarrativeKeyboardOffset({ ...eligible, key: "ArrowLeft" }), -1);
+  assert.equal(getFocusNarrativeKeyboardOffset({ ...eligible, key: "ArrowRight" }), 1);
+  assert.equal(getFocusNarrativeKeyboardOffset({ ...eligible, key: "Enter" }), null);
+});
+
+test("focus narrative keyboard navigation ignores modified or blocked events", () => {
+  const eligible = {
+    key: "ArrowRight",
+    focusNarrativeOpen: true,
+    expandedChartOpen: false,
+    saving: false,
+    total: 3,
+    defaultPrevented: false,
+    isComposing: false,
+    editableTarget: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+  };
+  const blockedInputs = [
+    { altKey: true },
+    { ctrlKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { defaultPrevented: true },
+    { isComposing: true },
+    { editableTarget: true },
+    { focusNarrativeOpen: false },
+    { expandedChartOpen: true },
+    { saving: true },
+    { total: 1 },
+    { total: 0 },
+  ];
+
+  for (const blockedInput of blockedInputs) {
+    assert.equal(getFocusNarrativeKeyboardOffset({ ...eligible, ...blockedInput }), null);
+  }
 });
 
 test("chart source options distinguish same-name sources and show all counts", () => {
