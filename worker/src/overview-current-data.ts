@@ -1112,6 +1112,18 @@ export function isOverviewCurrentRowPublishable(
     && Number.isFinite(row.change1d);
 }
 
+export function isOverviewCurrentRowPublishableForCycle(
+  row: OverviewCurrentData,
+  cycleStartedAt: string,
+): boolean {
+  const fetchedAt = Date.parse(row.fetchedAt);
+  const cycleStartedAtMs = Date.parse(cycleStartedAt);
+  return Number.isFinite(fetchedAt)
+    && Number.isFinite(cycleStartedAtMs)
+    && fetchedAt >= cycleStartedAtMs
+    && isOverviewCurrentRowPublishable(row);
+}
+
 export function isOverviewCurrentRowStructurallyUnsupported(row: OverviewCurrentData | null | undefined): boolean {
   if (!row) return false;
   return row.providerStatuses.tradingview?.status === "unsupported"

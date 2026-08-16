@@ -23,6 +23,7 @@ import {
   doesOverviewCurrentRowNeedRepair,
   isOverviewCurrentRowComplete,
   isOverviewCurrentRowPublishable,
+  isOverviewCurrentRowPublishableForCycle,
   isOverviewCurrentRowStructurallyUnsupported,
   loadOverviewCurrentData,
   loadOverviewCurrentRefreshJob,
@@ -334,7 +335,7 @@ function appendFreshnessWarning(base: string | null, extra: string): string {
 function criticalTickersWithoutLiveQuotes(
   rows: Array<{ ticker: string; groupTitle: string }>,
   currentRows: Map<string, OverviewCurrentData>,
-  now?: Date,
+  isPublishable: (row: OverviewCurrentData) => boolean,
 ): string[] {
   const missing = new Set<string>();
   for (const row of rows) {
@@ -343,7 +344,7 @@ function criticalTickersWithoutLiveQuotes(
     if (!isOverviewQuoteEligibleTicker(ticker, row.groupTitle)) continue;
     const current = currentRows.get(ticker);
     if (isOverviewCurrentRowStructurallyUnsupported(current)) continue;
-    if (current && isOverviewCurrentRowPublishable(current, now)) continue;
+    if (current && isPublishable(current)) continue;
     missing.add(ticker);
   }
   return Array.from(missing).sort();
@@ -1633,6 +1634,17 @@ export async function computeAndStoreSnapshot(
       console.error("overview current-data load failed; snapshot will contain unavailable scalars", error);
     }
   }
+  let sourceCycleStartedAt: string | null = null;
+  if (options.sourceCycleId) {
+    const sourceJob = await loadOverviewCurrentRefreshJob(env, configId, asOfDate);
+    if (sourceJob?.cycleId !== options.sourceCycleId || !sourceJob.cycleStartedAt) {
+      throw new Error(`Overview source cycle ${options.sourceCycleId} is no longer the exact-session current-data cycle.`);
+    }
+    sourceCycleStartedAt = sourceJob.cycleStartedAt;
+  }
+  const isCurrentRowPublishable = (row: OverviewCurrentData): boolean => sourceCycleStartedAt
+    ? isOverviewCurrentRowPublishableForCycle(row, sourceCycleStartedAt)
+    : isOverviewCurrentRowPublishable(row, generatedAtDate);
   const uniqueSnapshotTickers = Array.from(new Set(snapshotRows.map((row) => row.ticker.toUpperCase())));
   const currentDataEnabled = isOverviewCurrentV2Enabled(env);
   const quoteEligibleTickers = Array.from(new Set(snapshotRows
@@ -1643,18 +1655,18 @@ export async function computeAndStoreSnapshot(
   );
   const freshCurrentTickers = publicationEligibleTickers.filter((ticker) => {
     const row = currentRows.get(ticker);
-    return Boolean(row && isOverviewCurrentRowPublishable(row, generatedAtDate));
+    return Boolean(row && isCurrentRowPublishable(row));
   });
   const missingCurrentTickers = currentDataEnabled
     ? publicationEligibleTickers.filter((ticker) => {
       const row = currentRows.get(ticker);
-      return !row || !isOverviewCurrentRowPublishable(row, generatedAtDate);
+      return !row || !isCurrentRowPublishable(row);
     })
     : [];
   const optionalFieldMissingTickers = currentDataEnabled
     ? publicationEligibleTickers.filter((ticker) => {
       const row = currentRows.get(ticker);
-      return Boolean(row && isOverviewCurrentRowPublishable(row, generatedAtDate) && !isOverviewCurrentRowComplete(row));
+      return Boolean(row && isCurrentRowPublishable(row) && !isOverviewCurrentRowComplete(row));
     })
     : [];
   const repairableCurrentTickers = currentDataEnabled
@@ -1686,7 +1698,7 @@ export async function computeAndStoreSnapshot(
       `${optionalFieldMissingTickers.length} overview tickers have optional performance or SMA fields unavailable.`,
     );
   }
-  const missingLiveCriticalQuotes = criticalTickersWithoutLiveQuotes(snapshotRows, currentRows, generatedAtDate);
+  const missingLiveCriticalQuotes = criticalTickersWithoutLiveQuotes(snapshotRows, currentRows, isCurrentRowPublishable);
   if (missingLiveCriticalQuotes.length > 0) {
     finalFreshnessWarning = appendFreshnessWarning(
       finalFreshnessWarning,
@@ -1794,7 +1806,7 @@ export async function computeAndStoreSnapshot(
     const storedCurrent = currentRows.get(row.ticker.toUpperCase()) ?? null;
     const current = storedCurrent && (
       isOverviewCurrentRowStructurallyUnsupported(storedCurrent)
-      || isOverviewCurrentRowPublishable(storedCurrent, generatedAtDate)
+      || isCurrentRowPublishable(storedCurrent)
     ) ? storedCurrent : null;
     const barIsFresh = row.barDate === asOfDate;
     const quotePrice = resolvedCurrentValue(current, "price", current?.price);

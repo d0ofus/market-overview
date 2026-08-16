@@ -6,6 +6,7 @@ import {
   doesOverviewCurrentRowNeedRepair,
   isOverviewCurrentRowComplete,
   isOverviewCurrentRowPublishable,
+  isOverviewCurrentRowPublishableForCycle,
   isOverviewCurrentRowStructurallyUnsupported,
   OVERVIEW_CURRENT_COLUMNS,
   overviewCurrentRefreshStateAllowsPublication,
@@ -355,6 +356,8 @@ describe("overview TradingView current data", () => {
     expect(isOverviewCurrentRowComplete(row)).toBe(false);
     expect(isOverviewCurrentRowPublishable(row)).toBe(true);
     expect(isOverviewCurrentRowPublishable(row, new Date("2026-07-10T21:21:00.000Z"))).toBe(false);
+    expect(isOverviewCurrentRowPublishableForCycle(row, "2026-07-10T20:00:00.000Z")).toBe(true);
+    expect(isOverviewCurrentRowPublishableForCycle(row, "2026-07-10T21:01:00.000Z")).toBe(false);
     expect(doesOverviewCurrentRowNeedRepair(row)).toBe(true);
   });
 
