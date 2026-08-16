@@ -190,6 +190,8 @@ describe("loadSnapshot read-only mode", () => {
       providerLabel: null,
       generationId: null,
       expectedAsOfDate: expect.any(String),
+      servingState: "unavailable",
+      staleTradingSessions: 0,
       freshnessStatus: "stale",
       freshnessCoveragePct: 0,
       freshnessCurrentCount: 0,
@@ -225,7 +227,7 @@ describe("loadSnapshot read-only mode", () => {
     expect(db.statements.some((sql) => sql.includes("daily_bars"))).toBe(false);
   });
 
-  it("does not expose a prior-session snapshot through the latest-session reader", async () => {
+  it("keeps a prior-session snapshot visible but explicitly stale", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-12T12:00:00.000Z"));
     const db = new MalformedStoredSnapshotDb();
@@ -235,9 +237,14 @@ describe("loadSnapshot read-only mode", () => {
 
       expect(snapshot.expectedAsOfDate).toBe("2026-07-10");
       expect(snapshot.freshnessStatus).toBe("stale");
+      expect(snapshot.servingState).toBe("stale_fallback");
+      expect(snapshot.staleTradingSessions).toBeGreaterThan(1);
       expect(row?.price).toBe(500);
       expect(row?.sparkline).toEqual([]);
-      expect(row?.quoteFreshnessStatus).toBe("unavailable");
+      expect(row?.quoteFreshnessStatus).toBe("stale");
+      expect(row?.currentData?.status).toBe("stale");
+      expect(row?.currentData?.sessionDate).toBe("2026-06-12");
+      expect(row?.quoteFreshnessReason).toContain("expected completed US session 2026-07-10");
       expect(row?.barFreshnessStatus).toBe("stale");
     } finally {
       vi.useRealTimers();

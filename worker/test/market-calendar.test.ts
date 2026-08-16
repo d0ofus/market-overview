@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  countUsMarketTradingSessionsAfter,
   getUsMarketSessionContext,
   isUsMarketTradingDay,
   latestUsMarketSessionAsOfDate,
@@ -42,6 +43,13 @@ describe("US market calendar", () => {
     expect(usMarketHolidayName("2026-07-03")).toBe("Independence Day");
     expect(isUsMarketTradingDay("2026-07-03")).toBe(false);
     expect(latestUsMarketSessionAsOfDate(new Date("2026-07-03T22:00:00Z"))).toBe("2026-07-02");
+  });
+
+  it("counts only completed trading sessions across weekends and holidays", () => {
+    expect(countUsMarketTradingSessionsAfter("2026-07-02", "2026-07-02")).toBe(0);
+    expect(countUsMarketTradingSessionsAfter("2026-07-02", "2026-07-06")).toBe(1);
+    expect(countUsMarketTradingSessionsAfter("2026-06-18", "2026-06-22")).toBe(1);
+    expect(countUsMarketTradingSessionsAfter("2026-06-17", "2026-06-22")).toBe(2);
   });
 
   it("labels intraday and post-close sessions in New York time", () => {

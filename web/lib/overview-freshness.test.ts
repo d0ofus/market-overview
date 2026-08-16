@@ -182,6 +182,83 @@ test("overview freshness does not open an error for usable lagging history", () 
   assert.equal(summary, null);
 });
 
+test("stale fallback is always visible and escalates after one completed trading session", () => {
+  const oneSession = deriveOverviewFreshnessSummary({
+    status: status({
+      asOfDate: "2026-06-11",
+      servingState: "stale_fallback",
+      staleTradingSessions: 1,
+      overviewRecovery: {
+        expectedAsOfDate: "2026-06-12",
+        status: "refreshing_current",
+        sourceCycleId: "cycle-1",
+        processedTickers: 160,
+        requestedTickers: 225,
+        freshTickers: 157,
+        unavailableTickers: 3,
+        historyCoveragePct: null,
+        publicationCoveragePct: null,
+        generationId: null,
+        lastAttemptAt: "2026-06-12T20:30:00.000Z",
+        nextAttemptAt: null,
+        lastErrorCode: null,
+        lastError: null,
+      },
+    }),
+    sections: sections([{ ticker: "SPY", quoteFreshnessStatus: "fresh" }]),
+    dashboardAvailable: true,
+  });
+  const breached = deriveOverviewFreshnessSummary({
+    status: status({
+      asOfDate: "2026-06-10",
+      servingState: "stale_fallback",
+      staleTradingSessions: 2,
+    }),
+    sections: sections([{ ticker: "SPY", quoteFreshnessStatus: "fresh" }]),
+    dashboardAvailable: true,
+  });
+
+  assert.equal(oneSession?.tone, "warning");
+  assert.equal(oneSession?.title, "Refreshing current data (160/225)");
+  assert.equal(breached?.tone, "danger");
+  assert.equal(breached?.title, "Overview more than one trading session old");
+});
+
+test("retrying and blocked recovery states expose actionable copy", () => {
+  const recoveryBase = {
+    expectedAsOfDate: "2026-06-12",
+    sourceCycleId: "cycle-1",
+    processedTickers: 225,
+    requestedTickers: 225,
+    freshTickers: 220,
+    unavailableTickers: 5,
+    historyCoveragePct: 100,
+    publicationCoveragePct: 97.7,
+    generationId: null,
+    lastAttemptAt: "2026-06-12T21:00:00.000Z",
+    nextAttemptAt: "2026-06-12T21:05:00.000Z",
+    lastErrorCode: "publication_error",
+    lastError: "Temporary D1 failure.",
+  };
+  const retrying = deriveOverviewFreshnessSummary({
+    status: status({ overviewRecovery: { ...recoveryBase, status: "retrying" } }),
+    sections: sections([{ ticker: "SPY", quoteFreshnessStatus: "fresh" }]),
+    dashboardAvailable: true,
+  });
+  const blocked = deriveOverviewFreshnessSummary({
+    status: status({ overviewRecovery: { ...recoveryBase, status: "blocked" } }),
+    sections: sections([{ ticker: "SPY", quoteFreshnessStatus: "fresh" }]),
+    dashboardAvailable: true,
+  });
+
+  assert.equal(retrying?.title, "Current data ready — publication recovering");
+  assert.match(retrying?.message ?? "", /Temporary D1 failure/);
+  assert.equal(blocked?.title, "Overview publication blocked");
+  assert.ok(blocked?.details.some((detail) => detail.startsWith("Problem:")));
+  assert.ok(blocked?.details.some((detail) => detail.startsWith("Impact:")));
+  assert.ok(blocked?.details.some((detail) => detail.startsWith("Next step:")));
+});
+
 test("overview freshness reports stale breadth separately from live quotes", () => {
   const summary = deriveOverviewFreshnessSummary({
     status: status({

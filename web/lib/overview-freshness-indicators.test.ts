@@ -68,7 +68,7 @@ test("stale current data renders only the amber clock indicator", () => {
   assert.deepEqual(indicators.map(({ kind, tone }) => ({ kind, tone })), [
     { kind: "quote-stale", tone: "warning" },
   ]);
-  assert.match(indicators[0].detail, /Expected session: 2026-07-20/);
+  assert.match(indicators[0].detail, /Stored session: 2026-07-20/);
   assert.match(indicators[0].detail, /Source: tradingview-scanner/);
 });
 

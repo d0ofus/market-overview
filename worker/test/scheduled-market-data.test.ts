@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, WorkerScheduleSettings } from "../src/types";
+import type { OverviewCurrentRefreshJobState } from "../src/overview-current-data";
 import worker from "../src/index";
 
 const scheduledMocks = vi.hoisted(() => ({
@@ -10,6 +11,10 @@ const scheduledMocks = vi.hoisted(() => ({
   startAudit: vi.fn(async (_env: unknown, input: { jobKey: string }) => `audit-${input.jobKey}`),
   finishAudit: vi.fn(async () => undefined),
   breadthPublication: vi.fn(async () => undefined),
+  loadCurrentJob: vi.fn<() => Promise<OverviewCurrentRefreshJobState | null>>(async () => null),
+  reconcileOverview: vi.fn(),
+  loadRecovery: vi.fn(),
+  auditFreshness: vi.fn(async () => undefined),
 }));
 
 const workerSchedule: WorkerScheduleSettings = {
@@ -34,6 +39,14 @@ const workerSchedule: WorkerScheduleSettings = {
 vi.mock("../src/overview-current-data", async (importOriginal) => ({
   ...await importOriginal<typeof import("../src/overview-current-data")>(),
   maybeRunScheduledOverviewCurrentRefresh: scheduledMocks.overviewCurrent,
+  loadOverviewCurrentRefreshJob: scheduledMocks.loadCurrentJob,
+}));
+
+vi.mock("../src/overview-publication-recovery", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/overview-publication-recovery")>(),
+  reconcileOverviewPublication: scheduledMocks.reconcileOverview,
+  loadOverviewRecovery: scheduledMocks.loadRecovery,
+  auditOverviewFreshnessState: scheduledMocks.auditFreshness,
 }));
 
 vi.mock("../src/eod", async (importOriginal) => ({
@@ -96,6 +109,28 @@ async function runMarketDataLane(env = scheduledEnv()): Promise<void> {
 describe("scheduled market-data lane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    scheduledMocks.loadCurrentJob.mockResolvedValue(null);
+    const recovery = {
+      expectedAsOfDate: "2026-07-16",
+      status: "published",
+      sourceCycleId: "cycle-1",
+      processedTickers: 225,
+      requestedTickers: 225,
+      freshTickers: 220,
+      unavailableTickers: 5,
+      historyCoveragePct: 100,
+      publicationCoveragePct: 97.8,
+      generationId: "generation-1",
+      lastAttemptAt: "2026-07-16T21:00:00.000Z",
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastError: null,
+      publishedAt: "2026-07-16T21:00:00.000Z",
+      servingState: "ready",
+      staleTradingSessions: 0,
+    } as const;
+    scheduledMocks.reconcileOverview.mockResolvedValue(recovery);
+    scheduledMocks.loadRecovery.mockResolvedValue(recovery);
   });
 
   it("reserves a constrained lane budget for actionable post-close bars", async () => {
@@ -202,5 +237,48 @@ describe("scheduled market-data lane", () => {
       "No refresh job is due.",
       expect.anything(),
     );
+  });
+
+  it("finishes an actionable Overview cycle and reconciles publication before post-close work when recovery is enabled", async () => {
+    scheduledMocks.planPostClose.mockResolvedValue({
+      protect: true,
+      expectedTradingDate: "2026-07-16",
+      reason: "actionable-job",
+    });
+    scheduledMocks.loadCurrentJob.mockResolvedValue({
+      configId: "default",
+      sessionDate: "2026-07-16",
+      status: "running",
+      attemptCount: 2,
+      nextAttemptAt: null,
+      updatedAt: "2026-07-16T20:45:00.000Z",
+      cycleId: "cycle-1",
+      cycleStartedAt: "2026-07-16T20:30:00.000Z",
+      cursorOffset: 160,
+      processedTickers: 160,
+      requestedTickers: 225,
+      freshTickers: 157,
+      unavailableTickers: 3,
+      leaseExpiresAt: null,
+      lastError: null,
+      lastErrorCode: null,
+    });
+
+    await runMarketDataLane(scheduledEnv({
+      OVERVIEW_PUBLICATION_RECOVERY_ENABLED: "true",
+      SCHEDULED_MARKET_DATA_BUDGET: "90",
+      SCHEDULED_SUBREQUEST_RESERVE: "10",
+    }));
+
+    expect(scheduledMocks.overviewCurrent).toHaveBeenCalledOnce();
+    expect(scheduledMocks.reconcileOverview).toHaveBeenCalledOnce();
+    expect(scheduledMocks.postClose).toHaveBeenCalledOnce();
+    expect(scheduledMocks.overviewCurrent.mock.invocationCallOrder[0]).toBeLessThan(
+      scheduledMocks.reconcileOverview.mock.invocationCallOrder[0]!,
+    );
+    expect(scheduledMocks.reconcileOverview.mock.invocationCallOrder[0]).toBeLessThan(
+      scheduledMocks.postClose.mock.invocationCallOrder[0]!,
+    );
+    expect(scheduledMocks.auditFreshness).toHaveBeenCalledOnce();
   });
 });

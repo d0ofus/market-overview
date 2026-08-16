@@ -58,6 +58,7 @@ function formatDateTime(value: string | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
     timeZoneName: "short",
+    timeZone: "UTC",
   }).format(date);
 }
 
@@ -400,6 +401,13 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
               <p className="mt-1 truncate text-xs text-text/60">
                 {summaryText}
               </p>
+              {mode === "daily" && commentaryFreshness.label === "Old report" && latestAttempt ? (
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-warning">
+                  <span>Latest attempt {formatDateTime(latestAttempt.attemptedAt)}</span>
+                  <span className="rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5">{latestAttempt.status}</span>
+                  <span>{latestAttempt.reasonCode === "overview_not_ready" ? "Waiting for Overview publication" : latestAttempt.message ?? "No additional detail recorded."}</span>
+                </div>
+              ) : null}
             </div>
           </Collapsible.Trigger>
           <div className="flex flex-wrap items-center gap-2">
@@ -582,7 +590,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
                               <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">{latestAttempt.status}</span>
                             </div>
                             <div className="mt-1 text-text/65">
-                              {latestAttempt.message ?? "Commentary was published successfully."} Model: {latestAttempt.model}. Attempted {formatDateTime(latestAttempt.attemptedAt)}.
+                              {latestAttempt.message ?? "Commentary was published successfully."} Model: {latestAttempt.model ?? "N/A"}. Attempted {formatDateTime(latestAttempt.attemptedAt)}.
                             </div>
                           </div>
                         </div>

@@ -116,6 +116,75 @@ describe("dashboard API", () => {
     expect(env.DB.prepare).not.toHaveBeenCalled();
   });
 
+  it("exposes recovery diagnostics separately from the pointed dashboard generation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T22:00:00.000Z"));
+    eodMocks.loadSnapshot.mockResolvedValueOnce(readySnapshot);
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => {
+            if (sql.includes("JOIN overview_snapshot_pointer")) {
+              return {
+                generationId: "generation-2026-05-26",
+                asOfDate: "2026-05-26",
+                generatedAt: "2026-05-27T01:08:37.085Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: "2026-05-26",
+                status: "ready",
+                publicationQuality: "ready",
+                freshnessStatus: "fresh",
+                freshnessCoveragePct: 100,
+                freshnessCurrentCount: 225,
+                freshnessEligibleCount: 225,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: "2026-05-26",
+                freshnessMaxBarDate: "2026-05-26",
+                freshnessWarning: null,
+                quoteOverlayRequestedCount: 225,
+                quoteOverlayReturnedCount: 225,
+                quoteOverlayError: null,
+                quoteOverlayMissingSampleJson: "[]",
+                sourceCycleId: "cycle-2026-05-26",
+                publicationCoveragePct: 100,
+                publicationCriticalMissingJson: "[]",
+              } as T;
+            }
+            return null as T;
+          },
+        };
+        return statement;
+      }),
+    };
+    const marketDb = {
+      prepare: vi.fn(() => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => null as T,
+        };
+        return statement;
+      }),
+    };
+    const env = {
+      ...createEnv(),
+      DB: db,
+      MARKET_DATA_DB: marketDb,
+      OVERVIEW_PUBLICATION_RECOVERY_ENABLED: "true",
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request("https://example.com/api/dashboard"), env, createContext());
+    const body = await response.json() as SnapshotReadyResponse;
+
+    expect(body.asOfDate).toBe("2026-05-26");
+    expect(body.overviewRecovery).toMatchObject({
+      expectedAsOfDate: "2026-05-27",
+      status: "idle",
+      servingState: "stale_fallback",
+      staleTradingSessions: 1,
+    });
+  });
+
   it("passes explicit config and date through the read-only loader", async () => {
     eodMocks.loadSnapshot.mockResolvedValueOnce(readySnapshot);
 
@@ -259,6 +328,121 @@ describe("dashboard API", () => {
     expect(body.freshnessStatus).toBe("stale");
     expect(body.freshnessMaxBarDate).toBe("2026-06-05");
     expect(eodMocks.computeOverviewFreshnessDiagnostics).toHaveBeenCalledWith(env, "2026-06-12", "default");
+  });
+
+  it("keeps status pointed at the published generation while exposing a newer recovery candidate", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T12:00:00.000Z"));
+    let snapshotsMetaQueried = false;
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => {
+            if (sql.includes("FROM dashboard_configs")) {
+              return {
+                id: "default",
+                name: "Default Swing Dashboard",
+                timezone: "Australia/Melbourne",
+                eodRunLocalTime: "08:15",
+                eodRunTimeLabel: "08:15 Australia/Melbourne (prev US close)",
+              } as T;
+            }
+            if (sql.includes("JOIN overview_snapshot_pointer")) {
+              return {
+                generationId: "published-2026-08-13",
+                asOfDate: "2026-08-13",
+                generatedAt: "2026-08-13T22:00:00.000Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: "2026-08-13",
+                status: "ready",
+                publicationQuality: "ready",
+                freshnessStatus: "fresh",
+                freshnessCoveragePct: 88.9,
+                freshnessCurrentCount: 200,
+                freshnessEligibleCount: 225,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: "2026-08-13",
+                freshnessMaxBarDate: "2026-08-13",
+                freshnessWarning: null,
+                quoteOverlayRequestedCount: 225,
+                quoteOverlayReturnedCount: 200,
+                quoteOverlayError: null,
+                quoteOverlayMissingSampleJson: "[]",
+                sourceCycleId: "cycle-2026-08-13",
+                publicationCoveragePct: 88.9,
+                publicationCriticalMissingJson: "[]",
+              } as T;
+            }
+            if (sql.includes("FROM snapshots_meta")) {
+              snapshotsMetaQueried = true;
+              return { asOfDate: "2026-08-14", generatedAt: "2026-08-14T22:00:00.000Z" } as T;
+            }
+            return null as T;
+          },
+          all: async <T>() => ({ results: [] as T[] }),
+        };
+        return statement;
+      }),
+    };
+    const marketDb = {
+      prepare: vi.fn((sql: string) => {
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          first: async <T>() => sql.includes("FROM overview_current_refresh_jobs") ? {
+            configId: "default",
+            sessionDate: "2026-08-14",
+            status: "completed",
+            attemptCount: 3,
+            nextAttemptAt: null,
+            updatedAt: "2026-08-14T22:05:00.000Z",
+            cycleId: "cycle-2026-08-14",
+            cycleStartedAt: "2026-08-14T21:30:00.000Z",
+            cursorOffset: 0,
+            processedTickers: 225,
+            requestedTickers: 225,
+            freshTickers: 220,
+            unavailableTickers: 5,
+            leaseExpiresAt: null,
+            lastError: null,
+            lastErrorCode: null,
+          } as T : null as T,
+          all: async <T>() => ({ results: [] as T[] }),
+        };
+        return statement;
+      }),
+    };
+    const env = {
+      ...createEnv(),
+      DB: db,
+      MARKET_DATA_DB: marketDb,
+      OVERVIEW_PUBLICATION_RECOVERY_ENABLED: "true",
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request("https://example.com/api/status?page=overview"), env, createContext());
+    const body = await response.json() as {
+      asOfDate: string;
+      freshnessStatus: string;
+      freshnessCurrentCount: number;
+      freshnessEligibleCount: number;
+      servingState: string;
+      overviewRecovery: { expectedAsOfDate: string; status: string; sourceCycleId: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      asOfDate: "2026-08-13",
+      freshnessStatus: "stale",
+      freshnessCurrentCount: 200,
+      freshnessEligibleCount: 225,
+      servingState: "stale_fallback",
+      overviewRecovery: {
+        expectedAsOfDate: "2026-08-14",
+        status: "ready_to_publish",
+        sourceCycleId: "cycle-2026-08-14",
+      },
+    });
+    expect(snapshotsMetaQueried).toBe(false);
   });
 
   it("reports matching legacy overview snapshots with 0/0 diagnostics as stale unknown displayed data", async () => {

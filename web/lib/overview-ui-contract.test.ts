@@ -50,6 +50,16 @@ test("commentary keeps provider failures out of the default report panel", () =>
   assert.doesNotMatch(commentary, /activeWarning && activeStatus !== "failed"/);
   assert.match(commentary, /Latest refresh attempt/);
   assert.match(commentary, /queueRefreshPageData\("market-commentary"\)/);
+  assert.match(commentary, /Waiting for Overview publication/);
+});
+
+test("Fed countdown has a hydration-stable placeholder and explicit timestamp timezone", () => {
+  const fedFunds = source("../components/fed-funds-rate-panel.tsx");
+  assert.match(fedFunds, /useState<number \| null>\(null\)/);
+  assert.match(fedFunds, /if \(!nextMeeting\?\.meetingIso \|\| now == null\) return "--"/);
+  assert.match(fedFunds, /setNow\(Date\.now\(\)\)/);
+  assert.match(fedFunds, /timeZone: "UTC"/);
+  assert.doesNotMatch(fedFunds, /suppressHydrationWarning/);
 });
 
 test("FOMC commentary shows the official rate decision and only claims cited Brave context", () => {

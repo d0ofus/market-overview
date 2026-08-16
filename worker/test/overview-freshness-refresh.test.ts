@@ -389,7 +389,7 @@ describe("overview freshness refresh", () => {
       ARKK: ["2026-06-05"],
     });
 
-    await expect(refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12", "default", { requireFreshness: false }))
+    await expect(refreshAndStoreOverviewSnapshot(createEnv(db), "2026-06-12", "default"))
       .rejects.toThrow("last-ready generation retained");
 
     expect(db.snapshotWrites).toBe(0);

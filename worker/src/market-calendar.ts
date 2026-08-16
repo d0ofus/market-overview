@@ -123,6 +123,17 @@ export function nextUsMarketTradingDay(isoDate: string): string {
   return cursor;
 }
 
+export function countUsMarketTradingSessionsAfter(fromIsoDate: string | null, throughIsoDate: string): number {
+  if (!fromIsoDate || fromIsoDate >= throughIsoDate) return 0;
+  let count = 0;
+  let cursor = addDaysIso(fromIsoDate, 1);
+  while (cursor <= throughIsoDate) {
+    if (isUsMarketTradingDay(cursor)) count += 1;
+    cursor = addDaysIso(cursor, 1);
+  }
+  return count;
+}
+
 export function onOrAfterUsMarketTradingDay(isoDate: string): string {
   return isUsMarketTradingDay(isoDate) ? isoDate : nextUsMarketTradingDay(isoDate);
 }

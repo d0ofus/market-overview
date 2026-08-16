@@ -23,6 +23,7 @@ export type Env = {
   TRADINGVIEW_WIDGET_ENABLED?: string;
   OVERVIEW_CURRENT_V2_ENABLED?: string;
   OVERVIEW_TRADINGVIEW_SCANNER_ENABLED?: string;
+  OVERVIEW_PUBLICATION_RECOVERY_ENABLED?: string;
   MARKET_DATA_DB_REQUIRED?: string;
   MARKET_DATA_RETENTION_DAYS?: string;
   MARKET_DATA_DAILY_WRITE_BUDGET?: string;
@@ -115,9 +116,28 @@ export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupporte
 export type OverviewSeriesStatus = "fresh" | "fallback" | "stale" | "unavailable" | "unsupported";
 export type OverviewCurrentProviderStatus = "supported" | "unsupported" | "stale" | "missing" | "rate-limited" | "auth-blocked" | "provider-error";
 
+export type OverviewServingState = "ready" | "degraded" | "stale_fallback" | "unavailable";
+export type OverviewRecoveryStatus = "idle" | "refreshing_current" | "ready_to_publish" | "retrying" | "blocked" | "published";
+export type OverviewRecovery = {
+  expectedAsOfDate: string;
+  status: OverviewRecoveryStatus;
+  sourceCycleId: string | null;
+  processedTickers: number | null;
+  requestedTickers: number | null;
+  freshTickers: number | null;
+  unavailableTickers: number | null;
+  historyCoveragePct: number | null;
+  publicationCoveragePct: number | null;
+  generationId: string | null;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  lastErrorCode: string | null;
+  lastError: string | null;
+};
+
 export type OverviewCurrentDataResponse = {
   sessionDate: string;
-  status: "fresh" | "unavailable" | "retrying";
+  status: "fresh" | "stale" | "unavailable" | "retrying";
   reason: string;
   quoteSource: string | null;
   performanceSource: string | null;
@@ -255,6 +275,9 @@ export type SnapshotReadyResponse = {
   generatedAt: string;
   providerLabel: string;
   expectedAsOfDate?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;
   freshnessCurrentCount?: number | null;
@@ -324,6 +347,9 @@ export type SnapshotEmptyResponse = {
   providerLabel: null;
   generationId?: null;
   expectedAsOfDate?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;
   freshnessCurrentCount?: number | null;

@@ -31,6 +31,10 @@ export type RefreshJob = {
     historyRefreshStatus?: string;
     historyErrorCode?: string | null;
     historyNextAttemptAt?: string | null;
+    publicationStatus?: "published" | "recovering" | "blocked";
+    publicationNextAttemptAt?: string | null;
+    publicationErrorCode?: string | null;
+    publicationError?: string | null;
   } | null;
   error: string | null;
   createdAt: string;

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ChevronDown, Clock3, Database } from "lucide-react";
 import { ManualRefreshButton, type ManualRefreshPage } from "./manual-refresh-button";
+import type { OverviewRecovery, OverviewServingState } from "@/types/dashboard";
 
 export type OverviewRefreshStatus = {
   asOfDate: string | null;
@@ -20,6 +21,9 @@ export type OverviewRefreshStatus = {
   freshnessMinBarDate?: string | null;
   freshnessMaxBarDate?: string | null;
   freshnessWarning?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery | null;
   quoteOverlayRequestedCount?: number | null;
   quoteOverlayReturnedCount?: number | null;
   quoteOverlayError?: string | null;
@@ -133,7 +137,9 @@ export function OverviewRefreshMenu({ status, refreshPage = "overview", refreshI
 
   const lastUpdatedLabel = useMemo(() => formatInZone(status.lastUpdated, selectedTz), [status.lastUpdated, selectedTz]);
   const asOfLabel = useMemo(() => formatInZone(asOfToIso(status.asOfDate), selectedTz), [status.asOfDate, selectedTz]);
-  const freshnessStatus = status.freshnessStatus ?? "stale";
+  const freshnessStatus = status.servingState === "stale_fallback"
+    ? "stale"
+    : status.freshnessStatus ?? "stale";
   const marketDataAsOf =
     status.freshnessMinBarDate && status.freshnessMaxBarDate
       ? status.freshnessMinBarDate === status.freshnessMaxBarDate

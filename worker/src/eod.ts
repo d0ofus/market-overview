@@ -3,7 +3,8 @@ import { loadConfig } from "./db";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
-import { isUsMarketTradingDay, latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
+import { countUsMarketTradingSessionsAfter, isUsMarketTradingDay, latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
+import { envFlagEnabled } from "./auth";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import {
@@ -24,6 +25,8 @@ import {
   isOverviewCurrentRowPublishable,
   isOverviewCurrentRowStructurallyUnsupported,
   loadOverviewCurrentData,
+  loadOverviewCurrentRefreshJob,
+  overviewCurrentRefreshStateAllowsPublication,
   isOverviewCurrentV2Enabled,
   refreshOverviewCurrentDataIfDue,
   type OverviewCurrentData,
@@ -163,6 +166,10 @@ type SnapshotMetaRow = {
   quoteOverlayReturnedCount?: number | null;
   quoteOverlayError?: string | null;
   quoteOverlayMissingSampleJson?: string | null;
+  publicationQuality?: "ready" | "degraded" | "bootstrap" | "rejected" | null;
+  sourceCycleId?: string | null;
+  publicationCoveragePct?: number | null;
+  publicationCriticalMissingJson?: string | null;
 };
 
 export class OverviewFreshnessError extends Error {
@@ -538,17 +545,16 @@ export async function refreshAndStoreOverviewSnapshot(
   asOfDateInput?: string,
   configId = DEFAULT_CONFIG_ID,
   options: {
-    requireFreshness?: boolean;
     forceCurrentData?: boolean;
     refreshAllOverviewExactBars?: boolean;
   } = {},
 ): Promise<{
-  snapshotId: string;
+  snapshotId: string | null;
   asOfDate: string;
   freshness: OverviewFreshnessDiagnostics;
   fetchedRows: number;
   writtenRows: number;
-  generatedAt: string;
+  generatedAt: string | null;
   currentCoveragePct: number;
   historyExactCoveragePct: number;
   historyUsableCoveragePct: number;
@@ -556,6 +562,10 @@ export async function refreshAndStoreOverviewSnapshot(
   historyRefreshStatus: "not-needed" | "not-yet-eligible" | "completed" | "retrying" | "failed";
   historyErrorCode: string | null;
   historyNextAttemptAt: string | null;
+  publicationStatus: "published" | "recovering" | "blocked";
+  publicationNextAttemptAt?: string | null;
+  publicationErrorCode?: string | null;
+  publicationError?: string | null;
 }> {
   const asOfDate = resolveAsOfDate(asOfDateInput);
   const config = await loadConfig(env, configId);
@@ -632,12 +642,55 @@ export async function refreshAndStoreOverviewSnapshot(
         throw new OverviewCurrentRefreshPendingError();
       }
       if (options.forceCurrentData && !currentRefresh) {
-        throw new Error("A forced overview current-data refresh could not be claimed.");
+        throw new OverviewCurrentRefreshPendingError();
       }
     } catch (error) {
-      if (options.forceCurrentData) throw error;
+      if (options.forceCurrentData) {
+        const job = await loadOverviewCurrentRefreshJob(env, configId, asOfDate).catch(() => null);
+        if (job?.cycleId && !overviewCurrentRefreshStateAllowsPublication(job)) {
+          const dueAt = job.nextAttemptAt ?? job.leaseExpiresAt;
+          const dueAtMs = dueAt ? Date.parse(dueAt) : Number.NaN;
+          const retryAfterMs = Number.isFinite(dueAtMs)
+            ? Math.max(5_000, dueAtMs - Date.now())
+            : 5_000;
+          throw new OverviewCurrentRefreshPendingError(retryAfterMs);
+        }
+        throw error;
+      }
       console.error("overview current-data refresh failed; snapshot will fail closed", error);
     }
+  }
+
+  if (options.forceCurrentData && envFlagEnabled(env.OVERVIEW_PUBLICATION_RECOVERY_ENABLED)) {
+    const { reconcileOverviewPublication } = await import("./overview-publication-recovery");
+    const recovery = await reconcileOverviewPublication(env, new Date(), configId);
+    if (recovery.status === "refreshing_current" || recovery.status === "ready_to_publish") {
+      throw new OverviewCurrentRefreshPendingError();
+    }
+    const publicationStatus = recovery.status === "published"
+      ? "published" as const
+      : recovery.status === "blocked"
+        ? "blocked" as const
+        : "recovering" as const;
+    return {
+      snapshotId: publicationStatus === "published" ? recovery.generationId : null,
+      asOfDate,
+      freshness,
+      fetchedRows,
+      writtenRows,
+      generatedAt: publicationStatus === "published" ? recovery.publishedAt : null,
+      currentCoveragePct: recovery.publicationCoveragePct ?? 0,
+      historyExactCoveragePct: recovery.historyCoveragePct ?? freshness.coveragePct,
+      historyUsableCoveragePct: recovery.historyCoveragePct ?? freshness.coveragePct,
+      canonicalSession: asOfDate,
+      historyRefreshStatus,
+      historyErrorCode,
+      historyNextAttemptAt,
+      publicationStatus,
+      publicationNextAttemptAt: recovery.nextAttemptAt,
+      publicationErrorCode: recovery.lastErrorCode,
+      publicationError: recovery.lastError,
+    };
   }
 
   const result = await computeAndStoreSnapshot(env, asOfDate, configId, {
@@ -652,6 +705,7 @@ export async function refreshAndStoreOverviewSnapshot(
     historyRefreshStatus,
     historyErrorCode,
     historyNextAttemptAt,
+    publicationStatus: "published",
   };
 }
 
@@ -1236,6 +1290,8 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
 type SnapshotComputeOptions = {
   includeBreadth?: boolean;
   freshnessDiagnostics?: OverviewFreshnessDiagnostics | null;
+  sourceCycleId?: string | null;
+  snapshotId?: string;
 };
 
 type OverviewStoredSeries = {
@@ -1275,11 +1331,12 @@ export function resolveOverviewSeriesFallback(
 }
 
 export class OverviewCurrentRefreshPendingError extends Error {
-  readonly retryAfterMs = 5_000;
+  readonly retryAfterMs: number;
 
-  constructor() {
+  constructor(retryAfterMs = 5_000) {
     super("Overview current-data refresh is continuing in bounded background slices.");
     this.name = "OverviewCurrentRefreshPendingError";
+    this.retryAfterMs = Math.max(5_000, retryAfterMs);
   }
 }
 
@@ -1365,14 +1422,20 @@ function overviewGenerationStatement(env: Env, input: {
   quoteReturnedCount: number;
   quoteError: string | null;
   quoteMissingSample: string[];
+  sourceCycleId: string | null;
+  publicationQuality: "ready" | "degraded" | "bootstrap" | "rejected";
+  publicationCoveragePct: number;
+  publicationCriticalMissing: string[];
 }): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO overview_generations
        (id, config_id, as_of_date, generated_at, provider_label, expected_as_of_date,
         status, freshness_status, current_count, eligible_count, coverage_pct,
         critical_missing_json, min_bar_date, max_bar_date, warning,
-        quote_requested_count, quote_returned_count, quote_error, quote_missing_sample_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        quote_requested_count, quote_returned_count, quote_error, quote_missing_sample_json,
+        source_cycle_id, publication_quality, essential_current_coverage_pct,
+        publication_critical_missing_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     input.id,
     input.configId,
@@ -1393,6 +1456,10 @@ function overviewGenerationStatement(env: Env, input: {
     input.quoteReturnedCount,
     input.quoteError,
     JSON.stringify(input.quoteMissingSample),
+    input.sourceCycleId,
+    input.publicationQuality,
+    input.publicationCoveragePct,
+    JSON.stringify(input.publicationCriticalMissing),
   );
 }
 
@@ -1473,7 +1540,7 @@ export async function computeAndStoreSnapshot(
   if (preCleanup.deletedSnapshots > 0 || preCleanup.deletedRows > 0) {
     console.log("overview snapshot cleanup removed old rows before refresh", preCleanup);
   }
-  const snapshotId = uid();
+  const snapshotId = options.snapshotId ?? uid();
 
   const snapshotRows: Array<{
     sectionId: string;
@@ -1696,6 +1763,16 @@ export async function computeAndStoreSnapshot(
     quoteReturnedCount: quoteOverlayDiagnostics.returnedSnapshots,
     quoteError: quoteOverlayDiagnostics.providerError,
     quoteMissingSample: quoteOverlayDiagnostics.sampleMissingTickers,
+    sourceCycleId: options.sourceCycleId ?? null,
+    publicationQuality: !generationDecision.publish
+      ? "rejected"
+      : generationDecision.degraded
+        ? "degraded"
+        : generationDecision.bootstrap
+          ? "bootstrap"
+          : "ready",
+    publicationCoveragePct: currentCoveragePct,
+    publicationCriticalMissing: missingLiveCriticalQuotes,
   });
   if (!generationDecision.publish) {
     await generationStatement.run();
@@ -1707,6 +1784,7 @@ export async function computeAndStoreSnapshot(
       status: "blocked",
       coveragePct: currentCoveragePct,
       warning: generationWarning,
+      generationId: snapshotId,
     });
     throw new OverviewFreshnessError(publishedFreshness);
   }
@@ -1843,7 +1921,13 @@ export async function computeAndStoreSnapshot(
        VALUES (?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(config_id) DO UPDATE SET
          generation_id = excluded.generation_id,
-         updated_at = CURRENT_TIMESTAMP`,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE (SELECT as_of_date FROM overview_generations WHERE id = excluded.generation_id) >
+             COALESCE((SELECT as_of_date FROM overview_generations WHERE id = overview_snapshot_pointer.generation_id), '')
+          OR ((SELECT as_of_date FROM overview_generations WHERE id = excluded.generation_id) =
+              (SELECT as_of_date FROM overview_generations WHERE id = overview_snapshot_pointer.generation_id)
+              AND datetime((SELECT generated_at FROM overview_generations WHERE id = excluded.generation_id)) >
+                  datetime((SELECT generated_at FROM overview_generations WHERE id = overview_snapshot_pointer.generation_id)))`,
     ).bind(configId, snapshotId),
   ]);
   await recordDataReadiness(env, {
@@ -1854,6 +1938,7 @@ export async function computeAndStoreSnapshot(
     status: generationDecision.degraded ? "degraded" : generationDecision.bootstrap ? "bootstrap" : "ready",
     coveragePct: currentCoveragePct,
     warning: generationWarning,
+    generationId: snapshotId,
   });
   if (includeBreadth) {
     const breadthUniverseIds = Array.from(new Set<string>(breadthState.universeTickers.keys()));
@@ -2396,21 +2481,24 @@ async function recordDataReadiness(env: Env, input: {
   status: string;
   coveragePct: number | null;
   warning: string | null;
+  generationId?: string | null;
 }): Promise<void> {
   try {
     await env.DB.prepare(
       `INSERT INTO data_readiness
-         (domain, scope, expected_as_of_date, source_as_of_date, status, coverage_pct, warning, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         (domain, scope, expected_as_of_date, source_as_of_date, generation_id, status, coverage_pct, warning, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(domain, scope) DO UPDATE SET
          expected_as_of_date = excluded.expected_as_of_date,
          source_as_of_date = excluded.source_as_of_date,
+         generation_id = COALESCE(excluded.generation_id, data_readiness.generation_id),
          status = excluded.status,
          coverage_pct = excluded.coverage_pct,
          warning = excluded.warning,
          updated_at = CURRENT_TIMESTAMP
        WHERE data_readiness.expected_as_of_date IS NOT excluded.expected_as_of_date
           OR data_readiness.source_as_of_date IS NOT excluded.source_as_of_date
+          OR (excluded.generation_id IS NOT NULL AND data_readiness.generation_id IS NOT excluded.generation_id)
           OR data_readiness.status IS NOT excluded.status
           OR data_readiness.coverage_pct IS NOT excluded.coverage_pct
           OR data_readiness.warning IS NOT excluded.warning`,
@@ -2419,6 +2507,7 @@ async function recordDataReadiness(env: Env, input: {
       input.scope,
       input.expectedAsOfDate,
       input.sourceAsOfDate,
+      input.generationId ?? null,
       input.status,
       input.coveragePct,
       input.warning,
@@ -2442,6 +2531,8 @@ export function emptySnapshotResponse(warning = "No stored overview snapshot is 
     providerLabel: null,
     generationId: null,
     expectedAsOfDate: latestUsMarketSessionAsOfDate(new Date()),
+    servingState: "unavailable",
+    staleTradingSessions: 0,
     freshnessStatus: "stale",
     freshnessCoveragePct: 0,
     freshnessCurrentCount: 0,
@@ -2475,8 +2566,13 @@ async function loadSnapshotMeta(
             g.warning as freshnessWarning, g.quote_requested_count as quoteOverlayRequestedCount,
             g.quote_returned_count as quoteOverlayReturnedCount,
             g.quote_error as quoteOverlayError,
-            g.quote_missing_sample_json as quoteOverlayMissingSampleJson
+            g.quote_missing_sample_json as quoteOverlayMissingSampleJson,
+            g.publication_quality as publicationQuality,
+            g.source_cycle_id as sourceCycleId,
+            g.essential_current_coverage_pct as publicationCoveragePct,
+            g.publication_critical_missing_json as publicationCriticalMissingJson
        FROM overview_generations g`;
+  let pointerSchemaAvailable = true;
   try {
     const generation = requestedDate
       ? await env.DB.prepare(
@@ -2493,8 +2589,39 @@ async function loadSnapshotMeta(
     if (generation) return generation;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "");
-    if (!/no such table/i.test(message)) throw error;
+    if (!/no such (?:table|column)/i.test(message)) throw error;
+    try {
+      const legacyGenerationSelect =
+        `SELECT g.id, g.as_of_date as asOfDate, g.generated_at as generatedAt,
+                g.provider_label as providerLabel, g.expected_as_of_date as expectedAsOfDate,
+                g.freshness_status as freshnessStatus, g.current_count as freshnessCurrentCount,
+                g.eligible_count as freshnessEligibleCount, g.coverage_pct as freshnessCoveragePct,
+                g.critical_missing_json as freshnessCriticalMissingJson,
+                g.min_bar_date as freshnessMinBarDate, g.max_bar_date as freshnessMaxBarDate,
+                g.warning as freshnessWarning, g.quote_requested_count as quoteOverlayRequestedCount,
+                g.quote_returned_count as quoteOverlayReturnedCount, g.quote_error as quoteOverlayError,
+                g.quote_missing_sample_json as quoteOverlayMissingSampleJson
+           FROM overview_generations g`;
+      const generation = requestedDate
+        ? await env.DB.prepare(
+          `${legacyGenerationSelect}
+           WHERE g.config_id = ? AND g.as_of_date = ? AND g.status = 'ready'
+           ORDER BY g.generated_at DESC LIMIT 1`,
+        ).bind(configId, requestedDate).first<SnapshotMetaRow>()
+        : await env.DB.prepare(
+          `${legacyGenerationSelect}
+           JOIN overview_snapshot_pointer p ON p.generation_id = g.id
+           WHERE p.config_id = ? AND g.as_of_date <= ? AND g.status = 'ready'
+           LIMIT 1`,
+        ).bind(configId, latestAllowedAsOfDate).first<SnapshotMetaRow>();
+      if (generation) return generation;
+    } catch (fallbackError) {
+      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError ?? "");
+      if (!/no such table/i.test(fallbackMessage)) throw fallbackError;
+      pointerSchemaAvailable = false;
+    }
   }
+  if (envFlagEnabled(env.OVERVIEW_PUBLICATION_RECOVERY_ENABLED) && pointerSchemaAvailable) return null;
   const selectWithFreshness =
     "SELECT id, as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_coverage_pct as freshnessCoveragePct, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning, quote_overlay_requested_count as quoteOverlayRequestedCount, quote_overlay_returned_count as quoteOverlayReturnedCount, quote_overlay_error as quoteOverlayError, quote_overlay_missing_sample_json as quoteOverlayMissingSampleJson FROM snapshots_meta";
   const selectLegacy =
@@ -2745,6 +2872,12 @@ export async function loadSnapshot(
     ? appendFreshnessWarning(freshness?.warning ?? null, MISSING_OVERVIEW_DERIVED_METRICS_WARNING)
     : freshness?.warning ?? null;
   const snapshotMatchesExpectedSession = meta.asOfDate === expectedAsOfDate;
+  const servingState = !snapshotMatchesExpectedSession
+    ? "stale_fallback" as const
+    : meta.publicationQuality === "degraded"
+      ? "degraded" as const
+      : "ready" as const;
+  const staleTradingSessions = countUsMarketTradingSessionsAfter(meta.asOfDate, expectedAsOfDate);
   if (!snapshotMatchesExpectedSession) {
     freshnessWarning = appendFreshnessWarning(
       freshnessWarning,
@@ -2757,9 +2890,11 @@ export async function loadSnapshot(
     generatedAt: meta.generatedAt,
     providerLabel: meta.providerLabel,
     expectedAsOfDate,
+    servingState,
+    staleTradingSessions,
     freshnessStatus: snapshotMatchesExpectedSession ? freshness?.status ?? "stale" : "stale",
-    freshnessCoveragePct: snapshotMatchesExpectedSession ? freshness?.coveragePct ?? 0 : 0,
-    freshnessCurrentCount: snapshotMatchesExpectedSession ? freshness?.currentCount ?? 0 : 0,
+    freshnessCoveragePct: freshness?.coveragePct ?? 0,
+    freshnessCurrentCount: freshness?.currentCount ?? 0,
     freshnessEligibleCount: freshness?.eligibleCount ?? 0,
     freshnessCriticalMissingTickers: freshness?.criticalMissingTickers ?? [],
     freshnessMinBarDate: freshness?.minBarDate ?? null,
@@ -2789,7 +2924,7 @@ export async function loadSnapshot(
             const storedBarFreshnessStatus = isBarFreshnessStatus(r.barFreshnessStatus)
               ? r.barFreshnessStatus
               : null;
-            const exactSessionHistory = barDate === expectedAsOfDate
+            const exactSessionHistory = snapshotMatchesExpectedSession && barDate === expectedAsOfDate
               && storedBarFreshnessStatus !== "stale";
             const barFreshnessStatus: BarFreshnessStatus = exactSessionHistory
               ? "fresh"
@@ -2801,13 +2936,23 @@ export async function loadSnapshot(
               : barDate
                 ? `Last stored daily bar is ${barDate}; expected ${expectedAsOfDate}.`
                 : `No stored daily bar is available for ${r.ticker}.`;
-            const quoteFreshnessStatus: QuoteFreshnessStatus = isQuoteFreshnessStatus(r.quoteFreshnessStatus)
-              ? r.quoteFreshnessStatus
-              : "unavailable";
             const quotePrice = numberOrNull(r.quotePrice ?? r.price);
             const quoteChange1d = numberOrNull(r.quoteChange1d ?? r.change1d);
             const quotePrevClose = numberOrNull(r.quotePrevClose);
-            const quoteReason = r.quoteFreshnessReason ?? `No current data was stored in generation ${meta.id}.`;
+            const storedQuoteFreshnessStatus: QuoteFreshnessStatus = isQuoteFreshnessStatus(r.quoteFreshnessStatus)
+              ? r.quoteFreshnessStatus
+              : "unavailable";
+            const quoteFreshnessStatus: QuoteFreshnessStatus = snapshotMatchesExpectedSession
+              ? storedQuoteFreshnessStatus
+              : storedQuoteFreshnessStatus === "unsupported"
+                ? "unsupported"
+                : quotePrice != null || numberOrNull(r.price) != null
+                  ? "stale"
+                  : "unavailable";
+            const staleGenerationReason = `Stored value is from Overview generation ${meta.asOfDate}; expected completed US session ${expectedAsOfDate}.`;
+            const quoteReason = snapshotMatchesExpectedSession
+              ? r.quoteFreshnessReason ?? `No current data was stored in generation ${meta.id}.`
+              : staleGenerationReason;
             const quoteSource = r.quoteSource ?? null;
             const fieldSources = Object.fromEntries([
               ["price", r.price], ["change1d", r.change1d], ["change1w", r.change1w],
@@ -2821,13 +2966,16 @@ export async function loadSnapshot(
             const hasUsableSeries = sparkline.length > 1 || (relativeStrength30dVsSpy?.length ?? 0) > 1;
             const seriesThroughDate = r.historySeriesThroughDate
               ?? (hasUsableSeries ? barDate : null);
-            const seriesStatus: OverviewSeriesStatus = isOverviewSeriesStatus(r.historySeriesStatus)
+            const storedSeriesStatus: OverviewSeriesStatus = isOverviewSeriesStatus(r.historySeriesStatus)
               ? r.historySeriesStatus
               : !hasUsableSeries
                 ? "unavailable"
                 : seriesThroughDate === expectedAsOfDate
                   ? "fresh"
                   : "fallback";
+            const seriesStatus: OverviewSeriesStatus = !snapshotMatchesExpectedSession && hasUsableSeries
+              ? "fallback"
+              : storedSeriesStatus;
             return {
               ticker: r.ticker,
               displayName: r.displayName,
@@ -2856,8 +3004,12 @@ export async function loadSnapshot(
               quoteSource,
               quoteFetchedAt: r.quoteFetchedAt ?? null,
               currentData: {
-                sessionDate: expectedAsOfDate,
-                status: quoteFreshnessStatus === "fresh" ? "fresh" as const : "unavailable" as const,
+                sessionDate: meta.asOfDate,
+                status: quoteFreshnessStatus === "fresh"
+                  ? "fresh" as const
+                  : quoteFreshnessStatus === "stale"
+                    ? "stale" as const
+                    : "unavailable" as const,
                 reason: quoteReason,
                 quoteSource,
                 performanceSource: quoteSource,
@@ -2879,17 +3031,19 @@ export async function loadSnapshot(
                 tradingViewCurrentSession: null,
               },
               historyData: {
-                sessionDate: expectedAsOfDate,
+                sessionDate: meta.asOfDate,
                 status: barFreshnessStatus,
                 reason: barFreshnessReason,
                 barDate,
-                source: exactSessionHistory ? `alpaca:${marketDataFeed(env)}-bars` : null,
+                source: barDate ? `alpaca:${marketDataFeed(env)}-bars` : null,
                 seriesThroughDate,
                 seriesStatus,
                 seriesSource: r.historySeriesSource ?? (hasUsableSeries ? "stored-generation" : null),
-                seriesReason: r.historySeriesReason ?? (hasUsableSeries
-                  ? `Usable chart series is available through ${seriesThroughDate}.`
-                  : `Insufficient history is available to build chart series for ${r.ticker}.`),
+                seriesReason: !snapshotMatchesExpectedSession && hasUsableSeries
+                  ? `${staleGenerationReason} Usable stored chart history remains available through ${seriesThroughDate}.`
+                  : r.historySeriesReason ?? (hasUsableSeries
+                    ? `Usable chart series is available through ${seriesThroughDate}.`
+                    : `Insufficient history is available to build chart series for ${r.ticker}.`),
               },
               rankKey: numberOrNull(r.rankKey),
               holdings: parseStoredStringArray(r.holdingsJson),

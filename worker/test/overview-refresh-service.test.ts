@@ -35,13 +35,16 @@ describe("refreshOverviewPageData", () => {
     expect(calls).toEqual(["snapshot"]);
     expect(refreshRecentBarsForTickers).not.toHaveBeenCalled();
     expect(refreshAndStoreOverviewSnapshot).toHaveBeenCalledWith({} as never, {
-      requireFreshness: false,
       forceCurrentData: true,
       refreshAllOverviewExactBars: true,
     });
     expect(result).toEqual({
       page: "overview",
       refreshedTickers: 2,
+      publicationStatus: "published",
+      publicationNextAttemptAt: null,
+      publicationErrorCode: null,
+      publicationError: null,
       generationId: "generation-1",
       publishedAt: "2026-06-18T21:00:00.000Z",
       currentCoveragePct: 100,
@@ -88,13 +91,16 @@ describe("refreshOverviewPageData", () => {
     expect(refreshRecentBarsForTickers).not.toHaveBeenCalled();
     expect(refreshAndStoreOverviewSnapshot).toHaveBeenCalledTimes(1);
     expect(refreshAndStoreOverviewSnapshot).toHaveBeenNthCalledWith(1, {} as never, {
-      requireFreshness: false,
       forceCurrentData: true,
       refreshAllOverviewExactBars: true,
     });
     expect(result).toEqual({
       page: "overview",
       refreshedTickers: 2,
+      publicationStatus: "published",
+      publicationNextAttemptAt: null,
+      publicationErrorCode: null,
+      publicationError: null,
       generationId: "generation-2",
       publishedAt: "2026-06-18T21:01:00.000Z",
       currentCoveragePct: 95,
@@ -103,5 +109,34 @@ describe("refreshOverviewPageData", () => {
       historyUsableCoveragePct: 100,
       notes: "Published overview generation generation-2 with fresh current-data coverage (95.0%). Exact-session history is 50.0% and usable history is 100.0%. Broad post-close daily-bar catch-up will continue through the scheduled worker job. Fetched 0 rows; wrote 0.",
     });
+  });
+
+  it("reports a transient publication result as recovering without claiming success", async () => {
+    const result = await refreshOverviewPageData({} as never, {
+      loadOverviewTickers: async () => ["SPY"],
+      refreshAndStoreOverviewSnapshot: async () => ({
+        snapshotId: null,
+        asOfDate: "2026-06-18",
+        generatedAt: null,
+        currentCoveragePct: 100,
+        historyExactCoveragePct: 100,
+        historyUsableCoveragePct: 100,
+        publicationStatus: "recovering",
+        publicationNextAttemptAt: "2026-06-18T21:05:00.000Z",
+        publicationErrorCode: "publication_error",
+        publicationError: "Temporary D1 failure.",
+        freshness: {
+          status: "fresh",
+          currentCount: 1,
+          eligibleCount: 1,
+          coveragePct: 100,
+        },
+      }),
+    });
+
+    expect(result.publicationStatus).toBe("recovering");
+    expect(result.generationId).toBeUndefined();
+    expect(result.publishedAt).toBeUndefined();
+    expect(result.notes).toContain("Scheduled reconciliation will retry automatically");
   });
 });

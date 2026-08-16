@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTradingViewOverviewPayload,
   currentRefreshWindowOpen,
+  currentRefreshContinuationAllowed,
   doesOverviewCurrentRowNeedRepair,
   isOverviewCurrentRowComplete,
   isOverviewCurrentRowPublishable,
@@ -73,6 +74,33 @@ describe("overview current refresh cadence", () => {
       processedTickers: 225,
       requestedTickers: 225,
     })).toBe(true);
+  });
+
+  it("continues only a due incomplete expected-session cycle after hours", () => {
+    const now = new Date("2026-07-21T21:00:00.000Z");
+    const job = {
+      configId: "default",
+      sessionDate: "2026-07-21",
+      status: "running",
+      attemptCount: 2,
+      nextAttemptAt: "2026-07-21T20:55:00.000Z",
+      updatedAt: "2026-07-21T20:45:00.000Z",
+      cycleId: "cycle-1",
+      cycleStartedAt: "2026-07-21T20:30:00.000Z",
+      cursorOffset: 160,
+      processedTickers: 160,
+      requestedTickers: 225,
+      freshTickers: 157,
+      unavailableTickers: 3,
+      leaseExpiresAt: null,
+      lastError: null,
+      lastErrorCode: null,
+    };
+    expect(currentRefreshContinuationAllowed(job, "2026-07-21", now)).toBe(true);
+    expect(currentRefreshContinuationAllowed({ ...job, sessionDate: "2026-07-20" }, "2026-07-21", now)).toBe(false);
+    expect(currentRefreshContinuationAllowed({ ...job, processedTickers: 225 }, "2026-07-21", now)).toBe(false);
+    expect(currentRefreshContinuationAllowed({ ...job, leaseExpiresAt: "2026-07-21T21:03:00.000Z" }, "2026-07-21", now)).toBe(false);
+    expect(currentRefreshContinuationAllowed({ ...job, nextAttemptAt: "2026-07-21T21:05:00.000Z" }, "2026-07-21", now)).toBe(false);
   });
 });
 

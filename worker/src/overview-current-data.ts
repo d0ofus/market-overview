@@ -59,7 +59,7 @@ export const OVERVIEW_CURRENT_COLUMNS = [
 
 export type OverviewCurrentProviderStatus = SharedOverviewCurrentProviderStatus;
 
-export type OverviewCurrentDisplayStatus = "fresh" | "unavailable" | "retrying";
+export type OverviewCurrentDisplayStatus = "fresh" | "stale" | "unavailable" | "retrying";
 
 export type OverviewProviderDiagnostic = {
   status: OverviewCurrentProviderStatus;
@@ -1245,7 +1245,9 @@ async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurr
   for (const statementChunk of chunk(symbolStatements, 100)) await db.batch(statementChunk);
 }
 
-type OverviewCurrentRefreshJobState = {
+export type OverviewCurrentRefreshJobState = {
+  configId: string;
+  sessionDate: string;
   status: string;
   attemptCount: number;
   nextAttemptAt: string | null;
@@ -1258,20 +1260,24 @@ type OverviewCurrentRefreshJobState = {
   freshTickers: number;
   unavailableTickers: number;
   leaseExpiresAt: string | null;
+  lastError: string | null;
+  lastErrorCode: string | null;
 };
 
-async function loadOverviewCurrentRefreshJob(
+export async function loadOverviewCurrentRefreshJob(
   env: Env,
   configId: string,
   sessionDate: string,
 ): Promise<OverviewCurrentRefreshJobState | null> {
   return await getMarketDataDb(env).prepare(
-    `SELECT status, attempt_count as attemptCount, next_attempt_at as nextAttemptAt,
+    `SELECT config_id as configId, session_date as sessionDate,
+            status, attempt_count as attemptCount, next_attempt_at as nextAttemptAt,
             updated_at as updatedAt, cycle_id as cycleId, cycle_started_at as cycleStartedAt,
             cursor_offset as cursorOffset, processed_tickers as processedTickers,
             requested_tickers as requestedTickers,
             fresh_tickers as freshTickers, unavailable_tickers as unavailableTickers,
-            lease_expires_at as leaseExpiresAt
+            lease_expires_at as leaseExpiresAt, last_error as lastError,
+            last_error_code as lastErrorCode
      FROM overview_current_refresh_jobs
      WHERE config_id = ? AND session_date = ?`,
   ).bind(configId, sessionDate).first<OverviewCurrentRefreshJobState>();
@@ -1655,9 +1661,25 @@ export async function loadOverviewCurrentData(
   }]));
 }
 
-export function currentRefreshWindowOpen(now: Date): boolean {
+export function currentRefreshStartWindowOpen(now: Date): boolean {
   const ny = zonedParts(now, "America/New_York");
   return ny.minutesOfDay >= 4 * 60 && ny.minutesOfDay <= 16 * 60 + CURRENT_REFRESH_OFFSET_MINUTES;
+}
+
+/** @deprecated Use currentRefreshStartWindowOpen. */
+export const currentRefreshWindowOpen = currentRefreshStartWindowOpen;
+
+export function currentRefreshContinuationAllowed(
+  job: OverviewCurrentRefreshJobState | null,
+  expectedSession: string,
+  now: Date,
+): boolean {
+  if (!job || job.sessionDate !== expectedSession || !job.cycleId) return false;
+  if (job.status !== "running" && job.status !== "retrying") return false;
+  if (Number(job.processedTickers ?? 0) >= Number(job.requestedTickers ?? 0)) return false;
+  if (job.leaseExpiresAt && Date.parse(job.leaseExpiresAt) > now.getTime()) return false;
+  if (job.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()) return false;
+  return true;
 }
 
 export async function maybeRunScheduledOverviewCurrentRefresh(
@@ -1666,7 +1688,9 @@ export async function maybeRunScheduledOverviewCurrentRefresh(
   configId = "default",
 ): Promise<OverviewCurrentRefreshResult | null> {
   const sessionDate = latestUsMarketSessionAsOfDate(now);
-  if (!currentRefreshWindowOpen(now)) return null;
+  await ensureOverviewCurrentDataSchema(env);
+  const job = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
+  if (!currentRefreshStartWindowOpen(now) && !currentRefreshContinuationAllowed(job, sessionDate, now)) return null;
   return await refreshOverviewCurrentDataIfDue(env, configId, sessionDate, now);
 }
 
@@ -1693,8 +1717,7 @@ export async function refreshOverviewCurrentDataIfDue(
   const continueExistingCycle = (job?.status === "running" || job?.status === "retrying")
     && Boolean(job.cycleId)
     && Number(job.processedTickers ?? 0) < Number(job.requestedTickers ?? 0);
-  const ny = zonedParts(now, "America/New_York");
-  if (!force && !continueExistingCycle && ny.minutesOfDay > 16 * 60 + 30) return null;
+  if (!force && !continueExistingCycle && !currentRefreshStartWindowOpen(now)) return null;
   return await refreshOverviewCurrentData(env, configId, sessionDate, {
     now,
     startNewCycle: !continueExistingCycle,

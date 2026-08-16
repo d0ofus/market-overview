@@ -21,13 +21,22 @@ import { isBreadthUniverseMemberCountValid, isCurrentUsableBreadthRow, isUsableB
 import { refreshOverviewPageData } from "./overview-refresh-service";
 import {
   doesOverviewCurrentRowNeedRepair,
+  currentRefreshContinuationAllowed,
   isOverviewCurrentRefreshPublicationReady,
   isOverviewCurrentRowComplete,
   loadOverviewCurrentData,
+  loadOverviewCurrentRefreshJob,
   maybeRunScheduledOverviewCurrentRefresh,
   OVERVIEW_REQUIRED_CURRENT_FIELDS,
   refreshOverviewCurrentDataIfDue,
 } from "./overview-current-data";
+import {
+  auditOverviewFreshnessState,
+  isOverviewPublicationRecoveryEnabled,
+  loadOverviewRecovery,
+  loadPublishedOverviewGeneration,
+  reconcileOverviewPublication,
+} from "./overview-publication-recovery";
 import type { Env, PostCloseDailyBarRefreshJob, QuoteFreshnessStatus, SnapshotResponse } from "./types";
 import {
   configPatchSchema,
@@ -1350,6 +1359,10 @@ async function refreshPageScopedData(
   historyRefreshStatus?: string;
   historyErrorCode?: string | null;
   historyNextAttemptAt?: string | null;
+  publicationStatus?: "published" | "recovering" | "blocked";
+  publicationNextAttemptAt?: string | null;
+  publicationErrorCode?: string | null;
+  publicationError?: string | null;
   reportId?: string;
   sessionDate?: string;
 }> {
@@ -2378,6 +2391,7 @@ app.get("/api/status", async (c) => {
   }
 
   const latestAllowedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
+  const overviewRecoveryEnabled = isOverviewPublicationRecoveryEnabled(c.env);
   type OverviewLatestRow = {
         asOfDate?: string;
         generatedAt?: string;
@@ -2400,7 +2414,27 @@ app.get("/api/status", async (c) => {
         provider_label?: string;
       };
   let overviewLatest: OverviewLatestRow | null = null;
-  try {
+  if (overviewRecoveryEnabled) {
+    const published = (await loadPublishedOverviewGeneration(c.env, config?.id ?? "default")).generation;
+    overviewLatest = published ? {
+      asOfDate: published.asOfDate,
+      generatedAt: published.generatedAt,
+      providerLabel: published.providerLabel,
+      expectedAsOfDate: published.expectedAsOfDate,
+      freshnessStatus: published.freshnessStatus,
+      freshnessCoveragePct: published.freshnessCoveragePct,
+      freshnessCurrentCount: published.freshnessCurrentCount,
+      freshnessEligibleCount: published.freshnessEligibleCount,
+      freshnessCriticalMissingJson: published.freshnessCriticalMissingJson,
+      freshnessMinBarDate: published.freshnessMinBarDate,
+      freshnessMaxBarDate: published.freshnessMaxBarDate,
+      freshnessWarning: published.freshnessWarning,
+      quoteOverlayRequestedCount: published.quoteOverlayRequestedCount,
+      quoteOverlayReturnedCount: published.quoteOverlayReturnedCount,
+      quoteOverlayError: published.quoteOverlayError,
+      quoteOverlayMissingSampleJson: published.quoteOverlayMissingSampleJson,
+    } : null;
+  } else try {
     overviewLatest = await c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, generated_at as generatedAt, provider_label as providerLabel, expected_as_of_date as expectedAsOfDate, freshness_status as freshnessStatus, freshness_coverage_pct as freshnessCoveragePct, freshness_current_count as freshnessCurrentCount, freshness_eligible_count as freshnessEligibleCount, freshness_critical_missing_json as freshnessCriticalMissingJson, freshness_min_bar_date as freshnessMinBarDate, freshness_max_bar_date as freshnessMaxBarDate, freshness_warning as freshnessWarning, quote_overlay_requested_count as quoteOverlayRequestedCount, quote_overlay_returned_count as quoteOverlayReturnedCount, quote_overlay_error as quoteOverlayError, quote_overlay_missing_sample_json as quoteOverlayMissingSampleJson FROM snapshots_meta WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
     )
@@ -2434,17 +2468,17 @@ app.get("/api/status", async (c) => {
   const overviewStoredExpectedAsOfDate = overviewLatest?.expectedAsOfDate ?? normalizedOverview.asOfDate ?? latestAllowedAsOfDate;
   const overviewStoredFreshnessMatchesExpected =
     normalizedOverview.asOfDate === latestAllowedAsOfDate && overviewStoredExpectedAsOfDate === latestAllowedAsOfDate;
-  const overviewStoredFreshnessHasDiagnostics =
-    overviewStoredFreshnessMatchesExpected && Number(overviewLatest?.freshnessEligibleCount ?? 0) > 0;
+  const overviewStoredFreshnessHasDiagnostics = Number(overviewLatest?.freshnessEligibleCount ?? 0) > 0
+    && (overviewRecoveryEnabled || overviewStoredFreshnessMatchesExpected);
   const overviewStoredFreshnessUnknownWarning =
     "Snapshot freshness diagnostics are unavailable for the displayed data; refresh this page to rebuild row-level bar dates.";
   let overviewFreshness = {
     expectedAsOfDate: overviewStoredFreshnessMatchesExpected ? overviewStoredExpectedAsOfDate : latestAllowedAsOfDate,
     freshnessStatus: overviewStoredFreshnessHasDiagnostics && (overviewLatest?.freshnessStatus === "fresh" || overviewLatest?.freshnessStatus === "partial" || overviewLatest?.freshnessStatus === "stale")
-      ? overviewLatest.freshnessStatus
+      ? overviewStoredFreshnessMatchesExpected ? overviewLatest.freshnessStatus : "stale"
       : overviewStoredFreshnessMatchesExpected
         ? "stale"
-        : null,
+        : overviewRecoveryEnabled ? "stale" : null,
     freshnessCoveragePct: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCoveragePct ?? null : null,
     freshnessCurrentCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessCurrentCount ?? null : null,
     freshnessEligibleCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.freshnessEligibleCount ?? null : null,
@@ -2462,7 +2496,11 @@ app.get("/api/status", async (c) => {
       ? overviewLatest?.freshnessWarning ?? null
       : overviewStoredFreshnessMatchesExpected
         ? overviewStoredFreshnessUnknownWarning
-        : null,
+        : overviewRecoveryEnabled
+          ? normalizedOverview.asOfDate
+            ? `Published Overview is ${normalizedOverview.asOfDate}; expected ${latestAllowedAsOfDate}.`
+            : "No published Overview generation is available."
+          : null,
     quoteOverlayRequestedCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayRequestedCount ?? null : null,
     quoteOverlayReturnedCount: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayReturnedCount ?? null : null,
     quoteOverlayError: overviewStoredFreshnessHasDiagnostics ? overviewLatest?.quoteOverlayError ?? null : null,
@@ -2475,7 +2513,7 @@ app.get("/api/status", async (c) => {
       }
     })() : [],
   };
-  if (!overviewFreshness.freshnessStatus) {
+  if (!overviewFreshness.freshnessStatus && !overviewRecoveryEnabled) {
     try {
       const computed = await computeOverviewFreshnessDiagnostics(c.env, latestAllowedAsOfDate, config?.id ?? "default");
       overviewFreshness = {
@@ -2509,11 +2547,25 @@ app.get("/api/status", async (c) => {
   const useBreadthStatus = page === "breadth";
   const normalizedLastUpdated = useBreadthStatus
     ? normalizedBreadth.lastUpdated ?? normalizedOverview.lastUpdated
-    : normalizedOverview.lastUpdated ?? normalizedBreadth.lastUpdated;
+    : overviewRecoveryEnabled
+      ? normalizedOverview.lastUpdated
+      : normalizedOverview.lastUpdated ?? normalizedBreadth.lastUpdated;
   const normalizedAsOf = useBreadthStatus
     ? normalizedBreadth.asOfDate ?? normalizedOverview.asOfDate
-    : normalizedOverview.asOfDate ?? normalizedBreadth.asOfDate;
+    : overviewRecoveryEnabled
+      ? normalizedOverview.asOfDate
+      : normalizedOverview.asOfDate ?? normalizedBreadth.asOfDate;
   const normalizedProvider = normalizedOverview.providerLabel ?? "Alpaca (IEX Delayed Daily Bars)";
+  const overviewRecovery = overviewRecoveryEnabled
+    ? await loadOverviewRecovery(c.env, new Date(), config?.id ?? "default")
+    : null;
+  const servingState = overviewRecovery?.servingState
+    ?? (!normalizedOverview.asOfDate
+      ? "unavailable"
+      : normalizedOverview.asOfDate < latestAllowedAsOfDate
+        ? "stale_fallback"
+        : "ready");
+  const staleTradingSessions = overviewRecovery?.staleTradingSessions ?? 0;
 
   return c.json({
     configId: config?.id ?? "default",
@@ -2523,6 +2575,9 @@ app.get("/api/status", async (c) => {
     lastUpdated: normalizedLastUpdated ?? (normalizedAsOf ? `${normalizedAsOf}T00:00:00Z` : null),
     asOfDate: normalizedAsOf,
     providerLabel: normalizedProvider,
+    servingState,
+    staleTradingSessions,
+    overviewRecovery,
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
     ...overviewFreshness,
     breadthExpectedAsOfDate: latestAllowedAsOfDate,
@@ -2541,6 +2596,12 @@ app.get("/api/dashboard", async (c) => {
   let data;
   try {
     data = await loadSnapshot(c.env, configId, date, { allowComputeOnMissing: false });
+    if (!date && isOverviewPublicationRecoveryEnabled(c.env)) {
+      data = {
+        ...data,
+        overviewRecovery: await loadOverviewRecovery(c.env, new Date(), configId),
+      };
+    }
   } catch (error) {
     console.error("dashboard read-only load failed", { configId, date, error });
     const cached = dashboardResponseCache.get(dashboardRequestCacheKey(configId, date));
@@ -6738,7 +6799,7 @@ app.post("/api/admin/run-eod", async (c) => {
   try {
     const result = storedOnly
       ? await recomputeDashboardFromStoredBars(c.env, date, configId)
-      : await refreshAndStoreOverviewSnapshot(c.env, date, configId, { requireFreshness: false });
+      : await refreshAndStoreOverviewSnapshot(c.env, date, configId);
     return c.json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "run-eod failed";
@@ -6999,6 +7060,10 @@ app.post("/api/admin/refresh-page", async (c) => {
       historyRefreshStatus: job.result?.historyRefreshStatus,
       historyErrorCode: job.result?.historyErrorCode,
       historyNextAttemptAt: job.result?.historyNextAttemptAt,
+      publicationStatus: job.result?.publicationStatus,
+      publicationNextAttemptAt: job.result?.publicationNextAttemptAt,
+      publicationErrorCode: job.result?.publicationErrorCode,
+      publicationError: job.result?.publicationError,
       reportId: job.result?.reportId,
       sessionDate: job.result?.sessionDate,
     }, 202);
@@ -7042,6 +7107,10 @@ app.get("/api/admin/refresh-jobs/:jobId", async (c) => {
     historyRefreshStatus: job.result?.historyRefreshStatus,
     historyErrorCode: job.result?.historyErrorCode,
     historyNextAttemptAt: job.result?.historyNextAttemptAt,
+    publicationStatus: job.result?.publicationStatus,
+    publicationNextAttemptAt: job.result?.publicationNextAttemptAt,
+    publicationErrorCode: job.result?.publicationErrorCode,
+    publicationError: job.result?.publicationError,
     reportId: job.result?.reportId,
     sessionDate: job.result?.sessionDate,
   });
@@ -7667,6 +7736,39 @@ export default {
         await auditSkipped("refresh-job", "No refresh job is due.");
       }
 
+      const recoveryEnabled = isOverviewPublicationRecoveryEnabled(env);
+      const overviewSessionDate = latestUsMarketSessionAsOfDate(now);
+      const currentJob = recoveryEnabled
+        ? await loadOverviewCurrentRefreshJob(env, "default", overviewSessionDate).catch(() => null)
+        : null;
+      const recoveryCurrentActionable = recoveryEnabled
+        && currentRefreshContinuationAllowed(currentJob, overviewSessionDate, now);
+      const recoveryPublicationEligible = recoveryEnabled
+        && Boolean(currentJob?.cycleId)
+        && await isOverviewCurrentRefreshPublicationReady(env, "default", overviewSessionDate);
+      let overviewCurrentRan = false;
+      let reconciliationAttempted = false;
+      let recoveryResult: Awaited<ReturnType<typeof reconcileOverviewPublication>> | null = null;
+      const runOverviewCurrent = async (): Promise<void> => {
+        overviewCurrentRan = true;
+        await runBudgeted(
+          "overview-current-data",
+          overviewCurrentBudgetUnits,
+          () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
+        );
+      };
+      const runOverviewReconciliation = async (): Promise<void> => {
+        reconciliationAttempted = true;
+        await runBudgeted("overview-snapshot", 10, async () => {
+          recoveryResult = await reconcileOverviewPublication(env, now, "default");
+        });
+      };
+
+      if (recoveryEnabled && (recoveryCurrentActionable || recoveryPublicationEligible)) {
+        if (recoveryCurrentActionable) await runOverviewCurrent();
+        await runOverviewReconciliation();
+      }
+
       if (postClosePlan.protect) {
         await runBudgeted(
           "post-close-daily-bars",
@@ -7704,26 +7806,24 @@ export default {
           postCloseMetadata,
         );
       }
-      if (postClosePlan.protect && canFitPostCloseDailyBars && !canFitBothCriticalJobs) {
+      if (!overviewCurrentRan && postClosePlan.protect && canFitPostCloseDailyBars && !canFitBothCriticalJobs) {
         await auditSkipped(
           "overview-current-data",
           "Skipped to preserve market-data budget for actionable post-close daily bars.",
           postCloseMetadata,
         );
-      } else {
-        await runBudgeted(
-          "overview-current-data",
-          overviewCurrentBudgetUnits,
-          () => maybeRunScheduledOverviewCurrentRefresh(env, now).then(() => undefined),
-        );
+      } else if (!overviewCurrentRan) {
+        await runOverviewCurrent();
+      }
+      if (recoveryEnabled && !reconciliationAttempted) {
+        await runOverviewReconciliation();
       }
       await runBudgeted(
         "breadth-publication",
         6,
         () => publishScheduledBreadthIfReady(env, latestUsMarketSessionAsOfDate(now)).then(() => undefined),
       );
-      if (isOverviewGenerationSlot(now)) {
-        const overviewSessionDate = latestUsMarketSessionAsOfDate(now);
+      if (!recoveryEnabled && isOverviewGenerationSlot(now)) {
         if (!await isOverviewCurrentRefreshPublicationReady(env, "default", overviewSessionDate)) {
           await auditSkipped(
             "overview-snapshot",
@@ -7742,6 +7842,10 @@ export default {
             }
           });
         }
+      }
+      if (recoveryEnabled) {
+        const state = recoveryResult ?? await loadOverviewRecovery(env, now, "default");
+        await auditOverviewFreshnessState(env, now, state, "default");
       }
       if (isPeerMetricSlot(now)) {
         await runBudgeted("peer-metric-slice", 6, () => refreshScheduledPeerMetricSlice(env).then(() => undefined));

@@ -3,10 +3,28 @@ export type QuoteFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsuppor
 export type BarFreshnessStatus = "fresh" | "stale" | "unavailable" | "unsupported";
 export type OverviewSeriesStatus = "fresh" | "fallback" | "stale" | "unavailable" | "unsupported";
 export type OverviewCurrentProviderStatus = "supported" | "unsupported" | "stale" | "missing" | "rate-limited" | "auth-blocked" | "provider-error";
+export type OverviewServingState = "ready" | "degraded" | "stale_fallback" | "unavailable";
+export type OverviewRecoveryStatus = "idle" | "refreshing_current" | "ready_to_publish" | "retrying" | "blocked" | "published";
+export type OverviewRecovery = {
+  expectedAsOfDate: string;
+  status: OverviewRecoveryStatus;
+  sourceCycleId: string | null;
+  processedTickers: number | null;
+  requestedTickers: number | null;
+  freshTickers: number | null;
+  unavailableTickers: number | null;
+  historyCoveragePct: number | null;
+  publicationCoveragePct: number | null;
+  generationId: string | null;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  lastErrorCode: string | null;
+  lastError: string | null;
+};
 
 export type OverviewCurrentData = {
   sessionDate: string;
-  status: "fresh" | "unavailable" | "retrying";
+  status: "fresh" | "stale" | "unavailable" | "retrying";
   reason: string;
   quoteSource: string | null;
   performanceSource: string | null;
@@ -35,6 +53,9 @@ export type SnapshotReadyResponse = {
   generatedAt: string;
   providerLabel: string;
   expectedAsOfDate?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;
   freshnessCurrentCount?: number | null;
@@ -149,6 +170,9 @@ export type SnapshotEmptyResponse = {
   generatedAt: null;
   providerLabel: null;
   expectedAsOfDate?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;
   freshnessCurrentCount?: number | null;

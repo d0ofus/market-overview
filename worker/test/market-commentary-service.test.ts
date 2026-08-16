@@ -27,6 +27,7 @@ type StoredAttempt = {
   reportId: string | null;
   scheduledTimezone: string | null;
   scheduledLocalTime: string | null;
+  updatedAt?: string;
 };
 type StoredReport = Omit<MarketCommentaryReport, "sourceAudit" | "dataQuality" | "error"> & {
   createdAt: string;
@@ -94,6 +95,15 @@ class FakeMarketCommentaryDb {
         return statement;
       },
       async first<T>() {
+        if (sql.includes("FROM market_commentary_schedule_attempts")) {
+          const attempt = [...db.attempts].sort((left, right) =>
+            String(right.updatedAt ?? "2026-05-27 00:00:00").localeCompare(String(left.updatedAt ?? "2026-05-27 00:00:00")))[0];
+          return (attempt ? {
+            status: attempt.status,
+            reason: attempt.reason,
+            updatedAt: attempt.updatedAt ?? "2026-05-27 00:00:00",
+          } : null) as T;
+        }
         if (sql.includes("FROM market_commentary_settings")) {
           return (db.settings ? settingsToRow(db.settings) : null) as T;
         }
@@ -170,6 +180,7 @@ class FakeMarketCommentaryDb {
             reportId: bound[5] == null ? null : String(bound[5]),
             scheduledTimezone: bound[6] == null ? null : String(bound[6]),
             scheduledLocalTime: bound[7] == null ? null : String(bound[7]),
+            updatedAt: "2026-05-27 00:00:00",
           });
           return { meta: { rows_written: 1 } };
         }
@@ -518,6 +529,33 @@ describe("market commentary service", () => {
       status: "failed",
       reasonCode: "timeout",
       message: "The commentary provider did not respond before the timeout.",
+    });
+  });
+
+  it("exposes a newer skipped schedule attempt that is waiting for Overview", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("ready", "2026-05-22", "2026-05-22T21:10:00.000Z"),
+    ]);
+    db.attempts.push({
+      id: "attempt-1",
+      scheduledLocalDate: "2026-05-25",
+      sessionDate: "2026-05-25",
+      status: "skipped",
+      reason: "Overview snapshot for 2026-05-25 is not ready.",
+      reportId: null,
+      scheduledTimezone: "Australia/Melbourne",
+      scheduledLocalTime: "08:30",
+      updatedAt: "2026-05-25T23:00:00.000Z",
+    });
+
+    const response = await loadLatestMarketCommentary(createEnv(db));
+
+    expect(response.report?.id).toBe("ready");
+    expect(response.latestAttempt).toMatchObject({
+      status: "skipped",
+      model: null,
+      reasonCode: "overview_not_ready",
+      message: "The current Overview snapshot was not ready for commentary generation.",
     });
   });
 

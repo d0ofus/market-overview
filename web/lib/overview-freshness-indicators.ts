@@ -73,7 +73,7 @@ function currentDetail(row: OverviewFreshnessIndicatorRow, lead: string): string
   return sentence([
     lead,
     observedAt ? `Last observation: ${observedAt}.` : null,
-    expectedSession(row) ? `Expected session: ${expectedSession(row)}.` : null,
+    expectedSession(row) ? `Stored session: ${expectedSession(row)}.` : null,
     source ? `Source: ${source}.` : null,
     cleanReason(row.quoteFreshnessReason ?? row.currentData?.reason),
   ]);
@@ -106,7 +106,7 @@ function historyUnavailableDetail(row: OverviewFreshnessIndicatorRow): string {
   const source = row.historyData?.seriesSource ?? row.historyData?.source ?? null;
   return sentence([
     "Sparkline and 30-day RS are not currently available.",
-    expectedSession(row) ? `Expected session: ${expectedSession(row)}.` : null,
+    expectedSession(row) ? `Stored session: ${expectedSession(row)}.` : null,
     source ? `Source: ${source}.` : null,
     cleanReason(row.historyData?.seriesReason ?? row.historyData?.reason),
   ]);

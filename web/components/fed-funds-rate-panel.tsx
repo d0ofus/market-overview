@@ -53,6 +53,7 @@ function formatGeneratedAt(value: string | null | undefined): string {
     hour: "numeric",
     minute: "2-digit",
     timeZoneName: "short",
+    timeZone: "UTC",
   }).format(parsed);
 }
 
@@ -313,15 +314,16 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
 export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) {
   const rows = snapshot.data?.rows ?? [];
   const nextMeeting = rows[0] ?? null;
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState<number | null>(null);
 
   useEffect(() => {
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
   const countdown = useMemo(() => {
-    if (!nextMeeting?.meetingIso) return "--";
+    if (!nextMeeting?.meetingIso || now == null) return "--";
     const when = zonedTimeToUtc(nextMeeting.meetingIso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ);
     return formatCountdown(when.getTime() - now);
   }, [nextMeeting, now]);

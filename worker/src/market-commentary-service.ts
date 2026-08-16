@@ -56,9 +56,9 @@ export type MarketCommentaryResponse = {
 };
 
 export type MarketCommentaryAttemptSummary = {
-  status: MarketCommentaryStatus;
+  status: "ready" | "failed" | "skipped" | "running";
   attemptedAt: string;
-  model: string;
+  model: string | null;
   reasonCode: "provider_busy" | "timeout" | "overview_not_ready" | "configuration" | "authentication" | "incomplete" | "unknown" | null;
   message: string | null;
 };
@@ -78,6 +78,12 @@ type MarketCommentaryRow = {
   dataQualityJson: string;
   errorMessage: string | null;
   createdAt: string;
+  updatedAt: string;
+};
+
+type MarketCommentaryScheduleAttemptRow = {
+  status: "ready" | "failed" | "skipped" | "running";
+  reason: string | null;
   updatedAt: string;
 };
 
@@ -547,6 +553,7 @@ function normalizeRow(row: MarketCommentaryRow): MarketCommentaryReport {
 }
 
 export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommentaryResponse> {
+  const scheduledAttempt = await loadLatestPublicScheduleAttempt(env);
   const row = await env.DB.prepare(
     `${MARKET_COMMENTARY_REPORT_SELECT} ORDER BY session_date DESC, created_at DESC LIMIT 1`,
   ).first<MarketCommentaryRow>();
@@ -556,7 +563,7 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
       status: "empty",
       warning: "No market commentary report has been generated yet.",
       report: null,
-      latestAttempt: null,
+      latestAttempt: scheduledAttempt,
     };
   }
 
@@ -565,7 +572,7 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
       status: row.status,
       warning: null,
       report: normalizeRow(row),
-      latestAttempt: publicAttempt(row),
+      latestAttempt: newerAttempt(publicAttempt(row), scheduledAttempt),
     };
   }
 
@@ -577,7 +584,7 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
       status: row.status,
       warning: publicAttempt(row).message,
       report: normalizePublicFailedRow(row),
-      latestAttempt: publicAttempt(row),
+      latestAttempt: newerAttempt(publicAttempt(row), scheduledAttempt),
     };
   }
 
@@ -585,8 +592,46 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
     status: "ready",
     warning: `Latest commentary refresh did not complete. Showing the latest ready report from ${readyRow.sessionDate}.`,
     report: normalizeRow(readyRow),
-    latestAttempt: publicAttempt(row),
+    latestAttempt: newerAttempt(publicAttempt(row), scheduledAttempt),
   };
+}
+
+function newerAttempt(
+  reportAttempt: MarketCommentaryAttemptSummary,
+  scheduledAttempt: MarketCommentaryAttemptSummary | null,
+): MarketCommentaryAttemptSummary {
+  if (!scheduledAttempt) return reportAttempt;
+  return scheduleAttemptTimestamp(scheduledAttempt.attemptedAt) > scheduleAttemptTimestamp(reportAttempt.attemptedAt)
+    ? scheduledAttempt
+    : reportAttempt;
+}
+
+async function loadLatestPublicScheduleAttempt(env: Env): Promise<MarketCommentaryAttemptSummary | null> {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT status, reason, updated_at as updatedAt
+       FROM market_commentary_schedule_attempts
+       ORDER BY datetime(updated_at) DESC LIMIT 1`,
+    ).first<MarketCommentaryScheduleAttemptRow>();
+    if (!row) return null;
+    const classified = row.status === "ready"
+      ? { reasonCode: null, message: null }
+      : row.status === "running"
+        ? { reasonCode: null, message: "Commentary generation is in progress." }
+        : row.status === "skipped" && !/overview snapshot|overview market data/i.test(row.reason ?? "")
+          ? { reasonCode: null, message: row.reason }
+          : classifyCommentaryFailure(row.reason);
+    return {
+      status: row.status,
+      attemptedAt: row.updatedAt,
+      model: null,
+      ...classified,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (/no such table|market_commentary_schedule_attempts/i.test(message)) return null;
+    throw error;
+  }
 }
 
 function classifyCommentaryFailure(message: string | null | undefined): Pick<MarketCommentaryAttemptSummary, "reasonCode" | "message"> {

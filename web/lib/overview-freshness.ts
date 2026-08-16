@@ -6,6 +6,7 @@ import type {
   WeeklyMarketReviewResponse,
 } from "./api";
 import type { BarFreshnessStatus, QuoteFreshnessStatus } from "../types/dashboard";
+import type { OverviewRecovery, OverviewServingState } from "../types/dashboard";
 
 export type OverviewFreshnessStatus = "fresh" | "partial" | "stale";
 export type FreshnessTone = "ok" | "warning" | "danger";
@@ -19,6 +20,9 @@ export type OverviewFreshnessContext = {
   freshnessEligibleCount?: number | null;
   freshnessCriticalMissingTickers?: string[];
   freshnessWarning?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery | null;
   quoteOverlayRequestedCount?: number | null;
   quoteOverlayReturnedCount?: number | null;
   quoteOverlayError?: string | null;
@@ -52,7 +56,7 @@ export type OverviewFreshnessSection = {
       sparkline?: number[] | null;
       relativeStrength30dVsSpy?: number[] | null;
       currentData?: {
-        status: "fresh" | "unavailable" | "retrying";
+        status: "fresh" | "stale" | "unavailable" | "retrying";
         fieldSources: Record<string, string>;
       };
       historyData?: {
@@ -223,8 +227,18 @@ export function deriveOverviewFreshnessSummary({
   const hasQuoteProblems = counts.needsReview > 0 || hasOverlayGap || Boolean(criticalTickers);
   const hasHistoryProblems = counts.historyNeedsReview > 0;
   const hasBreadthProblems = Boolean(status.breadthStatus && status.breadthStatus !== "fresh");
+  const recovery = status.overviewRecovery ?? null;
+  const hasRecoveryProblem = Boolean(recovery && (
+    recovery.status === "refreshing_current"
+    || recovery.status === "ready_to_publish"
+    || recovery.status === "retrying"
+    || recovery.status === "blocked"
+  ));
+  const hasPointerStale = status.servingState === "stale_fallback";
   const hasProblems = !dashboardAvailable
     || missingFreshness
+    || hasPointerStale
+    || hasRecoveryProblem
     || hasQuoteProblems
     || hasHistoryProblems
     || hasBreadthProblems;
@@ -234,7 +248,9 @@ export function deriveOverviewFreshnessSummary({
   const hasDangerQuoteProblem = counts.stale > 0 || counts.unavailable > 0;
   const tone: Exclude<FreshnessTone, "ok"> = !dashboardAvailable
     || missingFreshness
-    || hasDangerQuoteProblem
+    || Number(status.staleTradingSessions ?? 0) > 1
+    || recovery?.status === "blocked"
+    || (hasDangerQuoteProblem && !hasPointerStale)
     ? "danger"
     : "warning";
 
@@ -250,13 +266,35 @@ export function deriveOverviewFreshnessSummary({
     criticalTickers ? `Critical current-data symbols: ${criticalTickers}` : null,
     overlay,
     hasBreadthProblems ? status.breadthWarning ?? `Breadth data is ${status.breadthStatus}.` : null,
+    recovery?.status === "refreshing_current" && recovery.requestedTickers
+      ? `Refreshing current data (${recovery.processedTickers ?? 0}/${recovery.requestedTickers})`
+      : null,
+    recovery?.status === "ready_to_publish" ? "Current data ready — publication pending" : null,
+    recovery?.status === "retrying" ? "Current data ready — publication recovering" : null,
+    recovery?.status === "retrying" && recovery.lastError ? `Last error: ${recovery.lastError}` : null,
+    recovery?.status === "retrying" && recovery.nextAttemptAt ? `Next attempt: ${recovery.nextAttemptAt}` : null,
+    recovery?.status === "blocked" ? `Problem: ${recovery.lastError ?? "Publication freshness gate was not met."}` : null,
+    recovery?.status === "blocked" ? "Impact: the last-ready Overview remains visible and is marked stale." : null,
+    recovery?.status === "blocked" ? "Next step: repair missing current data, then retry publication." : null,
   ].filter((detail): detail is string => Boolean(detail));
 
-  const title = !dashboardAvailable
+  const title = Number(status.staleTradingSessions ?? 0) > 1
+    ? "Overview more than one trading session old"
+    : !dashboardAvailable
     ? "Overview data unavailable"
+    : recovery?.status === "refreshing_current"
+      ? `Refreshing current data (${recovery.processedTickers ?? 0}/${recovery.requestedTickers ?? 0})`
+      : recovery?.status === "ready_to_publish"
+        ? "Current data ready — publication pending"
+        : recovery?.status === "retrying"
+          ? "Current data ready — publication recovering"
+          : recovery?.status === "blocked"
+            ? "Overview publication blocked"
+            : hasPointerStale
+              ? "Published Overview is stale"
     : missingFreshness
       ? "Overview freshness unknown"
-      : hasDangerQuoteProblem
+      : hasQuoteProblems
         ? "Current-session data incomplete"
         : counts.historyUnavailable > 0
           ? "Historical overview data stale"
@@ -268,7 +306,11 @@ export function deriveOverviewFreshnessSummary({
               ? "Unsupported overview rows"
               : "Current-session coverage incomplete";
 
-  const message = status.freshnessWarning
+  const message = recovery?.status === "retrying" && recovery.lastError
+    ? `${recovery.lastError}${recovery.nextAttemptAt ? ` Next attempt ${recovery.nextAttemptAt}.` : ""}`
+    : recovery?.status === "blocked"
+      ? "The candidate did not meet the unchanged publication gates. Last-ready values remain visible with stale indicators."
+    : status.freshnessWarning
     ?? (!dashboardAvailable
       ? "Overview market data could not be loaded. Refresh before relying on commentary or tables."
       : missingFreshness

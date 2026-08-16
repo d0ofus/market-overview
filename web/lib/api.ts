@@ -1,4 +1,4 @@
-import type { QuoteFreshnessStatus, SnapshotResponse } from "@/types/dashboard";
+import type { OverviewRecovery, OverviewServingState, QuoteFreshnessStatus, SnapshotResponse } from "@/types/dashboard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
@@ -124,9 +124,9 @@ export type MarketCommentaryResponse = {
   warning: string | null;
   report: MarketCommentaryReport | null;
   latestAttempt?: {
-    status: "ready" | "failed";
+    status: "ready" | "failed" | "skipped" | "running";
     attemptedAt: string;
-    model: string;
+    model: string | null;
     reasonCode: "provider_busy" | "timeout" | "overview_not_ready" | "configuration" | "authentication" | "incomplete" | "unknown" | null;
     message: string | null;
   } | null;
@@ -2762,6 +2762,9 @@ export function getStatus(page?: "overview" | "breadth" | "sectors"): Promise<{
   asOfDate: string | null;
   providerLabel: string;
   expectedAsOfDate?: string | null;
+  servingState?: OverviewServingState;
+  staleTradingSessions?: number;
+  overviewRecovery?: OverviewRecovery | null;
   freshnessStatus?: "fresh" | "partial" | "stale";
   freshnessCoveragePct?: number | null;
   freshnessCurrentCount?: number | null;
@@ -4857,6 +4860,10 @@ export type RefreshPageJobResponse = {
   historyRefreshStatus?: string;
   historyErrorCode?: string | null;
   historyNextAttemptAt?: string | null;
+  publicationStatus?: "published" | "recovering" | "blocked";
+  publicationNextAttemptAt?: string | null;
+  publicationErrorCode?: string | null;
+  publicationError?: string | null;
   reportId?: string;
   sessionDate?: string;
 };
