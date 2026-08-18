@@ -21,6 +21,7 @@ import {
   type PeerMetricRow,
   type PeerTickerDetail,
 } from "@/lib/api";
+import { shouldFocusPeerGroupsSearch } from "@/lib/peer-groups-search-shortcut";
 import { FundamentalsModal } from "./fundamentals-modal";
 import { FundamentalsTrendStrip } from "./fundamentals-trend-strip";
 import { PeerGroupFilterPicker } from "./peer-groups/peer-group-filter-picker";
@@ -316,6 +317,44 @@ export function PeerGroupsDashboard() {
       .then((res) => setGroups(res.rows ?? []))
       .catch(() => setGroups([]));
   }, []);
+
+  useEffect(() => {
+    const onSearchShortcut = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+
+      const target = event.target instanceof Element ? event.target : null;
+      const editableTarget = Boolean(target?.closest(
+        'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])',
+      ));
+      const blockedSurfaceOpen = Boolean(
+        activeFundamentalsTicker
+        || correlationPickerState
+        || document.fullscreenElement
+        || document.querySelector('[data-modal-close="true"]')
+      );
+
+      if (!shouldFocusPeerGroupsSearch({
+        key: event.key,
+        defaultPrevented: event.defaultPrevented,
+        isComposing: event.isComposing,
+        repeat: event.repeat,
+        editableTarget,
+        blockedSurfaceOpen,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+      })) return;
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", onSearchShortcut);
+    return () => window.removeEventListener("keydown", onSearchShortcut);
+  }, [activeFundamentalsTicker, correlationPickerState]);
 
   useEffect(() => {
     setLoadingDirectory(true);
@@ -930,7 +969,16 @@ export function PeerGroupsDashboard() {
       <div className="card scroll-mt-4 p-3" ref={searchPanelRef}>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr),18rem,auto]">
           <label className="text-xs text-slate-300">
-            Search ticker or company
+            <span className="flex items-center justify-between gap-2">
+              <span>Search ticker or company</span>
+              <kbd
+                className="rounded border border-borderSoft/80 bg-panelSoft px-1.5 py-0.5 font-mono text-[10px] text-slate-400"
+                aria-hidden="true"
+                title="Press / to focus ticker search"
+              >
+                /
+              </kbd>
+            </span>
             <div className="mt-1 flex items-center rounded border border-borderSoft bg-panelSoft px-2">
               <Search className="h-4 w-4 text-slate-400" />
               <input
@@ -944,6 +992,7 @@ export function PeerGroupsDashboard() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void loadTicker(query);
                 }}
+                aria-keyshortcuts="/"
                 placeholder="AAPL or Apple"
               />
             </div>
