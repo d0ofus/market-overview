@@ -1346,7 +1346,7 @@ export async function processPostCloseDailyBarRefreshJob(
           replaceExisting: true,
           providerBatchSize: MAX_POST_CLOSE_PROVIDER_BATCH_SIZE,
           target: "market",
-          mirrorLatestToLegacy: true,
+          syncSymbolsToCore: true,
         });
       }
       let currentTickers = await loadTickersWithBarOnDate(pinnedEnv, batchTickers, job.tradingDate);

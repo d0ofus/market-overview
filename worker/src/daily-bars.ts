@@ -309,24 +309,6 @@ async function writeFetchedDailyBars(
   return target === "market" ? writeUsage.changes : barsToWrite.length;
 }
 
-async function loadMarketBarsOnDate(env: Env, tickers: string[], feed: string, date: string): Promise<DailyBar[]> {
-  const rows: DailyBar[] = [];
-  for (const tickerChunk of chunkTickers(normalizeTickers(tickers), BAR_QUERY_TICKER_CHUNK_SIZE)) {
-    const placeholders = tickerChunk.map(() => "?").join(",");
-    const result = await getMarketDataDb(env).prepare(
-      `SELECT ticker, date, o, h, l, c, volume
-       FROM alpaca_daily_bars
-       WHERE feed = ? AND date = ? AND ticker IN (${placeholders})`,
-    ).bind(feed, date, ...tickerChunk).all<DailyBar>();
-    rows.push(...(result.results ?? []).map((bar) => ({
-      ...bar,
-      sourceProvider: "alpaca",
-      sourceFeed: feed,
-    })));
-  }
-  return rows;
-}
-
 export async function refreshDailyBarsIncremental(env: Env, input: {
   tickers: string[];
   startDate: string;
@@ -337,7 +319,7 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   providerBatchSize?: number;
   continueOnError?: boolean;
   target?: DailyBarStorageTarget;
-  mirrorLatestToLegacy?: boolean;
+  syncSymbolsToCore?: boolean;
   repairMissingMarketDates?: boolean;
 }): Promise<{
   requestedTickers: number;
@@ -347,7 +329,6 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
   currentDateTickers: number;
   missingCurrentDateTickers: number;
   currentDateCoveragePct: number;
-  mirroredRows?: number;
 }> {
   const tickers = normalizeTickers(input.tickers, input.maxTickers);
   if (tickers.length === 0) {
@@ -359,7 +340,6 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
       currentDateTickers: 0,
       missingCurrentDateTickers: 0,
       currentDateCoveragePct: 0,
-      mirroredRows: 0,
     };
   }
 
@@ -379,8 +359,11 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
     : tickers.length - Array.from(grouped.values()).reduce((sum, rows) => sum + rows.length, 0);
   let fetchedRows = 0;
   let writtenRows = 0;
-  let mirroredRows = 0;
   const providerBatchSize = Math.max(1, Math.trunc(input.providerBatchSize ?? DEFAULT_PROVIDER_BATCH_SIZE));
+
+  if (target === "market" && input.syncSymbolsToCore) {
+    await ensureSymbolsExist(env, tickers);
+  }
 
   for (const [startDate, groupTickers] of grouped) {
     for (const chunk of chunkTickers(groupTickers, providerBatchSize)) {
@@ -415,20 +398,6 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
     }
   }
 
-  if (target === "market" && input.mirrorLatestToLegacy) {
-    const latestRows = await loadMarketBarsOnDate(env, tickers, feed, input.endDate);
-    mirroredRows = await writeFetchedDailyBars(
-      env,
-      latestRows,
-      new Map<string, string | null>(),
-      input.endDate,
-      input.endDate,
-      true,
-      sourceProvider,
-      sourceFeed,
-      "legacy",
-    );
-  }
   const tickersWithEndDateBar = await loadTickersWithBarOnDate(env, tickers, input.endDate, target, feed);
   const currentDateTickers = tickersWithEndDateBar.size;
   const missingCurrentDateTickers = Math.max(0, tickers.length - currentDateTickers);
@@ -441,6 +410,5 @@ export async function refreshDailyBarsIncremental(env: Env, input: {
     currentDateTickers,
     missingCurrentDateTickers,
     currentDateCoveragePct: tickers.length > 0 ? (currentDateTickers / tickers.length) * 100 : 0,
-    mirroredRows,
   };
 }

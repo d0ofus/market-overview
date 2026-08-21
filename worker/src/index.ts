@@ -2352,7 +2352,7 @@ async function refreshRecentBarsForTickers(
       endDate: end,
       replaceExisting,
       target: options.target,
-      mirrorLatestToLegacy: options.target === "market",
+      syncSymbolsToCore: options.target === "market",
     });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);

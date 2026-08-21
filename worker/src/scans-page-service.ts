@@ -36,6 +36,12 @@ import {
   type VcpFeatureRow,
 } from "./vcp";
 import type { Env } from "./types";
+import {
+  inspectCoreDatabaseResults,
+  inspectCoreDatabaseSize,
+  isCoreDatabaseCapacityError,
+  normalizeScanStorageError,
+} from "./core-db-capacity";
 
 export type ScanRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "in" | "not_in";
 
@@ -8631,7 +8637,7 @@ async function storeScanSnapshotResult(
   },
 ): Promise<string> {
   const snapshotId = crypto.randomUUID();
-  await env.DB.batch([
+  const writeResults = await env.DB.batch([
     env.DB.prepare(
       "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)",
     ).bind(snapshotId, preset.id, result.providerLabel, result.rows.length, result.matchedRowCount, result.status, result.error),
@@ -8654,6 +8660,7 @@ async function storeScanSnapshotResult(
       ),
     ),
   ]);
+  inspectCoreDatabaseResults(env, writeResults, "scan-snapshot-write");
   return snapshotId;
 }
 
@@ -8908,7 +8915,7 @@ async function processRelativeStrengthMaterializationRun(
   } catch (error) {
     await updateRelativeStrengthMaterializationRun(env, leasedRun.id, {
       status: "failed",
-      error: error instanceof Error ? error.message : "Relative strength refresh failed.",
+      error: normalizeScanStorageError(error, "Relative strength refresh failed."),
       completedAt: new Date().toISOString(),
       lastAdvancedAt: new Date().toISOString(),
       phase: "failed",
@@ -9038,7 +9045,7 @@ export async function processRelativeStrengthRefreshJob(
     await invalidateRelativeStrengthRefreshJob(
       env,
       job.id,
-      error instanceof Error ? error.message : "Relative strength refresh failed.",
+      normalizeScanStorageError(error, "Relative strength refresh failed."),
     );
   }
 
@@ -9647,12 +9654,43 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
     await upsertSymbolsFromRows(env, result.rows);
     await storeScanSnapshotResult(env, preset, result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Scan refresh failed.";
-    await env.DB.prepare(
-      "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 0, 'error', ?)",
-    )
-      .bind(crypto.randomUUID(), preset.id, TV_PROVIDER_LABEL, message)
-      .run();
+    const message = normalizeScanStorageError(error);
+    if (isCoreDatabaseCapacityError(error)) {
+      return {
+        id: crypto.randomUUID(),
+        presetId: preset.id,
+        presetName: preset.name,
+        providerLabel: TV_PROVIDER_LABEL,
+        generatedAt: new Date().toISOString(),
+        rowCount: 0,
+        matchedRowCount: 0,
+        status: "error",
+        error: message,
+        rows: [],
+      };
+    }
+    try {
+      const errorWrite = await env.DB.prepare(
+        "INSERT INTO scan_snapshots (id, preset_id, provider_label, generated_at, row_count, matched_row_count, status, error) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 0, 0, 'error', ?)",
+      )
+        .bind(crypto.randomUUID(), preset.id, TV_PROVIDER_LABEL, message)
+        .run();
+      inspectCoreDatabaseSize(env, errorWrite.meta?.size_after, "scan-snapshot-error-write");
+    } catch (writeError) {
+      if (!isCoreDatabaseCapacityError(writeError)) throw writeError;
+      return {
+        id: crypto.randomUUID(),
+        presetId: preset.id,
+        presetName: preset.name,
+        providerLabel: TV_PROVIDER_LABEL,
+        generatedAt: new Date().toISOString(),
+        rowCount: 0,
+        matchedRowCount: 0,
+        status: "error",
+        error: normalizeScanStorageError(writeError),
+        rows: [],
+      };
+    }
   }
 
   const snapshot = await loadLatestScansSnapshot(env, preset.id);
@@ -9985,7 +10023,7 @@ export async function cleanupScannerCacheRunData(
 
 export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTION_DAYS): Promise<ScannerCacheRetentionStats> {
   const window = `-${Math.max(1, retentionDays)} day`;
-  await env.DB.batch([
+  const cleanupResults = await env.DB.batch([
     env.DB.prepare(
       "DELETE FROM relative_strength_materialization_queue WHERE run_id IN (SELECT id FROM relative_strength_materialization_runs WHERE datetime(updated_at) < datetime('now', ?))",
     ).bind(window),
@@ -10008,6 +10046,7 @@ export async function cleanupOldScansPageData(env: Env, retentionDays = RETENTIO
     ).bind(window),
     env.DB.prepare("DELETE FROM scan_snapshots WHERE datetime(generated_at) < datetime('now', ?)").bind(window),
   ]);
+  inspectCoreDatabaseResults(env, cleanupResults, "scans-page-housekeeping");
   return cleanupScannerCacheRunData(env, retentionDays);
 }
 

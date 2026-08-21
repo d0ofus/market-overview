@@ -611,7 +611,7 @@ export async function refreshAndStoreOverviewSnapshot(
           replaceExisting: true,
           providerBatchSize: 80,
           target: "market",
-          mirrorLatestToLegacy: true,
+          syncSymbolsToCore: true,
         });
         fetchedRows += refresh.fetchedRows;
         writtenRows += refresh.writtenRows;
@@ -2166,7 +2166,7 @@ export async function refreshMissingBreadthBarsForCoverage(
       replaceExisting: true,
       continueOnError: true,
       target: "market",
-      mirrorLatestToLegacy: true,
+      syncSymbolsToCore: true,
     });
     fetchedRows += refresh.fetchedRows;
     writtenRows += refresh.writtenRows;
@@ -2219,7 +2219,7 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
       startDate,
       endDate,
       target: "market",
-      mirrorLatestToLegacy: true,
+      syncSymbolsToCore: true,
     });
     barCount = refresh.writtenRows;
   } catch (error) {

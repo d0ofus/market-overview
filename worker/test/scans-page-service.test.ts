@@ -333,6 +333,7 @@ function createMutableScansEnv(input: {
   symbols?: string[];
   dailyBarsByTicker?: Record<string, Array<{ date: string; o: number; h: number; l: number; c: number; volume: number }>>;
   rowsBySnapshotId?: Record<string, Array<Partial<ScanSnapshotRow> & Pick<ScanSnapshotRow, "ticker">>>;
+  scanSnapshotBatchError?: string;
 }) {
   const presets = [...input.presets];
   const compilePresets = [...(input.compilePresets ?? [])];
@@ -376,6 +377,7 @@ function createMutableScansEnv(input: {
   );
   let generatedCounter = snapshots.length;
   let timestampCounter = 0;
+  let scanSnapshotBatchFailuresRemaining = input.scanSnapshotBatchError ? 1 : 0;
 
   const nextTimestamp = () => {
     timestampCounter += 1;
@@ -1066,6 +1068,13 @@ function createMutableScansEnv(input: {
         };
       },
       async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+        if (
+          scanSnapshotBatchFailuresRemaining > 0
+          && statements.some((statement) => statement.__sql?.includes("INSERT INTO scan_snapshots"))
+        ) {
+          scanSnapshotBatchFailuresRemaining -= 1;
+          throw new Error(input.scanSnapshotBatchError);
+        }
         for (const statement of statements) {
           if (!statement.__sql) continue;
           if (statement.__sql.includes("DELETE FROM relative_strength_materialization_queue WHERE run_id = ?")) {
@@ -3294,6 +3303,53 @@ describe("scans page service", () => {
     ]);
     expect(result.memberResults[1]?.usableSnapshot?.rows.map((row) => row.ticker)).toEqual(["OLDB"]);
     expect(result.snapshot.rows.map((row) => row.ticker)).toEqual(["NVDA", "OLDB"]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the prior compiled snapshot and reports an actionable error when core D1 is full", async () => {
+    const preset = { ...topGainersPreset, id: "preset-a", name: "Leaders", sortField: "change" } satisfies ScanPreset;
+    const { env, snapshots } = createMutableScansEnv({
+      presets: [preset],
+      compilePresets: [{
+        id: "compile-daily",
+        name: "Daily",
+        createdAt: "",
+        updatedAt: "",
+        members: [{ scanPresetId: "preset-a", scanPresetName: "Leaders", sortOrder: 1 }],
+      }],
+      snapshots: [
+        { id: "snap-prev", presetId: "preset-a", providerLabel: "TV", generatedAt: "2026-03-18T01:00:00.000Z", rowCount: 1, matchedRowCount: 1, status: "ok", error: null },
+      ],
+      rowsBySnapshotId: {
+        "snap-prev": [
+          { ticker: "OLD", name: "Prior Leader", change1d: 1.5, price: 10, rawJson: "{}" },
+        ],
+      },
+      scanSnapshotBatchError: "D1_ERROR: Exceeded maximum DB size",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { s: "NASDAQ:NEW", d: ["New Leader", "Technology", "Software", 5.2, 1, 2.3, 120, 10, 1200, 10, "NASDAQ", "stock"] },
+        ],
+      }),
+    }));
+
+    const result = await refreshScanCompilePreset(env, "compile-daily");
+
+    expect(result).toMatchObject({ refreshedCount: 0, failedCount: 1 });
+    expect(result.memberResults[0]).toMatchObject({
+      status: "error",
+      usedFallback: true,
+      includedInCompiled: true,
+      error: expect.stringContaining("Core D1 storage is full"),
+    });
+    expect(result.memberResults[0]?.usableSnapshot?.id).toBe("snap-prev");
+    expect(result.memberResults[0]?.snapshot?.rows).toEqual([]);
+    expect(result.snapshot.rows.map((row) => row.ticker)).toEqual(["OLD"]);
+    expect(snapshots.map((snapshot) => snapshot.id)).toEqual(["snap-prev"]);
 
     vi.unstubAllGlobals();
   });

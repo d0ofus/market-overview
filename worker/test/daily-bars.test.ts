@@ -174,7 +174,7 @@ describe("refreshDailyBarsIncremental", () => {
     expect(result.currentDateCoveragePct).toBeCloseTo(33.333, 2);
   });
 
-  it("stores full Alpaca history in MARKET_DATA_DB and mirrors only the latest session", async () => {
+  it("stores full Alpaca history in MARKET_DATA_DB, syncs symbols, and does not mirror legacy bars", async () => {
     const marketStatements: Array<{ sql: string; args: unknown[] }> = [];
     const legacyStatements: Array<{ sql: string; args: unknown[] }> = [];
     const createTrackingDb = (target: "market" | "legacy") => ({
@@ -247,14 +247,16 @@ describe("refreshDailyBarsIncremental", () => {
       provider,
       replaceExisting: true,
       target: "market",
-      mirrorLatestToLegacy: true,
+      syncSymbolsToCore: true,
     });
 
     const marketBarWrites = marketStatements.filter((statement) => statement.sql.includes("INSERT INTO alpaca_daily_bars"));
     const legacyBarWrites = legacyStatements.filter((statement) => statement.sql.includes("INSERT INTO daily_bars"));
+    const symbolWrites = legacyStatements.filter((statement) => statement.sql.includes("INSERT OR IGNORE INTO symbols"));
     expect(marketBarWrites.map((statement) => statement.args[2])).toEqual(["2026-06-01", "2026-06-02"]);
-    expect(legacyBarWrites.map((statement) => statement.args[1])).toEqual(["2026-06-02"]);
-    expect(result).toMatchObject({ writtenRows: 2, mirroredRows: 1, currentDateTickers: 1 });
+    expect(legacyBarWrites).toEqual([]);
+    expect(symbolWrites.map((statement) => statement.args[0])).toEqual(["AAA"]);
+    expect(result).toMatchObject({ writtenRows: 2, currentDateTickers: 1 });
   });
 
   it("requests and writes older missing sessions even when a newer market bar exists", async () => {
