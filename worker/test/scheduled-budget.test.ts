@@ -31,8 +31,10 @@ describe("scheduled budget and lane helpers", () => {
     expect(classifyScheduledCron(undefined)).toBe("core");
   });
 
-  it("keeps the deployed cron list in sync with wrangler.toml", () => {
+  it("keeps the deployable Free-plan cron list in sync with wrangler.toml and scans on the core fallback", () => {
     expect(configuredCronTriggers()).toEqual([...DEPLOYED_SCHEDULED_CRONS]);
+    expect(DEPLOYED_SCHEDULED_CRONS).not.toContain(SCHEDULED_SCANS_CRON);
+    expect(scheduledLanesForCron(SCHEDULED_CORE_CRON)).toContain("scans");
   });
 
   it("prioritizes scanner continuation and post-close planning before lower-priority scan work", () => {
