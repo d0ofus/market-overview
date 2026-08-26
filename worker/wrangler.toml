@@ -55,6 +55,19 @@ WEEKLY_MARKET_REVIEW_SCHEDULE_DAY = "Saturday"
 WEEKLY_MARKET_REVIEW_SCHEDULE_TIME = "11:00"
 WEEKLY_MARKET_REVIEW_HERMES_GRACE_MINUTES = "180"
 MARKET_OVERVIEW_PUBLIC_URL = "https://market-overview-nu.vercel.app"
+SCANNER_CACHE_QUEUE_ENABLED = "false"
+SCANNER_CACHE_BATCHING_ENABLED = "false"
+SCANNER_CACHE_BATCH_SIZE = "10"
+
+[[queues.producers]]
+binding = "SCANNER_CACHE_SCAN_QUEUE"
+queue = "scanner-cache-scan-runs"
+
+[[queues.consumers]]
+queue = "scanner-cache-scan-runs"
+dead_letter_queue = "scanner-cache-scan-runs-dlq"
+max_retries = 5
+max_batch_size = 1
 
 [[d1_databases]]
 binding = "DB"
@@ -71,6 +84,7 @@ migrations_dir = "market-data-migrations"
 binding = "SCANNER_CACHE_DB"
 database_name = "market_rs"
 database_id = "6837481f-3dd3-4f7c-933d-7927b5c755cd"
+migrations_dir = "scanner-cache-migrations"
 
 [[d1_databases]]
 binding = "FUNDAMENTALS_DB"
@@ -91,5 +105,6 @@ database_id = "efc8828b-6a94-41bd-9f7d-f3b6ece191c4"
 crons = [
   "*/15 * * * *",
   "*/5 * * * *",
+  "5,20,35,50 * * * *",
   "11,26,41,56 * * * *",
 ]

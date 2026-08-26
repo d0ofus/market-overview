@@ -1283,6 +1283,22 @@ export type ScanRefreshJob = {
   appliesToPreset?: boolean;
 };
 
+export type RelativeStrengthBackendReadiness = {
+  status: "ready" | "building" | "stale" | "failed" | "waiting" | "unavailable";
+  expectedTradingDate: string;
+  readyTradingDate: string | null;
+  processedTickers: number;
+  totalTickers: number;
+  progressPct: number;
+  runId: string | null;
+  runStartedAt: string | null;
+  runUpdatedAt: string | null;
+  publishedAt: string | null;
+  warning: string | null;
+  error: string | null;
+  capacity: { status: "ok" | "warning" | "halt" | "unavailable"; sizeBytes: number | null; warnBytes: number; haltBytes: number };
+};
+
 export type ScanRefreshResponse = {
   ok: boolean;
   async: boolean;
@@ -3510,7 +3526,7 @@ export function refreshScansSnapshot(presetId?: string | null) {
 }
 
 export function getLatestScanRefreshJob(presetId: string) {
-  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob | null }>(
+  return adminFetch<{ ok: boolean; snapshot: ScanSnapshot | null; job: ScanRefreshJob | null; readiness: RelativeStrengthBackendReadiness | null }>(
     appendQuery("/api/admin/scans/refresh-jobs/latest", { presetId }),
   );
 }

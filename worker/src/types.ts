@@ -3,6 +3,12 @@ export type Env = {
   MARKET_DATA_DB?: D1Database;
   FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
+  SCANNER_CACHE_SCAN_QUEUE?: Queue<ScannerCacheScanQueueWakeUp>;
+  SCANNER_CACHE_QUEUE_ENABLED?: string;
+  SCANNER_CACHE_BATCHING_ENABLED?: string;
+  SCANNER_CACHE_BATCH_SIZE?: string;
+  SCANNER_CACHE_WARN_BYTES?: string;
+  SCANNER_CACHE_HALT_BYTES?: string;
   RS_STATE_V2_DUAL_WRITE_ENABLED?: string;
   RS_STATE_V2_READ_ENABLED?: string;
   RS_LEGACY_CACHE_WRITE_ENABLED?: string;
@@ -110,6 +116,12 @@ export type Env = {
   ALPHA_VANTAGE_REQUESTS_PER_DAY_HARD?: string;
   FINNHUB_REQUESTS_PER_MINUTE_WARN?: string;
   FINNHUB_REQUESTS_PER_MINUTE_HARD?: string;
+};
+
+export type ScannerCacheScanQueueWakeUp = {
+  version: 1;
+  runId: string;
+  runType: "relative-strength" | "vcp";
 };
 
 export type RankingWindow = "1D" | "5D" | "1W" | "YTD" | "52W";

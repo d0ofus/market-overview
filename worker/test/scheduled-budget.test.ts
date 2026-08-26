@@ -35,6 +35,14 @@ describe("scheduled budget and lane helpers", () => {
     expect(configuredCronTriggers()).toEqual([...DEPLOYED_SCHEDULED_CRONS]);
   });
 
+  it("prioritizes scanner continuation and post-close planning before lower-priority scan work", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const lane = source.slice(source.indexOf("const runScansLane"), source.indexOf("const runReportsLane"));
+    expect(lane.indexOf("scanner-cache-scan-continuation")).toBeLessThan(lane.indexOf("relative-strength-post-close-precompute"));
+    expect(lane.indexOf("relative-strength-post-close-precompute")).toBeLessThan(lane.indexOf("runScheduledSocialAlertScrapeJob"));
+    expect(lane.indexOf("runScheduledSocialAlertScrapeJob")).toBeLessThan(lane.indexOf("pattern-scan"));
+  });
+
   it("runs scans and maintenance as explicit fallback lanes from the deployed core cron", () => {
     expect(scheduledLanesForCron(SCHEDULED_CORE_CRON)).toEqual(["core", "scans", "maintenance"]);
     expect(scheduledLanesForCron(SCHEDULED_MARKET_DATA_CRON)).toEqual(["market-data"]);

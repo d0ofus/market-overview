@@ -85,7 +85,7 @@ describe("scanner cache retention", () => {
           if (sql.includes("SELECT id, run_type as runType")) selectionSql = sql;
           return {
             bind() {
-              return { async first() { return null; } };
+              return { async first() { return null; }, async run() { return { meta: { rows_written: 0 } }; } };
             },
           };
         },
@@ -95,6 +95,8 @@ describe("scanner cache retention", () => {
     await cleanupScannerCacheRunData(env);
     expect(selectionSql).toContain("status IN ('completed', 'failed', 'cancelled')");
     expect(selectionSql).toContain("latest.status = 'completed'");
+    expect(selectionSql).toContain("rs_publications publication");
+    expect(selectionSql).toContain("publication.run_id = r.id");
     expect(selectionSql).not.toContain("status NOT IN ('queued', 'running')");
   });
 });

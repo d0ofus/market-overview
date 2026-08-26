@@ -203,13 +203,15 @@ import {
   loadScanPreset,
   backfillScannerCacheRsCache,
   loadScannerCacheRsCacheStatus,
-  refreshActiveRelativeStrengthPresets,
+  loadRelativeStrengthBackendReadiness,
   refreshScanCompilePreset,
   refreshScansSnapshot,
   requestScansRefresh,
   upsertScanCompilePreset,
   upsertScanPreset,
 } from "./scans-page-service";
+import { planScheduledRelativeStrengthPrecompute } from "./rs-precompute-service";
+import { consumeScannerCacheWakeUps, reconcileScannerCacheRuns } from "./scanner-cache-runner-service";
 import {
   createPeerGroup,
   deletePeerGroup,
@@ -4953,12 +4955,15 @@ app.get("/api/admin/scans/refresh-jobs/latest", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const presetId = (c.req.query("presetId") ?? "").trim();
   if (!presetId) return c.json({ error: "presetId is required." }, 400);
+  const preset = await loadScanPreset(c.env, presetId);
+  if (!preset) return c.json({ error: "Scan preset not found." }, 404);
+  const readiness = await loadRelativeStrengthBackendReadiness(c.env, preset);
   const payload = await loadLatestActiveScanRefreshJob(c.env, presetId);
-  if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId) });
+  if (!payload) return c.json({ ok: true, job: null, snapshot: await loadLatestUsableScansSnapshot(c.env, presetId), readiness });
   if (payload.job.status === "queued" || payload.job.status === "running") {
     scheduleScannerCacheScanPulse(c, payload.job.id);
   }
-  return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot });
+  return c.json({ ok: true, job: payload.job, snapshot: payload.snapshot, readiness });
 });
 
 app.get("/api/admin/scans/refresh-jobs/:jobId", async (c) => {
@@ -7589,6 +7594,7 @@ async function publishScheduledBreadthIfReady(env: Env, asOfDate: string): Promi
 }
 
 export default {
+  queue: consumeScannerCacheWakeUps,
   fetch: app.fetch,
   email: async (message: any, env: Env): Promise<void> => {
     await handleInboundTradingViewEmail(message, env);
@@ -7858,21 +7864,18 @@ export default {
     };
 
     const runScansLane = async (): Promise<void> => {
-      await runScheduledSocialAlertScrapeJob();
       const { runBudgeted } = runnerForLane("scans");
       const workerSchedule = await loadWorkerScheduleSettings(env);
-      await runBudgeted("scanner-cache-scan-continuation", 12, () => advanceScannerCacheScanRuns(env, {
-        maxRuns: 2,
+      await runBudgeted("scanner-cache-scan-continuation", 12, () => reconcileScannerCacheRuns(env, {
+        maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
         batchSize: workerSchedule.rsBackgroundBatchSize,
         timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-      }).then(() => undefined));
+      }));
       if (workerSchedule.rsBackgroundEnabled) {
-        await runBudgeted("relative-strength-background", 14, () => refreshActiveRelativeStrengthPresets(env, {
-          batchSize: workerSchedule.rsBackgroundBatchSize,
-          maxBatches: workerSchedule.rsBackgroundMaxBatchesPerTick,
-          timeBudgetMs: workerSchedule.rsBackgroundTimeBudgetMs,
-        }).then(() => undefined));
+        await runBudgeted("relative-strength-post-close-precompute", 6, () =>
+          planScheduledRelativeStrengthPrecompute(env, now, workerSchedule).then(() => undefined));
       }
+      await runScheduledSocialAlertScrapeJob();
       await runBudgeted("pattern-scan", 12, () => maybeRunScheduledPatternScan(env, now, workerSchedule).then(() => undefined));
     };
 

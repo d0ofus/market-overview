@@ -1,6 +1,8 @@
 import { getProvider } from "./provider";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
+import { getUsMarketSessionContext, latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
 import { meteredFetchWithRetry } from "./provider-usage";
@@ -466,6 +468,8 @@ type ManualRelativeStrengthCandidateRow = {
   reason: string | null;
   latestTradingDate: string | null;
   source: string | null;
+  attemptCount?: number;
+  lastError?: string | null;
 };
 
 type ManualRelativeStrengthFeatureRow = RelativeStrengthLatestCacheRecord & {
@@ -763,7 +767,7 @@ function relativeStrengthConfigKey(input: {
 
 function buildRelativeStrengthConfigIdentity(
   preset: Pick<ScanPreset, "benchmarkTicker" | "rsMaType" | "rsMaLength" | "newHighLookback">,
-  expectedTradingDate = latestUsSessionAsOfDate(new Date()),
+  expectedTradingDate = latestUsMarketSessionAsOfDate(new Date()),
 ): RelativeStrengthConfigIdentity {
   const benchmarkTicker = benchmarkTickerForPreset(preset);
   const rsMaType = normalizeRsMaType(preset.rsMaType);
@@ -779,6 +783,18 @@ function buildRelativeStrengthConfigIdentity(
     requiredBarCount: Math.max(newHighLookback, RS_REQUIRED_BAR_FLOOR, RS_RATIO_RETENTION_BARS),
     expectedTradingDate,
   };
+}
+
+export async function resolveRelativeStrengthExpectedTradingDate(env: Env, now = new Date()): Promise<string> {
+  const session = getUsMarketSessionContext(now);
+  if (!session.isTradingDay) return session.latestCompletedSessionDate;
+  try {
+    const storedSession = await loadStoredMarketSession(env, session.nyDate);
+    if (storedSession && session.nyTime >= storedSession.closeAt) return session.nyDate;
+  } catch (error) {
+    console.warn("stored market session lookup failed; using static market calendar", { sessionDate: session.nyDate, error });
+  }
+  return session.latestCompletedSessionDate;
 }
 
 function rawRelativeStrengthConfig(identity: RelativeStrengthConfigIdentity): RelativeStrengthConfig {
@@ -2977,6 +2993,21 @@ export type ScannerCacheScanRunAdvanceResult = {
   errors: string[];
 };
 
+export function scannerCacheRelativeStrengthBatchSize(
+  env: Pick<Env, "SCANNER_CACHE_BATCHING_ENABLED" | "SCANNER_CACHE_BATCH_SIZE">,
+  requestedBatchSize?: number,
+): number {
+  const batchingEnabled = String(env.SCANNER_CACHE_BATCHING_ENABLED ?? "").trim().toLowerCase() === "true";
+  if (!batchingEnabled) return 1;
+  const configuredBatchSize = Number(env.SCANNER_CACHE_BATCH_SIZE ?? requestedBatchSize ?? 10);
+  return Math.max(1, Math.min(25, Number.isFinite(configuredBatchSize) ? Math.trunc(configuredBatchSize) : 10));
+}
+
+export function shouldRetryManualRelativeStrengthTicker(status: string, completedAttempts: number): boolean {
+  return status === "error"
+    && Math.max(0, Math.trunc(Number(completedAttempts) || 0)) + 1 < RS_DEFERRED_TICKER_MAX_ATTEMPTS;
+}
+
 function isScannerCacheQueueMissingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
   const lower = message.toLowerCase();
@@ -2989,7 +3020,7 @@ function scannerCacheRunQueuePriority(source: string | null | undefined): number
   return 50;
 }
 
-async function enqueueScannerCacheScanRun(
+export async function enqueueScannerCacheScanRun(
   env: Env,
   runId: string,
   runType: ScannerCacheScanRunType,
@@ -3012,6 +3043,15 @@ async function enqueueScannerCacheScanRun(
     )
       .bind(runId, runType, source, scannerCacheRunQueuePriority(source), nextAttemptAt)
       .run();
+    if (String(env.SCANNER_CACHE_QUEUE_ENABLED ?? "").trim().toLowerCase() === "true" && env.SCANNER_CACHE_SCAN_QUEUE) {
+      try {
+        await env.SCANNER_CACHE_SCAN_QUEUE.send({ version: 1, runId, runType }, delayMs > 0
+          ? { delaySeconds: Math.max(1, Math.min(300, Math.ceil(delayMs / 1_000))) }
+          : undefined);
+      } catch (error) {
+        console.warn("scanner cache native queue wake-up failed; D1 reconciliation retained", { runId, runType, error });
+      }
+    }
     return true;
   } catch (error) {
     if (isScannerCacheQueueMissingError(error)) return false;
@@ -3699,9 +3739,11 @@ async function loadActiveManualRelativeStrengthRun(env: Env): Promise<ManualRela
   return row ? normalizeManualRunRecord(row) : null;
 }
 
-async function loadLatestCompletedManualRelativeStrengthRunForConfig(
+export async function loadLatestCompletedManualRelativeStrengthRunForConfig(
   env: Env,
   configKey: string,
+  expectedTradingDate?: string,
+  requestedBy?: "manual" | "scheduled",
 ): Promise<ManualRelativeStrengthRunRecord | null> {
   if (!hasScannerCacheStorage(env)) return null;
   const row = await env.SCANNER_CACHE_DB.prepare(
@@ -3745,11 +3787,21 @@ async function loadLatestCompletedManualRelativeStrengthRunForConfig(
        last_attempt_elapsed_ms as lastAttemptElapsedMs
      FROM rs_scan_runs
      WHERE config_key = ?
+       AND (? IS NULL OR expected_trading_date = ?)
+       AND (? IS NULL OR requested_by = ?)
+       AND (? != 'scheduled' OR (source_post_close_job_id IS NOT NULL AND universe_fingerprint IS NOT NULL))
        AND status = 'completed'
      ORDER BY datetime(completed_at) DESC, datetime(created_at) DESC
      LIMIT 1`,
   )
-    .bind(configKey)
+    .bind(
+      configKey,
+      expectedTradingDate ?? null,
+      expectedTradingDate ?? null,
+      requestedBy ?? null,
+      requestedBy ?? null,
+      requestedBy ?? null,
+    )
     .first<ManualRelativeStrengthRunRecord>();
   return row ? normalizeManualRunRecord(row) : null;
 }
@@ -3774,85 +3826,253 @@ async function failManualRelativeStrengthRun(env: Env, runId: string, error: str
   await removeScannerCacheScanRunFromQueue(env, runId);
 }
 
+const RS_UNIVERSE_SOURCE_VERSION = "post-close-job-completed-items-v1";
+const RS_SUPPORTED_UNIVERSE_TYPES = new Set([
+  "stock",
+  "stocks",
+  "equity",
+  "common_stock",
+  "common stock",
+  "dr",
+  "depositary_receipt",
+  "depositary receipt",
+]);
+
+function scanRowExchangeAndType(row: ScanSnapshotRow): { exchange: string | null; assetClass: string | null } {
+  try {
+    const raw = row.rawJson ? JSON.parse(row.rawJson) as Record<string, unknown> : null;
+    return {
+      exchange: typeof raw?.exchange === "string" ? raw.exchange : null,
+      assetClass: typeof raw?.type === "string" ? raw.type : null,
+    };
+  } catch {
+    return { exchange: null, assetClass: null };
+  }
+}
+
+const DEFAULT_SCANNER_CACHE_WARN_BYTES = 425_000_000;
+const DEFAULT_SCANNER_CACHE_HALT_BYTES = 475_000_000;
+
+export type ScannerCacheCapacity = {
+  status: "ok" | "warning" | "halt" | "unavailable";
+  sizeBytes: number | null;
+  warnBytes: number;
+  haltBytes: number;
+};
+
+function scannerCapacityThreshold(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+}
+
+export async function loadScannerCacheCapacity(env: Env): Promise<ScannerCacheCapacity> {
+  const warnBytes = scannerCapacityThreshold(env.SCANNER_CACHE_WARN_BYTES, DEFAULT_SCANNER_CACHE_WARN_BYTES);
+  const haltBytes = Math.max(warnBytes, scannerCapacityThreshold(env.SCANNER_CACHE_HALT_BYTES, DEFAULT_SCANNER_CACHE_HALT_BYTES));
+  if (!env.SCANNER_CACHE_DB) return { status: "unavailable", sizeBytes: null, warnBytes, haltBytes };
+  try {
+    const [count, size] = await Promise.all([
+      env.SCANNER_CACHE_DB.prepare("PRAGMA page_count").first<Record<string, number>>(),
+      env.SCANNER_CACHE_DB.prepare("PRAGMA page_size").first<Record<string, number>>(),
+    ]);
+    const pageCount = Number(count?.page_count ?? Object.values(count ?? {})[0]);
+    const pageSize = Number(size?.page_size ?? Object.values(size ?? {})[0]);
+    const sizeBytes = Number.isFinite(pageCount) && Number.isFinite(pageSize) ? pageCount * pageSize : null;
+    const status = sizeBytes == null ? "unavailable" : sizeBytes >= haltBytes ? "halt" : sizeBytes >= warnBytes ? "warning" : "ok";
+    return { status, sizeBytes, warnBytes, haltBytes };
+  } catch {
+    return { status: "unavailable", sizeBytes: null, warnBytes, haltBytes };
+  }
+}
+
+function inspectScannerCacheWriteResults(
+  env: Env,
+  results: D1Result<unknown>[],
+  operation: string,
+  options: { throwOnHalt?: boolean } = {},
+): void {
+  const sizeAfter = results.reduce<number | null>((largest, result) => {
+    const value = Number((result.meta as { size_after?: number } | undefined)?.size_after);
+    return Number.isFinite(value) ? Math.max(largest ?? 0, value) : largest;
+  }, null);
+  if (sizeAfter == null) return;
+  const warnBytes = scannerCapacityThreshold(env.SCANNER_CACHE_WARN_BYTES, DEFAULT_SCANNER_CACHE_WARN_BYTES);
+  const haltBytes = Math.max(warnBytes, scannerCapacityThreshold(env.SCANNER_CACHE_HALT_BYTES, DEFAULT_SCANNER_CACHE_HALT_BYTES));
+  if (sizeAfter >= warnBytes) console.warn("scanner cache capacity threshold reached", { operation, sizeAfter, warnBytes, haltBytes });
+  if (sizeAfter >= haltBytes && options.throwOnHalt !== false) {
+    throw new Error("Scanner cache capacity halt threshold reached; the previous RS publication remains active.");
+  }
+}
+
+function compareCanonicalUniverseRows(left: ScanSnapshotRow, right: ScanSnapshotRow): number {
+  const leftDetails = scanRowExchangeAndType(left);
+  const rightDetails = scanRowExchangeAndType(right);
+  const exchangeRank = (exchange: string | null): number => exchange?.toUpperCase() === "NASDAQ" ? 0
+    : exchange?.toUpperCase() === "NYSE" ? 1
+      : exchange?.toUpperCase() === "AMEX" ? 2
+        : 3;
+  const rankDifference = exchangeRank(leftDetails.exchange) - exchangeRank(rightDetails.exchange);
+  if (rankDifference !== 0) return rankDifference;
+  const liquidityDifference = (right.priceAvgVolume ?? 0) - (left.priceAvgVolume ?? 0);
+  if (liquidityDifference !== 0) return liquidityDifference;
+  return String(leftDetails.exchange ?? "").localeCompare(String(rightDetails.exchange ?? ""));
+}
+
+export function canonicalizeRelativeStrengthUniverseRows(rows: ScanSnapshotRow[]): ScanSnapshotRow[] {
+  const rowsByTicker = new Map<string, ScanSnapshotRow>();
+  for (const row of rows) {
+    const ticker = normalizeTicker(row.ticker);
+    const { assetClass } = scanRowExchangeAndType(row);
+    if (!ticker || !RS_SUPPORTED_UNIVERSE_TYPES.has(String(assetClass ?? "").trim().toLowerCase())) continue;
+    const candidate = { ...row, ticker };
+    const current = rowsByTicker.get(ticker);
+    if (!current || compareCanonicalUniverseRows(candidate, current) < 0) {
+      rowsByTicker.set(ticker, candidate);
+    }
+  }
+  return Array.from(rowsByTicker.values()).sort((left, right) => left.ticker.localeCompare(right.ticker));
+}
+
 async function loadManualRelativeStrengthUniverseCandidates(
   env: Env,
+  preset: ScanPreset,
+): Promise<ManualRelativeStrengthCandidateRow[]> {
+  const result = await fetchTradingViewScanRowsInternal(preset, {
+    rules: [],
+    sortField: "Value.Traded",
+    sortDirection: "desc",
+    rowLimit: MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE,
+    maxRowLimit: MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE,
+    alwaysPaginate: true,
+  }, env);
+  return canonicalizeRelativeStrengthUniverseRows(result.rows)
+    .map(snapshotRowToManualRelativeStrengthCandidate)
+    .map((row, cursorOffset) => ({ ...row, cursorOffset }));
+}
+
+export async function loadScheduledRelativeStrengthUniverseCandidates(
+  env: Env,
+  sourcePostCloseJobId: string,
   expectedTradingDate: string,
 ): Promise<ManualRelativeStrengthCandidateRow[]> {
-  const rows = await env.DB.prepare(
-    `SELECT
-       s.ticker,
-       s.name,
-       s.sector,
-       s.industry,
-       s.exchange,
-       s.asset_class as assetClass
-     FROM symbols s
-     WHERE COALESCE(s.is_active, 1) = 1
-       AND LOWER(COALESCE(s.asset_class, 'equity')) IN ('equity', 'stock', 'stocks', 'common_stock', 'common stock')
-     ORDER BY s.ticker ASC
-     LIMIT ?`,
-  )
-    .bind(MANUAL_RS_SCAN_MAX_UNIVERSE_SIZE)
-    .all<{
-      ticker: string;
-      name: string | null;
-      sector: string | null;
-      industry: string | null;
-      exchange: string | null;
-      assetClass: string | null;
-    }>();
+  const stateDb = getMarketDataDb(env);
+  const items = await stateDb.prepare(
+    `SELECT ticker, ordinal as cursorOffset
+     FROM post_close_daily_bar_refresh_job_items
+     WHERE job_id = ? AND status = 'completed' AND bar_date = ?
+     ORDER BY ordinal ASC`,
+  ).bind(sourcePostCloseJobId, expectedTradingDate).all<{ ticker: string; cursorOffset: number }>();
+  const rows = items.results ?? [];
+  if (rows.length === 0) {
+    throw new Error(`Post-close source job ${sourcePostCloseJobId} has no completed ${expectedTradingDate} universe items.`);
+  }
 
-  return (rows.results ?? [])
-    .map((row, index) => ({
-      cursorOffset: index,
-      ticker: row.ticker.toUpperCase(),
-      name: row.name ?? row.ticker.toUpperCase(),
-      sector: row.sector ?? null,
-      industry: row.industry ?? null,
-      exchange: row.exchange ?? null,
-      assetClass: row.assetClass ?? null,
-      marketCap: null,
-      relativeVolume: null,
-      avgVolume: null,
-      priceAvgVolume: null,
-      price: null,
-      change1d: null,
+  const normalizedRows = rows
+    .map((row) => ({ ...row, ticker: normalizeTicker(row.ticker) }))
+    .filter((row): row is typeof row & { ticker: string } => Boolean(row.ticker));
+  const symbols = new Map<string, { name: string | null; sector: string | null; industry: string | null; exchange: string | null; assetClass: string | null; sharesOutstanding: number | null }>();
+  const marketMetrics = new Map<string, { price: number | null; previousPrice: number | null; volume: number | null; avgVolume: number | null }>();
+  const tickers = normalizedRows.map((row) => row.ticker);
+  for (let index = 0; index < tickers.length; index += 90) {
+    const chunk = tickers.slice(index, index + 90);
+    const symbolRows = await env.DB.prepare(
+      `SELECT ticker, name, sector, industry, exchange, asset_class as assetClass, shares_outstanding as sharesOutstanding
+       FROM symbols WHERE ticker IN (${chunk.map(() => "?").join(",")})`,
+    ).bind(...chunk).all<{ ticker: string; name: string | null; sector: string | null; industry: string | null; exchange: string | null; assetClass: string | null; sharesOutstanding: number | null }>();
+    for (const symbol of symbolRows.results ?? []) {
+      const ticker = normalizeTicker(symbol.ticker);
+      if (ticker) symbols.set(ticker, symbol);
+    }
+    const metricRows = await stateDb.prepare(
+      `WITH ranked AS (
+         SELECT ticker, c, volume,
+           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as barRank
+         FROM alpaca_daily_bars
+         WHERE feed = ? AND date <= ? AND ticker IN (${chunk.map(() => "?").join(",")})
+       )
+       SELECT ticker,
+         MAX(CASE WHEN barRank = 1 THEN c END) as price,
+         MAX(CASE WHEN barRank = 2 THEN c END) as previousPrice,
+         MAX(CASE WHEN barRank = 1 THEN volume END) as volume,
+         AVG(CASE WHEN barRank <= 30 THEN volume END) as avgVolume
+       FROM ranked WHERE barRank <= 30 GROUP BY ticker`,
+    ).bind(marketDataFeed(env), expectedTradingDate, ...chunk).all<{
+      ticker: string;
+      price: number | null;
+      previousPrice: number | null;
+      volume: number | null;
+      avgVolume: number | null;
+    }>();
+    for (const metrics of metricRows.results ?? []) {
+      const ticker = normalizeTicker(metrics.ticker);
+      if (ticker) marketMetrics.set(ticker, metrics);
+    }
+  }
+
+  return normalizedRows.map((row, cursorOffset) => {
+    const ticker = row.ticker;
+    const symbol = symbols.get(ticker);
+    const metrics = marketMetrics.get(ticker);
+    const price = metrics?.price != null && Number.isFinite(Number(metrics.price)) ? Number(metrics.price) : null;
+    const previousPrice = metrics?.previousPrice != null && Number.isFinite(Number(metrics.previousPrice)) ? Number(metrics.previousPrice) : null;
+    const volume = metrics?.volume != null && Number.isFinite(Number(metrics.volume)) ? Number(metrics.volume) : null;
+    const avgVolume = metrics?.avgVolume != null && Number.isFinite(Number(metrics.avgVolume)) ? Number(metrics.avgVolume) : null;
+    const sharesOutstanding = symbol?.sharesOutstanding != null && Number.isFinite(Number(symbol.sharesOutstanding))
+      ? Number(symbol.sharesOutstanding)
+      : null;
+    return {
+      cursorOffset,
+      ticker,
+      name: symbol?.name ?? ticker,
+      sector: symbol?.sector ?? null,
+      industry: symbol?.industry ?? null,
+      exchange: symbol?.exchange ?? null,
+      assetClass: symbol?.assetClass ?? "stock",
+      marketCap: sharesOutstanding != null && price != null ? sharesOutstanding * price : null,
+      relativeVolume: volume != null && avgVolume != null && avgVolume > 0 ? volume / avgVolume : null,
+      avgVolume,
+      priceAvgVolume: price != null && avgVolume != null ? price * avgVolume : null,
+      price,
+      change1d: price != null && previousPrice != null && previousPrice !== 0 ? (price / previousPrice - 1) * 100 : null,
       status: "queued",
       reason: null,
       latestTradingDate: null,
-      source: "computed",
-    }))
-    .filter((row) => normalizeTicker(row.ticker) != null);
+      source: "post-close-job",
+    };
+  });
 }
 
 async function insertManualRelativeStrengthRunCandidates(
   env: Env & { SCANNER_CACHE_DB: D1Database },
   runId: string,
   candidates: ManualRelativeStrengthCandidateRow[],
+  bulk = false,
 ): Promise<void> {
-  for (let index = 0; index < candidates.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
-    const chunk = candidates.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
-    await env.SCANNER_CACHE_DB.batch(chunk.map((row) =>
-      env.SCANNER_CACHE_DB.prepare(
+  if (!bulk) {
+    for (let index = 0; index < candidates.length; index += RS_JOB_INSERT_CHUNK_SIZE) {
+      const chunk = candidates.slice(index, index + RS_JOB_INSERT_CHUNK_SIZE);
+      await env.SCANNER_CACHE_DB.batch(chunk.map((row) => env.SCANNER_CACHE_DB.prepare(
         `INSERT INTO rs_scan_run_tickers
           (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume, avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at, source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, 'computed')`,
-      ).bind(
-        runId,
-        row.cursorOffset,
-        row.ticker,
-        row.name,
-        row.sector,
-        row.industry,
-        row.exchange,
-        row.assetClass,
-        row.marketCap,
-        row.relativeVolume,
-        row.avgVolume,
-        row.priceAvgVolume,
-        row.price,
-        row.change1d,
-      )));
+      ).bind(runId, row.cursorOffset, row.ticker, row.name, row.sector, row.industry, row.exchange, row.assetClass,
+        row.marketCap, row.relativeVolume, row.avgVolume, row.priceAvgVolume, row.price, row.change1d)));
+    }
+    return;
+  }
+  for (let index = 0; index < candidates.length; index += 500) {
+    const json = JSON.stringify(candidates.slice(index, index + 500));
+    const result = await env.SCANNER_CACHE_DB.prepare(
+      `INSERT INTO rs_scan_run_tickers
+        (run_id, cursor_offset, ticker, name, sector, industry, exchange, asset_class, market_cap, relative_volume,
+         avg_volume, price_avg_volume, price, change_1d, status, reason, latest_trading_date, computed_at, source)
+       SELECT ?, CAST(json_extract(value, '$.cursorOffset') AS INTEGER), json_extract(value, '$.ticker'),
+         json_extract(value, '$.name'), json_extract(value, '$.sector'), json_extract(value, '$.industry'),
+         json_extract(value, '$.exchange'), json_extract(value, '$.assetClass'), json_extract(value, '$.marketCap'),
+         json_extract(value, '$.relativeVolume'), json_extract(value, '$.avgVolume'), json_extract(value, '$.priceAvgVolume'),
+         json_extract(value, '$.price'), json_extract(value, '$.change1d'), 'queued', NULL, NULL, NULL, 'computed'
+       FROM json_each(?)`,
+    ).bind(runId, json).run();
+    inspectScannerCacheWriteResults(env, [result], "rs-run-candidate-staging");
   }
 }
 
@@ -3860,6 +4080,7 @@ async function createManualRelativeStrengthRun(
   env: Env & { SCANNER_CACHE_DB: D1Database },
   preset: ScanPreset,
   requestedBy?: string | null,
+  expectedTradingDate?: string,
 ): Promise<ManualRelativeStrengthRunRecord> {
   const active = await loadActiveManualRelativeStrengthRun(env);
   if (active && !isManualRelativeStrengthRunAbandoned(active)) return active;
@@ -3867,7 +4088,10 @@ async function createManualRelativeStrengthRun(
     await failManualRelativeStrengthRun(env, active.id, "Manual relative strength run was abandoned and replaced by a new request.");
   }
 
-  const identity = buildRelativeStrengthConfigIdentity(preset);
+  const capacity = await loadScannerCacheCapacity(env);
+  if (capacity.status === "halt") throw new Error("Scanner cache capacity halt threshold reached; the previous RS publication remains active.");
+
+  const identity = buildRelativeStrengthConfigIdentity(preset, expectedTradingDate);
   const candidates = (await fetchRelativeStrengthPrefilterRows(preset, env)).map(snapshotRowToManualRelativeStrengthCandidate);
   const runId = crypto.randomUUID();
   try {
@@ -3892,15 +4116,84 @@ async function createManualRelativeStrengthRun(
       .run();
     await insertManualRelativeStrengthRunCandidates(env, runId, candidates);
   } catch (error) {
-    const existing = await loadActiveManualRelativeStrengthRun(env);
-    if (existing) return existing;
     await env.SCANNER_CACHE_DB.prepare("DELETE FROM rs_scan_runs WHERE id = ?").bind(runId).run();
+    const existing = await loadActiveManualRelativeStrengthRun(env);
+    if (existing && existing.id !== runId) return existing;
     throw error;
   }
 
   const created = await loadManualRelativeStrengthRun(env, runId);
   if (!created) throw new Error("Failed to create manual relative strength scan run.");
   return created;
+}
+
+export function fingerprintRelativeStrengthUniverse(expectedTradingDate: string, tickers: string[]): string {
+  let hash = 2166136261;
+  const value = `${RS_UNIVERSE_SOURCE_VERSION}|${expectedTradingDate}|${[...tickers].sort().join("|")}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+export async function createScheduledRelativeStrengthRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  expectedTradingDate: string,
+  sourcePostCloseJobId: string,
+): Promise<ManualRelativeStrengthRunRecord> {
+  const active = await loadActiveManualRelativeStrengthRun(env);
+  const identity = buildRelativeStrengthConfigIdentity(preset, expectedTradingDate);
+  if (active && active.expectedTradingDate === expectedTradingDate && active.configKey === identity.configKey) {
+    await enqueueScannerCacheScanRun(env, active.id, "relative-strength", "scheduled");
+    return active;
+  }
+  if (active && !isManualRelativeStrengthRunAbandoned(active)) return active;
+  if (active) await failManualRelativeStrengthRun(env, active.id, "Relative strength run was superseded by the current post-close session.");
+
+  const capacity = await loadScannerCacheCapacity(env);
+  if (capacity.status === "halt") throw new Error("Scanner cache capacity halt threshold reached; the previous RS publication remains active.");
+
+  const candidates = await loadScheduledRelativeStrengthUniverseCandidates(env, sourcePostCloseJobId, expectedTradingDate);
+  const runId = crypto.randomUUID();
+  const fingerprint = fingerprintRelativeStrengthUniverse(expectedTradingDate, candidates.map((row) => row.ticker));
+  try {
+    await env.SCANNER_CACHE_DB.prepare(
+      `INSERT INTO rs_scan_runs
+        (id, preset_id, preset_name, config_key, benchmark_ticker, rs_ma_type, rs_ma_length, new_high_lookback,
+         expected_trading_date, status, requested_by, total_tickers, processed_tickers, matched_tickers, cursor_offset,
+         source_post_close_job_id, universe_fingerprint, created_at, updated_at, warning)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'scheduled', ?, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+    ).bind(runId, preset.id, preset.name, identity.configKey, identity.benchmarkTicker, identity.rsMaType,
+      identity.rsMaLength, identity.newHighLookback, expectedTradingDate, candidates.length, sourcePostCloseJobId, fingerprint).run();
+    await insertManualRelativeStrengthRunCandidates(env, runId, candidates, true);
+  } catch (error) {
+    await env.SCANNER_CACHE_DB.prepare("DELETE FROM rs_scan_runs WHERE id = ?").bind(runId).run();
+    const existing = await loadActiveManualRelativeStrengthRun(env);
+    if (existing && existing.id !== runId) return existing;
+    throw error;
+  }
+  await enqueueScannerCacheScanRun(env, runId, "relative-strength", "scheduled");
+  const created = await loadManualRelativeStrengthRun(env, runId);
+  if (!created) throw new Error("Failed to create scheduled relative strength scan run.");
+  return created;
+}
+
+export async function listActiveRelativeStrengthPrecomputePresets(env: Env): Promise<ScanPreset[]> {
+  return (await listScanPresets(env)).filter((preset) => preset.isActive && preset.scanType === "relative-strength");
+}
+
+export function relativeStrengthPrecomputeConfigKey(preset: ScanPreset, expectedTradingDate: string): string {
+  return buildRelativeStrengthConfigIdentity(preset, expectedTradingDate).configKey;
+}
+
+export function relativeStrengthPrecomputeRequiredBarCount(preset: ScanPreset, expectedTradingDate: string): number {
+  return buildRelativeStrengthConfigIdentity(preset, expectedTradingDate).requiredBarCount;
+}
+
+export function relativeStrengthPrecomputeBenchmarkDataTicker(preset: ScanPreset, expectedTradingDate: string): string {
+  return buildRelativeStrengthConfigIdentity(preset, expectedTradingDate).benchmarkDataTicker;
 }
 
 async function loadManualRelativeStrengthRunCandidateSlice(
@@ -3927,7 +4220,9 @@ async function loadManualRelativeStrengthRunCandidateSlice(
        status,
        reason,
        latest_trading_date as latestTradingDate,
-       source
+       source,
+       attempt_count as attemptCount,
+       last_error as lastError
      FROM rs_scan_run_tickers
      WHERE run_id = ?
      ORDER BY cursor_offset ASC
@@ -3944,6 +4239,8 @@ async function loadManualRelativeStrengthRunCandidateSlice(
     priceAvgVolume: row.priceAvgVolume == null ? null : Number(row.priceAvgVolume),
     price: row.price == null ? null : Number(row.price),
     change1d: row.change1d == null ? null : Number(row.change1d),
+    attemptCount: Math.max(0, Math.trunc(Number(row.attemptCount ?? 0))),
+    lastError: row.lastError ?? null,
   }));
 }
 
@@ -3999,11 +4296,17 @@ function manualRuleFieldSupported(rule: ScanPresetRule): boolean {
 }
 
 function manualRulesWarning(preset: ScanPreset): string | null {
-  const unsupported = preset.rules
+  const unsupported = effectiveManualSnapshotRules(preset)
     .filter((rule) => !manualRuleFieldSupported(rule))
     .map((rule) => rule.field);
   if (unsupported.length === 0) return null;
   return `Skipped unsupported local scanner rule fields: ${Array.from(new Set(unsupported)).join(", ")}.`;
+}
+
+export function effectiveManualSnapshotRules(preset: Pick<ScanPreset, "prefilterRules" | "rules">): ScanPresetRule[] {
+  return preset.prefilterRules.length > 0
+    ? [...preset.prefilterRules, ...preset.rules]
+    : preset.rules;
 }
 
 function manualRowToTradingViewRow(
@@ -4083,6 +4386,18 @@ async function upsertManualRelativeStrengthBatchResults(
           run.id,
           result.candidate.ticker,
         ),
+        env.SCANNER_CACHE_DB.prepare(
+          `UPDATE rs_scan_run_tickers SET rs_ratio_close = ?, rs_ratio_ma = ?, rs_above_ma = ?, rs_new_high = ?,
+             rs_new_high_before_price = ?, bull_cross = ?, approx_rs_rating = ? WHERE run_id = ? AND ticker = ?`,
+        ).bind(feature?.rsRatioClose ?? null, feature?.rsRatioMa ?? null, feature ? (asBooleanFlag(feature.rsAboveMa) ? 1 : 0) : 0,
+          feature ? (asBooleanFlag(feature.rsNewHigh) ? 1 : 0) : 0, feature ? (asBooleanFlag(feature.rsNewHighBeforePrice) ? 1 : 0) : 0,
+          feature ? (asBooleanFlag(feature.bullCross) ? 1 : 0) : 0, feature?.approxRsRating ?? null, run.id, result.candidate.ticker),
+        env.SCANNER_CACHE_DB.prepare(
+          `UPDATE rs_scan_run_tickers
+           SET attempt_count = CASE WHEN ? = 'error' THEN attempt_count + 1 ELSE attempt_count END,
+               last_error = CASE WHEN ? = 'error' THEN ? ELSE NULL END
+           WHERE run_id = ? AND ticker = ?`,
+        ).bind(result.status, result.status, result.reason, run.id, result.candidate.ticker),
       ];
       if (result.source === "cache") return rowStatements;
       rowStatements.push(
@@ -4265,7 +4580,12 @@ async function acquireManualRelativeStrengthRunLease(
          lease_owner = ?,
          lease_expires_at = ?
      WHERE id = ?
-       AND status IN ('queued', 'running')`,
+       AND status IN ('queued', 'running')
+       AND (
+         lease_owner IS NULL
+         OR lease_expires_at IS NULL
+         OR datetime(lease_expires_at) <= datetime('now')
+       )`,
   )
     .bind(leaseOwner, leaseExpiresAt, run.id)
     .run();
@@ -4718,42 +5038,53 @@ async function buildManualRelativeStrengthSnapshotResult(
        t.reason,
        t.latest_trading_date as latestTradingDate,
        t.source,
-       f.benchmark_ticker as benchmarkTicker,
-       f.rs_ma_type as rsMaType,
-       f.rs_ma_length as rsMaLength,
-       f.new_high_lookback as newHighLookback,
-       f.expected_trading_date as expectedTradingDate,
-       f.trading_date as tradingDate,
-       f.price_close as priceClose,
-       f.change_1d as featureChange1d,
-       f.rs_ratio_close as rsRatioClose,
-       f.rs_ratio_ma as rsRatioMa,
-       f.rs_above_ma as rsAboveMa,
-       f.rs_new_high as rsNewHigh,
-       f.rs_new_high_before_price as rsNewHighBeforePrice,
-       f.bull_cross as bullCross,
-       f.approx_rs_rating as approxRsRating,
-       f.computed_at as computedAt
+       ? as benchmarkTicker,
+       ? as rsMaType,
+       ? as rsMaLength,
+       ? as newHighLookback,
+       ? as expectedTradingDate,
+       COALESCE(t.latest_trading_date, f.trading_date) as tradingDate,
+       COALESCE(t.price, f.price_close) as priceClose,
+       COALESCE(t.change_1d, f.change_1d) as featureChange1d,
+       COALESCE(t.rs_ratio_close, f.rs_ratio_close) as rsRatioClose,
+       COALESCE(t.rs_ratio_ma, f.rs_ratio_ma) as rsRatioMa,
+       COALESCE(t.rs_above_ma, f.rs_above_ma) as rsAboveMa,
+       COALESCE(t.rs_new_high, f.rs_new_high) as rsNewHigh,
+       COALESCE(t.rs_new_high_before_price, f.rs_new_high_before_price) as rsNewHighBeforePrice,
+       COALESCE(t.bull_cross, f.bull_cross) as bullCross,
+       COALESCE(t.approx_rs_rating, f.approx_rs_rating) as approxRsRating,
+       COALESCE(t.computed_at, f.computed_at) as computedAt
      FROM rs_scan_run_tickers t
-     JOIN rs_features_latest f
+     LEFT JOIN rs_features_latest f
        ON f.config_key = ?
       AND f.ticker = t.ticker
+      AND f.expected_trading_date = ?
+      AND f.status = 'computed'
      WHERE t.run_id = ?
-       AND f.status = 'computed'
+       AND t.status = 'computed'
      ORDER BY t.cursor_offset ASC`,
   )
-    .bind(run.configKey, run.id)
+    .bind(
+      run.benchmarkTicker,
+      run.rsMaType,
+      run.rsMaLength,
+      run.newHighLookback,
+      run.expectedTradingDate,
+      run.configKey,
+      run.expectedTradingDate,
+      run.id,
+    )
     .all<ManualRelativeStrengthCandidateRow & ManualRelativeStrengthFeatureRow & { featureChange1d: number | null }>();
 
   const scaleFactor = preset.verticalOffset * 100;
-  const supportedRules = preset.rules.filter(manualRuleFieldSupported);
+  const supportedRules = effectiveManualSnapshotRules(preset).filter(manualRuleFieldSupported);
   const skippedRuleWarning = manualRulesWarning(preset);
   const identity = buildRelativeStrengthConfigIdentity(preset, run.expectedTradingDate);
   const mergedRows = (rows.results ?? [])
     .map((row) => {
       const cacheRow: RelativeStrengthLatestCacheRecord = {
         ticker: row.ticker.toUpperCase(),
-        benchmarkTicker: row.benchmarkTicker.toUpperCase(),
+        benchmarkTicker: (row.benchmarkTicker ?? run.benchmarkTicker).toUpperCase(),
         rsMaType: normalizeRsMaType(row.rsMaType),
         rsMaLength: Math.max(1, Math.trunc(row.rsMaLength || 21)),
         newHighLookback: Math.max(1, Math.trunc(row.newHighLookback || 252)),
@@ -4822,11 +5153,93 @@ async function buildManualRelativeStrengthSnapshotResult(
   };
 }
 
+export async function publishRelativeStrengthPresetFromCompletedRun(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  run: ManualRelativeStrengthRunRecord,
+): Promise<ScanSnapshot | null> {
+  if (run.status !== "completed") throw new Error("Only a completed relative strength generation can be published.");
+  const identity = buildRelativeStrengthConfigIdentity(preset, run.expectedTradingDate);
+  if (identity.configKey !== run.configKey) throw new Error("Relative strength generation config does not match the preset.");
+  const result = await buildManualRelativeStrengthSnapshotResult(env, preset, run);
+  const publicationId = await stageRelativeStrengthPublication(env, preset, run, result);
+  const promoted = await env.SCANNER_CACHE_DB.batch([
+    relativeStrengthPublicationPointerStatement(env.SCANNER_CACHE_DB, preset.id, publicationId),
+  ]);
+  inspectScannerCacheWriteResults(env, promoted, "rs-publication-promotion", { throwOnHalt: false });
+  return loadLatestScansSnapshot(env, preset.id);
+}
+
+const RS_PUBLICATION_WRITE_CHUNK_SIZE = 50;
+
+async function stageRelativeStrengthPublication(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  run: ManualRelativeStrengthRunRecord,
+  result: { matchedRowCount: number; status: "ok" | "warning" | "error" | "empty"; error: string | null; rows: ScanSnapshotRow[] },
+): Promise<string> {
+  const publicationId = crypto.randomUUID();
+  const headerWrite = await env.SCANNER_CACHE_DB.prepare(
+    `INSERT INTO rs_publications
+      (id, preset_id, config_key, expected_trading_date, run_id, status, row_count, matched_row_count, warning, published_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+  ).bind(publicationId, preset.id, run.configKey, run.expectedTradingDate, run.id, result.status,
+    result.rows.length, result.matchedRowCount, result.error).run();
+  inspectScannerCacheWriteResults(env, [headerWrite], "rs-publication-header");
+
+  for (let offset = 0; offset < result.rows.length; offset += RS_PUBLICATION_WRITE_CHUNK_SIZE) {
+    const chunk = result.rows.slice(offset, offset + RS_PUBLICATION_WRITE_CHUNK_SIZE);
+    const memberWrites = await env.SCANNER_CACHE_DB.batch(chunk.map((row, index) =>
+      env.SCANNER_CACHE_DB.prepare(
+        "INSERT INTO rs_publication_tickers (publication_id, ticker, rank) VALUES (?, ?, ?)",
+      ).bind(publicationId, row.ticker, offset + index)));
+    inspectScannerCacheWriteResults(env, memberWrites, "rs-publication-members");
+  }
+
+  return publicationId;
+}
+
+export async function hasMatchingRelativeStrengthPublication(
+  env: Env,
+  presetId: string,
+  configKey: string,
+  expectedTradingDate: string,
+): Promise<boolean> {
+  if (!env.SCANNER_CACHE_DB) return false;
+  const row = await env.SCANNER_CACHE_DB.prepare(
+    `SELECT 1 as found FROM rs_preset_publications pointer
+     JOIN rs_publications publication ON publication.id = pointer.publication_id
+     JOIN rs_scan_runs run ON run.id = publication.run_id
+     WHERE pointer.preset_id = ? AND publication.config_key = ? AND publication.expected_trading_date = ?
+       AND publication.status != 'error' AND run.status = 'completed' LIMIT 1`,
+  ).bind(presetId, configKey, expectedTradingDate).first<{ found: number }>();
+  return Boolean(row?.found);
+}
+
+function relativeStrengthPublicationPointerStatement(
+  db: D1Database,
+  presetId: string,
+  publicationId: string,
+  completedRunId?: string,
+): D1PreparedStatement {
+  if (completedRunId) return db.prepare(
+    `INSERT INTO rs_preset_publications (preset_id, publication_id, updated_at)
+     SELECT ?, ?, CURRENT_TIMESTAMP WHERE EXISTS (SELECT 1 FROM rs_scan_runs WHERE id = ? AND status = 'completed')
+     ON CONFLICT(preset_id) DO UPDATE SET publication_id = excluded.publication_id, updated_at = CURRENT_TIMESTAMP`,
+  ).bind(presetId, publicationId, completedRunId);
+  return db.prepare(
+    `INSERT INTO rs_preset_publications (preset_id, publication_id, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(preset_id) DO UPDATE SET publication_id = excluded.publication_id, updated_at = CURRENT_TIMESTAMP`,
+  ).bind(presetId, publicationId);
+}
+
 async function listActiveRelativeStrengthPresetsForManualRunConfig(
   env: Env,
   run: ManualRelativeStrengthRunRecord,
   requestedPreset: ScanPreset,
 ): Promise<ScanPreset[]> {
+  if (run.requestedBy !== "scheduled") return [requestedPreset];
   const presets = (await listScanPresets(env))
     .filter((preset) => preset.isActive && preset.scanType === "relative-strength")
     .filter((preset) => buildRelativeStrengthConfigIdentity(preset, run.expectedTradingDate).configKey === run.configKey);
@@ -4842,36 +5255,62 @@ async function completeManualRelativeStrengthRun(
   run: ManualRelativeStrengthRunRecord,
   matchedTickers: number,
 ): Promise<ScanSnapshot | null> {
+  if (run.requestedBy === "scheduled" && (
+    run.cursorOffset !== run.totalTickers
+    || run.processedTickers !== run.totalTickers
+    || run.missingBarsTickers !== 0
+    || run.staleBenchmarkTickers !== 0
+    || run.errorTickers !== 0
+  )) {
+    throw new Error("Scheduled RS generation is incomplete or contains current-bar, benchmark, or ticker errors.");
+  }
   const settings = await loadWorkerScheduleSettings(env);
   const targetPresets = settings.rsSharedConfigSnapshotFanoutEnabled
     ? await listActiveRelativeStrengthPresetsForManualRunConfig(env, run, preset)
     : [preset];
-  let selectedSnapshot: ScanSnapshot | null = null;
   let selectedSnapshotId: string | null = null;
   let selectedWarning: string | null = null;
+  const staged: Array<{ preset: ScanPreset; publicationId: string }> = [];
   for (const targetPreset of targetPresets) {
     const result = await buildManualRelativeStrengthSnapshotResult(env, targetPreset, run);
-    await upsertSymbolsFromRows(env, result.rows);
-    const snapshotId = await storeScanSnapshotResult(env, targetPreset, result);
+    const snapshotId = await stageRelativeStrengthPublication(env, targetPreset, run, result);
+    staged.push({ preset: targetPreset, publicationId: snapshotId });
     if (targetPreset.id === preset.id) {
       selectedSnapshotId = snapshotId;
       selectedWarning = result.error;
-      selectedSnapshot = await loadLatestScansSnapshot(env, targetPreset.id);
     }
   }
-  await heartbeatManualRelativeStrengthRun(env, run.id, {
-    status: "completed",
-    processedTickers: run.totalTickers,
-    matchedTickers,
-    cursorOffset: run.totalTickers,
-    warning: selectedWarning,
-    latestSnapshotId: selectedSnapshotId,
-    durationMs: elapsedMs(run.startedAt ?? run.createdAt) ?? undefined,
-    completedAt: new Date().toISOString(),
-    releaseLease: true,
-  });
-  await removeScannerCacheScanRunFromQueue(env, run.id);
-  return selectedSnapshot ?? loadLatestScansSnapshot(env, preset.id);
+  const completion = env.SCANNER_CACHE_DB.prepare(
+    `UPDATE rs_scan_runs SET status = 'completed', processed_tickers = ?, matched_tickers = ?, cursor_offset = ?,
+       warning = ?, latest_snapshot_id = ?, duration_ms = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+       heartbeat_at = CURRENT_TIMESTAMP, lease_owner = NULL, lease_expires_at = NULL
+     WHERE id = ? AND status IN ('queued', 'running')
+       AND lease_owner = ?
+       AND datetime(lease_expires_at) > datetime('now')`,
+  ).bind(run.totalTickers, matchedTickers, run.totalTickers, selectedWarning, selectedSnapshotId,
+    elapsedMs(run.startedAt ?? run.createdAt), run.id, run.leaseOwner);
+  const promoted = await env.SCANNER_CACHE_DB.batch([
+    completion,
+    ...staged.map(({ preset: targetPreset, publicationId }) =>
+      relativeStrengthPublicationPointerStatement(env.SCANNER_CACHE_DB, targetPreset.id, publicationId, run.id)),
+  ]);
+  const completionChanges = Number((promoted[0]?.meta as { changes?: number } | undefined)?.changes);
+  if (Number.isFinite(completionChanges) && completionChanges === 0) {
+    console.warn("RS publication promotion skipped after lease loss", { runId: run.id, leaseOwner: run.leaseOwner });
+    return null;
+  }
+  inspectScannerCacheWriteResults(env, promoted, "rs-publication-atomic-promotion", { throwOnHalt: false });
+  try {
+    await removeScannerCacheScanRunFromQueue(env, run.id);
+  } catch (error) {
+    console.warn("completed RS run queue cleanup failed", { runId: run.id, error });
+  }
+  try {
+    return await loadLatestScansSnapshot(env, preset.id);
+  } catch (error) {
+    console.warn("completed RS publication hydration failed", { runId: run.id, presetId: preset.id, error });
+    return null;
+  }
 }
 
 function normalizeVcpRunRecord(row: VcpRunRecord): VcpRunRecord {
@@ -5594,7 +6033,12 @@ async function acquireVcpRunLease(
          lease_owner = ?,
          lease_expires_at = ?
      WHERE id = ?
-       AND status IN ('queued', 'running')`,
+       AND status IN ('queued', 'running')
+       AND (
+         lease_owner IS NULL
+         OR lease_expires_at IS NULL
+         OR datetime(lease_expires_at) <= datetime('now')
+       )`,
   )
     .bind(leaseOwner, leaseExpiresAt, run.id)
     .run();
@@ -6070,9 +6514,21 @@ export async function processManualRelativeStrengthScanRun(
     return failed ? mapManualRunRecordToJob(failed) : null;
   }
 
+  const capacity = await loadScannerCacheCapacity(env);
+  if (capacity.status === "halt") {
+    await failManualRelativeStrengthRun(
+      env,
+      leasedRun.id,
+      "Scanner cache capacity halt threshold reached; the previous RS publication remains active.",
+    );
+    const failed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    return failed ? mapManualRunRecordToJob(failed) : null;
+  }
+
   const startedAt = Date.now();
   const timeBudgetMs = Math.max(1_000, options?.timeBudgetMs ?? MANUAL_RS_SCAN_TIME_BUDGET_MS);
-  const batchSize = Math.max(1, Math.trunc(options?.batchSize ?? MANUAL_RS_SCAN_BATCH_SIZE));
+  const batchSize = scannerCacheRelativeStrengthBatchSize(env, options?.batchSize);
+  const batchingEnabled = batchSize > 1;
   const identity = buildRelativeStrengthConfigIdentity(preset, leasedRun.expectedTradingDate);
   const benchmarkBars = await loadStoredDailyBarsByCount(env, [identity.benchmarkDataTicker], identity.expectedTradingDate, identity.requiredBarCount);
   const benchmarkLatestDate = latestBarDate(benchmarkBars);
@@ -6113,13 +6569,16 @@ export async function processManualRelativeStrengthScanRun(
     }
     const candidates = await loadManualRelativeStrengthRunCandidateSlice(env, leasedRun.id, cursorOffset, batchSize);
     if (candidates.length === 0) break;
+    const batchResults: ManualRelativeStrengthBatchResult[] = [];
     for (const candidate of candidates) {
       if (timeBudgetMs - (Date.now() - startedAt) < MANUAL_RS_SCAN_TIME_GUARD_MS) {
         stoppedForTimeGuard = true;
         break;
       }
 
-      await markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, "cache_lookup", startedAt);
+      if (!batchingEnabled) {
+        await markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, "cache_lookup", startedAt);
+      }
       let batchResult: ManualRelativeStrengthBatchResult;
       if (cacheReuseEnabled) {
         const cached = (await loadManualRelativeStrengthFeatureCacheRows(env, identity.configKey, [candidate.ticker])).get(candidate.ticker);
@@ -6132,7 +6591,7 @@ export async function processManualRelativeStrengthScanRun(
             benchmarkBars,
             identity,
             config,
-            (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
+            batchingEnabled ? async () => undefined : (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
           );
         }
       } else {
@@ -6142,47 +6601,57 @@ export async function processManualRelativeStrengthScanRun(
           benchmarkBars,
           identity,
           config,
-          (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
+          batchingEnabled ? async () => undefined : (stage) => markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, stage, startedAt),
         );
       }
 
-      await markManualRelativeStrengthAttemptStage(env, leasedRun.id, candidate, "upsert", startedAt);
-      const batchResults = [batchResult];
-      matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
-      const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
-      cacheHitTickers += batchCounts.cacheHitTickers;
-      computedTickers += batchCounts.computedTickers;
-      missingBarsTickers += batchCounts.missingBarsTickers;
-      insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
-      errorTickers += batchCounts.errorTickers;
-      staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
-      cursorOffset = Math.max(cursorOffset, candidate.cursorOffset + 1);
-      processedTickers = cursorOffset;
-      const progressAt = new Date().toISOString();
+      batchResults.push(batchResult);
+    }
+    if (batchResults.length === 0) break;
+    const lastCandidate = batchResults[batchResults.length - 1].candidate;
+    const retryableError = batchResults.find((result) =>
+      shouldRetryManualRelativeStrengthTicker(result.status, result.candidate.attemptCount ?? 0));
+    if (retryableError) {
+      await env.SCANNER_CACHE_DB.prepare(
+        `UPDATE rs_scan_run_tickers
+         SET attempt_count = attempt_count + 1, last_error = ?
+         WHERE run_id = ? AND ticker = ? AND status = 'queued'`,
+      ).bind(retryableError.reason, leasedRun.id, retryableError.candidate.ticker).run();
       await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
-        status: "running",
-        processedTickers,
-        matchedTickers,
-        cursorOffset,
-        cacheHitTickers,
-        computedTickers,
-        missingBarsTickers,
-        insufficientHistoryTickers,
-        errorTickers,
-        staleBenchmarkTickers,
-        warning: null,
-        lastProgressAt: progressAt,
-        lastAttemptCursorOffset: candidate.cursorOffset,
-        lastAttemptTicker: candidate.ticker,
-        lastAttemptStage: "heartbeat",
+        warning: `Retrying ${retryableError.candidate.ticker} after a ticker processing error.`,
+        lastAttemptCursorOffset: retryableError.candidate.cursorOffset,
+        lastAttemptTicker: retryableError.candidate.ticker,
+        lastAttemptStage: "compute",
         lastAttemptElapsedMs: Date.now() - startedAt,
+        releaseLease: true,
       });
-      const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
-      if (!afterBatchRun) return null;
-      if (afterBatchRun.status === "cancelled") {
-        await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
-        return mapManualRunRecordToJob(afterBatchRun);
-      }
+      const retrying = await loadManualRelativeStrengthRun(env, leasedRun.id);
+      return retrying ? mapManualRunRecordToJob(retrying) : null;
+    }
+    if (!batchingEnabled) {
+      await markManualRelativeStrengthAttemptStage(env, leasedRun.id, lastCandidate, "upsert", startedAt);
+    }
+    matchedTickers += await upsertManualRelativeStrengthBatchResults(env, leasedRun, batchResults);
+    const batchCounts = countManualRelativeStrengthBatchStatus(batchResults);
+    cacheHitTickers += batchCounts.cacheHitTickers;
+    computedTickers += batchCounts.computedTickers;
+    missingBarsTickers += batchCounts.missingBarsTickers;
+    insufficientHistoryTickers += batchCounts.insufficientHistoryTickers;
+    errorTickers += batchCounts.errorTickers;
+    staleBenchmarkTickers += batchCounts.staleBenchmarkTickers;
+    cursorOffset = Math.max(cursorOffset, lastCandidate.cursorOffset + 1);
+    processedTickers = cursorOffset;
+    await heartbeatManualRelativeStrengthRun(env, leasedRun.id, {
+      status: "running", processedTickers, matchedTickers, cursorOffset, cacheHitTickers, computedTickers,
+      missingBarsTickers, insufficientHistoryTickers, errorTickers, staleBenchmarkTickers, warning: null,
+      lastProgressAt: new Date().toISOString(), lastAttemptCursorOffset: lastCandidate.cursorOffset,
+      lastAttemptTicker: lastCandidate.ticker, lastAttemptStage: "heartbeat", lastAttemptElapsedMs: Date.now() - startedAt,
+    });
+    const afterBatchRun = await loadManualRelativeStrengthRun(env, leasedRun.id);
+    if (!afterBatchRun) return null;
+    if (afterBatchRun.status === "cancelled") {
+      await removeScannerCacheScanRunFromQueue(env, leasedRun.id);
+      return mapManualRunRecordToJob(afterBatchRun);
     }
   }
 
@@ -6193,9 +6662,16 @@ export async function processManualRelativeStrengthScanRun(
     return mapManualRunRecordToJob(refreshedRun);
   }
   if (refreshedRun.cursorOffset >= refreshedRun.totalTickers) {
-    const snapshot = await completeManualRelativeStrengthRun(env, preset, refreshedRun, matchedTickers);
-    const completed = await loadManualRelativeStrengthRun(env, leasedRun.id);
-    return completed ? mapManualRunRecordToJob(completed) : (snapshot ? null : mapManualRunRecordToJob(refreshedRun));
+    try {
+      const snapshot = await completeManualRelativeStrengthRun(env, preset, refreshedRun, matchedTickers);
+      const completed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+      return completed ? mapManualRunRecordToJob(completed) : (snapshot ? null : mapManualRunRecordToJob(refreshedRun));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await failManualRelativeStrengthRun(env, leasedRun.id, `RS publication failed: ${message}`);
+      const failed = await loadManualRelativeStrengthRun(env, leasedRun.id);
+      return failed ? mapManualRunRecordToJob(failed) : null;
+    }
   }
 
   await heartbeatManualRelativeStrengthRun(env, leasedRun.id, { releaseLease: true });
@@ -9105,8 +9581,21 @@ export async function requestScansRefresh(
         job: null,
       };
     }
-    const identity = buildRelativeStrengthConfigIdentity(preset);
-    const run = await createManualRelativeStrengthRun(env, preset, requestedBy);
+    const expectedTradingDate = await resolveRelativeStrengthExpectedTradingDate(env);
+    const identity = buildRelativeStrengthConfigIdentity(preset, expectedTradingDate);
+    const completed = await loadLatestCompletedManualRelativeStrengthRunForConfig(
+      env,
+      identity.configKey,
+      identity.expectedTradingDate,
+    );
+    if (completed) {
+      return {
+        async: false,
+        snapshot: await publishRelativeStrengthPresetFromCompletedRun(env, preset, completed),
+        job: null,
+      };
+    }
+    const run = await createManualRelativeStrengthRun(env, preset, requestedBy, expectedTradingDate);
     if (isActiveScanStatus(run.status)) {
       await enqueueScannerCacheScanRun(env, run.id, "relative-strength", requestedBy ?? "manual");
     }
@@ -9701,6 +10190,10 @@ export async function refreshScansSnapshot(env: Env, presetId?: string | null): 
 export async function loadLatestScansSnapshot(env: Env, presetId?: string | null): Promise<ScanSnapshot | null> {
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) return null;
+  if (preset.scanType === "relative-strength" && env.SCANNER_CACHE_DB) {
+    const publication = await loadRelativeStrengthPublicationSnapshot(env as Env & { SCANNER_CACHE_DB: D1Database }, preset);
+    if (publication) return publication;
+  }
   const snapshot = await loadLatestScanSnapshotHeader(env, preset.id);
   if (!snapshot) return null;
   return hydrateScanSnapshot(env, preset, snapshot);
@@ -9709,9 +10202,144 @@ export async function loadLatestScansSnapshot(env: Env, presetId?: string | null
 export async function loadLatestUsableScansSnapshot(env: Env, presetId?: string | null): Promise<ScanSnapshot | null> {
   const preset = presetId ? await loadScanPreset(env, presetId) : await loadDefaultScanPreset(env);
   if (!preset) return null;
+  if (preset.scanType === "relative-strength" && env.SCANNER_CACHE_DB) {
+    const publication = await loadRelativeStrengthPublicationSnapshot(env as Env & { SCANNER_CACHE_DB: D1Database }, preset, true);
+    if (publication) return publication;
+  }
   const snapshot = await loadLatestScanSnapshotHeader(env, preset.id, { usableOnly: true });
   if (!snapshot) return null;
   return hydrateScanSnapshot(env, preset, snapshot);
+}
+
+function scannerPublicationTablesMissing(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  return /no such (?:table|column):?[^\n]*(?:rs_publications|rs_publication_tickers|rs_preset_publications)/.test(message);
+}
+
+export function scaleRelativeStrengthPublicationValue(value: unknown, verticalOffset: number): number | null {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric * verticalOffset * 100 : null;
+}
+
+async function loadRelativeStrengthPublicationSnapshot(
+  env: Env & { SCANNER_CACHE_DB: D1Database },
+  preset: ScanPreset,
+  usableOnly = false,
+): Promise<ScanSnapshot | null> {
+  try {
+    const publication = await env.SCANNER_CACHE_DB.prepare(
+      `SELECT p.id, p.published_at as generatedAt, p.row_count as rowCount,
+         p.matched_row_count as matchedRowCount, p.status, p.warning as error, p.run_id as runId,
+         r.benchmark_ticker as benchmarkTicker
+       FROM rs_preset_publications pointer
+       JOIN rs_publications p ON p.id = pointer.publication_id
+       JOIN rs_scan_runs r ON r.id = p.run_id
+       WHERE pointer.preset_id = ? ${usableOnly ? "AND p.status != 'error'" : ""}
+       LIMIT 1`,
+    ).bind(preset.id).first<ScanSnapshotHeader & { runId: string; benchmarkTicker: string }>();
+    if (!publication) return null;
+    const rows = await env.SCANNER_CACHE_DB.prepare(
+      `SELECT t.ticker, t.name, t.sector, t.industry, t.change_1d as change1d, t.market_cap as marketCap,
+         t.relative_volume as relativeVolume, t.price, t.avg_volume as avgVolume, t.price_avg_volume as priceAvgVolume,
+         t.rs_ratio_close as rsClose, t.rs_ratio_ma as rsMa, t.rs_above_ma as rsAboveMa,
+         t.rs_new_high as rsNewHigh, t.rs_new_high_before_price as rsNewHighBeforePrice,
+         t.bull_cross as bullCross, t.approx_rs_rating as approxRsRating, t.exchange, t.asset_class as assetClass,
+         t.latest_trading_date as tradingDate
+       FROM rs_publication_tickers m
+       JOIN rs_scan_run_tickers t ON t.run_id = ? AND t.ticker = m.ticker
+       WHERE m.publication_id = ? ORDER BY m.rank ASC`,
+    ).bind(publication.runId, publication.id).all<Record<string, unknown>>();
+    return {
+      id: publication.id,
+      presetId: preset.id,
+      presetName: preset.name,
+      providerLabel: RS_PROVIDER_LABEL,
+      generatedAt: publication.generatedAt,
+      rowCount: Number(publication.rowCount),
+      matchedRowCount: Number(publication.matchedRowCount),
+      status: publication.status,
+      error: publication.error,
+      rows: (rows.results ?? []).map((row) => ({
+        ticker: String(row.ticker), name: row.name == null ? null : String(row.name),
+        sector: row.sector == null ? null : String(row.sector), industry: row.industry == null ? null : String(row.industry),
+        change1d: row.change1d == null ? null : Number(row.change1d), marketCap: row.marketCap == null ? null : Number(row.marketCap),
+        relativeVolume: row.relativeVolume == null ? null : Number(row.relativeVolume), price: row.price == null ? null : Number(row.price),
+        avgVolume: row.avgVolume == null ? null : Number(row.avgVolume), priceAvgVolume: row.priceAvgVolume == null ? null : Number(row.priceAvgVolume),
+        rsClose: scaleRelativeStrengthPublicationValue(row.rsClose, preset.verticalOffset),
+        rsMa: scaleRelativeStrengthPublicationValue(row.rsMa, preset.verticalOffset),
+        rsAboveMa: asBooleanFlag(row.rsAboveMa), rsNewHigh: asBooleanFlag(row.rsNewHigh),
+        rsNewHighBeforePrice: asBooleanFlag(row.rsNewHighBeforePrice), bullCross: asBooleanFlag(row.bullCross),
+        approxRsRating: row.approxRsRating == null ? null : Number(row.approxRsRating),
+        rawJson: JSON.stringify({ benchmarkTicker: publication.benchmarkTicker, tradingDate: row.tradingDate,
+          exchange: row.exchange, type: row.assetClass, relative_volume_10d_calc: row.relativeVolume }),
+      })),
+    };
+  } catch (error) {
+    if (scannerPublicationTablesMissing(error)) return null;
+    throw error;
+  }
+}
+
+export type RelativeStrengthBackendReadiness = {
+  status: "ready" | "building" | "stale" | "failed" | "waiting" | "unavailable";
+  expectedTradingDate: string;
+  readyTradingDate: string | null;
+  processedTickers: number;
+  totalTickers: number;
+  progressPct: number;
+  runId: string | null;
+  runStartedAt: string | null;
+  runUpdatedAt: string | null;
+  publishedAt: string | null;
+  warning: string | null;
+  error: string | null;
+  capacity: ScannerCacheCapacity;
+};
+
+export async function loadRelativeStrengthBackendReadiness(
+  env: Env,
+  preset: ScanPreset,
+): Promise<RelativeStrengthBackendReadiness | null> {
+  if (preset.scanType !== "relative-strength") return null;
+  const expectedTradingDate = await resolveRelativeStrengthExpectedTradingDate(env);
+  const capacity = await loadScannerCacheCapacity(env);
+  const base = { expectedTradingDate, readyTradingDate: null, processedTickers: 0, totalTickers: 0, progressPct: 0,
+    runId: null, runStartedAt: null, runUpdatedAt: null, publishedAt: null, warning: null, error: null, capacity };
+  if (!env.SCANNER_CACHE_DB) return { ...base, status: "unavailable", error: "Scanner cache database is not configured." };
+  try {
+    const identity = buildRelativeStrengthConfigIdentity(preset, expectedTradingDate);
+    const [run, publication] = await Promise.all([
+      env.SCANNER_CACHE_DB.prepare(
+        `SELECT id, status, processed_tickers as processedTickers, total_tickers as totalTickers,
+           started_at as startedAt, updated_at as updatedAt, warning, error
+         FROM rs_scan_runs WHERE config_key = ? ORDER BY datetime(created_at) DESC LIMIT 1`,
+      ).bind(identity.configKey).first<{ id: string; status: string; processedTickers: number; totalTickers: number;
+        startedAt: string | null; updatedAt: string; warning: string | null; error: string | null }>(),
+      env.SCANNER_CACHE_DB.prepare(
+        `SELECT p.config_key as configKey, p.expected_trading_date as readyTradingDate, p.published_at as publishedAt, p.warning
+         FROM rs_preset_publications pointer JOIN rs_publications p ON p.id = pointer.publication_id
+         WHERE pointer.preset_id = ? LIMIT 1`,
+      ).bind(preset.id).first<{ configKey: string; readyTradingDate: string; publishedAt: string; warning: string | null }>(),
+    ]);
+    const totalTickers = Math.max(0, Number(run?.totalTickers ?? 0));
+    const processedTickers = Math.max(0, Number(run?.processedTickers ?? 0));
+    const progressPct = totalTickers > 0 ? Math.min(100, Math.round(processedTickers / totalTickers * 100)) : 0;
+    let status: RelativeStrengthBackendReadiness["status"] = "waiting";
+    if (publication?.readyTradingDate === expectedTradingDate && publication.configKey === identity.configKey) status = "ready";
+    else if (run?.status === "queued" || run?.status === "running") status = "building";
+    else if (run?.status === "failed" || run?.status === "cancelled") status = "failed";
+    else if (publication) status = "stale";
+    else if (capacity.status === "halt") status = "unavailable";
+    return { status, expectedTradingDate, readyTradingDate: publication?.readyTradingDate ?? null,
+      processedTickers, totalTickers, progressPct, runId: run?.id ?? null, runStartedAt: run?.startedAt ?? null,
+      runUpdatedAt: run?.updatedAt ?? null, publishedAt: publication?.publishedAt ?? null,
+      warning: run?.warning ?? publication?.warning ?? (capacity.status === "warning" ? "Scanner cache is nearing capacity." : null),
+      error: run?.error ?? (capacity.status === "halt" ? "Scanner cache capacity halt threshold reached." : null), capacity };
+  } catch (error) {
+    if (scannerPublicationTablesMissing(error)) return { ...base, status: "unavailable", error: "RS publication storage is not migrated yet." };
+    throw error;
+  }
 }
 
 export async function loadCompiledScansSnapshot(
@@ -9845,6 +10473,7 @@ export type ScannerCacheRetentionStats = {
   completedRunsDeleted: number;
   queueRowsDeleted: number;
   compactRowsDeleted: number;
+  publicationRowsDeleted: number;
   rowsWritten: number;
   cursor: string | null;
   stopReason: "complete" | "write_budget" | "safety_limit" | "scanner_cache_unavailable";
@@ -9872,6 +10501,10 @@ async function loadOldestDeletableScannerRun(
        FROM rs_scan_runs r
        WHERE r.status IN ('completed', 'failed', 'cancelled')
          AND datetime(r.updated_at) < datetime('now', ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM rs_publications publication
+           WHERE publication.run_id = r.id
+         )
          AND r.id != COALESCE((
            SELECT latest.id
            FROM rs_scan_runs latest
@@ -9956,6 +10589,7 @@ export async function cleanupScannerCacheRunData(
     completedRunsDeleted: 0,
     queueRowsDeleted: 0,
     compactRowsDeleted: 0,
+    publicationRowsDeleted: 0,
     rowsWritten: 0,
     cursor: null,
     stopReason: env.SCANNER_CACHE_DB ? "complete" : "scanner_cache_unavailable",
@@ -9966,6 +10600,33 @@ export async function cleanupScannerCacheRunData(
   const window = `-${Math.max(1, retentionDays)} day`;
   const examined = new Set<string>();
   let iterations = 0;
+
+  try {
+    const orphanMemberships = await scannerEnv.SCANNER_CACHE_DB.prepare(
+      `DELETE FROM rs_publication_tickers WHERE publication_id IN (
+         SELECT p.id FROM rs_publications p
+         LEFT JOIN rs_preset_publications pointer ON pointer.publication_id = p.id
+         WHERE pointer.publication_id IS NULL AND datetime(p.published_at) < datetime('now', ?) LIMIT ?
+       )`,
+    ).bind(window, Math.min(1_000, writeBudget)).run();
+    const membershipWrites = d1RowsWritten(orphanMemberships);
+    stats.publicationRowsDeleted += membershipWrites;
+    stats.rowsWritten += membershipWrites;
+    if (stats.rowsWritten < writeBudget) {
+      const orphanPublications = await scannerEnv.SCANNER_CACHE_DB.prepare(
+        `DELETE FROM rs_publications WHERE id IN (
+           SELECT p.id FROM rs_publications p
+           LEFT JOIN rs_preset_publications pointer ON pointer.publication_id = p.id
+           WHERE pointer.publication_id IS NULL AND datetime(p.published_at) < datetime('now', ?) LIMIT ?
+         )`,
+      ).bind(window, Math.min(1_000, writeBudget - stats.rowsWritten)).run();
+      const publicationWrites = d1RowsWritten(orphanPublications);
+      stats.publicationRowsDeleted += publicationWrites;
+      stats.rowsWritten += publicationWrites;
+    }
+  } catch (error) {
+    if (!scannerPublicationTablesMissing(error)) throw error;
+  }
 
   while (stats.rowsWritten < writeBudget && iterations < 100) {
     iterations += 1;

@@ -9,23 +9,263 @@ import {
 import {
   advanceScannerCacheScanRuns,
   buildTradingViewScanPayload,
+  canonicalizeRelativeStrengthUniverseRows,
   cancelScanRefreshJob,
   deleteScanPreset,
   duplicateScanPreset,
+  effectiveManualSnapshotRules,
   fetchTradingViewScanRows,
+  fingerprintRelativeStrengthUniverse,
   loadCompiledScansSnapshot,
   loadCompiledScansSnapshotForCompilePreset,
+  loadLatestScansSnapshot,
   loadScanCompilePresetByName,
+  listScanPresets,
+  loadScheduledRelativeStrengthUniverseCandidates,
   normalizeScanRows,
   processManualRelativeStrengthScanRun,
   processRelativeStrengthRefreshJob,
   refreshScansSnapshot,
   refreshScanCompilePreset,
   requestScansRefresh,
+  resolveRelativeStrengthExpectedTradingDate,
+  scaleRelativeStrengthPublicationValue,
+  scannerCacheRelativeStrengthBatchSize,
+  shouldRetryManualRelativeStrengthTicker,
   type ScanPreset,
   type ScanSnapshot,
   type ScanSnapshotRow,
 } from "../src/scans-page-service";
+
+function universeRow(
+  ticker: string,
+  type: string,
+  exchange: string,
+  priceAvgVolume: number,
+): ScanSnapshotRow {
+  return {
+    ticker,
+    name: ticker,
+    sector: "Technology",
+    industry: "Software",
+    change1d: 1,
+    marketCap: 1_000_000_000,
+    relativeVolume: 1.5,
+    price: 50,
+    avgVolume: 1_000_000,
+    priceAvgVolume,
+    rsClose: null,
+    rsMa: null,
+    rsAboveMa: false,
+    rsNewHigh: false,
+    rsNewHighBeforePrice: false,
+    bullCross: false,
+    approxRsRating: null,
+    rawJson: JSON.stringify({ type, exchange }),
+  };
+}
+
+describe("scheduled relative strength canonical universe", () => {
+  it("reapplies both a preset prefilter and its result rules during publication", () => {
+    const prefilter = { id: "cap", field: "market_cap", operator: "gt" as const, value: 1_000_000_000 };
+    const rule = { id: "high", field: "rs_new_high", operator: "eq" as const, value: true };
+    expect(effectiveManualSnapshotRules({ prefilterRules: [prefilter], rules: [rule] })).toEqual([prefilter, rule]);
+    expect(effectiveManualSnapshotRules({ prefilterRules: [], rules: [rule] })).toEqual([rule]);
+  });
+
+  it("is deterministic, retains stock and DR metadata, and excludes unsupported assets", () => {
+    const rows = [
+      universeRow("NYSE:XYZ", "stock", "NYSE", 30_000_000),
+      universeRow("NASDAQ:ABC", "stock", "NASDAQ", 20_000_000),
+      universeRow("NYSE:ABC", "stock", "NYSE", 40_000_000),
+      universeRow("NASDAQ:ADR", "dr", "NASDAQ", 10_000_000),
+      universeRow("AMEX:FUND", "fund", "AMEX", 50_000_000),
+    ];
+
+    const canonical = canonicalizeRelativeStrengthUniverseRows(rows);
+    expect(canonical.map((row) => row.ticker)).toEqual(["ABC", "ADR", "XYZ"]);
+    expect(JSON.parse(canonical[0].rawJson ?? "{}").exchange).toBe("NASDAQ");
+    expect(canonical[0]).toMatchObject({ marketCap: 1_000_000_000, price: 50, relativeVolume: 1.5 });
+    expect(canonicalizeRelativeStrengthUniverseRows([...rows].reverse())).toEqual(canonical);
+  });
+
+  it("fingerprints sorted ticker IDs with the session and source version", () => {
+    const first = fingerprintRelativeStrengthUniverse("2026-08-25", ["XYZ", "ABC"]);
+    expect(fingerprintRelativeStrengthUniverse("2026-08-25", ["ABC", "XYZ"])).toBe(first);
+    expect(fingerprintRelativeStrengthUniverse("2026-08-26", ["ABC", "XYZ"])).not.toBe(first);
+  });
+
+  it("restores the preset scale when loading scanner-D1 publication ratios", () => {
+    expect(scaleRelativeStrengthPublicationValue(0.012, 30)).toBeCloseTo(36);
+    expect(scaleRelativeStrengthPublicationValue(null, 30)).toBeNull();
+    expect(scaleRelativeStrengthPublicationValue("invalid", 30)).toBeNull();
+  });
+
+  it("uses the stored early close when resolving the current RS session", async () => {
+    const env = {
+      MARKET_DATA_DB: {
+        prepare() {
+          return {
+            bind() {
+              return {
+                async first() {
+                  return { sessionDate: "2026-11-27", openAt: "09:30", closeAt: "13:00" };
+                },
+              };
+            },
+          };
+        },
+      },
+    } as any;
+
+    expect(await resolveRelativeStrengthExpectedTradingDate(env, new Date("2026-11-27T18:30:00Z"))).toBe("2026-11-27");
+    expect(await resolveRelativeStrengthExpectedTradingDate(env, new Date("2026-11-27T17:30:00Z"))).toBe("2026-11-25");
+  });
+
+  it("reuses the completed post-close job universe for scheduled RS", async () => {
+    const stateDb = {
+      prepare(sql: string) {
+        return {
+          bind() {
+            return {
+              async all() {
+                if (sql.includes("FROM alpaca_daily_bars")) {
+                  return { results: [
+                    { ticker: "MSFT", price: 100, previousPrice: 95, volume: 200, avgVolume: 100 },
+                    { ticker: "AAPL", price: 50, previousPrice: 50, volume: 150, avgVolume: 100 },
+                  ] };
+                }
+                return { results: [
+                  { ticker: "MSFT", cursorOffset: 3 },
+                  { ticker: "AAPL", cursorOffset: 9 },
+                ] };
+              },
+            };
+          },
+        };
+      },
+    };
+    const env = {
+      MARKET_DATA_DB: stateDb,
+      DB: {
+        prepare() {
+          return {
+            bind(...tickers: string[]) {
+              return {
+                async all() {
+                  return { results: tickers.map((ticker) => ({
+                    ticker,
+                    name: `${ticker} Inc`,
+                    sector: "Technology",
+                    industry: "Software",
+                    exchange: "NASDAQ",
+                    assetClass: "stock",
+                    sharesOutstanding: ticker === "MSFT" ? 1_000 : 2_000,
+                  })) };
+                },
+              };
+            },
+          };
+        },
+      },
+    } as any;
+
+    const candidates = await loadScheduledRelativeStrengthUniverseCandidates(env, "post-close-job", "2026-04-21");
+
+    expect(candidates.map((candidate) => candidate.ticker)).toEqual(["MSFT", "AAPL"]);
+    expect(candidates.map((candidate) => candidate.cursorOffset)).toEqual([0, 1]);
+    expect(candidates[0]).toMatchObject({
+      name: "MSFT Inc",
+      exchange: "NASDAQ",
+      source: "post-close-job",
+      marketCap: 100_000,
+      relativeVolume: 2,
+      avgVolume: 100,
+      priceAvgVolume: 10_000,
+      price: 100,
+    });
+    expect(candidates[0].change1d).toBeCloseTo(5.2632, 4);
+  });
+
+  it("reconstructs the current scanner-D1 publication without reading core snapshot rows", async () => {
+    const preset: ScanPreset = {
+      ...topGainersPreset,
+      id: "rs-publication",
+      name: "Published RS",
+      scanType: "relative-strength",
+      verticalOffset: 30,
+      benchmarkTicker: "SPY",
+      rsMaType: "EMA",
+      rsMaLength: 21,
+      newHighLookback: 252,
+    };
+    const { env } = createMutableScansEnv({ presets: [preset] });
+    env.SCANNER_CACHE_DB = {
+      prepare(sql: string) {
+        const statement = {
+          args: [] as unknown[],
+          bind(...args: unknown[]) { statement.args = args; return statement; },
+          async first<T>() {
+            if (!sql.includes("FROM rs_preset_publications")) return null;
+            return {
+              id: "publication-1", presetId: preset.id, runId: "run-1", configKey: "config-1",
+              expectedTradingDate: "2026-08-25", status: "ok", rowCount: 1, matchedRowCount: 1,
+              providerLabel: "Scanner cache relative strength", error: null,
+              generatedAt: "2026-08-25T21:00:00.000Z", publishedAt: "2026-08-25T21:00:00.000Z",
+            } as T;
+          },
+          async all<T>() {
+            if (!sql.includes("FROM rs_publication_tickers")) return { results: [] as T[] };
+            return { results: [{
+              ticker: "NVDA", name: "NVIDIA", sector: "Technology", industry: "Semiconductors",
+              exchange: "NASDAQ", assetClass: "stock", marketCap: 4_000_000_000_000,
+              relativeVolume: 1.5, avgVolume: 50_000_000, priceAvgVolume: 9_000_000_000,
+              price: 180, change1d: 2.5, rsClose: 0.012, rsMa: 0.01,
+              rsAboveMa: 1, rsNewHigh: 1, rsNewHighBeforePrice: 0, bullCross: 0,
+              approxRsRating: 98,
+            }] as T[] };
+          },
+        };
+        return statement;
+      },
+    } as unknown as D1Database;
+
+    const snapshot = await loadLatestScansSnapshot(env, preset.id);
+
+    expect(snapshot).toMatchObject({ id: "publication-1", presetId: preset.id, rowCount: 1, status: "ok" });
+    expect(snapshot?.rows).toHaveLength(1);
+    expect(snapshot?.rows[0]).toMatchObject({ ticker: "NVDA", rsClose: 36, rsMa: 30, rsAboveMa: true, rsNewHigh: true });
+  });
+});
+
+describe("scanner-cache relative strength batch policy", () => {
+  it("preserves legacy one-ticker processing unless batching is explicitly enabled", () => {
+    expect(scannerCacheRelativeStrengthBatchSize({}, 24)).toBe(1);
+    expect(scannerCacheRelativeStrengthBatchSize({
+      SCANNER_CACHE_BATCHING_ENABLED: "false",
+      SCANNER_CACHE_BATCH_SIZE: "25",
+    })).toBe(1);
+  });
+
+  it("defaults and clamps enabled batches to the safe range", () => {
+    expect(scannerCacheRelativeStrengthBatchSize({ SCANNER_CACHE_BATCHING_ENABLED: "true" })).toBe(10);
+    expect(scannerCacheRelativeStrengthBatchSize({
+      SCANNER_CACHE_BATCHING_ENABLED: "true",
+      SCANNER_CACHE_BATCH_SIZE: "200",
+    })).toBe(25);
+    expect(scannerCacheRelativeStrengthBatchSize({
+      SCANNER_CACHE_BATCHING_ENABLED: "true",
+      SCANNER_CACHE_BATCH_SIZE: "invalid",
+    })).toBe(10);
+  });
+
+  it("retries poison ticker failures twice, then terminalizes the third failure", () => {
+    expect(shouldRetryManualRelativeStrengthTicker("error", 0)).toBe(true);
+    expect(shouldRetryManualRelativeStrengthTicker("error", 1)).toBe(true);
+    expect(shouldRetryManualRelativeStrengthTicker("error", 2)).toBe(false);
+    expect(shouldRetryManualRelativeStrengthTicker("computed", 0)).toBe(false);
+  });
+});
 
 function hasSqlAssignment(sql: string, column: string): boolean {
   return new RegExp(`(?:^|[\\s,])${column}\\s*=\\s*\\?`).test(sql);
@@ -3775,8 +4015,19 @@ describe("scans page service", () => {
             },
           };
         },
-        async batch() {
-          return [];
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("UPDATE rs_scan_runs SET status = 'completed'")) {
+              const args = statement.__args ?? [];
+              run.status = "completed";
+              run.processedTickers = Number(args[0]);
+              run.matchedTickers = Number(args[1]);
+              run.cursorOffset = Number(args[2]);
+              run.latestSnapshotId = args[4] == null ? null : String(args[4]);
+              run.completedAt = "2026-04-21T22:06:00.000Z";
+            }
+          }
+          return statements.map(() => ({}));
         },
       },
       SCANNER_CACHE_DB: {
@@ -3837,7 +4088,7 @@ describe("scans page service", () => {
     expect(queuedRunIds.has("run-active")).toBe(false);
   });
 
-  it("reuses fresh manual relative strength feature cache rows during processing", async () => {
+  it("reuses fresh manual relative strength feature cache rows without writing core snapshot rows", async () => {
     const expectedTradingDate = "2026-04-21";
     const presetRow: ScanPreset = {
       id: "rs-cache-preset",
@@ -4067,6 +4318,9 @@ describe("scans page service", () => {
               return { results: [] };
             },
             async run() {
+              if (sql.includes("DELETE FROM scanner_cache_scan_run_queue")) {
+                throw new Error("simulated post-promotion queue cleanup failure");
+              }
               if (sql.includes("SET status = 'running'")) {
                 run.status = "running";
                 run.startedAt = "2026-04-21T22:05:01.000Z";
@@ -4144,8 +4398,19 @@ describe("scans page service", () => {
             },
           };
         },
-        async batch() {
-          return [];
+        async batch(statements: Array<{ __sql?: string; __args?: unknown[] }>) {
+          for (const statement of statements) {
+            if (statement.__sql?.includes("UPDATE rs_scan_runs SET status = 'completed'")) {
+              const args = statement.__args ?? [];
+              run.status = "completed";
+              run.processedTickers = Number(args[0]);
+              run.matchedTickers = Number(args[1]);
+              run.cursorOffset = Number(args[2]);
+              run.latestSnapshotId = args[4] == null ? null : String(args[4]);
+              run.completedAt = "2026-04-21T22:06:00.000Z";
+            }
+          }
+          return statements.map(() => ({}));
         },
       },
     } as any;
@@ -4157,7 +4422,7 @@ describe("scans page service", () => {
     expect(job?.computedCount).toBe(0);
     expect(job?.matchedCandidates).toBe(2);
     expect(tickerDailyBarLoads).toHaveLength(0);
-    expect(snapshotRows.map((row) => row.ticker)).toEqual(["AAA", "BBB"]);
+    expect(snapshotRows).toEqual([]);
   });
 
   it("advances manual relative strength runs in chunks and marks stale bars missing after bounded refresh", async () => {

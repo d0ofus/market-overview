@@ -28,6 +28,7 @@ import {
   type ScanCompilePresetRow,
   type RelativeStrengthMaType,
   type RelativeStrengthOutputMode,
+  type RelativeStrengthBackendReadiness,
   type ScanRefreshJob,
   type ScanPreset,
   type ScanPresetType,
@@ -628,6 +629,7 @@ export function ScansPageDashboard() {
   const [draftCompilePreset, setDraftCompilePreset] = useState<ScanCompilePresetDetail>(emptyDraftCompilePreset);
   const [snapshot, setSnapshot] = useState<ScanSnapshot | null>(null);
   const [refreshJob, setRefreshJob] = useState<ScanRefreshJob | null>(null);
+  const [rsReadiness, setRsReadiness] = useState<RelativeStrengthBackendReadiness | null>(null);
   const [compiledSnapshot, setCompiledSnapshot] = useState<CompiledScansSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [compiledLoading, setCompiledLoading] = useState(false);
@@ -843,13 +845,16 @@ export function ScansPageDashboard() {
         try {
           const refreshResponse = await getLatestScanRefreshJob(nextPresetId);
           setRefreshJob(refreshResponse.job ?? null);
+          setRsReadiness(refreshResponse.readiness ?? null);
           if (refreshResponse.snapshot) setSnapshot(refreshResponse.snapshot);
         } catch {
           setRefreshJob(null);
+          setRsReadiness(null);
         }
       } else {
         setSnapshot(null);
         setRefreshJob(null);
+        setRsReadiness(null);
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load scans.");
@@ -934,9 +939,11 @@ export function ScansPageDashboard() {
         try {
           const refreshResponse = await getLatestScanRefreshJob(selectedPresetId);
           setRefreshJob(refreshResponse.job ?? null);
+          setRsReadiness(refreshResponse.readiness ?? null);
           if (refreshResponse.snapshot) setSnapshot(refreshResponse.snapshot);
         } catch {
           setRefreshJob(null);
+          setRsReadiness(null);
         }
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load scan snapshot.");
@@ -945,11 +952,16 @@ export function ScansPageDashboard() {
   }, [loading, selectedPresetId]);
 
   useEffect(() => {
-    if (!refreshJob || (refreshJob.status !== "queued" && refreshJob.status !== "running")) return;
     if (!selectedPresetId) return;
+    const shouldPollJob = refreshJob?.status === "queued" || refreshJob?.status === "running";
+    const shouldPollReadiness = selectedPreset?.scanType === "relative-strength"
+      && rsReadiness != null
+      && rsReadiness.status !== "ready";
+    if (!shouldPollJob && !shouldPollReadiness) return;
     let cancelled = false;
     let timeoutId: number | undefined;
     let failureCount = 0;
+    let pollDelayMs = shouldPollJob || rsReadiness?.status === "building" ? 2_000 : 30_000;
 
     const scheduleNext = (delayMs: number) => {
       timeoutId = window.setTimeout(() => {
@@ -963,28 +975,37 @@ export function ScansPageDashboard() {
         const response = await getLatestScanRefreshJob(selectedPresetId);
         if (cancelled) return;
         const nextJob = response.job ?? null;
+        const nextReadiness = response.readiness ?? null;
         setRefreshJob(nextJob);
+        setRsReadiness(nextReadiness);
         if (response.snapshot) setSnapshot(response.snapshot);
         if (nextJob?.status === "completed" && selectedCompilePreset?.presetIds.includes(nextJob.presetId)) {
           await loadCompiled(selectedCompilePresetId);
         }
-        shouldContinue = nextJob?.status === "queued" || nextJob?.status === "running";
+        shouldContinue = nextJob?.status === "queued" || nextJob?.status === "running"
+          || (selectedPreset?.scanType === "relative-strength" && nextReadiness != null && nextReadiness.status !== "ready");
+        pollDelayMs = nextJob?.status === "queued" || nextJob?.status === "running" || nextReadiness?.status === "building"
+          ? 2_000
+          : 30_000;
         failureCount = 0;
       } catch {
         // Keep the current snapshot visible while the background refresh continues.
         failureCount += 1;
       }
       if (!cancelled && shouldContinue) {
-        scheduleNext(Math.min(10_000, 2_000 * Math.max(1, failureCount + 1)));
+        const retryDelayMs = failureCount > 0 && pollDelayMs < 30_000
+          ? Math.min(10_000, 2_000 * Math.max(1, failureCount + 1))
+          : pollDelayMs;
+        scheduleNext(retryDelayMs);
       }
     };
 
-    scheduleNext(2000);
+    scheduleNext(pollDelayMs);
     return () => {
       cancelled = true;
       if (timeoutId != null) window.clearTimeout(timeoutId);
     };
-  }, [refreshJob?.id, refreshJob?.status, selectedCompilePreset?.presetIds, selectedCompilePresetId, selectedPresetId]);
+  }, [refreshJob?.id, refreshJob?.status, rsReadiness?.status, selectedCompilePreset?.presetIds, selectedCompilePresetId, selectedPreset?.scanType, selectedPresetId]);
 
   useEffect(() => {
     void loadCompiled(selectedCompilePresetId);
@@ -1159,6 +1180,15 @@ export function ScansPageDashboard() {
       const response = await refreshScansSnapshot(selectedPresetId);
       if (response.snapshot) setSnapshot(response.snapshot);
       setRefreshJob(response.job ?? null);
+      if (selectedPreset?.scanType === "relative-strength") {
+        try {
+          const refreshStatus = await getLatestScanRefreshJob(selectedPresetId);
+          setRsReadiness(refreshStatus.readiness ?? null);
+          if (refreshStatus.snapshot) setSnapshot(refreshStatus.snapshot);
+        } catch {
+          // The refresh result remains usable even if readiness metadata cannot be reloaded.
+        }
+      }
       if (!response.async && selectedCompilePreset?.presetIds.includes(selectedPresetId)) {
         await loadCompiled(selectedCompilePresetId);
       }
@@ -1394,6 +1424,17 @@ export function ScansPageDashboard() {
             </div>
 
             {refreshJob ? <p className="mt-3 text-xs leading-5 text-slate-400">{formatScanRefreshSummary(refreshJob, snapshot)}</p> : null}
+            {selectedPreset?.scanType === "relative-strength" && rsReadiness ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                <span className={`rounded-full px-2 py-1 font-medium ${rsReadiness.status === "ready" ? "bg-emerald-500/15 text-emerald-300" : rsReadiness.status === "building" ? "bg-accent/15 text-accent" : rsReadiness.status === "failed" || rsReadiness.status === "unavailable" ? "bg-red-500/15 text-red-300" : "bg-amber-500/15 text-amber-200"}`}>
+                  RS {rsReadiness.status}
+                </span>
+                <span>{rsReadiness.readyTradingDate ?? "no publication"} / expected {rsReadiness.expectedTradingDate}</span>
+                {rsReadiness.totalTickers > 0 ? <span>{rsReadiness.progressPct}% ({rsReadiness.processedTickers}/{rsReadiness.totalTickers})</span> : null}
+                {rsReadiness.capacity.status !== "ok" ? <span>cache {rsReadiness.capacity.status}</span> : null}
+                {(rsReadiness.error ?? rsReadiness.warning) ? <span className="basis-full text-slate-500">{rsReadiness.error ?? rsReadiness.warning}</span> : null}
+              </div>
+            ) : null}
             {message && <p className="mt-3 rounded-lg border border-borderSoft/70 bg-panelSoft/35 px-3 py-2 text-xs text-slate-300">{message}</p>}
             {error && <p className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
 
