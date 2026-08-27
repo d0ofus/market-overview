@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 
-const DEFAULT_WARN_BYTES = 400_000_000;
-const DEFAULT_CRITICAL_BYTES = 475_000_000;
+const DEFAULT_WARN_BYTES = 350_000_000;
+const DEFAULT_CRITICAL_BYTES = 425_000_000;
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);

@@ -1,6 +1,8 @@
 import { envFlagEnabled } from "./auth";
 import { computeAndStoreSnapshot, OverviewFreshnessError } from "./eod";
 import { countUsMarketTradingSessionsAfter, latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { getOpsDb } from "./ops-db";
+import { getMarketDataDb } from "./market-data-db";
 import {
   loadOverviewCurrentRefreshJob,
   overviewCurrentRefreshStateAllowsPublication,
@@ -109,7 +111,7 @@ export async function loadPublishedOverviewGeneration(
   configId = "default",
 ): Promise<{ schemaAvailable: boolean; generation: PublishedOverviewGeneration | null }> {
   try {
-    const generation = await env.DB.prepare(
+    const generation = await getMarketDataDb(env).prepare(
       `${GENERATION_SELECT}
        JOIN overview_snapshot_pointer p ON p.generation_id = g.id
        WHERE p.config_id = ? AND g.status = 'ready'
@@ -119,7 +121,7 @@ export async function loadPublishedOverviewGeneration(
   } catch (error) {
     if (!isSchemaUnavailable(error)) throw error;
     try {
-      const generation = await env.DB.prepare(
+      const generation = await getMarketDataDb(env).prepare(
         `${LEGACY_GENERATION_SELECT}
          JOIN overview_snapshot_pointer p ON p.generation_id = g.id
          WHERE p.config_id = ? AND g.status = 'ready'
@@ -140,7 +142,7 @@ async function loadSourceGeneration(
   sourceCycleId: string,
 ): Promise<PublishedOverviewGeneration | null> {
   try {
-    return await env.DB.prepare(
+    return await getMarketDataDb(env).prepare(
       `${GENERATION_SELECT}
        WHERE g.config_id = ? AND g.as_of_date = ? AND g.source_cycle_id = ?
        LIMIT 1`,
@@ -153,7 +155,7 @@ async function loadSourceGeneration(
 
 async function loadOverviewReadiness(env: Env, configId: string): Promise<ReadinessRow | null> {
   try {
-    return await env.DB.prepare(
+    return await getMarketDataDb(env).prepare(
       `SELECT generation_id as generationId, status, coverage_pct as coveragePct,
               warning, updated_at as updatedAt
        FROM data_readiness WHERE domain = 'overview' AND scope = ? LIMIT 1`,
@@ -173,7 +175,7 @@ async function recordOverviewReadiness(env: Env, input: {
   coveragePct: number | null;
   warning: string | null;
 }): Promise<void> {
-  await env.DB.prepare(
+  await getMarketDataDb(env).prepare(
     `INSERT INTO data_readiness
        (domain, scope, expected_as_of_date, source_as_of_date, generation_id,
         status, coverage_pct, warning, updated_at)
@@ -268,7 +270,7 @@ export async function loadOverviewRecovery(
 }
 
 async function promoteOverviewPointerIfNewer(env: Env, configId: string, generationId: string): Promise<void> {
-  await env.DB.prepare(
+  await getMarketDataDb(env).prepare(
     `INSERT INTO overview_snapshot_pointer (config_id, generation_id, updated_at)
      VALUES (?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(config_id) DO UPDATE SET
@@ -354,7 +356,7 @@ export async function reconcileOverviewPublication(
   } catch (error) {
     const winner = await loadSourceGeneration(env, configId, expectedAsOfDate, job.cycleId).catch(() => null);
     if (winner) {
-      await env.DB.prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ? AND snapshot_id <> ?")
+      await getMarketDataDb(env).prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ? AND snapshot_id <> ?")
         .bind(snapshotId, winner.generationId).run().catch(() => undefined);
       if (winner.status === "ready") {
         const pointed = await reconcileReadyGeneration(env, expectedAsOfDate, configId, winner);
@@ -366,7 +368,7 @@ export async function reconcileOverviewPublication(
       const rejected = await loadSourceGeneration(env, configId, expectedAsOfDate, job.cycleId);
       return recoveryFrom(expectedAsOfDate, job, rejected, await loadOverviewReadiness(env, configId), publishedBefore);
     }
-    await env.DB.prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ?")
+    await getMarketDataDb(env).prepare("DELETE FROM snapshot_rows WHERE snapshot_id = ?")
       .bind(snapshotId).run().catch(() => undefined);
     const message = errorMessage(error);
     await recordOverviewReadiness(env, {
@@ -396,7 +398,7 @@ type FreshnessAuditMetadata = {
 
 async function loadLatestFreshnessAuditMetadata(env: Env, configId: string): Promise<FreshnessAuditMetadata | null> {
   try {
-    const row = await env.DB.prepare(
+    const row = await getOpsDb(env).prepare(
       `SELECT metadata_json as metadataJson FROM scheduled_job_runs
        WHERE job_key = 'overview-freshness-alert'
          AND json_valid(metadata_json)

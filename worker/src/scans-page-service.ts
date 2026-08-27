@@ -4,6 +4,7 @@ import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import { getUsMarketSessionContext, latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { getOpsDb } from "./ops-db";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
 import { meteredFetchWithRetry } from "./provider-usage";
 import {
@@ -3955,7 +3956,7 @@ export async function loadScheduledRelativeStrengthUniverseCandidates(
   expectedTradingDate: string,
 ): Promise<ManualRelativeStrengthCandidateRow[]> {
   const stateDb = getMarketDataDb(env);
-  const items = await stateDb.prepare(
+  const items = await getOpsDb(env).prepare(
     `SELECT ticker, ordinal as cursorOffset
      FROM post_close_daily_bar_refresh_job_items
      WHERE job_id = ? AND status = 'completed' AND bar_date = ?
@@ -4597,7 +4598,7 @@ async function loadLatestCompletedPostCloseDailyBarRefreshAt(
   env: Env,
   tradingDate: string,
 ): Promise<number | null> {
-  const row = await env.DB.prepare(
+  const row = await getOpsDb(env).prepare(
     `SELECT completed_at as completedAt
      FROM post_close_daily_bar_refresh_jobs
      WHERE scope = ?

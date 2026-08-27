@@ -1,7 +1,11 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { coverageSatisfiesHistory, verifyMarketBarCoverage } from "./bar-coverage";
 import { alpacaHistoricalRequestEnd, getProvider } from "./provider";
-import { latestUsMarketSessionAsOfDate, previousUsMarketTradingDay } from "./market-calendar";
+import {
+  countUsMarketTradingSessionsAfter,
+  latestUsMarketSessionAsOfDate,
+  previousUsMarketTradingDay,
+} from "./market-calendar";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import {
   assertMarketDataBackgroundWriteBudget,
@@ -15,13 +19,14 @@ import {
   clearProviderSymbolBackoff,
 } from "./provider-backoff";
 import { zonedParts } from "./refresh-timing";
+import { getOpsDb } from "./ops-db";
 import type { Env, PostCloseDailyBarRefreshJob, WorkerScheduleSettings } from "./types";
 
 const DEFAULT_WORKER_SCHEDULE_ID = "default";
 const DEFAULT_RS_BACKGROUND_BATCH_SIZE = 50;
 const DEFAULT_RS_BACKGROUND_MAX_BATCHES_PER_TICK = 20;
 const DEFAULT_RS_BACKGROUND_TIME_BUDGET_MS = 15_000;
-const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 35;
+const DEFAULT_POST_CLOSE_BARS_OFFSET_MINUTES = 30;
 const DEFAULT_POST_CLOSE_BARS_BATCH_SIZE = 80;
 const DEFAULT_POST_CLOSE_BARS_MAX_BATCHES_PER_TICK = 4;
 const MAX_POST_CLOSE_PROVIDER_BATCH_SIZE = 80;
@@ -31,7 +36,7 @@ const OVERVIEW_HISTORY_BOOTSTRAP_BATCH_SIZE = 25;
 const OVERVIEW_HISTORY_LOOKBACK_DAYS = 470;
 const POST_CLOSE_ITEM_LEASE_MS = 10 * 60_000;
 const POST_CLOSE_RETRY_MINUTES = 15;
-const POST_CLOSE_DATA_NOT_READY_RETRY_MINUTES = 5;
+const POST_CLOSE_DATA_NOT_READY_RETRY_MINUTES = 15;
 const POST_CLOSE_STALE_RUNNING_MS = 30 * 60_000;
 const DEFAULT_PATTERN_SCAN_OFFSET_MINUTES = 75;
 const DEFAULT_PATTERN_SCAN_BATCH_SIZE = 40;
@@ -86,7 +91,63 @@ export function buildPostCloseDailyBarUniverseQuery(kind: "count" | "batch"): st
 let postCloseRetrySchemaReady = false;
 
 function postCloseStateEnv(env: Env): Env {
-  return withDatabase(env, getMarketDataDb(env));
+  return withDatabase(env, getOpsDb(env));
+}
+
+async function loadPostCloseUniverse(env: Env): Promise<Array<{ ticker: string; priority: number; historyRequired: number }>> {
+  const marketDb = getMarketDataDb(env);
+  const [coreRows, universeRows, assetRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT ticker, MIN(priority) as priority, MAX(history_required) as historyRequired
+         FROM (
+           SELECT UPPER(TRIM(di.ticker)) as ticker, 0 as priority, 1 as history_required
+             FROM dashboard_items di
+             JOIN dashboard_groups dg ON dg.id = di.group_id
+             JOIN dashboard_sections ds ON ds.id = dg.section_id
+             JOIN dashboard_configs dc ON dc.id = ds.config_id
+            WHERE dc.is_default = 1 AND di.enabled = 1
+              AND (ds.title LIKE '%Macro%' OR ds.title LIKE '%Equities%')
+         ) rows
+        WHERE ticker IS NOT NULL AND ticker <> ''
+        GROUP BY ticker`,
+    ).all<{ ticker: string; priority: number; historyRequired: number }>(),
+    marketDb.prepare(
+      `SELECT UPPER(TRIM(ticker)) as ticker,
+              MIN(CASE WHEN universe_id = 'sp500-core' THEN 1 ELSE 2 END) as priority,
+              1 as historyRequired
+         FROM universe_symbols
+        WHERE universe_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+          AND ticker IS NOT NULL AND TRIM(ticker) <> ''
+        GROUP BY ticker`,
+    ).bind(JSON.stringify(BREADTH_HISTORY_UNIVERSE_IDS)).all<{ ticker: string; priority: number; historyRequired: number }>(),
+    marketDb.prepare(
+      `SELECT UPPER(TRIM(CAST(asset.value AS TEXT))) as ticker,
+              3 as priority,
+              0 as historyRequired
+         FROM overview_provider_catalog_cache cache,
+              json_each(cache.symbols_json) asset
+        WHERE cache.provider_key = 'alpaca'
+          AND cache.catalog_date = (
+            SELECT MAX(catalog_date)
+              FROM overview_provider_catalog_cache
+             WHERE provider_key = 'alpaca'
+          )
+          AND asset.value IS NOT NULL
+          AND TRIM(CAST(asset.value AS TEXT)) <> ''`,
+    ).all<{ ticker: string; priority: number; historyRequired: number }>(),
+  ]);
+  const byTicker = new Map<string, { ticker: string; priority: number; historyRequired: number }>();
+  for (const row of [...(coreRows.results ?? []), ...(universeRows.results ?? []), ...(assetRows.results ?? [])]) {
+    const ticker = row.ticker.trim().toUpperCase();
+    if (!ticker) continue;
+    const previous = byTicker.get(ticker);
+    byTicker.set(ticker, {
+      ticker,
+      priority: Math.min(previous?.priority ?? Number.MAX_SAFE_INTEGER, Number(row.priority)),
+      historyRequired: Math.max(previous?.historyRequired ?? 0, Number(row.historyRequired)),
+    });
+  }
+  return Array.from(byTicker.values()).sort((left, right) => left.priority - right.priority || left.ticker.localeCompare(right.ticker));
 }
 
 async function ensurePostCloseRetrySchema(env: Env): Promise<void> {
@@ -124,18 +185,14 @@ async function materializePostCloseJobItems(
     "SELECT COUNT(*) as count FROM post_close_daily_bar_refresh_job_items WHERE job_id = ?",
   ).bind(jobId).first<{ count: number | null }>();
   if (Number(existingCount?.count ?? 0) >= totalTickers) return;
-  const universe = await env.DB.prepare(
-    `SELECT ticker, history_required as historyRequired
-     FROM (${POST_CLOSE_DAILY_BAR_UNIVERSE_SELECT}) post_close_universe
-     ORDER BY priority ASC, ticker ASC`,
-  ).all<{ ticker: string; historyRequired: number }>();
+  const universe = await loadPostCloseUniverse(env);
   const existing = await stateEnv.DB.prepare(
     "SELECT ticker FROM post_close_daily_bar_refresh_job_items WHERE job_id = ?",
   ).bind(jobId).all<{ ticker: string }>();
   const existingTickers = new Set(
     (existing.results ?? []).map((row) => row.ticker.trim().toUpperCase()).filter(Boolean),
   );
-  const missingItems = planPostCloseJobItemMaterialization(universe.results ?? [], existingTickers);
+  const missingItems = planPostCloseJobItemMaterialization(universe, existingTickers);
   const statements = missingItems.map((row) => stateEnv.DB.prepare(
     `INSERT OR IGNORE INTO post_close_daily_bar_refresh_job_items
        (job_id, ordinal, ticker, history_required, status, updated_at)
@@ -304,7 +361,7 @@ async function loadPostCloseJobItemSummary(env: Env, jobId: string): Promise<{
 }
 
 function retryDelayMinutes(attemptCount: number): number {
-  return [15, 30, 60, 120][Math.min(Math.max(0, attemptCount - 1), 3)];
+  return [15, 30, 60, 120, 360, 720, 1_440][Math.min(Math.max(0, attemptCount - 1), 6)];
 }
 
 function addUtcDays(isoDate: string, days: number): string {
@@ -347,6 +404,7 @@ export function boundPostCloseProviderWork(input: { batchSize?: number; maxBatch
 function retryAtForPostCloseError(error: unknown, attemptCount: number): string | null {
   const code = classifyPostCloseError(error);
   if (code === "auth-blocked") return null;
+  if (attemptCount >= 8) return null;
   if (code === "data-not-ready") {
     return new Date(Date.now() + POST_CLOSE_DATA_NOT_READY_RETRY_MINUTES * 60_000).toISOString();
   }
@@ -362,6 +420,24 @@ function retryAtForPostCloseError(error: unknown, attemptCount: number): string 
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
   return new Date(Date.now() + retryDelayMinutes(attemptCount) * 60_000).toISOString();
+}
+
+async function loadUnsupportedAlpacaAssets(env: Env, tickers: string[]): Promise<Set<string>> {
+  const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
+  const unsupported = new Set<string>();
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await getMarketDataDb(env).prepare(
+      `SELECT ticker
+         FROM overview_provider_symbols
+        WHERE provider_key = 'alpaca'
+          AND support_status = 'unsupported'
+          AND ticker IN (${placeholders})`,
+    ).bind(...chunk).all<{ ticker: string }>();
+    for (const row of rows.results ?? []) unsupported.add(row.ticker.toUpperCase());
+  }
+  return unsupported;
 }
 
 type WorkerScheduleSettingsRow = {
@@ -494,7 +570,6 @@ async function ensureWorkerScheduleSettingsRow(env: Env): Promise<void> {
 }
 
 export async function loadWorkerScheduleSettings(env: Env): Promise<WorkerScheduleSettings> {
-  await ensureWorkerScheduleSettingsRow(env);
   const row = await env.DB.prepare(
     `SELECT
        id,
@@ -833,9 +908,7 @@ async function updatePostCloseDailyBarRefreshJobRecord(
 }
 
 async function loadPostCloseDailyBarUniverseCount(env: Env): Promise<number> {
-  const row = await env.DB.prepare(buildPostCloseDailyBarUniverseQuery("count"))
-    .first<{ count: number | string | null }>();
-  return Math.max(0, Number(row?.count ?? 0) || 0);
+  return (await loadPostCloseUniverse(env)).length;
 }
 
 async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
@@ -849,6 +922,7 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
       `SELECT DISTINCT ticker
          FROM alpaca_daily_bars
         WHERE feed = ?
+          AND source_provider = 'alpaca'
           AND date = ?
           AND ticker IN (${placeholders})`,
     ).bind(marketDataFeed(env), date, ...batch).all<{ ticker: string }>();
@@ -925,7 +999,7 @@ export function shouldUseYahooRepair(input: {
   hasCurrentSession: boolean;
   mode: "exact" | "history" | "current";
 }): boolean {
-  return input.attemptCount >= 3 && (!input.hasCurrentSession || input.mode === "history");
+  return input.attemptCount >= 3 && input.hasCurrentSession && input.mode === "history";
 }
 
 async function loadOverviewHistoryStates(
@@ -939,11 +1013,18 @@ async function loadOverviewHistoryStates(
     const tickerChunk = unique.slice(index, index + 80);
     const placeholders = tickerChunk.map(() => "?").join(",");
     const rows = await getMarketDataDb(env).prepare(
-      `SELECT ticker, lookback_start as lookbackStart, through_date as throughDate
-       FROM overview_alpaca_history_state
-       WHERE source_feed = ?
-         AND status = 'completed'
-         AND ticker IN (${placeholders})`,
+      `SELECT state.ticker, state.lookback_start as lookbackStart, state.through_date as throughDate
+         FROM overview_alpaca_history_state state
+         JOIN alpaca_daily_bars bars
+           ON bars.ticker = state.ticker
+          AND bars.feed = state.source_feed
+          AND bars.source_provider = 'alpaca'
+          AND bars.date <= state.through_date
+        WHERE state.source_feed = ?
+          AND state.status = 'completed'
+          AND state.ticker IN (${placeholders})
+        GROUP BY state.ticker, state.lookback_start, state.through_date
+       HAVING COUNT(DISTINCT bars.date) >= 260`,
     ).bind(sourceFeed, ...tickerChunk).all<OverviewHistoryState>();
     for (const row of rows.results ?? []) out.set(row.ticker.toUpperCase(), row);
   }
@@ -1346,7 +1427,6 @@ export async function processPostCloseDailyBarRefreshJob(
           replaceExisting: true,
           providerBatchSize: MAX_POST_CLOSE_PROVIDER_BATCH_SIZE,
           target: "market",
-          syncSymbolsToCore: true,
         });
       }
       let currentTickers = await loadTickersWithBarOnDate(pinnedEnv, batchTickers, job.tradingDate);
@@ -1435,9 +1515,19 @@ export async function processPostCloseDailyBarRefreshJob(
         );
       }
       const unresolvedAfterYahooRepair = new Set([...missingTickers, ...historyMissingTickers]);
-      const unsupportedTickers = yahooRepairItem && unresolvedAfterYahooRepair.has(yahooRepairItem.ticker)
-        ? [yahooRepairItem.ticker]
-        : [];
+      const catalogUnsupported = await loadUnsupportedAlpacaAssets(pinnedEnv, Array.from(unresolvedAfterYahooRepair));
+      const jobAgeSessions = countUsMarketTradingSessionsAfter(
+        job.tradingDate,
+        latestUsMarketSessionAsOfDate(new Date()),
+      );
+      const unsupportedTickers = batchItems
+        .filter((item) => unresolvedAfterYahooRepair.has(item.ticker))
+        .filter((item) => (
+          catalogUnsupported.has(item.ticker)
+          || jobAgeSessions >= 3
+          || Number(item.attemptCount ?? 0) >= 8
+        ))
+        .map((item) => item.ticker);
       const retryHistoryMissingTickers = historyMissingTickers.filter((ticker) => !unsupportedTickers.includes(ticker));
 
       await updatePostCloseJobItems(stateEnv, job.id, completedTickers, {
@@ -1474,7 +1564,7 @@ export async function processPostCloseDailyBarRefreshJob(
         leaseExpiresAt: null,
         leaseToken: null,
         expectedLeaseToken: activeLeaseToken,
-        lastError: "Alpaca returned no complete result after three attempts and the Yahoo repair attempt did not resolve the session.",
+        lastError: "Alpaca returned no complete result before the terminal retry/session limit, or the asset is inactive.",
       });
       const missingByAttempt = new Map<number, string[]>();
       for (const item of batchItems) {
@@ -1484,10 +1574,13 @@ export async function processPostCloseDailyBarRefreshJob(
         rows.push(item.ticker);
         missingByAttempt.set(itemAttempt, rows);
       }
-      for (const itemTickers of missingByAttempt.values()) {
+      for (const [itemAttempt, itemTickers] of missingByAttempt.entries()) {
+        const retryDelayMinutes = itemAttempt < 6
+          ? POST_CLOSE_DATA_NOT_READY_RETRY_MINUTES
+          : 24 * 60;
         await updatePostCloseJobItems(stateEnv, job.id, itemTickers, {
           status: "missing",
-          nextAttemptAt: new Date(Date.now() + POST_CLOSE_DATA_NOT_READY_RETRY_MINUTES * 60_000).toISOString(),
+          nextAttemptAt: new Date(Date.now() + retryDelayMinutes * 60_000).toISOString(),
           leaseExpiresAt: null,
           leaseToken: null,
           expectedLeaseToken: activeLeaseToken,
@@ -1569,7 +1662,7 @@ export async function processPostCloseDailyBarRefreshJob(
     }
     for (const [retryKey, tickers] of retryGroups) {
       await updatePostCloseJobItems(stateEnv, job.id, tickers, {
-        status: errorCode,
+        status: retryKey === "terminal" ? "unsupported" : errorCode,
         nextAttemptAt: retryKey === "terminal" ? null : retryKey,
         leaseExpiresAt: null,
         leaseToken: null,

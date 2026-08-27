@@ -2819,6 +2819,65 @@ export function getBreadth(universeId = "sp500-core") {
   return getJson<{ requestedUniverseId: string; universeId: string; rows: any[] }>(`/api/breadth?universeId=${universeId}&limit=120`);
 }
 
+export type BreadthDashboardSnapshot = {
+  asOfDate: string;
+  universeId: string;
+  advancers: number;
+  decliners: number;
+  unchanged: number;
+  pctAbove20MA: number;
+  pctAbove50MA: number;
+  pctAbove200MA: number;
+  new20DHighs: number;
+  new20DLows: number;
+  medianReturn1D: number;
+  medianReturn5D: number;
+  generatedAt: string;
+  metrics?: Record<string, unknown> | null;
+  dataSource?: string | null;
+  provenance?: Record<string, unknown> | null;
+  sourceMix?: Record<string, number> | null;
+};
+
+export type BreadthDashboardResponse = {
+  generationId: string | null;
+  generatedAt: string | null;
+  expectedAsOfSession: string;
+  providerLabel: string;
+  overallHealth: "fresh" | "partial" | "stale";
+  warning: string | null;
+  universes: Array<{
+    universeId: string;
+    universeName: string;
+    displayedSnapshot: BreadthDashboardSnapshot | null;
+    displayedAsOfSession: string | null;
+    isFallback: boolean;
+    freshness: "fresh" | "stale" | "low_coverage" | "missing";
+    staleTradingSessions: number;
+    memberCount: number;
+    exactSessionCount: number;
+    eligibleCount: number;
+    unsupportedCount: number;
+    repairSourceCount: number;
+    coveragePct: number;
+    requiredCoveragePct: number;
+    membership: {
+      versionId: string | null;
+      source: string | null;
+      sourceType: string | null;
+      sourceUrl: string | null;
+      sourceAsOfDate: string | null;
+      status: "active" | "invalid" | "missing";
+    };
+    error: { code: string; message: string } | null;
+    history: BreadthDashboardSnapshot[];
+  }>;
+};
+
+export function getBreadthDashboard(historyLimit = 120): Promise<BreadthDashboardResponse> {
+  return getJson(appendQuery("/api/breadth/dashboard", { historyLimit }));
+}
+
 export function getFedWatch(force = false) {
   return getJson<FedWatchResponse>(appendQuery("/api/fedwatch", { force: force ? 1 : undefined }));
 }
@@ -4865,7 +4924,7 @@ export type RefreshPageJobResponse = {
   refreshedTickers: number;
   notes?: string;
   jobId?: string;
-  status?: "queued" | "running" | "completed" | "failed";
+  status?: "queued" | "running" | "completed" | "failed" | "paused";
   pollAfterMs?: number;
   generationId?: string;
   publishedAt?: string;

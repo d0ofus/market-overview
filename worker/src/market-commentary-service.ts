@@ -297,25 +297,13 @@ async function addMarketCommentaryReportColumn(env: Env, sql: string): Promise<v
 
 async function ensureMarketCommentaryReportScheduleSchema(env: Env): Promise<void> {
   if (marketCommentaryReportScheduleSchemaReady) return;
-  await addMarketCommentaryReportColumn(
-    env,
-    "ALTER TABLE market_commentary_reports ADD COLUMN generation_trigger TEXT NOT NULL DEFAULT 'manual'",
-  );
-  await addMarketCommentaryReportColumn(
-    env,
-    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_local_date TEXT",
-  );
-  await addMarketCommentaryReportColumn(
-    env,
-    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_timezone TEXT",
-  );
-  await addMarketCommentaryReportColumn(
-    env,
-    "ALTER TABLE market_commentary_reports ADD COLUMN scheduled_local_time TEXT",
-  );
-  await env.DB.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_market_commentary_scheduled_attempt ON market_commentary_reports (generation_trigger, scheduled_local_date, session_date, created_at DESC)",
-  ).run();
+  try {
+    await env.DB.prepare(
+      "SELECT generation_trigger, scheduled_local_date, scheduled_timezone, scheduled_local_time FROM market_commentary_reports LIMIT 1",
+    ).first();
+  } catch (error) {
+    throw new Error(`Core schema mismatch: apply migration 0058_market_commentary_schedule_metadata.sql (${error instanceof Error ? error.message : String(error)}).`);
+  }
   marketCommentaryReportScheduleSchemaReady = true;
 }
 
@@ -323,23 +311,13 @@ type MarketCommentaryScheduleAttemptStatus = "skipped" | "running" | "ready" | "
 
 async function ensureMarketCommentaryScheduleAttemptSchema(env: Env): Promise<void> {
   if (marketCommentaryScheduleAttemptSchemaReady) return;
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS market_commentary_schedule_attempts (
-      id TEXT PRIMARY KEY,
-      scheduled_local_date TEXT NOT NULL,
-      session_date TEXT NOT NULL,
-      status TEXT NOT NULL,
-      reason TEXT,
-      report_id TEXT,
-      scheduled_timezone TEXT,
-      scheduled_local_time TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )`,
-  ).run();
-  await env.DB.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_market_commentary_schedule_attempts_latest ON market_commentary_schedule_attempts (scheduled_local_date, session_date, updated_at DESC)",
-  ).run();
+  try {
+    await env.DB.prepare(
+      "SELECT id, scheduled_local_date, session_date, status, updated_at FROM market_commentary_schedule_attempts LIMIT 1",
+    ).first();
+  } catch (error) {
+    throw new Error(`Core schema mismatch: apply migration 0079_market_commentary_schedule_attempts.sql (${error instanceof Error ? error.message : String(error)}).`);
+  }
   marketCommentaryScheduleAttemptSchemaReady = true;
 }
 

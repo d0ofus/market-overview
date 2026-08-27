@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { getMarketDataDb } from "./market-data-db";
 
 const VERSION_MEMBER_BATCH_SIZE = 100;
 const UNIVERSE_VERSION_RETENTION = 5;
@@ -130,8 +131,9 @@ export function validateUniverseCandidate(input: {
 }
 
 export async function loadActiveUniverseTickers(env: Env, universeId: string): Promise<string[]> {
+  const db = getMarketDataDb(env);
   try {
-    const versionRows = await env.DB.prepare(
+    const versionRows = await db.prepare(
       `SELECT uvm.ticker
          FROM universes u
          JOIN universe_version_members uvm ON uvm.version_id = u.active_version_id
@@ -144,7 +146,7 @@ export async function loadActiveUniverseTickers(env: Env, universeId: string): P
     const message = error instanceof Error ? error.message : String(error ?? "");
     if (!/no such (?:table|column)/i.test(message)) throw error;
   }
-  const legacyRows = await env.DB.prepare(
+  const legacyRows = await db.prepare(
     "SELECT ticker FROM universe_symbols WHERE universe_id = ? ORDER BY ticker",
   ).bind(universeId).all<{ ticker: string }>();
   return normalizeTickers((legacyRows.results ?? []).map((row) => row.ticker));
@@ -162,25 +164,22 @@ async function promoteUniverseVersion(
   versionId: string,
   tickers: string[],
 ): Promise<void> {
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT OR IGNORE INTO symbols (ticker, name, asset_class)
-       SELECT ticker, ticker, 'equity' FROM universe_version_members WHERE version_id = ?`,
-    ).bind(versionId),
-    env.DB.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
-    env.DB.prepare(
+  const db = getMarketDataDb(env);
+  await db.batch([
+    db.prepare("DELETE FROM universe_symbols WHERE universe_id = ?").bind(universeId),
+    db.prepare(
       `INSERT INTO universe_symbols (universe_id, ticker)
        SELECT ?, ticker FROM universe_version_members WHERE version_id = ?`,
     ).bind(universeId, versionId),
-    env.DB.prepare(
+    db.prepare(
       "UPDATE universes SET active_version_id = ? WHERE id = ?",
     ).bind(versionId, universeId),
-    env.DB.prepare(
+    db.prepare(
       `UPDATE universe_versions
           SET status = 'active', promoted_at = CURRENT_TIMESTAMP, validation_error = NULL
         WHERE id = ?`,
     ).bind(versionId),
-    env.DB.prepare(
+    db.prepare(
       `UPDATE universe_versions
           SET status = 'superseded'
         WHERE universe_id = ? AND status = 'active' AND id <> ?`,
@@ -189,13 +188,14 @@ async function promoteUniverseVersion(
 }
 
 async function pruneUniverseVersions(env: Env, universeId: string, retainedVersionId: string): Promise<void> {
-  const universe = await env.DB.prepare(
+  const db = getMarketDataDb(env);
+  const universe = await db.prepare(
     "SELECT active_version_id as activeVersionId FROM universes WHERE id = ?",
   ).bind(universeId).first<{ activeVersionId?: string | null }>();
   const protectedIds = new Set(
     [retainedVersionId, universe?.activeVersionId].filter((id): id is string => Boolean(id)),
   );
-  const rows = await env.DB.prepare(
+  const rows = await db.prepare(
     `SELECT uv.id FROM universe_versions uv
       WHERE uv.universe_id = ?
       ORDER BY uv.created_at DESC, uv.id DESC`,
@@ -204,10 +204,10 @@ async function pruneUniverseVersions(env: Env, universeId: string, retainedVersi
   const unprotectedRetention = Math.max(0, UNIVERSE_VERSION_RETENTION - protectedIds.size);
   const staleIds = unprotectedRows.slice(unprotectedRetention).map((row) => row.id);
   if (staleIds.length === 0) return;
-  await runBatches(env.DB, staleIds.map((id) => env.DB.prepare(
+  await runBatches(db, staleIds.map((id) => db.prepare(
     "DELETE FROM universe_version_members WHERE version_id = ?",
   ).bind(id)));
-  await runBatches(env.DB, staleIds.map((id) => env.DB.prepare(
+  await runBatches(db, staleIds.map((id) => db.prepare(
     "DELETE FROM universe_versions WHERE id = ?",
   ).bind(id)));
 }
@@ -233,6 +233,7 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
   approveLargeChange?: boolean;
   versionId?: string;
 }): Promise<{ versionId: string; validation: UniverseCandidateValidation; unchanged?: boolean }> {
+  const db = getMarketDataDb(env);
   const tickers = normalizeTickers(input.tickers);
   const previousTickers = await loadActiveUniverseTickers(env, input.universeId);
   const validation = validateUniverseCandidate({
@@ -243,7 +244,7 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
     approveLargeChange: input.approveLargeChange,
   });
   const membershipHash = await computeUniverseMembershipHash(tickers);
-  const activeVersion = await env.DB.prepare(
+  const activeVersion = await db.prepare(
     `SELECT uv.id, uv.membership_hash as membershipHash
        FROM universes u
        JOIN universe_versions uv ON uv.id = u.active_version_id
@@ -253,7 +254,7 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
     && (activeVersion?.membershipHash === membershipHash
       || (previousTickers.length === tickers.length && previousTickers.every((ticker, index) => ticker === tickers[index])));
   if (validation.valid && sameMembership) {
-    await env.DB.prepare(
+    await db.prepare(
       `UPDATE universe_versions
           SET source = ?, source_type = ?, source_url = ?, source_as_of_date = ?,
               source_member_count = ?, normalized_member_count = ?, resolved_member_count = ?, unresolved_count = ?,
@@ -276,11 +277,11 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
   }
   const versionId = input.versionId ?? crypto.randomUUID();
 
-  await env.DB.prepare(
+  await db.prepare(
     `INSERT INTO universes (id, name) VALUES (?, ?)
      ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
   ).bind(input.universeId, input.universeName).run();
-  await env.DB.prepare(
+  await db.prepare(
     `INSERT INTO universe_versions
        (id, universe_id, source, source_type, source_url, source_as_of_date, status, member_count,
         source_member_count, normalized_member_count, resolved_member_count, unresolved_count, unresolved_symbols_json, membership_hash,
@@ -304,9 +305,9 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
     validation.changePct,
     validation.error,
   ).run();
-  await runBatches(env.DB, tickers.map((ticker) => {
+  await runBatches(db, tickers.map((ticker) => {
     const metadata = input.memberMetadata?.[ticker];
-    return env.DB.prepare(
+    return db.prepare(
       `INSERT OR IGNORE INTO universe_version_members
         (version_id, ticker, source_ticker, issuer_name, exchange, asset_class)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -321,7 +322,7 @@ export async function stageAndPromoteUniverseVersion(env: Env, input: {
   }));
 
   if (!validation.valid) {
-    await env.DB.prepare(
+    await db.prepare(
       "UPDATE universe_versions SET status = 'rejected' WHERE id = ?",
     ).bind(versionId).run();
     await pruneUniverseVersions(env, input.universeId, versionId);
@@ -338,6 +339,7 @@ export async function listUniverseVersions(
   universeId?: string | null,
   limit = 100,
 ): Promise<UniverseVersionRecord[]> {
+  const db = getMarketDataDb(env);
   const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
   const query = `SELECT id, universe_id as universeId, source,
       source_as_of_date as sourceAsOfDate, status, member_count as memberCount,
@@ -345,9 +347,9 @@ export async function listUniverseVersions(
       validation_error as validationError, created_at as createdAt, promoted_at as promotedAt
     FROM universe_versions`;
   const result = universeId
-    ? await env.DB.prepare(`${query} WHERE universe_id = ? ORDER BY created_at DESC LIMIT ?`)
+    ? await db.prepare(`${query} WHERE universe_id = ? ORDER BY created_at DESC LIMIT ?`)
       .bind(universeId, boundedLimit).all<UniverseVersionRecord>()
-    : await env.DB.prepare(`${query} ORDER BY created_at DESC LIMIT ?`)
+    : await db.prepare(`${query} ORDER BY created_at DESC LIMIT ?`)
       .bind(boundedLimit).all<UniverseVersionRecord>();
   return result.results ?? [];
 }
@@ -356,7 +358,8 @@ export async function approveUniverseVersion(
   env: Env,
   versionId: string,
 ): Promise<{ versionId: string; universeId: string; validation: UniverseCandidateValidation }> {
-  const version = await env.DB.prepare(
+  const db = getMarketDataDb(env);
+  const version = await db.prepare(
     `SELECT id, universe_id as universeId, status, source_member_count as sourceMemberCount,
             source_as_of_date as sourceAsOfDate
        FROM universe_versions
@@ -381,7 +384,7 @@ export async function approveUniverseVersion(
       throw new Error("Universe candidate source date is missing or stale; refresh the source before approval.");
     }
   }
-  const rows = await env.DB.prepare(
+  const rows = await db.prepare(
     "SELECT ticker FROM universe_version_members WHERE version_id = ? ORDER BY ticker",
   ).bind(versionId).all<{ ticker: string }>();
   const tickers = normalizeTickers((rows.results ?? []).map((row) => row.ticker));

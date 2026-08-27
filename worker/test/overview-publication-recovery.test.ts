@@ -117,7 +117,10 @@ class PrimaryDb {
 }
 
 class MarketDb {
-  prepare(_sql: string) {
+  constructor(private readonly publication: PrimaryDb) {}
+
+  prepare(sql: string) {
+    if (!sql.includes("overview_current_refresh_jobs")) return this.publication.prepare(sql);
     const statement = {
       bind: (..._args: unknown[]) => statement,
       first: async <T>() => ({
@@ -146,7 +149,7 @@ class MarketDb {
 function createEnv(primary: PrimaryDb): Env {
   return {
     DB: primary as unknown as D1Database,
-    MARKET_DATA_DB: new MarketDb() as unknown as D1Database,
+    MARKET_DATA_DB: new MarketDb(primary) as unknown as D1Database,
     OVERVIEW_PUBLICATION_RECOVERY_ENABLED: "true",
   } as Env;
 }

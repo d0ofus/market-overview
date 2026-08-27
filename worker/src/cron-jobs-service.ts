@@ -311,9 +311,11 @@ function isMissingCronTableError(error: unknown): boolean {
 }
 
 async function ensureCronJobSettingsTable(env: Env): Promise<void> {
-  await env.DB.prepare(
-    "CREATE TABLE IF NOT EXISTS cron_job_settings (key TEXT PRIMARY KEY, values_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-  ).run();
+  try {
+    await env.DB.prepare("SELECT key, values_json, updated_at FROM cron_job_settings LIMIT 1").bind().first();
+  } catch (error) {
+    throw new Error(`Core schema mismatch: apply migration 0057_cron_job_settings.sql (${error instanceof Error ? error.message : String(error)}).`);
+  }
 }
 
 function coerceBoolean(value: unknown, fallback: boolean): boolean {

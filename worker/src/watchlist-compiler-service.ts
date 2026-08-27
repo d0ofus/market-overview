@@ -530,14 +530,13 @@ function isWatchlistFactorSettingsSchemaMissing(error: unknown): boolean {
 }
 
 async function ensureWatchlistFactorSettingsTable(env: Env): Promise<void> {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS watchlist_factor_settings (
-      id TEXT PRIMARY KEY,
-      factor_config_json TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )`,
-  ).run();
+  try {
+    await env.DB.prepare(
+      "SELECT id, factor_config_json, created_at, updated_at FROM watchlist_factor_settings LIMIT 1",
+    ).first();
+  } catch (error) {
+    throw new Error(`Core schema mismatch: apply migration 0062_watchlist_factor_settings.sql (${error instanceof Error ? error.message : String(error)}).`);
+  }
 }
 
 function defaultWatchlistFactorSettings(): WatchlistFactorSettingsRecord {

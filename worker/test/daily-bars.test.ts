@@ -13,8 +13,8 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
       const ticker = args[0];
       if (ticker != null) symbols.add(String(ticker).toUpperCase());
     }
-    if (sql.includes("INTO daily_bars")) {
-      const [ticker, date, o, h, l, c, volume] = args;
+    if (sql.includes("INTO alpaca_daily_bars")) {
+      const [, ticker, date, o, h, l, c, volume] = args;
       const normalizedTicker = String(ticker).toUpperCase();
       const rows = barsByTicker.get(normalizedTicker) ?? [];
       const next = {
@@ -43,7 +43,7 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
           async all<T>() {
             if (sql.includes("SELECT ticker, MAX(date) as lastDate")) {
               return {
-                results: args.flatMap((arg) => {
+                results: args.slice(1).flatMap((arg) => {
                   const ticker = String(arg).toUpperCase();
                   const rows = barsByTicker.get(ticker) ?? [];
                   const latest = rows.map((row) => row.date).sort().at(-1);
@@ -51,16 +51,25 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
                 }) as T[],
               };
             }
-            if (sql.includes("SELECT DISTINCT ticker FROM daily_bars")) {
+            if (sql.includes("SELECT ticker FROM alpaca_daily_bars")) {
               const date = String(args.at(-1));
               return {
-                results: args.slice(0, -1).flatMap((arg) => {
+                results: args.slice(1, -1).flatMap((arg) => {
                   const ticker = String(arg).toUpperCase();
                   return (barsByTicker.get(ticker) ?? []).some((row) => row.date === date) ? [{ ticker }] : [];
                 }) as T[],
               };
             }
+            if (sql.includes("SELECT 1 as ok")) {
+              return { results: [{ ok: 1 }] as T[], meta: { size_after: 1024 } };
+            }
             return { results: [] as T[] };
+          },
+          async first<T>() {
+            if (sql.includes("market_data_daily_usage")) {
+              return { rowsWritten: 0, rowsRead: 0 } as T;
+            }
+            return null as T;
           },
           async run() {
             runStatement(sql, args);
@@ -74,6 +83,9 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
           async all<T>() {
             return makeBound([]).all<T>();
           },
+          async first<T>() {
+            return makeBound([]).first<T>();
+          },
           async run() {
             return makeBound([]).run();
           },
@@ -83,7 +95,7 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
         for (const statement of statements) {
           if (statement.__sql) runStatement(statement.__sql, statement.__args ?? []);
         }
-        return [];
+        return statements.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
       },
     },
   } as any;
@@ -174,7 +186,7 @@ describe("refreshDailyBarsIncremental", () => {
     expect(result.currentDateCoveragePct).toBeCloseTo(33.333, 2);
   });
 
-  it("stores full Alpaca history in MARKET_DATA_DB, syncs symbols, and does not mirror legacy bars", async () => {
+  it("stores full Alpaca history only in MARKET_DATA_DB and never syncs generated symbols to core", async () => {
     const marketStatements: Array<{ sql: string; args: unknown[] }> = [];
     const legacyStatements: Array<{ sql: string; args: unknown[] }> = [];
     const createTrackingDb = (target: "market" | "legacy") => ({
@@ -247,15 +259,17 @@ describe("refreshDailyBarsIncremental", () => {
       provider,
       replaceExisting: true,
       target: "market",
-      syncSymbolsToCore: true,
     });
 
     const marketBarWrites = marketStatements.filter((statement) => statement.sql.includes("INSERT INTO alpaca_daily_bars"));
     const legacyBarWrites = legacyStatements.filter((statement) => statement.sql.includes("INSERT INTO daily_bars"));
     const symbolWrites = legacyStatements.filter((statement) => statement.sql.includes("INSERT OR IGNORE INTO symbols"));
+    const featureInvalidations = marketStatements.filter((statement) => statement.sql.includes("DELETE FROM daily_market_features"));
     expect(marketBarWrites.map((statement) => statement.args[2])).toEqual(["2026-06-01", "2026-06-02"]);
     expect(legacyBarWrites).toEqual([]);
-    expect(symbolWrites.map((statement) => statement.args[0])).toEqual(["AAA"]);
+    expect(symbolWrites).toEqual([]);
+    expect(featureInvalidations).toHaveLength(1);
+    expect(featureInvalidations[0].args).toEqual(["iex", "AAA", "2026-06-01"]);
     expect(result).toMatchObject({ writtenRows: 2, currentDateTickers: 1 });
   });
 

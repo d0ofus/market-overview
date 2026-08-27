@@ -74,11 +74,16 @@ export async function verifyMarketBarCoverage(
               MIN(date) as observedStart,
               MAX(date) as observedEnd,
               COUNT(*) as observedSessions
-         FROM alpaca_daily_bars
-        WHERE feed = ?
-          AND ticker IN (${placeholders})
-          AND date >= ?
-          AND date <= ?
+         FROM (
+           SELECT ticker, date
+             FROM alpaca_daily_bars
+            WHERE ((feed = ? AND source_provider = 'alpaca')
+                OR (feed = 'repair-yahoo' AND source_provider = 'yahoo'))
+              AND ticker IN (${placeholders})
+              AND date >= ?
+              AND date <= ?
+            GROUP BY ticker, date
+         ) canonical_or_repair
         GROUP BY ticker`,
     ).bind(feed, ...chunk, input.requestedStart, input.throughDate).all<{
       ticker: string;

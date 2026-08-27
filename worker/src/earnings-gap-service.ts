@@ -859,7 +859,6 @@ async function calculateEarningsGapBatch(
         providerBatchSize: SYNC_BATCH_SIZE,
         continueOnError: true,
         target: "market",
-        syncSymbolsToCore: true,
         repairMissingMarketDates: true,
       });
       barsFetched = refresh.fetchedRows;

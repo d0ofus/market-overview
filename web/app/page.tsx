@@ -6,7 +6,7 @@ import { OverviewFreshnessDisclosure } from "@/components/overview-freshness-dis
 import { FedFundsRatePanel } from "@/components/fed-funds-rate-panel";
 import { MarketCommentaryPanel } from "@/components/market-commentary-panel";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
-import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, getStatus, type FedWatchResponse } from "@/lib/api";
+import { getDashboard, getFedWatch, getOverviewFocusHistory, getOverviewFocusItems, type FedWatchResponse } from "@/lib/api";
 import { deriveOverviewFreshnessSummary } from "@/lib/overview-freshness";
 
 export const revalidate = 0;
@@ -50,43 +50,13 @@ function overviewGroupLabel(title: string): string {
 }
 
 export default async function HomePage() {
-  const [dashboardResult, statusValue, fedWatch, focusItems, focusHistory] = await Promise.all([
+  const [dashboardResult, fedWatch, focusItems, focusHistory] = await Promise.all([
     getDashboard()
       .then((data) => ({ data, error: null as string | null }))
       .catch((error) => ({
         data: null,
         error: error instanceof Error ? error.message : "Overview data could not be loaded.",
       })),
-    getStatus("overview").catch(() => ({
-      timezone: "Australia/Melbourne",
-      autoRefreshLabel: "08:15 Australia/Melbourne",
-      autoRefreshLocalTime: "08:15",
-      lastUpdated: null,
-      asOfDate: null,
-      providerLabel: "TradingView/Alpaca current snapshots + Alpaca SIP daily history",
-      expectedAsOfDate: null,
-      servingState: "unavailable" as const,
-      staleTradingSessions: 0,
-      overviewRecovery: null,
-      freshnessStatus: "stale" as const,
-      freshnessCoveragePct: 0,
-      freshnessCurrentCount: 0,
-      freshnessEligibleCount: 0,
-      freshnessCriticalMissingTickers: [],
-      freshnessMinBarDate: null,
-      freshnessMaxBarDate: null,
-      freshnessWarning: "Overview freshness could not be loaded.",
-      quoteOverlayRequestedCount: null,
-      quoteOverlayReturnedCount: null,
-      quoteOverlayError: null,
-      quoteOverlayMissingSample: [],
-      breadthExpectedAsOfDate: null,
-      breadthStatus: "stale" as const,
-      breadthLatestAsOfDate: null,
-      breadthLastUpdated: null,
-      breadthWarning: "Breadth freshness could not be loaded.",
-      breadthDiagnostics: [],
-    })),
     getFedWatch().catch(() => ({
       status: "unavailable",
       warning: "FedWatch data could not be loaded.",
@@ -97,6 +67,37 @@ export default async function HomePage() {
   ]);
   const dashboard = dashboardResult.data;
   const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
+  const statusValue = {
+    timezone: dashboardValue?.config.timezone ?? "Australia/Melbourne",
+    autoRefreshLabel: dashboardValue?.config.eodRunTimeLabel ?? "08:15 Australia/Melbourne",
+    lastUpdated: dashboardValue?.generatedAt ?? null,
+    asOfDate: dashboardValue?.asOfDate ?? null,
+    providerLabel: dashboardValue?.providerLabel
+      ?? "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.",
+    expectedAsOfDate: dashboardValue?.expectedAsOfDate ?? null,
+    servingState: dashboardValue?.servingState ?? ("unavailable" as const),
+    staleTradingSessions: dashboardValue?.staleTradingSessions ?? 0,
+    overviewRecovery: dashboardValue?.overviewRecovery ?? null,
+    freshnessStatus: dashboardValue?.freshnessStatus ?? ("stale" as const),
+    freshnessCoveragePct: dashboardValue?.freshnessCoveragePct ?? 0,
+    freshnessCurrentCount: dashboardValue?.freshnessCurrentCount ?? 0,
+    freshnessEligibleCount: dashboardValue?.freshnessEligibleCount ?? 0,
+    freshnessCriticalMissingTickers: dashboardValue?.freshnessCriticalMissingTickers ?? [],
+    freshnessMinBarDate: dashboardValue?.freshnessMinBarDate ?? null,
+    freshnessMaxBarDate: dashboardValue?.freshnessMaxBarDate ?? null,
+    freshnessWarning: dashboardValue?.freshnessWarning
+      ?? (dashboardValue ? null : "Overview freshness could not be loaded."),
+    quoteOverlayRequestedCount: dashboardValue?.quoteOverlayRequestedCount ?? null,
+    quoteOverlayReturnedCount: dashboardValue?.quoteOverlayReturnedCount ?? null,
+    quoteOverlayError: dashboardValue?.quoteOverlayError ?? null,
+    quoteOverlayMissingSample: dashboardValue?.quoteOverlayMissingSample ?? [],
+    breadthExpectedAsOfDate: null,
+    breadthStatus: undefined,
+    breadthLatestAsOfDate: null,
+    breadthLastUpdated: null,
+    breadthWarning: null,
+    breadthDiagnostics: [],
+  };
   const dashboardUnavailableMessage = dashboardResult.error
     ?? (dashboard?.status === "empty" ? dashboard.warning : null)
     ?? "Overview data is temporarily unavailable.";
@@ -185,6 +186,15 @@ export default async function HomePage() {
           </div>
         )}
       />
+      <div className={`card px-4 py-3 text-sm ${statusValue.servingState === "stale_fallback" || statusValue.staleTradingSessions >= 2 ? "border-red-500/60 bg-red-950/30 text-red-100" : statusValue.servingState !== "ready" ? "border-amber-500/60 bg-amber-950/25 text-amber-100" : "text-slate-200"}`}>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+          <span><span className="text-slate-400">Expected session:</span> {statusValue.expectedAsOfDate ?? "Unavailable"}</span>
+          <span><span className="text-slate-400">Displaying data from:</span> {statusValue.asOfDate ?? "No validated generation"}</span>
+          <span><span className="text-slate-400">Generation:</span> {dashboardValue?.generationId ?? "None"}</span>
+          <span><span className="text-slate-400">Coverage:</span> {statusValue.freshnessCurrentCount}/{statusValue.freshnessEligibleCount} ({statusValue.freshnessCoveragePct.toFixed(1)}%)</span>
+        </div>
+        {statusValue.freshnessWarning ? <p className="mt-2">{statusValue.freshnessWarning}</p> : null}
+      </div>
       {dashboardValue ? (
         <OverviewFreshnessDisclosure summary={freshnessSummary} sections={focusedSections} />
       ) : null}

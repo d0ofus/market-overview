@@ -158,10 +158,33 @@ describe("dashboard API", () => {
       }),
     };
     const marketDb = {
-      prepare: vi.fn(() => {
+      prepare: vi.fn((sql: string) => {
         const statement = {
           bind: (..._args: unknown[]) => statement,
-          first: async <T>() => null as T,
+          first: async <T>() => sql.includes("JOIN overview_snapshot_pointer") ? {
+            generationId: "generation-2026-05-26",
+            asOfDate: "2026-05-26",
+            generatedAt: "2026-05-27T01:08:37.085Z",
+            providerLabel: "Stored Daily Bars",
+            expectedAsOfDate: "2026-05-26",
+            status: "ready",
+            publicationQuality: "ready",
+            freshnessStatus: "fresh",
+            freshnessCoveragePct: 100,
+            freshnessCurrentCount: 225,
+            freshnessEligibleCount: 225,
+            freshnessCriticalMissingJson: "[]",
+            freshnessMinBarDate: "2026-05-26",
+            freshnessMaxBarDate: "2026-05-26",
+            freshnessWarning: null,
+            quoteOverlayRequestedCount: 225,
+            quoteOverlayReturnedCount: 225,
+            quoteOverlayError: null,
+            quoteOverlayMissingSampleJson: "[]",
+            sourceCycleId: "cycle-2026-05-26",
+            publicationCoveragePct: 100,
+            publicationCriticalMissingJson: "[]",
+          } as T : null as T,
         };
         return statement;
       }),
@@ -389,24 +412,55 @@ describe("dashboard API", () => {
       prepare: vi.fn((sql: string) => {
         const statement = {
           bind: (..._args: unknown[]) => statement,
-          first: async <T>() => sql.includes("FROM overview_current_refresh_jobs") ? {
-            configId: "default",
-            sessionDate: "2026-08-14",
-            status: "completed",
-            attemptCount: 3,
-            nextAttemptAt: null,
-            updatedAt: "2026-08-14T22:05:00.000Z",
-            cycleId: "cycle-2026-08-14",
-            cycleStartedAt: "2026-08-14T21:30:00.000Z",
-            cursorOffset: 0,
-            processedTickers: 225,
-            requestedTickers: 225,
-            freshTickers: 220,
-            unavailableTickers: 5,
-            leaseExpiresAt: null,
-            lastError: null,
-            lastErrorCode: null,
-          } as T : null as T,
+          first: async <T>() => {
+            if (sql.includes("JOIN overview_snapshot_pointer")) {
+              return {
+                generationId: "published-2026-08-13",
+                asOfDate: "2026-08-13",
+                generatedAt: "2026-08-13T22:00:00.000Z",
+                providerLabel: "Stored Daily Bars",
+                expectedAsOfDate: "2026-08-13",
+                status: "ready",
+                publicationQuality: "ready",
+                freshnessStatus: "fresh",
+                freshnessCoveragePct: 88.9,
+                freshnessCurrentCount: 200,
+                freshnessEligibleCount: 225,
+                freshnessCriticalMissingJson: "[]",
+                freshnessMinBarDate: "2026-08-13",
+                freshnessMaxBarDate: "2026-08-13",
+                freshnessWarning: null,
+                quoteOverlayRequestedCount: 225,
+                quoteOverlayReturnedCount: 200,
+                quoteOverlayError: null,
+                quoteOverlayMissingSampleJson: "[]",
+                sourceCycleId: "cycle-2026-08-13",
+                publicationCoveragePct: 88.9,
+                publicationCriticalMissingJson: "[]",
+              } as T;
+            }
+            if (sql.includes("FROM overview_current_refresh_jobs")) {
+              return {
+                configId: "default",
+                sessionDate: "2026-08-14",
+                status: "completed",
+                attemptCount: 3,
+                nextAttemptAt: null,
+                updatedAt: "2026-08-14T22:05:00.000Z",
+                cycleId: "cycle-2026-08-14",
+                cycleStartedAt: "2026-08-14T21:30:00.000Z",
+                cursorOffset: 0,
+                processedTickers: 225,
+                requestedTickers: 225,
+                freshTickers: 220,
+                unavailableTickers: 5,
+                leaseExpiresAt: null,
+                lastError: null,
+                lastErrorCode: null,
+              } as T;
+            }
+            return null as T;
+          },
           all: async <T>() => ({ results: [] as T[] }),
         };
         return statement;
@@ -531,25 +585,6 @@ describe("dashboard API", () => {
     const nyseTickers = ["NYSE0", sharedTicker];
     const russellTickers = ["R2K0"];
     const overallTickers = [sharedTicker, "OVERALL0"];
-    const membershipRows = [
-      ...sp500Tickers.map((ticker) => ({ universeId: "sp500-core", ticker })),
-      ...nasdaqTickers.map((ticker) => ({ universeId: "nasdaq-core", ticker })),
-      ...nyseTickers.map((ticker) => ({ universeId: "nyse-core", ticker })),
-      ...russellTickers.map((ticker) => ({ universeId: "russell2000-core", ticker })),
-      ...overallTickers.map((ticker) => ({ universeId: "overall-market-proxy", ticker })),
-    ];
-    const expectedMarketDataTickers = [
-      ...sp500Tickers,
-      ...nasdaqTickers.filter((ticker) => ticker !== sharedTicker),
-      "NYSE0",
-      "R2K0",
-      "OVERALL0",
-    ];
-    const marketDataTickersWithBars = [
-      ...sp500Tickers.slice(0, 40),
-      sharedTicker,
-      "R2K0",
-    ];
     const primaryDb = {
       prepare: vi.fn((sql: string) => {
         primaryPreparedSql.push(sql);
@@ -590,7 +625,7 @@ describe("dashboard API", () => {
             return null as T;
           },
           all: async <T>() => ({
-            results: sql.includes("FROM universe_symbols") ? membershipRows as T[] : [],
+            results: [] as T[],
           }),
         };
         return statement;
@@ -599,19 +634,75 @@ describe("dashboard API", () => {
     const marketDataDb = {
       prepare: vi.fn((sql: string) => {
         marketDataPreparedSql.push(sql);
-        if (!sql.includes("FROM alpaca_daily_bars")) {
-          throw new Error("market-data DB must only be queried for breadth bars");
-        }
         const statement = {
-          bind: (feed: string, tickersJson: string, date: string) => {
-            expect(feed).toBe("iex");
-            expect(JSON.parse(tickersJson)).toEqual(expectedMarketDataTickers);
-            expect(date).toBe("2026-06-12");
-            return statement;
+          bind: (..._args: unknown[]) => statement,
+          all: async <T>() => {
+            if (sql.includes("WITH published AS")) {
+              const eligibleByUniverse: Record<string, number> = {
+                "sp500-core": 41,
+                "nasdaq-core": 1,
+                "nyse-core": 1,
+                "russell2000-core": 1,
+                "overall-market-proxy": 1,
+              };
+              return {
+                results: Object.entries(eligibleByUniverse).map(([universeId, eligible]) => ({
+                  asOfDate: "2026-06-10",
+                  universeId,
+                  advancers: eligible,
+                  decliners: 0,
+                  unchanged: 0,
+                  pctAbove20MA: 50,
+                  pctAbove50MA: 50,
+                  pctAbove200MA: 50,
+                  new20DHighs: 0,
+                  new20DLows: 0,
+                  medianReturn1D: 0,
+                  medianReturn5D: 0,
+                  sentimentJson: JSON.stringify({ metrics: { memberCount: eligible } }),
+                  generatedAt: "2026-06-11T03:27:00.000Z",
+                  generationId: "breadth-2026-06-10",
+                  publishedGenerationId: "breadth-2026-06-10",
+                  publishedAsOfDate: "2026-06-10",
+                  publishedGeneratedAt: "2026-06-11T03:27:00.000Z",
+                  publishedProviderLabel: "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.",
+                })) as T[],
+              };
+            }
+            if (sql.includes("FROM universes u")) {
+              const memberCountByUniverse: Record<string, number> = {
+                "sp500-core": sp500Tickers.length,
+                "nasdaq-core": nasdaqTickers.length,
+                "nyse-core": nyseTickers.length,
+                "russell2000-core": russellTickers.length,
+                "overall-market-proxy": overallTickers.length,
+              };
+              return {
+                results: Object.entries(memberCountByUniverse).map(([universeId, memberCount]) => ({
+                  universeId,
+                  universeName: universeId,
+                  memberCount,
+                  versionId: `${universeId}-v1`,
+                  source: "validated-proxy",
+                  sourceType: "public-common-stock-proxy",
+                  sourceUrl: "https://example.test/source",
+                  sourceAsOfDate: "2026-06-10",
+                  sourceMemberCount: memberCount,
+                  resolvedMemberCount: memberCount,
+                  unresolvedCount: 0,
+                  validationError: null,
+                })) as T[],
+              };
+            }
+            if (sql.includes("FROM data_readiness")) return { results: [] as T[] };
+            return {
+              results: [
+                { sessionDate: "2026-06-12" },
+                { sessionDate: "2026-06-11" },
+                { sessionDate: "2026-06-10" },
+              ] as T[],
+            };
           },
-          all: async <T>() => ({
-            results: marketDataTickersWithBars.map((ticker) => ({ ticker })) as T[],
-          }),
         };
         return statement;
       }),
@@ -643,7 +734,7 @@ describe("dashboard API", () => {
     expect(body.breadthExpectedAsOfDate).toBe("2026-06-12");
     expect(body.breadthStatus).toBe("stale");
     expect(body.breadthLatestAsOfDate).toBe("2026-06-10");
-    expect(body.breadthWarning).toContain("Breadth history is not current");
+    expect(body.breadthWarning).toContain("Breadth universes are not current");
     expect(body.breadthDiagnostics).toMatchObject([
       {
         universeId: "sp500-core",
@@ -686,10 +777,12 @@ describe("dashboard API", () => {
         coveragePct: 50,
       },
     ]);
-    expect(primaryPreparedSql.join("\n")).toContain("FROM universe_symbols");
+    expect(primaryPreparedSql.join("\n")).not.toContain("FROM universe_symbols");
     expect(primaryPreparedSql.join("\n")).not.toContain("daily_bars");
     expect(primaryPreparedSql.join("\n")).not.toContain("alpaca_daily_bars");
-    expect(marketDataPreparedSql.join("\n")).toContain("FROM alpaca_daily_bars");
+    expect(marketDataPreparedSql.join("\n")).toContain("FROM breadth_snapshots");
+    expect(marketDataPreparedSql.join("\n")).toContain("FROM universes u");
+    expect(marketDataPreparedSql.join("\n")).not.toContain("FROM alpaca_daily_bars");
   });
 
   it("fails breadth coverage diagnostics safely when MARKET_DATA_DB is unavailable", async () => {
@@ -776,8 +869,8 @@ describe("dashboard API", () => {
       expect(body.breadthWarning).toContain("could not be verified");
       expect(body.breadthDiagnostics).toHaveLength(5);
       expect(body.breadthDiagnostics.every((row) => row.status !== "fresh")).toBe(true);
-      expect(body.breadthDiagnostics.every((row) => row.latestAsOfDate === "2026-06-11")).toBe(true);
-      expect(body.breadthDiagnostics.every((row) => row.latestGeneratedAt === "2026-06-12T03:27:00.000Z")).toBe(true);
+      expect(body.breadthDiagnostics.every((row) => row.latestAsOfDate === null)).toBe(true);
+      expect(body.breadthDiagnostics.every((row) => row.latestGeneratedAt === null)).toBe(true);
     }
 
     expect(primaryDb.prepare.mock.calls.map(([sql]) => sql).join("\n")).not.toContain("alpaca_daily_bars");

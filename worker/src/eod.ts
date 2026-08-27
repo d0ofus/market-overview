@@ -7,13 +7,14 @@ import { countUsMarketTradingSessionsAfter, isUsMarketTradingDay, latestUsMarket
 import { envFlagEnabled } from "./auth";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { getOpsDb } from "./ops-db";
 import {
   aggregateDailyMarketFeatures,
   computeAndStoreDailyMarketFeatures,
   loadDailyMarketFeatures,
   suppressUnderCoveredBreadthMetrics,
 } from "./daily-market-features";
-import { loadNasdaqTraderUniverses, loadRussell2000Universe, loadSp500Constituents } from "./universe-constituents";
+import { loadNasdaqTraderUniverses, loadRussell2000Universe, loadSp500Constituents, loadSp500Universe } from "./universe-constituents";
 import { loadActiveUniverseTickers, stageAndPromoteUniverseVersion } from "./universe-version-service";
 import { evaluateOverviewGeneration } from "./overview-generation";
 import {
@@ -106,12 +107,12 @@ const MISSING_OVERVIEW_DERIVED_METRICS_WARNING =
   "Snapshot derived metrics are unavailable for this stored snapshot; use Refresh Overview Data to rebuild it.";
 let overviewFreshnessSchemaReady = false;
 
-const SP500_SOURCE_LABEL = "S&P 500 constituents (datasets/s-and-p-500-companies CSV) + provider daily bars";
-const NASDAQ_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange Q) + provider daily bars";
-const NYSE_SOURCE_LABEL = "NasdaqTrader nasdaqtraded.txt (common-stock filter, listing exchange N) + provider daily bars";
+const SP500_SOURCE_LABEL = "Wikipedia-derived S&P 500 public proxy + Alpaca SIP split-adjusted daily bars";
+const NASDAQ_SOURCE_LABEL = "NasdaqTrader common-stock NASDAQ proxy + Alpaca SIP split-adjusted daily bars";
+const NYSE_SOURCE_LABEL = "NasdaqTrader common-stock NYSE proxy + Alpaca SIP split-adjusted daily bars";
 const RUSSELL2000_SOURCE_LABEL =
   "Russell 2000 — iShares IWM holdings proxy (official ETF holdings) + provider daily bars";
-const OVERALL_SOURCE_LABEL = "NasdaqTrader all US common stocks (same filter set) + provider daily bars";
+const OVERALL_SOURCE_LABEL = "NasdaqTrader filtered US common-stock proxy + Alpaca SIP split-adjusted daily bars";
 
 type BreadthUniverseState = {
   universeTickers: Map<string, string[]>;
@@ -188,6 +189,11 @@ type UniverseSourceStatus = {
   status: string | null;
   error: string | null;
   recordsCount: number | null;
+  failureCount: number | null;
+  nextAttemptAt: string | null;
+  sourceType: string | null;
+  sourceAsOfDate: string | null;
+  lastVerifiedSourceDate: string | null;
 };
 
 type BreadthStoreResult = {
@@ -220,18 +226,16 @@ export type BreadthCoverageRefreshResult = {
   unavailable: Array<{ id: string; name: string; reason: string }>;
 };
 
-function isStatusStale(lastSyncedAt: string | null | undefined, maxAgeDays = 14): boolean {
-  if (!lastSyncedAt) return true;
-  const t = new Date(lastSyncedAt).getTime();
-  if (Number.isNaN(t)) return true;
-  return Date.now() - t > maxAgeDays * 86400_000;
-}
-
-async function runStatementsInChunks(env: Env, statements: D1PreparedStatement[], chunkSize = DB_BATCH_CHUNK_SIZE): Promise<void> {
+async function runStatementsInChunks(
+  env: Env,
+  statements: D1PreparedStatement[],
+  chunkSize = DB_BATCH_CHUNK_SIZE,
+  db: D1Database = env.DB,
+): Promise<void> {
   for (let i = 0; i < statements.length; i += chunkSize) {
     const chunk = statements.slice(i, i + chunkSize);
     if (chunk.length === 0) continue;
-    await env.DB.batch(chunk);
+    await db.batch(chunk);
   }
 }
 
@@ -438,6 +442,7 @@ async function computeOverviewFreshnessDiagnosticsForConfig(
       `SELECT ticker, MAX(date) as lastDate
        FROM alpaca_daily_bars
        WHERE feed = ?
+         AND source_provider = 'alpaca'
          AND ticker IN (${placeholders})
          AND date <= ?
        GROUP BY ticker`,
@@ -513,6 +518,7 @@ async function loadOverviewFreshnessMissingTickers(
       `SELECT DISTINCT ticker
        FROM alpaca_daily_bars
        WHERE feed = ?
+         AND source_provider = 'alpaca'
          AND ticker IN (${placeholders})
          AND date = ?`,
     )
@@ -611,7 +617,6 @@ export async function refreshAndStoreOverviewSnapshot(
           replaceExisting: true,
           providerBatchSize: 80,
           target: "market",
-          syncSymbolsToCore: true,
         });
         fetchedRows += refresh.fetchedRows;
         writtenRows += refresh.writtenRows;
@@ -749,7 +754,8 @@ export async function cleanupOldOverviewSnapshots(
   retentionDays = OVERVIEW_SNAPSHOT_RETENTION_DAYS,
 ): Promise<{ cutoffDate: string; deletedSnapshots: number; deletedRows: number; deletedOrphanRows: number }> {
   const cutoffDate = toISODate(new Date(Date.now() - retentionDays * 86400_000));
-  const orphanRowCount = await env.DB.prepare(
+  const db = getMarketDataDb(env);
+  const orphanRowCount = await db.prepare(
     `SELECT COUNT(*) as count
        FROM snapshot_rows
       WHERE snapshot_id NOT IN (SELECT id FROM snapshots_meta)
@@ -757,13 +763,13 @@ export async function cleanupOldOverviewSnapshots(
   ).first<{ count: number | null }>();
   const deletedOrphanRows = orphanRowCount?.count ?? 0;
   if (deletedOrphanRows > 0) {
-    await env.DB.prepare(
+    await db.prepare(
       `DELETE FROM snapshot_rows
         WHERE snapshot_id NOT IN (SELECT id FROM snapshots_meta)
           AND snapshot_id NOT IN (SELECT id FROM overview_generations)`,
     ).run();
   }
-  const staleSnapshots = await env.DB.prepare(
+  const staleSnapshots = await db.prepare(
     `SELECT sm.id as id
        FROM snapshots_meta sm
        LEFT JOIN overview_snapshot_pointer p ON p.generation_id = sm.id
@@ -781,7 +787,7 @@ export async function cleanupOldOverviewSnapshots(
   )
     .bind(cutoffDate)
     .all<{ id: string }>();
-  const staleGenerations = await env.DB.prepare(
+  const staleGenerations = await db.prepare(
     `SELECT g.id as id
        FROM overview_generations g
        LEFT JOIN overview_snapshot_pointer p ON p.generation_id = g.id
@@ -811,16 +817,16 @@ export async function cleanupOldOverviewSnapshots(
     const chunk = staleSnapshotIds.slice(i, i + SNAPSHOT_RETENTION_DELETE_CHUNK_SIZE);
     if (chunk.length === 0) continue;
     const placeholders = buildPlaceholders(chunk.length);
-    const rowCount = await env.DB.prepare(
+    const rowCount = await db.prepare(
       `SELECT COUNT(*) as count FROM snapshot_rows WHERE snapshot_id IN (${placeholders})`,
     )
       .bind(...chunk)
       .first<{ count: number | null }>();
     deletedRows += rowCount?.count ?? 0;
-    await env.DB.batch([
-      env.DB.prepare(`DELETE FROM snapshot_rows WHERE snapshot_id IN (${placeholders})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM snapshots_meta WHERE id IN (${placeholders})`).bind(...chunk),
-      env.DB.prepare(
+    await db.batch([
+      db.prepare(`DELETE FROM snapshot_rows WHERE snapshot_id IN (${placeholders})`).bind(...chunk),
+      db.prepare(`DELETE FROM snapshots_meta WHERE id IN (${placeholders})`).bind(...chunk),
+      db.prepare(
         `DELETE FROM overview_generations
           WHERE id IN (${placeholders})
             AND id NOT IN (SELECT generation_id FROM overview_snapshot_pointer)`,
@@ -834,16 +840,6 @@ export async function cleanupOldOverviewSnapshots(
     deletedRows,
     deletedOrphanRows,
   };
-}
-
-async function ensureSymbolsExist(env: Env, tickers: string[]): Promise<void> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  if (unique.length === 0) return;
-  const statements = unique.map((ticker) =>
-    env.DB.prepare("INSERT OR IGNORE INTO symbols (ticker, name, asset_class) VALUES (?, ?, ?)")
-      .bind(ticker, ticker, "equity"),
-  );
-  await runStatementsInChunks(env, statements);
 }
 
 async function loadBarsForTickers(
@@ -860,6 +856,7 @@ async function loadBarsForTickers(
     const sql = `SELECT ticker, date, c, volume
       FROM alpaca_daily_bars
       WHERE feed = ?
+        AND source_provider = 'alpaca'
         AND ticker IN (${placeholders})
         AND date <= ?
       ORDER BY ticker, date`;
@@ -887,6 +884,7 @@ async function loadOverviewSnapshotBarsForTickers(
       `SELECT ticker, date, c
          FROM alpaca_daily_bars
         WHERE feed = ?
+          AND source_provider = 'alpaca'
           AND ticker IN (${placeholders})
           AND date >= ?
           AND date <= ?
@@ -910,6 +908,7 @@ async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: strin
       `SELECT DISTINCT ticker
        FROM alpaca_daily_bars
        WHERE feed = ?
+         AND source_provider = 'alpaca'
          AND ticker IN (${placeholders})
          AND date = ?`,
     )
@@ -955,8 +954,14 @@ async function loadUniverseTickers(env: Env, universeId: string): Promise<string
 }
 
 async function loadUniverseSourceStatus(env: Env, sourceKey: string): Promise<UniverseSourceStatus | null> {
-  return await env.DB.prepare(
-    "SELECT last_synced_at as lastSyncedAt, status, error, records_count as recordsCount FROM etf_constituent_sync_status WHERE etf_ticker = ? LIMIT 1",
+  return await getOpsDb(env).prepare(
+    `SELECT last_success_at as lastSyncedAt, status, error_message as error,
+            records_count as recordsCount, failure_count as failureCount,
+            next_attempt_at as nextAttemptAt, source_type as sourceType,
+            source_as_of_date as sourceAsOfDate,
+            last_verified_source_date as lastVerifiedSourceDate
+       FROM universe_source_sync_state
+      WHERE source_key = ? LIMIT 1`,
   )
     .bind(sourceKey)
     .first<UniverseSourceStatus>();
@@ -969,13 +974,98 @@ async function saveUniverseSourceStatus(
   source: string,
   recordsCount: number,
   errorMessage: string | null,
+  metadata: {
+    sourceType?: string | null;
+    sourceUrl?: string | null;
+    sourceAsOfDate?: string | null;
+    contentHash?: string | null;
+    etag?: string | null;
+    lastModified?: string | null;
+  } = {},
 ): Promise<void> {
   const errorText = errorMessage ? errorMessage.slice(0, 700) : null;
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO etf_constituent_sync_status (etf_ticker, last_synced_at, status, error, source, records_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-  )
-    .bind(sourceKey, new Date().toISOString(), status, errorText, source.slice(0, 120), recordsCount)
-    .run();
+  const previous = await loadUniverseSourceStatus(env, sourceKey).catch(() => null);
+  const failureCount = status === "ok" ? 0 : Math.max(0, Number(previous?.failureCount ?? 0)) + 1;
+  const retryMinutes = [15, 60, 360, 1_440][Math.min(3, Math.max(0, failureCount - 1))] ?? 1_440;
+  const nextAttemptAt = status === "ok" ? null : new Date(Date.now() + retryMinutes * 60_000).toISOString();
+  try {
+    await getOpsDb(env).prepare(
+      `INSERT INTO universe_source_sync_state
+         (source_key, status, source_label, source_type, source_url, source_as_of_date,
+          content_hash, etag, last_modified, last_verified_source_date, last_verified_at,
+          records_count, failure_count, last_attempt_at,
+          last_success_at, next_attempt_at, error_code, error_message, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+               CASE WHEN ? <> 'bundled-fallback' AND ? = 'ok' THEN ? ELSE NULL END,
+               CASE WHEN ? <> 'bundled-fallback' AND ? = 'ok' THEN CURRENT_TIMESTAMP ELSE NULL END,
+               ?, ?, CURRENT_TIMESTAMP,
+               CASE WHEN ? = 'ok' THEN CURRENT_TIMESTAMP ELSE NULL END, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(source_key) DO UPDATE SET
+         status = excluded.status,
+         source_label = excluded.source_label,
+         source_type = COALESCE(excluded.source_type, universe_source_sync_state.source_type),
+         source_url = COALESCE(excluded.source_url, universe_source_sync_state.source_url),
+         source_as_of_date = COALESCE(excluded.source_as_of_date, universe_source_sync_state.source_as_of_date),
+         content_hash = COALESCE(excluded.content_hash, universe_source_sync_state.content_hash),
+         etag = COALESCE(excluded.etag, universe_source_sync_state.etag),
+         last_modified = COALESCE(excluded.last_modified, universe_source_sync_state.last_modified),
+         last_verified_source_date = CASE
+           WHEN excluded.source_type <> 'bundled-fallback' AND excluded.status = 'ok'
+             THEN excluded.source_as_of_date
+           ELSE universe_source_sync_state.last_verified_source_date
+         END,
+         last_verified_at = CASE
+           WHEN excluded.source_type <> 'bundled-fallback' AND excluded.status = 'ok'
+             THEN CURRENT_TIMESTAMP
+           ELSE universe_source_sync_state.last_verified_at
+         END,
+         records_count = excluded.records_count,
+         failure_count = excluded.failure_count,
+         last_attempt_at = CURRENT_TIMESTAMP,
+         last_success_at = CASE WHEN excluded.status = 'ok' THEN CURRENT_TIMESTAMP ELSE universe_source_sync_state.last_success_at END,
+         next_attempt_at = excluded.next_attempt_at,
+         error_code = excluded.error_code,
+         error_message = excluded.error_message,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).bind(
+      sourceKey,
+      status,
+      source.slice(0, 200),
+      metadata.sourceType ?? null,
+      metadata.sourceUrl ?? null,
+      metadata.sourceAsOfDate ?? null,
+      metadata.contentHash ?? null,
+      metadata.etag ?? null,
+      metadata.lastModified ?? null,
+      metadata.sourceType ?? null,
+      status,
+      metadata.sourceAsOfDate ?? null,
+      metadata.sourceType ?? null,
+      status,
+      recordsCount,
+      failureCount,
+      status,
+      nextAttemptAt,
+      status === "ok" ? null : "universe-source-refresh-failed",
+      errorText,
+    ).run();
+  } catch (error) {
+    console.error("universe source status write failed; cached membership remains usable", { sourceKey, error });
+  }
+}
+
+function businessDaysAfter(sourceDate: string, now = new Date()): number {
+  const cursor = new Date(`${sourceDate}T00:00:00Z`);
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (!Number.isFinite(cursor.getTime())) return Number.POSITIVE_INFINITY;
+  let count = 0;
+  cursor.setUTCDate(cursor.getUTCDate() + 1);
+  while (cursor <= end && count <= 10) {
+    const weekday = cursor.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) count += 1;
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return count;
 }
 
 async function ensureUniverseMembership(
@@ -1011,6 +1101,9 @@ type UniverseFetchResult = {
   unresolvedTickers?: string[];
   sourceType?: string | null;
   sourceUrl?: string | null;
+  contentHash?: string | null;
+  etag?: string | null;
+  lastModified?: string | null;
   memberMetadata?: Record<string, {
     sourceTicker: string;
     issuerName: string | null;
@@ -1025,12 +1118,37 @@ type UniverseSyncDef = {
   sourceLabel: string;
   sourceKey: string;
   staleAfterDays: number;
+  refreshAfterDays?: number;
+  maxSourceAgeDays?: number;
   unavailableReason: string;
   fetchTickers: () => Promise<string[] | UniverseFetchResult>;
 };
 
 function dedupeTickers(tickers: string[]): string[] {
   return Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
+export function universeSourceAgeDays(sourceAsOfDate: string | null | undefined, now = new Date()): number {
+  const sourceMs = sourceAsOfDate ? Date.parse(`${sourceAsOfDate}T00:00:00Z`) : Number.NaN;
+  return Number.isFinite(sourceMs)
+    ? Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sourceMs) / 86_400_000)
+    : Number.POSITIVE_INFINITY;
+}
+
+export function shouldRefreshUniverseSource(input: {
+  existingCount: number;
+  membershipIncomplete?: boolean;
+  status: string | null | undefined;
+  sourceAsOfDate: string | null | undefined;
+  nextAttemptAt: string | null | undefined;
+  refreshAfterDays: number;
+  now?: Date;
+}): boolean {
+  const now = input.now ?? new Date();
+  const retryDue = !input.nextAttemptAt || Date.parse(input.nextAttemptAt) <= now.getTime();
+  if (!retryDue) return false;
+  if (input.existingCount === 0 || input.membershipIncomplete || input.status !== "ok") return true;
+  return universeSourceAgeDays(input.sourceAsOfDate, now) >= input.refreshAfterDays;
 }
 
 async function syncUniverseFromSource(
@@ -1043,7 +1161,14 @@ async function syncUniverseFromSource(
   const existing = await loadUniverseTickers(env, def.id);
   const status = await loadUniverseSourceStatus(env, def.sourceKey);
   const membershipIncomplete = def.id === "russell2000-core" && (existing.length < 1_800 || existing.length > 2_100);
-  const shouldRefresh = existing.length === 0 || membershipIncomplete || status?.status !== "ok" || isStatusStale(status?.lastSyncedAt, def.staleAfterDays);
+  const shouldRefresh = shouldRefreshUniverseSource({
+    existingCount: existing.length,
+    membershipIncomplete,
+    status: status?.status,
+    sourceAsOfDate: status?.sourceAsOfDate,
+    nextAttemptAt: status?.nextAttemptAt,
+    refreshAfterDays: def.refreshAfterDays ?? def.staleAfterDays,
+  });
 
   let tickers = existing;
   let sourceLabel = def.sourceLabel;
@@ -1062,8 +1187,22 @@ async function syncUniverseFromSource(
             unresolvedTickers: fetchedResult.unresolvedTickers,
             sourceType: fetchedResult.sourceType,
             sourceUrl: fetchedResult.sourceUrl,
+            contentHash: fetchedResult.contentHash,
+            etag: fetchedResult.etag,
+            lastModified: fetchedResult.lastModified,
             memberMetadata: fetchedResult.memberMetadata,
           };
+      if (def.id === "sp500-core" && fetchedMetadata.sourceType === "bundled-fallback") {
+        const verifiedSourceDate = status?.lastVerifiedSourceDate ?? null;
+        const verifiedMs = verifiedSourceDate ? Date.parse(`${verifiedSourceDate}T00:00:00Z`) : Number.NaN;
+        const verifiedAgeDays = Number.isFinite(verifiedMs)
+          ? Math.floor((Date.now() - verifiedMs) / 86_400_000)
+          : Number.POSITIVE_INFINITY;
+        if (verifiedAgeDays < -1 || verifiedAgeDays > 7) {
+          throw new Error("Bundled S&P proxy is not eligible because no remotely verified membership exists within seven days");
+        }
+        fetchedMetadata.sourceAsOfDate = verifiedSourceDate;
+      }
       const fetched = dedupeTickers(fetchedTickers);
       if (fetched.length === 0) {
         throw new Error(`No tickers returned for ${def.id}`);
@@ -1074,7 +1213,10 @@ async function syncUniverseFromSource(
       if (fetchedMetadata.sourceAsOfDate) {
         const sourceDateMs = Date.parse(`${fetchedMetadata.sourceAsOfDate}T00:00:00Z`);
         const ageDays = Number.isFinite(sourceDateMs) ? Math.floor((Date.now() - sourceDateMs) / 86_400_000) : Number.POSITIVE_INFINITY;
-        if (ageDays < -1 || ageDays > def.staleAfterDays) {
+        const sourceAge = fetchedMetadata.sourceType === "public-common-stock-proxy"
+          ? businessDaysAfter(fetchedMetadata.sourceAsOfDate)
+          : ageDays;
+        if (ageDays < -1 || sourceAge > (def.maxSourceAgeDays ?? def.staleAfterDays)) {
           throw new Error(`${def.id} source date ${fetchedMetadata.sourceAsOfDate} is stale or invalid (${ageDays} days old)`);
         }
       }
@@ -1087,12 +1229,18 @@ async function syncUniverseFromSource(
         def.sourceLabel,
         fetchedMetadata.sourceMemberCount ?? fetched.length,
         null,
+        fetchedMetadata,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "constituent sync failed";
       console.error("breadth universe source sync failed", { universeId: def.id, error: message });
       await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message);
-      if (existing.length === 0 || def.id === "russell2000-core") {
+      const cachedSourceAgeDays = universeSourceAgeDays(status?.sourceAsOfDate);
+      const cachedMembershipUsable = existing.length > 0
+        && !membershipIncomplete
+        && cachedSourceAgeDays >= -1
+        && cachedSourceAgeDays <= (def.maxSourceAgeDays ?? def.staleAfterDays);
+      if (!cachedMembershipUsable) {
         unavailable.push({
           id: def.id,
           name: def.name,
@@ -1119,21 +1267,58 @@ async function syncUniverseFromSource(
   sourceByUniverse.set(def.id, sourceLabel);
 }
 
-async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
+async function loadCachedBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
+  const universeTickers = new Map<string, string[]>();
+  const sourceByUniverse = new Map<string, string>();
+  const unavailable: Array<{ id: string; name: string; reason: string }> = [];
+  const db = getMarketDataDb(env);
+  for (const universeId of CORE_BREADTH_UNIVERSE_IDS) {
+    const tickers = await loadUniverseTickers(env, universeId);
+    const version = await loadActiveUniverseVersion(env, universeId);
+    if (tickers.length === 0 || !version) {
+      unavailable.push({ id: universeId, name: universeId, reason: "No validated active membership version is stored." });
+      continue;
+    }
+    const sourceMs = version.sourceAsOfDate ? Date.parse(`${version.sourceAsOfDate}T00:00:00Z`) : Number.NaN;
+    const ageDays = Number.isFinite(sourceMs) ? Math.floor((Date.now() - sourceMs) / 86_400_000) : Number.POSITIVE_INFINITY;
+    const maxAgeDays = universeId === "russell2000-core" ? 14 : universeId === "sp500-core" ? 7 : 1;
+    const sourceAge = version.sourceType === "public-common-stock-proxy" && version.sourceAsOfDate
+      ? businessDaysAfter(version.sourceAsOfDate)
+      : ageDays;
+    if (ageDays < -1 || sourceAge > maxAgeDays) {
+      unavailable.push({
+        id: universeId,
+        name: universeId,
+        reason: `${version.source} membership source is ${Number.isFinite(ageDays) ? ageDays : "unknown"} days old; maximum is ${maxAgeDays}.`,
+      });
+      continue;
+    }
+    universeTickers.set(universeId, tickers);
+    sourceByUniverse.set(universeId, version.source);
+  }
+  await db.prepare("SELECT 1 FROM universes LIMIT 1").first();
+  unavailable.push({
+    id: "worden-common-stock-universe",
+    name: "Overall Market (Worden Common Stock Universe)",
+    reason: "Proprietary universe; no licensed direct feed is configured.",
+  });
+  return { universeTickers, sourceByUniverse, unavailable };
+}
+
+async function ensureBreadthUniverseMemberships(
+  env: Env,
+  options: { refreshSources?: boolean } = {},
+): Promise<BreadthUniverseState> {
+  if (!options.refreshSources) return await loadCachedBreadthUniverseMemberships(env);
   const universeTickers = new Map<string, string[]>();
   const sourceByUniverse = new Map<string, string>();
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
   let nasdaqUniverseCache:
-    | {
-        nasdaqTickers: string[];
-        nyseTickers: string[];
-        allCommonTickers: string[];
-        allActiveEquityTickers: string[];
-      }
+    | Awaited<ReturnType<typeof loadNasdaqTraderUniverses>>
     | null = null;
   const loadNasdaqUniverseCache = async () => {
     if (!nasdaqUniverseCache) {
-      nasdaqUniverseCache = await loadNasdaqTraderUniverses();
+      nasdaqUniverseCache = await loadNasdaqTraderUniverses(env);
     }
     return nasdaqUniverseCache;
   };
@@ -1147,7 +1332,10 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       sourceKey: "universe:nasdaq-core",
       staleAfterDays: 1,
       unavailableReason: "NASDAQ constituent source fetch failed and no cached NASDAQ membership is available",
-      fetchTickers: async () => (await loadNasdaqUniverseCache()).nasdaqTickers,
+      fetchTickers: async () => {
+        const source = await loadNasdaqUniverseCache();
+        return { ...source, tickers: source.nasdaqTickers, sourceMemberCount: source.nasdaqTickers.length };
+      },
     },
     universeTickers,
     sourceByUniverse,
@@ -1163,7 +1351,10 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       sourceKey: "universe:nyse-core",
       staleAfterDays: 1,
       unavailableReason: "NYSE constituent source fetch failed and no cached NYSE membership is available",
-      fetchTickers: async () => (await loadNasdaqUniverseCache()).nyseTickers,
+      fetchTickers: async () => {
+        const source = await loadNasdaqUniverseCache();
+        return { ...source, tickers: source.nyseTickers, sourceMemberCount: source.nyseTickers.length };
+      },
     },
     universeTickers,
     sourceByUniverse,
@@ -1178,13 +1369,14 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       sourceLabel: SP500_SOURCE_LABEL,
       sourceKey: "universe:sp500-core",
       staleAfterDays: 7,
+      refreshAfterDays: 1,
       unavailableReason: "S&P 500 constituent source fetch failed and no cached S&P 500 membership is available",
       fetchTickers: async () => {
         try {
           const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
-          return await loadSp500Constituents(allCommon);
+          return await loadSp500Universe(allCommon, env);
         } catch {
-          return await loadSp500Constituents(undefined);
+          return await loadSp500Universe(undefined, env);
         }
       },
     },
@@ -1200,11 +1392,13 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       name: "Russell 2000",
       sourceLabel: RUSSELL2000_SOURCE_LABEL,
       sourceKey: "universe:russell2000-core",
-      staleAfterDays: 14,
+      staleAfterDays: 10,
+      refreshAfterDays: 10,
+      maxSourceAgeDays: 14,
       unavailableReason: "Russell 2000 constituent source fetch failed and no cached Russell 2000 membership is available",
       fetchTickers: async () => {
         const activeEquities = new Set((await loadNasdaqUniverseCache()).allActiveEquityTickers);
-        return await loadRussell2000Universe(activeEquities);
+        return await loadRussell2000Universe(activeEquities, env);
       },
     },
     universeTickers,
@@ -1221,7 +1415,10 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
       sourceKey: "universe:overall-market-core",
       staleAfterDays: 1,
       unavailableReason: "Overall-market constituent source fetch failed and no cached overall-market membership is available",
-      fetchTickers: async () => (await loadNasdaqUniverseCache()).allCommonTickers,
+      fetchTickers: async () => {
+        const source = await loadNasdaqUniverseCache();
+        return { ...source, tickers: source.allCommonTickers, sourceMemberCount: source.allCommonTickers.length };
+      },
     },
     universeTickers,
     sourceByUniverse,
@@ -1244,13 +1441,13 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
   }
 
   for (const [universeId, tickers] of Array.from(universeTickers.entries())) {
-    const active = await env.DB.prepare(
+    const active = await getMarketDataDb(env).prepare(
       "SELECT active_version_id as activeVersionId FROM universes WHERE id = ? LIMIT 1",
     ).bind(universeId).first<{ activeVersionId: string | null }>();
     if (active?.activeVersionId) continue;
     const source = sourceByUniverse.get(universeId) ?? "existing universe membership";
     const sourceAsOfDate = new Date().toISOString().slice(0, 10);
-    const existingCandidate = await env.DB.prepare(
+    const existingCandidate = await getMarketDataDb(env).prepare(
       `SELECT id, status
          FROM universe_versions
         WHERE universe_id = ? AND source_as_of_date = ? AND member_count = ?
@@ -1286,6 +1483,10 @@ async function ensureBreadthUniverseMemberships(env: Env): Promise<BreadthUniver
   });
 
   return { universeTickers, sourceByUniverse, unavailable };
+}
+
+export async function refreshBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
+  return await ensureBreadthUniverseMemberships(env, { refreshSources: true });
 }
 
 type SnapshotComputeOptions = {
@@ -1345,7 +1546,7 @@ async function loadLatestValidOverviewSeries(
   env: Env,
   configId: string,
 ): Promise<Map<string, OverviewStoredSeries>> {
-  const rows = await env.DB.prepare(
+  const rows = await getMarketDataDb(env).prepare(
     `SELECT sr.group_id as groupId, sr.ticker, sr.bar_date as barDate,
             sr.history_series_through_date as seriesThroughDate,
             sr.history_series_source as seriesSource,
@@ -1395,8 +1596,9 @@ async function loadLatestValidOverviewSeries(
 }
 
 async function hasReadyOverviewGeneration(env: Env, configId: string): Promise<boolean> {
+  const db = getMarketDataDb(env);
   try {
-    const pointer = await env.DB.prepare(
+    const pointer = await db.prepare(
       "SELECT generation_id as generationId FROM overview_snapshot_pointer WHERE config_id = ? LIMIT 1",
     ).bind(configId).first<{ generationId: string }>();
     if (pointer?.generationId) return true;
@@ -1404,7 +1606,7 @@ async function hasReadyOverviewGeneration(env: Env, configId: string): Promise<b
     const message = error instanceof Error ? error.message : String(error ?? "");
     if (!/no such table/i.test(message)) throw error;
   }
-  const legacy = await env.DB.prepare(
+  const legacy = await db.prepare(
     "SELECT id FROM snapshots_meta WHERE config_id = ? ORDER BY generated_at DESC LIMIT 1",
   ).bind(configId).first<{ id: string }>();
   return Boolean(legacy?.id);
@@ -1428,7 +1630,7 @@ function overviewGenerationStatement(env: Env, input: {
   publicationCoveragePct: number;
   publicationCriticalMissing: string[];
 }): D1PreparedStatement {
-  return env.DB.prepare(
+  return getMarketDataDb(env).prepare(
     `INSERT INTO overview_generations
        (id, config_id, as_of_date, generated_at, provider_label, expected_as_of_date,
         status, freshness_status, current_count, eligible_count, coverage_pct,
@@ -1484,7 +1686,9 @@ export async function computeAndStoreSnapshot(
   const generatedAtDate = new Date(generatedAt);
   await ensureOverviewFreshnessSchema(env);
   const config = await loadConfig(env, configId);
-  const providerLabel = `TradingView/Alpaca current snapshots + Alpaca ${marketDataFeed(env).toUpperCase()} split-adjusted daily history`;
+  const dailyAdjustment = (env.ALPACA_DAILY_ADJUSTMENT ?? "split").trim().toLowerCase() || "split";
+  const adjustmentLabel = dailyAdjustment === "split" ? "split-adjusted" : `${dailyAdjustment}-adjusted`;
+  const providerLabel = `Alpaca ${marketDataFeed(env).toUpperCase()} ${adjustmentLabel} completed daily bars; Alpaca ${(env.ALPACA_LIVE_FEED ?? env.ALPACA_FEED ?? "iex").toUpperCase()} exact-session fallback.`;
 
   const dashboardTickers = Array.from(
     new Set(
@@ -1823,7 +2027,7 @@ export async function computeAndStoreSnapshot(
         ? `Last stored daily bar is ${row.barDate}; expected ${asOfDate}.`
         : `No stored daily bar is available for ${row.ticker}.`;
     rowInserts.push(
-      env.DB.prepare(
+      getMarketDataDb(env).prepare(
         "INSERT OR REPLACE INTO snapshot_rows (snapshot_id, section_id, group_id, ticker, display_name, price, change_1d, change_1w, change_5d, change_3m, change_6m, change_21d, ytd, pct_from_52w_high, sparkline_json, rank_key, holdings_json, bar_date, quote_price, quote_prev_close, quote_change_1d, quote_source, quote_fetched_at, quote_freshness_status, quote_freshness_reason, bar_freshness_status, bar_freshness_reason, history_series_through_date, history_series_status, history_series_source, history_series_reason, above_20_sma, above_50_sma, above_200_sma, relative_strength_30d_vs_spy_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).bind(
         snapshotId,
@@ -1864,8 +2068,9 @@ export async function computeAndStoreSnapshot(
       ),
     );
   }
-  if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts);
-  const snapshotMetaStatement = env.DB.prepare(
+  const publicationDb = getMarketDataDb(env);
+  if (rowInserts.length > 0) await runStatementsInChunks(env, rowInserts, DB_BATCH_CHUNK_SIZE, publicationDb);
+  const snapshotMetaStatement = publicationDb.prepare(
     `INSERT INTO snapshots_meta (
        id,
        config_id,
@@ -1925,10 +2130,10 @@ export async function computeAndStoreSnapshot(
       quoteOverlayDiagnostics.providerError,
       JSON.stringify(quoteOverlayDiagnostics.sampleMissingTickers),
     );
-  await env.DB.batch([
+  await publicationDb.batch([
     snapshotMetaStatement,
     generationStatement,
-    env.DB.prepare(
+    publicationDb.prepare(
       `INSERT INTO overview_snapshot_pointer (config_id, generation_id, updated_at)
        VALUES (?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(config_id) DO UPDATE SET
@@ -2026,6 +2231,9 @@ export async function recomputeBreadthFromStoredBars(
       { featuresPrepared: true },
     ));
   }
+  if (CORE_BREADTH_UNIVERSE_IDS.every((universeId) => results.some((result) => result.universeId === universeId && result.stored))) {
+    await publishBreadthGeneration(env, asOfDate, generatedAt);
+  }
   return {
     asOfDate,
     universeCount: results.filter((result) => result.stored).length,
@@ -2064,7 +2272,7 @@ export async function publishReadyBreadthUniverses(
   }
 
   const placeholders = buildPlaceholders(readyUniverseIds.length);
-  const existing = await env.DB.prepare(
+  const existing = await getMarketDataDb(env).prepare(
     `SELECT DISTINCT universe_id as universeId
        FROM breadth_snapshots
       WHERE as_of_date = ?
@@ -2073,6 +2281,9 @@ export async function publishReadyBreadthUniverses(
   const existingIds = new Set((existing.results ?? []).map((row) => row.universeId));
   const pendingUniverseIds = readyUniverseIds.filter((universeId) => !existingIds.has(universeId));
   if (pendingUniverseIds.length === 0) {
+    if (diagnostics.length === CORE_BREADTH_UNIVERSE_IDS.length && diagnostics.every((row) => row.ok)) {
+      await publishBreadthGeneration(env, asOfDate, new Date().toISOString());
+    }
     return { asOfDate, publishedUniverseIds: [], diagnostics, unavailable: breadthState.unavailable };
   }
 
@@ -2093,7 +2304,47 @@ export async function publishReadyBreadthUniverses(
     );
     if (result.stored) publishedUniverseIds.push(universeId);
   }
+  if (diagnostics.length === CORE_BREADTH_UNIVERSE_IDS.length && diagnostics.every((row) => row.ok)) {
+    const allReady = new Set([...existingIds, ...publishedUniverseIds]);
+    if (CORE_BREADTH_UNIVERSE_IDS.every((universeId) => allReady.has(universeId))) {
+      await publishBreadthGeneration(env, asOfDate, generatedAt);
+    }
+  }
   return { asOfDate, publishedUniverseIds, diagnostics, unavailable: breadthState.unavailable };
+}
+
+const BREADTH_PROVIDER_LABEL = "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.";
+
+async function publishBreadthGeneration(env: Env, asOfDate: string, generatedAt: string): Promise<string> {
+  const db = getMarketDataDb(env);
+  const existing = await db.prepare(
+    `SELECT g.id
+       FROM breadth_publication_pointer p
+       JOIN breadth_generations g ON g.id = p.generation_id
+      WHERE p.pointer_key = 'default' AND g.as_of_date = ?
+      LIMIT 1`,
+  ).bind(asOfDate).first<{ id: string }>();
+  if (existing?.id) return existing.id;
+  const generationId = crypto.randomUUID();
+  await db.batch([
+    db.prepare("UPDATE breadth_generations SET status = 'superseded' WHERE status = 'published'"),
+    db.prepare(
+      `INSERT INTO breadth_generations
+         (id, as_of_date, expected_as_of_date, generated_at, provider_label, status, health, warning)
+       VALUES (?, ?, ?, ?, ?, 'published', 'fresh', NULL)`,
+    ).bind(generationId, asOfDate, asOfDate, generatedAt, BREADTH_PROVIDER_LABEL),
+    db.prepare(
+      "UPDATE breadth_snapshots SET generation_id = ? WHERE as_of_date = ?",
+    ).bind(generationId, asOfDate),
+    db.prepare(
+      `INSERT INTO breadth_publication_pointer (pointer_key, generation_id, updated_at)
+       VALUES ('default', ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(pointer_key) DO UPDATE SET
+         generation_id = excluded.generation_id,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).bind(generationId),
+  ]);
+  return generationId;
 }
 
 export async function refreshMissingBreadthBarsForCoverage(
@@ -2166,7 +2417,6 @@ export async function refreshMissingBreadthBarsForCoverage(
       replaceExisting: true,
       continueOnError: true,
       target: "market",
-      syncSymbolsToCore: true,
     });
     fetchedRows += refresh.fetchedRows;
     writtenRows += refresh.writtenRows;
@@ -2187,8 +2437,8 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
   const asOfDate = resolveAsOfDate(asOfDateInput);
   let tickers: string[] = [];
   try {
-    const nasdaqUniverse = await loadNasdaqTraderUniverses();
-    tickers = await loadSp500Constituents(new Set(nasdaqUniverse.allCommonTickers));
+    const nasdaqUniverse = await loadNasdaqTraderUniverses(env);
+    tickers = await loadSp500Constituents(new Set(nasdaqUniverse.allCommonTickers), env);
     await saveUniverseSourceStatus(env, "universe:sp500-core", "ok", SP500_SOURCE_LABEL, tickers.length, null);
   } catch (error) {
     console.error("sp500 constituent refresh failed; using cached membership fallback", error);
@@ -2206,7 +2456,6 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
     tickers = [...SP500_TICKERS];
   }
   await ensureUniverseMembership(env, "sp500-core", "S&P 500", tickers, SP500_SOURCE_LABEL);
-  await ensureSymbolsExist(env, tickers);
 
   let barCount = 0;
   try {
@@ -2219,7 +2468,6 @@ export async function refreshSp500CoreBreadth(env: Env, asOfDateInput?: string):
       startDate,
       endDate,
       target: "market",
-      syncSymbolsToCore: true,
     });
     barCount = refresh.writtenRows;
   } catch (error) {
@@ -2309,11 +2557,13 @@ export async function computeAndStoreBreadth(
   }
 
   const sourceMix = Array.from(features.values()).reduce<Record<string, number>>((mix, feature) => {
-    mix[feature.sourceProvider] = (mix[feature.sourceProvider] ?? 0) + 1;
+    mix.alpaca = (mix.alpaca ?? 0) + Number(feature.alpacaBarCount ?? feature.sourceSessions);
+    mix.yahoo = (mix.yahoo ?? 0) + Number(feature.repairBarCount ?? 0);
     return mix;
   }, {});
   const repairedRows = sourceMix.yahoo ?? 0;
-  const repairedPct = stats.memberCount > 0 ? (repairedRows / stats.memberCount) * 100 : 0;
+  const sourceRows = (sourceMix.alpaca ?? 0) + repairedRows;
+  const repairedPct = sourceRows > 0 ? (repairedRows / sourceRows) * 100 : 0;
   if (repairedPct > 5) {
     await recordDataReadiness(env, {
       domain: "breadth",
@@ -2348,8 +2598,9 @@ export async function computeAndStoreBreadth(
     sourceMix,
     repairedPct,
   });
-  await env.DB.batch([
-    env.DB.prepare(
+  const db = getMarketDataDb(env);
+  await db.batch([
+    db.prepare(
       `INSERT INTO breadth_snapshots
          (id, as_of_date, universe_id, advancers, decliners, unchanged, pct_above_20ma,
           pct_above_50ma, pct_above_200ma, new_20d_highs, new_20d_lows,
@@ -2396,7 +2647,7 @@ export async function computeAndStoreBreadth(
       sentimentJson,
       generatedAt,
     ),
-    env.DB.prepare(
+    db.prepare(
       `DELETE FROM breadth_snapshots
         WHERE universe_id = ?
           AND as_of_date < COALESCE((
@@ -2448,7 +2699,7 @@ type ActiveUniverseVersionRow = Omit<ActiveUniverseVersion, "unresolvedTickers">
 
 async function loadActiveUniverseVersion(env: Env, universeId: string): Promise<ActiveUniverseVersion | null> {
   try {
-    const row = await env.DB.prepare(
+    const row = await getMarketDataDb(env).prepare(
       `SELECT uv.id, uv.source, uv.source_type as sourceType, uv.source_url as sourceUrl,
               uv.source_as_of_date as sourceAsOfDate, uv.source_member_count as sourceMemberCount,
               uv.normalized_member_count as normalizedMemberCount,
@@ -2496,7 +2747,7 @@ async function recordDataReadiness(env: Env, input: {
   generationId?: string | null;
 }): Promise<void> {
   try {
-    await env.DB.prepare(
+    await getMarketDataDb(env).prepare(
       `INSERT INTO data_readiness
          (domain, scope, expected_as_of_date, source_as_of_date, generation_id, status, coverage_pct, warning, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -2587,12 +2838,12 @@ async function loadSnapshotMeta(
   let pointerSchemaAvailable = true;
   try {
     const generation = requestedDate
-      ? await env.DB.prepare(
+      ? await getMarketDataDb(env).prepare(
         `${generationSelect}
           WHERE g.config_id = ? AND g.as_of_date = ? AND g.status = 'ready'
           ORDER BY g.generated_at DESC LIMIT 1`,
       ).bind(configId, requestedDate).first<SnapshotMetaRow>()
-      : await env.DB.prepare(
+      : await getMarketDataDb(env).prepare(
         `${generationSelect}
           JOIN overview_snapshot_pointer p ON p.generation_id = g.id
          WHERE p.config_id = ? AND g.as_of_date <= ? AND g.status = 'ready'
@@ -2615,12 +2866,12 @@ async function loadSnapshotMeta(
                 g.quote_missing_sample_json as quoteOverlayMissingSampleJson
            FROM overview_generations g`;
       const generation = requestedDate
-        ? await env.DB.prepare(
+        ? await getMarketDataDb(env).prepare(
           `${legacyGenerationSelect}
            WHERE g.config_id = ? AND g.as_of_date = ? AND g.status = 'ready'
            ORDER BY g.generated_at DESC LIMIT 1`,
         ).bind(configId, requestedDate).first<SnapshotMetaRow>()
-        : await env.DB.prepare(
+        : await getMarketDataDb(env).prepare(
           `${legacyGenerationSelect}
            JOIN overview_snapshot_pointer p ON p.generation_id = g.id
            WHERE p.config_id = ? AND g.as_of_date <= ? AND g.status = 'ready'
@@ -2643,7 +2894,7 @@ async function loadSnapshotMeta(
     : " WHERE config_id = ? AND as_of_date <= ? ORDER BY as_of_date DESC, generated_at DESC LIMIT 1";
 
   try {
-    return await env.DB.prepare(`${selectWithFreshness}${where}`)
+    return await getMarketDataDb(env).prepare(`${selectWithFreshness}${where}`)
       .bind(configId, requestedDate ?? latestAllowedAsOfDate)
       .first<SnapshotMetaRow>();
   } catch (error) {
@@ -2653,7 +2904,7 @@ async function loadSnapshotMeta(
       && !message.toLowerCase().includes("expected_as_of_date")
       && !message.toLowerCase().includes("quote_overlay_")
     ) throw error;
-    return await env.DB.prepare(`${selectLegacy}${where}`)
+    return await getMarketDataDb(env).prepare(`${selectLegacy}${where}`)
       .bind(configId, requestedDate ?? latestAllowedAsOfDate)
       .first<SnapshotMetaRow>();
   }
@@ -2791,7 +3042,7 @@ export async function loadSnapshot(
   let rows;
   let derivedMetricsUnavailable = false;
   try {
-    rows = await env.DB.prepare(
+    rows = await getMarketDataDb(env).prepare(
       "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_3m as change3m, change_6m as change6m, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson, bar_date as barDate, quote_price as quotePrice, quote_prev_close as quotePrevClose, quote_change_1d as quoteChange1d, quote_source as quoteSource, quote_fetched_at as quoteFetchedAt, quote_freshness_status as quoteFreshnessStatus, quote_freshness_reason as quoteFreshnessReason, bar_freshness_status as barFreshnessStatus, bar_freshness_reason as barFreshnessReason, history_series_through_date as historySeriesThroughDate, history_series_status as historySeriesStatus, history_series_source as historySeriesSource, history_series_reason as historySeriesReason, above_20_sma as above20Sma, above_50_sma as above50Sma, above_200_sma as above200Sma, relative_strength_30d_vs_spy_json as relativeStrength30dVsSpyJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
     )
       .bind(meta.id)
@@ -2845,7 +3096,7 @@ export async function loadSnapshot(
       && !lowerMessage.includes("history_series_")
     ) throw error;
     derivedMetricsUnavailable = true;
-    rows = await env.DB.prepare(
+    rows = await getMarketDataDb(env).prepare(
       "SELECT section_id as sectionId, group_id as groupId, ticker, display_name as displayName, price, change_1d as change1d, change_1w as change1w, change_5d as change5d, change_21d as change21d, ytd, pct_from_52w_high as pctFrom52wHigh, sparkline_json as sparklineJson, rank_key as rankKey, holdings_json as holdingsJson FROM snapshot_rows WHERE snapshot_id = ? ORDER BY rank_key DESC",
     )
       .bind(meta.id)

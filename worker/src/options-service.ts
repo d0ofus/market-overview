@@ -502,102 +502,12 @@ function candidateMid(bid: number | null, ask: number | null, last: number | nul
 }
 
 async function ensureOptionsSchema(env: Env): Promise<void> {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS option_chain_snapshots (
-      id TEXT PRIMARY KEY,
-      request_id TEXT NOT NULL,
-      watchlist_set_id TEXT,
-      watchlist_set_name TEXT,
-      watchlist_run_id TEXT,
-      ticker TEXT NOT NULL,
-      provider TEXT NOT NULL DEFAULT 'ibkr_bridge',
-      bridge_status TEXT NOT NULL DEFAULT 'unknown',
-      underlying_price REAL,
-      underlying_quote_time TEXT,
-      options_available INTEGER NOT NULL DEFAULT 0,
-      iv_rank_52w REAL,
-      iv_percentile_52w REAL,
-      data_mode TEXT,
-      latest_rth_session_date TEXT,
-      contract_count INTEGER NOT NULL DEFAULT 0,
-      candidate_count INTEGER NOT NULL DEFAULT 0,
-      warnings_json TEXT NOT NULL DEFAULT '[]',
-      raw_summary_json TEXT NOT NULL DEFAULT '{}',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      expires_at TEXT NOT NULL
-    )`,
-  ).run();
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS option_contract_quotes (
-      id TEXT PRIMARY KEY,
-      snapshot_id TEXT NOT NULL,
-      request_id TEXT NOT NULL,
-      row_kind TEXT NOT NULL DEFAULT 'candidate',
-      watchlist_set_id TEXT,
-      watchlist_run_id TEXT,
-      ticker TEXT NOT NULL,
-      strategy TEXT NOT NULL,
-      contract_key TEXT NOT NULL,
-      ibkr_con_id INTEGER,
-      local_symbol TEXT,
-      expiry TEXT,
-      strike REAL,
-      right TEXT,
-      bid REAL,
-      ask REAL,
-      mid REAL,
-      last REAL,
-      volume INTEGER,
-      open_interest INTEGER,
-      iv REAL,
-      delta REAL,
-      gamma REAL,
-      theta REAL,
-      vega REAL,
-      quote_time TEXT,
-      data_mode TEXT,
-      rth_session_date TEXT,
-      spread_basis TEXT NOT NULL DEFAULT 'unavailable',
-      rth_last_bid REAL,
-      rth_last_ask REAL,
-      rth_median_spread_pct REAL,
-      rth_p75_spread_pct REAL,
-      rth_max_spread_pct REAL,
-      rth_sample_count INTEGER,
-      rth_first_sample_time TEXT,
-      rth_last_sample_time TEXT,
-      score_liquidity REAL,
-      score_spread REAL,
-      score_iv REAL,
-      score_strategy REAL,
-      score REAL,
-      debit REAL,
-      width REAL,
-      breakeven REAL,
-      max_loss REAL,
-      legs_json TEXT NOT NULL DEFAULT '[]',
-      score_inputs_json TEXT NOT NULL DEFAULT '{}',
-      warnings_json TEXT NOT NULL DEFAULT '[]',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      expires_at TEXT NOT NULL
-    )`,
-  ).run();
   try {
-    const rowKindColumn = await env.DB.prepare(
-      "SELECT COUNT(*) as count FROM pragma_table_info('option_contract_quotes') WHERE name = 'row_kind'",
-    ).first<{ count: number }>();
-    if (!Number(rowKindColumn?.count ?? 0)) {
-      await env.DB.prepare("ALTER TABLE option_contract_quotes ADD COLUMN row_kind TEXT NOT NULL DEFAULT 'candidate'").run();
-    }
-  } catch {
-    // Production D1 is updated by migrations; this keeps older local DBs usable.
+    await env.DB.prepare("SELECT id, ticker, expires_at FROM option_chain_snapshots LIMIT 1").first();
+    await env.DB.prepare("SELECT id, snapshot_id, row_kind, ticker, score FROM option_contract_quotes LIMIT 1").first();
+  } catch (error) {
+    throw new Error(`Core schema mismatch: apply migrations 0082 and 0083 for options storage (${error instanceof Error ? error.message : String(error)}).`);
   }
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ticker_created ON option_chain_snapshots (ticker, created_at DESC)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_watchlist_created ON option_chain_snapshots (watchlist_set_id, watchlist_run_id, created_at DESC)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_snapshot ON option_contract_quotes (snapshot_id)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_row_kind_ticker ON option_contract_quotes (row_kind, ticker)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_ticker_score ON option_contract_quotes (ticker, score DESC)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_option_contract_quotes_strategy_score ON option_contract_quotes (strategy, score DESC)").run();
 }
 
 function bridgeHeaders(env: Env): Headers {

@@ -49,6 +49,7 @@ export type OverviewCurrentData = {
 export type SnapshotReadyResponse = {
   status?: "ready";
   warning?: null;
+  generationId?: string | null;
   asOfDate: string;
   generatedAt: string;
   providerLabel: string;

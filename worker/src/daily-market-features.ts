@@ -9,6 +9,8 @@ import type { Env } from "./types";
 
 const FEATURE_QUERY_BATCH_SIZE = 80;
 const FEATURE_WRITE_BATCH_SIZE = 100;
+const FEATURE_INPUT_SESSION_LIMIT = 260;
+const REPAIR_FEED = "repair-yahoo";
 
 type FeatureSourceBar = {
   ticker: string;
@@ -16,6 +18,8 @@ type FeatureSourceBar = {
   c: number;
   volume: number | null;
   sourceProvider?: string | null;
+  observedAt?: string | null;
+  fetchedAt?: string | null;
 };
 
 export type DailyMarketFeature = {
@@ -41,6 +45,10 @@ export type DailyMarketFeature = {
   low20: number;
   sourceSessions: number;
   sourceProvider: string;
+  inputStartDate?: string | null;
+  alpacaBarCount?: number;
+  repairBarCount?: number;
+  inputLastObservedAt?: string | null;
 };
 
 function normalizeTickers(tickers: string[]): string[] {
@@ -71,6 +79,13 @@ export function computeDailyMarketFeature(
   const previous = closes.at(-2) as number;
   const currentBar = bars.at(-1) as FeatureSourceBar;
   const last20 = closes.slice(Math.max(0, closes.length - 20));
+  const alpacaBarCount = bars.filter((bar) => String(bar.sourceProvider ?? "alpaca").toLowerCase() === "alpaca").length;
+  const repairBarCount = bars.length - alpacaBarCount;
+  const inputLastObservedAt = bars
+    .map((bar) => bar.observedAt ?? bar.fetchedAt ?? null)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1) ?? null;
   return {
     ticker: ticker.toUpperCase(),
     sessionDate,
@@ -94,7 +109,37 @@ export function computeDailyMarketFeature(
     low20: Math.min(...last20),
     sourceSessions: closes.length,
     sourceProvider: String(currentBar.sourceProvider ?? "alpaca").toLowerCase(),
+    inputStartDate: bars[0]?.date ?? null,
+    alpacaBarCount,
+    repairBarCount,
+    inputLastObservedAt,
   };
+}
+
+function subtractUtcDays(isoDate: string, days: number): string {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function featureInputStartDate(env: Env, sessionDate: string): Promise<string> {
+  const row = await getMarketDataDb(env).prepare(
+    `SELECT MIN(session_date) as inputStartDate
+       FROM (
+         SELECT session_date
+           FROM market_calendar_sessions
+          WHERE session_date <= ?
+          ORDER BY session_date DESC
+          LIMIT ?
+       ) retained_sessions`,
+  ).bind(sessionDate, FEATURE_INPUT_SESSION_LIMIT).first<{ inputStartDate: string | null }>();
+  return row?.inputStartDate ?? subtractUtcDays(sessionDate, 400);
+}
+
+function isFeatureSourceEligible(feature: DailyMarketFeature): boolean {
+  if (feature.sourceProvider !== "alpaca") return false;
+  if (feature.sourceSessions <= 0) return false;
+  return Number(feature.repairBarCount ?? 0) / feature.sourceSessions <= 0.05;
 }
 
 export async function computeAndStoreDailyMarketFeatures(
@@ -103,44 +148,61 @@ export async function computeAndStoreDailyMarketFeatures(
   sessionDate: string,
 ): Promise<Map<string, DailyMarketFeature>> {
   const tickers = normalizeTickers(tickersInput);
-  await assertMarketDataCriticalWorkBudget(env, {
-    rowsRead: tickers.length * 600,
-    rowsWritten: tickers.length,
-  });
+  const inputStartDate = await featureInputStartDate(env, sessionDate);
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
-  const barsByTicker = new Map<string, FeatureSourceBar[]>();
+  const cachedFeatures = await loadDailyMarketFeatures(env, tickers, sessionDate);
+  // Bar writes invalidate affected feature sessions transactionally in daily-bars.ts.
+  // A surviving cached row therefore has the same source mix and no newer input bar.
+  const candidateTickers = new Set(tickers.filter((ticker) => !cachedFeatures.has(ticker)));
   let rowsRead = 0;
-  for (let offset = 0; offset < tickers.length; offset += FEATURE_QUERY_BATCH_SIZE) {
-    const chunk = tickers.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE);
+  await assertMarketDataCriticalWorkBudget(env, {
+    rowsRead: candidateTickers.size * 800,
+    rowsWritten: candidateTickers.size,
+  });
+  const barsByTicker = new Map<string, FeatureSourceBar[]>();
+  const candidates = Array.from(candidateTickers);
+  for (let offset = 0; offset < candidates.length; offset += FEATURE_QUERY_BATCH_SIZE) {
+    const chunk = candidates.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE);
+    const tickerPlaceholders = chunk.map(() => "?").join(",");
     const result = await db.prepare(
-      `SELECT ticker, date, c, volume, source_provider as sourceProvider
+      `SELECT ticker, date, c, volume, source_provider as sourceProvider,
+              observed_at as observedAt, fetched_at as fetchedAt
          FROM alpaca_daily_bars
-        WHERE feed = ?
-          AND ticker IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-          AND date <= ?
-        ORDER BY ticker, date`,
-    ).bind(feed, JSON.stringify(chunk), sessionDate).all<FeatureSourceBar>();
+        WHERE ((feed = ? AND source_provider = 'alpaca')
+            OR (feed = ? AND source_provider = 'yahoo'))
+          AND ticker IN (${tickerPlaceholders})
+          AND date BETWEEN ? AND ?
+        ORDER BY ticker, date,
+                 CASE WHEN source_provider = 'alpaca' THEN 1 ELSE 0 END`,
+    ).bind(feed, REPAIR_FEED, ...chunk, inputStartDate, sessionDate).all<FeatureSourceBar>();
     rowsRead += Number(result.meta?.rows_read ?? 0);
     for (const bar of result.results ?? []) {
       const ticker = bar.ticker.toUpperCase();
       const current = barsByTicker.get(ticker) ?? [];
-      current.push(bar);
+      const existingIndex = current.findIndex((candidate) => candidate.date === bar.date);
+      if (existingIndex < 0) current.push(bar);
+      else if (String(bar.sourceProvider).toLowerCase() === "alpaca") current[existingIndex] = bar;
       barsByTicker.set(ticker, current);
     }
   }
 
-  const features = new Map<string, DailyMarketFeature>();
-  for (const ticker of tickers) {
+  const computedFeatures = new Map<string, DailyMarketFeature>();
+  const features = new Map(cachedFeatures);
+  for (const ticker of candidates) {
+    features.delete(ticker);
     const feature = computeDailyMarketFeature(ticker, sessionDate, barsByTicker.get(ticker) ?? []);
-    if (feature) features.set(ticker, feature);
+    if (!feature) continue;
+    computedFeatures.set(ticker, feature);
+    if (isFeatureSourceEligible(feature)) features.set(ticker, feature);
   }
-  const statements = Array.from(features.values()).map((feature) => db.prepare(
+  const statements = Array.from(computedFeatures.values()).map((feature) => db.prepare(
     `INSERT INTO daily_market_features
        (feed, ticker, session_date, close, volume, previous_close, return_1d, return_5d,
         return_63d, sma_5, sma_20, sma_50, sma_100, sma_200, high_5, high_20,
-        high_21, high_63, high_126, high_252, low_20, source_sessions, source_provider, computed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        high_21, high_63, high_126, high_252, low_20, source_sessions, source_provider,
+        input_start_date, alpaca_bar_count, repair_bar_count, input_last_observed_at, computed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(feed, ticker, session_date) DO UPDATE SET
        close = excluded.close,
        volume = excluded.volume,
@@ -162,6 +224,10 @@ export async function computeAndStoreDailyMarketFeatures(
        low_20 = excluded.low_20,
        source_sessions = excluded.source_sessions,
        source_provider = excluded.source_provider,
+       input_start_date = excluded.input_start_date,
+       alpaca_bar_count = excluded.alpaca_bar_count,
+       repair_bar_count = excluded.repair_bar_count,
+       input_last_observed_at = excluded.input_last_observed_at,
        computed_at = CURRENT_TIMESTAMP
      WHERE daily_market_features.close IS NOT excluded.close
         OR daily_market_features.volume IS NOT excluded.volume
@@ -182,7 +248,11 @@ export async function computeAndStoreDailyMarketFeatures(
         OR daily_market_features.high_252 IS NOT excluded.high_252
         OR daily_market_features.low_20 IS NOT excluded.low_20
         OR daily_market_features.source_sessions IS NOT excluded.source_sessions
-        OR daily_market_features.source_provider IS NOT excluded.source_provider`,
+        OR daily_market_features.source_provider IS NOT excluded.source_provider
+        OR daily_market_features.input_start_date IS NOT excluded.input_start_date
+        OR daily_market_features.alpaca_bar_count IS NOT excluded.alpaca_bar_count
+        OR daily_market_features.repair_bar_count IS NOT excluded.repair_bar_count
+        OR daily_market_features.input_last_observed_at IS NOT excluded.input_last_observed_at`,
   ).bind(
     feed,
     feature.ticker,
@@ -207,6 +277,10 @@ export async function computeAndStoreDailyMarketFeatures(
     feature.low20,
     feature.sourceSessions,
     feature.sourceProvider,
+    feature.inputStartDate,
+    feature.alpacaBarCount,
+    feature.repairBarCount,
+    feature.inputLastObservedAt,
   ));
   let rowsWritten = 0;
   for (let offset = 0; offset < statements.length; offset += FEATURE_WRITE_BATCH_SIZE) {
@@ -231,6 +305,7 @@ export async function loadDailyMarketFeatures(
   const features = new Map<string, DailyMarketFeature>();
   for (let offset = 0; offset < tickers.length; offset += FEATURE_QUERY_BATCH_SIZE) {
     const chunk = tickers.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE);
+    const tickerPlaceholders = chunk.map(() => "?").join(",");
     const result = await db.prepare(
       `SELECT ticker, session_date as sessionDate, close, volume,
               previous_close as previousClose, return_1d as return1d, return_5d as return5d,
@@ -238,11 +313,15 @@ export async function loadDailyMarketFeatures(
               sma_100 as sma100, sma_200 as sma200, high_5 as high5, high_20 as high20,
               high_21 as high21, high_63 as high63, high_126 as high126,
               high_252 as high252, low_20 as low20, source_sessions as sourceSessions,
-              source_provider as sourceProvider
+              source_provider as sourceProvider, input_start_date as inputStartDate,
+              alpaca_bar_count as alpacaBarCount, repair_bar_count as repairBarCount,
+              input_last_observed_at as inputLastObservedAt
          FROM daily_market_features
         WHERE feed = ? AND session_date = ?
-          AND ticker IN (SELECT CAST(value AS TEXT) FROM json_each(?))`,
-    ).bind(feed, sessionDate, JSON.stringify(chunk)).all<DailyMarketFeature>();
+          AND source_provider = 'alpaca'
+          AND (source_sessions = 0 OR CAST(repair_bar_count AS REAL) / source_sessions <= 0.05)
+          AND ticker IN (${tickerPlaceholders})`,
+    ).bind(feed, sessionDate, ...chunk).all<DailyMarketFeature>();
     for (const row of result.results ?? []) features.set(row.ticker.toUpperCase(), row);
   }
   return features;
@@ -255,7 +334,10 @@ function toPercent(count: number, total: number): number {
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.floor(sorted.length / 2)];
+  const midpoint = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+    : sorted[midpoint];
 }
 
 export function aggregateDailyMarketFeatures(
@@ -263,7 +345,9 @@ export function aggregateDailyMarketFeatures(
   features: Map<string, DailyMarketFeature>,
 ) {
   const tickers = normalizeTickers(tickersInput);
-  const rows = tickers.map((ticker) => features.get(ticker)).filter((row): row is DailyMarketFeature => Boolean(row));
+  const rows = tickers
+    .map((ticker) => features.get(ticker))
+    .filter((row): row is DailyMarketFeature => Boolean(row) && isFeatureSourceEligible(row as DailyMarketFeature));
   const total = rows.length;
   const count = (values: DailyMarketFeature[], predicate: (row: DailyMarketFeature) => boolean) => values.filter(predicate).length;
   const eligible = (sessions: number) => rows.filter((row) => row.sourceSessions >= sessions);

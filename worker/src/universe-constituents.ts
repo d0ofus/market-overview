@@ -1,7 +1,9 @@
 import { SP500_TICKERS } from "./sp500-tickers";
+import { meteredFetchWithRetry, ProviderRequestFailureError } from "./provider-usage";
+import type { Env } from "./types";
 
-const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
-const SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv";
+export const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
+export const SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv";
 const ISHARES_ORIGIN = "https://www.ishares.com";
 const IWM_PRODUCT_PAGE_URL = `${ISHARES_ORIGIN}/us/products/239710/ishares-russell-2000-etf`;
 const IWM_HOLDINGS_CSV_URL = `${IWM_PRODUCT_PAGE_URL}/latest-holdings.csv`;
@@ -73,17 +75,62 @@ function csvSplit(line: string): string[] {
   return out.map((cell) => cell.trim());
 }
 
-async function fetchText(url: string): Promise<string> {
+async function fetchText(url: string, env?: Env): Promise<string> {
+  return (await fetchTextWithMetadata(url, env)).raw;
+}
+
+async function fetchTextWithMetadata(url: string, env?: Env): Promise<{
+  raw: string;
+  etag: string | null;
+  lastModified: string | null;
+}> {
   const headers: Record<string, string> = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
     Accept: "text/plain,text/html,text/csv;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
   };
-  const res = await fetch(url, { headers });
+  const providerKey = url.includes("nasdaqtrader.com")
+    ? "nasdaqtrader"
+    : url.includes("ishares.com")
+      ? "ishares"
+      : "sp500-public-proxy";
+  const res = env
+    ? await meteredFetchWithRetry(env, url, { headers }, {
+        providerKey,
+        endpointKey: new URL(url).pathname,
+        caller: "universe-membership",
+      }, 15_000, 3)
+    : await fetch(url, { headers });
   if (!res.ok) {
-    throw new Error(`Source fetch failed (${res.status}) for ${url}`);
+    throw new ProviderRequestFailureError(
+      "provider-http-error",
+      `Membership source returned HTTP ${res.status}.`,
+      res.status,
+    );
   }
-  return await res.text();
+  const raw = await res.text();
+  if (!raw.trim()) throw new ProviderRequestFailureError("provider-invalid-payload", "Membership source returned an empty payload.");
+  return {
+    raw,
+    etag: res.headers.get("etag"),
+    lastModified: res.headers.get("last-modified"),
+  };
+}
+
+async function sha256Text(raw: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function parseNasdaqTraderFileCreationDate(raw: string): string | null {
+  const footer = raw.split(/\r?\n/).find((line) => /^File Creation Time/i.test(line.trim()));
+  if (!footer) return null;
+  const value = footer.split("|")[0]?.replace(/^File Creation Time\s*:?\s*/i, "").trim() ?? "";
+  const compact = value.match(/^(\d{2})(\d{2})(\d{4})/);
+  if (compact) return `${compact[3]}-${compact[1]}-${compact[2]}`;
+  const separated = value.match(/^(\d{1,2})[-/]([0-3]?\d)[-/](\d{4})/);
+  if (separated) return `${separated[3]}-${String(Number(separated[1])).padStart(2, "0")}-${String(Number(separated[2])).padStart(2, "0")}`;
+  return null;
 }
 
 export function parseNasdaqTradedCommonStocks(raw: string): NasdaqTraderCommonStock[] {
@@ -169,20 +216,44 @@ function parseTickerCsv(raw: string, tickerColumnNames: string[]): string[] {
 }
 
 
-export async function loadNasdaqTraderUniverses(): Promise<{
+export async function loadNasdaqTraderUniverses(env?: Env): Promise<{
   nasdaqTickers: string[];
   nyseTickers: string[];
   allCommonTickers: string[];
   allActiveEquityTickers: string[];
+  sourceAsOfDate: string;
+  sourceUrl: string;
+  sourceType: "public-common-stock-proxy";
+  contentHash: string;
+  etag: string | null;
+  lastModified: string | null;
 }> {
-  const raw = await fetchText(NASDAQ_TRADER_URL);
+  const response = await fetchTextWithMetadata(NASDAQ_TRADER_URL, env);
+  const raw = response.raw;
+  const sourceAsOfDate = parseNasdaqTraderFileCreationDate(raw);
+  if (!sourceAsOfDate) throw new Error("NasdaqTrader File Creation Time is missing or malformed");
+  const sourceMs = Date.parse(`${sourceAsOfDate}T00:00:00Z`);
+  if (!Number.isFinite(sourceMs) || sourceMs > Date.now() + 86_400_000) {
+    throw new Error(`NasdaqTrader File Creation Time is invalid or future-dated: ${sourceAsOfDate}`);
+  }
   const rows = parseNasdaqTradedCommonStocks(raw);
   const activeRows = parseNasdaqTradedActiveEquities(raw);
   const nasdaqTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "Q").map((r) => r.symbol));
   const nyseTickers = dedupeSorted(rows.filter((r) => r.listingExchange === "N").map((r) => r.symbol));
   const allCommonTickers = dedupeSorted(rows.map((r) => r.symbol));
   const allActiveEquityTickers = dedupeSorted(activeRows.map((r) => r.symbol));
-  return { nasdaqTickers, nyseTickers, allCommonTickers, allActiveEquityTickers };
+  return {
+    nasdaqTickers,
+    nyseTickers,
+    allCommonTickers,
+    allActiveEquityTickers,
+    sourceAsOfDate,
+    sourceUrl: NASDAQ_TRADER_URL,
+    sourceType: "public-common-stock-proxy",
+    contentHash: await sha256Text(raw),
+    etag: response.etag,
+    lastModified: response.lastModified,
+  };
 }
 
 export function parseIsharesHoldingsCsv(raw: string): string[] {
@@ -327,20 +398,57 @@ export function extractIsharesHoldingsCsvUrl(productPageHtml: string): string | 
   return null;
 }
 
-export async function loadSp500Constituents(allCommonUniverse?: Set<string>): Promise<string[]> {
+export async function loadSp500Constituents(allCommonUniverse?: Set<string>, env?: Env): Promise<string[]> {
+  return (await loadSp500Universe(allCommonUniverse, env)).tickers;
+}
+
+export type Sp500UniverseLoad = {
+  tickers: string[];
+  sourceAsOfDate: string | null;
+  sourceType: "wikipedia-derived-public-proxy" | "bundled-fallback";
+  sourceUrl: string | null;
+  contentHash: string;
+  etag: string | null;
+  lastModified: string | null;
+};
+
+export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: Env): Promise<Sp500UniverseLoad> {
   try {
-    const raw = await fetchText(SP500_CSV_URL);
+    const response = await fetchTextWithMetadata(SP500_CSV_URL, env);
+    const raw = response.raw;
     const parsed = parseSp500Csv(raw);
     if (parsed.length >= 450) {
-      if (!allCommonUniverse || allCommonUniverse.size === 0) return parsed;
-      const intersected = parsed.filter((ticker) => allCommonUniverse.has(ticker));
-      if (intersected.length >= parsed.length - 5) return intersected;
-      return parsed;
+      let tickers = parsed;
+      if (allCommonUniverse && allCommonUniverse.size > 0) {
+        const intersected = parsed.filter((ticker) => allCommonUniverse.has(ticker));
+        if (intersected.length >= parsed.length - 5) tickers = intersected;
+      }
+      const lastModifiedMs = Date.parse(response.lastModified ?? "");
+      return {
+        tickers,
+        sourceAsOfDate: Number.isFinite(lastModifiedMs)
+          ? new Date(lastModifiedMs).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10),
+        sourceType: "wikipedia-derived-public-proxy",
+        sourceUrl: SP500_CSV_URL,
+        contentHash: await sha256Text(raw),
+        etag: response.etag,
+        lastModified: response.lastModified,
+      };
     }
   } catch (error) {
     console.error("sp500 constituent source fetch failed; using bundled fallback", error);
   }
-  return dedupeSorted(SP500_TICKERS);
+  const tickers = dedupeSorted(SP500_TICKERS);
+  return {
+    tickers,
+    sourceAsOfDate: null,
+    sourceType: "bundled-fallback",
+    sourceUrl: null,
+    contentHash: await sha256Text(tickers.join("\n")),
+    etag: null,
+    lastModified: null,
+  };
 }
 
 export type Russell2000UniverseLoad = {
@@ -352,20 +460,21 @@ export type Russell2000UniverseLoad = {
   unresolvedTickers: string[];
   sourceType: "official-etf-holdings-proxy";
   sourceUrl: string;
+  contentHash: string;
   memberMetadata: Record<string, IsharesHolding>;
 };
 
-export async function loadRussell2000Universe(allCommonUniverse?: Set<string>): Promise<Russell2000UniverseLoad> {
+export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, env?: Env): Promise<Russell2000UniverseLoad> {
   let csvRaw: string;
   let sourceUrl = IWM_HOLDINGS_CSV_URL;
   try {
-    csvRaw = await fetchText(sourceUrl);
+    csvRaw = await fetchText(sourceUrl, env);
   } catch (primaryError) {
-    const productPage = await fetchText(IWM_PRODUCT_PAGE_URL);
+    const productPage = await fetchText(IWM_PRODUCT_PAGE_URL, env);
     const discoveredUrl = extractIsharesHoldingsCsvUrl(productPage);
     if (!discoveredUrl) throw primaryError;
     sourceUrl = discoveredUrl;
-    csvRaw = await fetchText(sourceUrl);
+    csvRaw = await fetchText(sourceUrl, env);
   }
   const parsed = parseIsharesHoldingsCsvDetailed(csvRaw);
   if (!parsed.sourceAsOfDate) {
@@ -426,6 +535,7 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>): 
     unresolvedTickers,
     sourceType: "official-etf-holdings-proxy",
     sourceUrl,
+    contentHash: await sha256Text(csvRaw),
     memberMetadata,
   };
 }

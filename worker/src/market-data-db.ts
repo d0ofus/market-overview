@@ -1,8 +1,9 @@
 import type { Env } from "./types";
+import { getOpsDb } from "./ops-db";
 
-// About 550 US sessions, with headroom for holidays and leap years. A single
-// conservative window avoids cross-database retention joins during rollout.
-const DEFAULT_RETENTION_DAYS = 800;
+// About 315 US sessions, preserving the 252-session feature horizon with
+// substantial holiday/listing headroom while staying within D1 Free capacity.
+const DEFAULT_RETENTION_DAYS = 460;
 const DEFAULT_DAILY_WRITE_BUDGET = 90_000;
 const DEFAULT_CRITICAL_WRITE_RESERVE = 20_000;
 const DEFAULT_DAILY_READ_BUDGET = 4_500_000;
@@ -10,6 +11,7 @@ const DEFAULT_CRITICAL_READ_RESERVE = 500_000;
 const DEFAULT_WARN_BYTES = 400_000_000;
 const DEFAULT_HALT_BYTES = 450_000_000;
 const MARKET_DATA_TICKER_QUERY_CHUNK_SIZE = 1000;
+const MARKET_DATA_MAINTENANCE_DELETE_LIMIT = 5_000;
 
 function enabled(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(String(value ?? "").trim());
@@ -55,6 +57,7 @@ export async function loadMarketDataTickersWithBarOnDate(
       `SELECT ticker
        FROM alpaca_daily_bars
        WHERE feed = ?
+         AND source_provider = 'alpaca'
          AND ticker IN (SELECT CAST(value AS TEXT) FROM json_each(?))
          AND date = ?`,
     )
@@ -67,7 +70,7 @@ export async function loadMarketDataTickersWithBarOnDate(
 }
 
 export function marketDataRetentionCutoff(env: Env, asOfDate: string): string {
-  const days = Math.max(800, positiveInteger(env.MARKET_DATA_RETENTION_DAYS, DEFAULT_RETENTION_DAYS));
+  const days = Math.max(460, positiveInteger(env.MARKET_DATA_RETENTION_DAYS, DEFAULT_RETENTION_DAYS));
   const date = new Date(`${asOfDate}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() - days);
   return date.toISOString().slice(0, 10);
@@ -151,7 +154,7 @@ async function assertMarketDataReadLimit(
 ): Promise<void> {
   if (limit === 0) return;
   const usageDate = now.toISOString().slice(0, 10);
-  const row = await getMarketDataDb(env).prepare(
+  const row = await getOpsDb(env).prepare(
     "SELECT rows_read as rowsRead FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
   ).bind(usageDate).first<{ rowsRead: number | null }>();
   const used = Number(row?.rowsRead ?? 0);
@@ -171,7 +174,7 @@ async function assertMarketDataWriteLimit(
   estimatedWrites = 0,
 ): Promise<void> {
   const usageDate = now.toISOString().slice(0, 10);
-  const row = await getMarketDataDb(env).prepare(
+  const row = await getOpsDb(env).prepare(
     "SELECT rows_written as rowsWritten FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
   ).bind(usageDate).first<{ rowsWritten: number | null }>();
   const used = Number(row?.rowsWritten ?? 0);
@@ -185,7 +188,7 @@ async function assertMarketDataWriteLimit(
 
 export async function recordMarketDataBarsWritten(env: Env, count: number, now = new Date()): Promise<void> {
   if (count <= 0) return;
-  await getMarketDataDb(env).prepare(
+  await getOpsDb(env).prepare(
     `INSERT INTO market_data_daily_usage (usage_date, bars_written, rows_written, updated_at)
      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(usage_date) DO UPDATE SET
@@ -204,7 +207,7 @@ export async function recordMarketDataD1Usage(
   const rowsWritten = Math.max(0, Math.trunc(usage.rowsWritten ?? 0));
   const barsChanged = Math.max(0, Math.trunc(usage.barsChanged ?? 0));
   if (rowsRead === 0 && rowsWritten === 0 && barsChanged === 0) return;
-  await getMarketDataDb(env).prepare(
+  await getOpsDb(env).prepare(
     `INSERT INTO market_data_daily_usage
        (usage_date, bars_written, rows_read, rows_written, updated_at)
      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -250,10 +253,18 @@ export async function cleanupMarketDataOperationalState(env: Env, asOfDate: stri
   const runDate = new Date().toISOString().slice(0, 10);
   if (state?.lastRunDate === runDate) return;
   const currentDataCutoff = subtractUtcDays(asOfDate, 120);
-  const jobCutoff = subtractUtcDays(asOfDate, 14);
   const barCutoff = marketDataRetentionCutoff(env, asOfDate);
   const results = await db.batch([
-    db.prepare("DELETE FROM alpaca_daily_bars WHERE date < ?").bind(barCutoff),
+    db.prepare(
+      `DELETE FROM alpaca_daily_bars
+        WHERE (feed, ticker, date) IN (
+          SELECT feed, ticker, date
+            FROM alpaca_daily_bars
+           WHERE date < ?
+           ORDER BY date, feed, ticker
+           LIMIT ?
+        )`,
+    ).bind(barCutoff, MARKET_DATA_MAINTENANCE_DELETE_LIMIT),
     db.prepare(
       `DELETE FROM daily_market_features
         WHERE session_date NOT IN (
@@ -269,21 +280,6 @@ export async function cleanupMarketDataOperationalState(env: Env, asOfDate: stri
     db.prepare("DELETE FROM overview_current_data WHERE session_date < ?").bind(currentDataCutoff),
     db.prepare("DELETE FROM overview_current_refresh_jobs WHERE session_date < ?").bind(currentDataCutoff),
     db.prepare("DELETE FROM overview_provider_catalog_cache WHERE catalog_date < ?").bind(subtractUtcDays(runDate, 7)),
-    db.prepare(
-      `DELETE FROM post_close_daily_bar_refresh_job_items
-       WHERE job_id IN (
-         SELECT id FROM post_close_daily_bar_refresh_jobs
-         WHERE trading_date < ?
-         ORDER BY trading_date ASC
-         LIMIT 1
-       )`,
-    ).bind(jobCutoff),
-    db.prepare(
-      `DELETE FROM post_close_daily_bar_refresh_jobs
-       WHERE trading_date < ?
-         AND id NOT IN (SELECT DISTINCT job_id FROM post_close_daily_bar_refresh_job_items)`,
-    ).bind(jobCutoff),
-    db.prepare("DELETE FROM market_data_daily_usage WHERE usage_date < ?").bind(subtractUtcDays(runDate, 14)),
     db.prepare(
       `INSERT INTO market_data_maintenance_state (id, last_run_date, updated_at)
        VALUES ('default', ?, CURRENT_TIMESTAMP)

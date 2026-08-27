@@ -147,6 +147,8 @@ describe("scheduled relative strength canonical universe", () => {
     };
     const env = {
       MARKET_DATA_DB: stateDb,
+      OPS_DB: stateDb,
+      OPS_DB_REQUIRED: "true",
       DB: {
         prepare() {
           return {

@@ -41,12 +41,11 @@ function tradingViewData(overrides: Record<string, unknown> = {}): unknown[] {
 }
 
 describe("overview current refresh cadence", () => {
-  it("opens only during the 04:00-16:45 New York snapshot window", () => {
-    expect(currentRefreshWindowOpen(new Date("2026-07-21T07:59:00.000Z"))).toBe(false);
-    expect(currentRefreshWindowOpen(new Date("2026-07-21T08:00:00.000Z"))).toBe(true);
+  it("opens 30 minutes after the completed New York session", () => {
+    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:29:00.000Z"))).toBe(false);
     expect(currentRefreshWindowOpen(new Date("2026-07-21T20:30:00.000Z"))).toBe(true);
-    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:45:00.000Z"))).toBe(true);
-    expect(currentRefreshWindowOpen(new Date("2026-07-21T20:46:00.000Z"))).toBe(false);
+    expect(currentRefreshWindowOpen(new Date("2026-07-22T01:00:00.000Z"))).toBe(true);
+    expect(currentRefreshWindowOpen(new Date("2026-07-22T01:01:00.000Z"))).toBe(false);
   });
 
   it("advances a 225-ticker refresh in bounded 80-ticker slices", () => {
@@ -224,7 +223,7 @@ describe("overview TradingView current data", () => {
     expect(row.reason).toContain("market timestamp");
   });
 
-  it("keeps TradingView primary while using fresh Alpaca bars for an individually missing field", () => {
+  it("ignores legacy TradingView values and uses exact-session Alpaca bars", () => {
     const tv = parseTradingViewOverviewRow(
       "AAPL",
       "NASDAQ:AAPL",
@@ -257,14 +256,14 @@ describe("overview TradingView current data", () => {
       fetchedAt: "2026-07-10T21:00:00.000Z",
     });
 
-    expect(row.price).toBe(105);
-    expect(row.change1w).toBe(4);
+    expect(row.price).toBe(104);
+    expect(row.change1w).toBe(3);
     expect(row.above200Sma).toBe(false);
-    expect(row.fieldSources.price).toBe("tradingview-scanner");
-    expect(row.fieldSources.above200Sma).toBe("alpaca:iex-bars");
+    expect(row.fieldSources.price).toBe("alpaca:iex-split-daily-bars");
+    expect(row.fieldSources.above200Sma).toBe("alpaca:iex-split-daily-bars");
   });
 
-  it("uses an Alpaca snapshot for price and Alpaca bars for longer-period fallback values", () => {
+  it("prefers a completed Alpaca bar over an exact-session IEX snapshot", () => {
     const staleTimestamp = Date.parse("2026-07-09T20:00:00.000Z") / 1000;
     const tv = parseTradingViewOverviewRow(
       "RSHO",
@@ -310,14 +309,14 @@ describe("overview TradingView current data", () => {
     });
 
     expect(row.status).toBe("fresh");
-    expect(row.quoteSource).toBe("alpaca:iex-snapshot");
-    expect(row.performanceSource).toBe("alpaca:iex-bars");
+    expect(row.quoteSource).toBe("alpaca:iex-split-daily-bars");
+    expect(row.performanceSource).toBe("alpaca:iex-split-daily-bars");
     expect(row.price).toBe(31);
     expect(row.change1w).toBe(6);
     expect(row.ytd).toBe(22);
   });
 
-  it("keeps fresh fields usable while marking an individually missing field incomplete", () => {
+  it("rejects legacy values when Alpaca has no exact-session price pair", () => {
     const tv = parseTradingViewOverviewRow(
       "NEWETF",
       "AMEX:NEWETF",
@@ -350,13 +349,13 @@ describe("overview TradingView current data", () => {
       fetchedAt: "2026-07-10T21:00:00.000Z",
     });
 
-    expect(row.status).toBe("fresh");
-    expect(row.price).toBe(105);
+    expect(row.status).toBe("retrying");
+    expect(row.price).toBeNull();
     expect(row.above200Sma).toBeNull();
     expect(isOverviewCurrentRowComplete(row)).toBe(false);
-    expect(isOverviewCurrentRowPublishable(row)).toBe(true);
+    expect(isOverviewCurrentRowPublishable(row)).toBe(false);
     expect(isOverviewCurrentRowPublishable(row, new Date("2026-07-10T21:21:00.000Z"))).toBe(false);
-    expect(isOverviewCurrentRowPublishableForCycle(row, "2026-07-10T20:00:00.000Z")).toBe(true);
+    expect(isOverviewCurrentRowPublishableForCycle(row, "2026-07-10T20:00:00.000Z")).toBe(false);
     expect(isOverviewCurrentRowPublishableForCycle(row, "2026-07-10T21:01:00.000Z")).toBe(false);
     expect(doesOverviewCurrentRowNeedRepair(row)).toBe(true);
   });

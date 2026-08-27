@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadProviderUsageDaily, meteredFetch, meteredFetchWithRetry, recordProviderUsage } from "../src/provider-usage";
+import {
+  loadProviderUsageDaily,
+  meteredFetch,
+  meteredFetchWithRetry,
+  recordProviderUsage,
+} from "../src/provider-usage";
 import type { Env } from "../src/types";
 
 type UsageRow = {
@@ -85,11 +90,12 @@ class FakeProviderUsageDb {
         };
       },
       async run() {
-        if (normalized.startsWith("INSERT INTO provider_usage_minute")) {
-          const minuteBucket = String(bound[0]);
-          const providerKey = String(bound[1]);
-          const hardLimit = Number(bound[2]);
-          const key = `${minuteBucket}|${providerKey}`;
+        if (normalized.startsWith("INSERT INTO provider_budget_counters")) {
+          const providerKey = String(bound[0]);
+          const windowKind = String(bound[1]);
+          const windowBucket = String(bound[2]);
+          const hardLimit = Number(bound[3]);
+          const key = `${windowKind}|${windowBucket}|${providerKey}`;
           const current = db.minuteRows.get(key) ?? 0;
           if (current >= hardLimit) return { meta: { changes: 0 } };
           db.minuteRows.set(key, current + 1);
@@ -154,6 +160,19 @@ afterEach(() => {
 });
 
 describe("provider usage metering", () => {
+  it("fails closed before network access when the required OPS database is unavailable", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, { OPS_DB_REQUIRED: "true" });
+    const fetchMock = vi.fn(async () => Response.json({}));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(meteredFetch(env, "https://example.com/alpaca", {}, {
+      providerKey: "alpaca",
+      endpointKey: "daily-bars",
+      caller: "post-close",
+    })).rejects.toMatchObject({ code: "provider-budget-unavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("records successful, rate-limited, and cache-hit usage rows", async () => {
     const db = new FakeProviderUsageDb();
     const env = createEnv(db);
@@ -218,25 +237,29 @@ describe("provider usage metering", () => {
   it("enforces daily hard budgets before calling the provider", async () => {
     const db = new FakeProviderUsageDb();
     const env = createEnv(db, { FMP_REQUESTS_PER_DAY_HARD: "1" });
-    await recordProviderUsage(env, {
+    const fetchMock = vi.fn(async () => Response.json({}));
+    vi.stubGlobal("fetch", fetchMock);
+    await meteredFetch(env, "https://example.com/fmp", {}, {
       providerKey: "fmp",
       endpointKey: "daily-bars",
       caller: "fallback",
-    }, { ok: true, status: 200 });
-    const fetchMock = vi.fn(async () => Response.json({}));
-    vi.stubGlobal("fetch", fetchMock);
+    });
 
     await expect(meteredFetch(env, "https://example.com/fmp", {}, {
       providerKey: "fmp",
       endpointKey: "daily-bars",
       caller: "fallback",
     })).rejects.toThrow("Provider budget exceeded");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("reserves persistent minute capacity before calling Alpaca", async () => {
     const db = new FakeProviderUsageDb();
-    const env = createEnv(db, { ALPACA_REQUESTS_PER_MINUTE_HARD: "1" });
+    const env = createEnv(db, {
+      OPS_DB: db as unknown as D1Database,
+      OPS_DB_REQUIRED: "true",
+      ALPACA_REQUESTS_PER_MINUTE_HARD: "1",
+    });
     const fetchMock = vi.fn(async () => Response.json({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -255,15 +278,48 @@ describe("provider usage metering", () => {
     expect(Array.from(db.minuteRows.values())).toEqual([1]);
   });
 
+  it("classifies provider timeouts with a stable code", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, {
+      OPS_DB: db as unknown as D1Database,
+      OPS_DB_REQUIRED: "true",
+      ALPACA_REQUESTS_PER_MINUTE_HARD: "5",
+    });
+    const timeout = new Error("aborted");
+    timeout.name = "AbortError";
+    vi.stubGlobal("fetch", vi.fn(async () => { throw timeout; }));
+
+    await expect(meteredFetch(env, "https://example.com/alpaca", {}, {
+      providerKey: "alpaca",
+      endpointKey: "daily-bars",
+      caller: "post-close",
+    }, 10)).rejects.toMatchObject({ code: "provider-timeout" });
+  });
+
+  it("atomically admits only one concurrent request at a one-request limit", async () => {
+    const db = new FakeProviderUsageDb();
+    const env = createEnv(db, { OPS_DB: db as unknown as D1Database, OPS_DB_REQUIRED: "true", ALPACA_REQUESTS_PER_MINUTE_HARD: "1" });
+    const fetchMock = vi.fn(async () => Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcomes = await Promise.allSettled([1, 2].map(() => meteredFetch(env, "https://example.com/alpaca", {}, {
+      providerKey: "alpaca",
+      endpointKey: "daily-bars",
+      caller: "post-close",
+    })));
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("opens a short circuit after three repeated provider failures", async () => {
     const db = new FakeProviderUsageDb();
-    const env = createEnv(db, { TRADINGVIEW_REQUESTS_PER_MINUTE_HARD: "10" });
+    const env = createEnv(db, { ALPACA_REQUESTS_PER_MINUTE_HARD: "10" });
     const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
     const meta = {
-      providerKey: "tradingview",
-      endpointKey: "overview-current",
-      caller: "overview-current",
+      providerKey: "alpaca",
+      endpointKey: "test-circuit",
+      caller: "provider-usage-test",
     };
 
     await meteredFetch(env, "https://example.com/tv", {}, meta);
@@ -278,16 +334,16 @@ describe("provider usage metering", () => {
 
   it("honors Retry-After while keeping retries bounded", async () => {
     const db = new FakeProviderUsageDb();
-    const env = createEnv(db, { TRADINGVIEW_REQUESTS_PER_MINUTE_HARD: "6" });
+    const env = createEnv(db, { ALPACA_REQUESTS_PER_MINUTE_HARD: "6" });
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response("busy", { status: 429, headers: { "Retry-After": "0" } }))
       .mockResolvedValueOnce(Response.json({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
 
     const response = await meteredFetchWithRetry(env, "https://example.com/tv-retry", {}, {
-      providerKey: "tradingview",
-      endpointKey: "overview-current",
-      caller: "overview-current",
+      providerKey: "alpaca",
+      endpointKey: "test-retry",
+      caller: "provider-usage-test",
     });
 
     expect(response.ok).toBe(true);

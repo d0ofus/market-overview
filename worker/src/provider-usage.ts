@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { getOpsDb, isOpsDbRequired, OpsDbUnavailableError } from "./ops-db";
 
 export type ProviderUsageMeta = {
   providerKey: string;
@@ -92,6 +93,8 @@ export type AdminProviderUsageResponse = {
 };
 
 export class ProviderBudgetExceededError extends Error {
+  readonly code = "provider-budget-exhausted";
+
   constructor(
     readonly providerKey: string,
     readonly limit: number,
@@ -99,6 +102,34 @@ export class ProviderBudgetExceededError extends Error {
   ) {
     super(`Provider budget exceeded for ${providerKey}: ${limit}/${window}.`);
     this.name = "ProviderBudgetExceededError";
+  }
+}
+
+export class ProviderBudgetUnavailableError extends Error {
+  readonly code = "provider-budget-unavailable";
+
+  constructor(readonly providerKey: string, cause?: unknown) {
+    super(`Provider budget storage is unavailable for ${providerKey}; request was not sent.`);
+    this.name = "ProviderBudgetUnavailableError";
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+export type ProviderRequestFailureCode =
+  | "provider-timeout"
+  | "provider-http-error"
+  | "provider-invalid-payload";
+
+export class ProviderRequestFailureError extends Error {
+  constructor(
+    readonly code: ProviderRequestFailureCode,
+    message: string,
+    readonly status: number | null = null,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = "ProviderRequestFailureError";
+    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -215,16 +246,33 @@ function providerBudget(env: Env, providerKey: string): { warn: number; hard: nu
     const hard = envInt(env.YAHOO_REQUESTS_PER_DAY_HARD, DEFAULT_BUDGETS.yahooDayHard);
     return { warn: Math.max(0, Math.floor(hard * 0.8)), hard, window: "day" };
   }
+  if (key === "nasdaqtrader" || key === "sp500-public-proxy") {
+    return { warn: 3, hard: 4, window: "day" };
+  }
+  if (key === "ishares") {
+    return { warn: 4, hard: 6, window: "day" };
+  }
   return null;
 }
 
-function canUseD1(env: Env): boolean {
-  return Boolean(env.DB && typeof env.DB.prepare === "function");
+function usageDb(env: Env): D1Database | null {
+  try {
+    const db = getOpsDb(env);
+    return db && typeof db.prepare === "function" ? db : null;
+  } catch (error) {
+    if (error instanceof OpsDbUnavailableError) return null;
+    throw error;
+  }
+}
+
+function reservationDb(env: Env): D1Database | null {
+  const db = env.OPS_DB;
+  return db && typeof db.prepare === "function" ? db : null;
 }
 
 function isMissingUsageTable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /provider_usage_(?:daily|minute)|no such table|\.prepare is not a function|\.run is not a function|\.first is not a function/i.test(message);
+  return /provider_(?:usage_daily|budget_counters)|no such table|\.prepare is not a function|\.run is not a function|\.first is not a function/i.test(message);
 }
 
 function classifyTimeout(error: unknown): boolean {
@@ -239,71 +287,46 @@ function errorMessage(error: unknown): string | null {
   return String(error).slice(0, 500);
 }
 
-async function loadProviderRequestCountForDay(env: Env, providerKey: string, day: string): Promise<number> {
-  if (!canUseD1(env)) return 0;
-  try {
-    const row = await env.DB.prepare(
-      `SELECT COALESCE(SUM(request_count), 0) as requestCount
-         FROM provider_usage_daily
-        WHERE usage_day = ? AND provider_key = ?`,
-    ).bind(day, normalizeKey(providerKey)).first<{ requestCount: number | string | null }>();
-    return Math.max(0, Number(row?.requestCount ?? 0) || 0);
-  } catch (error) {
-    if (!isMissingUsageTable(error)) {
-      console.warn("Provider usage budget lookup failed", { providerKey, error });
-    }
-    return 0;
-  }
-}
-
 async function checkBudgetBeforeFetch(env: Env, providerKey: string, now: Date): Promise<void> {
   const budget = providerBudget(env, providerKey);
   if (!budget || budget.hard <= 0) return;
   const key = normalizeKey(providerKey);
-  if (budget.window === "minute") {
-    const minuteBucket = now.toISOString().slice(0, 16);
-    let reservedPersistently = false;
-    if (canUseD1(env)) {
-      try {
-        const reservation = await env.DB.prepare(
-        `INSERT INTO provider_usage_minute
-           (minute_bucket, provider_key, request_count, updated_at)
-         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-         ON CONFLICT(minute_bucket, provider_key) DO UPDATE SET
-           request_count = provider_usage_minute.request_count + 1,
+  const windowBucket = budget.window === "minute"
+    ? now.toISOString().slice(0, 16)
+    : now.toISOString().slice(0, 10);
+  const db = reservationDb(env);
+  if (db) {
+    try {
+      const reservation = await db.prepare(
+        `INSERT INTO provider_budget_counters
+           (provider_key, window_kind, window_bucket, request_count, updated_at)
+         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+         ON CONFLICT(provider_key, window_kind, window_bucket) DO UPDATE SET
+           request_count = provider_budget_counters.request_count + 1,
            updated_at = CURRENT_TIMESTAMP
-         WHERE provider_usage_minute.request_count < ?`,
-        ).bind(minuteBucket, key, budget.hard).run();
-        const changes = reservation.meta?.changes;
-        if (typeof changes === "number") {
-          if (changes <= 0) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
-          reservedPersistently = true;
-        }
-      } catch (error) {
-        if (error instanceof ProviderBudgetExceededError) throw error;
-        if (!isMissingUsageTable(error)) throw error;
+         WHERE provider_budget_counters.request_count < ?`,
+      ).bind(key, budget.window, windowBucket, budget.hard).run();
+      if (Number(reservation.meta?.changes ?? 0) <= 0) {
+        throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
+      }
+      return;
+    } catch (error) {
+      if (error instanceof ProviderBudgetExceededError) throw error;
+      if (isOpsDbRequired(env) || !isMissingUsageTable(error)) {
+        throw new ProviderBudgetUnavailableError(key, error);
       }
     }
-    if (!reservedPersistently) {
-      const minuteKey = `${key}|${minuteBucket}`;
-      const counters = minuteCountersFor(env);
-      const used = counters.get(minuteKey) ?? 0;
-      if (used >= budget.hard) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
-      counters.set(minuteKey, used + 1);
-    }
-    if (key === "tradingview" || key === "trading-view") {
-      const day = now.toISOString().slice(0, 10);
-      const dailyHard = envInt(env.TRADINGVIEW_REQUESTS_PER_DAY_HARD, DEFAULT_BUDGETS.tradingViewDayHard);
-      const used = await loadProviderRequestCountForDay(env, key, day);
-      if (dailyHard > 0 && used >= dailyHard) {
-        throw new ProviderBudgetExceededError(key, dailyHard, "day");
-      }
-    }
-    return;
+  } else if (isOpsDbRequired(env)) {
+    throw new ProviderBudgetUnavailableError(key);
   }
-  const day = now.toISOString().slice(0, 10);
-  const used = await loadProviderRequestCountForDay(env, key, day);
+
+  // Local/test compatibility only. Production requires OPS_DB and never uses
+  // isolate-local counters for a provider reservation.
+  const counterKey = `${key}|${budget.window}|${windowBucket}`;
+  const counters = minuteCountersFor(env);
+  const used = counters.get(counterKey) ?? 0;
   if (used >= budget.hard) throw new ProviderBudgetExceededError(key, budget.hard, budget.window);
+  counters.set(counterKey, used + 1);
 }
 
 export async function recordProviderUsage(
@@ -311,7 +334,8 @@ export async function recordProviderUsage(
   meta: ProviderUsageMeta,
   result: ProviderUsageResult = {},
 ): Promise<void> {
-  if (!canUseD1(env)) return;
+  const db = usageDb(env);
+  if (!db) return;
   const nowIso = new Date().toISOString();
   const providerKey = normalizeKey(meta.providerKey);
   const endpointKey = normalizeKey(meta.endpointKey);
@@ -329,7 +353,7 @@ export async function recordProviderUsage(
   const lastCalledAt = requestCount > 0 ? nowIso : null;
   const lastError = errorMessage(result.error);
   try {
-    await env.DB.prepare(
+    await db.prepare(
       `INSERT INTO provider_usage_daily
          (usage_day, provider_key, endpoint_key, caller, request_count, success_count, error_count, rate_limited_count, timeout_count, symbol_count, row_count, cache_hit_count, total_duration_ms, last_status, last_error, last_called_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -376,14 +400,59 @@ export async function recordProviderUsage(
 }
 
 export async function cleanupProviderUsage(env: Env, now = new Date()): Promise<void> {
-  if (!canUseD1(env)) return;
+  const db = usageDb(env);
+  if (!db) return;
   const minuteCutoff = new Date(now.getTime() - 2 * 24 * 60 * 60_000).toISOString().slice(0, 16);
   const dailyCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+  const detailedCutoff = new Date(now.getTime() - 14 * 24 * 60 * 60_000).toISOString();
+  const runBatches = async (sql: string, bindings: unknown[], limit: number, maxBatches = 50): Promise<void> => {
+    for (let batch = 0; batch < maxBatches; batch += 1) {
+      const result = await db.prepare(sql).bind(...bindings).run();
+      const changes = Number(result.meta?.changes ?? result.meta?.rows_written ?? 0);
+      if (changes < limit) return;
+    }
+  };
   try {
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM provider_usage_minute WHERE minute_bucket < ?").bind(minuteCutoff),
-      env.DB.prepare("DELETE FROM provider_usage_daily WHERE usage_day < ?").bind(dailyCutoff),
-    ]);
+    await runBatches(
+      `DELETE FROM provider_budget_counters WHERE (provider_key, window_kind, window_bucket) IN (
+         SELECT provider_key, window_kind, window_bucket FROM provider_budget_counters
+          WHERE window_kind = 'minute' AND window_bucket < ? ORDER BY window_bucket LIMIT 500
+       )`, [minuteCutoff], 500,
+    );
+    await runBatches(
+      `DELETE FROM provider_budget_counters WHERE (provider_key, window_kind, window_bucket) IN (
+         SELECT provider_key, window_kind, window_bucket FROM provider_budget_counters
+          WHERE window_kind = 'day' AND window_bucket < ? ORDER BY window_bucket LIMIT 500
+       )`, [dailyCutoff], 500,
+    );
+    await runBatches(
+      `DELETE FROM provider_usage_daily WHERE (usage_day, provider_key, endpoint_key, caller) IN (
+         SELECT usage_day, provider_key, endpoint_key, caller FROM provider_usage_daily
+          WHERE usage_day < ? ORDER BY usage_day LIMIT 500
+       )`, [dailyCutoff], 500,
+    );
+    await runBatches("DELETE FROM scheduled_job_runs WHERE id IN (SELECT id FROM scheduled_job_runs WHERE started_at < ? ORDER BY started_at LIMIT 500)", [detailedCutoff], 500);
+    await runBatches("DELETE FROM market_pipeline_runs WHERE id IN (SELECT id FROM market_pipeline_runs WHERE started_at < ? ORDER BY started_at LIMIT 500)", [detailedCutoff], 500);
+    await runBatches("DELETE FROM capacity_health_samples WHERE id IN (SELECT id FROM capacity_health_samples WHERE observed_at < datetime('now', '-90 days') ORDER BY observed_at LIMIT 500)", [], 500);
+    await runBatches("DELETE FROM market_data_daily_usage WHERE usage_date IN (SELECT usage_date FROM market_data_daily_usage WHERE usage_date < ? ORDER BY usage_date LIMIT 500)", [dailyCutoff], 500);
+    await runBatches(
+      `DELETE FROM post_close_daily_bar_refresh_job_items
+        WHERE (job_id, ticker) IN (
+          SELECT item.job_id, item.ticker FROM post_close_daily_bar_refresh_job_items item
+          JOIN post_close_daily_bar_refresh_jobs job ON job.id = item.job_id
+          WHERE job.status IN ('completed', 'failed', 'superseded') AND job.updated_at < ?
+          ORDER BY job.updated_at, item.ordinal LIMIT 1000
+        )`, [detailedCutoff], 1000,
+    );
+    await runBatches(
+      `DELETE FROM post_close_daily_bar_refresh_jobs
+        WHERE id IN (
+          SELECT job.id FROM post_close_daily_bar_refresh_jobs job
+          WHERE job.status IN ('completed', 'failed', 'superseded') AND job.updated_at < ?
+            AND NOT EXISTS (SELECT 1 FROM post_close_daily_bar_refresh_job_items item WHERE item.job_id = job.id)
+          ORDER BY job.updated_at LIMIT 100
+        )`, [detailedCutoff], 100,
+    );
   } catch (error) {
     if (!isMissingUsageTable(error)) throw error;
   }
@@ -424,7 +493,12 @@ export async function meteredFetch(
     return response;
   } catch (error) {
     const mapped = controller && classifyTimeout(error)
-      ? new Error(`Provider fetch timed out after ${timeoutMs}ms.`)
+      ? new ProviderRequestFailureError(
+          "provider-timeout",
+          `Provider fetch timed out after ${timeoutMs}ms.`,
+          null,
+          error,
+        )
       : error;
     await recordProviderUsage(env, meta, {
       ok: false,
@@ -473,7 +547,13 @@ export async function meteredFetchWithRetry(
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error ?? "");
-      if (/provider budget exceeded|provider circuit open/i.test(message) || attempt === attempts) throw error;
+      const code = error instanceof Error && "code" in error ? String(error.code) : "";
+      if (
+        code === "provider-budget-exhausted"
+        || code === "provider-budget-unavailable"
+        || /provider budget exceeded|provider circuit open/i.test(message)
+        || attempt === attempts
+      ) throw error;
     }
     const delayMs = providerRetryDelayMs(response, attempt);
     if (delayMs > 0) {
@@ -580,7 +660,8 @@ function computeBudgetWarnings(env: Env, rows: ProviderUsageDailyRow[], now: Dat
 export async function loadProviderUsageDaily(env: Env, daysInput = 14, now = new Date()): Promise<AdminProviderUsageResponse> {
   const days = Math.max(1, Math.min(90, Math.floor(Number(daysInput) || 14)));
   const cutoff = new Date(now.getTime() - (days - 1) * 24 * 60 * 60_000).toISOString().slice(0, 10);
-  if (!canUseD1(env)) {
+  const db = usageDb(env);
+  if (!db) {
     return {
       days,
       rows: [],
@@ -591,7 +672,7 @@ export async function loadProviderUsageDaily(env: Env, daysInput = 14, now = new
     };
   }
   try {
-    const result = await env.DB.prepare(
+    const result = await db.prepare(
       `SELECT usage_day as usageDay,
               provider_key as providerKey,
               endpoint_key as endpointKey,

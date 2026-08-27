@@ -15,9 +15,11 @@ import {
   recomputeBreadthFromStoredBars,
   recomputeDashboardFromStoredBars,
   refreshAndStoreOverviewSnapshot,
+  refreshBreadthUniverseMemberships,
   refreshMissingBreadthBarsForCoverage,
 } from "./eod";
 import { isBreadthUniverseMemberCountValid, isCurrentUsableBreadthRow, isUsableBreadthRow } from "./breadth-quality";
+import { loadBreadthDashboard } from "./breadth-dashboard-service";
 import { refreshOverviewPageData } from "./overview-refresh-service";
 import {
   doesOverviewCurrentRowNeedRepair,
@@ -100,6 +102,7 @@ import {
 } from "./validation";
 import { loadConfig, upsertAudit } from "./db";
 import { refreshDailyBarsIncremental, type DailyBarStorageTarget } from "./daily-bars";
+import { computeAndStoreDailyMarketFeatures } from "./daily-market-features";
 import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
@@ -112,6 +115,12 @@ import {
   loadMarketDataTickersWithBarOnDate,
   marketDataFeed,
 } from "./market-data-db";
+import {
+  assertMarketPipelineActive,
+  getOpsDb,
+  marketPipelineMode,
+  MarketPipelinePausedError,
+} from "./ops-db";
 import {
   CENTRAL_CRON_JOB_DEFINITIONS,
   CRON_TIMEZONE_OPTIONS,
@@ -151,6 +160,7 @@ import { registerFedWatchRoutes } from "./routes/fedwatch";
 import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
 import { cleanupProviderUsage, loadProviderUsageDaily } from "./provider-usage";
+import { loadDatabaseCapacity, sampleDatabaseCapacity } from "./database-capacity-service";
 import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, type ScheduledBudget, type ScheduledLane } from "./scheduled-budget";
 import { legacyRsCacheRetired } from "./rs-state-v2-service";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
@@ -237,7 +247,7 @@ import {
   requestRefreshJob,
   type RefreshJob,
 } from "./refresh-jobs-service";
-import { approveUniverseVersion, listUniverseVersions } from "./universe-version-service";
+import { approveUniverseVersion, listUniverseVersions, loadActiveUniverseTickers } from "./universe-version-service";
 import { normalizeSeededPeerGroupLabels, seedPeerGroupForTicker } from "./peer-seed-service";
 import { loadFundamentalsTrends, loadTickerFundamentals, refreshTickerFundamentals } from "./fundamentals-service";
 import {
@@ -1368,6 +1378,9 @@ async function refreshPageScopedData(
   reportId?: string;
   sessionDate?: string;
 }> {
+  if (["overview", "breadth", "sectors", "thirteenf", "admin", "ticker"].includes(page)) {
+    assertMarketPipelineActive(env);
+  }
   if (page === "overview") {
     return await refreshOverviewPageData(env, {
       loadOverviewTickers,
@@ -1394,7 +1407,7 @@ async function refreshPageScopedData(
       maxPasses: 1,
     });
     const recompute = await recomputeBreadthFromStoredBars(env);
-    const sp500CountRow = await env.DB.prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
+    const sp500CountRow = await getMarketDataDb(env).prepare("SELECT COUNT(*) as count FROM universe_symbols WHERE universe_id = ?")
       .bind("sp500-core")
       .first<{ count: number }>();
     const lowCoverage = catchUp.diagnostics
@@ -1545,6 +1558,10 @@ async function processClaimedRefreshJob(
     const result = await refreshPageScopedData(env, job.page as RefreshPage, job.ticker);
     await completeRefreshJob(env, job, result);
   } catch (error) {
+    if (error instanceof MarketPipelinePausedError) {
+      await deferRefreshJob(env, job, 15 * 60_000);
+      return;
+    }
     if (error instanceof OverviewCurrentRefreshPendingError) {
       await deferRefreshJob(env, job, error.retryAfterMs);
       return;
@@ -2354,7 +2371,6 @@ async function refreshRecentBarsForTickers(
       endDate: end,
       replaceExisting,
       target: options.target,
-      syncSymbolsToCore: options.target === "market",
     });
   } catch (error) {
     console.error("refresh recent bars for tickers failed", error);
@@ -2362,7 +2378,16 @@ async function refreshRecentBarsForTickers(
   }
 }
 
-app.get("/api/health", (c) => c.json({ ok: true }));
+app.get("/api/health", async (c) => {
+  const mode = marketPipelineMode(c.env);
+  const capacity = await loadDatabaseCapacity(c.env);
+  const [core, market, ops] = capacity;
+  const unhealthyLevels = new Set(["critical", "halt", "unavailable"]);
+  const ok = core.ok && market.ok && ops.ok
+    && !capacity.some((database) => unhealthyLevels.has(database.level));
+  c.header("Cache-Control", "no-store");
+  return c.json({ ok, pipelineMode: mode, databases: { core, market, ops } }, ok ? 200 : 503);
+});
 
 app.get("/api/status", async (c) => {
   const page = (c.req.query("page") ?? "overview").trim();
@@ -2449,16 +2474,28 @@ app.get("/api/status", async (c) => {
       .bind(config?.id ?? "default", latestAllowedAsOfDate)
       .first<OverviewLatestRow>();
   }
-  const breadthLatest = await c.env.DB.prepare(
-    "SELECT as_of_date as asOfDate, generated_at as generatedAt FROM breadth_snapshots ORDER BY as_of_date DESC, generated_at DESC LIMIT 1",
-  )
-    .first<{ asOfDate?: string; generatedAt?: string; as_of_date?: string; generated_at?: string }>();
-  const breadthDiagnostics = await loadBreadthStatusDiagnostics(c.env, latestAllowedAsOfDate).catch((error) => {
+  const breadthDashboard = await loadBreadthDashboard(c.env, 1).catch((error) => {
     console.error("status breadth diagnostics load failed", error);
     return {
-      status: "stale" as const,
-      warning: "Breadth diagnostics could not be loaded.",
-      diagnostics: [] as BreadthStatusDiagnostic[],
+      generatedAt: null,
+      providerLabel: "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.",
+      overallHealth: "stale" as const,
+      warning: "Breadth freshness could not be verified because the market-data database is unavailable.",
+      universes: CORE_BREADTH_UNIVERSE_IDS.map((universeId) => ({
+        universeId,
+        displayedAsOfSession: null,
+        displayedSnapshot: null,
+        staleTradingSessions: 0,
+        memberCount: 0,
+        exactSessionCount: 0,
+        coveragePct: 0,
+        requiredCoveragePct: minBreadthCoveragePct(universeId),
+        freshness: "missing" as const,
+        error: {
+          code: "market-data-db-unavailable",
+          message: "Breadth freshness could not be verified because the market-data database is unavailable.",
+        },
+      })),
     };
   });
 
@@ -2543,21 +2580,24 @@ app.get("/api/status", async (c) => {
     }
   }
   const normalizedBreadth = {
-    lastUpdated: breadthLatest?.generatedAt ?? breadthLatest?.generated_at ?? null,
-    asOfDate: breadthLatest?.asOfDate ?? breadthLatest?.as_of_date ?? null,
+    lastUpdated: breadthDashboard.generatedAt,
+    asOfDate: breadthDashboard.universes[0]?.displayedAsOfSession ?? null,
   };
   const useBreadthStatus = page === "breadth";
   const normalizedLastUpdated = useBreadthStatus
-    ? normalizedBreadth.lastUpdated ?? normalizedOverview.lastUpdated
+    ? normalizedBreadth.lastUpdated
     : overviewRecoveryEnabled
       ? normalizedOverview.lastUpdated
       : normalizedOverview.lastUpdated ?? normalizedBreadth.lastUpdated;
   const normalizedAsOf = useBreadthStatus
-    ? normalizedBreadth.asOfDate ?? normalizedOverview.asOfDate
+    ? normalizedBreadth.asOfDate
     : overviewRecoveryEnabled
       ? normalizedOverview.asOfDate
       : normalizedOverview.asOfDate ?? normalizedBreadth.asOfDate;
-  const normalizedProvider = normalizedOverview.providerLabel ?? "Alpaca (IEX Delayed Daily Bars)";
+  const normalizedProvider = useBreadthStatus
+    ? breadthDashboard.providerLabel
+    : normalizedOverview.providerLabel
+      ?? "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback";
   const overviewRecovery = overviewRecoveryEnabled
     ? await loadOverviewRecovery(c.env, new Date(), config?.id ?? "default")
     : null;
@@ -2567,7 +2607,9 @@ app.get("/api/status", async (c) => {
       : normalizedOverview.asOfDate < latestAllowedAsOfDate
         ? "stale_fallback"
         : "ready");
-  const staleTradingSessions = overviewRecovery?.staleTradingSessions ?? 0;
+  const staleTradingSessions = useBreadthStatus
+    ? Math.max(0, ...breadthDashboard.universes.map((universe) => universe.staleTradingSessions))
+    : overviewRecovery?.staleTradingSessions ?? 0;
 
   return c.json({
     configId: config?.id ?? "default",
@@ -2583,11 +2625,22 @@ app.get("/api/status", async (c) => {
     dataProvider: c.env.DATA_PROVIDER ?? "alpaca",
     ...overviewFreshness,
     breadthExpectedAsOfDate: latestAllowedAsOfDate,
-    breadthStatus: breadthDiagnostics.status,
+    breadthStatus: breadthDashboard.overallHealth,
     breadthLatestAsOfDate: normalizedBreadth.asOfDate,
     breadthLastUpdated: normalizedBreadth.lastUpdated,
-    breadthWarning: breadthDiagnostics.warning,
-    breadthDiagnostics: breadthDiagnostics.diagnostics,
+    breadthWarning: breadthDashboard.warning,
+    breadthDiagnostics: breadthDashboard.universes.map((universe) => ({
+      universeId: universe.universeId,
+      expectedAsOfDate: latestAllowedAsOfDate,
+      latestAsOfDate: universe.displayedAsOfSession,
+      latestGeneratedAt: universe.displayedSnapshot?.generatedAt ?? null,
+      memberCount: universe.memberCount,
+      currentDateTickers: universe.exactSessionCount,
+      coveragePct: universe.coveragePct,
+      minCoveragePct: universe.requiredCoveragePct,
+      status: universe.freshness,
+      reason: universe.error?.message ?? `Breadth snapshot is current for ${latestAllowedAsOfDate}.`,
+    })),
   });
 });
 
@@ -2617,7 +2670,7 @@ app.get("/api/dashboard", async (c) => {
     return c.json(emptySnapshotResponse(error instanceof Error ? error.message : "Failed to load dashboard snapshot."), 200);
   }
   rememberDashboardResponse(configId, date, data);
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", date ? "public, max-age=300" : "no-store");
   c.header("X-Dashboard-Cache-Version", dashboardVersionKey(configId, date, data));
   return c.json(data);
 });
@@ -2735,6 +2788,11 @@ app.get("/api/overview/focus/history", async (c) => {
 app.get("/api/breadth", async (c) => {
   const requestedUniverseId = c.req.query("universeId") ?? "sp500-core";
   const limit = Number(c.req.query("limit") ?? 60);
+  const dashboard = await loadBreadthDashboard(c.env, limit);
+  const universe = dashboard.universes.find((row) => row.universeId === requestedUniverseId);
+  c.header("Cache-Control", "no-store");
+  return c.json({ requestedUniverseId, universeId: requestedUniverseId, rows: universe?.history ?? [] });
+  /* Compatibility implementation retained for one release; remove after consumers use /api/breadth/dashboard.
   const loadRows = async (universeId: string) =>
     c.env.DB.prepare(
       "SELECT as_of_date as asOfDate, universe_id as universeId, advancers, decliners, unchanged, pct_above_20ma as pctAbove20MA, pct_above_50ma as pctAbove50MA, pct_above_200ma as pctAbove200MA, new_20d_highs as new20DHighs, new_20d_lows as new20DLows, median_return_1d as medianReturn1D, median_return_5d as medianReturn5D, sentiment_json as sentimentJson FROM breadth_snapshots WHERE universe_id = ? ORDER BY as_of_date DESC LIMIT ?",
@@ -2768,7 +2826,14 @@ app.get("/api/breadth", async (c) => {
       provenance: sentiment.provenance ?? null,
     };
   });
-  return c.json({ requestedUniverseId, universeId, rows: parsedRows });
+  return c.json({ requestedUniverseId, universeId, rows: parsedRows }); */
+});
+
+app.get("/api/breadth/dashboard", async (c) => {
+  const historyLimit = Number(c.req.query("historyLimit") ?? 120);
+  const dashboard = await loadBreadthDashboard(c.env, historyLimit);
+  c.header("Cache-Control", "no-store");
+  return c.json(dashboard);
 });
 
 async function loadFreshBreadthUniverseIdsForCurrentSummary(env: Env, expectedAsOfDate: string): Promise<Set<string>> {
@@ -2801,6 +2866,26 @@ async function loadFreshBreadthUniverseIdsForCurrentSummary(env: Env, expectedAs
 
 app.get("/api/breadth/summary", async (c) => {
   const requestedDate = c.req.query("date");
+  {
+    const dashboard = await loadBreadthDashboard(c.env, requestedDate ? 450 : 1);
+    const rows = dashboard.universes.flatMap((universe) => {
+      const snapshot = requestedDate
+        ? universe.history.find((row) => row.asOfDate === requestedDate) ?? null
+        : universe.displayedSnapshot;
+      return snapshot ? [{ ...snapshot, universeName: universe.universeName }] : [];
+    });
+    const unavailable = dashboard.universes.flatMap((universe) => universe.error
+      ? [{ id: universe.universeId, name: universe.universeName, reason: universe.error.message }]
+      : []);
+    c.header("Cache-Control", "no-store");
+    return c.json({
+      asOfDate: requestedDate ?? dashboard.universes[0]?.displayedAsOfSession ?? null,
+      rows,
+      unavailable,
+      generationId: dashboard.generationId,
+      expectedAsOfSession: dashboard.expectedAsOfSession,
+    });
+  }
   const expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const selectCols =
     "b.as_of_date as asOfDate, b.universe_id as universeId, COALESCE(u.name, b.universe_id) as universeName, b.advancers, b.decliners, b.unchanged, b.pct_above_20ma as pctAbove20MA, b.pct_above_50ma as pctAbove50MA, b.pct_above_200ma as pctAbove200MA, b.new_20d_highs as new20DHighs, b.new_20d_lows as new20DLows, b.median_return_1d as medianReturn1D, b.median_return_5d as medianReturn5D, b.sentiment_json as sentimentJson";
@@ -2815,7 +2900,7 @@ app.get("/api/breadth/summary", async (c) => {
       .all();
 
   if (requestedDate) {
-    const rows = await loadRowsByDate(requestedDate);
+    const rows = await loadRowsByDate(requestedDate as string);
     const parsedRequestedRows = (rows.results ?? []).map((row: any) => {
       const sentiment = parseBreadthSentiment(row.sentimentJson);
       return {
@@ -2911,14 +2996,14 @@ app.get("/api/breadth/summary", async (c) => {
     unavailable.push({
       id: "sp500-core",
       name: "S&P 500",
-      reason: "S&P 500 breadth data is currently unavailable from configured free sources",
+      reason: "No validated S&P 500 snapshot is stored for the expected session.",
     });
   }
   if (!present.has("nasdaq-core")) {
     unavailable.push({
       id: "nasdaq-core",
       name: "NASDAQ",
-      reason: "NASDAQ breadth data is currently unavailable from configured free sources",
+      reason: "No validated NASDAQ snapshot is stored for the expected session.",
     });
   }
   if (!present.has("nyse-core")) {
@@ -6802,6 +6887,7 @@ app.post("/api/admin/run-eod", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   const storedOnly = c.req.query("storedOnly") === "1";
   try {
+    assertMarketPipelineActive(c.env);
     const result = storedOnly
       ? await recomputeDashboardFromStoredBars(c.env, date, configId)
       : await refreshAndStoreOverviewSnapshot(c.env, date, configId);
@@ -6818,6 +6904,7 @@ app.post("/api/admin/overview-current/refresh", async (c) => {
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
+    assertMarketPipelineActive(c.env, true);
     const result = await refreshOverviewCurrentDataIfDue(c.env, configId, date);
     return c.json(result ?? {
       configId,
@@ -6832,9 +6919,60 @@ app.post("/api/admin/overview-current/refresh", async (c) => {
   }
 });
 
+app.post("/api/admin/market-pipeline/canary", async (c) => {
+  if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (marketPipelineMode(c.env) !== "canary") {
+    return c.json({ error: "market-pipeline-not-canary", message: "Set MARKET_PIPELINE_MODE=canary before running this cohort." }, 409);
+  }
+  const sessionDate = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
+  const configId = c.req.query("configId") ?? "default";
+  const runId = crypto.randomUUID();
+  const now = new Date();
+  const opsDb = getOpsDb(c.env);
+  await opsDb.prepare(
+    `INSERT INTO market_pipeline_runs
+       (id, pipeline, session_date, mode, stage, status, checkpoint_json, started_at, updated_at)
+     VALUES (?, 'market-recovery-canary', ?, 'canary', 'overview-current', 'running', '{}', ?, ?)`,
+  ).bind(runId, sessionDate, now.toISOString(), now.toISOString()).run();
+  try {
+    const current = await refreshOverviewCurrentDataIfDue(c.env, configId, sessionDate);
+    await opsDb.prepare(
+      `UPDATE market_pipeline_runs SET stage = 'feature-batch', checkpoint_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).bind(JSON.stringify({ current }), runId).run();
+    const featureTickers = (await loadActiveUniverseTickers(c.env, "sp500-core")).slice(0, 80);
+    const features = await computeAndStoreDailyMarketFeatures(c.env, featureTickers, sessionDate);
+    await opsDb.prepare(
+      `UPDATE market_pipeline_runs SET stage = 'universe-candidate', completed_count = ?, checkpoint_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).bind(features.size, JSON.stringify({ current, featureTickerCount: featureTickers.length, featureCount: features.size }), runId).run();
+    const breadthCandidate = await computeAndStoreBreadth(
+      c.env,
+      sessionDate,
+      "sp500-core",
+      "S&P 500 Wikipedia-derived public proxy (canary candidate)",
+    );
+    await opsDb.prepare(
+      `UPDATE market_pipeline_runs
+          SET stage = 'completed', status = 'completed', completed_count = ?, checkpoint_json = ?,
+              completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
+    ).bind(features.size, JSON.stringify({ current, featureTickerCount: featureTickers.length, featureCount: features.size, breadthCandidate }), runId).run();
+    return c.json({ ok: true, runId, sessionDate, pointerMoved: false, current, featureTickerCount: featureTickers.length, featureCount: features.size, breadthCandidate });
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 700);
+    await opsDb.prepare(
+      `UPDATE market_pipeline_runs
+          SET stage = 'failed', status = 'failed', error_code = 'canary-failed', error_message = ?,
+              completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
+    ).bind(message, runId).run();
+    return c.json({ ok: false, runId, sessionDate, error: "canary-failed", message }, 500);
+  }
+});
+
 app.post("/api/admin/overview-current/history-refresh", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   try {
+    assertMarketPipelineActive(c.env);
     const settings = await loadWorkerScheduleSettings(c.env);
     const result = await maybeRunScheduledPostCloseDailyBarRefresh(c.env, new Date(), settings);
     return c.json(result ?? {
@@ -6991,6 +7129,7 @@ app.post("/api/admin/run-breadth", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const date = c.req.query("date");
   try {
+    assertMarketPipelineActive(c.env);
     const catchUp = await refreshMissingBreadthBarsForCoverage(c.env, date, {
       maxTickers: 1600,
       maxPasses: 2,
@@ -7036,6 +7175,24 @@ app.post("/api/admin/refresh-page", async (c) => {
   const page = (rawPage || "overview") as RefreshPage;
   if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers", "earnings", "market-commentary"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
+  }
+  const pipelineMode = marketPipelineMode(c.env);
+  if (pipelineMode !== "active" && ["overview", "breadth", "sectors", "thirteenf", "admin", "ticker"].includes(page)) {
+    try {
+      const job = await requestRefreshJob(c.env, { page, ticker: body.ticker ?? null, requestedBy: "admin" });
+      return c.json({
+        ok: true,
+        page,
+        refreshedTickers: 0,
+        notes: `Market-data pipeline is ${pipelineMode}; run ${job.id} is queued and the last validated data remains available.`,
+        jobId: job.id,
+        status: "paused",
+        pollAfterMs: 0,
+      }, 202);
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? String(error.code) : "ops-db-unavailable";
+      return c.json({ ok: false, page, error: code, message: "The paused pipeline request could not be recorded in OPS_DB." }, 503);
+    }
   }
   try {
     const job = await requestRefreshJob(c.env, {
@@ -7693,6 +7850,7 @@ export default {
           await cleanupProviderUsage(env, now);
           await cleanupRefreshJobs(env, now);
         });
+        await runBudgeted("database-capacity-sample", 2, () => sampleDatabaseCapacity(env, now).then(() => undefined));
       }
     };
 
@@ -7725,6 +7883,15 @@ export default {
     const runMarketDataLane = async (): Promise<void> => {
       const runner = runnerForLane("market-data");
       const { runBudgeted, auditSkipped, budget } = runner;
+      const pipelineMode = marketPipelineMode(env);
+      if (pipelineMode !== "active") {
+        await auditSkipped(
+          "market-data-pipeline",
+          `Market-data pipeline is ${pipelineMode}; scheduled provider and publication work is disabled.`,
+          { pipelineMode },
+        );
+        return;
+      }
       const workerSchedule = await loadWorkerScheduleSettings(env);
       const postClosePlan = await planPostCloseBudgetProtection(env, now, workerSchedule);
       const overviewCurrentBudgetUnits = 12;
@@ -7735,6 +7902,16 @@ export default {
         expectedTradingDate: postClosePlan.expectedTradingDate,
         postCloseReason: postClosePlan.reason,
       };
+
+      // Membership sources publish daily. Use one dedicated UTC window rather
+      // than rechecking them on every five-minute market-data tick.
+      if (now.getUTCHours() === 23 && now.getUTCMinutes() < 5) {
+        await runBudgeted(
+          "universe-membership-refresh",
+          4,
+          () => refreshBreadthUniverseMemberships(env).then(() => undefined),
+        );
+      }
 
       if (await hasClaimableRefreshJob(env, now)) {
         await runBudgeted("refresh-job", 8, () => processNextRefreshJob(env).then(() => undefined));

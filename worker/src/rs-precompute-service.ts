@@ -1,6 +1,7 @@
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb } from "./market-data-db";
+import { getOpsDb } from "./ops-db";
 import {
   createScheduledRelativeStrengthRun,
   hasMatchingRelativeStrengthPublication,
@@ -71,7 +72,7 @@ export async function planScheduledRelativeStrengthPrecompute(
   }
   const source = postCloseJobIdentity(env);
   const marketDataDb = getMarketDataDb(env);
-  const barsJob = await marketDataDb.prepare(
+  const barsJob = await getOpsDb(env).prepare(
     `SELECT id, status, total_tickers as totalTickers, processed_tickers as processedTickers,
        missing_current_date_tickers as missingCurrentDateTickers, current_date_coverage_pct as currentDateCoveragePct
      FROM post_close_daily_bar_refresh_jobs

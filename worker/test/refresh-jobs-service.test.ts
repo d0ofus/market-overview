@@ -54,10 +54,10 @@ describe("refresh job leasing", () => {
     let capturedArgs: unknown[] = [];
     const db = {
       prepare(sql: string) {
-        capturedSql = sql;
+        if (sql.includes("UPDATE refresh_jobs")) capturedSql = sql;
         return {
           bind(...args: unknown[]) {
-            capturedArgs = args;
+            if (sql.includes("UPDATE refresh_jobs")) capturedArgs = args;
             return { async first<T>() { return null as T; } };
           },
         };
@@ -79,10 +79,10 @@ describe("refresh job leasing", () => {
     let capturedArgs: unknown[] = [];
     const db = {
       prepare(sql: string) {
-        capturedSql = sql;
+        if (sql.includes("UPDATE refresh_jobs")) capturedSql = sql;
         return {
           bind(...args: unknown[]) {
-            capturedArgs = args;
+            if (sql.includes("UPDATE refresh_jobs")) capturedArgs = args;
             return { async run() { return { meta: { changes: 1 } }; } };
           },
         };

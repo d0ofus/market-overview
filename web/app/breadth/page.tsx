@@ -1,138 +1,86 @@
 import { BreadthPanels } from "@/components/breadth-panels";
 import { EqualWeightComps } from "@/components/equal-weight-comps";
 import { ManualRefreshButton } from "@/components/manual-refresh-button";
-import { getBreadth, getBreadthSummary, getStatus } from "@/lib/api";
 import { StatusBar } from "@/components/status-bar";
-
-type BreadthRow = {
-  asOfDate: string;
-  universeId: string;
-  advancers: number;
-  decliners: number;
-  unchanged: number;
-  pctAbove20MA: number;
-  pctAbove50MA: number;
-  pctAbove200MA: number;
-  new20DHighs: number;
-  new20DLows: number;
-  medianReturn1D: number;
-  medianReturn5D: number;
-  metrics?: Record<string, unknown> | null;
-  dataSource?: string | null;
-  provenance?: {
-    source?: string | null;
-    sourceType?: string | null;
-    sourceUrl?: string | null;
-    sourceAsOfDate?: string | null;
-    sourceMemberCount?: number | null;
-    resolvedMemberCount?: number | null;
-    unresolvedCount?: number | null;
-    unresolvedTickers?: string[];
-  } | null;
-};
-
-type SummaryRow = BreadthRow & {
-  universeName: string;
-};
-
-type SummaryPayload = {
-  asOfDate: string | null;
-  rows: SummaryRow[];
-  unavailable: Array<{ id: string; name: string; reason: string }>;
-};
-
-type StatusPayload = {
-  timezone: string;
-  autoRefreshLabel: string;
-  autoRefreshLocalTime?: string;
-  lastUpdated: string | null;
-  asOfDate: string | null;
-  providerLabel: string;
-};
+import { getBreadthDashboard, type BreadthDashboardSnapshot } from "@/lib/api";
 
 const universeOrder = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"];
 
-const universeNames: Record<string, string> = {
-  "sp500-core": "S&P 500",
-  "nasdaq-core": "NASDAQ",
-  "nyse-core": "NYSE",
-  "russell2000-core": "Russell 2000 — IWM proxy",
-  "overall-market-proxy": "Overall Market",
-};
-
-const coreUniverseSource: Record<string, string> = {
-  "sp500-core": "S&P 500 constituents CSV (datasets/s-and-p-500-companies) + provider daily bars.",
-  "nasdaq-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NASDAQ listings + provider daily bars.",
-  "nyse-core": "NasdaqTrader nasdaqtraded.txt filtered common-stock NYSE listings + provider daily bars.",
-  "russell2000-core": "iShares IWM official ETF holdings proxy (not licensed FTSE Russell index constituents) + provider daily bars.",
-  "overall-market-proxy": "NasdaqTrader filtered US common-stock universe + provider daily bars.",
-};
-
-
-async function loadUniverse(universeId: string): Promise<BreadthRow[]> {
-  try {
-    const payload = await getBreadth(universeId);
-    return (payload.rows ?? []) as BreadthRow[];
-  } catch {
-    return [];
-  }
-}
-
-
 export default async function BreadthPage() {
-  const summaryPromise = getBreadthSummary().catch(() => null);
-  const universeRowsPromise = Promise.all(universeOrder.map(async (universeId) => [universeId, await loadUniverse(universeId)] as const));
-
-  const [summaryApi, universeRowsPairs] = await Promise.all([summaryPromise, universeRowsPromise]);
-  const status = await getStatus("breadth").catch(
-    (): StatusPayload => ({
-      timezone: "Australia/Melbourne",
-      autoRefreshLabel: "08:15 Australia/Melbourne (prev US close)",
-      autoRefreshLocalTime: "08:15",
-      lastUpdated: null,
-      asOfDate: null,
-      providerLabel: "Alpaca (IEX Delayed Daily Bars)",
-    }),
-  );
-
-  const historyByUniverse = Object.fromEntries(universeRowsPairs) as Record<string, BreadthRow[]>;
-  const historyRows = historyByUniverse["sp500-core"] ?? [];
-
-  const summary: SummaryPayload = summaryApi
-    ? {
-        ...summaryApi,
-        rows: (Array.isArray(summaryApi.rows) ? summaryApi.rows : []).filter(Boolean).map((row: any) => ({
-          ...row,
-          universeName: universeNames[row.universeId] ?? row.universeName ?? row.universeId,
-          dataSource: row.dataSource ?? coreUniverseSource[row.universeId] ?? null,
-        })),
-        unavailable: Array.isArray(summaryApi.unavailable) ? summaryApi.unavailable : [],
-      }
-    : {
-        asOfDate: null,
-        rows: [],
-        unavailable: universeOrder.map((id) => ({
-          id,
-          name: universeNames[id] ?? id,
-          reason: "Current breadth summary is unavailable because freshness or provenance validation failed.",
-        })),
-      };
-  const statusAsOfDate = status.asOfDate ?? summary.asOfDate ?? null;
-  const statusLastUpdated = status.lastUpdated ?? (summary.asOfDate ? `${summary.asOfDate}T00:00:00Z` : null);
+  const dashboard = await getBreadthDashboard(120).catch(() => null);
+  const universes = dashboard?.universes ?? [];
+  const universeById = new Map(universes.map((universe) => [universe.universeId, universe]));
+  const histories = Object.fromEntries(universeOrder.map((universeId) => [
+    universeId,
+    universeById.get(universeId)?.history ?? [],
+  ])) as Record<string, BreadthDashboardSnapshot[]>;
+  const summary = {
+    asOfDate: universes.find((universe) => universe.displayedAsOfSession)?.displayedAsOfSession ?? null,
+    rows: universes.flatMap((universe) => universe.displayedSnapshot
+      ? [{ ...universe.displayedSnapshot, universeName: universe.universeName }]
+      : []),
+    unavailable: universes.flatMap((universe) => universe.error
+      ? [{ id: universe.universeId, name: universe.universeName, reason: universe.error.message }]
+      : []),
+  };
+  if (!dashboard) {
+    summary.unavailable.push({
+      id: "breadth-dashboard",
+      name: "Breadth dashboard",
+      reason: "The market-data database or Breadth publication state is unavailable.",
+    });
+  }
+  const staleTradingSessions = Math.max(0, ...universes.map((universe) => universe.staleTradingSessions));
+  const severity = universes.some((universe) => universe.freshness === "missing" || universe.staleTradingSessions >= 2)
+    ? "red"
+    : universes.some((universe) => universe.freshness !== "fresh" || universe.staleTradingSessions === 1)
+      ? "amber"
+      : null;
+  const displayedDates = Array.from(new Set(universes
+    .map((universe) => universe.displayedAsOfSession)
+    .filter((value): value is string => Boolean(value))));
 
   return (
     <div className="space-y-4">
       <StatusBar
-        asOfDate={statusAsOfDate}
-        lastUpdated={statusLastUpdated}
-        timezone={status.timezone}
-        autoRefreshLabel={status.autoRefreshLabel}
-        providerLabel={status.providerLabel}
+        asOfDate={summary.asOfDate}
+        lastUpdated={dashboard?.generatedAt ?? null}
+        timezone="Australia/Melbourne"
+        autoRefreshLabel="08:15 Australia/Melbourne (prev US close)"
+        providerLabel={dashboard?.providerLabel ?? "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback."}
       />
+
+      <div className={`card px-4 py-3 text-sm ${severity === "red" ? "border-red-500/60 bg-red-950/30 text-red-100" : severity === "amber" ? "border-amber-500/60 bg-amber-950/25 text-amber-100" : "text-slate-200"}`}>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+          <span><span className="text-slate-400">Expected session:</span> {dashboard?.expectedAsOfSession ?? "Unavailable"}</span>
+          <span><span className="text-slate-400">Displaying data from:</span> {displayedDates.length ? displayedDates.join(", ") : "No validated generation"}</span>
+          <span><span className="text-slate-400">Generation:</span> {dashboard?.generationId ?? "None"}</span>
+        </div>
+        {(dashboard?.warning || severity) && (
+          <p className="mt-2">
+            {dashboard?.warning ?? `Breadth is ${staleTradingSessions} trading session${staleTradingSessions === 1 ? "" : "s"} stale.`}
+          </p>
+        )}
+        {universes.some((universe) => universe.error) && (
+          <ul className="mt-2 space-y-1">
+            {universes.filter((universe) => universe.error).map((universe) => (
+              <li key={universe.universeId}>
+                {universe.universeName}: {universe.error?.message} Coverage {universe.coveragePct.toFixed(1)}%/{universe.requiredCoveragePct}%; membership {universe.membership.source ?? "missing"} ({universe.membership.sourceAsOfDate ?? "unknown source date"}); repair inputs {universe.repairSourceCount}.
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       <div className="flex justify-end">
         <ManualRefreshButton page="breadth" />
       </div>
-      <BreadthPanels rows={historyRows} summary={summary} histories={historyByUniverse} footer={<EqualWeightComps />} />
+      <BreadthPanels
+        rows={histories["sp500-core"] ?? []}
+        summary={summary}
+        histories={histories}
+        footer={<EqualWeightComps />}
+      />
     </div>
   );
 }

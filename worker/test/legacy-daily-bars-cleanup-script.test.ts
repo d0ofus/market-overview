@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertNoLegacyDailyBarsRuntimeDependency,
   buildDeleteSql,
   parseCliArgs,
   runCleanup,
@@ -38,6 +39,8 @@ function createRunner(options: {
   let legacyRows = options.legacyRows ?? 2_500;
   let exportCalls = 0;
   let deleteCalls = 0;
+  let dropCalls = 0;
+  let legacyExists = true;
   const calls: string[][] = [];
   const runner = vi.fn(async (_command: string, args: string[]) => {
     calls.push(args);
@@ -59,6 +62,24 @@ function createRunner(options: {
     if (args.includes("execute")) {
       const database = args[args.indexOf("execute") + 1];
       const sql = args[args.indexOf("--command") + 1];
+      if (database === "market_command" && sql.includes("COUNT(*) AS tableCount") && sql.includes("name = 'daily_bars'")) {
+        return { stdout: queryResponse([{ tableCount: legacyExists ? 1 : 0 }]), stderr: "" };
+      }
+      if (database === "market_command" && sql.includes("tbl_name = 'daily_bars'")) {
+        return { stdout: queryResponse([
+          { type: "table", name: "daily_bars", sql: "CREATE TABLE daily_bars (...)" },
+          { type: "index", name: "idx_daily_bars_date", sql: "CREATE INDEX idx_daily_bars_date ON daily_bars(date)" },
+        ]), stderr: "" };
+      }
+      if (database === "market_command" && sql.includes("FROM dashboard_items di")) {
+        return { stdout: queryResponse([{ ticker: "SPY" }]), stderr: "" };
+      }
+      if (database === "market_command" && sql === "DROP TABLE daily_bars") {
+        dropCalls += 1;
+        legacyRows = 0;
+        legacyExists = false;
+        return { stdout: queryResponse([], 1), stderr: "" };
+      }
       if (sql.startsWith("DELETE FROM daily_bars")) {
         deleteCalls += 1;
         if (options.failDelete) throw new Error(options.failDelete);
@@ -79,6 +100,28 @@ function createRunner(options: {
           stderr: "",
         };
       }
+      if (database === "market_prices" && sql.includes("JOIN universe_version_members")) {
+        return { stdout: queryResponse([
+          { universeId: "sp500-core", ticker: "AAPL" },
+          { universeId: "nasdaq-core", ticker: "AAPL" },
+          { universeId: "nyse-core", ticker: "IBM" },
+          { universeId: "russell2000-core", ticker: "AA" },
+          { universeId: "overall-market-proxy", ticker: "AAPL" },
+        ]), stderr: "" };
+      }
+      if (database === "market_prices" && sql.includes("overview_provider_catalog_cache")) {
+        return { stdout: queryResponse([{ ticker: "SPY" }, { ticker: "QQQ" }, { ticker: "IWM" }]), stderr: "" };
+      }
+      if (database === "market_prices" && sql.includes("ticker IN ('SPY','QQQ','IWM')") && sql.includes("date <=")) {
+        const maxDate = options.marketMaxDate ?? "2026-08-20";
+        return { stdout: queryResponse(["SPY", "QQQ", "IWM"].map((ticker) => ({ ticker, barCount: 260, maxDate }))), stderr: "" };
+      }
+      if (database === "market_prices" && sql.includes("COUNT(DISTINCT ticker) AS currentCount")) {
+        return { stdout: queryResponse([{ currentCount: 10_000 }]), stderr: "" };
+      }
+      if (database === "market_prices" && sql.includes("GROUP BY ticker") && sql.includes("MAX(date) AS maxDate")) {
+        return { stdout: queryResponse(["SPY", "QQQ", "IWM"].map((ticker) => ({ ticker, barCount: 260, maxDate: options.marketMaxDate ?? "2026-08-20" }))), stderr: "" };
+      }
       if (database === "market_prices") {
         return {
           stdout: queryResponse([{
@@ -92,7 +135,13 @@ function createRunner(options: {
         };
       }
       if (sql.includes("scanSnapshotCount")) {
-        return { stdout: queryResponse([{ tableCount: 130, symbolCount: 6_000, scanSnapshotCount: 33, scanRowCount: 2_303 }]), stderr: "" };
+        return { stdout: queryResponse([{ tableCount: legacyExists ? 130 : 129, symbolCount: 6_000, scanSnapshotCount: 33, scanRowCount: 2_303 }]), stderr: "" };
+      }
+      if (database === "market_command" && (sql.includes("INSERT INTO config_audit") || sql.includes("DELETE FROM config_audit"))) {
+        return { stdout: queryResponse([], 1), stderr: "" };
+      }
+      if (database === "market_ops" && sql.includes("provider_budget_counters")) {
+        return { stdout: queryResponse([], 1), stderr: "" };
       }
     }
     throw new Error(`Unexpected Wrangler call: ${args.join(" ")}`);
@@ -102,6 +151,7 @@ function createRunner(options: {
     calls,
     get exportCalls() { return exportCalls; },
     get deleteCalls() { return deleteCalls; },
+    get dropCalls() { return dropCalls; },
     get legacyRows() { return legacyRows; },
   };
 }
@@ -127,6 +177,11 @@ describe("legacy daily-bars cleanup script", () => {
       confirm: "market_command",
       batchSize: 1_000,
       maxDeleteRows: 10_000,
+    });
+    expect(() => parseCliArgs(["--archive-and-drop", "--confirm", "market_prices"], {})).toThrow(/--confirm market_command/);
+    expect(parseCliArgs(["--archive-and-drop", "--confirm", "market_command"], {})).toMatchObject({
+      archiveAndDrop: true,
+      confirm: "market_command",
     });
   });
 
@@ -179,6 +234,45 @@ describe("legacy daily-bars cleanup script", () => {
     expect(mock.exportCalls).toBe(1);
     expect(mock.legacyRows).toBe(0);
     expect(JSON.parse(await readFile(paths.stateFile, "utf8"))).toMatchObject({ completed: true, remainingRows: 0, totalDeleted: 2_500 });
+  });
+
+  it("blocks a drop when Worker runtime code still queries the legacy table", async () => {
+    const paths = await tempPaths();
+    const srcDir = path.join(paths.root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(path.join(srcDir, "safe.ts"), "SELECT * FROM alpaca_daily_bars", "utf8");
+    await expect(assertNoLegacyDailyBarsRuntimeDependency(paths.root)).resolves.toMatchObject({ matches: [] });
+    await writeFile(path.join(srcDir, "unsafe.ts"), "const sql = `SELECT * FROM daily_bars`;", "utf8");
+    await expect(assertNoLegacyDailyBarsRuntimeDependency(paths.root)).rejects.toThrow(/runtime still depends/);
+  });
+
+  it("archives and drops only after critical history, universe coverage, and protected-data gates pass", async () => {
+    const paths = await tempPaths();
+    const mock = createRunner();
+    const result = await runCleanup({
+      argv: [
+        "--archive-and-drop",
+        "--confirm",
+        "market_command",
+        "--archive-dir",
+        paths.archiveDir,
+        "--state-file",
+        paths.stateFile,
+      ],
+      commandRunner: mock.runner,
+      logger: quietLogger,
+    });
+    expect(result.status).toBe("complete");
+    expect(mock.exportCalls).toBe(1);
+    expect(mock.dropCalls).toBe(1);
+    expect(result.preflight.dropReadiness.critical).toHaveLength(3);
+    expect(result.preflight.dropReadiness.overview).toMatchObject({ supportedCount: 1, completeCount: 1, coveragePct: 100 });
+    expect(result.preflight.dropReadiness.universes).toHaveLength(5);
+    expect(JSON.parse(await readFile(paths.stateFile, "utf8"))).toMatchObject({
+      operation: "drop",
+      completed: true,
+      canariesPassed: true,
+    });
   });
 
   it("never deletes when archive creation fails", async () => {

@@ -7,6 +7,20 @@ import {
 import { computeBreadthStats } from "../src/metrics";
 
 describe("daily breadth features", () => {
+  it("averages both middle values for an even-sized median", () => {
+    const base = {
+      sessionDate: "2026-07-29", close: 2, volume: 1_000, previousClose: 1,
+      return5d: 1, return63d: 1, sma5: 1, sma20: 1, sma50: 1, sma100: 1, sma200: 1,
+      high5: 2, high20: 2, high21: 2, high63: 2, high126: 2, high252: 2,
+      low20: 1, sourceSessions: 260, sourceProvider: "alpaca",
+    };
+    const features = new Map([
+      ["AAA", { ...base, ticker: "AAA", return1d: 1 }],
+      ["BBB", { ...base, ticker: "BBB", return1d: 9 }],
+    ]);
+    expect(aggregateDailyMarketFeatures(["AAA", "BBB"], features).medianReturn1D).toBe(5);
+  });
+
   it("matches the existing breadth formulas", () => {
     const series = {
       AAA: Array.from({ length: 260 }, (_, index) => 100 + index),

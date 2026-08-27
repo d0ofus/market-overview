@@ -705,7 +705,7 @@ function evaluateFactor(input: {
       const tvSma = row.metrics?.sma200 ?? null;
       const localSma = tvSma == null ? closeSma(bars, 200) : null;
       const sma = tvSma ?? localSma;
-      const source = tvSma != null ? "TradingView Screener" : localSma != null ? "daily_bars" : null;
+      const source = tvSma != null ? "TradingView Screener" : localSma != null ? "Alpaca daily bars" : null;
       return numericPass(key, row.price, sma, source, (value, threshold) => value > threshold, { price: row.price, sma200: sma });
     }
     case "priceAbove":
@@ -723,12 +723,12 @@ function evaluateFactor(input: {
       const localHigh = tvHigh == null ? high52Week(bars) : null;
       const high = tvHigh ?? localHigh;
       const distance = row.price != null && high != null && high > 0 ? ((high - row.price) / high) * 100 : null;
-      const source = tvHigh != null ? "TradingView Screener" : localHigh != null ? "daily_bars" : null;
+      const source = tvHigh != null ? "TradingView Screener" : localHigh != null ? "Alpaca daily bars" : null;
       return numericPass(key, distance, config.thresholds.within52WeekHigh.maxDistancePct, source, (value, threshold) => value <= threshold, { price: row.price, high52Week: high });
     }
     case "priorStrongMove": {
       const movePct = calculatePriorStrongMovePct(bars, config.thresholds.priorStrongMove.lookbackMonths);
-      return numericPass(key, movePct, config.thresholds.priorStrongMove.movePct, movePct != null ? "daily_bars" : null, (value, threshold) => value >= threshold, {
+      return numericPass(key, movePct, config.thresholds.priorStrongMove.movePct, movePct != null ? "Alpaca daily bars" : null, (value, threshold) => value >= threshold, {
         lookbackMonths: config.thresholds.priorStrongMove.lookbackMonths,
       });
     }
@@ -743,12 +743,12 @@ function evaluateFactor(input: {
       const tvValue = tvAverageVolume != null && row.price != null ? tvAverageVolume * row.price : null;
       const localValue = tvValue == null ? avg10dDollarVolume(bars) : null;
       const value = tvValue ?? localValue;
-      const source = tvValue != null ? "TradingView Screener" : localValue != null ? "daily_bars" : null;
+      const source = tvValue != null ? "TradingView Screener" : localValue != null ? "Alpaca daily bars" : null;
       return numericPass(key, value, config.thresholds.avg10dDollarVolume.minDollarVolumeMillions * 1_000_000, source, (left, right) => left >= right);
     }
     case "increasingVolumeProfile": {
       const trendPct = rolling10dVolumeTrendPct(bars ?? [], config.thresholds.increasingVolumeProfile.lookbackMonths);
-      return numericPass(key, trendPct, config.thresholds.increasingVolumeProfile.minTrendPct, trendPct != null ? "daily_bars" : null, (value, threshold) => value >= threshold, {
+      return numericPass(key, trendPct, config.thresholds.increasingVolumeProfile.minTrendPct, trendPct != null ? "Alpaca daily bars" : null, (value, threshold) => value >= threshold, {
         lookbackMonths: config.thresholds.increasingVolumeProfile.lookbackMonths,
       });
     }
@@ -782,7 +782,7 @@ function evaluateFactor(input: {
       const tvAtrp = row.metrics?.atrp ?? null;
       const localAtrp = tvAtrp == null ? averageTrueRangePct(bars) : null;
       const value = tvAtrp ?? localAtrp;
-      const source = tvAtrp != null ? "TradingView Screener" : localAtrp != null ? "daily_bars" : null;
+      const source = tvAtrp != null ? "TradingView Screener" : localAtrp != null ? "Alpaca daily bars" : null;
       return numericPass(key, value, config.thresholds.averageTradingRangePct.minAtrPct, source, (left, right) => left > right);
     }
     default:

@@ -86,24 +86,31 @@ describe("post-close relative strength precompute gates", () => {
     expect(first.get("SPY|EMA|21|252")?.id).toBe("a");
   });
 
-  it("reads post-close job state and benchmark bars from MARKET_DATA_DB", async () => {
+  it("reads post-close state from OPS_DB and benchmark bars from MARKET_DATA_DB", async () => {
     const corePrepare = vi.fn(() => {
       throw new Error("core DB must not be queried for market-data state");
     });
-    const marketPrepare = vi.fn((sql: string) => {
+    const marketPrepare = vi.fn(() => {
       const statement = {
         bind: vi.fn(() => statement),
-        first: vi.fn(async () => sql.includes("post_close_daily_bar_refresh_jobs")
-          ? completeJob
-          : { latestDate: "2026-08-25", barCount: 520 }),
+        first: vi.fn(async () => ({ latestDate: "2026-08-25", barCount: 520 })),
+      };
+      return statement;
+    });
+    const opsPrepare = vi.fn(() => {
+      const statement = {
+        bind: vi.fn(() => statement),
+        first: vi.fn(async () => completeJob),
       };
       return statement;
     });
     const env = {
       DB: { prepare: corePrepare } as unknown as D1Database,
       MARKET_DATA_DB: { prepare: marketPrepare } as unknown as D1Database,
+      OPS_DB: { prepare: opsPrepare } as unknown as D1Database,
       SCANNER_CACHE_DB: {} as D1Database,
       MARKET_DATA_DB_REQUIRED: "true",
+      OPS_DB_REQUIRED: "true",
     } as Env;
     const settings = {
       postCloseBarsEnabled: true,
@@ -117,7 +124,8 @@ describe("post-close relative strength precompute gates", () => {
     expect(serviceMocks.loadLatestCompletedManualRelativeStrengthRunForConfig)
       .toHaveBeenCalledWith(env, "SPY|EMA|21|252", "2026-08-25", "scheduled");
     expect(corePrepare).not.toHaveBeenCalled();
-    expect(marketPrepare).toHaveBeenCalledTimes(2);
+    expect(marketPrepare).toHaveBeenCalledOnce();
+    expect(opsPrepare).toHaveBeenCalledOnce();
   });
 
   it("does not create a scheduled run at the capacity halt threshold", async () => {
@@ -138,12 +146,21 @@ describe("post-close relative strength precompute gates", () => {
       id: "run-ready", status: "completed", configKey: "SPY|EMA|21|252", expectedTradingDate: "2026-08-25",
     });
     serviceMocks.hasMatchingRelativeStrengthPublication.mockImplementation(async (_env, presetId) => presetId === "rs-a");
-    const marketPrepare = vi.fn((sql: string) => {
+    const marketPrepare = vi.fn(() => {
       const statement = { bind: vi.fn(() => statement), first: vi.fn(async () =>
-        sql.includes("post_close_daily_bar_refresh_jobs") ? completeJob : { latestDate: "2026-08-25", barCount: 520 }) };
+        ({ latestDate: "2026-08-25", barCount: 520 })) };
       return statement;
     });
-    const env = { MARKET_DATA_DB: { prepare: marketPrepare }, SCANNER_CACHE_DB: {} } as unknown as Env;
+    const opsPrepare = vi.fn(() => {
+      const statement = { bind: vi.fn(() => statement), first: vi.fn(async () => completeJob) };
+      return statement;
+    });
+    const env = {
+      MARKET_DATA_DB: { prepare: marketPrepare },
+      OPS_DB: { prepare: opsPrepare },
+      OPS_DB_REQUIRED: "true",
+      SCANNER_CACHE_DB: {},
+    } as unknown as Env;
     const result = await planScheduledRelativeStrengthPrecompute(env, new Date("2026-08-25T21:00:00Z"), {
       postCloseBarsEnabled: true, postCloseBarsOffsetMinutes: 35, rsBackgroundEnabled: true,
     } as WorkerScheduleSettings);

@@ -249,9 +249,10 @@ describe("post-close budget protection", () => {
     })).toMatchObject({ protect: false, reason: "retry-not-due" });
   });
 
-  it("reads post-close state from the market-data binding without schema writes", async () => {
+  it("reads post-close state from the operations binding without schema writes", async () => {
     const completed = postCloseJob({ status: "completed", completedAt: "2026-07-16T21:10:00.000Z" });
     let primaryPrepareCalls = 0;
+    let opsPrepareCalls = 0;
     let marketPrepareCalls = 0;
     const primaryDb = {
       prepare() {
@@ -259,9 +260,9 @@ describe("post-close budget protection", () => {
         throw new Error("primary DB should not be queried");
       },
     } as unknown as D1Database;
-    const marketDataDb = {
+    const opsDb = {
       prepare() {
-        marketPrepareCalls += 1;
+        opsPrepareCalls += 1;
         const statement = {
           bind: (..._args: unknown[]) => statement,
           async first<T>() {
@@ -271,16 +272,35 @@ describe("post-close budget protection", () => {
         return statement;
       },
     } as unknown as D1Database;
+    const marketDataDb = {
+      prepare() {
+        marketPrepareCalls += 1;
+        const statement = {
+          bind: (..._args: unknown[]) => statement,
+          async first<T>() {
+            return null as T;
+          },
+        };
+        return statement;
+      },
+    } as unknown as D1Database;
 
     const decision = await planPostCloseBudgetProtection(
-      { DB: primaryDb, MARKET_DATA_DB: marketDataDb } as Env,
+      {
+        DB: primaryDb,
+        MARKET_DATA_DB: marketDataDb,
+        MARKET_DATA_DB_REQUIRED: "true",
+        OPS_DB: opsDb,
+        OPS_DB_REQUIRED: "true",
+      } as Env,
       now,
       workerScheduleSettings(),
     );
 
     expect(decision).toMatchObject({ protect: false, reason: "completed" });
     expect(primaryPrepareCalls).toBe(0);
-    expect(marketPrepareCalls).toBe(2);
+    expect(opsPrepareCalls).toBe(1);
+    expect(marketPrepareCalls).toBe(1);
   });
 
   it("protects post-close budget when the state diagnostic fails", async () => {
@@ -292,7 +312,7 @@ describe("post-close budget protection", () => {
     } as unknown as D1Database;
 
     const decision = await planPostCloseBudgetProtection(
-      { DB: brokenDb, MARKET_DATA_DB: brokenDb } as Env,
+      { DB: brokenDb, OPS_DB: brokenDb, OPS_DB_REQUIRED: "true" } as Env,
       now,
       workerScheduleSettings(),
     );
@@ -327,9 +347,9 @@ describe("worker schedule service", () => {
 
     expect(settings.id).toBe("default");
     expect(settings.cronExpression).toBe("*/15 * * * *");
-    expect(settings.rsBackgroundEnabled).toBe(true);
+    expect(settings.rsBackgroundEnabled).toBe(false);
     expect(settings.rsBackgroundBatchSize).toBe(50);
-    expect(settings.postCloseBarsOffsetMinutes).toBe(35);
+    expect(settings.postCloseBarsOffsetMinutes).toBe(30);
   });
 
   it("persists worker schedule updates", async () => {
@@ -485,7 +505,7 @@ describe("post-close daily bar universe", () => {
 
   it("permits a bounded Yahoo repair only after three Alpaca attempts", () => {
     expect(shouldUseYahooRepair({ attemptCount: 2, hasCurrentSession: false, mode: "exact" })).toBe(false);
-    expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: false, mode: "exact" })).toBe(true);
+    expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: false, mode: "exact" })).toBe(false);
     expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: true, mode: "history" })).toBe(true);
     expect(shouldUseYahooRepair({ attemptCount: 3, hasCurrentSession: true, mode: "current" })).toBe(false);
   });

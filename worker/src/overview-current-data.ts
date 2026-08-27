@@ -1,15 +1,13 @@
 import { computeMetrics, isPriceAboveSma, sanitizeBarSeries } from "./metrics";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb } from "./market-data-db";
 import { getProvider, type QuoteSnapshot } from "./provider";
-import { meteredFetch, meteredFetchWithRetry } from "./provider-usage";
+import { meteredFetch, ProviderRequestFailureError } from "./provider-usage";
 import { zonedParts } from "./refresh-timing";
 import type { Env, OverviewCurrentProviderStatus as SharedOverviewCurrentProviderStatus } from "./types";
 
-const TV_SCAN_URL = "https://scanner.tradingview.com/america/scan";
-const TV_REQUEST_CHUNK_SIZE = 100;
 const DB_CHUNK_SIZE = 80;
-const CURRENT_REFRESH_OFFSET_MINUTES = 45;
 const CURRENT_RETRY_MINUTES = 15;
 const CURRENT_REFRESH_BATCH_SIZE = 80;
 const CURRENT_REFRESH_LEASE_MS = 4 * 60_000;
@@ -158,9 +156,13 @@ export type AlpacaBarMetrics = {
   above20Sma: boolean | null;
   above50Sma: boolean | null;
   above200Sma: boolean | null;
+  sourceProvider?: string | null;
+  sourceFeed?: string | null;
+  adjustment?: string | null;
+  observedAt?: string | null;
 };
 
-let schemaReady = false;
+const schemaReadyByDb = new WeakSet<object>();
 
 export function isOverviewCurrentV2Enabled(env: Env): boolean {
   return !/^(0|false|off)$/i.test(String(env.OVERVIEW_CURRENT_V2_ENABLED ?? "true").trim());
@@ -254,105 +256,23 @@ function startDateForHistory(sessionDate: string): string {
 }
 
 export async function ensureOverviewCurrentDataSchema(env: Env): Promise<void> {
-  if (schemaReady) return;
   const db = getMarketDataDb(env);
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS alpaca_daily_bars (
-       feed TEXT NOT NULL,
-       ticker TEXT NOT NULL,
-       date TEXT NOT NULL,
-       o REAL NOT NULL,
-       h REAL NOT NULL,
-       l REAL NOT NULL,
-       c REAL NOT NULL,
-       volume REAL,
-       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (feed, ticker, date)
-     ) STRICT, WITHOUT ROWID`,
-  ).run();
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS overview_provider_symbols (
-       provider_key TEXT NOT NULL,
-       ticker TEXT NOT NULL,
-       provider_symbol TEXT,
-       support_status TEXT NOT NULL,
-       reason TEXT,
-       checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (provider_key, ticker)
-     )`,
-  ).run();
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS overview_current_data (
-       config_id TEXT NOT NULL,
-       session_date TEXT NOT NULL,
-       ticker TEXT NOT NULL,
-       status TEXT NOT NULL,
-       reason TEXT,
-       price REAL,
-       change_1d REAL,
-       change_1w REAL,
-       change_5d REAL,
-       change_3m REAL,
-       change_6m REAL,
-       ytd REAL,
-       pct_from_52w_high REAL,
-       above_20_sma INTEGER,
-       above_50_sma INTEGER,
-       above_200_sma INTEGER,
-       quote_source TEXT,
-       performance_source TEXT,
-       sma_source TEXT,
-       field_sources_json TEXT NOT NULL DEFAULT '{}',
-       provider_statuses_json TEXT NOT NULL DEFAULT '{}',
-       tradingview_symbol TEXT,
-       tradingview_time TEXT,
-       tradingview_last_bar_update_time TEXT,
-       tradingview_last_price_update_time TEXT,
-       tradingview_update_time TEXT,
-       tradingview_update_mode TEXT,
-       tradingview_current_session TEXT,
-       fetched_at TEXT NOT NULL,
-       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (config_id, session_date, ticker)
-     )`,
-  ).run();
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS overview_current_refresh_jobs (
-       config_id TEXT NOT NULL,
-       session_date TEXT NOT NULL,
-       status TEXT NOT NULL,
-       attempt_count INTEGER NOT NULL DEFAULT 0,
-       next_attempt_at TEXT,
-       requested_tickers INTEGER NOT NULL DEFAULT 0,
-       fresh_tickers INTEGER NOT NULL DEFAULT 0,
-       unavailable_tickers INTEGER NOT NULL DEFAULT 0,
-       last_error TEXT,
-       last_error_code TEXT,
-       cycle_id TEXT,
-       cycle_started_at TEXT,
-       cursor_offset INTEGER NOT NULL DEFAULT 0,
-       processed_tickers INTEGER NOT NULL DEFAULT 0,
-       lease_token TEXT,
-       lease_expires_at TEXT,
-       started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       completed_at TEXT,
-       PRIMARY KEY (config_id, session_date)
-     )`,
-  ).run();
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS overview_provider_catalog_cache (
-       provider_key TEXT NOT NULL,
-       catalog_date TEXT NOT NULL,
-       symbols_json TEXT NOT NULL,
-       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY (provider_key, catalog_date)
-     )`,
-  ).run();
-  await db.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_overview_current_data_session_status ON overview_current_data (config_id, session_date, status)",
-  ).run();
-  schemaReady = true;
+  if (schemaReadyByDb.has(db as object)) return;
+  try {
+    await db.prepare(
+      `SELECT source_provider, adjustment, observed_at
+         FROM alpaca_daily_bars LIMIT 0`,
+    ).all();
+    await db.prepare(
+      `SELECT cycle_id, cursor_offset, lease_expires_at
+         FROM overview_current_refresh_jobs LIMIT 0`,
+    ).all();
+    await db.prepare("SELECT provider_statuses_json FROM overview_current_data LIMIT 0").all();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "schema check failed");
+    throw new Error(`Market-data schema is unavailable; apply D1 migrations before serving requests: ${message}`);
+  }
+  schemaReadyByDb.add(db as object);
 }
 
 export function buildTradingViewOverviewPayload(symbols: string[]): Record<string, unknown> {
@@ -448,195 +368,10 @@ async function loadOverviewTickerInputs(env: Env, configId: string): Promise<Ove
       exchange: row.exchange ?? null,
     }))
     .filter((row) => Boolean(row.ticker));
-  const tradingViewSymbols = new Map<string, string>();
-  const db = getMarketDataDb(env);
-  for (const tickerChunk of chunk(normalized.map((row) => row.ticker), DB_CHUNK_SIZE)) {
-    const placeholders = tickerChunk.map(() => "?").join(",");
-    const mappings = await db.prepare(
-      `SELECT ticker, provider_symbol as providerSymbol
-       FROM overview_provider_symbols
-       WHERE provider_key = 'tradingview'
-         AND support_status = 'supported'
-         AND ticker IN (${placeholders})`,
-    ).bind(...tickerChunk).all<{ ticker: string; providerSymbol: string | null }>();
-    for (const mapping of mappings.results ?? []) {
-      if (mapping.providerSymbol) tradingViewSymbols.set(mapping.ticker.toUpperCase(), mapping.providerSymbol);
-    }
-  }
   return normalized.map((row) => ({
     ...row,
-    tradingViewSymbol: tradingViewSymbols.get(row.ticker) ?? TV_SYMBOL_OVERRIDES[row.ticker] ?? null,
+    tradingViewSymbol: null,
   }));
-}
-
-async function fetchTradingViewRows(
-  env: Env,
-  inputs: OverviewTickerInput[],
-  expectedSessionDate: string,
-  observedAt: Date,
-): Promise<Map<string, TradingViewScalarRow>> {
-  const enabled = !/^(0|false|off)$/i.test(String(env.OVERVIEW_TRADINGVIEW_SCANNER_ENABLED ?? "true").trim());
-  if (!enabled) {
-    return new Map(inputs.map((input) => [input.ticker, {
-      ticker: input.ticker,
-      providerSymbol: input.tradingViewSymbol,
-      status: "unsupported" as const,
-      reason: "TradingView overview scanner is disabled by configuration.",
-      price: null,
-      change1d: null,
-      change1w: null,
-      change3m: null,
-      change6m: null,
-      ytd: null,
-      high52w: null,
-      sma20: null,
-      sma50: null,
-      sma200: null,
-      time: null,
-      lastBarUpdateTime: null,
-      lastPriceUpdateTime: null,
-      updateTime: null,
-      updateMode: null,
-      currentSession: null,
-    }]));
-  }
-  const candidatesByTicker = new Map(inputs.map((input) => [input.ticker, candidatesForTicker(input)]));
-  const tickerByCandidate = new Map<string, string>();
-  for (const [ticker, candidates] of candidatesByTicker.entries()) {
-    for (const candidate of candidates) tickerByCandidate.set(candidate, ticker);
-  }
-  const responseRows = new Map<string, TradingViewResponseRow>();
-  const requestErrors = new Map<string, OverviewProviderDiagnostic>();
-  let terminalRequestError: OverviewProviderDiagnostic | null = null;
-  const candidateChunks = chunk(Array.from(tickerByCandidate.keys()), TV_REQUEST_CHUNK_SIZE);
-
-  for (const candidateChunk of candidateChunks) {
-    try {
-      const response = await meteredFetchWithRetry(env, TV_SCAN_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "market-command-centre/1.0",
-        },
-        body: JSON.stringify(buildTradingViewOverviewPayload(candidateChunk)),
-      }, {
-        providerKey: "tradingview",
-        endpointKey: "overview-current",
-        caller: "overview-current",
-        symbolCount: candidateChunk.length,
-      }, 8_000);
-      if (!response.ok) {
-        const body = await response.text();
-        const retryAfter = response.headers.get("Retry-After");
-        throw new Error(
-          `TradingView overview request failed (${response.status})${retryAfter ? `; retry-after=${retryAfter}` : ""}: ${body.slice(0, 180)}`,
-        );
-      }
-      const body = await response.json() as { data?: TradingViewResponseRow[] };
-      if (!Array.isArray(body.data)) throw new Error("TradingView overview response is missing its data array.");
-      if (candidateChunk.length > 0 && body.data.length === 0) {
-        throw new Error("TradingView overview response returned zero rows for a non-empty symbol request.");
-      }
-      for (const row of body.data) {
-        if (typeof row.s !== "string" || !Array.isArray(row.d)) continue;
-        if (row.d.length !== OVERVIEW_CURRENT_COLUMNS.length) {
-          const ticker = tickerByCandidate.get(row.s.toUpperCase());
-          if (ticker) {
-            requestErrors.set(ticker, {
-              status: "provider-error",
-              reason: `TradingView overview row shape changed: expected ${OVERVIEW_CURRENT_COLUMNS.length} fields, received ${row.d.length}.`,
-              providerSymbol: row.s,
-            });
-          }
-          continue;
-        }
-        responseRows.set(row.s.toUpperCase(), row);
-      }
-    } catch (error) {
-      const status = statusFromError(error);
-      const reason = errorMessage(error);
-      for (const candidate of candidateChunk) {
-        const ticker = tickerByCandidate.get(candidate);
-        if (ticker && !requestErrors.has(ticker)) requestErrors.set(ticker, { status, reason });
-      }
-      if (status === "rate-limited" || status === "auth-blocked") {
-        terminalRequestError = { status, reason };
-        break;
-      }
-    }
-  }
-
-  const out = new Map<string, TradingViewScalarRow>();
-  for (const input of inputs) {
-    const candidates = candidatesByTicker.get(input.ticker) ?? [];
-    let matches = candidates
-      .map((candidate) => responseRows.get(candidate.toUpperCase()))
-      .filter((row): row is TradingViewResponseRow & { s: string; d: unknown[] } => Boolean(row?.s && Array.isArray(row.d)));
-    const storedSymbol = String(input.tradingViewSymbol ?? "").trim().toUpperCase();
-    const storedMatch = storedSymbol ? responseRows.get(storedSymbol) : null;
-    if (storedMatch?.s && Array.isArray(storedMatch.d)) {
-      matches = [storedMatch as TradingViewResponseRow & { s: string; d: unknown[] }];
-    }
-    if (matches.length > 1) {
-      out.set(input.ticker, {
-        ticker: input.ticker,
-        providerSymbol: null,
-        status: "provider-error",
-        reason: `TradingView symbol resolution is ambiguous: ${matches.map((row) => row.s).join(", ")}.`,
-        price: null,
-        change1d: null,
-        change1w: null,
-        change3m: null,
-        change6m: null,
-        ytd: null,
-        high52w: null,
-        sma20: null,
-        sma50: null,
-        sma200: null,
-        time: null,
-        lastBarUpdateTime: null,
-        lastPriceUpdateTime: null,
-        updateTime: null,
-        updateMode: null,
-        currentSession: null,
-      });
-      continue;
-    }
-    if (matches.length === 1) {
-      out.set(input.ticker, parseTradingViewOverviewRow(
-        input.ticker,
-        matches[0].s,
-        matches[0].d,
-        expectedSessionDate,
-        observedAt,
-      ));
-      continue;
-    }
-    const requestError = requestErrors.get(input.ticker) ?? terminalRequestError;
-    out.set(input.ticker, {
-      ticker: input.ticker,
-      providerSymbol: null,
-      status: requestError?.status ?? "unsupported",
-      reason: requestError?.reason ?? `${input.ticker} was not found in the TradingView America scanner.`,
-      price: null,
-      change1d: null,
-      change1w: null,
-      change3m: null,
-      change6m: null,
-      ytd: null,
-      high52w: null,
-      sma20: null,
-      sma50: null,
-      sma200: null,
-      time: null,
-      lastBarUpdateTime: null,
-      lastPriceUpdateTime: null,
-      updateTime: null,
-      updateMode: null,
-      currentSession: null,
-    });
-  }
-  return out;
 }
 
 function quoteSnapshotMarketTimestamp(snapshot: QuoteSnapshot): string | null {
@@ -741,11 +476,16 @@ async function syncAlpacaAssetSupport(
         symbolCount: tickers.length,
       });
       if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Alpaca asset catalog failed (${response.status}): ${body.slice(0, 180)}`);
+        throw new ProviderRequestFailureError(
+          "provider-http-error",
+          `Alpaca asset catalog returned HTTP ${response.status}.`,
+          response.status,
+        );
       }
       const assets = await response.json() as Array<{ symbol?: string; tradable?: boolean; status?: string }>;
-      if (!Array.isArray(assets)) throw new Error("Alpaca asset catalog returned an invalid response.");
+      if (!Array.isArray(assets)) {
+        throw new ProviderRequestFailureError("provider-invalid-payload", "Alpaca asset catalog returned an invalid payload.");
+      }
       activeSymbols = new Set(assets
         .filter((asset) => asset.status === "active" && asset.tradable !== false)
         .map((asset) => String(asset.symbol ?? "").trim().toUpperCase())
@@ -824,28 +564,48 @@ async function loadAlpacaBarMetrics(
   alpacaFeed: string,
 ): Promise<Map<string, AlpacaBarMetrics>> {
   const db = getMarketDataDb(env);
-  const rowsByTicker = new Map<string, { dates: string[]; closes: number[]; sourceProvider: string | null; sourceFeed: string | null }>();
+  const rowsByTicker = new Map<string, {
+    dates: string[];
+    closes: number[];
+    sourceProvider: string | null;
+    sourceFeed: string | null;
+    adjustment: string | null;
+    observedAt: string | null;
+  }>();
   const startDate = startDateForHistory(expectedSessionDate);
+  const adjustment = (env.ALPACA_DAILY_ADJUSTMENT ?? "split").trim().toLowerCase() || "split";
   for (const tickerChunk of chunk(tickers, DB_CHUNK_SIZE)) {
     const placeholders = tickerChunk.map(() => "?").join(",");
     const rows = await db.prepare(
-      `SELECT ticker, date, c
+      `SELECT ticker, date, c, source_provider as sourceProvider, feed as sourceFeed,
+              adjustment, COALESCE(observed_at, fetched_at) as observedAt
        FROM alpaca_daily_bars
        WHERE feed = ?
          AND ticker IN (${placeholders})
          AND date BETWEEN ? AND ?
+         AND source_provider = 'alpaca'
+         AND adjustment = ?
        ORDER BY ticker, date`,
     )
-      .bind(alpacaFeed, ...tickerChunk, startDate, expectedSessionDate)
-      .all<{ ticker: string; date: string; c: number }>();
+      .bind(alpacaFeed, ...tickerChunk, startDate, expectedSessionDate, adjustment)
+      .all<{ ticker: string; date: string; c: number; sourceProvider: string; sourceFeed: string; adjustment: string; observedAt: string | null }>();
     for (const row of rows.results ?? []) {
       const ticker = row.ticker.toUpperCase();
-      const existing = rowsByTicker.get(ticker) ?? { dates: [], closes: [], sourceProvider: null, sourceFeed: null };
+      const existing = rowsByTicker.get(ticker) ?? {
+        dates: [],
+        closes: [],
+        sourceProvider: null,
+        sourceFeed: null,
+        adjustment: null,
+        observedAt: null,
+      };
       existing.dates.push(row.date);
       existing.closes.push(Number(row.c));
       if (row.date === expectedSessionDate) {
-        existing.sourceProvider = "alpaca";
-        existing.sourceFeed = alpacaFeed;
+        existing.sourceProvider = row.sourceProvider;
+        existing.sourceFeed = row.sourceFeed;
+        existing.adjustment = row.adjustment;
+        existing.observedAt = row.observedAt;
       }
       rowsByTicker.set(ticker, existing);
     }
@@ -857,6 +617,12 @@ async function loadAlpacaBarMetrics(
     const cleaned = sanitizeBarSeries(series?.dates ?? [], series?.closes ?? []);
     const barDate = cleaned.dates.at(-1) ?? null;
     const sourceIsAlpaca = series?.sourceProvider === "alpaca";
+    const sourceFeedMatches = series?.sourceFeed === alpacaFeed;
+    const adjustmentMatches = series?.adjustment === adjustment;
+    const observedAtMs = series?.observedAt ? Date.parse(series.observedAt) : Number.NaN;
+    const observationIsValid = Number.isFinite(observedAtMs)
+      && observedAtMs >= Date.parse(`${expectedSessionDate}T00:00:00Z`)
+      && observedAtMs <= Date.now() + 5 * 60_000;
     if (!barDate) {
       result.set(ticker, {
         status: "missing",
@@ -875,12 +641,18 @@ async function loadAlpacaBarMetrics(
       });
       continue;
     }
-    if (barDate !== expectedSessionDate || !sourceIsAlpaca) {
+    if (barDate !== expectedSessionDate || !sourceIsAlpaca || !sourceFeedMatches || !adjustmentMatches || !observationIsValid) {
       result.set(ticker, {
         status: "stale",
         reason: barDate !== expectedSessionDate
           ? `Latest stored bar is ${barDate}; expected ${expectedSessionDate}.`
-          : "The current stored bar has no verified Alpaca provenance.",
+          : !sourceIsAlpaca
+            ? "The current stored bar has no verified Alpaca provenance."
+            : !sourceFeedMatches
+              ? `The current stored bar feed is ${series?.sourceFeed ?? "missing"}; expected ${alpacaFeed}.`
+              : !adjustmentMatches
+                ? `The current stored bar adjustment is ${series?.adjustment ?? "missing"}; expected ${adjustment}.`
+                : "The current stored bar has a missing, invalid, or future observation timestamp.",
         barDate,
         price: null,
         change1d: null,
@@ -910,6 +682,10 @@ async function loadAlpacaBarMetrics(
       above20Sma: isPriceAboveSma(cleaned.closes, 20),
       above50Sma: isPriceAboveSma(cleaned.closes, 50),
       above200Sma: isPriceAboveSma(cleaned.closes, 200),
+      sourceProvider: series?.sourceProvider ?? null,
+      sourceFeed: series?.sourceFeed ?? null,
+      adjustment: series?.adjustment ?? null,
+      observedAt: series?.observedAt ?? null,
     });
   }
   return result;
@@ -950,68 +726,48 @@ export function resolveOverviewCurrentRow(input: {
   alpacaAssetDiagnostic: OverviewProviderDiagnostic | null;
   bars: AlpacaBarMetrics;
   alpacaFeed: string;
+  alpacaSnapshotFeed?: string;
   fetchedAt: string;
 }): OverviewCurrentData {
-  const tvFresh = input.tv.status === "supported";
   const barFresh = input.bars.status === "supported";
   const snapshot = input.alpacaSnapshot;
-  const tvSource = "tradingview-scanner";
-  const snapshotSource = `alpaca:${input.alpacaFeed}-snapshot`;
-  const barSource = `alpaca:${input.alpacaFeed}-bars`;
+  const snapshotSource = `alpaca:${input.alpacaSnapshotFeed ?? "iex"}-exact-session-snapshot`;
+  const barSource = `${input.bars.sourceProvider ?? "alpaca"}:${input.bars.sourceFeed ?? input.alpacaFeed}-${input.bars.adjustment ?? "split"}-daily-bars`;
   const fieldSources: Record<string, string> = {};
   const price = pickNumber("price", fieldSources, [
-    { value: tvFresh ? input.tv.price : null, source: tvSource },
-    { value: snapshot?.price ?? null, source: snapshotSource },
     { value: barFresh ? input.bars.price : null, source: barSource },
+    { value: snapshot?.price ?? null, source: snapshotSource },
   ]);
   const change1d = pickNumber("change1d", fieldSources, [
-    { value: tvFresh ? input.tv.change1d : null, source: tvSource },
-    { value: snapshot?.change1d ?? null, source: snapshotSource },
     { value: barFresh ? input.bars.change1d : null, source: barSource },
+    { value: snapshot?.change1d ?? null, source: snapshotSource },
   ]);
   const change1w = pickNumber("change1w", fieldSources, [
-    { value: tvFresh ? input.tv.change1w : null, source: tvSource },
     { value: barFresh ? input.bars.change1w : null, source: barSource },
   ]);
   if (fieldSources.change1w) fieldSources.change5d = fieldSources.change1w;
   const change3m = pickNumber("change3m", fieldSources, [
-    { value: tvFresh ? input.tv.change3m : null, source: tvSource },
     { value: barFresh ? input.bars.change3m : null, source: barSource },
   ]);
   const change6m = pickNumber("change6m", fieldSources, [
-    { value: tvFresh ? input.tv.change6m : null, source: tvSource },
     { value: barFresh ? input.bars.change6m : null, source: barSource },
   ]);
   const ytd = pickNumber("ytd", fieldSources, [
-    { value: tvFresh ? input.tv.ytd : null, source: tvSource },
     { value: barFresh ? input.bars.ytd : null, source: barSource },
   ]);
-  const tvPctFromHigh = tvFresh && input.tv.price != null && input.tv.high52w != null && input.tv.high52w > 0
-    ? ((input.tv.price - input.tv.high52w) / input.tv.high52w) * 100
-    : null;
   const pctFrom52wHigh = pickNumber("pctFrom52wHigh", fieldSources, [
-    { value: tvPctFromHigh, source: tvSource },
     { value: barFresh ? input.bars.pctFrom52wHigh : null, source: barSource },
   ]);
   const above20Sma = pickBoolean("above20Sma", fieldSources, [
-    { value: tvFresh && input.tv.price != null && input.tv.sma20 != null ? input.tv.price > input.tv.sma20 : null, source: tvSource },
     { value: barFresh ? input.bars.above20Sma : null, source: barSource },
   ]);
   const above50Sma = pickBoolean("above50Sma", fieldSources, [
-    { value: tvFresh && input.tv.price != null && input.tv.sma50 != null ? input.tv.price > input.tv.sma50 : null, source: tvSource },
     { value: barFresh ? input.bars.above50Sma : null, source: barSource },
   ]);
   const above200Sma = pickBoolean("above200Sma", fieldSources, [
-    { value: tvFresh && input.tv.price != null && input.tv.sma200 != null ? input.tv.price > input.tv.sma200 : null, source: tvSource },
     { value: barFresh ? input.bars.above200Sma : null, source: barSource },
   ]);
   const providerStatuses: Record<string, OverviewProviderDiagnostic> = {
-    tradingview: {
-      status: input.tv.status,
-      reason: input.tv.reason,
-      providerSymbol: input.tv.providerSymbol,
-      marketTimestamp: input.tv.lastBarUpdateTime ?? input.tv.time ?? input.tv.lastPriceUpdateTime,
-    },
     alpacaBars: {
       status: input.bars.status,
       reason: input.bars.reason,
@@ -1035,12 +791,11 @@ export function resolveOverviewCurrentRow(input: {
   }
   const alpacaPermanentlyBlocked = input.alpacaAssetDiagnostic?.status === "unsupported"
     || input.alpacaAssetDiagnostic?.status === "auth-blocked";
-  const transient = isRetryableProviderStatus(input.tv.status)
-    || (!alpacaPermanentlyBlocked && (
+  const transient = !alpacaPermanentlyBlocked && (
       isRetryableProviderStatus(input.bars.status)
       || isRetryableProviderStatus(providerStatuses.alpacaSnapshot.status)
       || isRetryableProviderStatus(input.alpacaAssetDiagnostic?.status ?? "missing")
-    ));
+    );
   const status: OverviewCurrentDisplayStatus = price != null && change1d != null
     ? "fresh"
     : transient
@@ -1070,13 +825,13 @@ export function resolveOverviewCurrentRow(input: {
     smaSource: fieldSources.above20Sma ?? fieldSources.above50Sma ?? fieldSources.above200Sma ?? null,
     fieldSources,
     providerStatuses,
-    tradingViewSymbol: input.tv.providerSymbol,
-    tradingViewTime: input.tv.time,
-    tradingViewLastBarUpdateTime: input.tv.lastBarUpdateTime,
-    tradingViewLastPriceUpdateTime: input.tv.lastPriceUpdateTime,
-    tradingViewUpdateTime: input.tv.updateTime,
-    tradingViewUpdateMode: input.tv.updateMode,
-    tradingViewCurrentSession: input.tv.currentSession,
+    tradingViewSymbol: null,
+    tradingViewTime: null,
+    tradingViewLastBarUpdateTime: null,
+    tradingViewLastPriceUpdateTime: null,
+    tradingViewUpdateTime: null,
+    tradingViewUpdateMode: null,
+    tradingViewCurrentSession: null,
     fetchedAt: input.fetchedAt,
   };
 }
@@ -1126,15 +881,15 @@ export function isOverviewCurrentRowPublishableForCycle(
 
 export function isOverviewCurrentRowStructurallyUnsupported(row: OverviewCurrentData | null | undefined): boolean {
   if (!row) return false;
-  return row.providerStatuses.tradingview?.status === "unsupported"
-    && row.providerStatuses.alpacaAsset?.status === "unsupported";
+  return row.providerStatuses.alpacaAsset?.status === "unsupported";
 }
 
 export function doesOverviewCurrentRowNeedRepair(row: OverviewCurrentData): boolean {
   if (row.status === "retrying") return true;
   if (row.status === "unavailable" || isOverviewCurrentRowComplete(row)) return false;
-  const tradingView = row.providerStatuses.tradingview;
   const alpacaBars = row.providerStatuses.alpacaBars;
+  if (row.status === "fresh" && alpacaBars?.status === "supported") return false;
+  const alpacaSnapshot = row.providerStatuses.alpacaSnapshot;
   const retryableStatuses = new Set<OverviewCurrentProviderStatus>([
     "stale",
     "missing",
@@ -1142,8 +897,8 @@ export function doesOverviewCurrentRowNeedRepair(row: OverviewCurrentData): bool
     "provider-error",
   ]);
   return Boolean(
-    (tradingView?.status && retryableStatuses.has(tradingView.status))
-    || (alpacaBars?.status && retryableStatuses.has(alpacaBars.status)),
+    (alpacaBars?.status && retryableStatuses.has(alpacaBars.status))
+    || (alpacaSnapshot?.status && retryableStatuses.has(alpacaSnapshot.status)),
   );
 }
 
@@ -1241,20 +996,6 @@ async function persistCurrentRows(env: Env, configId: string, rows: OverviewCurr
     row.fetchedAt,
   ));
   for (const statementChunk of chunk(statements, 100)) await db.batch(statementChunk);
-
-  const symbolStatements = rows.map((row) => {
-    const diagnostic = row.providerStatuses.tradingview;
-    return db.prepare(
-      `INSERT INTO overview_provider_symbols (provider_key, ticker, provider_symbol, support_status, reason, checked_at)
-       VALUES ('tradingview', ?, ?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(provider_key, ticker) DO UPDATE SET
-         provider_symbol = excluded.provider_symbol,
-         support_status = excluded.support_status,
-         reason = excluded.reason,
-         checked_at = CURRENT_TIMESTAMP`,
-    ).bind(row.ticker, row.tradingViewSymbol, diagnostic?.status ?? "missing", diagnostic?.reason ?? row.reason);
-  });
-  for (const statementChunk of chunk(symbolStatements, 100)) await db.batch(statementChunk);
 }
 
 export type OverviewCurrentRefreshJobState = {
@@ -1327,6 +1068,7 @@ export async function refreshOverviewCurrentData(
   const now = options.now ?? new Date();
   const fetchedAt = now.toISOString();
   const feed = (env.ALPACA_DAILY_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
+  const snapshotFeed = (env.ALPACA_LIVE_FEED ?? env.ALPACA_FEED ?? "iex").trim().toLowerCase() || "iex";
   const previousJob = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
   const continuingCycle = (previousJob?.status === "running" || previousJob?.status === "retrying")
     && Boolean(previousJob.cycleId)
@@ -1423,13 +1165,12 @@ export async function refreshOverviewCurrentData(
   const sliceInputs = inputs.slice(slicePlan.start, slicePlan.end);
   const sliceTickers = sliceInputs.map((input) => input.ticker);
   try {
-    const [tvRows, barRows, alpacaAssetSupport] = await Promise.all([
-      fetchTradingViewRows(env, sliceInputs, sessionDate, new Date(fetchedAt)),
+    const [barRows, alpacaAssetSupport] = await Promise.all([
       loadAlpacaBarMetrics(env, sliceTickers, sessionDate, feed),
       syncAlpacaAssetSupport(env, sliceTickers),
     ]);
     const quoteFallbackTickers = sliceTickers.filter((ticker) => {
-      const row = tvRows.get(ticker);
+      const row = barRows.get(ticker);
       return row?.status !== "supported" || row.price == null || row.change1d == null;
     });
     const attemptedSnapshotTickers = quoteFallbackTickers.slice(
@@ -1442,11 +1183,11 @@ export async function refreshOverviewCurrentData(
     const rows = sliceTickers.map((ticker) => resolveOverviewCurrentRow({
     ticker,
     sessionDate,
-    tv: tvRows.get(ticker) ?? {
+    tv: {
       ticker,
       providerSymbol: null,
-      status: "missing",
-      reason: "TradingView was not attempted for this ticker.",
+      status: "unsupported",
+      reason: "TradingView Overview ingestion has been retired; Alpaca is canonical.",
       price: null,
       change1d: null,
       change1w: null,
@@ -1490,6 +1231,7 @@ export async function refreshOverviewCurrentData(
       above200Sma: null,
     },
     alpacaFeed: feed,
+    alpacaSnapshotFeed: snapshotFeed,
     fetchedAt,
     }));
     await persistCurrentRows(env, configId, rows);
@@ -1673,9 +1415,13 @@ export async function loadOverviewCurrentData(
   }]));
 }
 
-export function currentRefreshStartWindowOpen(now: Date): boolean {
+export function currentRefreshStartWindowOpen(now: Date, marketCloseTime = "16:00"): boolean {
   const ny = zonedParts(now, "America/New_York");
-  return ny.minutesOfDay >= 4 * 60 && ny.minutesOfDay <= 16 * 60 + CURRENT_REFRESH_OFFSET_MINUTES;
+  const [closeHour, closeMinute] = marketCloseTime.split(":").map(Number);
+  const closeMinutes = Number.isFinite(closeHour) && Number.isFinite(closeMinute)
+    ? closeHour * 60 + closeMinute
+    : 16 * 60;
+  return ny.minutesOfDay >= closeMinutes + 30 && ny.minutesOfDay <= 21 * 60;
 }
 
 /** @deprecated Use currentRefreshStartWindowOpen. */
@@ -1702,7 +1448,9 @@ export async function maybeRunScheduledOverviewCurrentRefresh(
   const sessionDate = latestUsMarketSessionAsOfDate(now);
   await ensureOverviewCurrentDataSchema(env);
   const job = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
-  if (!currentRefreshStartWindowOpen(now) && !currentRefreshContinuationAllowed(job, sessionDate, now)) return null;
+  await ensureMarketCalendarCoverage(env, sessionDate).catch(() => undefined);
+  const storedSession = await loadStoredMarketSession(env, sessionDate).catch(() => null);
+  if (!currentRefreshStartWindowOpen(now, storedSession?.closeAt) && !currentRefreshContinuationAllowed(job, sessionDate, now)) return null;
   return await refreshOverviewCurrentDataIfDue(env, configId, sessionDate, now);
 }
 

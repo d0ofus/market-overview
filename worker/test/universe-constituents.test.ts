@@ -5,6 +5,7 @@ import {
   parseIsharesHoldingsCsvDetailed,
   parseNasdaqTradedActiveEquities,
   parseNasdaqTradedCommonStocks,
+  parseNasdaqTraderFileCreationDate,
   parseSp500Csv,
 } from "../src/universe-constituents";
 
@@ -26,6 +27,12 @@ describe("universe constituent parsers", () => {
       securityName: "Apple Inc. Common Stock",
       listingExchange: "Q",
     });
+    expect(parseNasdaqTraderFileCreationDate(sample)).toBe("2026-03-04");
+  });
+
+  it("fails closed when NasdaqTrader File Creation Time is absent or malformed", () => {
+    expect(parseNasdaqTraderFileCreationDate("Nasdaq Traded|Symbol\nY|AAPL")).toBeNull();
+    expect(parseNasdaqTraderFileCreationDate("File Creation Time: tomorrow")).toBeNull();
   });
 
   it("keeps active listed equities for provider resolution without the common-stock name blacklist", () => {

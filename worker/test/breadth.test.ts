@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeAndStoreBreadth } from "../src/eod";
+import { computeAndStoreBreadth, shouldRefreshUniverseSource, universeSourceAgeDays } from "../src/eod";
 import { computeBreadthStats } from "../src/metrics";
 import type { DailyBar } from "../src/provider";
 
@@ -20,7 +20,7 @@ function createBreadthEnv(tickers: string[], bars: DailyBar[]) {
             if (sql.includes("SELECT ticker, date, c, volume") && sql.includes("FROM alpaca_daily_bars")) {
               const asOfDate = String(args.at(-1));
               const requested = sql.includes("json_each")
-                ? new Set((JSON.parse(String(args[1])) as string[]).map((ticker) => ticker.toUpperCase()))
+                ? new Set((JSON.parse(String(args.find((arg) => typeof arg === "string" && arg.startsWith("[")))) as string[]).map((ticker) => ticker.toUpperCase()))
                 : new Set(args.slice(1, -1).map((arg) => String(arg).toUpperCase()));
               return {
                 results: normalizedBars
@@ -133,5 +133,34 @@ describe("breadth computations", () => {
       totalUniverseMembers: 50,
     });
     expect(snapshots.has("2026-06-02:sp500-core")).toBe(true);
+  });
+});
+
+describe("breadth universe source age", () => {
+  const now = new Date("2026-08-27T02:00:00Z");
+
+  it("refreshes Russell holdings at ten source days but keeps retry backoff authoritative", () => {
+    expect(universeSourceAgeDays("2026-08-17", now)).toBe(10);
+    expect(shouldRefreshUniverseSource({
+      existingCount: 2_000,
+      status: "ok",
+      sourceAsOfDate: "2026-08-17",
+      nextAttemptAt: null,
+      refreshAfterDays: 10,
+      now,
+    })).toBe(true);
+    expect(shouldRefreshUniverseSource({
+      existingCount: 2_000,
+      status: "error",
+      sourceAsOfDate: "2026-08-13",
+      nextAttemptAt: "2026-08-28T02:00:00Z",
+      refreshAfterDays: 10,
+      now,
+    })).toBe(false);
+  });
+
+  it("distinguishes the fourteen-day cached-use ceiling", () => {
+    expect(universeSourceAgeDays("2026-08-13", now)).toBe(14);
+    expect(universeSourceAgeDays("2026-08-12", now)).toBe(15);
   });
 });
