@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 type Props = {
-  values: number[] | null;
+  values: Array<number | null> | null;
   width?: number;
   height?: number;
   ariaLabel?: string;
@@ -33,7 +33,8 @@ export function HistogramSparkline({
     if (activeIndex >= values.length) setActiveIndex(null);
   }, [activeIndex, values]);
 
-  if (!values?.length) {
+  const observed = values?.filter((value): value is number => typeof value === "number" && Number.isFinite(value)) ?? [];
+  if (!values?.length || !observed.length) {
     return (
       <div className="flex items-center text-xs text-slate-500" style={{ width, height }}>
         -
@@ -41,8 +42,8 @@ export function HistogramSparkline({
     );
   }
 
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = Math.min(...observed);
+  const max = Math.max(...observed);
   const range = max - min;
   const barSlotWidth = width / values.length;
   const gap = Math.max(1, Math.min(3, barSlotWidth * 0.25));
@@ -70,6 +71,7 @@ export function HistogramSparkline({
       )}
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-label={ariaLabel}>
         {values.map((value, index) => {
+          if (value === null || !Number.isFinite(value)) return null;
           const normalizedHeight = range === 0
             ? height * 0.6
             : minBarHeight + ((value - min) / range) * (height - minBarHeight);

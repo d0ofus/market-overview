@@ -1,6 +1,8 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistoryCoverage, loadMarketHistoryOhlcv } from "./market-history";
+import { loadEodCatalogRows } from "./eod-catalog-service";
 import { latestUsSessionAsOfDate, zonedParts } from "./refresh-timing";
 import type { Env, WorkerScheduleSettings } from "./types";
 
@@ -556,6 +558,12 @@ async function loadPatternBarCoverage(
   const out = new Map<string, PatternBarCoverage>();
   const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   if (unique.length === 0) return out;
+  if (env.MARKET_HISTORY_DB) {
+    for (const [ticker, coverage] of await loadMarketHistoryCoverage(env, { tickers: unique, startDate, endDate })) {
+      out.set(ticker, { ticker, latestBarDate: coverage.lastDate, barCount: coverage.barCount });
+    }
+    return out;
+  }
   for (let index = 0; index < unique.length; index += PATTERN_UNIVERSE_QUERY_CHUNK_SIZE) {
     const chunk = unique.slice(index, index + PATTERN_UNIVERSE_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
@@ -1020,6 +1028,14 @@ async function loadBarsByCount(
   const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   const out = new Map<string, PatternDailyBar[]>();
   if (uniqueTickers.length === 0 || barLimit <= 0) return out;
+  if (env.MARKET_HISTORY_DB) {
+    for (const bar of await loadMarketHistoryOhlcv(env, { tickers: uniqueTickers, endDate, limitPerTicker: barLimit })) {
+      const current = out.get(bar.ticker) ?? [];
+      current.push(bar);
+      out.set(bar.ticker, current);
+    }
+    return out;
+  }
   for (let index = 0; index < uniqueTickers.length; index += PATTERN_UNIVERSE_QUERY_CHUNK_SIZE) {
     const chunk = uniqueTickers.slice(index, index + PATTERN_UNIVERSE_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
@@ -2350,7 +2366,7 @@ async function loadActivePatternSymbols(env: Env): Promise<Map<string, PatternUn
   return new Map((rows.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
 }
 
-async function loadCanonicalPatternUniverseStats(
+export async function loadCanonicalPatternUniverseStats(
   env: Env,
   profile: PatternProfile,
   tradingDate: string,
@@ -2358,6 +2374,21 @@ async function loadCanonicalPatternUniverseStats(
   offset: number | null,
   limit: number | null,
 ): Promise<PatternUniverseStats[] | { count: number | string | null }> {
+  if (env.EOD_READ_ENABLED === "true") {
+    const eligible: PatternUniverseStats[] = [];
+    for (const row of (await loadEodCatalogRows(env, tickers, tradingDate)).values()) {
+      if (row.price != null && row.lastDate != null && row.avgDollarVolume20d != null
+        && row.price >= profile.prefilterConfig.minPrice
+        && row.avgDollarVolume20d >= profile.prefilterConfig.minDollarVolume20d
+        && row.barCount >= profile.prefilterConfig.minBars) {
+        eligible.push({ ticker: row.ticker, latestBarDate: row.lastDate, price: row.price,
+          avgDollarVolume20d: row.avgDollarVolume20d, barCount: row.barCount });
+      }
+    }
+    eligible.sort((left, right) => left.ticker.localeCompare(right.ticker));
+    if (offset == null || limit == null) return { count: eligible.length };
+    return eligible.slice(offset, offset + limit);
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   const eligibleSql = `

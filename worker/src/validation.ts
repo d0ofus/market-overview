@@ -1,4 +1,23 @@
 import { z } from "zod";
+
+export const eodEnqueueSchema = z.object({
+  sessionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  purpose: z.enum(["daily", "reconcile", "backfill", "maintenance"]).default("daily"),
+  retry: z.boolean().default(false),
+  historyTickers: z.array(z.string().trim().min(1).max(20).transform((ticker) => ticker.toUpperCase())
+    .pipe(z.string().regex(/^[A-Z0-9^][A-Z0-9.^=_/-]*$/)))
+    .min(1).max(100).transform((tickers) => [...new Set(tickers)].sort()).optional(),
+  historySessions: z.union([z.literal(520), z.literal(1400)]).optional(),
+}).strict().superRefine((request, context) => {
+  if (request.purpose !== "backfill" && (request.historyTickers !== undefined || request.historySessions !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["purpose"],
+      message: "History selections are only supported for backfill runs." });
+  }
+  if (request.historySessions === 1400 && !request.historyTickers?.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["historyTickers"],
+      message: "A 1400-session backfill requires between 1 and 100 explicit tickers." });
+  }
+});
 export {
   promptVersionCreateSchema,
   researchCompareQuerySchema,

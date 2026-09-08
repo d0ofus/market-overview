@@ -1,6 +1,7 @@
 import { sanitizeBarSeries } from "./metrics";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import type { Env } from "./types";
 
 export const CORRELATION_LOOKBACKS = {
@@ -494,6 +495,16 @@ function buildResolutionError(baseMessage: string, unresolvedTickers: Correlatio
 
 async function loadTickerBars(env: Env, tickers: string[], closePeriods: number): Promise<Map<string, PriceSeries>> {
   if (tickers.length === 0) return new Map();
+  if (env.MARKET_HISTORY_DB) {
+    const grouped = new Map<string, PriceSeries>();
+    for (const bar of await loadMarketHistory(env, { tickers, limitPerTicker: closePeriods + BAR_FETCH_BUFFER })) {
+      const series = grouped.get(bar.ticker) ?? { dates: [], closes: [] };
+      series.dates.push(bar.date);
+      series.closes.push(bar.c);
+      grouped.set(bar.ticker, series);
+    }
+    return grouped;
+  }
   const placeholders = tickers.map(() => "?").join(", ");
   const perTickerLimit = closePeriods + BAR_FETCH_BUFFER;
   const result = await getMarketDataDb(env).prepare(

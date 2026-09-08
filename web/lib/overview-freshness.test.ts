@@ -96,6 +96,19 @@ test("overview freshness hides the banner when status and rows are fresh", () =>
   assert.equal(summary, null);
 });
 
+test("overview keeps the publication warning when all closes exist but a long-window metric is unavailable", () => {
+  const warning = "The 252-session high is unavailable; verified closes remain visible.";
+  const summary = deriveOverviewFreshnessSummary({
+    status: status({ freshnessStatus: "partial", servingState: "degraded", freshnessWarning: warning }),
+    sections: sections([{ ticker: "SPY", barDate: "2026-06-12", quoteFreshnessStatus: "fresh",
+      currentData: { status: "fresh", fieldSources: { price: "alpaca", change1d: "alpaca" } },
+      historyData: { seriesStatus: "fresh" }, sparkline: [98, 99, 100] }]),
+    dashboardAvailable: true,
+  });
+  assert.equal(summary?.message, warning);
+  assert.equal(summary?.tone, "warning");
+});
+
 test("overview freshness marks stale critical symbols as danger", () => {
   const summary = deriveOverviewFreshnessSummary({
     status: status({

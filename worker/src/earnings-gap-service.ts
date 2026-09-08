@@ -3,6 +3,7 @@ import { meteredFetch } from "./provider-usage";
 import type { Env } from "./types";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import {
   latestUsMarketSessionAsOfDate,
   nextUsMarketTradingDay,
@@ -697,6 +698,14 @@ async function loadDailyBarsByTicker(
 ): Promise<Map<string, DailyBar[]>> {
   const uniqueTickers = Array.from(new Set(tickers.map(normalizeTicker).filter(Boolean)));
   const byTicker = new Map<string, DailyBar[]>();
+  if (env.MARKET_HISTORY_DB) {
+    for (const bar of await loadMarketHistory(env, { tickers: uniqueTickers, startDate, endDate })) {
+      const current = byTicker.get(bar.ticker) ?? [];
+      current.push({ ticker: bar.ticker, date: bar.date, o: bar.o, c: bar.c });
+      byTicker.set(bar.ticker, current);
+    }
+    return byTicker;
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += 80) {

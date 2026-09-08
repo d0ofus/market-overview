@@ -2,6 +2,43 @@ import type { OverviewRecovery, OverviewServingState, QuoteFreshnessStatus, Snap
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
+export type EodPublicationStatus = {
+  mode: string;
+  ready: boolean;
+  expectedSession?: string | null;
+  lastSuccessfulSession?: string | null;
+  inputCorrectionsPending?: boolean | null;
+  inputRevision?: number | null;
+  completedInputRevision?: number | null;
+  missingScopes?: string[];
+  runs: Array<{
+    id?: string; session_date: string; status: string; stage?: string | null; attempt?: number;
+    purpose?: string; mode?: string; next_attempt_at?: string | null; deadline_at?: string | null;
+    deadline_checked_at?: string | null; deadline_missed?: number; deadlineMissingScopes?: string[];
+    deadlineAppliesToDelivery?: boolean; error_code?: string | null; error_message?: string | null;
+    failedStage?: string | null; providerErrors?: Record<string, string>; github_run_id?: string | null;
+    updated_at?: string | null;
+    historyTickers?: string[] | null;
+    historySessions?: 520 | 1400;
+  }>;
+  publications: Array<{ scope: string; publication_id: string; session_date: string; published_at: string }>;
+  scopeHealth?: Array<{ scope: string; sessionDate: string | null; publicationId: string | null; status: "missing" | "current" | "stale" }>;
+  quota?: {
+    status: "blocked" | "recorded" | "unknown"; scope: string; usageDate: string;
+    rowsRead: number | null; rowsWritten: number | null; reservedReads: number | null; reservedWrites: number | null;
+    resetAt: string; nextAttemptAt: string | null;
+  };
+  capacity?: { status: "blocked" | "unknown"; warning: string | null };
+  accountUsage?: {
+    usage_date?: string; rows_read?: number | null; rows_written?: number | null;
+    sampled_at?: string | null; error?: string | null;
+  } | null;
+};
+
+export function getEodPublicationStatus(options?: { signal?: AbortSignal }): Promise<EodPublicationStatus> {
+  return getJson<EodPublicationStatus>("/api/eod/status", options);
+}
+
 export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";
 
 export type FedFundsPathRow = {
@@ -82,7 +119,20 @@ export type FedWatchData = {
   fomcCommentary?: FomcCommentaryItem[];
 };
 
+export type OfficialRateFacts = {
+  source: string;
+  sourceUrl: string;
+  effectiveDate: string;
+  fetchedAt: string;
+  effr: number;
+  targetLower: number | null;
+  targetUpper: number | null;
+};
+
 export type FedWatchResponse = {
+  officialRates?: OfficialRateFacts | null;
+  officialRatesWarning?: string | null;
+  fomcCommentary?: FomcCommentaryItem[];
   status: "ok" | "stale" | "unavailable";
   warning: string | null;
   data: FedWatchData | null;
@@ -2822,27 +2872,34 @@ export function getBreadth(universeId = "sp500-core") {
 export type BreadthDashboardSnapshot = {
   asOfDate: string;
   universeId: string;
-  advancers: number;
-  decliners: number;
-  unchanged: number;
-  pctAbove20MA: number;
-  pctAbove50MA: number;
-  pctAbove200MA: number;
-  new20DHighs: number;
-  new20DLows: number;
-  medianReturn1D: number;
-  medianReturn5D: number;
+  advancers: number | null;
+  decliners: number | null;
+  unchanged: number | null;
+  pctAbove20MA: number | null;
+  pctAbove50MA: number | null;
+  pctAbove200MA: number | null;
+  new20DHighs: number | null;
+  new20DLows: number | null;
+  medianReturn1D: number | null;
+  medianReturn5D: number | null;
   generatedAt: string;
   metrics?: Record<string, unknown> | null;
   dataSource?: string | null;
   provenance?: Record<string, unknown> | null;
   sourceMix?: Record<string, number> | null;
+  volumeCollection?: {
+    earliest: string | null;
+    latest: string | null;
+    observedCount: number;
+    eligibleCount: number;
+  } | null;
 };
 
 export type BreadthDashboardResponse = {
   generationId: string | null;
   generatedAt: string | null;
   expectedAsOfSession: string;
+  exchangeSessionDates?: string[];
   providerLabel: string;
   overallHealth: "fresh" | "partial" | "stale";
   warning: string | null;
@@ -2867,7 +2924,11 @@ export type BreadthDashboardResponse = {
       sourceType: string | null;
       sourceUrl: string | null;
       sourceAsOfDate: string | null;
-      status: "active" | "invalid" | "missing";
+      status: "active" | "published-version" | "invalid" | "missing";
+      verifiedAt?: string | null;
+      sourceAgeSessions?: number | null;
+      degraded?: boolean;
+      degradationReason?: string | null;
     };
     error: { code: string; message: string } | null;
     history: BreadthDashboardSnapshot[];

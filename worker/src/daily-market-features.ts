@@ -5,6 +5,7 @@ import {
   recordMarketDataD1Usage,
 } from "./market-data-db";
 import { sma } from "./metrics";
+import { loadMarketHistory } from "./market-history";
 import type { Env } from "./types";
 
 const FEATURE_QUERY_BATCH_SIZE = 80;
@@ -49,6 +50,7 @@ export type DailyMarketFeature = {
   alpacaBarCount?: number;
   repairBarCount?: number;
   inputLastObservedAt?: string | null;
+  inputRevision?: number;
 };
 
 function normalizeTickers(tickers: string[]): string[] {
@@ -124,7 +126,7 @@ function subtractUtcDays(isoDate: string, days: number): string {
 
 async function featureInputStartDate(env: Env, sessionDate: string): Promise<string> {
   const row = await getMarketDataDb(env).prepare(
-    `SELECT MIN(session_date) as inputStartDate
+    `SELECT MIN(session_date) as inputStartDate, COUNT(*) as sessionCount
        FROM (
          SELECT session_date
            FROM market_calendar_sessions
@@ -132,14 +134,38 @@ async function featureInputStartDate(env: Env, sessionDate: string): Promise<str
           ORDER BY session_date DESC
           LIMIT ?
        ) retained_sessions`,
-  ).bind(sessionDate, FEATURE_INPUT_SESSION_LIMIT).first<{ inputStartDate: string | null }>();
-  return row?.inputStartDate ?? subtractUtcDays(sessionDate, 400);
+  ).bind(sessionDate, FEATURE_INPUT_SESSION_LIMIT).first<{ inputStartDate: string | null; sessionCount: number }>();
+  // A short retained calendar is not a short requested lookback.
+  return row?.inputStartDate && Number(row.sessionCount) >= FEATURE_INPUT_SESSION_LIMIT
+    ? row.inputStartDate : subtractUtcDays(sessionDate, 400);
 }
 
 function isFeatureSourceEligible(feature: DailyMarketFeature): boolean {
   if (feature.sourceProvider !== "alpaca") return false;
   if (feature.sourceSessions <= 0) return false;
   return Number(feature.repairBarCount ?? 0) / feature.sourceSessions <= 0.05;
+}
+
+function revisionGuardEnabled(env: Env): boolean {
+  return env.EOD_READ_ENABLED === "true" || env.EOD_RUNNER_MODE === "shadow" || env.EOD_RUNNER_MODE === "active";
+}
+
+async function loadFeatureInputRevisions(env: Env, tickers: string[]): Promise<Map<string, number>> {
+  const revisions = new Map(tickers.map((ticker) => [ticker, 0]));
+  if (!revisionGuardEnabled(env) || !tickers.length) return revisions;
+  for (let offset = 0; offset < tickers.length; offset += FEATURE_QUERY_BATCH_SIZE) {
+    const tickerJson = JSON.stringify(tickers.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE));
+    const pending = await getMarketDataDb(env).prepare(`SELECT ticker FROM eod_adjustment_repairs
+      WHERE status='pending' AND feed IN (?,?) AND ticker IN (SELECT value FROM json_each(?)) LIMIT 1`)
+      .bind(marketDataFeed(env), REPAIR_FEED, tickerJson).first<{ ticker: string }>();
+    if (pending) throw new Error(`market-feature-adjustment-repair-pending:${pending.ticker}`);
+    const rows = await getMarketDataDb(env).prepare(`SELECT ticker,SUM(revision) as revision FROM eod_input_revisions
+      WHERE feed IN (?,?) AND ticker IN (SELECT value FROM json_each(?)) GROUP BY ticker`)
+      .bind(marketDataFeed(env), REPAIR_FEED, tickerJson)
+      .all<{ ticker: string; revision: number }>();
+    for (const row of rows.results ?? []) revisions.set(row.ticker, Number(row.revision));
+  }
+  return revisions;
 }
 
 export async function computeAndStoreDailyMarketFeatures(
@@ -151,9 +177,10 @@ export async function computeAndStoreDailyMarketFeatures(
   const inputStartDate = await featureInputStartDate(env, sessionDate);
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
+  const revisionGuard = revisionGuardEnabled(env);
+  const inputRevisions = await loadFeatureInputRevisions(env, tickers);
   const cachedFeatures = await loadDailyMarketFeatures(env, tickers, sessionDate);
-  // Bar writes invalidate affected feature sessions transactionally in daily-bars.ts.
-  // A surviving cached row therefore has the same source mix and no newer input bar.
+  // EOD-mode cache rows are keyed to monotonically increasing canonical/repair input revisions.
   const candidateTickers = new Set(tickers.filter((ticker) => !cachedFeatures.has(ticker)));
   let rowsRead = 0;
   await assertMarketDataCriticalWorkBudget(env, {
@@ -165,7 +192,18 @@ export async function computeAndStoreDailyMarketFeatures(
   for (let offset = 0; offset < candidates.length; offset += FEATURE_QUERY_BATCH_SIZE) {
     const chunk = candidates.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE);
     const tickerPlaceholders = chunk.map(() => "?").join(",");
-    const result = await db.prepare(
+    const result = env.MARKET_HISTORY_DB ? {
+      results: [
+        ...await loadMarketHistory(env, {
+          tickers: chunk, feed: REPAIR_FEED, sourceProvider: "yahoo", startDate: inputStartDate, endDate: sessionDate,
+          onD1Usage: (usage) => { rowsRead += usage.rowsRead; },
+        }),
+        ...await loadMarketHistory(env, {
+          tickers: chunk, feed, sourceProvider: "alpaca", startDate: inputStartDate, endDate: sessionDate,
+          onD1Usage: (usage) => { rowsRead += usage.rowsRead; },
+        }),
+      ], meta: { rows_read: 0 },
+    } : await db.prepare(
       `SELECT ticker, date, c, volume, source_provider as sourceProvider,
               observed_at as observedAt, fetched_at as fetchedAt
          FROM alpaca_daily_bars
@@ -193,6 +231,7 @@ export async function computeAndStoreDailyMarketFeatures(
     features.delete(ticker);
     const feature = computeDailyMarketFeature(ticker, sessionDate, barsByTicker.get(ticker) ?? []);
     if (!feature) continue;
+    if (revisionGuard) feature.inputRevision = inputRevisions.get(ticker) ?? 0;
     computedFeatures.set(ticker, feature);
     if (isFeatureSourceEligible(feature)) features.set(ticker, feature);
   }
@@ -201,8 +240,10 @@ export async function computeAndStoreDailyMarketFeatures(
        (feed, ticker, session_date, close, volume, previous_close, return_1d, return_5d,
         return_63d, sma_5, sma_20, sma_50, sma_100, sma_200, high_5, high_20,
         high_21, high_63, high_126, high_252, low_20, source_sessions, source_provider,
-        input_start_date, alpaca_bar_count, repair_bar_count, input_last_observed_at, computed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        input_start_date, alpaca_bar_count, repair_bar_count, input_last_observed_at${revisionGuard ? ", input_revision" : ""}, computed_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${revisionGuard ? ", ?" : ""}, CURRENT_TIMESTAMP
+     WHERE ${revisionGuard ? `? = (SELECT COALESCE(SUM(revision),0) FROM eod_input_revisions WHERE feed IN (?,?) AND ticker=?)
+       AND NOT EXISTS (SELECT 1 FROM eod_adjustment_repairs WHERE status='pending' AND feed IN (?,?) AND ticker=?)` : "1"}
      ON CONFLICT(feed, ticker, session_date) DO UPDATE SET
        close = excluded.close,
        volume = excluded.volume,
@@ -227,7 +268,7 @@ export async function computeAndStoreDailyMarketFeatures(
        input_start_date = excluded.input_start_date,
        alpaca_bar_count = excluded.alpaca_bar_count,
        repair_bar_count = excluded.repair_bar_count,
-       input_last_observed_at = excluded.input_last_observed_at,
+       input_last_observed_at = excluded.input_last_observed_at${revisionGuard ? ", input_revision = excluded.input_revision" : ""},
        computed_at = CURRENT_TIMESTAMP
      WHERE daily_market_features.close IS NOT excluded.close
         OR daily_market_features.volume IS NOT excluded.volume
@@ -252,7 +293,8 @@ export async function computeAndStoreDailyMarketFeatures(
         OR daily_market_features.input_start_date IS NOT excluded.input_start_date
         OR daily_market_features.alpaca_bar_count IS NOT excluded.alpaca_bar_count
         OR daily_market_features.repair_bar_count IS NOT excluded.repair_bar_count
-        OR daily_market_features.input_last_observed_at IS NOT excluded.input_last_observed_at`,
+        OR daily_market_features.input_last_observed_at IS NOT excluded.input_last_observed_at
+        ${revisionGuard ? "OR daily_market_features.input_revision IS NOT excluded.input_revision" : ""}`,
   ).bind(
     feed,
     feature.ticker,
@@ -281,6 +323,7 @@ export async function computeAndStoreDailyMarketFeatures(
     feature.alpacaBarCount,
     feature.repairBarCount,
     feature.inputLastObservedAt,
+    ...(revisionGuard ? [feature.inputRevision ?? 0, feature.inputRevision ?? 0, feed, REPAIR_FEED, feature.ticker, feed, REPAIR_FEED, feature.ticker] : []),
   ));
   let rowsWritten = 0;
   for (let offset = 0; offset < statements.length; offset += FEATURE_WRITE_BATCH_SIZE) {
@@ -291,6 +334,10 @@ export async function computeAndStoreDailyMarketFeatures(
     );
   }
   await recordMarketDataD1Usage(env, { rowsRead, rowsWritten });
+  if (revisionGuard) {
+    const after = await loadFeatureInputRevisions(env, tickers);
+    if (tickers.some((ticker) => after.get(ticker) !== inputRevisions.get(ticker))) throw new Error("market-feature-inputs-changed");
+  }
   return features;
 }
 
@@ -302,6 +349,7 @@ export async function loadDailyMarketFeatures(
   const tickers = normalizeTickers(tickersInput);
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
+  const revisionGuard = revisionGuardEnabled(env);
   const features = new Map<string, DailyMarketFeature>();
   for (let offset = 0; offset < tickers.length; offset += FEATURE_QUERY_BATCH_SIZE) {
     const chunk = tickers.slice(offset, offset + FEATURE_QUERY_BATCH_SIZE);
@@ -315,13 +363,17 @@ export async function loadDailyMarketFeatures(
               high_252 as high252, low_20 as low20, source_sessions as sourceSessions,
               source_provider as sourceProvider, input_start_date as inputStartDate,
               alpaca_bar_count as alpacaBarCount, repair_bar_count as repairBarCount,
-              input_last_observed_at as inputLastObservedAt
+              input_last_observed_at as inputLastObservedAt${revisionGuard ? ", input_revision as inputRevision" : ""}
          FROM daily_market_features
         WHERE feed = ? AND session_date = ?
           AND source_provider = 'alpaca'
           AND (source_sessions = 0 OR CAST(repair_bar_count AS REAL) / source_sessions <= 0.05)
-          AND ticker IN (${tickerPlaceholders})`,
-    ).bind(feed, sessionDate, ...chunk).all<DailyMarketFeature>();
+          AND ticker IN (${tickerPlaceholders})
+          ${revisionGuard ? `AND input_revision = (SELECT COALESCE(SUM(r.revision),0) FROM eod_input_revisions r
+            WHERE r.ticker=daily_market_features.ticker AND r.feed IN (?,?))
+            AND NOT EXISTS (SELECT 1 FROM eod_adjustment_repairs repair WHERE repair.ticker=daily_market_features.ticker
+              AND repair.feed IN (?,?) AND repair.status='pending')` : ""}`,
+    ).bind(feed, sessionDate, ...chunk, ...(revisionGuard ? [feed, REPAIR_FEED, feed, REPAIR_FEED] : [])).all<DailyMarketFeature>();
     for (const row of result.results ?? []) features.set(row.ticker.toUpperCase(), row);
   }
   return features;

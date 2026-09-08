@@ -5,7 +5,7 @@ import type { Env } from "./types";
 export type DatabaseCapacityLevel = "ok" | "warning" | "critical" | "halt" | "unavailable";
 
 export type DatabaseCapacityStatus = {
-  database: "core" | "market" | "ops";
+  database: "core" | "market" | "ops" | "history";
   ok: boolean;
   sizeBytes: number | null;
   warnBytes: number;
@@ -39,6 +39,7 @@ function thresholds(env: Env, database: DatabaseCapacityStatus["database"]): {
       halt: positiveInteger(env.MARKET_DATA_HALT_BYTES, 425_000_000),
     };
   }
+  if (database === "history") return {warn:350_000_000,critical:400_000_000,halt:425_000_000};
   return {
     warn: positiveInteger(env.OPS_DB_WARN_BYTES, 100_000_000),
     critical: null,
@@ -130,6 +131,7 @@ export async function loadDatabaseCapacity(env: Env): Promise<DatabaseCapacitySt
     probe(env, "core", env.DB),
     marketProbe,
     opsProbe,
+    ...(env.MARKET_HISTORY_DB ? [probe(env,"history",env.MARKET_HISTORY_DB)] : []),
   ]);
 }
 

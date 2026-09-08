@@ -80,4 +80,11 @@ describe("fed funds rate service helpers", () => {
     expect(isSnapshotFresh(freshAt)).toBe(true);
     expect(isSnapshotFresh(staleAt)).toBe(false);
   });
+
+  it("does not make an old provider observation fresh by fetching it again", () => {
+    const now = Date.parse("2026-09-08T14:00:00Z");
+    expect(isSnapshotFresh("2026-09-08T13:59:00Z", now, "2026-08-24")).toBe(false);
+    expect(isSnapshotFresh("2026-09-08T13:59:00Z", now, "2026-09-04")).toBe(true);
+    expect(isSnapshotFresh("2026-09-08T13:59:00Z", now, null)).toBe(false);
+  });
 });

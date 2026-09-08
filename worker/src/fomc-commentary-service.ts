@@ -1,3 +1,4 @@
+import { freeMarketReportEnv } from "./factual-market-report";
 import { extractText, getDocumentProxy } from "unpdf";
 import type { BraveSearchResult } from "./market-report-common";
 import { cachedBraveSearch, generateMarkdownWithGemini } from "./market-report-common";
@@ -1267,8 +1268,8 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
   }
 
   if (!explicitSourceUrl) {
-    braveSources = await collectBraveFomcSources(env, eventType, meetingDate, { now, pendingSource: true }).catch(() => []);
-    const discoveredOfficial = braveSources.find((source) => isFedUrl(source.url))?.url;
+    const officialSources = await discoverLatestOfficialFomcSources(env, now).catch(() => []);
+    const discoveredOfficial = officialSources.find((source) => source.eventType === eventType && source.meetingDate === meetingDate)?.sourceUrl;
     sourceUrl = discoveredOfficial || DEFAULT_SOURCE_URL;
     existing = await loadExisting(env, eventType, meetingDate, sourceUrl);
     if (discoveredOfficial && isFedUrl(sourceUrl)) {
@@ -1328,16 +1329,6 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
       await markFomcCommentaryUnchanged(env, existing.id, nowIso, sourceMetadata);
       return { ok: true, warning: null, items: await loadLatestFomcCommentary(env, 4) };
     }
-  }
-
-  const shouldCollectBrave = hasOfficialText && (
-    options.force
-    || !existing
-    || existing.status !== "ready"
-    || existing.sourceTextHash !== sourceTextHash
-  );
-  if (shouldCollectBrave && braveSources.length === 0) {
-    braveSources = await collectBraveFomcSources(env, eventType, meetingDate, { now, pendingSource: false }).catch(() => []);
   }
 
   const contextSources = braveSources.filter((source) => source.usedFor === "context");
@@ -1411,7 +1402,7 @@ export async function refreshFomcCommentary(env: Env, options: RefreshOptions = 
 
   try {
     const prompt = buildFomcPrompt({ eventType, meetingDate, sourceMode, officialText: synthesisText, citations: citationsForPrompt });
-    const generated = await generateMarkdownWithGemini(env, prompt, { temperature: 0.15, maxOutputTokens: 2500, responseMimeType: "application/json" });
+    const generated = await generateMarkdownWithGemini(freeMarketReportEnv(env), prompt, { temperature: 0.15, maxOutputTokens: 2500, responseMimeType: "application/json", timeoutMs: 30_000 });
     const parsed = parseGeminiFomcJson(generated.text);
     const usedUrls = new Set(parsed.usedCitationUrls.map(canonicalUrl));
     const citationSources = citationsForPrompt.filter((source) => usedUrls.has(canonicalUrl(source.url)));

@@ -1,5 +1,7 @@
 import { buildRelativeStrengthSeries, computeMetrics, isPriceAboveSma, rankValue, sanitizeBarSeries } from "./metrics";
 import { loadConfig } from "./db";
+import { eodHash, loadEodOverview } from "./eod-publication-service";
+import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getProvider } from "./provider";
 import { SP500_TICKERS } from "./sp500-tickers";
@@ -7,6 +9,7 @@ import { countUsMarketTradingSessionsAfter, isUsMarketTradingDay, latestUsMarket
 import { envFlagEnabled } from "./auth";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
 import {
   aggregateDailyMarketFeatures,
@@ -15,7 +18,7 @@ import {
   suppressUnderCoveredBreadthMetrics,
 } from "./daily-market-features";
 import { loadNasdaqTraderUniverses, loadRussell2000Universe, loadSp500Constituents, loadSp500Universe } from "./universe-constituents";
-import { loadActiveUniverseTickers, stageAndPromoteUniverseVersion } from "./universe-version-service";
+import { loadActiveUniverseTickers, stageAndPromoteUniverseVersion, validateUniverseCandidate } from "./universe-version-service";
 import { evaluateOverviewGeneration } from "./overview-generation";
 import {
   isOverviewQuoteEligibleTicker,
@@ -435,23 +438,9 @@ async function computeOverviewFreshnessDiagnosticsForConfig(
 
   const latestByTicker = new Map<string, string | null>();
   const tickers = candidates.map((row) => row.ticker);
-  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
-    const placeholders = buildPlaceholders(chunk.length);
-    const rows = await getMarketDataDb(env).prepare(
-      `SELECT ticker, MAX(date) as lastDate
-       FROM alpaca_daily_bars
-       WHERE feed = ?
-         AND source_provider = 'alpaca'
-         AND ticker IN (${placeholders})
-         AND date <= ?
-       GROUP BY ticker`,
-    )
-      .bind(marketDataFeed(env), ...chunk, expectedAsOfDate)
-      .all<{ ticker: string; lastDate: string | null }>();
-    for (const row of rows.results ?? []) {
-      latestByTicker.set(row.ticker.toUpperCase(), row.lastDate ?? null);
-    }
+  for (const row of await loadMarketHistory(env, { tickers, endDate: expectedAsOfDate,
+    limitPerTicker: 1, feed: marketDataFeed(env), sourceProvider: "alpaca" })) {
+    latestByTicker.set(row.ticker.toUpperCase(), row.date);
   }
 
   let currentCount = 0;
@@ -510,22 +499,7 @@ async function loadOverviewFreshnessMissingTickers(
     .filter((row) => row.eligible && (!options.criticalOnly || row.critical));
   const tickers = candidates.map((row) => row.ticker);
   if (tickers.length === 0) return [];
-  const current = new Set<string>();
-  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
-    const placeholders = buildPlaceholders(chunk.length);
-    const rows = await getMarketDataDb(env).prepare(
-      `SELECT DISTINCT ticker
-       FROM alpaca_daily_bars
-       WHERE feed = ?
-         AND source_provider = 'alpaca'
-         AND ticker IN (${placeholders})
-         AND date = ?`,
-    )
-      .bind(marketDataFeed(env), ...chunk, expectedAsOfDate)
-      .all<{ ticker: string }>();
-    for (const row of rows.results ?? []) current.add(row.ticker.toUpperCase());
-  }
+  const current = await loadTickersWithBarOnDate(env, tickers, expectedAsOfDate);
   return tickers.filter((ticker) => !current.has(ticker.toUpperCase()));
 }
 
@@ -847,25 +821,8 @@ async function loadBarsForTickers(
   tickers: string[],
   asOfDate: string,
 ): Promise<Array<{ ticker: string; date: string; c: number; volume: number | null }>> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const rows: Array<{ ticker: string; date: string; c: number; volume: number | null }> = [];
-  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
-    if (chunk.length === 0) continue;
-    const placeholders = chunk.map(() => "?").join(", ");
-    const sql = `SELECT ticker, date, c, volume
-      FROM alpaca_daily_bars
-      WHERE feed = ?
-        AND source_provider = 'alpaca'
-        AND ticker IN (${placeholders})
-        AND date <= ?
-      ORDER BY ticker, date`;
-    const result = await getMarketDataDb(env).prepare(sql)
-      .bind(marketDataFeed(env), ...chunk, asOfDate)
-      .all<{ ticker: string; date: string; c: number; volume: number | null }>();
-    rows.push(...(result.results ?? []));
-  }
-  return rows;
+  return loadMarketHistory(env, { tickers, endDate: asOfDate,
+    feed: marketDataFeed(env), sourceProvider: "alpaca" });
 }
 
 async function loadOverviewSnapshotBarsForTickers(
@@ -873,52 +830,15 @@ async function loadOverviewSnapshotBarsForTickers(
   tickers: string[],
   asOfDate: string,
 ): Promise<Array<{ ticker: string; date: string; c: number }>> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const rows: Array<{ ticker: string; date: string; c: number }> = [];
   const startDate = toISODate(new Date(new Date(`${asOfDate}T00:00:00Z`).getTime() - OVERVIEW_SNAPSHOT_BAR_LOOKBACK_DAYS * 86400_000));
-  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
-    if (chunk.length === 0) continue;
-    const placeholders = chunk.map(() => "?").join(", ");
-    const result = await getMarketDataDb(env).prepare(
-      `SELECT ticker, date, c
-         FROM alpaca_daily_bars
-        WHERE feed = ?
-          AND source_provider = 'alpaca'
-          AND ticker IN (${placeholders})
-          AND date >= ?
-          AND date <= ?
-        ORDER BY ticker, date`,
-    )
-      .bind(marketDataFeed(env), ...chunk, startDate, asOfDate)
-      .all<{ ticker: string; date: string; c: number }>();
-    rows.push(...(result.results ?? []));
-  }
-  return rows;
+  return loadMarketHistory(env, { tickers, startDate, endDate: asOfDate,
+    feed: marketDataFeed(env), sourceProvider: "alpaca" });
 }
 
 async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
-  const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const out = new Set<string>();
-  for (let i = 0; i < unique.length; i += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + BAR_QUERY_TICKER_CHUNK_SIZE);
-    if (chunk.length === 0) continue;
-    const placeholders = chunk.map(() => "?").join(", ");
-    const result = await getMarketDataDb(env).prepare(
-      `SELECT DISTINCT ticker
-       FROM alpaca_daily_bars
-       WHERE feed = ?
-         AND source_provider = 'alpaca'
-         AND ticker IN (${placeholders})
-         AND date = ?`,
-    )
-      .bind(marketDataFeed(env), ...chunk, date)
-      .all<{ ticker: string }>();
-    for (const row of result.results ?? []) {
-      out.add(row.ticker.toUpperCase());
-    }
-  }
-  return out;
+  const rows = await loadMarketHistory(env, { tickers, startDate: date, endDate: date,
+    feed: marketDataFeed(env), sourceProvider: "alpaca" });
+  return new Set(rows.map((row) => row.ticker.toUpperCase()));
 }
 
 async function buildBreadthCoverageDiagnostics(
@@ -984,7 +904,9 @@ async function saveUniverseSourceStatus(
   } = {},
 ): Promise<void> {
   const errorText = errorMessage ? errorMessage.slice(0, 700) : null;
-  const previous = await loadUniverseSourceStatus(env, sourceKey).catch(() => null);
+  const previous = await loadUniverseSourceStatus(env, sourceKey).catch((error: unknown) => {
+    throw new Error(`universe-storage-failure: source status read failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
   const failureCount = status === "ok" ? 0 : Math.max(0, Number(previous?.failureCount ?? 0)) + 1;
   const retryMinutes = [15, 60, 360, 1_440][Math.min(3, Math.max(0, failureCount - 1))] ?? 1_440;
   const nextAttemptAt = status === "ok" ? null : new Date(Date.now() + retryMinutes * 60_000).toISOString();
@@ -1050,22 +972,18 @@ async function saveUniverseSourceStatus(
       errorText,
     ).run();
   } catch (error) {
-    console.error("universe source status write failed; cached membership remains usable", { sourceKey, error });
+    throw new Error(`universe-storage-failure: source status write failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
+export function isUniverseInfrastructureFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:\bD1\b|\bD1_|\bd1-|\beod-|\bSQLITE|database|no such (?:table|column)|quota|budget|capacity|universe-(?:storage|stage|promotion)-)/i.test(message);
+}
+
 function businessDaysAfter(sourceDate: string, now = new Date()): number {
-  const cursor = new Date(`${sourceDate}T00:00:00Z`);
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  if (!Number.isFinite(cursor.getTime())) return Number.POSITIVE_INFINITY;
-  let count = 0;
-  cursor.setUTCDate(cursor.getUTCDate() + 1);
-  while (cursor <= end && count <= 10) {
-    const weekday = cursor.getUTCDay();
-    if (weekday !== 0 && weekday !== 6) count += 1;
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return count;
+  if (!Number.isFinite(Date.parse(`${sourceDate}T00:00:00Z`))) return Number.POSITIVE_INFINITY;
+  return countUsMarketTradingSessionsAfter(sourceDate, latestUsMarketSessionAsOfDate(now));
 }
 
 async function ensureUniverseMembership(
@@ -1076,20 +994,27 @@ async function ensureUniverseMembership(
   source = "manual",
   metadata: Omit<UniverseFetchResult, "tickers"> = {},
 ): Promise<void> {
-  await stageAndPromoteUniverseVersion(env, {
-    universeId,
-    universeName,
-    source,
-    sourceType: metadata.sourceType,
-    sourceUrl: metadata.sourceUrl,
-    sourceAsOfDate: metadata.sourceAsOfDate ?? null,
-    sourceMemberCount: metadata.sourceMemberCount,
-    normalizedMemberCount: metadata.normalizedMemberCount,
-    unresolvedCount: metadata.unresolvedCount,
-    unresolvedTickers: metadata.unresolvedTickers,
-    tickers,
-    memberMetadata: metadata.memberMetadata,
-  });
+  try {
+    await stageAndPromoteUniverseVersion(env, {
+      universeId,
+      universeName,
+      source,
+      sourceType: metadata.sourceType,
+      sourceUrl: metadata.sourceUrl,
+      sourceAsOfDate: metadata.sourceAsOfDate ?? null,
+      sourceMemberCount: metadata.sourceMemberCount,
+      normalizedMemberCount: metadata.normalizedMemberCount,
+      unresolvedCount: metadata.unresolvedCount,
+      unresolvedTickers: metadata.unresolvedTickers,
+      tickers,
+      memberMetadata: metadata.memberMetadata,
+    });
+  } catch (error) {
+    // Only an explicit data-quality rejection is a source failure. Failed
+    // writes/admission must stop the run and resume the same staged version.
+    if (error instanceof Error && /^Rejected .* universe candidate:/.test(error.message)) throw error;
+    throw new Error(`universe-storage-failure: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 type UniverseFetchResult = {
@@ -1193,15 +1118,7 @@ async function syncUniverseFromSource(
             memberMetadata: fetchedResult.memberMetadata,
           };
       if (def.id === "sp500-core" && fetchedMetadata.sourceType === "bundled-fallback") {
-        const verifiedSourceDate = status?.lastVerifiedSourceDate ?? null;
-        const verifiedMs = verifiedSourceDate ? Date.parse(`${verifiedSourceDate}T00:00:00Z`) : Number.NaN;
-        const verifiedAgeDays = Number.isFinite(verifiedMs)
-          ? Math.floor((Date.now() - verifiedMs) / 86_400_000)
-          : Number.POSITIVE_INFINITY;
-        if (verifiedAgeDays < -1 || verifiedAgeDays > 7) {
-          throw new Error("Bundled S&P proxy is not eligible because no remotely verified membership exists within seven days");
-        }
-        fetchedMetadata.sourceAsOfDate = verifiedSourceDate;
+        throw new Error("Remote S&P verification failed; reuse the last verified membership rather than promoting the bundled list");
       }
       const fetched = dedupeTickers(fetchedTickers);
       if (fetched.length === 0) {
@@ -1213,10 +1130,8 @@ async function syncUniverseFromSource(
       if (fetchedMetadata.sourceAsOfDate) {
         const sourceDateMs = Date.parse(`${fetchedMetadata.sourceAsOfDate}T00:00:00Z`);
         const ageDays = Number.isFinite(sourceDateMs) ? Math.floor((Date.now() - sourceDateMs) / 86_400_000) : Number.POSITIVE_INFINITY;
-        const sourceAge = fetchedMetadata.sourceType === "public-common-stock-proxy"
-          ? businessDaysAfter(fetchedMetadata.sourceAsOfDate)
-          : ageDays;
-        if (ageDays < -1 || sourceAge > (def.maxSourceAgeDays ?? def.staleAfterDays)) {
+        const sourceAge = businessDaysAfter(fetchedMetadata.sourceAsOfDate);
+        if (ageDays < -1 || sourceAge > 5) {
           throw new Error(`${def.id} source date ${fetchedMetadata.sourceAsOfDate} is stale or invalid (${ageDays} days old)`);
         }
       }
@@ -1232,14 +1147,15 @@ async function syncUniverseFromSource(
         fetchedMetadata,
       );
     } catch (error) {
+      if (isUniverseInfrastructureFailure(error)) throw error;
       const message = error instanceof Error ? error.message : "constituent sync failed";
       console.error("breadth universe source sync failed", { universeId: def.id, error: message });
       await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message);
-      const cachedSourceAgeDays = universeSourceAgeDays(status?.sourceAsOfDate);
+      const cachedSourceAgeDays = status?.sourceAsOfDate ? businessDaysAfter(status.sourceAsOfDate) : Number.POSITIVE_INFINITY;
       const cachedMembershipUsable = existing.length > 0
         && !membershipIncomplete
         && cachedSourceAgeDays >= -1
-        && cachedSourceAgeDays <= (def.maxSourceAgeDays ?? def.staleAfterDays);
+        && cachedSourceAgeDays <= 5;
       if (!cachedMembershipUsable) {
         unavailable.push({
           id: def.id,
@@ -1279,12 +1195,13 @@ async function loadCachedBreadthUniverseMemberships(env: Env): Promise<BreadthUn
       unavailable.push({ id: universeId, name: universeId, reason: "No validated active membership version is stored." });
       continue;
     }
-    const sourceMs = version.sourceAsOfDate ? Date.parse(`${version.sourceAsOfDate}T00:00:00Z`) : Number.NaN;
+    const sourceKey = universeId === "overall-market-proxy" ? "universe:overall-market-core" : `universe:${universeId}`;
+    const verification = await loadUniverseSourceStatus(env, sourceKey);
+    const sourceAsOfDate = verification?.sourceAsOfDate ?? version.sourceAsOfDate;
+    const sourceMs = sourceAsOfDate ? Date.parse(`${sourceAsOfDate}T00:00:00Z`) : Number.NaN;
     const ageDays = Number.isFinite(sourceMs) ? Math.floor((Date.now() - sourceMs) / 86_400_000) : Number.POSITIVE_INFINITY;
-    const maxAgeDays = universeId === "russell2000-core" ? 14 : universeId === "sp500-core" ? 7 : 1;
-    const sourceAge = version.sourceType === "public-common-stock-proxy" && version.sourceAsOfDate
-      ? businessDaysAfter(version.sourceAsOfDate)
-      : ageDays;
+    const maxAgeDays = 5;
+    const sourceAge = sourceAsOfDate ? businessDaysAfter(sourceAsOfDate) : Number.POSITIVE_INFINITY;
     if (ageDays < -1 || sourceAge > maxAgeDays) {
       unavailable.push({
         id: universeId,
@@ -1375,7 +1292,8 @@ async function ensureBreadthUniverseMemberships(
         try {
           const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
           return await loadSp500Universe(allCommon, env);
-        } catch {
+        } catch (error) {
+          if (isUniverseInfrastructureFailure(error)) throw error;
           return await loadSp500Universe(undefined, env);
         }
       },
@@ -1392,9 +1310,9 @@ async function ensureBreadthUniverseMemberships(
       name: "Russell 2000",
       sourceLabel: RUSSELL2000_SOURCE_LABEL,
       sourceKey: "universe:russell2000-core",
-      staleAfterDays: 10,
-      refreshAfterDays: 10,
-      maxSourceAgeDays: 14,
+      staleAfterDays: 1,
+      refreshAfterDays: 1,
+      maxSourceAgeDays: 5,
       unavailableReason: "Russell 2000 constituent source fetch failed and no cached Russell 2000 membership is available",
       fetchTickers: async () => {
         const activeEquities = new Set((await loadNasdaqUniverseCache()).allActiveEquityTickers);
@@ -1425,20 +1343,7 @@ async function ensureBreadthUniverseMemberships(
     unavailable,
   );
 
-  if (!universeTickers.has(OVERALL_BREADTH_UNIVERSE_ID)) {
-    const unionTickers = dedupeTickers([...universeTickers.values()].flat());
-    if (unionTickers.length > 0) {
-      await ensureUniverseMembership(
-        env,
-        OVERALL_BREADTH_UNIVERSE_ID,
-        "Overall Market",
-        unionTickers,
-        "Union of available non-proxy universes",
-      );
-      universeTickers.set(OVERALL_BREADTH_UNIVERSE_ID, unionTickers);
-      sourceByUniverse.set(OVERALL_BREADTH_UNIVERSE_ID, "Union of available non-proxy universes + provider daily bars");
-    }
-  }
+  // A failed directory must not redefine Overall Market as an arbitrary union.
 
   for (const [universeId, tickers] of Array.from(universeTickers.entries())) {
     const active = await getMarketDataDb(env).prepare(
@@ -1466,6 +1371,7 @@ async function ensureBreadthUniverseMemberships(
     try {
       await ensureUniverseMembership(env, universeId, universeId, tickers, source);
     } catch (error) {
+      if (isUniverseInfrastructureFailure(error)) throw error;
       universeTickers.delete(universeId);
       sourceByUniverse.delete(universeId);
       unavailable.push({
@@ -1487,6 +1393,126 @@ async function ensureBreadthUniverseMemberships(
 
 export async function refreshBreadthUniverseMemberships(env: Env): Promise<BreadthUniverseState> {
   return await ensureBreadthUniverseMemberships(env, { refreshSources: true });
+}
+
+export type EodMembershipInput = {
+  universeId: string;
+  versionId: string;
+  source: string;
+  sourceType: string | null;
+  sourceUrl: string | null;
+  sourceAsOfDate: string | null;
+  verifiedAt: string | null;
+  members: string[];
+};
+
+/** Freeze historical membership, while using fresh verification separately from
+ * immutable version provenance. Never apply today's membership to a past date. */
+export async function loadEodMemberships(env: Env, targetSession: string): Promise<EodMembershipInput[]> {
+  const validEvidenceDate = (value: string | null | undefined): value is string => {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const timestamp = Date.parse(`${value}T00:00:00Z`);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0,10) === value && value <= targetSession;
+  };
+  const verifiedTime = (value: string | null | undefined): number | null => {
+    if (!value || !validEvidenceDate(value.slice(0,10))) return null;
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  };
+  const evidenceTime = (membership: Pick<EodMembershipInput,"verifiedAt" | "sourceAsOfDate">): number | null =>
+    verifiedTime(membership.verifiedAt) ?? (validEvidenceDate(membership.sourceAsOfDate)
+      ? Date.parse(`${membership.sourceAsOfDate}T00:00:00Z`) : null);
+  const versions = await getMarketDataDb(env).prepare(
+    `WITH eligible_versions AS (
+       SELECT v.*, ROW_NUMBER() OVER (PARTITION BY v.universe_id
+         ORDER BY COALESCE(v.promoted_at, v.created_at) DESC, v.id DESC) AS position
+         FROM universe_versions v
+        WHERE v.status IN ('active', 'superseded')
+          AND date(COALESCE(v.promoted_at, v.created_at)) <= ?
+     )
+     SELECT v.universe_id AS universeId, v.id AS versionId, v.source,
+            v.source_type AS sourceType, v.source_url AS sourceUrl,
+            v.source_as_of_date AS sourceAsOfDate, u.active_version_id AS activeVersionId,
+            m.ticker
+       FROM eligible_versions v JOIN universes u ON u.id = v.universe_id
+       JOIN universe_version_members m ON m.version_id = v.id
+      WHERE v.position = 1 AND v.universe_id IN (SELECT value FROM json_each(?))
+      ORDER BY v.universe_id, m.ticker`,
+  ).bind(targetSession, JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null }>();
+  const sourceRows = await getOpsDb(env).prepare(
+    `SELECT source_key AS sourceKey, source_label AS source, source_type AS sourceType,
+            source_url AS sourceUrl, source_as_of_date AS sourceAsOfDate,
+            last_verified_at AS verifiedAt
+       FROM universe_source_sync_state`,
+  ).all<{ sourceKey: string; source: string; sourceType: string | null; sourceUrl: string | null; sourceAsOfDate: string | null; verifiedAt: string | null }>();
+  const sources = new Map((sourceRows.results ?? []).map((source) => [source.sourceKey, source]));
+  const memberships = new Map<string, EodMembershipInput>();
+  for (const row of versions.results ?? []) {
+    let membership = memberships.get(row.universeId);
+    if (!membership) {
+      const sourceKey = row.universeId === "overall-market-proxy" ? "universe:overall-market-core" : `universe:${row.universeId}`;
+      const currentSource = sources.get(sourceKey);
+      const canUseVerification = row.versionId === row.activeVersionId
+        && validEvidenceDate(currentSource?.sourceAsOfDate)
+        && verifiedTime(currentSource?.verifiedAt) !== null;
+      membership = {
+        universeId: row.universeId, versionId: row.versionId,
+        source: canUseVerification ? currentSource.source : row.source,
+        sourceType: canUseVerification ? currentSource.sourceType : row.sourceType,
+        sourceUrl: canUseVerification ? currentSource.sourceUrl : row.sourceUrl,
+        sourceAsOfDate: canUseVerification ? currentSource.sourceAsOfDate : row.sourceAsOfDate,
+        verifiedAt: canUseVerification ? currentSource.verifiedAt : null,
+        members: [],
+      };
+      memberships.set(row.universeId, membership);
+    }
+    membership.members.push(row.ticker);
+  }
+  for (const membership of memberships.values()) {
+    const currentEvidenceTime=evidenceTime(membership);
+    if (currentEvidenceTime!==null
+      && countUsMarketTradingSessionsAfter(new Date(currentEvidenceTime).toISOString().slice(0,10),targetSession) <= 5) continue;
+    // Unchanged membership versions may span months. Recover the contemporaneous
+    // verification saved in an accepted historical publication, never today's
+    // source verification or today's constituent list.
+    const evidence = await getMarketDataDb(env).prepare(`SELECT payload_json AS payload,payload_checksum AS payloadChecksum,
+      payload_codec AS payloadCodec,payload_base64 AS payloadBase64
+      FROM eod_publications WHERE scope=? AND status='accepted' AND session_date<=?
+      AND json_extract(payload_json,'$.membership.versionId')=?
+      ORDER BY session_date DESC,revision DESC LIMIT 1`)
+      .bind(`breadth:${membership.universeId}`,targetSession,membership.versionId)
+      .all<EodStoredPayload & {payloadChecksum:string|null}>();
+    const stored=evidence.results[0];
+    if (!stored?.payloadChecksum) continue;
+    let payload: {membership?:Partial<EodMembershipInput>};
+    try { payload=await decodeEodPayload(stored) as {membership?:Partial<EodMembershipInput>}; } catch { continue; }
+    if (await eodHash(payload) !== stored.payloadChecksum) continue;
+    const proof=payload?.membership;
+    if (!proof || proof.versionId!==membership.versionId || typeof proof.source!=="string"
+      || !validEvidenceDate(proof.sourceAsOfDate) || proof.sourceType==="bundled-fallback"
+      || ![proof.sourceType,proof.sourceUrl,proof.verifiedAt].every((value) => value==null || typeof value==="string")
+      || (proof.verifiedAt!=null && verifiedTime(proof.verifiedAt)===null)) continue;
+    const recoveredEvidenceTime=evidenceTime({verifiedAt:proof.verifiedAt ?? null,sourceAsOfDate:proof.sourceAsOfDate});
+    // Recovery fills missing/expired evidence; it must never age an unchanged
+    // list by replacing a later verification with an older frozen publication.
+    if (recoveredEvidenceTime===null || (currentEvidenceTime!==null && recoveredEvidenceTime<=currentEvidenceTime)) continue;
+    // The immutable version is the source of constituents. Older publications
+    // also embedded members; validate that redundant copy when present.
+    if (proof.members !== undefined) {
+      if (!Array.isArray(proof.members)) continue;
+      const proofMembers=new Set(proof.members);
+      if (proof.members.length!==membership.members.length || proofMembers.size!==membership.members.length
+        || !membership.members.every((ticker) => proofMembers.has(ticker))) continue;
+    }
+    membership.source=proof.source;
+    membership.sourceType=proof.sourceType ?? null;
+    membership.sourceUrl=proof.sourceUrl ?? null;
+    membership.sourceAsOfDate=proof.sourceAsOfDate;
+    membership.verifiedAt=proof.verifiedAt ?? null;
+  }
+  return Array.from(memberships.values()).filter((membership) => validateUniverseCandidate({
+    universeId: membership.universeId, tickers: membership.members,
+  }).valid);
 }
 
 type SnapshotComputeOptions = {
@@ -3025,8 +3051,13 @@ export async function loadSnapshot(
   requestedDate?: string,
   options: LoadSnapshotOptions = {},
 ): Promise<SnapshotResponse> {
+  const eodReadsEnabled = env.EOD_READ_ENABLED === "true";
+  if (eodReadsEnabled) {
+    const publication = await loadEodOverview(env, configId, requestedDate);
+    if (publication) return publication;
+  }
   const config = await loadConfig(env, configId);
-  const allowComputeOnMissing = options.allowComputeOnMissing ?? true;
+  const allowComputeOnMissing = !eodReadsEnabled && (options.allowComputeOnMissing ?? true);
   const latestAllowedAsOfDate = latestUsMarketSessionAsOfDate(new Date());
   const meta = await loadSnapshotMeta(env, configId, latestAllowedAsOfDate, requestedDate);
 
@@ -3134,10 +3165,12 @@ export async function loadSnapshot(
   let freshnessWarning = derivedMetricsUnavailable
     ? appendFreshnessWarning(freshness?.warning ?? null, MISSING_OVERVIEW_DERIVED_METRICS_WARNING)
     : freshness?.warning ?? null;
+  if (eodReadsEnabled) freshnessWarning = appendFreshnessWarning(freshnessWarning,
+    "Unverified legacy snapshot: this overview has not received its first immutable EOD publication.");
   const snapshotMatchesExpectedSession = meta.asOfDate === expectedAsOfDate;
   const servingState = !snapshotMatchesExpectedSession
     ? "stale_fallback" as const
-    : meta.publicationQuality === "degraded"
+    : meta.publicationQuality === "degraded" || eodReadsEnabled
       ? "degraded" as const
       : "ready" as const;
   const staleTradingSessions = countUsMarketTradingSessionsAfter(meta.asOfDate, expectedAsOfDate);
@@ -3155,7 +3188,7 @@ export async function loadSnapshot(
     expectedAsOfDate,
     servingState,
     staleTradingSessions,
-    freshnessStatus: snapshotMatchesExpectedSession ? freshness?.status ?? "stale" : "stale",
+    freshnessStatus: snapshotMatchesExpectedSession && !eodReadsEnabled ? freshness?.status ?? "stale" : "stale",
     freshnessCoveragePct: freshness?.coveragePct ?? 0,
     freshnessCurrentCount: freshness?.currentCount ?? 0,
     freshnessEligibleCount: freshness?.eligibleCount ?? 0,

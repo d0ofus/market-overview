@@ -223,7 +223,7 @@ describe("market commentary API", () => {
     expect(response.status).toBe(401);
   });
 
-  it("stores and returns an isolated failed report when provider config is missing", async () => {
+  it("stores and returns a factual report when the free AI key is missing", async () => {
     const db = new FakeMarketCommentaryDb({ snapshotAvailable: true });
     const response = await worker.fetch(
       new Request("https://example.com/api/admin/market-commentary/refresh", {
@@ -235,10 +235,10 @@ describe("market commentary API", () => {
     );
     expect(response.status).toBe(200);
     const payload = await response.json() as { ok: boolean; status: string; report: { status: string; error: string | null } };
-    expect(payload.ok).toBe(false);
-    expect(payload.status).toBe("failed");
-    expect(payload.report.status).toBe("failed");
-    expect(payload.report.error).toContain("GEMINI_API_KEY");
+    expect(payload.ok).toBe(true);
+    expect(payload.status).toBe("ready");
+    expect(payload.report.status).toBe("ready");
+    expect(payload.report.error).toContain("Free AI enrichment");
     expect(db.rows).toHaveLength(1);
   });
 });

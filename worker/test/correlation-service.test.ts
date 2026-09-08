@@ -10,6 +10,7 @@ import {
 import * as providerModule from "../src/provider";
 import { latestUsSessionAsOfDate } from "../src/refresh-timing";
 import * as symbolResolverModule from "../src/symbol-resolver";
+import { encodeMarketHistoryBlock, type MarketHistoryBar } from "../src/market-history";
 import type { Env } from "../src/types";
 
 type BarRow = {
@@ -151,6 +152,30 @@ afterEach(() => {
 });
 
 describe("correlation service", () => {
+  it("preserves the full 5Y matrix after only 260 recent closes remain hot", async () => {
+    const dates = buildRecentDates(1_300, latestUsSessionAsOfDate(new Date()));
+    const bars: MarketHistoryBar[] = ["AAA", "BBB"].flatMap((ticker, offset) => dates.map((date, index) => {
+      const close = 100 + index * 0.04 + Math.sin(index / (9 + offset));
+      return { ticker, date, o: close, h: close + 1, l: close - 1, c: close, volume: 1000,
+        reportedVolume: null, feed: "iex", sourceProvider: "alpaca", adjustment: "split",
+        observedAt: null, fetchedAt: null };
+    }));
+    const symbols = ["AAA", "BBB"].map((ticker) => ({ ticker, displayName: ticker }));
+    const hot = bars.filter((row) => row.date >= dates.at(-260)!);
+    const old = bars.filter((row) => row.date < dates.at(-260)!);
+    const keys = new Set(old.map((row) => `${row.ticker}:${row.date.slice(0, 4)}`));
+    const blocks = await Promise.all(Array.from(keys, (key) => encodeMarketHistoryBlock(old.filter((row) => `${row.ticker}:${row.date.slice(0, 4)}` === key))));
+    const archive = { prepare() {
+      const statement = { bind: (..._args: unknown[]) => statement,
+        all: async () => ({ results: blocks.map((block) => ({ ...block, verifiedAt: "2026-09-08" })) }) };
+      return statement;
+    } } as unknown as D1Database;
+    const expected = await loadCorrelationMatrix(createCorrelationEnv(symbols, bars), ["AAA", "BBB"], "5Y");
+    const actual = await loadCorrelationMatrix({ ...createCorrelationEnv(symbols, hot), MARKET_HISTORY_DB: archive }, ["AAA", "BBB"], "5Y");
+    expect({ ...actual, generatedAt: expected.generatedAt }).toEqual(expected);
+    expect(actual.resolvedTickers.every((row) => row.barCount === 1_261)).toBe(true);
+  });
+
   it("computes Pearson correlation for positive and negative relationships", () => {
     expect(pearsonCorrelation([1, 2, 3], [2, 4, 6])).toBeCloseTo(1);
     expect(pearsonCorrelation([1, 2, 3], [6, 4, 2])).toBeCloseTo(-1);

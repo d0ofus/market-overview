@@ -88,6 +88,7 @@ function sessionLabel(value: string | undefined): string {
 
 function weeklyProviderLabel(report: WeeklyMarketReviewResponse["report"]): string {
   if (!report) return "Not generated";
+  if (report.provider === "factual") return "Factual report (no AI interpretation)";
   return report.generationProvider === "hermes_gpt" ? "Hermes / GPT-5.5" : "Gemini fallback";
 }
 
@@ -183,6 +184,12 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   const [weeklyCachedLoading, setWeeklyCachedLoading] = useState(false);
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [reloadVersion, setReloadVersion] = useState(0);
+  useEffect(() => {
+    const reload = () => setReloadVersion((value) => value + 1);
+    window.addEventListener("market-data-updated", reload);
+    return () => window.removeEventListener("market-data-updated", reload);
+  }, []);
   const messageTimerRef = useRef<number | null>(null);
   const cachedLoadControllerRef = useRef<AbortController | null>(null);
   const cachedLoadRequestRef = useRef(0);
@@ -212,7 +219,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
     activeLoading && !hasReport
       ? "Loading"
       : activeStatus === "ready"
-        ? "Ready"
+        ? report?.provider === "factual" ? "Factual ? AI unavailable" : "Ready"
         : activeStatus === "failed"
           ? "Needs attention"
           : "Not generated";
@@ -233,7 +240,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
       : commentary.warning ?? "No market commentary has been generated yet. The rest of Overview is still using the existing market data workflow."
     : weeklyCachedLoading
       ? "Loading weekly market review. Daily commentary is still available."
-      : weeklyReview.warning ?? "No weekly market review has been generated for the latest completed week yet. It should appear automatically after the weekly schedule. If it is missing, use Generate Weekly Review to run the Gemini fallback.";
+      : weeklyReview.warning ?? "No weekly market review has been generated for the latest completed week yet. It should appear automatically after the weekly schedule. If it is missing, use Generate Weekly Review to generate a factual report with optional free AI enrichment.";
 
   useEffect(() => {
     return () => {
@@ -244,7 +251,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   }, []);
 
   useEffect(() => {
-    if (initial) {
+    if (initial && reloadVersion === 0) {
       setCommentary(initial);
       setCachedLoading(false);
       return;
@@ -285,10 +292,10 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
       if (cachedLoadControllerRef.current === controller) cachedLoadControllerRef.current = null;
       window.clearTimeout(timeout);
     };
-  }, [initial]);
+  }, [initial, reloadVersion]);
 
   useEffect(() => {
-    if (mode !== "weekly" || weeklyReview.report || weeklyReview.warning) return;
+    if (mode !== "weekly") return;
 
     const requestId = weeklyLoadRequestRef.current + 1;
     weeklyLoadRequestRef.current = requestId;
@@ -325,7 +332,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
       if (weeklyLoadControllerRef.current === controller) weeklyLoadControllerRef.current = null;
       window.clearTimeout(timeout);
     };
-  }, [mode, weeklyReview.report, weeklyReview.warning]);
+  }, [mode, reloadVersion]);
 
   function showMessage(value: string) {
     setMessage(value);
@@ -390,7 +397,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
                   {statusLabel}
                 </span>
                 <span className="rounded-full border border-borderSoft bg-panelSoft/80 px-2 py-0.5 text-xs text-text/70">
-                  {mode === "daily" ? sessionLabel(dailyReport?.marketSession) : weeklyProviderLabel(weeklyReport)}
+                  {mode === "daily" ? dailyReport?.provider === "factual" ? "Factual report" : sessionLabel(dailyReport?.marketSession) : weeklyProviderLabel(weeklyReport)}
                 </span>
                 {!(activeLoading && !hasReport) && (
                   <span className={`rounded-full border px-2 py-0.5 text-xs ${freshnessBadgeClass(commentaryFreshness.tone)}`}>

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import {
   loadSnapshotsForTickers,
@@ -63,6 +63,10 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe("options service", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-03T12:00:00Z"));
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();

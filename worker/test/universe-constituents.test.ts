@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractIsharesHoldingsCsvUrl,
   parseIsharesHoldingsCsv,
@@ -7,7 +7,11 @@ import {
   parseNasdaqTradedCommonStocks,
   parseNasdaqTraderFileCreationDate,
   parseSp500Csv,
+  loadSp500Universe,
+  loadRussell2000Universe,
 } from "../src/universe-constituents";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("universe constituent parsers", () => {
   it("applies NasdaqTrader common-stock filters", () => {
@@ -43,7 +47,7 @@ describe("universe constituent parsers", () => {
       "File Creation Time: 0304202618:00",
     ].join("\n");
 
-    expect(parseNasdaqTradedCommonStocks(sample)).toEqual([]);
+    expect(parseNasdaqTradedCommonStocks(sample).map((row) => row.symbol)).toEqual(["CLDT"]);
     expect(parseNasdaqTradedActiveEquities(sample).map((row) => row.symbol)).toEqual(["CLDT"]);
   });
 
@@ -57,6 +61,48 @@ describe("universe constituent parsers", () => {
 
     const symbols = parseSp500Csv(csv);
     expect(symbols).toEqual(["AAPL", "BF.B", "BRK.B"]);
+  });
+
+  it("retains class shares and beneficial-interest common shares without retaining warrants", () => {
+    const sample = [
+      "Nasdaq Traded|Symbol|Security Name|Listing Exchange|Market Category|ETF|Round Lot Size|Test Issue|Financial Status|CQS Symbol|NASDAQ Symbol|NextShares",
+      "Y|BRK.B|Berkshire Hathaway Class B Common Stock|N||N|100|N||BRK.B|BRK.B|N",
+      "Y|CLDT|Chatham Lodging Trust Common Shares of Beneficial Interest|N||N|100|N||CLDT|CLDT|N",
+      "Y|ABCD.W|ABCD Warrant|Q||N|100|N||ABCD.W|ABCD.W|N",
+      "File Creation Time: 0908202618:00",
+    ].join("\n");
+    expect(parseNasdaqTradedCommonStocks(sample).map((row) => row.symbol)).toEqual(["BRK.B", "CLDT"]);
+  });
+
+  it("does not remove S&P constituents missing from a secondary directory", async () => {
+    const tickers = ["BRK.B", "BF.B", ...Array.from({ length: 498 }, (_, index) => `T${index}`)];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`Symbol,Security\n${tickers.map((ticker) => `${ticker},Company`).join("\n")}`)));
+    const result = await loadSp500Universe(new Set(tickers.slice(2)));
+    expect(result.tickers).toHaveLength(500);
+    expect(result.tickers).toContain("BRK.B");
+    expect(result.tickers).toContain("BF.B");
+  });
+
+  it("discovers an alternate IWM export after an HTTP200 malformed primary payload", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("<html>Temporarily unavailable</html>"))
+      .mockResolvedValueOnce(new Response('<a href="/us/products/239710/alternate-holdings.csv">Holdings</a>'))
+      .mockResolvedValueOnce(new Response("iShares Russell 2000 ETF\nFund Holdings as of,Sep 04, 2026\nTicker,Name,Asset Class\nAAA,Company,Equity"));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await loadRussell2000Universe();
+    expect(result.tickers).toEqual(["AAA"]);
+    expect(result.sourceUrl).toContain("alternate-holdings.csv");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps valid IWM holdings absent from the secondary directory in the coverage population", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      "iShares Russell 2000 ETF\nFund Holdings as of,Sep 04, 2026\nTicker,Name,Asset Class\nAAA,Company,Equity\nBRK-B,Berkshire,Equity",
+    )));
+    const result = await loadRussell2000Universe(new Set(["BRK.B"]));
+    expect(result.tickers).toEqual(["AAA", "BRK.B"]);
+    expect(result.unresolvedTickers).toContain("AAA");
+    expect(result.memberMetadata.AAA?.sourceTicker).toBe("AAA");
   });
 
   it("parses the iShares IWM holdings export used as the Russell proxy", () => {

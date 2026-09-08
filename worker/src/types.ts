@@ -1,6 +1,34 @@
+/** A manual history request; omission resumes an existing saved request. */
+export type EodHistorySelection = {
+  historyTickers?: string[];
+  historySessions?: 520 | 1400;
+};
+
+export type EodStoredHistorySelection = {
+  historyTickers: string[] | null;
+  historySessions: 520 | 1400;
+};
+
+export type EodInputCorrectionStatus = {
+  inputRevision: number | null;
+  completedInputRevision: number | null;
+  /** Null means the input clock or a completed delivery record is unavailable. */
+  inputCorrectionsPending: boolean | null;
+};
+
 export type Env = {
   DB: D1Database;
   MARKET_DATA_DB?: D1Database;
+  MARKET_HISTORY_DB?: D1Database;
+  EOD_RUNNER_MODE?: "disabled" | "shadow" | "active";
+  EOD_READ_ENABLED?: string;
+  EOD_CODE_REVISION?: string;
+  EOD_ARCHIVE_PRUNE_ENABLED?: string;
+  EOD_RUNNER_SECRET?: string;
+  EOD_GITHUB_TOKEN?: string;
+  EOD_GITHUB_REPOSITORY?: string;
+  EOD_GITHUB_WORKFLOW?: string;
+  GEMINI_FREE_API_KEY?: string;
   OPS_DB?: D1Database;
   FUNDAMENTALS_DB?: D1Database;
   SCANNER_CACHE_DB?: D1Database;
@@ -169,7 +197,7 @@ export type OverviewCurrentDataResponse = {
     providerSymbol?: string | null;
     marketTimestamp?: string | null;
   }>;
-  fetchedAt: string;
+  fetchedAt: string | null;
   tradingViewSymbol: string | null;
   tradingViewTime: string | null;
   tradingViewLastBarUpdateTime: string | null;
@@ -335,8 +363,10 @@ export type SnapshotReadyResponse = {
         change21d: number | null;
         ytd: number | null;
         pctFrom52wHigh: number | null;
-        sparkline: number[] | null;
-        relativeStrength30dVsSpy: number[] | null;
+        sparkline: Array<number | null> | null;
+        sparklineDates?: string[];
+        relativeStrength30dVsSpy: Array<number | null> | null;
+        relativeStrength30dDates?: string[];
         above20Sma: boolean | null;
         above50Sma: boolean | null;
         above200Sma: boolean | null;

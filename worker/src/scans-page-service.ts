@@ -4,6 +4,8 @@ import { latestUsSessionAsOfDate, previousWeekdayIso } from "./refresh-timing";
 import { getUsMarketSessionContext, latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistoryOhlcv } from "./market-history";
+import { loadEodCatalogRows } from "./eod-catalog-service";
 import { getOpsDb } from "./ops-db";
 import { loadWorkerScheduleSettings } from "./worker-schedule-service";
 import { meteredFetchWithRetry } from "./provider-usage";
@@ -2836,6 +2838,7 @@ async function loadStoredDailyBarsInRange(
       .filter(Boolean),
   ));
   if (uniqueTickers.length === 0) return [];
+  if (env.MARKET_HISTORY_DB) return loadMarketHistoryOhlcv(env, { tickers: uniqueTickers, startDate, endDate });
   const out: RelativeStrengthDailyBar[] = [];
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
@@ -2868,7 +2871,7 @@ async function loadStoredDailyBarsInRange(
   return out;
 }
 
-async function loadDailyBarCoverage(
+export async function loadDailyBarCoverage(
   env: Env,
   tickers: string[],
   endDate: string,
@@ -2880,6 +2883,12 @@ async function loadDailyBarCoverage(
   ));
   const out = new Map<string, DailyBarCoverageRow>();
   if (uniqueTickers.length === 0) return out;
+  if (env.EOD_READ_ENABLED === "true") {
+    for (const [ticker, row] of await loadEodCatalogRows(env, uniqueTickers, endDate)) {
+      if (row.lastDate != null) out.set(ticker, { ticker, lastDate: row.lastDate, barCount: row.barCount });
+    }
+    return out;
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += RS_STORED_BAR_QUERY_CHUNK_SIZE) {
@@ -2918,6 +2927,7 @@ async function loadStoredDailyBarsByCount(
       .filter(Boolean),
   ));
   if (uniqueTickers.length === 0 || barLimit <= 0) return [];
+  if (env.MARKET_HISTORY_DB) return loadMarketHistoryOhlcv(env, { tickers: uniqueTickers, endDate, limitPerTicker: barLimit });
   const out: RelativeStrengthDailyBar[] = [];
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
@@ -3973,15 +3983,24 @@ export async function loadScheduledRelativeStrengthUniverseCandidates(
   const symbols = new Map<string, { name: string | null; sector: string | null; industry: string | null; exchange: string | null; assetClass: string | null; sharesOutstanding: number | null }>();
   const marketMetrics = new Map<string, { price: number | null; previousPrice: number | null; volume: number | null; avgVolume: number | null }>();
   const tickers = normalizedRows.map((row) => row.ticker);
-  for (let index = 0; index < tickers.length; index += 90) {
-    const chunk = tickers.slice(index, index + 90);
+  const metadataBatchSize = env.EOD_READ_ENABLED === "true" ? Math.max(1, tickers.length) : 90;
+  for (let index = 0; index < tickers.length; index += metadataBatchSize) {
+    const chunk = tickers.slice(index, index + metadataBatchSize);
     const symbolRows = await env.DB.prepare(
       `SELECT ticker, name, sector, industry, exchange, asset_class as assetClass, shares_outstanding as sharesOutstanding
-       FROM symbols WHERE ticker IN (${chunk.map(() => "?").join(",")})`,
-    ).bind(...chunk).all<{ ticker: string; name: string | null; sector: string | null; industry: string | null; exchange: string | null; assetClass: string | null; sharesOutstanding: number | null }>();
+       FROM symbols WHERE ticker IN (${env.EOD_READ_ENABLED === "true" ? "SELECT value FROM json_each(?)" : chunk.map(() => "?").join(",")})`,
+    ).bind(...(env.EOD_READ_ENABLED === "true" ? [JSON.stringify(chunk)] : chunk)).all<{ ticker: string; name: string | null; sector: string | null; industry: string | null; exchange: string | null; assetClass: string | null; sharesOutstanding: number | null }>();
     for (const symbol of symbolRows.results ?? []) {
       const ticker = normalizeTicker(symbol.ticker);
       if (ticker) symbols.set(ticker, symbol);
+    }
+    if (env.EOD_READ_ENABLED === "true") {
+      for (const [ticker, row] of await loadEodCatalogRows(env, chunk, expectedTradingDate)) {
+        marketMetrics.set(ticker, {
+          price: row.price, previousPrice: row.previousPrice, volume: row.volume, avgVolume: row.avgVolume30d,
+        });
+      }
+      continue;
     }
     const metricRows = await stateDb.prepare(
       `WITH ranked AS (

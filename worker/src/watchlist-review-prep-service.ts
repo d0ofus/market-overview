@@ -1,6 +1,7 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { getUsMarketSessionContext } from "./market-calendar";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistoryCoverage, loadMarketHistoryOhlcv } from "./market-history";
 import { getProvider } from "./provider";
 import type { Env } from "./types";
 
@@ -264,6 +265,12 @@ async function loadLatestBars(
   expectedAsOfDate: string,
 ): Promise<Map<string, { latestDate: string | null; barCount: number }>> {
   const latest = new Map<string, { latestDate: string | null; barCount: number }>();
+  if (env.MARKET_HISTORY_DB) {
+    for (const [ticker, coverage] of await loadMarketHistoryCoverage(env, { tickers, startDate, endDate: expectedAsOfDate })) {
+      latest.set(ticker, { latestDate: coverage.lastDate, barCount: coverage.barCount });
+    }
+    return latest;
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   for (const group of chunk(tickers)) {
@@ -485,6 +492,16 @@ async function loadOhlcvBars(
 ): Promise<Map<string, WatchlistReviewPrepBarsResponse["symbols"][number]["bars"]>> {
   const byTicker = new Map<string, WatchlistReviewPrepBarsResponse["symbols"][number]["bars"]>();
   const startDate = startDateForLookback(expectedAsOfDate, lookbackBars);
+  if (env.MARKET_HISTORY_DB) {
+    for (const bar of await loadMarketHistoryOhlcv(env, {
+      tickers, startDate, endDate: expectedAsOfDate, limitPerTicker: lookbackBars,
+    })) {
+      const current = byTicker.get(bar.ticker) ?? [];
+      current.push({ date: bar.date, o: bar.o, h: bar.h, l: bar.l, c: bar.c, volume: bar.volume });
+      byTicker.set(bar.ticker, current);
+    }
+    return byTicker;
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   for (const group of chunk(tickers)) {

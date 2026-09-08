@@ -53,8 +53,8 @@ export type OverviewFreshnessSection = {
       barDate?: string | null;
       barFreshnessStatus?: BarFreshnessStatus;
       quoteFreshnessStatus?: QuoteFreshnessStatus;
-      sparkline?: number[] | null;
-      relativeStrength30dVsSpy?: number[] | null;
+      sparkline?: Array<number | null> | null;
+      relativeStrength30dVsSpy?: Array<number | null> | null;
       currentData?: {
         status: "fresh" | "stale" | "unavailable" | "retrying";
         fieldSources: Record<string, string>;
@@ -237,6 +237,8 @@ export function deriveOverviewFreshnessSummary({
   const hasPointerStale = status.servingState === "stale_fallback";
   const hasProblems = !dashboardAvailable
     || missingFreshness
+    || status.servingState === "degraded"
+    || status.freshnessStatus === "stale"
     || hasPointerStale
     || hasRecoveryProblem
     || hasQuoteProblems

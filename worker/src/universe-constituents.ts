@@ -9,7 +9,7 @@ const IWM_PRODUCT_PAGE_URL = `${ISHARES_ORIGIN}/us/products/239710/ishares-russe
 const IWM_HOLDINGS_CSV_URL = `${IWM_PRODUCT_PAGE_URL}/latest-holdings.csv`;
 
 const SAFE_TICKER_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
-const BANNED_NAME_TERMS = ["warrant", "preferred", "interest", "acquisition", "leveraged"];
+const BANNED_NAME_TERMS = ["warrant", "preferred"];
 const BANNED_NAME_REGEXES = [
   /\bunits?\b/i,
   /\betfs?\b/i,
@@ -39,7 +39,7 @@ function looksLikeCommonStock(symbol: string, securityName: string, etfFlag: str
   if (!symbol || !securityName) return false;
   if (normalizeTicker(etfFlag) === "Y") return false;
   if (normalizeTicker(testIssueFlag) === "Y") return false;
-  if (symbol.includes(".") || symbol.includes("$")) return false;
+  if (symbol.includes("$")) return false;
   if (!SAFE_TICKER_RE.test(symbol)) return false;
 
   const name = securityName.toLowerCase();
@@ -418,17 +418,14 @@ export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: E
     const raw = response.raw;
     const parsed = parseSp500Csv(raw);
     if (parsed.length >= 450) {
-      let tickers = parsed;
-      if (allCommonUniverse && allCommonUniverse.size > 0) {
-        const intersected = parsed.filter((ticker) => allCommonUniverse.has(ticker));
-        if (intersected.length >= parsed.length - 5) tickers = intersected;
-      }
-      const lastModifiedMs = Date.parse(response.lastModified ?? "");
+      // An index member must not disappear because a second directory has a
+      // different common-share classification or punctuation convention.
+      const tickers = parsed;
       return {
         tickers,
-        sourceAsOfDate: Number.isFinite(lastModifiedMs)
-          ? new Date(lastModifiedMs).toISOString().slice(0, 10)
-          : new Date().toISOString().slice(0, 10),
+        // This proxy has no constituent effective-date field. This is the date
+        // its current contents were verified; Last-Modified remains separate.
+        sourceAsOfDate: new Date().toISOString().slice(0, 10),
         sourceType: "wikipedia-derived-public-proxy",
         sourceUrl: SP500_CSV_URL,
         contentHash: await sha256Text(raw),
@@ -469,6 +466,8 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, e
   let sourceUrl = IWM_HOLDINGS_CSV_URL;
   try {
     csvRaw = await fetchText(sourceUrl, env);
+    const primary = parseIsharesHoldingsCsvDetailed(csvRaw);
+    if (!primary.sourceAsOfDate || !primary.tickers.length) throw new Error("Primary IWM holdings payload is not a dated equity CSV");
   } catch (primaryError) {
     const productPage = await fetchText(IWM_PRODUCT_PAGE_URL, env);
     const discoveredUrl = extractIsharesHoldingsCsvUrl(productPage);
@@ -480,9 +479,9 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, e
   if (!parsed.sourceAsOfDate) {
     throw new Error("IWM holdings source date is missing or unparseable");
   }
-  if (parsed.blankTickerCount > 0 || parsed.duplicateTickerCount > 10) {
+  if (parsed.invalidSourceIdentifiers.length > 0 || parsed.blankTickerCount > 0 || parsed.duplicateTickerCount > 10) {
     throw new Error(
-      `IWM holdings contains invalid source rows (blank tickers: ${parsed.blankTickerCount}, duplicate tickers: ${parsed.duplicateTickerCount}; maximum duplicates: 10)`,
+      `IWM holdings contains invalid source rows (invalid identifiers: ${parsed.invalidSourceIdentifiers.length}, blank tickers: ${parsed.blankTickerCount}, duplicate tickers: ${parsed.duplicateTickerCount}; maximum duplicates: 10)`,
     );
   }
   let tickers = parsed.tickers;
@@ -513,12 +512,13 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, e
         resolved.push(aliases[0]!);
         sourceToProvider.set(sourceTicker, aliases[0]!);
       } else {
+        // A secondary symbol directory cannot remove a valid official holding
+        // from the coverage denominator. Keep its source identity for provider
+        // resolution; missing prices remain explicitly missing at publication.
+        resolved.push(sourceTicker);
+        sourceToProvider.set(sourceTicker, sourceTicker);
         unresolvedTickers.push(sourceTicker);
       }
-    }
-    const coveragePct = parsed.tickers.length > 0 ? (resolved.length / parsed.tickers.length) * 100 : 0;
-    if (coveragePct < 95) {
-      throw new Error(`IWM symbol resolution coverage ${coveragePct.toFixed(2)}% is below 95%`);
     }
     tickers = resolved;
   }

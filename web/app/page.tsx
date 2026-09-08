@@ -1,3 +1,4 @@
+import { EodPublicationMonitor } from "@/components/eod-publication-monitor";
 import { FloatingSectionNav } from "@/components/floating-section-nav";
 import { GroupPanel } from "@/components/group-panel";
 import { CurrentFocusPanel } from "@/components/current-focus-panel";
@@ -46,7 +47,7 @@ function overviewGroupLabel(title: string): string {
   if (title === "Thematic ETFs" || title.startsWith("Industry/Thematic ETFs")) {
     return "Industry/Thematic ETFs";
   }
-  return title;
+  return title.replace("US Index Futures", "US Index ETF Proxies").replace("Global Indices", "Global Equity ETF Proxies");
 }
 
 export default async function HomePage() {
@@ -69,11 +70,11 @@ export default async function HomePage() {
   const dashboardValue = dashboard?.status === "empty" ? null : dashboard;
   const statusValue = {
     timezone: dashboardValue?.config.timezone ?? "Australia/Melbourne",
-    autoRefreshLabel: dashboardValue?.config.eodRunTimeLabel ?? "08:15 Australia/Melbourne",
+    autoRefreshLabel: "Within 2 hours of US cash close (including early closes)",
     lastUpdated: dashboardValue?.generatedAt ?? null,
     asOfDate: dashboardValue?.asOfDate ?? null,
     providerLabel: dashboardValue?.providerLabel
-      ?? "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.",
+      ?? "Alpaca completed daily bars; Yahoo same-session fallback; source-labelled price returns.",
     expectedAsOfDate: dashboardValue?.expectedAsOfDate ?? null,
     servingState: dashboardValue?.servingState ?? ("unavailable" as const),
     staleTradingSessions: dashboardValue?.staleTradingSessions ?? 0,
@@ -152,6 +153,7 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-4">
+      <EodPublicationMonitor scope="overview" generationId={dashboardValue?.generationId} />
       <FloatingSectionNav
         items={jumpItems}
         showHeading={false}

@@ -269,7 +269,7 @@ function createFomcEnv(db: FakeFomcDb): Env {
   return {
     DB: db as unknown as D1Database,
     BRAVE_SEARCH_API_KEY: "brave-test-key",
-    GEMINI_API_KEY: "gemini-test-key",
+    GEMINI_FREE_API_KEY: "gemini-test-key",
   } as Env;
 }
 
@@ -318,6 +318,10 @@ function stubFomcFetches(officialText = LONG_OFFICIAL_TEXT) {
           groundingMetadata: { groundingChunks: [] },
         }],
       }), { status: 200 });
+    }
+    if (url.includes("fomccalendars.htm")) {
+      counts.official += 1;
+      return new Response(`<a href="${OFFICIAL_URL}">Minutes</a>`, { status: 200 });
     }
     if (url.includes("federalreserve.gov")) {
       counts.official += 1;
@@ -941,7 +945,7 @@ describe("FOMC commentary service helpers", () => {
     expect(db.rows[0]?.refreshAttemptCount).toBe(2);
   });
 
-  it("collects Brave context and regenerates when official source text changes", async () => {
+  it("regenerates from official text without paid search when the source changes", async () => {
     const db = new FakeFomcDb([createReadyFomcRow("old-hash")]);
     const counts = stubFomcFetches(`${LONG_OFFICIAL_TEXT} The Committee added a new sentence about balance sheet policy.`);
 
@@ -954,14 +958,14 @@ describe("FOMC commentary service helpers", () => {
 
     expect(result.ok).toBe(true);
     expect(counts.official).toBe(1);
-    expect(counts.brave).toBe(3);
+    expect(counts.brave).toBe(0);
     expect(counts.gemini).toBe(1);
     expect(db.rows[0]?.status).toBe("ready");
-    expect(db.rows[0]?.sourceMode).toBe("official_plus_brave");
+    expect(db.rows[0]?.sourceMode).toBe("official");
     expect(db.rows[0]?.refreshAttemptCount).toBe(1);
   });
 
-  it("can still use Brave discovery when no explicit source URL is known", async () => {
+  it("uses the official Federal Reserve calendar when no source URL is known", async () => {
     const db = new FakeFomcDb();
     const counts = stubFomcFetches();
 
@@ -972,8 +976,8 @@ describe("FOMC commentary service helpers", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(counts.brave).toBe(3);
-    expect(counts.official).toBe(1);
+    expect(counts.brave).toBe(0);
+    expect(counts.official).toBe(2);
     expect(counts.gemini).toBe(1);
     expect(db.rows[0]?.sourceUrl).toBe(OFFICIAL_URL);
   });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { Check, Plus, Pencil, Target, Trash2, X } from "lucide-react";
 import {
@@ -41,6 +41,8 @@ function buttonClass(tone: "quiet" | "accent" | "danger" = "quiet"): string {
 export function CurrentFocusPanel({ initialItems, initialHistory, configId = "default", anchorId }: Props) {
   const [items, setItems] = useState(initialItems);
   const [history, setHistory] = useState(initialHistory);
+  useEffect(() => setItems(initialItems), [initialItems]);
+  useEffect(() => setHistory(initialHistory), [initialHistory]);
   const [draft, setDraft] = useState("");
   const [selectedHistoryText, setSelectedHistoryText] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);

@@ -36,7 +36,7 @@ export type OverviewCurrentData = {
     providerSymbol?: string | null;
     marketTimestamp?: string | null;
   }>;
-  fetchedAt: string;
+  fetchedAt: string | null;
   tradingViewSymbol: string | null;
   tradingViewTime: string | null;
   tradingViewLastBarUpdateTime: string | null;
@@ -130,8 +130,10 @@ export type SnapshotReadyResponse = {
         change21d: number | null;
         ytd: number | null;
         pctFrom52wHigh: number | null;
-        sparkline: number[] | null;
-        relativeStrength30dVsSpy: number[] | null;
+        sparkline: Array<number | null> | null;
+        sparklineDates?: string[];
+        relativeStrength30dDates?: string[];
+        relativeStrength30dVsSpy: Array<number | null> | null;
         above20Sma: boolean | null;
         above50Sma: boolean | null;
         above200Sma: boolean | null;

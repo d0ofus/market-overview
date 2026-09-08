@@ -5,9 +5,17 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import { ChevronDown } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { HistogramSparkline } from "./histogram-sparkline";
+import { marketMetricValue as asNumber } from "@/lib/market-metric-value";
+import { alignMarketSessionRows } from "@/lib/market-series";
 
 type MetricCoverage = {
   eligibleCount: number;
+  eligiblePopulation?: number;
+  structurallyIneligibleCount?: number;
+  missingCount?: number;
+  lowerBound?: number | null;
+  upperBound?: number | null;
+  boundUnit?: "count" | "percent";
   coveragePct: number;
   thresholdPct: number;
   status: "ready" | "suppressed";
@@ -49,18 +57,24 @@ type BreadthMetrics = {
 type HistoricalRow = {
   asOfDate: string;
   universeId: string;
-  advancers: number;
-  decliners: number;
-  unchanged: number;
-  pctAbove20MA: number;
-  pctAbove50MA: number;
-  pctAbove200MA: number;
-  new20DHighs: number;
-  new20DLows: number;
-  medianReturn1D: number;
-  medianReturn5D: number;
+  advancers: number | null;
+  decliners: number | null;
+  unchanged: number | null;
+  pctAbove20MA: number | null;
+  pctAbove50MA: number | null;
+  pctAbove200MA: number | null;
+  new20DHighs: number | null;
+  new20DLows: number | null;
+  medianReturn1D: number | null;
+  medianReturn5D: number | null;
   metrics?: Record<string, unknown> | null;
   dataSource?: string | null;
+  volumeCollection?: {
+    earliest: string | null;
+    latest: string | null;
+    observedCount: number;
+    eligibleCount: number;
+  } | null;
   provenance?: {
     source?: string | null;
     sourceType?: string | null;
@@ -77,6 +91,15 @@ type HistoricalRow = {
 type SummaryRow = HistoricalRow & {
   universeName: string;
 };
+
+function volumeCollectionLabel(collection: HistoricalRow["volumeCollection"]): string {
+  const format = (value: string | null) => value && Number.isFinite(Date.parse(value))
+    ? new Date(value).toISOString().slice(0, 16).replace("T", " ") : null;
+  const earliest = format(collection?.earliest ?? null);
+  const latest = format(collection?.latest ?? null);
+  if (!collection || !earliest || !latest) return "Collection time unavailable";
+  return `Collected ${earliest === latest ? latest : `${earliest} to ${latest}`} UTC; ${collection.observedCount}/${collection.eligibleCount} eligible members timestamped`;
+}
 
 type SummaryPayload = {
   asOfDate: string | null;
@@ -99,11 +122,11 @@ const metricOptions = [
   { key: "pctAbove50MA", label: "% > 50MA", format: (value: number) => pct(value) },
   { key: "pctAbove100MA", label: "% > 100MA", format: (value: number) => pct(value) },
   { key: "pctAbove200MA", label: "% > 200MA", format: (value: number) => pct(value) },
-  { key: "new5DHighs", label: "New 5D Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
-  { key: "new1MHighs", label: "New 1M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
-  { key: "new3MHighs", label: "New 3M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
-  { key: "new6MHighs", label: "New 6M Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
-  { key: "new52WHighs", label: "New 52W Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new5DHighs", label: "5D Closing Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new1MHighs", label: "1M Closing Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new3MHighs", label: "3M Closing Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new6MHighs", label: "6M Closing Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
+  { key: "new52WHighs", label: "52W Closing Highs (#)", format: (value: number) => numFmt.format(Math.round(value)) },
   { key: "totalVolume", label: "Total Volume", format: (value: number) => numFmt.format(Math.round(value)) },
   { key: "medianReturn1D", label: "Median Return 1D (%)", format: (value: number) => `${value.toFixed(2)}%` },
   { key: "medianReturn5D", label: "Median Return 5D (%)", format: (value: number) => `${value.toFixed(2)}%` },
@@ -124,7 +147,7 @@ type HistoricalColumn = {
 
 type MetricTrendPoint = {
   asOfDate: string;
-  value: number;
+  value: number | null;
 };
 
 type MetricTrend = {
@@ -145,35 +168,30 @@ const numFmt = new Intl.NumberFormat("en-US");
 const metricSourceMap = [
   "Advancers/Decliners/Unchanged and A/D Ratio: computed from each member's latest 1D close change in the selected universe.",
   "Stocks Above 5/20/50/100/200 MA: computed from daily close vs simple moving average from stored daily bars.",
-  "New Highs (5D/1M/3M/6M/52W): computed from rolling high windows on stored daily closes; percentages are count / universe members.",
+  "Closing Highs (5D/1M/3M/6M/52W): computed from rolling daily-close windows. Percentages use observed eligible members. Brackets show possible bounds from missing eligible members; verified IPO short histories are structurally ineligible. A new closing high may differ from a traded intraday high.",
   "Total Volume: sum of latest daily volume across universe members from daily bars.",
   "Other Breadth Indicators (>+4%, <-4%, >+25% quarter, <-25% quarter): computed from 1D and ~63-trading-day returns.",
 ];
 
-function asNumber(value: unknown, fallback = 0): number {
-  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  if (Number.isFinite(parsed)) return parsed;
-  const fallbackParsed = typeof fallback === "number" ? fallback : Number(fallback);
-  return Number.isFinite(fallbackParsed) ? fallbackParsed : 0;
-}
-
 function asNullableNumber(value: unknown): number | null {
-  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  const parsed = asNumber(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 function colorForPercent(value: number, threshold = 0): string {
+  if (!Number.isFinite(value)) return neutral;
   return value >= threshold ? positive : negative;
 }
 
-function colorVsPrevious(current: number, previous: number | null | undefined): string {
-  if (previous == null || !Number.isFinite(previous)) return neutral;
+function colorVsPrevious(current: number | null | undefined, previous: number | null | undefined): string {
+  if (typeof current !== "number" || !Number.isFinite(current) || previous == null || !Number.isFinite(previous)) return neutral;
   if (current > previous) return positive;
   if (current < previous) return negative;
   return neutral;
 }
 
 function pct(value: number): string {
+  if (!Number.isFinite(value)) return "N/A";
   return `${value.toFixed(1)}%`;
 }
 
@@ -183,11 +201,17 @@ function normalizeMetricCoverage(value: unknown): Record<string, MetricCoverage>
     Object.entries(value as Record<string, unknown>).flatMap(([key, raw]) => {
       if (!raw || typeof raw !== "object") return [];
       const item = raw as Record<string, unknown>;
-      const status = item.status === "suppressed" ? "suppressed" : "ready";
+      const status = item.status === "ready" ? "ready" : "suppressed";
       return [[key, {
-        eligibleCount: asNumber(item.eligibleCount, 0),
-        coveragePct: asNumber(item.coveragePct, 0),
-        thresholdPct: asNumber(item.thresholdPct, 95),
+        eligibleCount: asNumber(item.eligibleCount),
+        eligiblePopulation: asNullableNumber(item.eligiblePopulation) ?? undefined,
+        structurallyIneligibleCount: asNullableNumber(item.structurallyIneligibleCount) ?? undefined,
+        missingCount: asNullableNumber(item.missingCount) ?? undefined,
+        lowerBound: asNullableNumber(item.lowerBound),
+        upperBound: asNullableNumber(item.upperBound),
+        boundUnit: item.boundUnit === "count" || item.boundUnit === "percent" ? item.boundUnit : undefined,
+        coveragePct: asNumber(item.coveragePct),
+        thresholdPct: asNumber(item.thresholdPct),
         status,
       } satisfies MetricCoverage]];
     }),
@@ -195,28 +219,30 @@ function normalizeMetricCoverage(value: unknown): Record<string, MetricCoverage>
 }
 
 function metricIsReady(metrics: BreadthMetrics, key: string): boolean {
-  return metrics.metricCoverage[key]?.status !== "suppressed";
+  return metrics.metricCoverage[key]?.status !== "suppressed" && !Number.isNaN((metrics as unknown as Record<string, unknown>)[key]);
 }
 
 function coveredText(metrics: BreadthMetrics, key: string, text: string): string {
   const quality = metrics.metricCoverage[key];
-  return metricIsReady(metrics, key) ? text : `N/A (${quality?.coveragePct.toFixed(1) ?? "0.0"}% coverage)`;
+  if (text.includes("NaN")) text = "N/A";
+  const bounds = quality?.lowerBound != null && quality.upperBound != null && quality.lowerBound !== quality.upperBound
+    ? ` [${quality.lowerBound.toFixed(quality.boundUnit === "percent" ? 1 : 0)} to ${quality.upperBound.toFixed(quality.boundUnit === "percent" ? 1 : 0)}${quality.boundUnit === "percent" ? "%" : ""}]` : "";
+  return metricIsReady(metrics, key) ? `${text}${bounds}` : `N/A (${quality && Number.isFinite(quality.coveragePct) ? `${quality.coveragePct.toFixed(1)}%` : "unknown"} coverage)${bounds}`;
 }
 
 function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
   const m = (row.metrics ?? {}) as Record<string, unknown>;
-  const memberCount = asNumber(m.memberCount, row.advancers + row.decliners + row.unchanged);
+  const memberCount = asNumber(m.memberCount, asNumber(row.advancers) + asNumber(row.decliners) + asNumber(row.unchanged));
   const totalUniverseMembers = asNumber(m.totalUniverseMembers, memberCount);
-  const dataCoveragePct = asNumber(m.dataCoveragePct, totalUniverseMembers > 0 ? (memberCount / totalUniverseMembers) * 100 : 0);
+  const dataCoveragePct = asNumber(m.dataCoveragePct, totalUniverseMembers > 0 ? (memberCount / totalUniverseMembers) * 100 : Number.NaN);
   const advancers = asNumber(m.advancers, row.advancers);
   const decliners = asNumber(m.decliners, row.decliners);
   const unchanged = asNumber(m.unchanged, row.unchanged);
-  const high5 = asNumber(m.new5DHighs, row.new20DHighs);
+  const high5 = asNumber(m.new5DHighs);
   const high1m = asNumber(m.new1MHighs, row.new20DHighs);
-  const high3m = asNumber(m.new3MHighs, row.new20DHighs);
-  const high6m = asNumber(m.new6MHighs, row.new20DHighs);
-  const high52w = asNumber(m.new52WHighs, row.new20DHighs);
-  const toPct = (count: number) => (memberCount > 0 ? (count / memberCount) * 100 : 0);
+  const high3m = asNumber(m.new3MHighs);
+  const high6m = asNumber(m.new6MHighs);
+  const high52w = asNumber(m.new52WHighs);
   return {
     memberCount,
     totalUniverseMembers,
@@ -225,27 +251,27 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
     advancers,
     decliners,
     unchanged,
-    advDecRatio: asNullableNumber(m.advDecRatio) ?? (decliners > 0 ? advancers / decliners : advancers > 0 ? null : 0),
-    totalVolume: asNumber(m.totalVolume, 0),
-    pctAbove5MA: asNumber(m.pctAbove5MA, row.pctAbove20MA),
+    advDecRatio: asNullableNumber(m.advDecRatio) ?? (decliners > 0 ? advancers / decliners : advancers > 0 ? null : null),
+    totalVolume: asNumber(m.totalVolume),
+    pctAbove5MA: asNumber(m.pctAbove5MA),
     pctAbove20MA: asNumber(m.pctAbove20MA, row.pctAbove20MA),
     pctAbove50MA: asNumber(m.pctAbove50MA, row.pctAbove50MA),
-    pctAbove100MA: asNumber(m.pctAbove100MA, row.pctAbove50MA),
+    pctAbove100MA: asNumber(m.pctAbove100MA),
     pctAbove200MA: asNumber(m.pctAbove200MA, row.pctAbove200MA),
     new5DHighs: high5,
     new1MHighs: high1m,
     new3MHighs: high3m,
     new6MHighs: high6m,
     new52WHighs: high52w,
-    pctNew5DHighs: asNumber(m.pctNew5DHighs, toPct(high5)),
-    pctNew1MHighs: asNumber(m.pctNew1MHighs, toPct(high1m)),
-    pctNew3MHighs: asNumber(m.pctNew3MHighs, toPct(high3m)),
-    pctNew6MHighs: asNumber(m.pctNew6MHighs, toPct(high6m)),
-    pctNew52WHighs: asNumber(m.pctNew52WHighs, toPct(high52w)),
-    stocksGtPos4Pct: asNumber(m.stocksGtPos4Pct, 0),
-    stocksLtNeg4Pct: asNumber(m.stocksLtNeg4Pct, 0),
-    stocksGtPos25Q: asNumber(m.stocksGtPos25Q, 0),
-    stocksLtNeg25Q: asNumber(m.stocksLtNeg25Q, 0),
+    pctNew5DHighs: asNumber(m.pctNew5DHighs),
+    pctNew1MHighs: asNumber(m.pctNew1MHighs),
+    pctNew3MHighs: asNumber(m.pctNew3MHighs),
+    pctNew6MHighs: asNumber(m.pctNew6MHighs),
+    pctNew52WHighs: asNumber(m.pctNew52WHighs),
+    stocksGtPos4Pct: asNumber(m.stocksGtPos4Pct),
+    stocksLtNeg4Pct: asNumber(m.stocksLtNeg4Pct),
+    stocksGtPos25Q: asNumber(m.stocksGtPos25Q),
+    stocksLtNeg25Q: asNumber(m.stocksLtNeg25Q),
     medianReturn1D: asNumber(m.medianReturn1D, row.medianReturn1D),
     medianReturn5D: asNumber(m.medianReturn5D, row.medianReturn5D),
   };
@@ -254,15 +280,16 @@ function normalizeMetrics(row: HistoricalRow | SummaryRow): BreadthMetrics {
 function metricValue(metrics: BreadthMetrics, key: MetricKey): number {
   if (!metricIsReady(metrics, key)) return Number.NaN;
   const value = metrics[key];
-  return typeof value === "number" ? value : 0;
+  return typeof value === "number" ? value : Number.NaN;
 }
 
 function ratioText(value: number | null): string {
-  if (value === null) return "N/A";
+  if (value === null || !Number.isFinite(value)) return "N/A";
   return value.toFixed(2);
 }
 
 function highCell(count: number, pctValue: number): string {
+  if (!Number.isFinite(count) || !Number.isFinite(pctValue)) return "N/A";
   return `${count} (${pctValue.toFixed(1)}%)`;
 }
 
@@ -300,11 +327,11 @@ const historicalColumns: HistoricalColumn[] = [
   { key: "pctAbove50MA", label: "%>50", trendable: true, getMetricValue: (metrics) => metrics.pctAbove50MA, formatValue: formatPercentValue },
   { key: "pctAbove100MA", label: "%>100", trendable: true, getMetricValue: (metrics) => metrics.pctAbove100MA, formatValue: formatPercentValue },
   { key: "pctAbove200MA", label: "%>200", trendable: true, getMetricValue: (metrics) => metrics.pctAbove200MA, formatValue: formatPercentValue },
-  { key: "new5DHighs", label: "5D Highs", trendable: true, getMetricValue: (metrics) => metrics.new5DHighs, formatValue: formatWholeNumber },
-  { key: "new1MHighs", label: "1M Highs", trendable: true, getMetricValue: (metrics) => metrics.new1MHighs, formatValue: formatWholeNumber },
-  { key: "new3MHighs", label: "3M Highs", trendable: true, getMetricValue: (metrics) => metrics.new3MHighs, formatValue: formatWholeNumber },
-  { key: "new6MHighs", label: "6M Highs", trendable: true, getMetricValue: (metrics) => metrics.new6MHighs, formatValue: formatWholeNumber },
-  { key: "new52WHighs", label: "52W Highs", trendable: true, getMetricValue: (metrics) => metrics.new52WHighs, formatValue: formatWholeNumber },
+  { key: "new5DHighs", label: "5D Closing Highs", trendable: true, getMetricValue: (metrics) => metrics.new5DHighs, formatValue: formatWholeNumber },
+  { key: "new1MHighs", label: "1M Closing Highs", trendable: true, getMetricValue: (metrics) => metrics.new1MHighs, formatValue: formatWholeNumber },
+  { key: "new3MHighs", label: "3M Closing Highs", trendable: true, getMetricValue: (metrics) => metrics.new3MHighs, formatValue: formatWholeNumber },
+  { key: "new6MHighs", label: "6M Closing Highs", trendable: true, getMetricValue: (metrics) => metrics.new6MHighs, formatValue: formatWholeNumber },
+  { key: "new52WHighs", label: "52W Closing Highs", trendable: true, getMetricValue: (metrics) => metrics.new52WHighs, formatValue: formatWholeNumber },
   { key: "totalVolume", label: "Vol", trendable: true, getMetricValue: (metrics) => metrics.totalVolume, formatValue: formatWholeNumber },
   { key: "medianReturn1D", label: "Med 1D", trendable: true, getMetricValue: (metrics) => metrics.medianReturn1D, formatValue: formatPercentReturn },
   { key: "medianReturn5D", label: "Med 5D", trendable: true, getMetricValue: (metrics) => metrics.medianReturn5D, formatValue: formatPercentReturn },
@@ -331,11 +358,13 @@ export function BreadthPanels({
   rows,
   summary,
   histories,
+  exchangeSessionDates,
   footer,
 }: {
   rows: HistoricalRow[];
   summary: SummaryPayload;
   histories: Record<string, HistoricalRow[]>;
+  exchangeSessionDates?: string[];
   footer?: React.ReactNode;
 }) {
   const [lookback, setLookback] = useState<Lookback>(90);
@@ -343,7 +372,14 @@ export function BreadthPanels({
   const [previewHistoricalMetricKey, setPreviewHistoricalMetricKey] = useState<MetricKey | null>(null);
   const activeHistoricalMetricKey = previewHistoricalMetricKey ?? metricKey;
 
-  const historyRows = useMemo(() => rows.slice(-HISTORY_DAYS), [rows]);
+  const hasExchangeGrid = Boolean(exchangeSessionDates?.length);
+  const historyRows = useMemo(() => alignMarketSessionRows(rows, exchangeSessionDates, HISTORY_DAYS)
+    .map(({ asOfDate, row }): HistoricalRow => row ?? {
+      asOfDate, universeId: rows[0]?.universeId ?? "sp500-core",
+      advancers: null, decliners: null, unchanged: null,
+      pctAbove20MA: null, pctAbove50MA: null, pctAbove200MA: null,
+      new20DHighs: null, new20DLows: null, medianReturn1D: null, medianReturn5D: null,
+    }), [rows, exchangeSessionDates]);
   const normalizedHistoryRows = useMemo(() => {
     const normalized = historyRows.map((row) => ({
       row,
@@ -363,7 +399,7 @@ export function BreadthPanels({
       scoped.map(({ row, metrics }) => {
         return {
           asOfDate: row.asOfDate,
-          metricValue: metricValue(metrics, metricKey),
+          metricValue: Number.isFinite(metricValue(metrics, metricKey)) ? metricValue(metrics, metricKey) : null,
         };
       }),
     [scoped, metricKey],
@@ -375,13 +411,16 @@ export function BreadthPanels({
 
   const previousByUniverse = useMemo(() => {
     const map = new Map<string, BreadthMetrics>();
+    if (!exchangeSessionDates?.length) return map;
+    const dates = [...new Set(exchangeSessionDates)].sort();
     for (const [universeId, universeRows] of Object.entries(histories)) {
-      if ((universeRows ?? []).length < 2) continue;
-      const prevRow = universeRows[universeRows.length - 2];
+      const displayedDate = summary.rows.find((row) => row.universeId === universeId)?.asOfDate;
+      const previousDate = displayedDate ? dates[dates.indexOf(displayedDate) - 1] : undefined;
+      const prevRow = previousDate ? universeRows.find((row) => row.asOfDate === previousDate) : undefined;
       if (prevRow) map.set(universeId, normalizeMetrics(prevRow));
     }
     return map;
-  }, [histories]);
+  }, [histories, summary.rows, exchangeSessionDates]);
 
   const summaryRows = useMemo(
     () =>
@@ -401,10 +440,11 @@ export function BreadthPanels({
     const entries = historicalColumns
       .filter((column): column is HistoricalColumn & { key: MetricKey; getMetricValue: (metrics: BreadthMetrics) => number | null } => column.trendable && column.getMetricValue != null)
       .map((column) => {
-        const points = recentRows.flatMap(({ row, metrics }) => {
+        const points = recentRows.map(({ row, metrics }) => {
           const value = metricIsReady(metrics, column.key) ? column.getMetricValue(metrics) : null;
-          return value != null && Number.isFinite(value) ? [{ asOfDate: row.asOfDate, value }] : [];
+          return { asOfDate: row.asOfDate, value: value != null && Number.isFinite(value) ? value : null };
         });
+        const observed = points.map((point) => point.value).filter((value): value is number => value != null);
         const latestValue = points[points.length - 1]?.value ?? null;
         const previousValue = points.length > 1 ? points[points.length - 2]?.value ?? null : null;
         return [
@@ -415,8 +455,8 @@ export function BreadthPanels({
             points,
             latest: latestValue,
             previous: previousValue,
-            low: points.length ? Math.min(...points.map((point) => point.value)) : null,
-            high: points.length ? Math.max(...points.map((point) => point.value)) : null,
+            low: observed.length ? Math.min(...observed) : null,
+            high: observed.length ? Math.max(...observed) : null,
             formatValue: column.formatValue,
           },
         ] as const;
@@ -425,7 +465,7 @@ export function BreadthPanels({
   }, [normalizedHistoryRows]);
 
   const activeHistoricalTrend = metricTrendByKey[activeHistoricalMetricKey] ?? null;
-  const activeHistoricalDelta = activeHistoricalTrend && activeHistoricalTrend.latest != null && activeHistoricalTrend.previous != null
+  const activeHistoricalDelta = hasExchangeGrid && activeHistoricalTrend && activeHistoricalTrend.latest != null && activeHistoricalTrend.previous != null
     ? activeHistoricalTrend.latest - activeHistoricalTrend.previous
     : null;
 
@@ -441,13 +481,13 @@ export function BreadthPanels({
           <div className="card px-3 py-2">
             <div className="text-xs text-slate-400">{headline.universeName} Members</div>
             <div className="flex items-baseline gap-2">
-              <span className="text-lg font-semibold leading-tight">{numFmt.format(headline.metrics.memberCount)}</span>
-              <span className="whitespace-nowrap text-[11px] text-slate-500">coverage {headline.metrics.dataCoveragePct.toFixed(1)}%</span>
+              <span className="text-lg font-semibold leading-tight">{formatWholeNumber(headline.metrics.memberCount)}</span>
+              <span className="whitespace-nowrap text-[11px] text-slate-500">coverage {pct(headline.metrics.dataCoveragePct)}</span>
             </div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">Adv/Dec Ratio</div>
-            <div className={`text-lg font-semibold ${colorForPercent((headline.metrics.advDecRatio ?? 0) - 1, 0)}`}>{ratioText(headline.metrics.advDecRatio)}</div>
+            <div className={`text-lg font-semibold ${colorForPercent((headline.metrics.advDecRatio ?? Number.NaN) - 1, 0)}`}>{ratioText(headline.metrics.advDecRatio)}</div>
           </div>
           <div className="card p-3">
             <div className="text-xs text-slate-400">% &gt; 20MA</div>
@@ -458,7 +498,7 @@ export function BreadthPanels({
             <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctAbove200MA, 50)}`}>{coveredText(headline.metrics, "pctAbove200MA", pct(headline.metrics.pctAbove200MA))}</div>
           </div>
           <div className="card p-3">
-            <div className="text-xs text-slate-400">New 52W Highs</div>
+            <div className="text-xs text-slate-400">52W Closing Highs</div>
             <div className={`text-lg font-semibold ${colorForPercent(headline.metrics.pctNew52WHighs, 10)}`}>{coveredText(headline.metrics, "new52WHighs", highCell(headline.metrics.new52WHighs, headline.metrics.pctNew52WHighs))}</div>
           </div>
         </div>
@@ -541,6 +581,7 @@ export function BreadthPanels({
 
       <div className="card p-4">
         <div className="mb-3 text-sm font-semibold">Advance / Decline + Volume</div>
+        <p className="mb-3 text-xs text-slate-400">Volume uses reported SIP shares. Collection times cover the observed members with known timestamps.</p>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-900/60">
@@ -558,11 +599,14 @@ export function BreadthPanels({
                 return (
                   <tr key={`ad-${row.universeId}`} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{row.universeName}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advancers, prev?.advancers)}`}>{row.metrics.advancers}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.decliners, prev?.decliners)}`}>{row.metrics.decliners}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.unchanged, prev?.unchanged)}`}>{row.metrics.unchanged}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advDecRatio ?? 0, prev?.advDecRatio ?? null)}`}>{ratioText(row.metrics.advDecRatio)}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.totalVolume, prev?.totalVolume)}`}>{numFmt.format(Math.round(row.metrics.totalVolume))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advancers, prev?.advancers)}`}>{coveredText(row.metrics, "advancers", formatWholeNumber(row.metrics.advancers))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.decliners, prev?.decliners)}`}>{coveredText(row.metrics, "decliners", formatWholeNumber(row.metrics.decliners))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.unchanged, prev?.unchanged)}`}>{coveredText(row.metrics, "unchanged", formatWholeNumber(row.metrics.unchanged))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.advDecRatio, prev?.advDecRatio)}`}>{ratioText(row.metrics.advDecRatio)}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.totalVolume, prev?.totalVolume)}`}>
+                      {coveredText(row.metrics, "totalVolume", formatWholeNumber(row.metrics.totalVolume))}
+                      <div className="mt-1 max-w-xs text-[10px] text-slate-400">{volumeCollectionLabel(row.volumeCollection)}</div>
+                    </td>
                   </tr>
                 );
               })}
@@ -590,10 +634,10 @@ export function BreadthPanels({
                 return (
                   <tr key={`other-${row.universeId}`} className="border-t border-borderSoft/60">
                     <td className="px-3 py-2">{row.universeName}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos4Pct, prev?.stocksGtPos4Pct)}`}>{row.metrics.stocksGtPos4Pct}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg4Pct, prev?.stocksLtNeg4Pct)}`}>{row.metrics.stocksLtNeg4Pct}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos25Q, prev?.stocksGtPos25Q)}`}>{coveredText(row.metrics, "return63D", String(row.metrics.stocksGtPos25Q))}</td>
-                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg25Q, prev?.stocksLtNeg25Q)}`}>{coveredText(row.metrics, "return63D", String(row.metrics.stocksLtNeg25Q))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos4Pct, prev?.stocksGtPos4Pct)}`}>{coveredText(row.metrics, "stocksGtPos4Pct", formatWholeNumber(row.metrics.stocksGtPos4Pct))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg4Pct, prev?.stocksLtNeg4Pct)}`}>{coveredText(row.metrics, "stocksLtNeg4Pct", formatWholeNumber(row.metrics.stocksLtNeg4Pct))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksGtPos25Q, prev?.stocksGtPos25Q)}`}>{coveredText(row.metrics, "return63D", formatWholeNumber(row.metrics.stocksGtPos25Q))}</td>
+                    <td className={`px-3 py-2 ${colorVsPrevious(row.metrics.stocksLtNeg25Q, prev?.stocksLtNeg25Q)}`}>{coveredText(row.metrics, "return63D", formatWholeNumber(row.metrics.stocksLtNeg25Q))}</td>
                   </tr>
                 );
               })}
@@ -632,6 +676,7 @@ export function BreadthPanels({
             ))}
           </div>
         </div>
+        {!hasExchangeGrid && <p className="mb-2 text-xs text-amber-300">Exchange session grid unavailable. Session trends and changes cannot be verified.</p>}
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData}>
@@ -641,27 +686,28 @@ export function BreadthPanels({
                 content={({ active, payload, label }) => {
                   if (!active || !payload?.length) return null;
                   const raw = payload[0]?.value;
-                  const value = typeof raw === "number" ? raw : Number(raw ?? 0);
+                  const value = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
                   return (
                     <div className="rounded border border-slate-600/50 bg-slate-950/95 px-2 py-1 text-xs text-white">
                       <div className="text-white">{label}</div>
-                      <div className="font-medium text-white">{selectedMetric.format(value)}</div>
+                      <div className="font-medium text-white">{value == null ? "N/A" : selectedMetric.format(value)}</div>
                     </div>
                   );
                 }}
               />
-              <Line type="monotone" dataKey="metricValue" stroke="#38BDF8" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="metricValue" stroke="#38BDF8" strokeWidth={2}
+                strokeOpacity={hasExchangeGrid ? 1 : 0} dot={hasExchangeGrid ? false : { r: 2 }} connectNulls={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
       </div>
 
       <div className="card p-4">
-        <div className="mb-3 text-sm font-semibold">Historical Metrics Table (90 days)</div>
+        <div className="mb-3 text-sm font-semibold">Historical Metrics Table ({hasExchangeGrid ? "90 sessions" : "dated observations"})</div>
         <div className="mb-4 rounded-2xl border border-borderSoft/70 bg-panelSoft/70 p-3">
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">30 Session Preview</div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">{hasExchangeGrid ? "30 Session Preview" : "Dated Observations"}</div>
               <div className="text-sm font-semibold text-slate-100">{activeHistoricalTrend?.label ?? "No metric selected"}</div>
             </div>
             {activeHistoricalTrend && (
@@ -684,7 +730,7 @@ export function BreadthPanels({
             <div className="grid flex-1 gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-borderSoft/60 bg-slate-950/40 px-3 py-2">
                 <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">1D Change</div>
-                <div className={`text-sm font-semibold ${colorVsPrevious(activeHistoricalTrend?.latest ?? 0, activeHistoricalTrend?.previous)}`}>
+                <div className={`text-sm font-semibold ${colorVsPrevious(activeHistoricalTrend?.latest, activeHistoricalTrend?.previous)}`}>
                   {activeHistoricalTrend ? formatSignedDelta(activeHistoricalDelta, activeHistoricalTrend.formatValue) : "N/A"}
                 </div>
               </div>
@@ -748,7 +794,7 @@ export function BreadthPanels({
                       const currentValue = metricIsReady(metrics, column.key) ? column.getMetricValue(metrics) : null;
                       const previousValue = prevMetrics && metricIsReady(prevMetrics, column.key) ? column.getMetricValue(prevMetrics) : null;
                       return (
-                        <td key={`${row.asOfDate}-${column.key}`} className={`px-3 py-2 ${colorVsPrevious(currentValue ?? 0, previousValue)}`}>
+                        <td key={`${row.asOfDate}-${column.key}`} className={`px-3 py-2 ${colorVsPrevious(currentValue, previousValue)}`}>
                           {column.formatValue(currentValue)}
                         </td>
                       );
@@ -763,6 +809,25 @@ export function BreadthPanels({
 
       {!latestMetrics && <p className="text-sm text-slate-400">No breadth history available yet. Run EOD refresh to populate.</p>}
       {footer}
+
+      <CollapsibleInfoSection title="Metric Coverage and Bounds">
+        <p className="mb-3 text-xs text-slate-400">Observed values use members with the required history. Missing eligible members widen the possible range; verified IPOs with insufficient history are excluded from eligibility. Ranges are uncertainty from missing members, not statistical confidence intervals.</p>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead><tr className="text-slate-400"><th className="p-2 text-left">Universe / metric</th><th className="p-2">Observed / eligible</th><th className="p-2">Missing</th><th className="p-2">IPO ineligible</th><th className="p-2">Coverage</th><th className="p-2">Possible range</th></tr></thead>
+            <tbody>{summaryRows.flatMap((row) => Object.entries(row.metrics.metricCoverage).map(([key, quality]) => (
+              <tr key={`${row.universeId}-${key}`} className="border-t border-borderSoft/40">
+                <td className="p-2">{row.universeName} / {metricOptions.find((option) => option.key === key)?.label ?? key}</td>
+                <td className="p-2 text-center">{formatWholeNumber(quality.eligibleCount)} / {formatWholeNumber(quality.eligiblePopulation ?? null)}</td>
+                <td className="p-2 text-center">{quality.missingCount ?? "N/A"}</td>
+                <td className="p-2 text-center">{quality.structurallyIneligibleCount ?? "N/A"}</td>
+                <td className="p-2 text-center">{formatPercentValue(quality.coveragePct)} ({quality.status})</td>
+                <td className="p-2 text-center">{quality.lowerBound != null && quality.upperBound != null ? `${quality.lowerBound.toFixed(quality.boundUnit === "percent" ? 1 : 0)}–${quality.upperBound.toFixed(quality.boundUnit === "percent" ? 1 : 0)}${quality.boundUnit === "percent" ? "%" : ""}` : "N/A"}</td>
+              </tr>
+            )))}</tbody>
+          </table>
+        </div>
+      </CollapsibleInfoSection>
 
       {summaryRows.some((row) => row.dataSource) && (
         <CollapsibleInfoSection title="Data Sources">

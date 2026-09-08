@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractInvescoDownloadLinksFromHtml,
   parseAdvisorSharesDelimitedRows,
+  parseHoldingsFileByType,
   parseCoinSharesHoldingsHtml,
   parseFlexibleDelimitedRows,
   parseGlobalXDelimitedRows,
@@ -81,6 +82,7 @@ describe("ETF constituent parsers", () => {
       "MSOS,CURLF,Curaleaf Holdings Inc,12.30%",
     ].join("\n");
 
+    expect(parseHoldingsFileByType("https://advisorshares.com/all.csv", "text/csv", csv, null, { etfTicker: "EATZ" })).toEqual([]);
     expect(parseAdvisorSharesDelimitedRows(csv, "MSOS")).toEqual([
       { ticker: "GTBIF", name: "Green Thumb Industries Inc", weight: 17.5 },
       { ticker: "CURLF", name: "Curaleaf Holdings Inc", weight: 12.3 },
@@ -185,5 +187,8 @@ describe("ETF constituent parsers", () => {
     expect(batch).not.toHaveBeenCalled();
     expect(runs[0]?.args).toContain("official:test-provider");
     expect(runs[0]?.args).toContain(1);
+    expect(runs[0]?.args[2]).toBe("partial");
+    expect(runs[0]?.args[3]).toContain("retaining the last full holdings from 2026-05-18");
+    expect(runs[0]?.args).toContain("2026-05-18T00:00:00.000Z");
   });
 });

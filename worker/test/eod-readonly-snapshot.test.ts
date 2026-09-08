@@ -227,6 +227,23 @@ describe("loadSnapshot read-only mode", () => {
     expect(db.statements.some((sql) => sql.includes("daily_bars"))).toBe(false);
   });
 
+  it("never starts legacy computation on an EOD publication read, even when the caller omits the read-only option", async () => {
+    const db = new ReadOnlySnapshotDb();
+    const snapshot = await loadSnapshot({ ...createEnv(db), EOD_READ_ENABLED: "true" });
+    expect(snapshot.status).toBe("empty");
+    expect(db.statements.some((sql) => sql.includes("eod_publication_pointers"))).toBe(true);
+    expect(db.statements.some((sql) => sql.includes("daily_bars"))).toBe(false);
+  });
+
+  it("labels same-session legacy data as unverified until the first immutable publication exists", async () => {
+    const db = new MalformedStoredSnapshotDb(true);
+    const snapshot = await loadSnapshot({ ...createEnv(db), EOD_READ_ENABLED: "true" }, "default", "2026-06-12");
+    expect(snapshot.sections[0]?.groups[0]?.rows[0]?.price).toBe(500);
+    expect(snapshot.freshnessStatus).toBe("stale");
+    expect(snapshot.servingState).toBe("degraded");
+    expect(snapshot.freshnessWarning).toContain("Unverified legacy snapshot");
+  });
+
   it("keeps a prior-session snapshot visible but explicitly stale", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-12T12:00:00.000Z"));

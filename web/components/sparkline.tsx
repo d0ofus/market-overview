@@ -1,25 +1,25 @@
+import { marketSeriesSegments } from "@/lib/market-series";
+
 type Props = {
-  values: number[];
+  values: Array<number | null>;
+  dates?: string[];
   width?: number;
   height?: number;
 };
 
-export function Sparkline({ values, width = 100, height = 26 }: Props) {
-  if (!values.length) return <div className="h-6 w-24 rounded bg-slate-800" />;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const points = values
-    .map((v, i) => {
-      const x = (i / Math.max(1, values.length - 1)) * width;
-      const y = height - ((v - min) / range) * height;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const up = values[values.length - 1] >= values[0];
+export function Sparkline({ values, dates, width = 100, height = 26 }: Props) {
+  const segments = marketSeriesSegments(values, width, height);
+  if (!segments.length) return <span className="text-xs text-slate-500">N/A</span>;
+  const first = segments[0][0];
+  const last = segments.at(-1)!.at(-1)!;
+  const up = last.value >= first.value;
+  const stroke = up ? "#22C55E" : "#EF4444";
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      <polyline fill="none" stroke={up ? "#22C55E" : "#EF4444"} strokeWidth="1.75" points={points} />
+      <title>{dates?.length ? `${dates[0]} to ${dates.at(-1)}. ` : ""}Missing observations remain gaps.</title>
+      {segments.map((segment) => segment.length === 1
+        ? <circle key={segment[0].index} cx={segment[0].x} cy={segment[0].y} r={1.5} fill={stroke} />
+        : <polyline key={segment[0].index} fill="none" stroke={stroke} strokeWidth="1.75" points={segment.map((point) => `${point.x},${point.y}`).join(" ")} />)}
     </svg>
   );
 }

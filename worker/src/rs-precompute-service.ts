@@ -1,6 +1,7 @@
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb } from "./market-data-db";
+import { loadMarketHistoryCoverage } from "./market-history";
 import { getOpsDb } from "./ops-db";
 import {
   createScheduledRelativeStrengthRun,
@@ -93,6 +94,15 @@ export async function planScheduledRelativeStrengthPrecompute(
   for (const preset of configs.values()) {
     const benchmarkTicker = relativeStrengthPrecomputeBenchmarkDataTicker(preset, expectedTradingDate);
     const requiredBarCount = relativeStrengthPrecomputeRequiredBarCount(preset, expectedTradingDate);
+    if (env.MARKET_HISTORY_DB) {
+      const benchmark = (await loadMarketHistoryCoverage(env, {
+        tickers: [benchmarkTicker], feed: source.feed, limitPerTicker: requiredBarCount,
+      })).get(benchmarkTicker);
+      if (benchmark?.lastDate !== expectedTradingDate || (benchmark?.barCount ?? 0) < requiredBarCount) {
+        return { status: "waiting-for-benchmark", expectedTradingDate, reason: `${benchmarkTicker} history is incomplete.` };
+      }
+      continue;
+    }
     const benchmark = await marketDataDb.prepare(
       `SELECT MAX(date) as latestDate, COUNT(*) as barCount FROM (
          SELECT date FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC LIMIT ?

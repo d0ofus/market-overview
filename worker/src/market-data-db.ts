@@ -155,7 +155,10 @@ async function assertMarketDataReadLimit(
   if (limit === 0) return;
   const usageDate = now.toISOString().slice(0, 10);
   const row = await getOpsDb(env).prepare(
-    "SELECT rows_read as rowsRead FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
+    ["shadow","active"].includes(env.EOD_RUNNER_MODE ?? "")
+      ? `SELECT COALESCE((SELECT rows_read FROM market_data_daily_usage WHERE usage_date=?1),0)
+          +COALESCE((SELECT reserved_reads FROM eod_usage WHERE usage_date=?1),0) as rowsRead`
+      : "SELECT rows_read as rowsRead FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
   ).bind(usageDate).first<{ rowsRead: number | null }>();
   const used = Number(row?.rowsRead ?? 0);
   const exhausted = estimatedReads > 0 ? used + estimatedReads > limit : used >= limit;
@@ -175,7 +178,10 @@ async function assertMarketDataWriteLimit(
 ): Promise<void> {
   const usageDate = now.toISOString().slice(0, 10);
   const row = await getOpsDb(env).prepare(
-    "SELECT rows_written as rowsWritten FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
+    ["shadow","active"].includes(env.EOD_RUNNER_MODE ?? "")
+      ? `SELECT COALESCE((SELECT rows_written FROM market_data_daily_usage WHERE usage_date=?1),0)
+          +COALESCE((SELECT reserved_writes FROM eod_usage WHERE usage_date=?1),0) as rowsWritten`
+      : "SELECT rows_written as rowsWritten FROM market_data_daily_usage WHERE usage_date = ? LIMIT 1",
   ).bind(usageDate).first<{ rowsWritten: number | null }>();
   const used = Number(row?.rowsWritten ?? 0);
   const exhausted = estimatedWrites > 0 ? used + estimatedWrites > limit : used >= limit;
@@ -253,7 +259,10 @@ export async function cleanupMarketDataOperationalState(env: Env, asOfDate: stri
   const runDate = new Date().toISOString().slice(0, 10);
   if (state?.lastRunDate === runDate) return;
   const currentDataCutoff = subtractUtcDays(asOfDate, 120);
-  const barCutoff = marketDataRetentionCutoff(env, asOfDate);
+  // The archive maintenance path verifies parity before deleting. Legacy cleanup
+  // must never bypass that gate while the new pipeline owns the data.
+  const barCutoff = env.EOD_RUNNER_MODE === "shadow" || env.EOD_RUNNER_MODE === "active" || env.EOD_READ_ENABLED === "true"
+    ? "0001-01-01" : marketDataRetentionCutoff(env, asOfDate);
   const results = await db.batch([
     db.prepare(
       `DELETE FROM alpaca_daily_bars

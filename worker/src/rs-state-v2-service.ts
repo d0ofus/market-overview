@@ -1,4 +1,5 @@
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistoryOhlcv } from "./market-history";
 import {
   advanceRelativeStrengthState,
   bootstrapRelativeStrengthStateFromRatioRows,
@@ -271,6 +272,9 @@ async function loadBarsByCount(
 ): Promise<RelativeStrengthDailyBar[]> {
   const normalized = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   if (normalized.length === 0) return [];
+  if (env.MARKET_HISTORY_DB) {
+    return loadMarketHistoryOhlcv(env, { tickers: normalized, endDate, limitPerTicker: limit });
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   const output: RelativeStrengthDailyBar[] = [];
@@ -301,6 +305,10 @@ async function loadBarsInRange(
 ): Promise<RelativeStrengthDailyBar[]> {
   const normalized = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   if (normalized.length === 0) return [];
+  if (env.MARKET_HISTORY_DB) {
+    return (await loadMarketHistoryOhlcv(env, { tickers: normalized, startDate, endDate }))
+      .filter((bar) => bar.date > startDate);
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   const output: RelativeStrengthDailyBar[] = [];

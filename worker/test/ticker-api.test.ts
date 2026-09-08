@@ -78,12 +78,12 @@ function createTickerEnv(seed: Record<string, TestBar[]>) {
             return null;
           },
           async all<T>() {
-            if (sql.includes("SELECT date, c FROM alpaca_daily_bars")) {
+            if (sql.includes("FROM alpaca_daily_bars")) {
               const ticker = String(args[1]).toUpperCase();
               const rows = [...(barsByTicker.get(ticker) ?? [])]
                 .sort((left, right) => right.date.localeCompare(left.date));
-              const limit = sql.includes("LIMIT ?") ? Number(args[2]) : rows.length;
-              return { results: rows.slice(0, limit) as T[] };
+              const limit = sql.includes("row_num <= ?") ? Number(args.at(-1)) : rows.length;
+              return { results: rows.slice(0, limit).map((row) => ({...row,ticker})) as T[] };
             }
             return { results: [] as T[] };
           },

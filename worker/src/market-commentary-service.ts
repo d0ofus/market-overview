@@ -1,5 +1,8 @@
 import { loadSnapshot } from "./eod";
-import { getFedWatchSnapshot } from "./fedwatch-service";
+import { loadEodOverview } from "./eod-publication-service";
+import { loadStoredFedWatchSnapshot } from "./fedwatch-service";
+import { buildFactualDailyReport, EOD_REPORT_PUBLICATION_SOURCE, FACTUAL_REPORT_MODEL, FACTUAL_REPORT_PROVIDER, freeMarketReportEnv,
+  loadFactualBreadthEvidence, summarizeVerifiedOverview } from "./factual-market-report";
 import {
   DEFAULT_GEMINI_MODEL,
   GEMINI_PROVIDER,
@@ -97,6 +100,7 @@ type MarketCommentaryScheduleDecision = {
 type MarketEvidence = {
   session: UsMarketSessionContext;
   dashboardSummary: string;
+  breadthSummary: string;
   fedWatchSummary: string;
   searchSummary: string;
   compiledScanSummary: string;
@@ -140,7 +144,7 @@ const DEFAULT_SETTINGS_ID = "default";
 const DEFAULT_COMMENTARY_SCHEDULE_TIMEZONE = "Australia/Melbourne";
 const DEFAULT_COMMENTARY_SCHEDULE_TIME = "09:00";
 const DEFAULT_COMMENTARY_SCHEDULE_DAYS = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 90_000;
+const MARKET_COMMENTARY_GEMINI_TIMEOUT_MS = 30_000;
 const DEFAULT_COMMENTARY_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 const MARKET_COMMENTARY_MAX_OUTPUT_TOKENS = 16000;
 const MARKET_COMMENTARY_MIN_MARKDOWN_LENGTH = 1200;
@@ -548,7 +552,10 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
   if (row.status !== "failed") {
     return {
       status: row.status,
-      warning: null,
+      warning: [
+        row.provider === FACTUAL_REPORT_PROVIDER ? "Factual report; AI interpretation unavailable." : null,
+        row.sessionDate < getUsMarketSessionContext().latestCompletedSessionDate ? `Showing commentary for ${row.sessionDate}; a newer completed US session is available.` : null,
+      ].filter(Boolean).join(" ") || null,
       report: normalizeRow(row),
       latestAttempt: newerAttempt(publicAttempt(row), scheduledAttempt),
     };
@@ -753,53 +760,24 @@ async function insertMarketCommentaryReport(
 }
 
 function summarizeDashboard(snapshot: SnapshotResponse | null, session: UsMarketSessionContext): string {
-  if (!snapshot) {
-    return "Dashboard snapshot: N/A. Existing app snapshot could not be loaded.";
-  }
-
-  const lines: string[] = [
-    `Existing app snapshot as of ${snapshot.asOfDate}, generated ${snapshot.generatedAt}, provider ${snapshot.providerLabel}.`,
-    `Current report session date: ${session.sessionDate}. Latest completed US session: ${session.latestCompletedSessionDate}.`,
-  ];
-  const metric = (value: number | null | undefined, suffix = ""): string =>
-    typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : "N/A";
-  if (snapshot.freshnessStatus === "partial") {
-    lines.push(
-      `Data quality warning: snapshot coverage is partial (${snapshot.freshnessCurrentCount ?? 0}/${snapshot.freshnessEligibleCount ?? 0} tickers current). Treat only rows tagged current for ${session.sessionDate} as current-market evidence; stale or unknown rows are included only for audit context.`,
-    );
-  }
-
-  for (const section of snapshot.sections.filter((s) => s.title.includes("Macro") || s.title.includes("Equities"))) {
-    lines.push(`Section: ${section.title}`);
-    for (const group of section.groups) {
-      const rows = group.rows.slice(0, 12).map((row) => {
-        const sma = [
-          row.above20Sma == null ? "20SMA N/A" : row.above20Sma ? "above 20SMA" : "below 20SMA",
-          row.above50Sma == null ? "50SMA N/A" : row.above50Sma ? "above 50SMA" : "below 50SMA",
-          row.above200Sma == null ? "200SMA N/A" : row.above200Sma ? "above 200SMA" : "below 200SMA",
-        ].join(", ");
-        const rowFreshness = row.currentData?.status === "fresh"
-          ? `current ${row.currentData.sessionDate}`
-          : `current data ${row.currentData?.status ?? "unavailable"}`;
-        return `${row.ticker} (${row.displayName ?? row.ticker}): ${rowFreshness}, price ${metric(row.price)}, 1D ${metric(row.change1d, "%")}, 1W ${metric(row.change1w, "%")}, YTD ${metric(row.ytd, "%")}, ${sma}`;
-      });
-      lines.push(`- ${group.title}: ${rows.length ? rows.join("; ") : "N/A"}`);
-    }
-  }
-
-  return lines.join("\n");
+  return summarizeVerifiedOverview(snapshot, overviewSnapshotDateForSession(session));
 }
 
 async function summarizeFedWatch(env: Env, dataQuality: MarketCommentaryDataQuality[], sourceAudit: MarketCommentarySourceAudit[]): Promise<string> {
   try {
-    const fedWatch = await getFedWatchSnapshot(env);
+    const fedWatch = await loadStoredFedWatchSnapshot(env);
+    const facts = fedWatch.officialRates;
+    const officialSummary = facts
+      ? `Official New York Fed observation effective ${facts.effectiveDate}: EFFR ${facts.effr}%; target range ${facts.targetLower ?? "N/A"}?${facts.targetUpper ?? "N/A"}%. ${fedWatch.officialRatesWarning ?? ""}`
+      : "Official rate facts are unavailable.";
+    if (facts) sourceAudit.push({ sourceName: facts.source, url: facts.sourceUrl, timestamp: facts.effectiveDate, dataUsed: "Official EFFR and target range on the observation date" });
     if (!fedWatch.data) {
       dataQuality.push({
         metric: "FedWatch",
         status: fedWatch.status === "unavailable" ? "unavailable" : "stale",
         note: fedWatch.warning ?? "FedWatch data was unavailable from the configured provider.",
       });
-      return `FedWatch: N/A. ${fedWatch.warning ?? "Configured provider returned no usable data."}`;
+      return `${officialSummary}\nMarket probabilities: N/A. ${fedWatch.warning ?? "Configured provider returned no usable data."}`;
     }
 
     sourceAudit.push({
@@ -819,8 +797,10 @@ async function summarizeFedWatch(env: Env, dataQuality: MarketCommentaryDataQual
       `${row.meeting} (${row.meetingIso}): implied ${row.impliedRatePostMeeting.toFixed(2)}%, move probability ${row.probMovePct.toFixed(1)}%, change ${row.changeBps.toFixed(1)} bps`,
     );
     return [
+      officialSummary,
+      fedWatch.warning ?? "",
       `FedWatch source ${fedWatch.data.sourceUrl}; generated ${fedWatch.data.generatedAt}; as-of ${fedWatch.data.asOf ?? "N/A"}.`,
-      `Current Fed funds band: ${fedWatch.data.currentBand ?? "N/A"}; midpoint ${fedWatch.data.midpoint ?? "N/A"}; most recent EFFR ${fedWatch.data.mostRecentEffr ?? "N/A"}.`,
+      `RateProbability band on its source date: ${fedWatch.data.currentBand ?? "N/A"}; midpoint ${fedWatch.data.midpoint ?? "N/A"}; most recent EFFR ${fedWatch.data.mostRecentEffr ?? "N/A"}.`,
       rows.join("; "),
     ].join("\n");
   } catch (error) {
@@ -1035,14 +1015,15 @@ async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, s
 
   let snapshot: SnapshotResponse | null = null;
   try {
-    snapshot = snapshotOverride ?? await loadSnapshot(env, "default", session.sessionDate, { allowComputeOnMissing: false });
+    snapshot = snapshotOverride ?? await loadSnapshot(env, "default", overviewSnapshotDateForSession(session), { allowComputeOnMissing: false });
     sourceAudit.push({
       sourceName: "Market Command dashboard snapshot",
       url: null,
       dataUsed: "Cached index, ETF, sector, and technical snapshot from the existing application",
       timestamp: snapshot.generatedAt,
+      note: `Overview publication: ${snapshot.generationId ?? snapshot.generatedAt}`,
     });
-    const snapshotStatus = snapshot.status === "empty" || snapshot.freshnessStatus === "stale"
+    const snapshotStatus = snapshot.status === "empty" || snapshot.asOfDate !== overviewSnapshotDateForSession(session) || snapshot.freshnessStatus === "stale"
       ? "stale"
       : snapshot.freshnessStatus === "partial"
         ? "stale"
@@ -1061,13 +1042,19 @@ async function gatherMarketEvidence(env: Env, session: UsMarketSessionContext, s
     dataQuality.push({ metric: "Existing dashboard snapshot", status: "unavailable", note: message });
   }
 
+  const breadth = await loadFactualBreadthEvidence(env, overviewSnapshotDateForSession(session),
+    snapshot?.status !== "empty" ? snapshot?.generationId ?? snapshot?.generatedAt ?? null : null);
+  sourceAudit.push(...breadth.sourceAudit);
+  dataQuality.push(...breadth.dataQuality);
   const fedWatchSummary = await summarizeFedWatch(env, dataQuality, sourceAudit);
-  const searchSummary = await summarizeSearch(env, session, settings, dataQuality, sourceAudit);
-  const compiledScanSummary = await summarizeDailyAbove200SmaScan(env, dataQuality, sourceAudit);
+  const searchSummary = "Live web/news search is unavailable in the free EOD report. Do not infer news, catalysts, or calendar facts.";
+  const compiledScanSummary = "Compiled scans are a separately scheduled workflow; no scan refresh or scan-derived market breadth is performed for this report.";
+  dataQuality.push({ metric: "News and catalysts", status: "unavailable", note: searchSummary });
 
   return {
     session,
     dashboardSummary: summarizeDashboard(snapshot, session),
+    breadthSummary: breadth.summary,
     fedWatchSummary,
     searchSummary,
     compiledScanSummary,
@@ -1095,6 +1082,9 @@ function buildPrompt(evidence: MarketEvidence, settings: MarketCommentarySetting
     "",
     "EXISTING APP MARKET DATA",
     evidence.dashboardSummary,
+    "",
+    "Accepted same-session breadth observations (independent universe membership and metric coverage):",
+    evidence.breadthSummary,
     "",
     "FED / RATE EXPECTATIONS DATA",
     evidence.fedWatchSummary,
@@ -1218,13 +1208,48 @@ export function shouldRunScheduledMarketCommentary(settings: MarketCommentarySet
   return scheduledMarketCommentaryDecision(settings, now).due;
 }
 
+async function reportNeedsOverviewUpdate(env: Env, report: MarketCommentaryReport, sessionDate: string): Promise<boolean> {
+  try {
+    const snapshot = env.EOD_READ_ENABLED === "true" ? await loadEodOverview(env, "default", sessionDate)
+      : await loadSnapshot(env, "default", sessionDate, { allowComputeOnMissing: false });
+    if (!snapshot || snapshot.status === "empty" || snapshot.asOfDate !== sessionDate) return false;
+    const source = report.sourceAudit.find((entry) => entry.sourceName === "Market Command dashboard snapshot");
+    const publication = snapshot.generationId ?? snapshot.generatedAt;
+    if (source?.note !== `Overview publication: ${publication}`) return true;
+    if (env.EOD_READ_ENABLED !== "true") return false;
+    const breadth = await loadFactualBreadthEvidence(env, sessionDate, publication);
+    return breadth.readAvailable && report.sourceAudit.find((entry) => entry.sourceName === EOD_REPORT_PUBLICATION_SOURCE)?.note !== breadth.identity;
+  } catch {
+    return false;
+  }
+}
+
+/** Called from either the report lane or the EOD coordinator after a publication is promoted. */
+export async function maybeRunPublishedEodCommentary(env: Env, now = new Date(), suppliedSettings?: MarketCommentarySettings): Promise<MarketCommentaryResponse | null> {
+  if (env.EOD_RUNNER_MODE !== "active" || env.EOD_READ_ENABLED !== "true") return null;
+  const settings = suppliedSettings ?? await loadMarketCommentarySettings(env);
+  if (!settings.enabled || !settings.scheduleEnabled) return null;
+  const snapshot = await loadEodOverview(env).catch(() => null);
+  if (!snapshot) return null;
+  const report = await loadRecentReportForSession(env, snapshot.asOfDate);
+  if (report?.status === "ready" && !(await reportNeedsOverviewUpdate(env, report, snapshot.asOfDate))) return null;
+  return refreshMarketCommentary(env, {
+    now, force: true, trigger: "scheduled", settings, snapshot,
+    scheduledLocalDate: snapshot.asOfDate, scheduledTimezone: "America/New_York", scheduledLocalTime: "after-publication",
+    factualOnly: true,
+  });
+}
+
 export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date()): Promise<MarketCommentaryResponse | null> {
   const settings = await loadMarketCommentarySettings(env);
+  if (env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true") {
+    return maybeRunPublishedEodCommentary(env, now, settings);
+  }
   const decision = scheduledMarketCommentaryDecision(settings, now);
   if (!decision.due || !decision.localDate) return null;
   const session = getUsMarketSessionContext(now);
   const existingReadyReport = await loadReadyScheduledReportForAttempt(env, decision.localDate, session.sessionDate);
-  if (existingReadyReport) {
+  if (existingReadyReport && !(await reportNeedsOverviewUpdate(env, existingReadyReport, overviewSnapshotDateForSession(session)))) {
     await recordMarketCommentaryScheduleAttempt(env, {
       scheduledLocalDate: decision.localDate,
       sessionDate: session.sessionDate,
@@ -1241,18 +1266,6 @@ export async function maybeRunScheduledMarketCommentary(env: Env, now = new Date
     };
   }
   if (await shouldDeferScheduledCommentaryAttempt(env, decision.localDate, session.sessionDate, now)) {
-    return null;
-  }
-  const requiredSnapshotDate = overviewSnapshotDateForSession(session);
-  if (!(await overviewSnapshotReadyForSession(env, requiredSnapshotDate))) {
-    await recordMarketCommentaryScheduleAttempt(env, {
-      scheduledLocalDate: decision.localDate,
-      sessionDate: session.sessionDate,
-      status: "skipped",
-      reason: `Overview snapshot for ${requiredSnapshotDate} is not ready.`,
-      scheduledTimezone: decision.timezone,
-      scheduledLocalTime: decision.localTime,
-    });
     return null;
   }
   const attemptId = await recordMarketCommentaryScheduleAttempt(env, {
@@ -1307,10 +1320,17 @@ export async function refreshMarketCommentary(env: Env, options?: {
   scheduledLocalDate?: string | null;
   scheduledTimezone?: string | null;
   scheduledLocalTime?: string | null;
+  snapshot?: SnapshotResponse | null;
+  factualOnly?: boolean;
 }): Promise<MarketCommentaryResponse> {
   const now = options?.now ?? new Date();
   const nowIso = now.toISOString();
-  const session = getUsMarketSessionContext(now);
+  const publication = options?.snapshot ?? (env.EOD_READ_ENABLED === "true" ? await loadEodOverview(env).catch(() => null) : null);
+  const clockSession = getUsMarketSessionContext(now);
+  const session: UsMarketSessionContext = publication && publication.status !== "empty" ? {
+    ...clockSession, sessionDate: publication.asOfDate, latestCompletedSessionDate: publication.asOfDate,
+    status: "after_hours", dataBasis: "closing", label: `EOD report for US session ${publication.asOfDate}; publication ${publication.generationId ?? publication.generatedAt}`,
+  } : clockSession;
   const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const settings = options?.settings ?? await loadMarketCommentarySettings(env);
 
@@ -1323,7 +1343,8 @@ export async function refreshMarketCommentary(env: Env, options?: {
   }
 
   const recent = await loadRecentReportForSession(env, session.sessionDate);
-  if (!options?.force && recent && recent.status === "ready" && Date.parse(nowIso) - Date.parse(recent.generatedAt) < REFRESH_GUARD_MS) {
+  if (!options?.force && recent && recent.status === "ready" && Date.parse(nowIso) - Date.parse(recent.generatedAt) < REFRESH_GUARD_MS
+    && !(await reportNeedsOverviewUpdate(env, recent, overviewSnapshotDateForSession(session)))) {
     return {
       status: recent.status,
       warning: `Using the latest commentary generated at ${recent.generatedAt}; refresh is guarded for 10 minutes to control LLM/search usage.`,
@@ -1335,12 +1356,10 @@ export async function refreshMarketCommentary(env: Env, options?: {
 
   let evidence: MarketEvidence | null = null;
   try {
-    const overviewSnapshot = await assertFreshOverviewSnapshotForSession(env, overviewSnapshotDateForSession(session));
-    if (!env.GEMINI_API_KEY?.trim()) {
-      throw new Error("GEMINI_API_KEY is not configured.");
-    }
-    evidence = await gatherMarketEvidence(env, session, settings, overviewSnapshot);
-    const result = await generateCompleteMarketCommentary(env, buildPrompt(evidence, settings), evidence.sourceAudit);
+    evidence = await gatherMarketEvidence(env, session, settings, publication);
+    if (options?.factualOnly) throw new Error("Factual EOD report generated from the published observations; AI interpretation is unavailable.");
+    const freeEnv = freeMarketReportEnv(env);
+    const result = await generateCompleteMarketCommentary(freeEnv, buildPrompt(evidence, settings), evidence.sourceAudit);
     const report = await insertMarketCommentaryReport(env, {
       sessionDate: session.sessionDate,
       asOf: session.nowIso,
@@ -1374,10 +1393,19 @@ export async function refreshMarketCommentary(env: Env, options?: {
       marketSession: session.status,
       marketSessionLabel: session.label,
       dataBasis: session.dataBasis,
-      provider: GEMINI_PROVIDER,
-      model,
-      status: "failed",
-      reportMarkdown: fallbackReport(session, message),
+      provider: FACTUAL_REPORT_PROVIDER,
+      model: FACTUAL_REPORT_MODEL,
+      status: "ready",
+      reportMarkdown: buildFactualDailyReport({
+        sessionDate: session.sessionDate,
+        sessionLabel: session.label,
+        reason: message,
+        dashboardSummary: evidence?.dashboardSummary ?? "Dashboard evidence is unavailable.",
+        breadthSummary: evidence?.breadthSummary,
+        fedWatchSummary: evidence?.fedWatchSummary ?? "Rate evidence is unavailable.",
+        sourceAudit: evidence?.sourceAudit ?? [],
+        dataQuality,
+      }),
       sourceAudit: evidence?.sourceAudit ?? settings.staticSources,
       dataQuality,
       error: message,
@@ -1386,6 +1414,6 @@ export async function refreshMarketCommentary(env: Env, options?: {
       scheduledTimezone: options?.trigger === "scheduled" ? options.scheduledTimezone ?? null : null,
       scheduledLocalTime: options?.trigger === "scheduled" ? options.scheduledLocalTime ?? null : null,
     }, nowIso);
-    return { status: "failed", warning: message, report };
+    return { status: "ready", warning: `Factual report; AI interpretation unavailable. ${message}`, report };
   }
 }

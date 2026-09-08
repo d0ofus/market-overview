@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { loadDatabaseCapacity, sampleDatabaseCapacity } from "../src/database-capacity-service";
+import worker from "../src/index";
 import type { Env } from "../src/types";
 
-function fakeDb(sizeAfter: number, inserts: unknown[][] = []): D1Database {
+function fakeDb(sizeAfter: number | Error, inserts: unknown[][] = []): D1Database {
   return {
     prepare(sql: string) {
       let bound: unknown[] = [];
@@ -12,6 +13,7 @@ function fakeDb(sizeAfter: number, inserts: unknown[][] = []): D1Database {
           return statement;
         },
         async all<T>() {
+          if (sizeAfter instanceof Error) throw sizeAfter;
           return { results: [{ ok: 1 }] as T[], meta: { size_after: sizeAfter } };
         },
         async run() {
@@ -28,6 +30,57 @@ function fakeDb(sizeAfter: number, inserts: unknown[][] = []): D1Database {
 }
 
 describe("database capacity health", () => {
+  it.each([
+    { size: 30_000_000, level: "ok", status: 200 },
+    { size: 351_000_000, level: "warning", status: 200 },
+    { size: 401_000_000, level: "critical", status: 503 },
+    { size: 426_000_000, level: "halt", status: 503 },
+  ])("exposes archive $level diagnostics without changing HTTP $status", async ({ size, level, status }) => {
+    const env = {
+      DB: fakeDb(20_000_000), MARKET_DATA_DB: fakeDb(30_000_000), OPS_DB: fakeDb(10_000_000),
+      MARKET_HISTORY_DB: fakeDb(size), MARKET_PIPELINE_MODE: "canary", EOD_RUNNER_MODE: "disabled",
+    } as Env;
+    const response = await worker.fetch(new Request("https://example.com/api/health"), env, {} as ExecutionContext);
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({
+      ok: status === 200,
+      pipelineMode: "canary",
+      databases: { history: { database: "history", sizeBytes: size, level, ok: true } },
+    });
+  });
+
+  it("identifies archive connectivity failure in the existing unhealthy response", async () => {
+    const env = {
+      DB: fakeDb(20_000_000), MARKET_DATA_DB: fakeDb(30_000_000), OPS_DB: fakeDb(10_000_000),
+      MARKET_HISTORY_DB: fakeDb(new Error("Provider error containing private details")),
+    } as Env;
+    const response = await worker.fetch(new Request("https://example.com/api/health"), env, {} as ExecutionContext);
+    expect(response.status).toBe(503);
+    const payload = await response.json();
+    expect(payload).toMatchObject({ ok: false, databases: {
+      history: { database: "history", ok: false, sizeBytes: null, level: "unavailable", errorCode: "storage-unavailable" },
+    } });
+    expect(JSON.stringify(payload)).not.toContain("private details");
+  });
+
+  it("preserves the original database response when no archive is bound", async () => {
+    const env = {
+      DB: fakeDb(20_000_000), MARKET_DATA_DB: fakeDb(30_000_000), OPS_DB: fakeDb(10_000_000),
+    } as Env;
+    const response = await worker.fetch(new Request("https://example.com/api/health"), env, {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { databases: Record<string, unknown> };
+    expect(Object.keys(payload.databases)).toEqual(["core", "market", "ops"]);
+  });
+
+  it("includes the archive in reserved capacity sampling when it is bound",async () => {
+    const inserts:unknown[][]=[];
+    const env={DB:fakeDb(20_000_000),MARKET_DATA_DB:fakeDb(30_000_000),OPS_DB:fakeDb(10_000_000,inserts),
+      MARKET_HISTORY_DB:fakeDb(351_000_000)} as Env;
+    const statuses=await sampleDatabaseCapacity(env,new Date("2026-09-08T00:05:00Z"));
+    expect(statuses.find((row) => row.database==="history")).toMatchObject({sizeBytes:351_000_000,level:"warning"});
+    expect(inserts.map((row) => row[1])).toEqual(["core","market","ops","history"]);
+  });
   it("applies separate warning, critical, and halt thresholds", async () => {
     const env = {
       DB: fakeDb(351_000_000),

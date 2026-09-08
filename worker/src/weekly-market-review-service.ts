@@ -1,5 +1,7 @@
 import { loadSnapshot } from "./eod";
-import { getFedWatchSnapshot } from "./fedwatch-service";
+import { loadStoredFedWatchSnapshot } from "./fedwatch-service";
+import { buildFactualWeeklyReport, FACTUAL_REPORT_MODEL, FACTUAL_REPORT_PROVIDER, freeMarketReportEnv,
+  loadFactualBreadthEvidence, summarizeVerifiedOverview } from "./factual-market-report";
 import { getUsMarketSessionContext, isUsMarketTradingDay } from "./market-calendar";
 import {
   DEFAULT_GEMINI_MODEL,
@@ -105,6 +107,7 @@ type WeeklyEvidence = {
   week: WeeklyMarketReviewWeek;
   nowIso: string;
   dashboardSummary: string;
+  breadthSummary: string;
   recentDailyCommentarySummary: string;
   overviewFocusSummary: string;
   sectorFocusSummary: string;
@@ -385,7 +388,7 @@ async function storeWeeklyMarketReview(env: Env, input: StoredWeeklyMarketReview
 export async function loadLatestWeeklyMarketReview(env: Env, now = new Date()): Promise<WeeklyMarketReviewResponse> {
   const week = resolveWeeklyMarketReviewWeek(now);
   const preferred = await loadPreferredReadyReviewForWeek(env, week.weekEnd);
-  if (preferred) return { status: "ready", warning: null, report: preferred };
+  if (preferred) return { status: "ready", warning: preferred.provider === FACTUAL_REPORT_PROVIDER ? "Factual report; AI interpretation unavailable." : null, report: preferred };
 
   const latest = await loadLatestReviewForWeek(env, week.weekEnd);
   if (latest?.status === "failed") {
@@ -462,46 +465,18 @@ function renderWeeklySearchQueries(week: WeeklyMarketReviewWeek): string[] {
 }
 
 function summarizeDashboard(snapshot: SnapshotResponse | null, week: WeeklyMarketReviewWeek): string {
-  if (!snapshot || snapshot.status === "empty") return "Dashboard snapshot: N/A. No overview snapshot was available.";
-  const lines = [
-    `Dashboard snapshot generated ${snapshot.generatedAt}; as-of ${snapshot.asOfDate}; freshness ${snapshot.freshnessStatus ?? "unknown"}.`,
-    `Target weekly window: ${week.weekStart} to ${week.weekEnd}. Use 1W/5D changes as weekly evidence where available.`,
-  ];
-  const metric = (value: number | null | undefined, suffix = ""): string =>
-    typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : "N/A";
-  for (const section of snapshot.sections.filter((entry) => entry.title.includes("Macro") || entry.title.includes("Equities"))) {
-    lines.push(`Section: ${section.title}`);
-    for (const group of section.groups) {
-      const groupRelevant =
-        group.title.includes("Index")
-        || group.title.includes("Sector")
-        || group.title.includes("Thematic")
-        || group.title.includes("Industry")
-        || group.title.includes("Macro")
-        || group.title.includes("Commodities")
-        || group.title.includes("Rates");
-      if (!groupRelevant) continue;
-      const rows = group.rows.slice(0, 15).map((row) => {
-        const currentState = row.currentData?.status === "fresh"
-          ? `current ${row.currentData.sessionDate}`
-          : `current data ${row.currentData?.status ?? "unavailable"}`;
-        return `${row.ticker} (${row.displayName ?? row.ticker}): ${currentState}, price ${metric(row.price)}, 1D ${metric(row.change1d, "%")}, 1W ${metric(row.change1w, "%")}, 5D ${metric(row.change5d, "%")}, YTD ${metric(row.ytd, "%")}`;
-      });
-      lines.push(`- ${group.title}: ${rows.length ? rows.join("; ") : "N/A"}`);
-    }
-  }
-  return lines.join("\n");
+  return summarizeVerifiedOverview(snapshot, week.weekEnd);
 }
 
-async function summarizeRecentDailyCommentary(env: Env, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
+export async function summarizeRecentDailyCommentary(env: Env, week: WeeklyMarketReviewWeek, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
   try {
     const rows = await env.DB.prepare(
-      `SELECT session_date as sessionDate, generated_at as generatedAt, market_session_label as marketSessionLabel, report_markdown as reportMarkdown
+      `SELECT session_date as sessionDate, created_at as generatedAt, market_session_label as marketSessionLabel, report_markdown as reportMarkdown
        FROM market_commentary_reports
-       WHERE status = 'ready'
-       ORDER BY session_date DESC, datetime(generated_at) DESC
+       WHERE status = 'ready' AND session_date BETWEEN ? AND ?
+       ORDER BY session_date DESC, datetime(created_at) DESC
        LIMIT 5`,
-    ).all<{ sessionDate: string; generatedAt: string; marketSessionLabel: string; reportMarkdown: string }>();
+    ).bind(week.weekStart, week.weekEnd).all<{ sessionDate: string; generatedAt: string; marketSessionLabel: string; reportMarkdown: string }>();
     const reports = rows.results ?? [];
     if (reports.length === 0) {
       dataQuality.push({ metric: "Recent daily commentary", status: "unavailable", note: "No ready daily commentary reports were available." });
@@ -539,7 +514,7 @@ async function summarizeOverviewFocus(env: Env, sourceAudit: MarketReportSourceA
       status: rows.length > 0 ? "ok" : "unavailable",
       note: rows.length > 0 ? `Loaded ${rows.length} focus items.` : "No current focus items were configured.",
     });
-    return rows.length ? rows.map((row) => `- ${row.text}`).join("\n") : "Overview focus: N/A.";
+    return rows.length ? rows.map((row) => `- User-maintained focus (updated ${row.updatedAt}): ${row.text}`).join("\n") : "Overview focus: N/A.";
   } catch (error) {
     const message = error instanceof Error ? error.message : "Overview focus load failed.";
     dataQuality.push({ metric: "Overview focus", status: "unavailable", note: message });
@@ -547,7 +522,7 @@ async function summarizeOverviewFocus(env: Env, sourceAudit: MarketReportSourceA
   }
 }
 
-async function summarizeSectorFocus(env: Env, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
+async function summarizeSectorFocus(env: Env, week: WeeklyMarketReviewWeek, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
   try {
     const [focusRows, entryRows] = await Promise.all([
       env.DB.prepare(
@@ -567,7 +542,7 @@ async function summarizeSectorFocus(env: Env, sourceAudit: MarketReportSourceAud
       ).all<{ sectorName: string; eventDate: string; trendScore: number; notes: string | null; tickers: string | null }>(),
     ]);
     const focus = focusRows.results ?? [];
-    const entries = entryRows.results ?? [];
+    const entries = (entryRows.results ?? []).filter((row) => row.eventDate >= week.weekStart && row.eventDate <= week.weekEnd);
     sourceAudit.push({
       sourceName: "Market Overview sector tracker",
       url: null,
@@ -580,8 +555,8 @@ async function summarizeSectorFocus(env: Env, sourceAudit: MarketReportSourceAud
       note: `Loaded ${focus.length} focus narratives and ${entries.length} recent sector tracker entries.`,
     });
     return [
-      "Focus narratives:",
-      focus.length ? focus.map((row) => `- ${row.sectorName}: ${row.commentText || "No comment."}`).join("\n") : "N/A",
+      "User-maintained focus narratives (context, not independently verified market facts):",
+      focus.length ? focus.map((row) => `- ${row.sectorName} (updated ${row.updatedAt}): ${row.commentText || "No comment."}`).join("\n") : "N/A",
       "",
       "Recent sector tracker entries:",
       entries.length
@@ -595,7 +570,7 @@ async function summarizeSectorFocus(env: Env, sourceAudit: MarketReportSourceAud
   }
 }
 
-async function summarizeStoredGappers(env: Env, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
+async function summarizeStoredGappers(env: Env, week: WeeklyMarketReviewWeek, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
   try {
     const snapshot = await env.DB.prepare(
       "SELECT id, generated_at as generatedAt, row_count as rowCount, status, error FROM gappers_snapshots ORDER BY datetime(generated_at) DESC LIMIT 1",
@@ -603,6 +578,11 @@ async function summarizeStoredGappers(env: Env, sourceAudit: MarketReportSourceA
     if (!snapshot) {
       dataQuality.push({ metric: "Stored gappers snapshot", status: "unavailable", note: "No stored gappers snapshot was available." });
       return "Stored gappers/top movers: N/A.";
+    }
+    const sourceDate = Number.isFinite(Date.parse(snapshot.generatedAt)) ? getUsMarketSessionContext(new Date(snapshot.generatedAt)).nyDate : null;
+    if (!sourceDate || sourceDate < week.weekStart || sourceDate > week.weekEnd) {
+      dataQuality.push({ metric: "Stored gappers snapshot", status: "stale", note: `Latest mover snapshot ${snapshot.generatedAt} falls outside the report week; its values are omitted.` });
+      return "Stored gappers/top movers: N/A for the requested week.";
     }
     const rows = await env.DB.prepare(
       `SELECT ticker, name, sector, industry, gap_pct as gapPct, price, premarket_volume as premarketVolume, composite_score as compositeScore
@@ -621,11 +601,11 @@ async function summarizeStoredGappers(env: Env, sourceAudit: MarketReportSourceA
     });
     dataQuality.push({
       metric: "Stored gappers snapshot",
-      status: movers.length > 0 ? "ok" : "unavailable",
+      status: movers.length > 0 ? snapshot.error ? "stale" : "ok" : "unavailable",
       note: movers.length > 0 ? `Loaded ${movers.length} rows from stored snapshot ${snapshot.id}.` : `Stored snapshot ${snapshot.id} had no rows.`,
     });
     return movers.length
-      ? movers.map((row) => `- ${row.ticker} (${row.name ?? "N/A"}): gap ${row.gapPct?.toFixed?.(2) ?? row.gapPct}%, price ${row.price}, sector ${row.sector ?? "N/A"}, industry ${row.industry ?? "N/A"}, premarket volume ${row.premarketVolume ?? "N/A"}`).join("\n")
+      ? `Premarket observations from ${snapshot.generatedAt}; this is one dated snapshot, not a full-week mover ranking.\n` + movers.map((row) => `- ${row.ticker} (${row.name ?? "N/A"}): gap ${row.gapPct?.toFixed?.(2) ?? row.gapPct}%, price ${row.price}, sector ${row.sector ?? "N/A"}, industry ${row.industry ?? "N/A"}, premarket volume ${row.premarketVolume ?? "N/A"}`).join("\n")
       : "Stored gappers/top movers: N/A.";
   } catch (error) {
     const message = error instanceof Error ? error.message : "Stored gappers load failed.";
@@ -636,14 +616,19 @@ async function summarizeStoredGappers(env: Env, sourceAudit: MarketReportSourceA
 
 async function summarizeFedWatch(env: Env, sourceAudit: MarketReportSourceAudit[], dataQuality: MarketReportDataQuality[]): Promise<string> {
   try {
-    const fedWatch = await getFedWatchSnapshot(env);
+    const fedWatch = await loadStoredFedWatchSnapshot(env);
+    const facts = fedWatch.officialRates;
+    const officialSummary = facts
+      ? `Official New York Fed observation effective ${facts.effectiveDate}: EFFR ${facts.effr}%; target range ${facts.targetLower ?? "N/A"}?${facts.targetUpper ?? "N/A"}%. ${fedWatch.officialRatesWarning ?? ""}`
+      : "Official rate facts are unavailable.";
+    if (facts) sourceAudit.push({ sourceName: facts.source, url: facts.sourceUrl, timestamp: facts.effectiveDate, dataUsed: "Official EFFR and target range on the observation date" });
     if (!fedWatch.data) {
       dataQuality.push({
         metric: "FedWatch",
         status: fedWatch.status === "unavailable" ? "unavailable" : "stale",
         note: fedWatch.warning ?? "FedWatch data was unavailable from the configured provider.",
       });
-      return `FedWatch: N/A. ${fedWatch.warning ?? "Configured provider returned no usable data."}`;
+      return `${officialSummary}\nMarket probabilities: N/A. ${fedWatch.warning ?? "Configured provider returned no usable data."}`;
     }
     sourceAudit.push({
       sourceName: "RateProbability FedWatch snapshot",
@@ -661,8 +646,10 @@ async function summarizeFedWatch(env: Env, sourceAudit: MarketReportSourceAudit[
       `${row.meeting} (${row.meetingIso}): implied ${row.impliedRatePostMeeting.toFixed(2)}%, move probability ${row.probMovePct.toFixed(1)}%, change ${row.changeBps.toFixed(1)} bps`,
     );
     return [
+      officialSummary,
+      fedWatch.warning ?? "",
       `FedWatch source ${fedWatch.data.sourceUrl}; generated ${fedWatch.data.generatedAt}; as-of ${fedWatch.data.asOf ?? "N/A"}.`,
-      `Current Fed funds band: ${fedWatch.data.currentBand ?? "N/A"}; midpoint ${fedWatch.data.midpoint ?? "N/A"}; most recent EFFR ${fedWatch.data.mostRecentEffr ?? "N/A"}.`,
+      `RateProbability band on its source date: ${fedWatch.data.currentBand ?? "N/A"}; midpoint ${fedWatch.data.midpoint ?? "N/A"}; most recent EFFR ${fedWatch.data.mostRecentEffr ?? "N/A"}.`,
       rows.join("; "),
     ].join("\n");
   } catch (error) {
@@ -688,12 +675,12 @@ async function gatherWeeklyEvidence(env: Env, week: WeeklyMarketReviewWeek, now:
     sourceAudit.push({
       sourceName: "Market Overview dashboard snapshot",
       url: null,
-      dataUsed: "Cached index, ETF, sector, breadth, and technical snapshot from the existing application",
+      dataUsed: "Cached index, ETF, sector, and technical snapshot from the existing application",
       timestamp: snapshot.generatedAt,
     });
     dataQuality.push({
       metric: "Existing dashboard snapshot",
-      status: snapshot.status === "empty" || snapshot.freshnessStatus === "stale" || snapshot.freshnessStatus === "partial" ? "stale" : "ok",
+      status: snapshot.status === "empty" || snapshot.asOfDate !== week.weekEnd || snapshot.freshnessStatus === "stale" || snapshot.freshnessStatus === "partial" ? "stale" : "ok",
       note: snapshot.status === "empty"
         ? "Overview snapshot was unavailable."
         : `Loaded snapshot as of ${snapshot.asOfDate}; freshness ${snapshot.freshnessStatus ?? "unknown"} (${snapshot.freshnessCurrentCount ?? 0}/${snapshot.freshnessEligibleCount ?? 0} tickers current). ${snapshot.freshnessWarning ?? ""}`.trim(),
@@ -703,6 +690,10 @@ async function gatherWeeklyEvidence(env: Env, week: WeeklyMarketReviewWeek, now:
     dataQuality.push({ metric: "Existing dashboard snapshot", status: "unavailable", note: message });
   }
 
+  const breadth = await loadFactualBreadthEvidence(env, week.weekEnd,
+    snapshot?.status !== "empty" ? snapshot?.generationId ?? snapshot?.generatedAt ?? null : null);
+  sourceAudit.push(...breadth.sourceAudit);
+  dataQuality.push(...breadth.dataQuality);
   const [
     recentDailyCommentarySummary,
     overviewFocusSummary,
@@ -711,26 +702,19 @@ async function gatherWeeklyEvidence(env: Env, week: WeeklyMarketReviewWeek, now:
     fedWatchSummary,
     searchSummary,
   ] = await Promise.all([
-    summarizeRecentDailyCommentary(env, sourceAudit, dataQuality),
+    summarizeRecentDailyCommentary(env, week, sourceAudit, dataQuality),
     summarizeOverviewFocus(env, sourceAudit, dataQuality),
-    summarizeSectorFocus(env, sourceAudit, dataQuality),
-    summarizeStoredGappers(env, sourceAudit, dataQuality),
+    summarizeSectorFocus(env, week, sourceAudit, dataQuality),
+    summarizeStoredGappers(env, week, sourceAudit, dataQuality),
     summarizeFedWatch(env, sourceAudit, dataQuality),
-    summarizeBraveSearch(env, renderWeeklySearchQueries(week), dataQuality, sourceAudit, {
-      metric: "Weekly web/news search",
-      freshness: "pw",
-      dataUsedPrefix: "Weekly Brave Search result for",
-      caller: "weekly_review",
-      dateBucket: `weekly:${week.weekStart}:${week.weekEnd}`,
-      ttlSeconds: 86400,
-      now,
-    }),
+    Promise.resolve("Live news/search evidence is unavailable in the free EOD report; do not infer catalysts or event dates."),
   ]);
 
   return {
     week,
     nowIso,
     dashboardSummary: summarizeDashboard(snapshot, week),
+    breadthSummary: breadth.summary,
     recentDailyCommentarySummary,
     overviewFocusSummary,
     sectorFocusSummary,
@@ -746,7 +730,10 @@ async function gatherWeeklyEvidence(env: Env, week: WeeklyMarketReviewWeek, now:
       dashboardStatus: snapshot?.status ?? "unavailable",
       dashboardAsOfDate: snapshot?.asOfDate ?? null,
       dashboardGeneratedAt: snapshot?.generatedAt ?? null,
-      sources: ["market-overview", "daily-commentary", "overview-focus", "sector-tracker", "fedwatch", "brave-search", "gemini"],
+      dashboardPublicationId: snapshot?.generationId ?? snapshot?.generatedAt ?? null,
+      eodPublicationIdentity: breadth.identity,
+      eodPublicationIds: breadth.publicationIds,
+      sources: ["market-overview", "daily-commentary", "overview-focus", "sector-tracker", "fedwatch", "official-nyfed"],
       tradingViewExcluded: "No TradingView MCP, chart screenshots, watchlist flags, or watchlist review candidates are used.",
     },
   };
@@ -780,6 +767,9 @@ function buildWeeklyPrompt(evidence: WeeklyEvidence): string {
     "",
     "EXISTING APP MARKET DATA",
     evidence.dashboardSummary,
+    "",
+    "Accepted end-of-week breadth observations; these are endpoint values, not weekly changes:",
+    evidence.breadthSummary,
     "",
     "RECENT DAILY MARKET COMMENTARY",
     evidence.recentDailyCommentarySummary,
@@ -827,6 +817,19 @@ function fallbackReviewId(week: WeeklyMarketReviewWeek, mode: WeeklyMarketReview
   return `weekly-market-review-${week.weekStart}-${week.weekEnd}-${mode}-${nowIso.replace(/[^0-9]/g, "").slice(0, 14)}`;
 }
 
+async function weeklyNeedsOverviewUpdate(env: Env, report: WeeklyMarketReviewReport, weekEnd: string): Promise<boolean> {
+  if (report.generationProvider === "hermes_gpt") return false;
+  try {
+    const snapshot = await loadSnapshot(env, "default", weekEnd, { allowComputeOnMissing: false });
+    if (snapshot.status === "empty" || snapshot.asOfDate !== weekEnd) return false;
+    const publication = snapshot.generationId ?? snapshot.generatedAt;
+    if (report.sourceSnapshot.dashboardPublicationId !== publication) return true;
+    if (env.EOD_READ_ENABLED !== "true") return false;
+    const breadth = await loadFactualBreadthEvidence(env, weekEnd, publication);
+    return breadth.readAvailable && report.sourceSnapshot.eodPublicationIdentity !== breadth.identity;
+  } catch { return false; }
+}
+
 export async function generateWeeklyMarketReview(env: Env, options?: { force?: boolean; mode?: "scheduled_fallback" | "manual_retry"; now?: Date }): Promise<WeeklyMarketReviewGenerateResponse> {
   const parsed = weeklyMarketReviewGenerateSchema.parse({
     force: options?.force ?? false,
@@ -838,13 +841,13 @@ export async function generateWeeklyMarketReview(env: Env, options?: { force?: b
 
   if (!parsed.force) {
     const existing = await loadPreferredReadyReviewForWeek(env, week.weekEnd);
-    if (existing) {
+    if (existing && !(await weeklyNeedsOverviewUpdate(env, existing, week.weekEnd))) {
       return {
         ok: true,
         status: "ready",
         warning: existing.generationProvider === "hermes_gpt"
           ? "Using the current Hermes / GPT weekly market review."
-          : "Using the current Gemini fallback weekly market review.",
+          : existing.provider === FACTUAL_REPORT_PROVIDER ? "Using the current factual weekly market review; AI interpretation unavailable." : "Using the current Gemini fallback weekly market review.",
         report: existing,
       };
     }
@@ -852,11 +855,9 @@ export async function generateWeeklyMarketReview(env: Env, options?: { force?: b
 
   let evidence: WeeklyEvidence | null = null;
   try {
-    if (!env.GEMINI_API_KEY?.trim()) {
-      throw new Error("GEMINI_API_KEY is not configured.");
-    }
     evidence = await gatherWeeklyEvidence(env, week, now);
-    const result = await generateMarkdownWithGemini(env, buildWeeklyPrompt(evidence), { maxOutputTokens: 24000 });
+    if (parsed.mode === "scheduled_fallback") throw new Error("Factual EOD weekly report generated from accepted observations; AI interpretation is unavailable.");
+    const result = await generateMarkdownWithGemini(freeMarketReportEnv(env), buildWeeklyPrompt(evidence), { maxOutputTokens: 16000, timeoutMs: 30_000 });
     const report = await storeWeeklyMarketReview(env, {
       id: fallbackReviewId(week, parsed.mode, nowIso),
       weekStart: week.weekStart,
@@ -891,14 +892,23 @@ export async function generateWeeklyMarketReview(env: Env, options?: { force?: b
       weekEnd: week.weekEnd,
       generatedAt: nowIso,
       asOf: nowIso,
-      provider: GEMINI_PROVIDER,
-      model: env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL,
+      provider: FACTUAL_REPORT_PROVIDER,
+      model: FACTUAL_REPORT_MODEL,
       generationProvider: "gemini_fallback",
       generationMode: parsed.mode,
-      status: "failed",
+      status: "ready",
       title: `Weekly Market Review - ${week.weekStart} to ${week.weekEnd}`,
       marketTone: null,
-      reviewMarkdown: weeklyFallbackMarkdown(week, message),
+      reviewMarkdown: buildFactualWeeklyReport({
+        ...week,
+        reason: message,
+        dashboardSummary: evidence?.dashboardSummary ?? "Dashboard evidence is unavailable.",
+        breadthSummary: evidence?.breadthSummary,
+        fedWatchSummary: evidence?.fedWatchSummary ?? "Rate evidence is unavailable.",
+        recentDailyCommentarySummary: evidence?.recentDailyCommentarySummary ?? "Daily commentary is unavailable.",
+        sourceAudit: evidence?.sourceAudit ?? [],
+        dataQuality,
+      }),
       sections: {},
       keyTickers: [],
       sourceAudit: evidence?.sourceAudit ?? WEEKLY_STATIC_SOURCES,
@@ -911,7 +921,7 @@ export async function generateWeeklyMarketReview(env: Env, options?: { force?: b
       },
       error: message,
     }, nowIso);
-    return { ok: false, status: "failed", warning: message, report };
+    return { ok: true, status: "ready", warning: `Factual report; AI interpretation unavailable. ${message}`, report };
   }
 }
 
@@ -920,7 +930,7 @@ export async function maybeRunScheduledWeeklyMarketReview(env: Env, now = new Da
   if (!decision.due) return null;
   const week = resolveWeeklyMarketReviewWeek(now);
   const existing = await loadPreferredReadyReviewForWeek(env, week.weekEnd);
-  if (existing) {
+  if (existing && !(await weeklyNeedsOverviewUpdate(env, existing, week.weekEnd))) {
     return {
       ok: true,
       status: "ready",
@@ -929,7 +939,7 @@ export async function maybeRunScheduledWeeklyMarketReview(env: Env, now = new Da
     };
   }
   const scheduledAttempt = await loadScheduledFallbackAttemptForWeek(env, week.weekEnd);
-  if (scheduledAttempt) {
+  if (scheduledAttempt && !(await weeklyNeedsOverviewUpdate(env, scheduledAttempt, week.weekEnd)) && (scheduledAttempt.status === "ready" || now.getTime() - Date.parse(scheduledAttempt.generatedAt) < 15 * 60_000)) {
     return {
       ok: scheduledAttempt.status === "ready",
       status: scheduledAttempt.status,

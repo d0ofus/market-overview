@@ -6,6 +6,7 @@ import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
   maybeRunScheduledMarketCommentary,
+  maybeRunPublishedEodCommentary,
   pruneMarketCommentaryReports,
   renderMarketCommentaryQueryTemplate,
   summarizeDailyAbove200SmaScanEvidence,
@@ -15,7 +16,14 @@ import {
   type MarketCommentaryReport,
   type MarketCommentarySettings,
 } from "../src/market-commentary-service";
-import type { Env } from "../src/types";
+import type { Env, SnapshotReadyResponse } from "../src/types";
+import { eodHash } from "../src/eod-publication-service";
+
+const publicationMocks = vi.hoisted(() => ({ loadEodOverview: vi.fn(async (): Promise<unknown> => null) }));
+vi.mock("../src/eod-publication-service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/eod-publication-service")>(),
+  loadEodOverview: publicationMocks.loadEodOverview,
+}));
 
 
 type StoredAttempt = {
@@ -72,6 +80,7 @@ function freshSnapshotRow(
 }
 
 class FakeMarketCommentaryDb {
+  eodPublications: Array<Record<string, unknown>> = [];
   rows: StoredReport[];
   attempts: StoredAttempt[];
   settings: MarketCommentarySettings | null;
@@ -135,6 +144,9 @@ class FakeMarketCommentaryDb {
         return null as T;
       },
       async all<T>() {
+        if (sql.includes("LEFT JOIN eod_publications")) {
+          return { results: db.eodPublications.filter((row) => row.sessionDate === String(bound[1])) as T[] };
+        }
         if (sql.includes("FROM market_commentary_schedule_attempts")) {
           return { results: db.attempts.map((attempt) => ({
             status: attempt.status,
@@ -249,7 +261,7 @@ function createReport(
   id: string,
   sessionDate: string,
   generatedAt: string,
-  options: Partial<Pick<StoredReport, "status" | "errorMessage" | "generationTrigger" | "scheduledLocalDate" | "scheduledTimezone" | "scheduledLocalTime">> = {},
+  options: Partial<Pick<StoredReport, "status" | "errorMessage" | "generationTrigger" | "scheduledLocalDate" | "scheduledTimezone" | "scheduledLocalTime" | "sourceAuditJson">> = {},
 ): StoredReport {
   return {
     id,
@@ -265,7 +277,7 @@ function createReport(
     model: "gemini-3.5-flash",
     status: options.status ?? "ready",
     reportMarkdown: `# Report ${id}`,
-    sourceAuditJson: "[]",
+    sourceAuditJson: options.sourceAuditJson ?? "[]",
     dataQualityJson: "[]",
     errorMessage: options.errorMessage ?? null,
     generationTrigger: options.generationTrigger ?? "manual",
@@ -284,6 +296,41 @@ function createEnv(db: FakeMarketCommentaryDb, extra?: Partial<Env>): Env {
 }
 
 describe("market commentary service", () => {
+  it("publishes a factual early-close report without waiting for Melbourne schedule or calling AI", async () => {
+    const db = new FakeMarketCommentaryDb();
+    const env = createEnv(db, { EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", GEMINI_FREE_API_KEY: "unused-free-key" });
+    publicationMocks.loadEodOverview.mockResolvedValue({
+      status: "ready", generationId: "early-close-publication", asOfDate: "2026-11-27",
+      generatedAt: "2026-11-27T18:20:00Z", providerLabel: "Alpaca daily", sections: [], freshnessStatus: "fresh",
+    } as unknown as SnapshotReadyResponse);
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const response = await maybeRunScheduledMarketCommentary(env, new Date("2026-11-27T18:30:00Z"));
+      expect(response?.report).toMatchObject({ provider: "factual", status: "ready", sessionDate: "2026-11-27", dataBasis: "closing" });
+      expect(response?.report?.marketSessionLabel).toContain("EOD report for US session 2026-11-27");
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await maybeRunPublishedEodCommentary(env, new Date("2026-11-27T18:35:00Z"))).toBeNull();
+      expect(db.rows).toHaveLength(1);
+      const breadth = { asOfDate: "2026-11-27", universeId: "nasdaq-core", metrics: {
+        advancers: 123, metricCoverage: { advancers: { status: "ready", eligibleCount: 3000, eligiblePopulation: 3000, missingCount: 0 } },
+      }, membership: { source: "Nasdaq Trader", sourceType: "exchange-listed" } };
+      db.eodPublications.push({ id: "nasdaq-catch-up", scope: "breadth:nasdaq-core", sessionDate: "2026-11-27",
+        acceptedAt: "2026-11-27T18:36:00Z", payload: JSON.stringify(breadth), payloadCodec: "json", payloadBase64: null,
+        checksum: await eodHash(breadth) });
+      const caughtUp = await maybeRunPublishedEodCommentary(env, new Date("2026-11-27T18:37:00Z"));
+      expect(caughtUp?.report?.reportMarkdown).toContain("advancers: 123.00");
+      expect(caughtUp?.report?.provider).toBe("factual");
+      expect(db.rows).toHaveLength(2);
+      expect(await maybeRunPublishedEodCommentary(env, new Date("2026-11-27T18:38:00Z"))).toBeNull();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await maybeRunPublishedEodCommentary(env, new Date("2026-11-27T18:35:00Z"), { ...DEFAULT_MARKET_COMMENTARY_SETTINGS, enabled: false })).toBeNull();
+    } finally {
+      publicationMocks.loadEodOverview.mockResolvedValue(null);
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns default configurable settings when no row exists", async () => {
     const settings = await loadMarketCommentarySettings(createEnv(new FakeMarketCommentaryDb()));
     expect(settings.enabled).toBe(true);
@@ -378,7 +425,7 @@ describe("market commentary service", () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-26" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:00:00.000Z"));
 
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.sessionDate).toBe("2026-05-26");
     expect(db.rows).toHaveLength(1);
     expect(db.rows[0]).toMatchObject({
@@ -393,31 +440,27 @@ describe("market commentary service", () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-26" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
 
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.sessionDate).toBe("2026-05-26");
     expect(db.rows[0]?.scheduledLocalDate).toBe("2026-05-27");
   });
 
-  it("defers scheduled generation until the matching overview snapshot is ready", async () => {
+  it("publishes factual unavailable sections when the matching overview is missing", async () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-25" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
-
-    expect(response).toBeNull();
-    expect(db.rows).toHaveLength(0);
-    expect(db.attempts).toEqual([
-      expect.objectContaining({
-        scheduledLocalDate: "2026-05-27",
-        sessionDate: "2026-05-26",
-        status: "skipped",
-        reason: expect.stringContaining("Overview snapshot for 2026-05-26 is not ready"),
-      }),
-    ]);
+    expect(response?.status).toBe("ready");
+    expect(response?.report?.provider).toBe("factual");
+    expect(response?.report?.reportMarkdown).toContain("unavailable");
+    expect(response?.report?.reportMarkdown).toContain("18. SOURCE AUDIT");
+    expect(db.rows).toHaveLength(1);
+    expect(db.attempts[0]).toMatchObject({ status: "ready", sessionDate: "2026-05-26" });
   });
 
   it("scheduled generation skips when a same-day ready scheduled attempt already exists", async () => {
     const db = new FakeMarketCommentaryDb([
       createReport("monday", "2026-06-01", "2026-06-01T23:00:00.000Z", {
         generationTrigger: "scheduled",
+        sourceAuditJson: JSON.stringify([{ sourceName: "Market Command dashboard snapshot", note: "Overview publication: snapshot-2026-06-01", timestamp: "2026-06-01T22:00:00.000Z" }]),
         scheduledLocalDate: "2026-06-02",
         scheduledTimezone: "Australia/Melbourne",
         scheduledLocalTime: "09:00",
@@ -427,6 +470,23 @@ describe("market commentary service", () => {
     expect(response?.status).toBe("ready");
     expect(response?.warning).toContain("scheduled attempt already exists");
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("rebuilds a ready report when a new overview publication arrives, then reuses it", async () => {
+    const db = new FakeMarketCommentaryDb([
+      createReport("old-inputs", "2026-06-01", "2026-06-01T23:00:00.000Z", {
+        generationTrigger: "scheduled", scheduledLocalDate: "2026-06-02",
+        scheduledTimezone: "Australia/Melbourne", scheduledLocalTime: "09:00",
+        sourceAuditJson: JSON.stringify([{ sourceName: "Market Command dashboard snapshot", note: "Overview publication: old-generation" }]),
+      }),
+    ], { snapshotAsOfDate: "2026-06-01" });
+    const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:30:00.000Z"));
+    expect(response?.report?.id).not.toBe("old-inputs");
+    expect(response?.report?.sourceAudit).toEqual(expect.arrayContaining([expect.objectContaining({ note: "Overview publication: snapshot-2026-06-01" })]));
+    expect(db.rows).toHaveLength(2);
+    const duplicate = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:45:00.000Z"));
+    expect(duplicate?.warning).toContain("scheduled attempt already exists");
+    expect(db.rows).toHaveLength(2);
   });
 
   it("scheduled generation retries when a same-day failed scheduled report already exists", async () => {
@@ -442,24 +502,24 @@ describe("market commentary service", () => {
     ], { snapshotAsOfDate: "2026-05-26" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-26T23:30:00.000Z"));
 
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.id).not.toBe("failed");
-    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(response?.report?.error).toContain("Free AI enrichment");
     expect(db.rows).toHaveLength(2);
     expect(db.attempts[0]).toMatchObject({
       scheduledLocalDate: "2026-05-27",
       sessionDate: "2026-05-26",
-      status: "failed",
-      reason: expect.stringContaining("GEMINI_API_KEY"),
+      status: "ready",
+      reason: expect.stringContaining("Free AI enrichment"),
     });
   });
 
-  it("scheduled generation stores an isolated failed report when provider config is missing", async () => {
+  it("scheduled generation stores a factual report when provider config is missing", async () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-01" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.sessionDate).toBe("2026-06-01");
-    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(response?.report?.error).toContain("Free AI enrichment");
     expect(db.rows).toHaveLength(1);
   });
 
@@ -476,9 +536,9 @@ describe("market commentary service", () => {
     });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-06-01T23:00:00.000Z"));
 
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.sessionDate).toBe("2026-06-01");
-    expect(response?.report?.error).toContain("GEMINI_API_KEY");
+    expect(response?.report?.error).toContain("Free AI enrichment");
     expect(response?.report?.error).not.toContain("stale");
     expect(db.rows).toHaveLength(1);
   });
@@ -489,7 +549,7 @@ describe("market commentary service", () => {
     ], { snapshotAsOfDate: "2026-05-22" });
     const response = await maybeRunScheduledMarketCommentary(createEnv(db), new Date("2026-05-25T23:00:00.000Z"));
 
-    expect(response?.status).toBe("failed");
+    expect(response?.status).toBe("ready");
     expect(response?.report?.sessionDate).toBe("2026-05-22");
     expect(db.rows).toHaveLength(2);
     expect(db.rows[1]?.generationTrigger).toBe("scheduled");
@@ -576,10 +636,10 @@ describe("market commentary service", () => {
       force: true,
     });
 
-    expect(response.status).toBe("failed");
+    expect(response.status).toBe("ready");
     expect(response.report?.sessionDate).toBe("2026-06-16");
     expect(response.report?.marketSession).toBe("pre_market");
-    expect(response.report?.error).toContain("GEMINI_API_KEY");
+    expect(response.report?.error).toContain("Free AI enrichment");
     expect(response.report?.error).not.toContain("Overview snapshot for 2026-06-16");
     expect(db.rows).toHaveLength(1);
   });
@@ -595,25 +655,25 @@ describe("market commentary service", () => {
       now: new Date("2026-06-16T08:01:00.000Z"),
     });
 
-    expect(response.status).toBe("failed");
-    expect(response.warning).toContain("GEMINI_API_KEY");
+    expect(response.status).toBe("ready");
+    expect(response.warning).toContain("Free AI enrichment");
     expect(response.report?.id).not.toBe("recent-failed");
-    expect(response.report?.error).toContain("GEMINI_API_KEY");
+    expect(response.report?.error).toContain("Free AI enrichment");
     expect(db.rows).toHaveLength(2);
   });
 
-  it("stores an isolated failed report when Gemini is not configured", async () => {
+  it("stores a factual report when Gemini is not configured", async () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-05-22" });
     const response = await refreshMarketCommentary(createEnv(db), {
       now: new Date("2026-05-25T15:00:00.000Z"),
       force: true,
     });
 
-    expect(response.status).toBe("failed");
-    expect(response.report?.status).toBe("failed");
+    expect(response.status).toBe("ready");
+    expect(response.report?.status).toBe("ready");
     expect(response.report?.sessionDate).toBe("2026-05-22");
     expect(response.report?.marketSession).toBe("closed");
-    expect(response.report?.error).toContain("GEMINI_API_KEY");
+    expect(response.report?.error).toContain("Free AI enrichment");
     expect(db.rows).toHaveLength(1);
   });
 
@@ -644,7 +704,7 @@ describe("market commentary service", () => {
 
     try {
       const response = await refreshMarketCommentary(createEnv(db, {
-        GEMINI_API_KEY: "test-key",
+        GEMINI_FREE_API_KEY: "test-key",
         GEMINI_MODEL: "gemini-3.5-flash",
         GEMINI_COMMENTARY_FALLBACK_MODEL: "gemini-3.1-flash-lite",
       }), {
@@ -662,22 +722,22 @@ describe("market commentary service", () => {
     }
   });
 
-  it("stores short or malformed Gemini output as a failed report", async () => {
+  it("uses factual evidence when Gemini output is short or malformed", async () => {
     const db = new FakeMarketCommentaryDb([], { snapshotAsOfDate: "2026-06-01" });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       candidates: [{ content: { parts: [{ text: "XLY +1.2%, XLI +0.9%, partial sector fragment" }] } }],
     }), { status: 200 })));
 
     try {
-      const response = await refreshMarketCommentary(createEnv(db, { GEMINI_API_KEY: "test-key" }), {
+      const response = await refreshMarketCommentary(createEnv(db, { GEMINI_FREE_API_KEY: "test-key" }), {
         now: new Date("2026-06-01T23:00:00.000Z"),
         force: true,
       });
 
-      expect(response.status).toBe("failed");
+      expect(response.status).toBe("ready");
       expect(response.report?.error).toContain("incomplete market commentary");
       expect(db.rows).toHaveLength(1);
-      expect(db.rows[0]?.status).toBe("failed");
+      expect(db.rows[0]?.status).toBe("ready");
     } finally {
       vi.unstubAllGlobals();
     }

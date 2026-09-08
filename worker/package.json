@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "eod:run": "tsx scripts/eod-runner.ts",
+    "eod:typecheck": "tsc -p tsconfig.runner.json",
     "dev": "wrangler dev --local --persist-to .wrangler/state",
     "build": "wrangler deploy --dry-run",
     "test": "vitest run",
@@ -27,6 +29,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3",
     "vitest": "^3.0.6",
     "wrangler": "^4.3.0"

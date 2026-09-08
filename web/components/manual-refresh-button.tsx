@@ -36,6 +36,7 @@ export function ManualRefreshButton({
           try {
             const res = await refreshPageData(page, ticker);
             setLabel(res.notes ?? `Refreshed ${res.refreshedTickers} ticker${res.refreshedTickers === 1 ? "" : "s"}`);
+            window.dispatchEvent(new Event("market-data-updated"));
             router.refresh();
           } catch (error) {
             setLabel(error instanceof Error ? error.message : "Refresh failed");

@@ -678,7 +678,7 @@ export function parseHtmlHoldingsRows(html: string, etfTicker: string): EtfConst
   return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
 }
 
-function parseHoldingsFileByType(
+export function parseHoldingsFileByType(
   url: string,
   contentType: string,
   textBody: string | null,
@@ -698,6 +698,10 @@ function parseHoldingsFileByType(
     return parseSsgaWorkbookRows(binaryBody);
   }
   const text = textBody ?? "";
+  // Consolidated issuer exports must never fall through to an unfiltered generic parser.
+  if (/account symbol/i.test(text) && /stock ticker/i.test(text)) {
+    return options.etfTicker ? parseAdvisorSharesDelimitedRows(text, options.etfTicker) : [];
+  }
   if (options.etfTicker) {
     const parsedAdvisorShares = parseAdvisorSharesDelimitedRows(text, options.etfTicker);
     if (parsedAdvisorShares.length > 0) return parsedAdvisorShares;
@@ -1719,15 +1723,15 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   const finalResult = result;
 
   const now = new Date().toISOString();
-  const asOfDate = finalResult.asOfDate ?? now.slice(0, 10);
+  const asOfDate = finalResult.asOfDate ?? null;
   const isPartial = finalResult.coverage === "partial" || finalResult.sourceTier === "partial";
   if (isPartial && existingCacheLooksFull(existing)) {
-    const retainedCount = Math.max(existing.actualCount, existing.recordsCount);
+    const retainedCount = existing.actualCount;
     await persistSyncStatus(env, {
       etfTicker,
       syncedAt: now,
-      status: "ok",
-      error: null,
+      status: "partial",
+      error: `Latest provider returned partial holdings (${finalResult.holdings.length}); retaining the last full holdings from ${existing.lastFullSyncedAt ?? existing.lastSyncedAt ?? "an unknown date"}.`,
       source: existing.source ?? finalResult.source,
       recordsCount: retainedCount,
       sourceUrl: existing.sourceUrl ?? finalResult.sourceUrl,

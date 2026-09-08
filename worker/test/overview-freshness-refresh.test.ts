@@ -137,20 +137,19 @@ class OverviewFreshnessDb {
 
   rowsForSql<T>(sql: string, args: unknown[]): T[] {
     this.queries.push({ sql, args });
-    if (sql.includes("SELECT ticker, date, c") && sql.includes("FROM alpaca_daily_bars")) {
-      const hasLowerBound = sql.includes("date >= ?");
-      const startDate = hasLowerBound ? String(args.at(-2)) : null;
-      const cutoff = String(args.at(-1) ?? args[0]);
-      const requestedTickers = new Set(
-        (hasLowerBound ? args.slice(1, -2) : args.slice(1, -1))
-          .map((value) => String(value).toUpperCase()),
-      );
+    if (sql.includes("SELECT ticker, date, o, h, l, c") && sql.includes("FROM alpaca_daily_bars")) {
+      const startIndex = args.findIndex((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value)));
+      const startDate = String(args[startIndex]);
+      const cutoff = String(args[startIndex + 1]);
+      const limit = sql.includes("row_num <= ?") ? Number(args.at(-1)) : null;
+      const requestedTickers = new Set(args.slice(1, startIndex).map((value) => String(value).toUpperCase()));
       return this.items
         .filter((item) => requestedTickers.size === 0 || requestedTickers.has(item.ticker.toUpperCase()))
         .flatMap((item, itemIndex) =>
           (this.dailyBars[item.ticker.toUpperCase()] ?? [])
-          .filter((date) => (!startDate || date >= startDate) && date <= cutoff)
+          .filter((date) => date >= startDate && date <= cutoff)
           .sort()
+          .slice(limit == null ? 0 : -limit)
           .map((date, dateIndex) => ({
             ticker: item.ticker,
             date,
@@ -362,16 +361,16 @@ describe("overview freshness refresh", () => {
     });
 
     const barQuery = db.queries.find((query) =>
-      query.sql.includes("SELECT ticker, date, c")
+      query.sql.includes("SELECT ticker, date, o, h, l, c")
         && query.sql.includes("FROM alpaca_daily_bars")
-        && query.sql.includes("date >= ?"),
+        && query.sql.includes("date >= ?") && !query.sql.includes("row_num"),
     );
     expect(barQuery?.sql).toContain("ticker IN");
     expect(barQuery?.sql).toContain("date <= ?");
     expect(barQuery?.sql).not.toContain("SELECT ticker FROM dashboard_items");
     expect(barQuery?.args).toContain("SPY");
     expect(barQuery?.args).toContain("2025-04-18");
-    expect(barQuery?.args.at(-1)).toBe("2026-06-12");
+    expect(barQuery?.args).toContain("2026-06-12");
     expect(db.snapshotRows.find((row) => row.ticker === "SPY")?.price).not.toBe(100);
   });
 

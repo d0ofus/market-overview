@@ -1,10 +1,13 @@
 import { CORE_BREADTH_UNIVERSE_IDS, minBreadthCoveragePct } from "./eod";
 import { isBreadthUniverseMemberCountValid } from "./breadth-quality";
 import { getMarketDataDb } from "./market-data-db";
-import { latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { countUsMarketTradingSessionsAfter, latestUsMarketSessionAsOfDate } from "./market-calendar";
+import { expectedEodSession } from "./eod-coordinator";
+import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
+import { EOD_METRICS_VERSION } from "./eod-metrics";
 import type { Env } from "./types";
 
-const PROVIDER_LABEL = "Alpaca SIP split-adjusted completed daily bars; Alpaca IEX exact-session fallback.";
+const PROVIDER_LABEL = "Split-adjusted daily prices: Alpaca SIP, coherent Yahoo fallback; reported volume: Alpaca SIP.";
 
 const UNIVERSE_NAMES: Record<string, string> = {
   "sp500-core": "S&P 500",
@@ -100,7 +103,7 @@ function publicSnapshot(row: SnapshotRow) {
 
 export type BreadthDashboardResponse = Awaited<ReturnType<typeof loadBreadthDashboard>>;
 
-export async function loadBreadthDashboard(
+async function loadLegacyBreadthDashboard(
   env: Env,
   historyLimitInput = 120,
   now = new Date(),
@@ -124,7 +127,7 @@ export async function loadBreadthDashboard(
          FROM breadth_snapshots b
          JOIN breadth_generations generation
            ON generation.id = b.generation_id
-          AND generation.status = 'published'
+          AND generation.status IN ('published', 'superseded')
         WHERE b.universe_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
      )
      SELECT r.as_of_date as asOfDate, r.universe_id as universeId,
@@ -204,7 +207,7 @@ export async function loadBreadthDashboard(
     const sourceMix = sentiment.sourceMix && typeof sentiment.sourceMix === "object"
       ? sentiment.sourceMix as Record<string, unknown>
       : {};
-    const memberCount = numeric(membership?.memberCount, numeric(metrics.totalUniverseMembers));
+    const memberCount = numeric(metrics.totalUniverseMembers, numeric(membership?.memberCount));
     const eligibleCount = numeric(metrics.memberCount, displayed ? displayed.advancers + displayed.decliners + displayed.unchanged : 0);
     const unsupportedCount = numeric(membership?.unresolvedCount);
     const exactSessionCount = eligibleCount;
@@ -226,7 +229,7 @@ export async function loadBreadthDashboard(
       freshness = "low_coverage";
       errorCode = "universe-membership-invalid";
       errorMessage = `The active ${universeId} membership contains ${memberCount} members and is outside its validated range.`;
-    } else if (coveragePct < requiredCoveragePct || readiness?.status === "blocked") {
+    } else if (coveragePct < requiredCoveragePct) {
       freshness = "low_coverage";
       errorCode = repairSourceCount > 0 && numeric(sentiment.repairedPct) > 5
         ? "repair-source-limit"
@@ -279,6 +282,162 @@ export async function loadBreadthDashboard(
     warning: problemRows.length
       ? `${problemRows.length} of ${universes.length} Breadth universes are not current for ${expectedAsOfSession}.`
       : null,
+    universes,
+  };
+}
+
+type Dashboard = Awaited<ReturnType<typeof loadLegacyBreadthDashboard>>;
+type PublishedSnapshot = NonNullable<Dashboard["universes"][number]["displayedSnapshot"]>;
+type PublicationRow = EodStoredPayload & {
+  id: string;
+  scope: string;
+  sessionDate: string;
+  revision: number;
+  createdAt: string;
+  publicationId: string | null;
+  publishedAt: string | null;
+};
+
+async function parsePublishedSnapshot(row: PublicationRow): Promise<PublishedSnapshot | null> {
+  let decoded: unknown;
+  try {
+    const summary: unknown = JSON.parse(row.payload);
+    const candidate = summary && typeof summary === "object" && !Array.isArray(summary) ? summary as Record<string, unknown> : null;
+    const completeSummary = candidate?.methodologyVersion === EOD_METRICS_VERSION
+      && ["advancers", "decliners", "unchanged", "pctAbove20MA", "pctAbove50MA", "pctAbove200MA",
+        "new20DHighs", "new20DLows", "medianReturn1D", "medianReturn5D", "metrics", "membership"]
+        .every((key) => Object.prototype.hasOwnProperty.call(candidate, key));
+    // New Breadth summaries contain the complete scalar snapshot. Avoid one
+    // gzip stream per historical row; decode only older incomplete summaries.
+    decoded = completeSummary ? candidate : await decodeEodPayload(row);
+  } catch { return null; }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
+  const payload = decoded as Record<string, unknown>;
+  if (payload.asOfDate !== row.sessionDate || payload.universeId !== row.scope.slice("breadth:".length)
+    || !payload.metrics || typeof payload.metrics !== "object" || Array.isArray(payload.metrics)
+    || (payload.methodologyVersion !== undefined && payload.methodologyVersion !== EOD_METRICS_VERSION)) return null;
+  // Accepted publications must have a complete daily group; never manufacture
+  // zero values when a corrupt/incompatible publication is encountered.
+  if (![payload.advancers, payload.decliners, payload.unchanged].every((value) => typeof value === "number" && Number.isFinite(value))) return null;
+  return { ...payload, generatedAt: typeof payload.generatedAt === "string" ? payload.generatedAt : row.createdAt } as PublishedSnapshot;
+}
+
+/** New publications are immutable and independently promoted per universe.
+ * Legacy data remains visible during rollout, explicitly identified as unverified. */
+export async function loadBreadthDashboard(env: Env, historyLimitInput = 120, now = new Date()) {
+  if (env.EOD_READ_ENABLED !== "true") return { ...await loadLegacyBreadthDashboard(env, historyLimitInput, now),
+    exchangeSessionDates: undefined as string[] | undefined };
+  const expectedAsOfSession = await expectedEodSession(env,now);
+  if (!expectedAsOfSession) throw new Error("Exchange calendar unavailable; Breadth freshness cannot be verified.");
+  const historyLimit = Math.max(1, Math.min(450, Math.trunc(historyLimitInput) || 120));
+  const calendar = await getMarketDataDb(env).prepare(`SELECT session_date AS date FROM market_calendar_sessions
+    WHERE session_date<=? ORDER BY session_date DESC LIMIT 1600`).bind(expectedAsOfSession).all<{date:string}>();
+  const calendarDates = calendar.results.map((row) => row.date).reverse();
+  const exchangeSessionDates = calendarDates.slice(-historyLimit);
+  const scopes = JSON.stringify(CORE_BREADTH_UNIVERSE_IDS.map((id) => `breadth:${id}`));
+  const rows = await getMarketDataDb(env).prepare(
+    `WITH requested_ids AS (
+       SELECT e.id FROM json_each(?) scopes CROSS JOIN json_each(?) dates
+       JOIN eod_publications e ON e.id=(
+         SELECT latest.id FROM eod_publications latest
+         WHERE latest.scope=scopes.value AND latest.status='accepted' AND latest.session_date=dates.value
+         ORDER BY latest.revision DESC,latest.created_at DESC,latest.id DESC LIMIT 1)
+       UNION
+       SELECT p.publication_id FROM eod_publication_pointers p
+       JOIN eod_publications current ON current.id=p.publication_id AND current.scope=p.scope
+         AND current.session_date=p.session_date AND current.status='accepted'
+       WHERE p.scope IN (SELECT value FROM json_each(?)) AND p.session_date<=?
+     )
+     SELECT h.id, h.scope, h.session_date AS sessionDate, h.revision,
+            h.payload_json AS payload, h.payload_codec AS payloadCodec, h.payload_base64 AS payloadBase64,
+            h.created_at AS createdAt,
+            p.publication_id AS publicationId, p.published_at AS publishedAt
+       FROM requested_ids requested JOIN eod_publications h ON h.id=requested.id
+       LEFT JOIN eod_publication_pointers p ON p.scope = h.scope
+      ORDER BY h.scope, h.session_date DESC`,
+  ).bind(scopes,JSON.stringify(exchangeSessionDates),scopes,expectedAsOfSession).all<PublicationRow>();
+  const snapshots = new Map<string, PublishedSnapshot | null>();
+  // History can contain up to 2,250 publications. Bound simultaneous gzip
+  // streams so a long chart request cannot multiply decompression buffers.
+  const publicationRows = rows.results ?? [];
+  for (let offset = 0; offset < publicationRows.length; offset += 8) {
+    const decoded = await Promise.all(publicationRows.slice(offset, offset + 8).map(async (row) =>
+      [row.id, await parsePublishedSnapshot(row)] as const));
+    for (const [id, snapshot] of decoded) snapshots.set(id, snapshot);
+  }
+  const byScope = new Map<string, PublicationRow[]>();
+  for (const row of rows.results ?? []) {
+    const current = byScope.get(row.scope) ?? [];
+    current.push(row);
+    byScope.set(row.scope, current);
+  }
+  const needsLegacy = CORE_BREADTH_UNIVERSE_IDS.some((id) => !byScope.get(`breadth:${id}`)?.some((row) => row.id === row.publicationId && snapshots.get(row.id)));
+  const legacy = needsLegacy ? await loadLegacyBreadthDashboard(env, historyLimitInput, now) : null;
+  type Universe = Omit<Dashboard["universes"][number],"membership"> & { publicationId?: string; revision?: number; legacyUnverified?: boolean;
+    membership:Dashboard["universes"][number]["membership"] & {
+      verifiedAt?:string|null;sourceAgeSessions?:number|null;degraded?:boolean;degradationReason?:string|null;
+    } };
+  const universes = CORE_BREADTH_UNIVERSE_IDS.map((universeId): Universe => {
+    const history = byScope.get(`breadth:${universeId}`) ?? [];
+    const current = history.find((row) => row.id === row.publicationId);
+    const displayed = current ? snapshots.get(current.id) : null;
+    if (!displayed || !current) {
+      const fallback = legacy?.universes.find((row) => row.universeId === universeId);
+      if (!fallback) throw new Error(`No compatible Breadth publication or legacy state for ${universeId}.`);
+      return { ...fallback, legacyUnverified: true,
+        freshness: fallback.displayedSnapshot ? "stale" : "missing", isFallback: true,
+        error: { code: "legacy-breadth-unverified", message: "Displaying unverified legacy data until this universe receives its first EOD publication." } };
+    }
+    const raw = displayed as unknown as Record<string, unknown>;
+    const membership = raw.membership && typeof raw.membership === "object" ? raw.membership as Record<string, unknown> : {};
+    const metrics = displayed.metrics as Record<string, unknown>;
+    const memberCount = numeric(metrics.totalUniverseMembers);
+    const eligibleCount = numeric(metrics.memberCount);
+    const coveragePct = numeric(metrics.dataCoveragePct);
+    const requiredCoveragePct = minBreadthCoveragePct(universeId);
+    const sourceMix = displayed.sourceMix && typeof displayed.sourceMix === "object" ? displayed.sourceMix as Record<string, unknown> : {};
+    const stale = displayed.asOfDate !== expectedAsOfSession;
+    const lowCoverage = coveragePct < requiredCoveragePct;
+    const verifiedAt = typeof membership.verifiedAt === "string" && Number.isFinite(Date.parse(membership.verifiedAt)) ? membership.verifiedAt : null;
+    const sourceAsOfDate = typeof membership.sourceAsOfDate === "string" ? membership.sourceAsOfDate : null;
+    const verifiedDate = verifiedAt?.slice(0,10) ?? sourceAsOfDate;
+    const sourceAgeSessions = verifiedDate === displayed.asOfDate ? 0
+      : verifiedDate && verifiedDate <= displayed.asOfDate && calendarDates[0] && verifiedDate >= calendarDates[0]
+        ? calendarDates.filter((date) => date > verifiedDate && date <= displayed.asOfDate).length : null;
+    const degraded = membership.degraded === true || sourceAgeSessions === null || sourceAgeSessions > 0;
+    const degradationReason = !degraded ? null : typeof membership.degradationReason === "string" ? membership.degradationReason
+      : sourceAgeSessions === null ? "Membership verification age is unavailable for this publication."
+        : `This publication used membership verified ${sourceAgeSessions} exchange session${sourceAgeSessions === 1 ? "" : "s"} earlier.`;
+    return {
+      universeId, universeName: typeof raw.universeName === "string" ? raw.universeName : UNIVERSE_NAMES[universeId]!,
+      publicationId: current.id, revision: current.revision,
+      displayedSnapshot: displayed, displayedAsOfSession: displayed.asOfDate,
+      isFallback: stale, freshness: lowCoverage ? "low_coverage" : stale ? "stale" : "fresh",
+      staleTradingSessions: calendarDates[0] && displayed.asOfDate >= calendarDates[0]
+        ? calendarDates.filter((date) => date > displayed.asOfDate).length
+        : countUsMarketTradingSessionsAfter(displayed.asOfDate, expectedAsOfSession),
+      memberCount, exactSessionCount: eligibleCount, eligibleCount,
+      unsupportedCount: numeric(membership.unresolvedCount), repairSourceCount: numeric(sourceMix.yahoo),
+      coveragePct, requiredCoveragePct,
+      membership: {
+        versionId: typeof membership.versionId === "string" ? membership.versionId : null,
+        source: typeof membership.source === "string" ? membership.source : null,
+        sourceType: typeof membership.sourceType === "string" ? membership.sourceType : null,
+        sourceUrl: typeof membership.sourceUrl === "string" ? membership.sourceUrl : null,
+        sourceAsOfDate, verifiedAt, sourceAgeSessions, degraded, degradationReason,
+        status: "published-version",
+      },
+      error: lowCoverage ? { code: "breadth-coverage-below-threshold", message: `Published coverage is ${coveragePct.toFixed(1)}%; required ${requiredCoveragePct}%.` }
+        : stale ? { code: "breadth-generation-stale", message: `Displaying ${displayed.asOfDate}; no accepted publication exists for ${expectedAsOfSession}.` } : null,
+      history: history.slice(0, historyLimit).map((row) => snapshots.get(row.id)).filter((row): row is PublishedSnapshot => Boolean(row)).reverse(),
+    };
+  });
+  const problems = universes.filter((row) => row.freshness !== "fresh");
+  const publishedAt = (rows.results ?? []).map((row) => row.publishedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? legacy?.generatedAt ?? null;
+  return {
+    generationId: "per-universe", generatedAt: publishedAt, expectedAsOfSession, exchangeSessionDates, providerLabel: PROVIDER_LABEL,
+    overallHealth: problems.length === 0 ? "fresh" : problems.length === universes.length ? "stale" : "partial",
+    warning: problems.length ? `${problems.length} of ${universes.length} Breadth universes are unavailable, stale, or unverified for ${expectedAsOfSession}.` : null,
     universes,
   };
 }

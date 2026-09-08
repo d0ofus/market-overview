@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse, FomcCommentaryItem } from "@/lib/api";
 import { groupFomcCommentaryItems } from "@/lib/fomc-commentary";
+import { fedFundsPricingHeadline } from "@/lib/fed-funds-pricing";
 
 const DECISION_TZ = "America/New_York";
 const DECISION_HOUR = 14;
@@ -59,9 +60,7 @@ function formatGeneratedAt(value: string | null | undefined): string {
 
 function nextMeetingPricing(row: FedFundsPathRow | null): { headline: string; detail: string } {
   if (!row) return { headline: "Unavailable", detail: "No meeting data" };
-  if (row.probMovePct <= 0) return { headline: "0% NO CHANGE", detail: signedBps(row.changeBps) };
-  const action = row.probIsCut ? "CUT" : "HIKE";
-  return { headline: `${Math.round(row.probMovePct)}% ${action}`, detail: signedBps(row.changeBps) };
+  return { headline: fedFundsPricingHeadline(row.probMovePct, row.probIsCut), detail: signedBps(row.changeBps) };
 }
 
 function numMovesLabel(row: FedFundsPathRow): string {
@@ -154,10 +153,10 @@ function buildChartData(
       label: "Current",
       meetingIso: "current",
       current: currentMidpoint,
-      ago_1w: comparisons.find((series) => series.key === "ago_1w")?.effr ?? null,
-      ago_3w: comparisons.find((series) => series.key === "ago_3w")?.effr ?? null,
-      ago_6w: comparisons.find((series) => series.key === "ago_6w")?.effr ?? null,
-      ago_10w: comparisons.find((series) => series.key === "ago_10w")?.effr ?? null,
+      ago_1w: null,
+      ago_3w: null,
+      ago_6w: null,
+      ago_10w: null,
     },
     ...currentRows.map((row) => ({
       label: row.meeting,
@@ -313,8 +312,8 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
 
 export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) {
   const rows = snapshot.data?.rows ?? [];
-  const nextMeeting = rows[0] ?? null;
   const [now, setNow] = useState<number | null>(null);
+  const nextMeeting = rows.find((row) => zonedTimeToUtc(row.meetingIso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ).getTime() > (now ?? Date.now())) ?? null;
 
   useEffect(() => {
     setNow(Date.now());
@@ -357,10 +356,10 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Macro Rates</div>
             <h2 className="text-xl font-semibold text-text">Federal Reserve</h2>
-            <p className="text-sm text-slate-400">Fed Funds Rate: Twelve-Month Market Pricing</p>
+            <p className="text-sm text-slate-400">Official Rate Facts and Dated Market Pricing</p>
           </div>
           <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-300">
-            <span>As of: <span className="font-medium text-text">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
+            <span>Probability source date: <span className="font-medium text-text">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
             <span>Target Band: <span className="font-medium text-text">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
             <span>Midpoint: <span className="font-medium text-text">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
             <span>Last EFFR: <span className="font-medium text-text">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
@@ -379,6 +378,15 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
             <span>Snapshot: <span className="font-medium text-text">{formatGeneratedAt(snapshot.data?.generatedAt)}</span></span>
           </div>
         </div>
+      </div>
+
+      <div className="mx-5 mt-4 rounded-2xl border border-borderSoft/70 bg-panelSoft/70 p-4 text-sm">
+        <h3 className="font-semibold text-text">Official New York Fed Rate Facts</h3>
+        {snapshot.officialRates ? <>
+          <p className="mt-2 text-slate-300">Effective {snapshot.officialRates.effectiveDate}: EFFR {ratePct(snapshot.officialRates.effr, 2)}; target range {ratePct(snapshot.officialRates.targetLower, 2)} to {ratePct(snapshot.officialRates.targetUpper, 2)}.</p>
+          <p className="mt-1 text-xs text-slate-400">Checked {formatGeneratedAt(snapshot.officialRates.fetchedAt)}. EFFR is published for the preceding business day. <a className="text-accent hover:underline" href={snapshot.officialRates.sourceUrl} target="_blank" rel="noreferrer">Official source</a></p>
+        </> : <p className="mt-2 text-slate-400">Official rate facts unavailable.</p>}
+        {snapshot.officialRatesWarning && <p className="mt-2 text-warning">{snapshot.officialRatesWarning}</p>}
       </div>
 
       {snapshot.warning && (
@@ -420,7 +428,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
               <div className="mt-3 text-base text-emerald-600 dark:text-emerald-300">{nextPricing.detail}</div>
             </div>
             <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/80 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Current Rate</div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Rate on probability source date</div>
               <div className="mt-2 text-3xl font-semibold text-text">{ratePct(snapshot.data.midpoint, 2)}</div>
               <div className="mt-3 text-sm text-slate-400">Last EFFR: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
             </div>
@@ -458,7 +466,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
                 </table>
               </div>
               <p className="mt-4 text-xs text-slate-500">
-                Estimates represent market expectations for the midpoint of the Fed&apos;s target band for the fed funds rate. Data updates multiple times daily and the page shows the last cached copy if the live fetch is unavailable.
+                Estimates represent expectations on the displayed source date. Historical values are not current probabilities. Missing comparison series are unavailable; historical EFFR is not substituted for target midpoint.
               </p>
             </div>
 
@@ -494,7 +502,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
                     <Line
                       type="monotone"
                       dataKey="current"
-                      name="Current"
+                      name={`As of ${snapshot.data.asOf ?? "unknown date"}`}
                       stroke="#3B82F6"
                       strokeWidth={2.5}
                       dot={{ r: 3 }}
@@ -520,9 +528,10 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
             </div>
           </div>
 
-          <FomcCommentarySection items={snapshot.data.fomcCommentary ?? []} />
+
         </div>
       )}
+      <div className="px-5 pb-5"><FomcCommentarySection items={snapshot.fomcCommentary ?? snapshot.data?.fomcCommentary ?? []} /></div>
     </section>
   );
 }

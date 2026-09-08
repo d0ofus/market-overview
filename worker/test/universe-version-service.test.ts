@@ -106,7 +106,7 @@ describe("universe candidate validation", () => {
       .rejects.toThrow(/source date is missing or stale/i);
   });
 
-  it("updates provenance without creating version/member rows when membership is unchanged", async () => {
+  it("preserves accepted membership provenance when fresh verification has the same constituents", async () => {
     const members = tickers("R", 1_953);
     const membershipHash = await computeUniverseMembershipHash(members);
     const executed: Array<{ sql: string; args: unknown[] }> = [];
@@ -127,7 +127,8 @@ describe("universe candidate validation", () => {
           },
           first: async () => {
             if (sql.includes("uv.membership_hash as membershipHash")) {
-              return { id: "active-v1", membershipHash: null };
+              return { id: "active-v1", membershipHash: null, source: "iShares IWM holdings",
+                sourceType: "official-etf-holdings-proxy", sourceUrl: "https://example.test/iwm.csv" };
             }
             throw new Error(`Unexpected first(): ${sql}`);
           },
@@ -156,11 +157,7 @@ describe("universe candidate validation", () => {
 
     expect(result).toMatchObject({ versionId: "active-v1", unchanged: true });
     expect(batch).not.toHaveBeenCalled();
-    expect(executed).toHaveLength(1);
-    expect(executed[0].sql).toContain("UPDATE universe_versions");
-    expect(executed[0].sql).not.toContain("INSERT");
-    expect(executed[0].args).toContain("2026-07-29");
-    expect(executed[0].args).toContain(membershipHash);
+    expect(executed).toHaveLength(0);
   });
 
   it("prunes stale rejected versions before surfacing candidate validation failure", async () => {
@@ -193,6 +190,9 @@ describe("universe candidate validation", () => {
                 ],
               };
             }
+            if (sql.includes("SELECT ticker FROM universe_version_members")) {
+              return { results: (args[0] === candidateId ? tickers("R", 24) : ["OLD"]).map((ticker) => ({ ticker })) };
+            }
             return { results: [] };
           },
           run: async () => {
@@ -217,8 +217,8 @@ describe("universe candidate validation", () => {
     })).rejects.toThrow(/rejected .* candidate/i);
 
     expect(executed.some((entry) => entry.sql.includes("status = 'rejected'"))).toBe(true);
-    expect(batched.filter((entry) => entry.sql.includes("DELETE FROM universe_version_members"))).toHaveLength(3);
-    expect(batched.filter((entry) => entry.sql.includes("DELETE FROM universe_versions"))).toHaveLength(3);
-    expect(batched.flatMap((entry) => entry.args)).not.toContain("active-old");
+    expect(executed.filter((entry) => entry.sql.includes("DELETE FROM universe_version_members"))).toHaveLength(3);
+    expect(executed.filter((entry) => entry.sql.includes("DELETE FROM universe_versions"))).toHaveLength(3);
+    expect(executed.filter((entry) => entry.sql.startsWith("DELETE")).flatMap((entry) => entry.args)).not.toContain("active-old");
   });
 });

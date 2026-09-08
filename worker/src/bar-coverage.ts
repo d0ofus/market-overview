@@ -1,4 +1,5 @@
 import { getMarketDataDb, marketDataFeed, recordMarketDataD1Usage } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import { isUsMarketTradingDay } from "./market-calendar";
 import type { Env } from "./types";
 
@@ -69,7 +70,25 @@ export async function verifyMarketBarCoverage(
   for (let offset = 0; offset < tickers.length; offset += COVERAGE_QUERY_CHUNK_SIZE) {
     const chunk = tickers.slice(offset, offset + COVERAGE_QUERY_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
-    const result = await db.prepare(
+    const historyDates = new Map<string, Set<string>>();
+    if (env.MARKET_HISTORY_DB) {
+      for (const [sourceFeed, sourceProvider] of [[feed, "alpaca"], ["repair-yahoo", "yahoo"]]) {
+        for (const bar of await loadMarketHistory(env, {
+          tickers: chunk, feed: sourceFeed, sourceProvider, startDate: input.requestedStart, endDate: input.throughDate,
+          onD1Usage: (usage) => { rowsRead += usage.rowsRead; },
+        })) {
+          const dates = historyDates.get(bar.ticker) ?? new Set<string>();
+          dates.add(bar.date);
+          historyDates.set(bar.ticker, dates);
+        }
+      }
+    }
+    const result = env.MARKET_HISTORY_DB ? {
+      results: Array.from(historyDates, ([ticker, dates]) => {
+        const sorted = Array.from(dates).sort();
+        return { ticker, observedStart: sorted[0], observedEnd: sorted.at(-1)!, observedSessions: sorted.length };
+      }), meta: { rows_read: 0 },
+    } : await db.prepare(
       `SELECT ticker,
               MIN(date) as observedStart,
               MAX(date) as observedEnd,

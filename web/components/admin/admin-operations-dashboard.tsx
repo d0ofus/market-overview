@@ -24,6 +24,7 @@ import { AdminPageHeader } from "./admin-page-header";
 import { AdminStatCard } from "./admin-stat-card";
 import { CronJobConfigurationPanel } from "./cron-job-configuration-panel";
 import { EmptyState } from "./empty-state";
+import { EodOperationsPanel } from "./eod-operations-panel";
 import { InlineAlert } from "./inline-alert";
 import {
   EtfSyncStatusRow,
@@ -222,6 +223,8 @@ export function AdminOperationsDashboard() {
 
       {message ? <InlineAlert tone={message.tone === "danger" ? "danger" : message.tone}>{message.text}</InlineAlert> : null}
 
+      <EodOperationsPanel />
+
       {loading ? (
         <div className="grid gap-4 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => (
@@ -287,7 +290,7 @@ export function AdminOperationsDashboard() {
               {commentarySettings ? (
                 <AdminCard
                   title="Market Commentary Settings"
-                  description="Edit the Gemini report prompt, source references, and Brave Search queries. Scheduled generation is configured in Cron Job Configuration."
+                  description="Reports use stored, dated facts and a factual fallback. Optional free Gemini enrichment uses the report prompt; EOD daily reports follow each new publication. Legacy search settings remain stored for compatibility."
                 >
                   <div className="space-y-5">
                     <div className="grid gap-3 md:grid-cols-2">

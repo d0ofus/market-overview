@@ -30,8 +30,8 @@ export type OverviewFreshnessIndicatorRow = {
   quoteFreshnessReason?: string | null;
   quoteSource?: string | null;
   quoteFetchedAt?: string | null;
-  sparkline?: number[] | null;
-  relativeStrength30dVsSpy?: number[] | null;
+  sparkline?: Array<number | null> | null;
+  relativeStrength30dVsSpy?: Array<number | null> | null;
   currentData?: OverviewCurrentData;
   historyData?: {
     sessionDate: string;

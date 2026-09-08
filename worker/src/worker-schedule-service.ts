@@ -7,6 +7,7 @@ import {
   previousUsMarketTradingDay,
 } from "./market-calendar";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
+import { loadMarketHistory, loadMarketHistoryCoverage } from "./market-history";
 import {
   assertMarketDataBackgroundWriteBudget,
   assertMarketDataCriticalWorkBudget,
@@ -914,6 +915,11 @@ async function loadPostCloseDailyBarUniverseCount(env: Env): Promise<number> {
 async function loadTickersWithBarOnDate(env: Env, tickers: string[], date: string): Promise<Set<string>> {
   const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
   const out = new Set<string>();
+  if (env.MARKET_HISTORY_DB) {
+    return new Set((await loadMarketHistory(env, {
+      tickers: unique, startDate: date, endDate: date, sourceProvider: "alpaca",
+    })).map((bar) => bar.ticker));
+  }
   for (let i = 0; i < unique.length; i += 80) {
     const batch = unique.slice(i, i + 80);
     if (batch.length === 0) continue;
@@ -1012,6 +1018,22 @@ async function loadOverviewHistoryStates(
   for (let index = 0; index < unique.length; index += 80) {
     const tickerChunk = unique.slice(index, index + 80);
     const placeholders = tickerChunk.map(() => "?").join(",");
+    if (env.MARKET_HISTORY_DB) {
+      const states = await getMarketDataDb(env).prepare(
+        `SELECT ticker, lookback_start as lookbackStart, through_date as throughDate
+         FROM overview_alpaca_history_state
+         WHERE source_feed = ? AND status = 'completed' AND ticker IN (${placeholders})`,
+      ).bind(sourceFeed, ...tickerChunk).all<OverviewHistoryState>();
+      const dates = new Set((states.results ?? []).map((row) => row.throughDate));
+      for (const endDate of dates) {
+        const candidates = (states.results ?? []).filter((row) => row.throughDate === endDate);
+        const coverage = await loadMarketHistoryCoverage(env, {
+          tickers: candidates.map((row) => row.ticker), feed: sourceFeed, sourceProvider: "alpaca", endDate, limitPerTicker: 260,
+        });
+        for (const row of candidates) if ((coverage.get(row.ticker.toUpperCase())?.barCount ?? 0) >= 260) out.set(row.ticker.toUpperCase(), row);
+      }
+      continue;
+    }
     const rows = await getMarketDataDb(env).prepare(
       `SELECT state.ticker, state.lookback_start as lookbackStart, state.through_date as throughDate
          FROM overview_alpaca_history_state state

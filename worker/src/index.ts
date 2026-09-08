@@ -1,4 +1,9 @@
 import { Hono } from "hono";
+import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, expectedEodSession, registerEodRoutes, requestEodRefresh, type EodRun } from "./eod-coordinator";
+import { loadMarketHistory, loadMarketHistoryCoverage } from "./market-history";
+import { getStoredHoldingStats } from "./eod-holdings-quotes";
+import { EodCatalogUnavailableError, loadEodCatalogRows } from "./eod-catalog-service";
+import { loadEodApiStatus } from "./eod-api-status";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 import {
@@ -173,6 +178,7 @@ import {
   loadMarketCommentarySettings,
   loadLatestMarketCommentary,
   maybeRunScheduledMarketCommentary,
+  maybeRunPublishedEodCommentary,
   refreshMarketCommentary,
   resetMarketCommentarySettings,
   updateMarketCommentarySettings,
@@ -608,6 +614,7 @@ function isD1CpuResetError(error: unknown): boolean {
 }
 
 app.use("/api/*", cors());
+registerEodRoutes(app);
 
 const isAuthed = isAdminRequestAuthorized;
 
@@ -1286,6 +1293,16 @@ async function loadTickersMissingRecentBars(env: Env, tickers: string[], expecte
 async function loadTickersMissingBarHistory(env: Env, tickers: string[], minBars = OVERVIEW_SPARKLINE_MIN_POINTS): Promise<string[]> {
   const unique = uniqueTickers(tickers);
   if (unique.length === 0) return [];
+  if (env.EOD_READ_ENABLED === "true") {
+    const session = await expectedEodSession(env);
+    if (!session) throw new EodCatalogUnavailableError("the expected completed exchange session cannot be verified");
+    const catalog = await loadEodCatalogRows(env, unique, session);
+    return unique.filter((ticker) => catalog.get(ticker)!.barCount < minBars);
+  }
+  if (env.MARKET_HISTORY_DB) {
+    const coverage=await loadMarketHistoryCoverage(env,{tickers:unique});
+    return unique.filter((ticker) => (coverage.get(ticker)?.barCount ?? 0)<minBars);
+  }
   const barCountByTicker = new Map<string, number>();
   const chunkSize = 80;
   for (let i = 0; i < unique.length; i += chunkSize) {
@@ -1555,6 +1572,22 @@ async function processClaimedRefreshJob(
   job: RefreshJob,
 ): Promise<void> {
   try {
+    if (eodEnabled(env) && ["overview", "breadth"].includes(job.page)) {
+      const session = await expectedEodSession(env);
+      if (!session) throw new Error("Exchange calendar unavailable; refresh could not resolve a completed session.");
+      const run = await enqueueEodRun(env, session);
+      const status = await eodStatus(env);
+      const pageReady = job.page === "overview"
+        ? status.publications.some((row) => row.scope === "overview:default" && row.session_date === session)
+        : !status.missingScopes?.some((scope) => scope.startsWith("breadth:"));
+      if (pageReady) {
+        await completeRefreshJob(env, job, { page: job.page, refreshedTickers: 0, sessionDate: run.session_date, notes: "EOD publication completed." });
+      } else {
+        await dispatchEodRun(env, run);
+        await deferRefreshJob(env, job, 15 * 60_000);
+      }
+      return;
+    }
     const result = await refreshPageScopedData(env, job.page as RefreshPage, job.ticker);
     await completeRefreshJob(env, job, result);
   } catch (error) {
@@ -2381,16 +2414,20 @@ async function refreshRecentBarsForTickers(
 app.get("/api/health", async (c) => {
   const mode = marketPipelineMode(c.env);
   const capacity = await loadDatabaseCapacity(c.env);
-  const [core, market, ops] = capacity;
+  const [core, market, ops, history] = capacity;
   const unhealthyLevels = new Set(["critical", "halt", "unavailable"]);
   const ok = core.ok && market.ok && ops.ok
     && !capacity.some((database) => unhealthyLevels.has(database.level));
   c.header("Cache-Control", "no-store");
-  return c.json({ ok, pipelineMode: mode, databases: { core, market, ops } }, ok ? 200 : 503);
+  return c.json({ ok, pipelineMode: mode, databases: { core, market, ops, ...(history ? { history } : {}) } }, ok ? 200 : 503);
 });
 
 app.get("/api/status", async (c) => {
   const page = (c.req.query("page") ?? "overview").trim();
+  if (c.env.EOD_READ_ENABLED === "true") {
+    c.header("Cache-Control", "no-store");
+    return c.json(await loadEodApiStatus(c.env,page));
+  }
   let config:
     | {
         id: string;
@@ -2651,7 +2688,7 @@ app.get("/api/dashboard", async (c) => {
   let data;
   try {
     data = await loadSnapshot(c.env, configId, date, { allowComputeOnMissing: false });
-    if (!date && isOverviewPublicationRecoveryEnabled(c.env)) {
+    if (!date && !eodEnabled(c.env) && isOverviewPublicationRecoveryEnabled(c.env)) {
       data = {
         ...data,
         overviewRecovery: await loadOverviewRecovery(c.env, new Date(), configId),
@@ -3730,15 +3767,17 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
   const finalHasNoRecords = finalRows.length === 0;
 
   // Limit per-request quote/bar fanout to avoid worker subrequest caps on large constituent sets.
-  const pricedTickers = finalRows.slice(0, 80).map((r: any) => r.ticker);
-  const statsMap = await getStored1dStatsMap(c.env, pricedTickers);
+  const pricedTickers = finalRows.map((r: any) => String(r.ticker));
+  const statsMap = await getStoredHoldingStats(c.env, pricedTickers);
   const rowsWithStats = finalRows.map((row: any) => {
     const stats = statsMap.get(String(row.ticker).toUpperCase());
     return {
       ...row,
-      change1d: stats?.change1d ?? 0,
-      lastPrice: stats?.lastPrice ?? 0,
-      priceSource: stats?.source ?? "daily-bars",
+      change1d: stats?.change1d ?? null,
+      lastPrice: stats?.lastPrice ?? null,
+      priceSessionDate: stats?.barDate ?? null,
+      barDate: stats?.barDate ?? null,
+      priceSource: stats?.source ?? null,
     };
   });
   if (!warning && status?.status === "error" && status.error) {
@@ -4120,18 +4159,8 @@ app.get("/api/ticker/:ticker", async (c) => {
     .first();
   if (!symbol) return c.json({ error: "Ticker not found" }, 404);
 
-  const bars = timeframeConfig.limit == null
-    ? await getMarketDataDb(c.env).prepare(
-      "SELECT date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC",
-    )
-      .bind(marketDataFeed(c.env), ticker)
-      .all<{ date: string; c: number }>()
-    : await getMarketDataDb(c.env).prepare(
-      "SELECT date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC LIMIT ?",
-    )
-      .bind(marketDataFeed(c.env), ticker, timeframeConfig.limit)
-      .all<{ date: string; c: number }>();
-  const asc = [...(bars.results ?? [])].reverse();
+  const asc = (await loadMarketHistory(c.env,{tickers:[ticker],limitPerTicker:timeframeConfig.limit ?? undefined}))
+    .map((bar) => ({date:bar.date,c:bar.c}));
   const historyStatus: {
     timeframe: TickerSeriesTimeframe;
     requestedBars: number | null;
@@ -6883,6 +6912,12 @@ app.get("/api/admin/fundamentals/seed/errors", async (c) => {
 
 app.post("/api/admin/run-eod", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (eodEnabled(c.env)) {
+    const session=c.req.query("date") ?? await expectedEodSession(c.env);
+    if (!session) return c.json({error:"exchange-calendar-unavailable"},503);
+    const run=await requestEodRefresh(c.env,session);
+    return c.json({ok:true,jobId:run.id,status:"queued",pollAfterMs:5000},202);
+  }
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   const storedOnly = c.req.query("storedOnly") === "1";
@@ -6901,6 +6936,12 @@ app.post("/api/admin/run-eod", async (c) => {
 
 app.post("/api/admin/overview-current/refresh", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (eodEnabled(c.env)) {
+    const session=c.req.query("date") ?? await expectedEodSession(c.env);
+    if (!session) return c.json({error:"exchange-calendar-unavailable"},503);
+    const run=await requestEodRefresh(c.env,session);
+    return c.json({ok:true,jobId:run.id,status:"queued",pollAfterMs:5000},202);
+  }
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
@@ -6921,6 +6962,7 @@ app.post("/api/admin/overview-current/refresh", async (c) => {
 
 app.post("/api/admin/market-pipeline/canary", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (eodEnabled(c.env)) return c.json({error:"Use /api/admin/eod/runs for full-universe validation."},409);
   if (marketPipelineMode(c.env) !== "canary") {
     return c.json({ error: "market-pipeline-not-canary", message: "Set MARKET_PIPELINE_MODE=canary before running this cohort." }, 409);
   }
@@ -6971,6 +7013,12 @@ app.post("/api/admin/market-pipeline/canary", async (c) => {
 
 app.post("/api/admin/overview-current/history-refresh", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (eodEnabled(c.env)) {
+    const session=c.req.query("date") ?? await expectedEodSession(c.env);
+    if (!session) return c.json({error:"exchange-calendar-unavailable"},503);
+    const run=await requestEodRefresh(c.env,session);
+    return c.json({ok:true,jobId:run.id,status:"queued",pollAfterMs:5000},202);
+  }
   try {
     assertMarketPipelineActive(c.env);
     const settings = await loadWorkerScheduleSettings(c.env);
@@ -6988,6 +7036,12 @@ app.post("/api/admin/overview-current/history-refresh", async (c) => {
 
 app.post("/api/admin/overview-current/rebuild", async (c) => {
   if (!isOverviewRolloutRequestAuthorized(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (eodEnabled(c.env)) {
+    const session=c.req.query("date") ?? await expectedEodSession(c.env);
+    if (!session) return c.json({error:"exchange-calendar-unavailable"},503);
+    const run=await requestEodRefresh(c.env,session);
+    return c.json({ok:true,jobId:run.id,status:"queued",pollAfterMs:5000},202);
+  }
   const date = c.req.query("date") ?? latestUsMarketSessionAsOfDate(new Date());
   const configId = c.req.query("configId") ?? "default";
   try {
@@ -7176,6 +7230,12 @@ app.post("/api/admin/refresh-page", async (c) => {
   if (!["overview", "breadth", "sectors", "thirteenf", "admin", "ticker", "alerts", "scans", "pattern-scanner", "watchlist-compiler", "gappers", "earnings", "market-commentary"].includes(page)) {
     return c.json({ error: "Unsupported page key." }, 400);
   }
+  if (eodEnabled(c.env) && ["overview","breadth"].includes(page)) {
+    const session=await expectedEodSession(c.env);
+    if (!session) return c.json({error:"exchange-calendar-unavailable"},503);
+    const run=await requestEodRefresh(c.env,session);
+    return c.json({ok:true,page,jobId:run.id,status:"queued",refreshedTickers:0,pollAfterMs:5000,notes:"EOD refresh queued; completion is tracked by the daily runner."},202);
+  }
   const pipelineMode = marketPipelineMode(c.env);
   if (pipelineMode !== "active" && ["overview", "breadth", "sectors", "thirteenf", "admin", "ticker"].includes(page)) {
     try {
@@ -7246,6 +7306,14 @@ app.post("/api/admin/refresh-page", async (c) => {
 
 app.get("/api/admin/refresh-jobs/:jobId", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  if (c.req.param("jobId").startsWith("eod:") && eodEnabled(c.env)) {
+    const run=await getOpsDb(c.env).prepare("SELECT * FROM eod_runs WHERE id=?").bind(c.req.param("jobId")).first<EodRun>();
+    if (!run) return c.json({error:"EOD run not found"},404);
+    return c.json({ok:true,page:"overview",jobId:run.id,status:run.status==="completed" ? "completed" : "running",
+      refreshedTickers:0,pollAfterMs:run.status==="completed" ? 0 : 5000,sessionDate:run.session_date,
+      notes:run.error_code ? `Recovery pending: ${run.error_code}; next attempt ${run.next_attempt_at ?? "scheduled"}.` : `EOD stage: ${run.stage}`,
+      run});
+  }
   const job = await loadRefreshJob(c.env, c.req.param("jobId"));
   if (!job) return c.json({ error: "Refresh job not found." }, 404);
   return c.json({
@@ -7839,19 +7907,19 @@ export default {
 
     const runMaintenanceLane = async (): Promise<void> => {
       const { runBudgeted } = runnerForLane("maintenance");
+      if (now.getUTCHours() === 0 && now.getUTCMinutes() < 15) {
+        await runBudgeted("database-capacity-sample", 2, () => sampleDatabaseCapacity(env, now).then(() => undefined));
+        await runBudgeted("freshness-housekeeping", 2, async () => {
+          await cleanupProviderUsage(env, now);
+          await cleanupRefreshJobs(env, now);
+        });
+      }
       await runBudgeted("alerts-housekeeping", 4, () => maybeRunAlertsHousekeeping(env, cron("alerts-housekeeping")));
       await runBudgeted("social-alerts-housekeeping", 4, () => maybeRunSocialAlertsHousekeeping(env, cron("social-alerts-housekeeping")));
       await runBudgeted("scans-page-housekeeping", 4, () => maybeRunScansPageHousekeeping(env, cron("scans-page-housekeeping")));
       await runBudgeted("scanning-housekeeping", 4, () => maybeRunScanningHousekeeping(env, cron("scanning-housekeeping")));
       await runBudgeted("gappers-housekeeping", 4, () => maybeRunGappersHousekeeping(env, cron("gappers-housekeeping")));
       await runBudgeted("options-housekeeping", 4, () => maybeRunOptionsHousekeeping(env, cron("options-housekeeping")).then(() => undefined));
-      if (now.getUTCHours() === 0 && now.getUTCMinutes() < 15) {
-        await runBudgeted("freshness-housekeeping", 2, async () => {
-          await cleanupProviderUsage(env, now);
-          await cleanupRefreshJobs(env, now);
-        });
-        await runBudgeted("database-capacity-sample", 2, () => sampleDatabaseCapacity(env, now).then(() => undefined));
-      }
     };
 
     const runCoreLane = async (): Promise<void> => {
@@ -7883,6 +7951,18 @@ export default {
     const runMarketDataLane = async (): Promise<void> => {
       const runner = runnerForLane("market-data");
       const { runBudgeted, auditSkipped, budget } = runner;
+      if (eodEnabled(env)) {
+        await runBudgeted("eod-coordinate", 4, () => coordinateEod(env,now));
+        await runBudgeted("eod-commentary",6,() => maybeRunPublishedEodCommentary(env,now).then(() => undefined));
+      }
+      if (env.EOD_RUNNER_MODE === "active") {
+        if (await hasClaimableRefreshJob(env,now)) await runBudgeted("refresh-job",8,() => processNextRefreshJob(env));
+        if (isPeerMetricSlot(now)) await runBudgeted("peer-metric-slice",6,() => refreshScheduledPeerMetricSlice(env).then(() => undefined));
+        if (isPremarketGappersSlot(now)) await runBudgeted("gappers-snapshot",8,() => refreshGappersSnapshot(env,50).then(() => undefined));
+        await runBudgeted("symbol-catalog-sync",6,() => maybeRunScheduledSymbolCatalogSync(env,now).then(() => undefined));
+        await runBudgeted("etf-constituent-slice",10,() => syncMonthlyEtfSlice(env,cron("etf-constituent-slice")));
+        return;
+      }
       const pipelineMode = marketPipelineMode(env);
       if (pipelineMode !== "active") {
         await auditSkipped(

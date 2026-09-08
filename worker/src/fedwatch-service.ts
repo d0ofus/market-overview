@@ -1,3 +1,5 @@
+import { loadOfficialRateFacts, refreshOfficialRateFacts, type OfficialRatesResult } from "./official-rates-service";
+import { getUsMarketSessionContext } from "./market-calendar";
 import type { Env } from "./types";
 import { fetchWithTimeout, resolveFetchTimeoutMs } from "./timeout";
 import {
@@ -101,7 +103,8 @@ export type {
   FomcCommentarySourceMode,
 } from "./fomc-commentary-service";
 
-export type FedWatchResponse = {
+export type FedWatchResponse = Partial<OfficialRatesResult> & {
+  fomcCommentary?: FomcCommentaryItem[];
   status: "ok" | "stale" | "unavailable";
   warning: string | null;
   data: FedWatchData | null;
@@ -118,7 +121,7 @@ function parseTodayRow(row: RateProbabilityApiRow): FedFundsPathRow | null {
   const probMovePct = asNumber(row.prob_move_pct);
   const numMoves = asNumber(row.num_moves);
   const changeBps = asNumber(row.change_bps);
-  if (!meeting || !meetingIso || impliedRatePostMeeting == null || probMovePct == null || numMoves == null || changeBps == null) {
+  if (!meeting || !/^\d{4}-\d{2}-\d{2}$/.test(meetingIso) || !Number.isFinite(Date.parse(meetingIso)) || impliedRatePostMeeting == null || probMovePct == null || probMovePct < 0 || probMovePct > 100 || numMoves == null || numMoves < 0 || changeBps == null) {
     return null;
   }
   return {
@@ -166,9 +169,11 @@ export function normalizeRateProbabilityPayload(
   generatedAt = new Date().toISOString(),
 ): FedWatchData | null {
   const today = payload.today;
+  if (!today?.as_of || !/\d{4}-\d{2}-\d{2}/.test(today.as_of)) return null;
   const rows = (today?.rows ?? [])
     .map((row) => parseTodayRow(row))
-    .filter((value): value is FedFundsPathRow => Boolean(value));
+    .filter((value): value is FedFundsPathRow => Boolean(value))
+    .sort((a, b) => a.meetingIso.localeCompare(b.meetingIso));
   if (rows.length === 0) return null;
 
   const comparisons = [
@@ -214,7 +219,7 @@ async function fetchLiveFedFundsData(env: Env): Promise<FedWatchData> {
 function parseStoredData(raw: string): FedWatchData | null {
   try {
     const parsed = JSON.parse(raw) as Partial<FedWatchData> | null;
-    return parsed?.rows?.length
+    return parsed?.rows?.length && typeof parsed.asOf === "string" && /\d{4}-\d{2}-\d{2}/.test(parsed.asOf)
       ? { ...parsed, fomcCommentary: Array.isArray(parsed.fomcCommentary) ? parsed.fomcCommentary : [] } as FedWatchData
       : null;
   } catch {
@@ -237,10 +242,12 @@ async function loadLatestStoredSnapshot(env: Env): Promise<FedWatchData | null> 
   };
 }
 
-function isSnapshotFresh(generatedAt: string, now = Date.now()): boolean {
+function isSnapshotFresh(generatedAt: string, now = Date.now(), asOf?: string | null): boolean {
   const parsed = Date.parse(generatedAt);
   if (!Number.isFinite(parsed)) return false;
-  return now - parsed < SNAPSHOT_FRESH_MS;
+  const sourceDate = asOf?.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  const expected = getUsMarketSessionContext(new Date(now)).latestCompletedSessionDate;
+  return now >= parsed && now - parsed < SNAPSHOT_FRESH_MS && (asOf === undefined || Boolean(sourceDate && sourceDate >= expected && sourceDate <= getUsMarketSessionContext(new Date(now)).nyDate));
 }
 
 async function persistSnapshot(env: Env, data: FedWatchData): Promise<void> {
@@ -268,52 +275,45 @@ async function withFomcCommentary(env: Env, data: FedWatchData): Promise<FedWatc
 }
 
 export async function loadStoredFedWatchSnapshot(env: Env): Promise<FedWatchResponse> {
-  const stored = await loadLatestStoredSnapshot(env);
-  if (!stored) {
-    return {
-      status: "unavailable",
-      warning: "No stored FedWatch snapshot is available; the reports scheduler will retry.",
-      data: null,
-    };
-  }
-  const data = {
-    ...stored,
-    fomcCommentary: await loadLatestFomcCommentary(env, 4).catch(() => []),
+  const [stored, official, fomcCommentary] = await Promise.all([
+    loadLatestStoredSnapshot(env),
+    loadOfficialRateFacts(env),
+    loadLatestFomcCommentary(env, 4).catch(() => []),
+  ]);
+  if (!stored) return {
+    status: "unavailable", warning: "Market-implied rate probabilities are unavailable; no probabilities are estimated.",
+    data: null, ...official, fomcCommentary,
   };
-  return isSnapshotFresh(data.generatedAt)
-    ? { status: "ok", warning: null, data }
-    : {
-      status: "stale",
-      warning: "Showing the last stored FedWatch snapshot while refresh continues in the reports lane.",
-      data,
-    };
+  const data = { ...stored, fomcCommentary };
+  return {
+    status: isSnapshotFresh(data.generatedAt, Date.now(), data.asOf) ? "ok" : "stale",
+    warning: isSnapshotFresh(data.generatedAt, Date.now(), data.asOf) ? null
+      : `Historical market probabilities as of ${data.asOf ?? "an unknown source date"}; last fetched ${data.generatedAt}. They are not current expectations.`,
+    data, ...official, fomcCommentary,
+  };
 }
 
 export async function getFedWatchSnapshot(env: Env, options?: { force?: boolean }): Promise<FedWatchResponse> {
-  const cachedSnapshot = await loadLatestStoredSnapshot(env);
-  const cached = cachedSnapshot ? await withFomcCommentary(env, cachedSnapshot) : null;
-  if (!options?.force && cached && isSnapshotFresh(cached.generatedAt)) {
-    return { status: "ok", warning: null, data: cached };
-  }
-
+  const cached = await loadStoredFedWatchSnapshot(env);
+  if (!options?.force && cached.status === "ok") return cached;
+  // Each source refreshes independently: a blocked probability endpoint cannot hide official facts/FOMC.
+  const [official, fomcCommentary] = await Promise.all([
+    refreshOfficialRateFacts(env),
+    loadOrRefreshLatestFomcCommentary(env, 4).catch(() => cached.fomcCommentary ?? []),
+  ]);
   try {
-    const live = await withFomcCommentary(env, await fetchLiveFedFundsData(env));
+    const live = { ...await fetchLiveFedFundsData(env), fomcCommentary };
     await persistSnapshot(env, live);
     await cleanupOldSnapshots(env, SNAPSHOT_RETENTION_DAYS);
-    return { status: "ok", warning: null, data: live };
+    const current = isSnapshotFresh(live.generatedAt, Date.now(), live.asOf);
+    return { status: current ? "ok" : "stale", warning: current ? null : `Provider returned historical probabilities as of ${live.asOf ?? "an unknown date"}.`, data: live, ...official, fomcCommentary };
   } catch (error) {
     const message = error instanceof Error ? error.message : "RateProbability fetch failed.";
-    if (cached) {
-      return {
-        status: "stale",
-        warning: `Showing the last successful RateProbability snapshot because the live API could not be refreshed. ${message}`,
-        data: cached,
-      };
-    }
     return {
-      status: "unavailable",
-      warning: `Fed funds pricing data is temporarily unavailable from RateProbability. ${message}`,
-      data: null,
+      ...cached, ...official, fomcCommentary,
+      data: cached.data ? { ...cached.data, fomcCommentary } : null,
+      status: cached.data ? "stale" : "unavailable",
+      warning: `${cached.data ? `Historical probabilities as of ${cached.data.asOf ?? "an unknown date"}; current probabilities unavailable.` : "Market-implied probabilities unavailable."} ${message}`,
     };
   }
 }

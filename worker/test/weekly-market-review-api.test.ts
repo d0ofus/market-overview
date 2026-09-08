@@ -68,6 +68,7 @@ const HERMES_PAYLOAD = {
 class FakeWeeklyReviewDb {
   rows: StoredWeeklyReview[] = [];
   braveUsageRows: StoredBraveUsage[] = [];
+  dailyQueries: Array<{ sql: string; bound: unknown[] }> = [];
 
   prepare(sql: string) {
     const db = this;
@@ -102,6 +103,11 @@ class FakeWeeklyReviewDb {
         return null as T;
       },
       async all<T>() {
+        if (normalized.includes("FROM market_commentary_reports")) {
+          db.dailyQueries.push({ sql: normalized, bound });
+          if (normalized.includes("generated_at")) throw new Error("no such column: generated_at");
+          return { results: [] as T[] };
+        }
         if (normalized.includes("FROM brave_usage_daily")) {
           const cutoff = String(bound[0]);
           return { results: db.braveUsageRows.filter((row) => row.usageDay >= cutoff).sort((left, right) => (
@@ -314,18 +320,38 @@ describe("weekly market review API and service", () => {
     expect(db.rows).toHaveLength(1);
   });
 
-  it("stores a failed Gemini fallback when fallback provider config is missing", async () => {
+  it("stores all factual report sections when the free AI key is missing", async () => {
     const db = new FakeWeeklyReviewDb();
     const response = await generateWeeklyMarketReview(createEnv(db), {
       mode: "manual_retry",
       now: new Date("2026-06-14T00:00:00.000Z"),
     });
-    expect(response.ok).toBe(false);
-    expect(response.status).toBe("failed");
+    expect(response.ok).toBe(true);
+    expect(response.status).toBe("ready");
     expect(response.report?.generationProvider).toBe("gemini_fallback");
     expect(response.report?.generationMode).toBe("manual_retry");
-    expect(response.warning).toContain("GEMINI_API_KEY");
+    expect(response.warning).toContain("Factual report");
+    expect(response.report?.provider).toBe("factual");
+    expect(response.report?.reviewMarkdown).toContain("## Sector Leadership");
+    expect(db.dailyQueries).toHaveLength(1);
+    expect(db.dailyQueries[0]?.sql).toContain("created_at as generatedAt");
+    expect(db.dailyQueries[0]?.bound).toEqual(["2026-06-08", "2026-06-12"]);
+    expect(response.report?.dataQuality.some((entry) => entry.note.includes("no such column"))).toBe(false);
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("publishes scheduled factual output without waiting for optional free AI enrichment", async () => {
+    const db = new FakeWeeklyReviewDb();
+    const fetch = vi.fn(() => { throw new Error("Scheduled factual reports must not call AI."); });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const response = await generateWeeklyMarketReview(createEnv(db, { GEMINI_FREE_API_KEY: "optional-free-key" }), {
+        mode: "scheduled_fallback", now: new Date("2026-06-14T00:00:00Z"),
+      });
+      expect(response.report?.provider).toBe("factual");
+      expect(response.report?.reviewMarkdown.match(/^## /gm)).toHaveLength(9);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("does not duplicate an existing current Gemini fallback when force is false", async () => {
@@ -344,11 +370,11 @@ describe("weekly market review API and service", () => {
     expect(beforeGrace).toBeNull();
 
     const afterGrace = await maybeRunScheduledWeeklyMarketReview(env, new Date("2026-06-13T04:30:00.000Z"));
-    expect(afterGrace?.status).toBe("failed");
+    expect(afterGrace?.status).toBe("ready");
     expect(db.rows).toHaveLength(1);
 
     const duplicate = await maybeRunScheduledWeeklyMarketReview(env, new Date("2026-06-13T04:45:00.000Z"));
-    expect(duplicate?.warning).toContain("scheduled fallback attempt already exists");
+    expect(duplicate?.warning).toContain("review already exists");
     expect(db.rows).toHaveLength(1);
   });
 

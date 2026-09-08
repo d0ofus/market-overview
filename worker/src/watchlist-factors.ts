@@ -1,6 +1,7 @@
 import { refreshDailyBarsIncremental } from "./daily-bars";
 import { latestUsSessionAsOfDate } from "./refresh-timing";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistoryOhlcv } from "./market-history";
 import type { Env } from "./types";
 
 export type WatchlistFactorStatus = "pass" | "fail" | "unknown";
@@ -354,6 +355,14 @@ function requiredCalendarDays(config: WatchlistFactorConfig, keys: WatchlistFact
 async function loadDailyBars(env: Env, tickers: string[], startDate: string): Promise<Map<string, DailyBar[]>> {
   const barsByTicker = new Map<string, DailyBar[]>();
   const uniqueTickers = Array.from(new Set(tickers.map((ticker) => ticker.toUpperCase()).filter(Boolean)));
+  if (env.MARKET_HISTORY_DB) {
+    for (const bar of await loadMarketHistoryOhlcv(env, { tickers: uniqueTickers, startDate })) {
+      const current = barsByTicker.get(bar.ticker) ?? [];
+      current.push(bar);
+      barsByTicker.set(bar.ticker, current);
+    }
+    return barsByTicker;
+  }
   const db = getMarketDataDb(env);
   const feed = marketDataFeed(env);
   for (let index = 0; index < uniqueTickers.length; index += 80) {

@@ -46,8 +46,10 @@ type Row = {
   change6m: number | null;
   ytd: number | null;
   pctFrom52wHigh: number | null;
-  sparkline: number[] | null;
-  relativeStrength30dVsSpy: number[] | null;
+  sparkline: Array<number | null> | null;
+  sparklineDates?: string[];
+  relativeStrength30dDates?: string[];
+  relativeStrength30dVsSpy: Array<number | null> | null;
   above20Sma: boolean | null;
   above50Sma: boolean | null;
   above200Sma: boolean | null;
@@ -85,34 +87,28 @@ type Props = {
   anchorId?: string;
 };
 
-const cellClass = (n: number | null | undefined) => (typeof n === "number" && n < 0 ? "text-neg" : "text-pos");
+const cellClass = (n: number | null | undefined) => (typeof n !== "number" || !Number.isFinite(n) ? "text-slate-400" : n < 0 ? "text-neg" : "text-pos");
 const pct = (n: number | null | undefined) => (typeof n === "number" && Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "N/A");
 const isSmaColumn = (column: string) => column === "20SMA" || column === "50SMA" || column === "200SMA";
 const smaSortValue = (value: boolean | null): number | null => {
   if (value == null) return null;
   return value ? 1 : 0;
 };
-const regressionSlope = (values: number[] | null): number | null => {
-  if (!values || values.length < 2) return null;
-  const count = values.length;
-  const meanX = (count - 1) / 2;
-  const meanY = values.reduce((sum, value) => sum + value, 0) / count;
-  let numerator = 0;
-  let denominator = 0;
-  for (let index = 0; index < count; index += 1) {
-    const centeredX = index - meanX;
-    numerator += centeredX * (values[index] - meanY);
-    denominator += centeredX * centeredX;
-  }
-  if (denominator === 0) return null;
-  return numerator / denominator;
+const regressionSlope = (values: Array<number | null> | null): number | null => {
+  const points = (values ?? []).flatMap((value, index) => typeof value === "number" && Number.isFinite(value) ? [{ x: index, y: value }] : []);
+  if (points.length < 2) return null;
+  const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+  const numerator = points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0);
+  const denominator = points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
+  return denominator ? numerator / denominator : null;
 };
 const defaultSortDirectionFor = (column: string): "asc" | "desc" =>
   column === "1D" || column === "relativeStrength30dVsSpy" || isSmaColumn(column) ? "desc" : "asc";
 const titleCase = (value: string): string => {
   if (value === "1D" || value === "5D" || value === "1W" || value === "3M" || value === "6M" || value === "YTD" || isSmaColumn(value)) return value;
   if (value === "pctFrom52WHigh") return "% From 52W High";
-  if (value === "relativeStrength30dVsSpy") return "RS 30d vs SPY";
+  if (value === "relativeStrength30dVsSpy") return "RS 30 Sessions vs SPY";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
 const hasCurrentField = (row: Row, field: string): boolean => {
@@ -239,7 +235,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [activeEtf, setActiveEtf] = useState<{ ticker: string; name: string | null } | null>(null);
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
-  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number }>>([]);
+  const [constituentMetadata, setConstituentMetadata] = useState<string | null>(null);
+  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number; priceSessionDate?: string | null; priceStatus?: string | null; priceSource?: string | null; asOfDate?: string | null }>>([]);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker || activeEtf) });
@@ -296,7 +293,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     });
     return copy;
   }, [rows, sortDir, sortKey]);
-  const selected = pinTop10 ? sortedRows.slice(0, 10) : sortedRows;
+  const selected = pinTop10 && !title.startsWith("Sector ETFs") ? sortedRows.slice(0, 10) : sortedRows;
   const sortGlyph = (col: string): string => {
     if (sortKey !== col) return "";
     return sortDir === "asc" ? " ▲" : " ▼";
@@ -369,14 +366,14 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     if (column === "sparkline") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {row.sparkline?.length ? <Sparkline values={row.sparkline} /> : <span className="text-slate-500">N/A</span>}
+          {row.sparkline?.length ? <Sparkline values={row.sparkline} dates={row.sparklineDates} /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
     if (column === "relativeStrength30dVsSpy") {
       return (
         <td key={`${row.ticker}-${column}`} className="px-3 py-2">
-          {row.relativeStrength30dVsSpy?.length ? <HistogramSparkline values={row.relativeStrength30dVsSpy} /> : <span className="text-slate-500">N/A</span>}
+          {row.relativeStrength30dVsSpy?.length ? <HistogramSparkline values={row.relativeStrength30dVsSpy} barLabels={row.relativeStrength30dDates} tooltipEnabled valueFormatter={(value) => value.toFixed(2)} ariaLabel="Date-aligned relative strength to SPY, first common observation = 100; missing dates remain gaps" /> : <span className="text-slate-500">N/A</span>}
         </td>
       );
     }
@@ -418,7 +415,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const sortedConstituents = useMemo(() => {
     const rowsCopy = [...constituents];
     if (constituentSort === "change1d") {
-      rowsCopy.sort((a, b) => (b.change1d ?? 0) - (a.change1d ?? 0));
+      rowsCopy.sort((a, b) => (b.change1d ?? Number.NEGATIVE_INFINITY) - (a.change1d ?? Number.NEGATIVE_INFINITY));
       return rowsCopy;
     }
     rowsCopy.sort((a, b) => (b.weight ?? Number.NEGATIVE_INFINITY) - (a.weight ?? Number.NEGATIVE_INFINITY));
@@ -434,6 +431,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
     setActiveEtf({ ticker, name });
     setConstituentLoading(true);
     setConstituentWarning(null);
+    setConstituentMetadata(null);
     setConstituents([]);
     setConstituentSort("change1d");
     setConstituentPage(1);
@@ -445,8 +443,13 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
         weight: typeof row.weight === "number" ? row.weight : null,
         change1d: typeof row.change1d === "number" ? row.change1d : undefined,
         lastPrice: typeof row.lastPrice === "number" ? row.lastPrice : undefined,
+        priceSessionDate: row.priceSessionDate ?? row.barDate ?? null,
+        priceStatus: row.priceStatus ?? null,
+        priceSource: row.priceSource ?? null,
+        asOfDate: row.asOfDate ?? null,
       })));
-      setConstituentWarning(res.warning ?? null);
+      setConstituentWarning(res.warning ?? res.syncStatus?.error ?? null);
+      setConstituentMetadata(`Holdings source: ${res.syncStatus?.source ?? "unknown"}; coverage: ${res.syncStatus?.coverage ?? "unknown"}. Last full success: ${res.syncStatus?.lastFullSyncedAt ?? "unknown"}; latest attempt: ${res.syncStatus?.lastSyncedAt ?? "unknown"} (${res.syncStatus?.status ?? "unknown"}).`);
     } catch (error) {
       setConstituentWarning(error instanceof Error ? error.message : "Failed to load ETF constituents.");
     } finally {
@@ -481,7 +484,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
         className={`card overflow-hidden shadow-[0_6px_30px_rgba(15,23,42,0.3)] ${anchorId ? "scroll-mt-28 md:scroll-mt-32" : ""}`}
       >
         <Collapsible.Trigger className="flex w-full items-center justify-between border-b border-borderSoft px-4 py-3 text-left">
-          <span className="font-medium tracking-wide">{title}</span>
+          <span className="font-medium tracking-wide">{title.replace("US Index Futures", "US Index ETF Proxies").replace("Global Indices", "Global Equity ETF Proxies")}</span>
           <ChevronDown className="h-4 w-4" />
         </Collapsible.Trigger>
         <Collapsible.Content>
@@ -543,6 +546,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
               </span>
             </div>
             <div className="overflow-y-auto pr-1">
+              {constituentMetadata && <p className="mb-2 text-xs text-slate-400">{constituentMetadata}</p>}
+              <p className="mb-2 text-xs text-slate-400">Quotes are dated stored EOD observations. Embedded TradingView charts load independently and may use different sessions or adjustments.</p>
               {constituentWarning && (
                 <div className="mb-2 rounded border border-yellow-700/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-200">
                   Constituent sync warning: {constituentWarning}
@@ -569,9 +574,10 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                         <span className="text-xs text-slate-400">{row.weight != null ? `${row.weight.toFixed(2)}%` : "-"}</span>
                       </div>
                       <div className="mb-1 text-xs">
-                        <span className={cellClass(row.change1d ?? 0)}>{pct(row.change1d ?? 0)}</span>
-                        <span className="ml-2 text-slate-400">{(row.lastPrice ?? 0).toFixed(2)}</span>
+                        <span className={cellClass(row.change1d)}>{pct(row.change1d)}</span>
+                        <span className="ml-2 text-slate-400">{typeof row.lastPrice === "number" ? row.lastPrice.toFixed(2) : "N/A"}</span>
                       </div>
+                      <p className="mb-1 text-[10px] text-slate-400">Price session {row.priceSessionDate ?? "unavailable"} ? {row.priceSource ?? "source unavailable"}; holdings effective {row.asOfDate ?? "unknown"}.</p>
                       <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
                       <TradingViewWidget
                         ticker={row.ticker}
