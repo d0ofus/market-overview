@@ -78,7 +78,7 @@ describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => 
     const admission = createEodAdmission(storage.db, "run", { now: () => time });
     const database = createEodD1Database({ accountId: "a".repeat(32), databaseId: "b".repeat(36), token: "test-token",
       allowedDatabaseIds: ["b".repeat(36)], admission, fetcher: async () => { throw new Error("connection lost after send"); } });
-    await expect(database.prepare(write[0].sql).bind(1).run()).rejects.toThrow(/connection lost/);
+    await expect(database.prepare(write[0].sql).bind(1).run()).rejects.toThrow(/d1-network-error/);
     const settle = await admission(read);
     await settle({ rowsRead: 1, rowsWritten: 0, sizeAfter: 0 });
     await admission.flush();

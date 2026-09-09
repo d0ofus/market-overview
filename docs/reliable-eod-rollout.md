@@ -39,6 +39,19 @@ npx wrangler d1 execute market_command --remote --file=migrations/0102_earnings_
 
 Core SQL is idempotent; verify migration history first because this repository's older core setup mixes direct SQL application and migration tooling. Market/Ops migrations must be applied in order, including market `0008` and Ops `0004`–`0009`. Verify the new tables, expression index and required bindings before enabling any runner.
 
+During production rollout, remote Wrangler `d1 migrations apply` rejected market `0008` with `incomplete input: SQLITE_ERROR` while processing its trigger bodies. SQL whitespace fixes make the installed Wrangler splitter work locally, but the remote multi-statement string parser still fails. Use the narrow [0008 operator helper](../worker/scripts/apply-eod-publication-migration.py) for this migration. It uses Python 3.11+ and SQLite's statement-completion parser, sends all 18 complete statements plus the migration-ledger insertion in one D1 REST `{batch:[...]}` transaction, and never accepts an arbitrary SQL file.
+
+From the repository root, with `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` already set securely:
+
+```powershell
+# Read-only preflight is the default. This UUID must match MARKET_DATA_DB in worker/wrangler.toml.
+python worker/scripts/apply-eod-publication-migration.py --database-id a6dedc93-6ffc-4793-9b3d-0ef47e29c4b8
+# Apply only if preflight reports dry-run/pending and this target still needs migration 0008.
+python worker/scripts/apply-eod-publication-migration.py --database-id a6dedc93-6ffc-4793-9b3d-0ef47e29c4b8 --apply
+```
+
+`--account-id` can select the account explicitly instead of the environment variable; `--token-env CLOUDFLARE_EOD_D1_TOKEN` selects an existing alternative secret variable without printing its value. The helper verifies the live database name/UUID, prior migration ledger and schema before applying. An already-applied migration becomes a verified read-only no-op. Partial schema, missing objects behind an applied ledger, or a mismatched target stop execution. HTTP/timeout failures are never automatically replayed; rerun the default read-only preflight to resolve an unknown outcome before attempting another application. The helper prints sanitized source identity and actual query read/write totals. Its schema/ledger probes are bounded and do not scan market history.
+
 Create the GitHub environment `market-eod` and configure:
 
 | Kind | Name | Purpose |

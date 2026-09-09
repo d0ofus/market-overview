@@ -18,8 +18,8 @@ Verified archival relocation changes storage location without pretending prices 
 
 ## Validation performed
 
-- Full Worker suite: **146 files, 1080 tests passed**.
-- Final changes to cutover watermark validation and archive capacity sampling: **30 focused tests passed**, including two additional regressions beyond that full run.
+- Final Worker suite after production integration fixes: **150 files, 1127 tests passed**, with process exit code 0. This includes REST batch contracts, atomic rollback, migration parsing and the operator helper.
+- The migration helper's **12 isolated Python tests passed**; its production read-only check verified the already-applied schema using 96 reads and zero writes.
 - Web suite: **96 tests passed**.
 - Worker, web and Node batch-runner TypeScript checks passed.
 - Worker dry-run build and production web build passed. The web build generated 34 static pages.

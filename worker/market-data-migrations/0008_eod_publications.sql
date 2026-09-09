@@ -86,23 +86,24 @@ CREATE TABLE IF NOT EXISTS eod_history_relocations (
   PRIMARY KEY(feed,ticker,date)
 ) STRICT, WITHOUT ROWID;
 -- Every writer, including legacy/manual paths, invalidates input manifests.
+-- Keep whitespace around CASE/END tokens for Wrangler's migration SQL splitter.
 CREATE TRIGGER IF NOT EXISTS eod_bar_insert AFTER INSERT ON alpaca_daily_bars BEGIN
   INSERT INTO eod_input_revisions(feed,ticker,semantic_revision,last_correction_revision,
     append_high_water_date,append_epoch_start_revision,append_epoch_start_date)
   SELECT NEW.feed,NEW.ticker,1,
-    CASE WHEN high_water>NEW.date THEN 1 ELSE 0 END,high_water,
-    CASE WHEN high_water>NEW.date THEN NULL ELSE 1 END,
+    CASE WHEN high_water>NEW.date THEN 1 ELSE 0 END ,high_water,
+    CASE WHEN high_water>NEW.date THEN NULL ELSE 1 END ,
     CASE WHEN high_water>NEW.date THEN NULL ELSE NEW.date END
   FROM (SELECT date AS high_water FROM alpaca_daily_bars
     WHERE feed=NEW.feed AND ticker=NEW.ticker ORDER BY date DESC LIMIT 1) WHERE 1
   ON CONFLICT(feed,ticker) DO UPDATE SET
     revision=revision+1,semantic_revision=revision+1,updated_at=CURRENT_TIMESTAMP,
-    last_correction_revision=CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
-      OR NEW.date<=append_high_water_date THEN revision+1 ELSE last_correction_revision END,
-    append_epoch_start_revision=CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
-      OR NEW.date<=append_high_water_date THEN NULL ELSE COALESCE(append_epoch_start_revision,revision+1) END,
-    append_epoch_start_date=CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
-      OR NEW.date<=append_high_water_date THEN NULL ELSE COALESCE(append_epoch_start_date,NEW.date) END,
+    last_correction_revision= CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
+      OR NEW.date<=append_high_water_date THEN revision+1 ELSE last_correction_revision END ,
+    append_epoch_start_revision= CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
+      OR NEW.date<=append_high_water_date THEN NULL ELSE COALESCE(append_epoch_start_revision,revision+1) END ,
+    append_epoch_start_date= CASE WHEN semantic_revision<>revision OR append_high_water_date IS NULL
+      OR NEW.date<=append_high_water_date THEN NULL ELSE COALESCE(append_epoch_start_date,NEW.date) END ,
     append_high_water_date=MAX(COALESCE(append_high_water_date,excluded.append_high_water_date),excluded.append_high_water_date);
 END;
 CREATE TRIGGER IF NOT EXISTS eod_bar_update AFTER UPDATE ON alpaca_daily_bars

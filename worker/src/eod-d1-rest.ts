@@ -5,6 +5,85 @@ export type D1Settlement = ((usage: EodUsage) => Promise<void>) & { abandon?: ()
 export type D1Admission = (queries: readonly EodSql[]) => Promise<D1Settlement>;
 export type EodAdmission = D1Admission & { flush: () => Promise<void> };
 
+const textEncoder = new TextEncoder();
+const MAX_REQUEST_BYTES = 8_000_000;
+
+/** This runtime adapter accepts one prepared statement per result slot. Keep
+ * SQL and bindings separate; joining SQL would change numbered/anonymous bind
+ * scope and let a hidden second statement bypass admission and result mapping. */
+function validateEodStatement(query: EodSql): void {
+  if (typeof query.sql !== "string" || textEncoder.encode(query.sql).length > 90_000
+    || !Array.isArray(query.params) || query.params.length > 100) throw new Error("Disallowed EOD SQL size or parameters.");
+  for (const value of query.params) {
+    if (value !== null && typeof value !== "string" && !(typeof value === "number" && Number.isFinite(value))) {
+      throw new Error("Unsupported EOD binding type.");
+    }
+    if (typeof value === "string" && textEncoder.encode(value).length > 2_000_000) throw new Error("EOD binding exceeds D1 value limit.");
+  }
+  let tokenText = "", bindCount = 0, ended = false, hasSql = false;
+  for (let index = 0; index < query.sql.length;) {
+    const char = query.sql[index], next = query.sql[index + 1];
+    if (/\s/.test(char)) { tokenText += " "; index++; continue; }
+    if (char === "-" && next === "-") {
+      const end = query.sql.indexOf("\n", index + 2); index = end < 0 ? query.sql.length : end; tokenText += " "; continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = query.sql.indexOf("*/", index + 2);
+      if (end < 0) throw new Error("Unterminated EOD SQL comment.");
+      index = end + 2; tokenText += " "; continue;
+    }
+    if (ended) throw new Error("EOD prepared statements must contain exactly one SQL statement.");
+    if (char === ";") { ended = true; index++; continue; }
+    hasSql = true;
+    if (char === "'" || char === '"' || char === "`" || char === "[") {
+      const closing = char === "[" ? "]" : char;
+      let closed = false; index++;
+      while (index < query.sql.length) {
+        if (query.sql[index] === closing) {
+          if (closing !== "]" && query.sql[index + 1] === closing) { index += 2; continue; }
+          index++; closed = true; break;
+        }
+        index++;
+      }
+      if (!closed) throw new Error("Unterminated EOD SQL quote.");
+      tokenText += " "; continue;
+    }
+    if (char === "?") {
+      let end = index + 1;
+      while (end < query.sql.length && /[0-9]/.test(query.sql[end])) end++;
+      const number = end === index + 1 ? bindCount + 1 : Number(query.sql.slice(index + 1, end));
+      if (!Number.isInteger(number) || number < 1 || number > 100) throw new Error("Invalid EOD bind index.");
+      bindCount = Math.max(bindCount, number); index = end; tokenText += " "; continue;
+    }
+    if ((char === ":" || char === "@" || char === "$") && /[A-Za-z_]/.test(next ?? "")) throw new Error("EOD bindings must use positional placeholders.");
+    tokenText += char; index++;
+  }
+  if (!hasSql || /\b(?:DROP|ATTACH|DETACH|VACUUM|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(tokenText)) throw new Error("Disallowed EOD SQL.");
+  if (bindCount !== query.params.length) throw new Error("EOD bind count does not match its statement.");
+}
+
+function responseError(status: number, errors: unknown): Error {
+  const entries: unknown[] = Array.isArray(errors) ? errors : [];
+  const codes = entries.map((error: unknown) => {
+    const code = error && typeof error === "object" ? (error as {code?:unknown}).code : undefined;
+    return typeof code === "number" && Number.isSafeInteger(code) ? code : null;
+  }).filter((code): code is number => code !== null).slice(0, 8);
+  const messages = entries.slice(0, 8).map((error) => {
+    const message = error && typeof error === "object" ? (error as {message?:unknown}).message : undefined;
+    return typeof message === "string" ? message.slice(0, 10_000) : "";
+  }).join("\n");
+  // Only static categories leave this function. Known daily D1 exhaustion and
+  // storage failures must retain the runner's next-UTC-day resource deferral.
+  // Generic HTTP429 is an API request-rate cooldown (15min in the runner), not
+  // evidence that daily D1 row allowances are exhausted.
+  const category = /D1['’]s free tier daily row (?:read|write) limit|exceeded (?:the )?maximum amount of rows (?:read|written)/i.test(messages)
+    ? "d1-quota-exhausted"
+    : /SQLITE_FULL|database or disk is full|exceeded maximum (?:DB|database) size|exceeded D1['’]s maximum account storage limit/i.test(messages)
+      ? "d1-capacity-exhausted" : status === 429 ? "d1-api-rate-limited" : null;
+  // Provider messages can echo SQL or bound data. Persist status/codes/tags only.
+  return new Error(`d1-http-${status}${codes.length ? `: codes=${codes.join(",")}` : ": query failed"}${category ? `; ${category}` : ""}`);
+}
+
 export function createEodD1Database(options: {
   accountId:string; databaseId:string; token:string; allowedDatabaseIds:readonly string[];
   admission?:D1Admission; fetcher?:typeof fetch;
@@ -13,35 +92,50 @@ export function createEodD1Database(options: {
     || !options.allowedDatabaseIds.includes(options.databaseId)
     || !/^[a-f0-9-]{36}$/i.test(options.databaseId)) throw new Error("D1 database is not allowlisted.");
   const execute = async (queries:EodSql[]):Promise<D1Result[]> => {
+    if (!queries.length) return [];
     if (queries.length > 40) throw new Error("D1 batch exceeds 40 statements.");
-    for (const query of queries) {
-      if (query.params.length > 100 || query.sql.length > 90_000
-        || /\b(?:DROP|ATTACH|DETACH|VACUUM)\b/i.test(query.sql)) throw new Error("Disallowed EOD SQL.");
-    }
-    const settle = await options.admission?.(queries);
+    queries.forEach(validateEodStatement);
+    const statements = queries.map(({sql, params}) => ({sql, params: [...params]}));
+    // Public REST uses an object envelope, unlike the internal binding transport.
+    // https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
+    // One atomic batch retains independent parameter scope and ordered results.
+    const requestBody = JSON.stringify(statements.length === 1 ? statements[0] : { batch: statements });
+    if (textEncoder.encode(requestBody).length > MAX_REQUEST_BYTES) throw new Error("EOD request exceeds the bounded batch payload limit.");
+    const settle = await options.admission?.(statements);
     // Ambiguous network failures are not automatically replayed: the caller resumes
     // through idempotent checkpoints, and a lost reservation remains charged.
     try {
-      const response = await (options.fetcher ?? fetch)(
-      `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/d1/database/${options.databaseId}/query`,
-      {method:"POST",headers:{Authorization:`Bearer ${options.token}`,"Content-Type":"application/json"},
-        body:JSON.stringify(queries.length === 1 ? queries[0] : queries),signal:AbortSignal.timeout(30_000)},
-    );
-    const body = await response.json() as {success?:boolean;result?:D1Result[];errors?:Array<{message?:string}>};
-    if (!response.ok || body.success === false || !Array.isArray(body.result)
-      || body.result.some((result) => !result.success)) {
-      throw new Error(`d1-http-${response.status}: ${body.errors?.map((error) => error.message).join("; ") ?? "query failed"}`);
-    }
-    if (body.result.some((result) => !Number.isFinite(result.meta?.rows_read) || Number(result.meta.rows_read) < 0
-      || !Number.isFinite(result.meta?.rows_written) || Number(result.meta.rows_written) < 0)) {
-      throw new Error("d1-usage-metadata-unavailable");
-    }
-    const usage = body.result.reduce((sum,result) => ({
-      rowsRead:sum.rowsRead+Number(result.meta.rows_read ?? 0),
-      rowsWritten:sum.rowsWritten+Number(result.meta.rows_written ?? 0),
-      sizeAfter:Math.max(sum.sizeAfter,Number(result.meta.size_after ?? 0)),
-    }),{rowsRead:0,rowsWritten:0,sizeAfter:0});
-    await settle?.(usage);
+      let response: Response;
+      try {
+        response = await (options.fetcher ?? fetch)(
+          `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/d1/database/${options.databaseId}/query`,
+          {method:"POST",headers:{Authorization:`Bearer ${options.token}`,"Content-Type":"application/json"},
+            body:requestBody,signal:AbortSignal.timeout(30_000)},
+        );
+      } catch (error) {
+        throw new Error(error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name) ? "d1-request-timeout" : "d1-network-error");
+      }
+      let body: {success?:boolean;result?:D1Result[];errors?:unknown} | null;
+      try { body = await response.json() as typeof body; } catch {
+        if (response.status === 429) throw responseError(response.status, undefined);
+        throw new Error(`d1-response-invalid-json: status=${response.status}`);
+      }
+      if (!response.ok || body?.success !== true || !Array.isArray(body.result)
+        || body.result.some((result) => !result || result.success !== true)) throw responseError(response.status, body?.errors);
+      if (body.result.length !== statements.length || body.result.some((result) => !Array.isArray(result.results))) {
+        throw new Error("d1-response-result-count-or-shape-mismatch");
+      }
+      if (body.result.some((result) => !Number.isSafeInteger(result.meta?.rows_read) || Number(result.meta.rows_read) < 0
+        || !Number.isSafeInteger(result.meta?.rows_written) || Number(result.meta.rows_written) < 0
+        || (result.meta.size_after !== undefined && (!Number.isSafeInteger(result.meta.size_after) || result.meta.size_after < 0)))) {
+        throw new Error("d1-usage-metadata-unavailable");
+      }
+      const usage = body.result.reduce((sum,result) => ({
+        rowsRead:sum.rowsRead+Number(result.meta.rows_read),
+        rowsWritten:sum.rowsWritten+Number(result.meta.rows_written),
+        sizeAfter:Math.max(sum.sizeAfter,Number(result.meta.size_after ?? 0)),
+      }),{rowsRead:0,rowsWritten:0,sizeAfter:0});
+      await settle?.(usage);
       return body.result;
     } catch (error) {
       // A failed/ambiguous request consumes its reserved maximum. This also
