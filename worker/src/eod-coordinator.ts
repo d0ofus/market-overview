@@ -6,6 +6,8 @@ import { parseLocalTime, zonedParts } from "./refresh-timing";
 import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
 import { eodEnqueueSchema } from "./validation";
 import type { Env, EodHistorySelection, EodStoredHistorySelection, EodInputCorrectionStatus } from "./types";
+import { publicStorageMigrationStatus, storageMigrationBlocksEod } from "./market-storage-control";
+import { coordinateStorageMigration } from "./market-storage-scheduler";
 
 export type EodPurpose = "daily" | "reconcile" | "backfill" | "maintenance";
 export type EodRun = {
@@ -224,6 +226,7 @@ async function deferEodDispatchForKnownQuota(env: Env, run: EodRun, now: Date): 
 }
 
 export async function dispatchEodRun(env: Env, run: EodRun, now = new Date()): Promise<void> {
+  if (await storageMigrationBlocksEod(env)) return;
   const timestamp = now.toISOString();
   if (run.status === "completed" || (run.lease_until && run.lease_until > timestamp)
     || (run.next_attempt_at && run.next_attempt_at > timestamp)) return;
@@ -350,6 +353,7 @@ export async function scheduleEodInputCorrections(env: Env, sessionDate: string 
 }
 
 export async function coordinateEod(env: Env, now = new Date()): Promise<void> {
+  if (await coordinateStorageMigration(env,now)) return;
   if (!eodEnabled(env)) return;
   await checkEodDeadlines(env,now);
   const local = zonedParts(now,"America/New_York");
@@ -401,7 +405,10 @@ function objectJson(value: string | undefined): Record<string, unknown> {
 }
 
 export async function eodStatus(env: Env, now = new Date()) {
+  const storageMigration=await publicStorageMigrationStatus(env);
+  const pipelineMode=storageMigration?.blocksEod ? "storage-migration" : env.EOD_RUNNER_MODE ?? "disabled";
   if (!eodEnabled(env)) return {mode:"disabled",runs:[],publications:[],ready:false,
+    pipelineMode,storageMigration,
     inputRevision:null,completedInputRevision:null,inputCorrectionsPending:null,
     expectedSession:null,missingScopes:[],lastSuccessfulSession:null,scopeHealth:[],
     usage:null,accountUsage:null,quota:undefined,capacity:undefined};
@@ -447,7 +454,7 @@ export async function eodStatus(env: Env, now = new Date()) {
   const unfinished=publicRuns.filter((run) => run.status!=="completed");
   const quotaBlocked=unfinished.some((run) => /budget|quota/i.test(`${run.error_code} ${run.error_message}`));
   const capacityBlocked=unfinished.some((run) => /capacity/i.test(`${run.error_code} ${run.error_message}`));
-  return {mode:env.EOD_RUNNER_MODE,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
+  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
     missingScopes,lastSuccessfulSession:lastComplete?.date ?? null,
     scopeHealth:EOD_PUBLICATION_SCOPES.map((scope) => {
       const head=publications.results.find((row) => row.scope===scope);
@@ -461,7 +468,7 @@ export async function eodStatus(env: Env, now = new Date()) {
       nextAttemptAt:unfinished.filter((run) => /budget|quota/i.test(`${run.error_code} ${run.error_message}`))
         .map((run) => run.next_attempt_at).filter((date):date is string => Boolean(date)).sort()[0] ?? null},
     capacity:{status:capacityBlocked ? "blocked" : "unknown",warning:capacityBlocked ? "A runner stopped at its D1 storage safety limit." : null},
-    ready:env.EOD_RUNNER_MODE==="active" && Boolean(expectedSession) && missingScopes.length===0
+    ready:!storageMigration?.blocksEod && env.EOD_RUNNER_MODE==="active" && Boolean(expectedSession) && missingScopes.length===0
       && corrections.inputCorrectionsPending===false};
 }
 

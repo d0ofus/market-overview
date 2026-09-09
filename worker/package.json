@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "eod:run": "tsx scripts/eod-runner.ts",
+    "eod:storage": "tsx scripts/market-storage-runner.ts",
+    "eod:storage:snapshot": "tsx scripts/market-storage-snapshot.ts",
     "eod:typecheck": "tsc -p tsconfig.runner.json",
     "dev": "wrangler dev --local --persist-to .wrangler/state",
     "build": "wrangler deploy --dry-run",

@@ -1,0 +1,42 @@
+name: EOD storage migration
+run-name: Storage ${{ inputs.migration_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      migration_id:
+        description: Durable Cloudflare storage migration ID
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: market-eod-writer
+  cancel-in-progress: false
+jobs:
+  storage:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    environment: market-eod
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Dispatch always targets main; a multi-day copy retains its reviewed
+          # implementation even when unrelated changes land on main meanwhile.
+          ref: ${{ vars.EOD_STORAGE_CODE_REVISION || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Resume the verified storage copy
+        run: npm run eod:storage -w worker
+        env:
+          EOD_STORAGE_MIGRATION_ID: ${{ inputs.migration_id }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          EOD_MARKET_DATABASE_ID: ${{ vars.EOD_MARKET_DATABASE_ID }}
+          EOD_STORAGE_TARGET_DATABASE_ID: ${{ vars.EOD_STORAGE_TARGET_DATABASE_ID }}
+          EOD_OPS_DATABASE_ID: ${{ vars.EOD_OPS_DATABASE_ID }}
+          EOD_HISTORY_DATABASE_ID: ${{ vars.EOD_HISTORY_DATABASE_ID }}
+          CLOUDFLARE_EOD_D1_TOKEN: ${{ secrets.CLOUDFLARE_EOD_D1_TOKEN }}
+          CLOUDFLARE_EOD_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_EOD_ANALYTICS_TOKEN }}

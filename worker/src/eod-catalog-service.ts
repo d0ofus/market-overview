@@ -16,6 +16,7 @@ export type EodCatalogRow = {
   previousPrice: number | null;
   volume: number | null;
   avgVolume30d: number | null;
+  compatibility?: { previousDate: string | null; trend5d: number | null; trendWindowStartDate: string | null };
 };
 export type EodCatalogTuple = [string, number, string | null, string | null, number | null,
   number | null, number, number | null, number | null, number | null];
@@ -24,6 +25,7 @@ export type EodCatalogPayload = {
   sessionDate: string;
   methodologyVersion: typeof EOD_CATALOG_METHODOLOGY_VERSION;
   rows: EodCatalogTuple[];
+  compatibility?: { schemaVersion: 1; rows: Array<[string, string | null, number | null, string | null]> };
 };
 
 /** Input is the once-loaded, merged retained SIP history through the target
@@ -44,16 +46,22 @@ export function buildEodCatalogRow(tickerInput: string, bars: MarketHistoryBar[]
       ? recent20.reduce((sum, bar) => sum + bar.c * (bar.volume ?? 0), 0) / recent20.length : null,
     sourceRevision, previousPrice: canonical.at(-2)?.c ?? null, volume: canonical.at(-1)?.volume ?? null,
     avgVolume30d: volumes30.length ? volumes30.reduce((sum, volume) => sum + volume, 0) / volumes30.length : null,
+    compatibility: { previousDate: canonical.at(-2)?.date ?? null,
+      trend5d: canonical.length >= 7 ? (canonical.at(-1)!.c / canonical.at(-6)!.c - 1) * 100 : null,
+      trendWindowStartDate: canonical.length >= 7 ? canonical.at(-7)!.date : null },
   };
 }
 
 export function encodeEodCatalogPayload(sessionDate: string, rows: EodCatalogRow[]): EodCatalogPayload {
+  const sorted = [...rows].sort((left, right) => left.ticker.localeCompare(right.ticker));
   return {
     schemaVersion: 1, sessionDate, methodologyVersion: EOD_CATALOG_METHODOLOGY_VERSION,
-    rows: [...rows].sort((left, right) => left.ticker.localeCompare(right.ticker)).map((row) => [
+    rows: sorted.map((row) => [
       row.ticker, row.barCount, row.firstDate, row.lastDate, row.price, row.avgDollarVolume20d,
       row.sourceRevision, row.previousPrice, row.volume, row.avgVolume30d,
     ]),
+    compatibility: { schemaVersion: 1, rows: sorted.flatMap((row) => row.compatibility
+      ? [[row.ticker, row.compatibility.previousDate, row.compatibility.trend5d, row.compatibility.trendWindowStartDate]] : []) },
   };
 }
 
@@ -67,7 +75,8 @@ export class EodCatalogUnavailableError extends Error {
  * Older catalogs may outlive strictly later-session appends. Constant-size
  * revision evidence proves that exception; the latest accepted session remains
  * exact-revision only. A missing/stale catalog is not an empty universe. */
-export async function loadEodCatalogRows(env: Env, tickersInput: readonly string[], sessionDate: string): Promise<Map<string, EodCatalogRow>> {
+export async function loadEodCatalogRows(env: Env, tickersInput: readonly string[], sessionDate: string,
+  options: { unavailableRows?: "omit" } = {}): Promise<Map<string, EodCatalogRow>> {
   const tickers = [...new Set(tickersInput.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
   if (!tickers.length) return new Map();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate)) throw new EodCatalogUnavailableError("invalid requested session");
@@ -77,6 +86,7 @@ export async function loadEodCatalogRows(env: Env, tickersInput: readonly string
               json_extract(payload_json, '$.schemaVersion') AS schemaVersion,
               json_extract(payload_json, '$.sessionDate') AS payloadSession,
               json_extract(payload_json, '$.methodologyVersion') AS payloadMethodology,
+              json_extract(payload_json, '$.compatibility.schemaVersion') AS compatibilityVersion,
               (SELECT MAX(session_date) FROM eod_publications
                 WHERE scope='history:catalog' AND status='accepted') AS latestCatalogSession
          FROM eod_publications
@@ -87,22 +97,28 @@ export async function loadEodCatalogRows(env: Env, tickersInput: readonly string
          FROM publication, json_each(CASE WHEN payload_codec IS NULL OR payload_codec = 'json'
            THEN payload_json ELSE '{}' END, '$.rows')
         WHERE json_extract(value, '$[0]') IN (SELECT value FROM json_each(?))
+     ), compatibility AS MATERIALIZED (
+       SELECT value AS compatibility_json, json_extract(value, '$[0]') AS ticker
+         FROM publication, json_each(CASE WHEN compatibilityVersion=1 THEN payload_json ELSE '{}' END, '$.compatibility.rows')
+        WHERE json_extract(value, '$[0]') IN (SELECT value FROM json_each(?))
      )
      SELECT p.id AS publicationId, p.session_date AS sessionDate, p.methodology_version AS methodologyVersion,
             p.payload_codec AS payloadCodec, p.schemaVersion, p.payloadSession, p.payloadMethodology,
             p.latestCatalogSession, c.row_json AS rowJson, COALESCE(r.revision, 0) AS currentRevision,
             r.semantic_revision AS semanticRevision, r.last_correction_revision AS lastCorrectionRevision,
             r.append_high_water_date AS appendHighWaterDate, r.append_epoch_start_revision AS appendEpochStartRevision,
-            r.append_epoch_start_date AS appendEpochStartDate, f.status AS repairStatus
+            r.append_epoch_start_date AS appendEpochStartDate, f.status AS repairStatus, x.compatibility_json AS compatibilityJson
        FROM publication p LEFT JOIN catalog c ON 1 = 1
+       LEFT JOIN compatibility x ON x.ticker=c.ticker
        LEFT JOIN eod_input_revisions r ON r.feed = 'sip' AND r.ticker = c.ticker
        LEFT JOIN eod_adjustment_repairs f ON f.feed = 'sip' AND f.ticker = c.ticker /* eod-history-catalog-read */`,
-  ).bind(sessionDate, JSON.stringify(tickers)).all<{
+  ).bind(sessionDate, JSON.stringify(tickers), JSON.stringify(tickers)).all<{
     publicationId: string; sessionDate: string; methodologyVersion: string; payloadCodec: string | null;
     schemaVersion: number | null; payloadSession: string | null; payloadMethodology: string | null;
     rowJson: string | null; currentRevision: number; repairStatus: string | null;
     latestCatalogSession: string; semanticRevision: number | null; lastCorrectionRevision: number | null;
     appendHighWaterDate: string | null; appendEpochStartRevision: number | null; appendEpochStartDate: string | null;
+    compatibilityJson: string | null;
   }>();
   const first = result.results?.[0];
   if (!first) throw new EodCatalogUnavailableError(`no accepted full-catalog metadata for ${sessionDate}`);
@@ -142,11 +158,26 @@ export async function loadEodCatalogRows(env: Env, tickersInput: readonly string
       && (stored.appendEpochStartDate > sessionDate
         || (lastDate === sessionDate && sourceRevision >= stored.appendEpochStartRevision));
     if (stored.repairStatus === "pending" || (sourceRevision !== stored.currentRevision && !onlyLaterAppends)) {
+      if (options.unavailableRows === "omit") continue;
       throw new EodCatalogUnavailableError(`input revision changed or adjustment repair is pending for ${ticker}`);
     }
-    rows.set(ticker, { ticker, barCount, firstDate, lastDate, price, avgDollarVolume20d, sourceRevision, previousPrice, volume, avgVolume30d });
+    let compatibility: EodCatalogRow["compatibility"];
+    if (stored.compatibilityJson != null) {
+      const extra: unknown = JSON.parse(stored.compatibilityJson);
+      if (!Array.isArray(extra) || extra.length !== 4 || extra[0] !== ticker || !numericOrNull(extra[2])
+        || ![extra[1], extra[3]].every((date) => date === null || (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)
+          && firstDate !== null && date >= firstDate && lastDate !== null && date < lastDate))
+        || (barCount >= 2 ? extra[1] === null || previousPrice === null : extra[1] !== null)
+        || (barCount >= 7 ? extra[2] === null || extra[3] === null || extra[1] === null || extra[3] >= extra[1]
+          : extra[2] !== null || extra[3] !== null)) {
+        throw new EodCatalogUnavailableError(`invalid compatibility metadata for ${ticker}`);
+      }
+      compatibility = { previousDate: extra[1] as string | null, trend5d: extra[2] as number | null, trendWindowStartDate: extra[3] as string | null };
+    }
+    rows.set(ticker, { ticker, barCount, firstDate, lastDate, price, avgDollarVolume20d, sourceRevision, previousPrice, volume, avgVolume30d,
+      ...(compatibility ? { compatibility } : {}) });
   }
   const missing = tickers.find((ticker) => !rows.has(ticker));
-  if (missing) throw new EodCatalogUnavailableError(`requested ticker ${missing} was not included in the full-catalog attempt`);
+  if (missing && options.unavailableRows !== "omit") throw new EodCatalogUnavailableError(`requested ticker ${missing} was not included in the full-catalog attempt`);
   return rows;
 }

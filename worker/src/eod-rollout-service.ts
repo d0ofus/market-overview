@@ -129,6 +129,9 @@ const catalogRowSchema = z.tuple([
 const catalogSchema = z.object({
   schemaVersion: z.literal(1), sessionDate: date,
   methodologyVersion: z.literal(EOD_CATALOG_METHODOLOGY_VERSION), rows: z.array(catalogRowSchema),
+  compatibility: z.object({ schemaVersion: z.literal(1),
+    rows: z.array(z.tuple([z.string().min(1), date.nullable(), z.number().finite().nullable(), date.nullable()])),
+  }).strict(),
 }).strict();
 
 /** Archive consumers need the full compact SIP catalog as well as the six page
@@ -151,12 +154,22 @@ async function checkCatalogPublication(env: Env, publicationId: unknown, session
   if (rows.length !== tickers.length || actual.size !== tickers.length || rows.some((row) => !expected.has(row[0]))) {
     fail("catalog-publication-population");
   }
+  const compatibility = parsed.data.compatibility.rows;
+  const compatibilityByTicker = new Map(compatibility.map((row) => [row[0], row]));
+  if (compatibility.length !== tickers.length || compatibilityByTicker.size !== tickers.length
+    || compatibility.some((row) => !expected.has(row[0]))) fail("catalog-compatibility-population");
   for (const row of rows) {
-    const [, barCount, firstDate, lastDate, price, avgDollarVolume20d, , previousPrice, volume, avgVolume30d] = row;
+    const [ticker, barCount, firstDate, lastDate, price, avgDollarVolume20d, , previousPrice, volume, avgVolume30d] = row;
     if (barCount === 0
       ? [firstDate, lastDate, price, avgDollarVolume20d, previousPrice, volume, avgVolume30d].some((value) => value !== null)
       : firstDate === null || lastDate === null || firstDate > lastDate || lastDate > sessionDate || price === null
         || (barCount === 1 && previousPrice !== null)) fail("catalog-publication-coverage");
+    const [, previousDate, trend5d, windowStart] = compatibilityByTicker.get(ticker)!;
+    if ([previousDate, windowStart].some((value) => value !== null
+      && (firstDate === null || lastDate === null || value < firstDate || value >= lastDate))
+      || (barCount >= 2 ? previousDate === null || previousPrice === null : previousDate !== null)
+      || (barCount >= 7 ? trend5d === null || windowStart === null || previousDate === null || windowStart >= previousDate
+        : trend5d !== null || windowStart !== null)) fail("catalog-compatibility-coverage");
   }
   // This is one bounded indexed query over the frozen manifest. Zero revisions
   // explicitly represent a security with no previous revision record.

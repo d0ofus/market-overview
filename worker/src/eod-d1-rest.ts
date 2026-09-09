@@ -87,6 +87,9 @@ function responseError(status: number, errors: unknown): Error {
 export function createEodD1Database(options: {
   accountId:string; databaseId:string; token:string; allowedDatabaseIds:readonly string[];
   admission?:D1Admission; fetcher?:typeof fetch;
+  /** Operator runner only: exact repository-reviewed DDL, including complete triggers.
+   * Never supplied from an HTTP request or provider response. */
+  reviewedDdl?:readonly string[];
 }): D1Database {
   if (!/^[a-f0-9]{32}$/i.test(options.accountId)
     || !options.allowedDatabaseIds.includes(options.databaseId)
@@ -94,7 +97,10 @@ export function createEodD1Database(options: {
   const execute = async (queries:EodSql[]):Promise<D1Result[]> => {
     if (!queries.length) return [];
     if (queries.length > 40) throw new Error("D1 batch exceeds 40 statements.");
-    queries.forEach(validateEodStatement);
+    queries.forEach((query) => {
+      if (query.params.length===0 && options.reviewedDdl?.includes(query.sql)) return;
+      validateEodStatement(query);
+    });
     const statements = queries.map(({sql, params}) => ({sql, params: [...params]}));
     // Public REST uses an object envelope, unlike the internal binding transport.
     // https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
@@ -209,6 +215,22 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if (query.sql.trimEnd().endsWith("/* storage-copy-page */")) {
+      // Keyset pages are capped at 250 rows and use the complete primary key.
+      // The same label covers read-back verification; no OFFSET/full-table scan.
+      reads+=2_000; continue;
+    }
+    if (query.sql.trimEnd().endsWith("/* storage-copy-insert */")) {
+      let rows:unknown;
+      try { rows=JSON.parse(String(query.params[0])); } catch { throw new Error("storage-copy-invalid-batch"); }
+      if (!Array.isArray(rows) || rows.length>100) throw new Error("storage-copy-invalid-batch");
+      reads+=rows.length*8+32; writes+=rows.length*8+16; continue;
+    }
+    if (query.sql.trimEnd().endsWith("/* storage-reviewed-ddl */")) {
+      // Tables/indexes are installed while the destination is empty. Source
+      // fence and final business triggers contain no data backfill operations.
+      reads+=256; writes+=16; continue;
+    }
     if (query.sql.trimEnd().endsWith("/* eod-membership-input-read */")) {
       // Five overlapping populations can exceed the generic 25k-read estimate
       // even at normal sizes (26,497 observed in the first full live load).

@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "types": ["node", "@cloudflare/workers-types"], "noEmit": true },
-  "include": ["src", "scripts/eod-runner.ts"]
+  "include": ["src", "scripts/eod-runner.ts", "scripts/market-storage-runner.ts", "scripts/market-storage-snapshot.ts"]
 }

@@ -3,6 +3,8 @@ import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, ex
 import { loadMarketHistory, loadMarketHistoryCoverage } from "./market-history";
 import { getStoredHoldingStats } from "./eod-holdings-quotes";
 import { EodCatalogUnavailableError, loadEodCatalogRows } from "./eod-catalog-service";
+import { loadCatalogSectorTrending } from "./sector-trending-service";
+import { loadMarketHistoryLatestDates } from "./market-history-metadata";
 import { loadEodApiStatus } from "./eod-api-status";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
@@ -1274,6 +1276,10 @@ async function loadOverviewTickers(env: Env): Promise<string[]> {
 async function loadTickersMissingRecentBars(env: Env, tickers: string[], expectedAsOfDate = latestUsMarketSessionAsOfDate(new Date())): Promise<string[]> {
   const unique = uniqueTickers(tickers);
   if (unique.length === 0) return [];
+  if (env.MARKET_HISTORY_DB) {
+    const dates = await loadMarketHistoryLatestDates(env, unique, marketDataFeed(env));
+    return unique.filter((ticker) => (dates.get(ticker) ?? "") < expectedAsOfDate);
+  }
   const lastDateByTicker = new Map<string, string | null>();
   const chunkSize = 80;
   for (let i = 0; i < unique.length; i += chunkSize) {
@@ -2297,13 +2303,20 @@ function deriveStoredQuoteFreshness(input: {
   };
 }
 
-async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number; lastPrice: number; barDate: string | null; source: string }>> {
+export async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<string, { change1d: number | null; lastPrice: number | null; barDate: string | null; source: string }>> {
   const unique = Array.from(new Set(tickers.map((t) => t.toUpperCase()).filter(Boolean)));
-  const map = new Map<string, { change1d: number; lastPrice: number; barDate: string | null; source: string }>();
+  const map = new Map<string, { change1d: number | null; lastPrice: number | null; barDate: string | null; source: string }>();
+  if (env.MARKET_HISTORY_DB && env.EOD_READ_ENABLED === "true") {
+    for (const [ticker, stats] of await getStoredHoldingStats(env, unique)) {
+      map.set(ticker, { ...stats, source: stats.source ?? "daily-bars" });
+    }
+    return map;
+  }
   for (let index = 0; index < unique.length; index += 80) {
     const batch = unique.slice(index, index + 80);
     if (batch.length === 0) continue;
-    const rows = await getMarketDataDb(env).prepare(
+    const rows = env.MARKET_HISTORY_DB ? { results: (await loadMarketHistory(env, { tickers: batch, limitPerTicker: 2 }))
+      .sort((left, right) => left.ticker.localeCompare(right.ticker) || right.date.localeCompare(left.date)) } : await getMarketDataDb(env).prepare(
       `SELECT ticker, date, c, rowNumber FROM (
          SELECT ticker, date, c, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rowNumber
          FROM alpaca_daily_bars
@@ -2324,10 +2337,10 @@ async function getStored1dStatsMap(env: Env, tickers: string[]): Promise<Map<str
     for (const [ticker, bars] of barsByTicker.entries()) {
       const latest = bars[0] ?? null;
       const previous = bars[1] ?? null;
-      const lastPrice = latest?.c ?? 0;
-      const prev = previous?.c ?? 0;
+      const lastPrice = latest?.c ?? null;
+      const prev = previous?.c ?? null;
       map.set(ticker, {
-        change1d: lastPrice && prev ? ((lastPrice - prev) / prev) * 100 : 0,
+        change1d: lastPrice && prev ? ((lastPrice - prev) / prev) * 100 : null,
         lastPrice,
         barDate: latest?.date ?? null,
         source: "daily-bars",
@@ -3170,6 +3183,13 @@ app.get("/api/sectors/trending", async (c) => {
   const symbols = await c.env.DB.prepare(
     "SELECT ticker, name, sector FROM symbols WHERE sector IS NOT NULL ORDER BY ticker",
   ).all<{ ticker: string; name: string | null; sector: string }>();
+  if (c.env.EOD_READ_ENABLED === "true") {
+    try { return c.json(await loadCatalogSectorTrending(c.env, symbols.results ?? [], days)); }
+    catch (error) {
+      if (error instanceof EodCatalogUnavailableError) return c.json({ error: error.message, days, status: "unavailable" }, 503);
+      throw error;
+    }
+  }
   const symbolByTicker = new Map((symbols.results ?? []).map((row) => [row.ticker.toUpperCase(), row]));
   const tickers = Array.from(symbolByTicker.keys());
   const marketRows: Array<{ ticker: string; date: string; c: number }> = [];
@@ -6632,7 +6652,9 @@ app.post("/api/admin/weekly-market-review/generate", async (c) => {
 app.get("/api/admin/provider-check", async (c) => {
   if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
   const ticker = (c.req.query("ticker") ?? "SPY").toUpperCase();
-  const latestBar = await getMarketDataDb(c.env).prepare(
+  const latestBar = c.env.MARKET_HISTORY_DB
+    ? (await loadMarketHistory(c.env, { tickers: [ticker], limitPerTicker: 1 })).map((bar) => ({ticker:bar.ticker,date:bar.date,c:bar.c}))[0] ?? null
+    : await getMarketDataDb(c.env).prepare(
     "SELECT ticker, date, c FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? ORDER BY date DESC LIMIT 1",
   )
     .bind(marketDataFeed(c.env), ticker)
@@ -7060,17 +7082,8 @@ app.get("/api/admin/overview-current/audit", async (c) => {
   const configId = c.req.query("configId") ?? "default";
   try {
     const currentRows = await loadOverviewCurrentData(c.env, configId, date);
-    const tickersWithCurrentBars = new Set<string>();
     const currentTickers = Array.from(currentRows.keys());
-    for (let index = 0; index < currentTickers.length; index += 80) {
-      const tickerChunk = currentTickers.slice(index, index + 80);
-      const placeholders = tickerChunk.map(() => "?").join(",");
-      const bars = await getMarketDataDb(c.env).prepare(
-        `SELECT ticker FROM alpaca_daily_bars
-         WHERE feed = ? AND date = ? AND ticker IN (${placeholders})`,
-      ).bind(marketDataFeed(c.env), date, ...tickerChunk).all<{ ticker: string }>();
-      for (const bar of bars.results ?? []) tickersWithCurrentBars.add(bar.ticker.toUpperCase());
-    }
+    const tickersWithCurrentBars = await loadMarketDataTickersWithBarOnDate(c.env, currentTickers, date);
     const storedRows = await c.env.DB.prepare(
       `SELECT sr.ticker, sr.price, sr.change_1d as change1d, sr.change_1w as change1w,
               sr.change_3m as change3m, sr.change_6m as change6m, sr.ytd
@@ -7951,7 +7964,7 @@ export default {
     const runMarketDataLane = async (): Promise<void> => {
       const runner = runnerForLane("market-data");
       const { runBudgeted, auditSkipped, budget } = runner;
-      if (eodEnabled(env)) {
+      if (eodEnabled(env) || env.EOD_STORAGE_MIGRATION_ID) {
         await runBudgeted("eod-coordinate", 4, () => coordinateEod(env,now));
         await runBudgeted("eod-commentary",6,() => maybeRunPublishedEodCommentary(env,now).then(() => undefined));
       }

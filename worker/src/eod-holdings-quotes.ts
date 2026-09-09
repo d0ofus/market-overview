@@ -1,5 +1,6 @@
 import { getMarketDataDb,marketDataFeed } from "./market-data-db";
 import { expectedEodSession } from "./eod-coordinator";
+import { loadEodCatalogRows } from "./eod-catalog-service";
 import type { Env } from "./types";
 
 export async function getStoredHoldingStats(env:Env,tickers:string[]) {
@@ -9,6 +10,27 @@ export async function getStoredHoldingStats(env:Env,tickers:string[]) {
   if (!unique.length) return map;
   const completedSession=await expectedEodSession(env);
   if (!completedSession) return map;
+  if (env.MARKET_HISTORY_DB && env.EOD_READ_ENABLED === "true") {
+    // Full holding lists can exceed a thousand symbols. Their compact accepted
+    // metadata avoids one archive decompression/query group per holding batch.
+    const catalog=await loadEodCatalogRows(env,unique,completedSession,{unavailableRows:"omit"});
+    const dates=[...new Set([...catalog.values()].flatMap((row) => row.lastDate ? [row.lastDate] : []))];
+    const sessions=await getMarketDataDb(env).prepare(`SELECT session_date AS date,
+      (SELECT MAX(previous.session_date) FROM market_calendar_sessions previous WHERE previous.session_date<current.session_date) AS previousDate
+      FROM market_calendar_sessions current WHERE session_date IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(dates)).all<{date:string;previousDate:string|null}>();
+    const previousByDate=new Map(sessions.results.map((row) => [row.date,row.previousDate]));
+    for(const [ticker,row] of catalog) {
+      if(!row.lastDate || !previousByDate.has(row.lastDate) || row.price===null) continue;
+      const previousDate=previousByDate.get(row.lastDate);
+      const exactPrevious=previousDate && row.compatibility?.previousDate===previousDate;
+      const change=exactPrevious && row.previousPrice!==null && row.previousPrice>0
+        ? (row.price/row.previousPrice-1)*100 : null;
+      map.set(ticker,{lastPrice:row.price,change1d:change!==null && Number.isFinite(change) ? change : null,
+        barDate:row.lastDate,source:"alpaca:sip:split"});
+    }
+    return map;
+  }
   // Indexed seeks per security, not a full-history window scan. A JSON bound
   // parameter avoids D1's 100-parameter limit and prices every returned holding.
   const rows=await getMarketDataDb(env).prepare(`WITH requested AS (SELECT value AS ticker FROM json_each(?))

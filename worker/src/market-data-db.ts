@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
 
 // About 315 US sessions, preserving the 252-session feature horizon with
@@ -59,13 +60,20 @@ export async function loadMarketDataTickersWithBarOnDate(
        WHERE feed = ?
          AND source_provider = 'alpaca'
          AND ticker IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-         AND date = ?`,
+         AND date = ?
+         ${env.MARKET_HISTORY_DB && (env.EOD_READ_ENABLED === "true" || ["shadow","active"].includes(env.EOD_RUNNER_MODE ?? ""))
+           ? "AND NOT EXISTS (SELECT 1 FROM eod_adjustment_repairs repair WHERE repair.feed=alpaca_daily_bars.feed AND repair.ticker=alpaca_daily_bars.ticker AND repair.status='pending')" : ""}`,
     )
       .bind(feed, JSON.stringify(chunk), date)
       .all<{ ticker: string }>();
     for (const row of rows.results ?? []) found.add(row.ticker.toUpperCase());
   }
-
+  const missing = unique.filter((ticker) => !found.has(ticker));
+  if (env.MARKET_HISTORY_DB && missing.length) {
+    for (const bar of await loadMarketHistory(env, {
+      tickers: missing, startDate: date, endDate: date, sourceProvider: "alpaca",
+    })) found.add(bar.ticker);
+  }
   return found;
 }
 

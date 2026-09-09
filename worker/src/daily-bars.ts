@@ -8,6 +8,8 @@ import {
   recordMarketDataD1Usage,
 } from "./market-data-db";
 import type { Env } from "./types";
+import { loadMarketHistory } from "./market-history";
+import { loadMarketHistoryLatestDates } from "./market-history-metadata";
 
 const BAR_QUERY_TICKER_CHUNK_SIZE = 80;
 const BAR_WRITE_CHUNK_SIZE = 200;
@@ -64,6 +66,7 @@ async function loadLatestBarDates(
   target: DailyBarStorageTarget,
   feed: string,
 ): Promise<Map<string, string | null>> {
+  if (env.MARKET_HISTORY_DB) return loadMarketHistoryLatestDates(env, tickers, feed);
   const latestByTicker = new Map<string, string | null>();
   void target;
   const db = getMarketDataDb(env);
@@ -92,17 +95,24 @@ async function loadTickersWithBarOnDate(
   const tickersWithBar = new Set<string>();
   void target;
   const db = getMarketDataDb(env);
-  for (let index = 0; index < tickers.length; index += BAR_QUERY_TICKER_CHUNK_SIZE) {
-    const chunk = tickers.slice(index, index + BAR_QUERY_TICKER_CHUNK_SIZE);
+  const chunkSize = env.MARKET_HISTORY_DB ? 1_000 : BAR_QUERY_TICKER_CHUNK_SIZE;
+  for (let index = 0; index < tickers.length; index += chunkSize) {
+    const chunk = tickers.slice(index, index + chunkSize);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(",");
-    const sql = `SELECT ticker FROM alpaca_daily_bars WHERE feed = ? AND ticker IN (${placeholders}) AND date = ?`;
+    const sql = `SELECT ticker FROM alpaca_daily_bars WHERE feed = ? AND ticker IN (${env.MARKET_HISTORY_DB ? "SELECT value FROM json_each(?)" : placeholders}) AND date = ?
+      ${env.MARKET_HISTORY_DB && (env.EOD_READ_ENABLED === "true" || ["shadow","active"].includes(env.EOD_RUNNER_MODE ?? ""))
+        ? "AND NOT EXISTS (SELECT 1 FROM eod_adjustment_repairs repair WHERE repair.feed=alpaca_daily_bars.feed AND repair.ticker=alpaca_daily_bars.ticker AND repair.status='pending')" : ""}`;
     const rows = await db.prepare(sql)
-      .bind(feed, ...chunk, date)
+      .bind(feed, ...(env.MARKET_HISTORY_DB ? [JSON.stringify(chunk)] : chunk), date)
       .all<{ ticker: string }>();
     for (const row of rows.results ?? []) {
       tickersWithBar.add(row.ticker.toUpperCase());
     }
+  }
+  const missing = tickers.filter((ticker) => !tickersWithBar.has(ticker));
+  if (env.MARKET_HISTORY_DB && missing.length) {
+    for (const bar of await loadMarketHistory(env, { tickers: missing, feed, startDate: date, endDate: date })) tickersWithBar.add(bar.ticker);
   }
   return tickersWithBar;
 }

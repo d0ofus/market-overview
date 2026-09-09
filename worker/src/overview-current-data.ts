@@ -2,6 +2,7 @@ import { computeMetrics, isPriceAboveSma, sanitizeBarSeries } from "./metrics";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-calendar-cache";
 import { getMarketDataDb } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import { getProvider, type QuoteSnapshot } from "./provider";
 import { meteredFetch, ProviderRequestFailureError } from "./provider-usage";
 import { zonedParts } from "./refresh-timing";
@@ -557,7 +558,7 @@ async function fetchAlpacaSnapshots(
   }
 }
 
-async function loadAlpacaBarMetrics(
+export async function loadAlpacaBarMetrics(
   env: Env,
   tickers: string[],
   expectedSessionDate: string,
@@ -576,7 +577,11 @@ async function loadAlpacaBarMetrics(
   const adjustment = (env.ALPACA_DAILY_ADJUSTMENT ?? "split").trim().toLowerCase() || "split";
   for (const tickerChunk of chunk(tickers, DB_CHUNK_SIZE)) {
     const placeholders = tickerChunk.map(() => "?").join(",");
-    const rows = await db.prepare(
+    const rows = env.MARKET_HISTORY_DB ? { results: (await loadMarketHistory(env, {
+      tickers: tickerChunk, feed: alpacaFeed, startDate, endDate: expectedSessionDate,
+      sourceProvider: "alpaca", adjustment,
+    })).map((bar) => ({ ticker: bar.ticker, date: bar.date, c: bar.c, sourceProvider: bar.sourceProvider,
+      sourceFeed: bar.feed, adjustment: bar.adjustment, observedAt: bar.observedAt ?? bar.fetchedAt })) } : await db.prepare(
       `SELECT ticker, date, c, source_provider as sourceProvider, feed as sourceFeed,
               adjustment, COALESCE(observed_at, fetched_at) as observedAt
        FROM alpaca_daily_bars

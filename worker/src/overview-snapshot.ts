@@ -1,6 +1,7 @@
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
+import { loadMarketHistory } from "./market-history";
 import { sanitizeBarSeries } from "./metrics";
 import type { Env } from "./types";
 
@@ -93,7 +94,9 @@ export async function isOverviewSnapshotStale(env: Env, configId = DEFAULT_CONFI
   const seriesByTicker = new Map<string, { dates: string[]; closes: number[] }>();
   if (uniqueTickers.length > 0) {
     const placeholders = uniqueTickers.map(() => "?").join(", ");
-    const bars = await getMarketDataDb(env).prepare(
+    const bars = env.MARKET_HISTORY_DB ? { results: await loadMarketHistory(env, {
+      tickers: uniqueTickers, endDate: latest.asOfDate, limitPerTicker: SPARKLINE_LOOKBACK_POINTS,
+    }) } : await getMarketDataDb(env).prepare(
       `SELECT ticker, date, c
        FROM alpaca_daily_bars
        WHERE feed = ? AND ticker IN (${placeholders}) AND date <= ?

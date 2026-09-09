@@ -6,6 +6,15 @@ const options = { accountId: "a".repeat(32), databaseId: "00000000-0000-4000-800
 const result = (value: number) => ({ success: true, results: [{value}], meta: {rows_read:value, rows_written:0, size_after:8192} });
 
 describe("public D1 REST adapter contract", () => {
+  it("allows complete operator-reviewed trigger DDL only by exact match", async () => {
+    const ddl="CREATE TRIGGER guard BEFORE INSERT ON sample BEGIN SELECT RAISE(ABORT,'frozen'); END; /* storage-reviewed-ddl */";
+    const fetcher=vi.fn(async () => Response.json({success:true,result:[result(1)]}));
+    const db=createEodD1Database({...options,fetcher,reviewedDdl:[ddl]});
+    await db.prepare(ddl).run();
+    await expect(db.prepare(ddl+" DROP TABLE sample").run()).rejects.toThrow();
+    await expect(db.prepare(ddl).bind("unexpected").run()).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it("sends a documented object batch with separate parameter arrays and maps ordered results", async () => {
     const settle = Object.assign(vi.fn(async () => undefined), { abandon: vi.fn(async () => undefined) }) as D1Settlement;
     const admission = vi.fn(async () => settle);

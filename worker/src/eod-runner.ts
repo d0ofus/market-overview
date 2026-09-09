@@ -289,7 +289,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       if (run.purpose==="daily" && checkpoint?.hash===signature) {
         const stored=JSON.parse(checkpoint.payload) as FeatureCheckpoint & {payloadCodec?:string;payloadBase64?:string};
         const cached=stored.payloadCodec ? await decodeEodPayload({...stored,payload:"{}"}) as FeatureCheckpoint : stored;
-        if (cached.catalogRows?.length===tickers.length && tickers.every((ticker) => cached.catalogRows.some((row) => row.ticker===ticker))
+        if (cached.catalogRows?.length===tickers.length && cached.catalogRows.every((row) => row.compatibility)
+          && tickers.every((ticker) => cached.catalogRows.some((row) => row.ticker===ticker))
           && cached.features.every(([,feature]) => feature.price!==null && feature.change1d!==null && feature.above200Sma!==null)) {
           cached.features.forEach(([ticker,feature]) => features.set(ticker,feature));
           cached.catalogRows.forEach((row) => catalogRows.set(row.ticker,row));

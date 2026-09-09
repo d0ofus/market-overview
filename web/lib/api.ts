@@ -4,6 +4,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
 export type EodPublicationStatus = {
   mode: string;
+  pipelineMode?: string;
+  storageMigration?: {
+    id: string; status: string; stage: string; failedStage: string | null; errorCode: string | null;
+    nextAttemptAt: string | null; updatedAt: string; sessionDate: string; blocksEod: boolean;
+    freezeAuthorized: boolean; sourceSnapshotCaptured: boolean; copiedRows: number | null; archivedRows: number | null;
+  } | null;
   ready: boolean;
   expectedSession?: string | null;
   lastSuccessfulSession?: string | null;

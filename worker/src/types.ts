@@ -28,6 +28,8 @@ export type Env = {
   EOD_GITHUB_TOKEN?: string;
   EOD_GITHUB_REPOSITORY?: string;
   EOD_GITHUB_WORKFLOW?: string;
+  EOD_STORAGE_MIGRATION_ID?: string;
+  EOD_STORAGE_GITHUB_WORKFLOW?: string;
   GEMINI_FREE_API_KEY?: string;
   OPS_DB?: D1Database;
   FUNDAMENTALS_DB?: D1Database;

@@ -46,11 +46,19 @@ export function EodOperationsPanel() {
         {error ? <InlineAlert tone="danger">Status check failed: {error}{data ? " The last successful status is retained below." : ""}</InlineAlert> : null}
         {!data ? <p className="text-sm text-slate-400">{loading ? "Loading EOD status..." : "No EOD status available."}</p> : <>
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            <span>Mode: <strong>{data.mode}</strong></span>
+            <span>Mode: <strong>{data.pipelineMode ?? data.mode}</strong></span>
             <span>Delivery: <strong className={data.ready ? "text-emerald-400" : "text-amber-300"}>{data.ready ? "All scopes current" : data.mode === "disabled" ? "Disabled" : "Pending"}</strong></span>
             <span>Expected session: <strong>{data.expectedSession ?? "Unavailable"}</strong></span>
             <span>Last complete session: <strong>{data.lastSuccessfulSession ?? "Unavailable"}</strong></span>
           </div>
+          {data.storageMigration ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+            <p className="font-semibold">Storage migration: {data.storageMigration.status}</p>
+            <p className="mt-1 text-slate-400">Stage: {data.storageMigration.failedStage ?? data.storageMigration.stage} · Session: {data.storageMigration.sessionDate}</p>
+            <p className="text-slate-400">Archived rows: {count(data.storageMigration.archivedRows)} · Current table rows copied: {count(data.storageMigration.copiedRows)}</p>
+            <p className="text-slate-400">{data.storageMigration.sourceSnapshotCaptured ? "Source capture recorded; cutover requires verification." : "Preflight in progress; source capture not yet recorded."}</p>
+            {data.storageMigration.errorCode ? <p className="text-amber-300">{data.storageMigration.errorCode}</p> : null}
+            <p className="text-slate-400">{data.storageMigration.nextAttemptAt ? `Next retry: ${timestamp(data.storageMigration.nextAttemptAt)}` : "No automatic retry scheduled."} Updated: {timestamp(data.storageMigration.updatedAt)}</p>
+          </div> : null}
           {data.missingScopes?.length ? <InlineAlert tone="info">Awaiting current publications: {data.missingScopes.join(", ")}</InlineAlert> : null}
           {data.inputCorrectionsPending === true ? <InlineAlert tone="info">Stored inputs changed after the completed publication run. Corrected publications are pending (input revision {count(data.inputRevision)}; published run revision {count(data.completedInputRevision)}).</InlineAlert> : null}
           {data.inputCorrectionsPending === null ? <InlineAlert tone="info">Input correction status is unknown; the latest input clock or completed-run watermark is unavailable.</InlineAlert> : null}

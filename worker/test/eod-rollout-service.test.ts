@@ -75,7 +75,7 @@ describe("bounded cutover proof validation", () => {
   });
 });
 
-describe("cutover proof against actual migrated SQLite references", () => {
+describe("cutover proof against actual migrated SQLite references", { timeout: 30_000 }, () => {
   let storage: ReturnType<typeof createSqliteD1>;
   let env: Env;
   beforeEach(async () => {
@@ -101,7 +101,8 @@ describe("cutover proof against actual migrated SQLite references", () => {
     }
     const catalog: EodCatalogPayload = { schemaVersion: 1, sessionDate: proof.sessionDate,
       methodologyVersion: EOD_CATALOG_METHODOLOGY_VERSION,
-      rows: tickers.map((ticker) => [ticker, 0, null, null, null, null, 0, null, null, null]) };
+      rows: tickers.map((ticker) => [ticker, 0, null, null, null, null, 0, null, null, null]),
+      compatibility: { schemaVersion: 1, rows: tickers.map((ticker) => [ticker,null,null,null]) } };
     await storage.db.prepare(`INSERT INTO eod_publications(id,scope,session_date,revision,input_hash,methodology_version,
       payload_json,payload_checksum,payload_codec,status,created_at)
       VALUES('proof-catalog',?,?,1,'catalog-hash',?,?,?,'json','candidate','2026-11-27T22:00:00Z')`)
@@ -186,6 +187,35 @@ describe("cutover proof against actual migrated SQLite references", () => {
   it("rejects fabricated prices on a zero-history row", async () => {
     await alterCatalog((catalog) => { catalog.rows[0]![4] = 123; });
     await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-publication-coverage/);
+  });
+  it("rejects an old ten-tuple catalog without compatibility metadata at cutover", async () => {
+    await alterCatalog((catalog) => { delete catalog.compatibility; });
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-publication-schema/);
+  });
+  it.each(["missing", "duplicate", "unexpected"] as const)("rejects %s compatibility tickers", async (kind) => {
+    await alterCatalog((catalog) => {
+      const rows = catalog.compatibility!.rows;
+      if (kind === "missing") rows.pop();
+      else if (kind === "duplicate") rows[1] = rows[0]!;
+      else rows[0]![0] = "UNEXPECTED";
+    });
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-compatibility-population/);
+  });
+  it("validates compatibility dates and count semantics before accepting a non-empty catalog", async () => {
+    await alterCatalog((catalog) => {
+      const ticker = catalog.rows[0]![0];
+      catalog.rows[0] = [ticker,7,"2026-11-18","2026-11-27",7,700,0,6,100,100];
+      catalog.compatibility!.rows[0] = [ticker,"2026-11-27",16.6667,"2026-11-18"];
+    });
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-compatibility-coverage/);
+    await alterCatalog((catalog) => {catalog.compatibility!.rows[0]![1]="2026-11-25";catalog.compatibility!.rows[0]![3]="2026-11-17";});
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-compatibility-coverage/);
+    await alterCatalog((catalog) => {catalog.compatibility!.rows[0]![3]="2026-11-25";});
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-compatibility-coverage/);
+    await alterCatalog((catalog) => {catalog.compatibility!.rows[0]![3]="2026-11-18";catalog.rows[0]![1]=2;});
+    await expect(assertEodCutover(env, revision)).rejects.toThrow(/catalog-compatibility-coverage/);
+    await alterCatalog((catalog) => {catalog.rows[0]![1]=7;});
+    expect((await assertEodCutover(env, revision))?.sharedTickers.count).toBe(60);
   });
   it("checks current SIP revisions and incomplete adjustment repairs before initial approval", async () => {
     await storage.db.prepare("INSERT INTO eod_input_revisions(feed,ticker,revision) VALUES('sip','catalog-0',1)").run();
