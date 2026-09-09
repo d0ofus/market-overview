@@ -60,8 +60,10 @@ export function eodDeadline(sessionDate:string,closeAt:string):string {
 export async function expectedEodSession(env:Env,now=new Date()):Promise<string|null> {
   const local=zonedParts(now,"America/New_York");
   const time=`${Math.floor(local.minutesOfDay/60)}`.padStart(2,"0")+":"+`${local.minutesOfDay%60}`.padStart(2,"0");
+  // An explicit date range lets SQLite seek the newest candidate and inspect
+  // at most today and the preceding session, without sorting all prior dates.
   const row=await getMarketDataDb(env).prepare(`SELECT session_date as date FROM market_calendar_sessions
-    WHERE (session_date<? OR (session_date=? AND close_at<=?))
+    WHERE session_date<=? AND (session_date<? OR close_at<=?)
       AND EXISTS (SELECT 1 FROM market_calendar_refresh_state WHERE id='default' AND covered_start<=? AND covered_end>=?)
     ORDER BY session_date DESC LIMIT 1`)
     .bind(local.localDate,local.localDate,time,local.localDate,local.localDate).first<{date:string}>();

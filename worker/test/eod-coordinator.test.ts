@@ -225,6 +225,44 @@ describe("EOD durable coordinator against SQLite", { timeout: 30_000 }, () => {
     expect(await expectedEodSession(env,new Date("2026-09-08T22:00:00Z"))).toBeNull();
   });
 
+  it("preserves exact close boundaries, New York midnight and winter offsets", async () => {
+    market.script(`INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source)
+      VALUES('2026-01-02','09:30','16:00','fixture'),('2026-01-05','09:30','16:00','fixture'),
+        ('2026-11-25','09:30','16:00','fixture');
+      UPDATE market_calendar_refresh_state SET covered_start='2026-01-01';`);
+    for (const [timestamp, expected] of [
+      ["2026-01-05T20:59:59Z", "2026-01-02"],
+      ["2026-01-05T21:00:00Z", "2026-01-05"],
+      ["2026-09-08T19:59:59Z", "2026-09-04"],
+      ["2026-09-08T20:00:00Z", "2026-09-08"],
+      ["2026-09-09T03:59:59Z", "2026-09-08"],
+      ["2026-09-09T04:00:00Z", "2026-09-08"],
+      ["2026-11-26T23:00:00Z", "2026-11-25"],
+      ["2026-11-27T17:59:59Z", "2026-11-25"],
+      ["2026-11-27T18:00:00Z", "2026-11-27"],
+    ]) expect(await expectedEodSession(env, new Date(timestamp))).toBe(expected);
+  });
+
+  it("seeks the calendar primary-key range without scanning or sorting retained history", async () => {
+    market.script(`WITH RECURSIVE dates(d) AS (
+      VALUES('2020-01-01') UNION ALL SELECT date(d,'+1 day') FROM dates WHERE d<'2025-12-31'
+    ) INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source)
+      SELECT d,'09:30','16:00','fixture' FROM dates;`);
+    const spy = vi.spyOn(market.db, "prepare");
+    let sql: string;
+    try {
+      expect(await expectedEodSession(env, new Date("2026-09-08T19:59:00Z"))).toBe("2026-09-04");
+      expect(spy).toHaveBeenCalledOnce();
+      sql = spy.mock.calls[0][0];
+    } finally { spy.mockRestore(); }
+    const plan = await market.db.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .bind("2026-09-08", "2026-09-08", "15:59", "2026-09-08", "2026-09-08")
+      .all<{detail: string}>();
+    const details = plan.results.map((row) => row.detail).join("\n");
+    expect(details).toMatch(/SEARCH market_calendar_sessions USING PRIMARY KEY \(session_date<\?\)/);
+    expect(details).not.toMatch(/MULTI-INDEX OR|TEMP B-TREE|SCAN market_calendar_sessions/);
+  });
+
   it("does not dispatch twice after GitHub accepts a run that remains queued", async () => {
     const run = await enqueueEodRun(env,"2026-09-08","daily",now);
     await dispatchEodRun(env,run,now);
