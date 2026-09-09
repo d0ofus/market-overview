@@ -46,6 +46,8 @@ describe("immutable EOD membership inputs", () => {
     expect(rows[0]!.members).toHaveLength(500);
     expect(queries[0]!.sql).toContain("v.status IN ('active', 'superseded')");
     expect(queries[0]!.sql).toContain("date(COALESCE(v.promoted_at, v.created_at)) <= ?");
+    expect(queries[0]!.sql).toContain("AND v.universe_id IN (SELECT value FROM json_each(?))");
+    expect(queries[0]!.sql.trimEnd()).toMatch(/\/\* eod-membership-input-read \*\/$/);
     expect(queries[0]!.args[0]).toBe("2026-09-08");
   });
 
@@ -95,6 +97,12 @@ describe("immutable EOD membership inputs", () => {
   it("rejects malformed stored memberships before they reach aggregate coverage gates", async () => {
     const { env } = environment({ count: 24 });
     expect(await loadEodMemberships(env, "2026-09-08")).toEqual([]);
+  });
+
+  it("fails closed when a retained population exceeds the query's declared maximum", async () => {
+    const { env, queries } = environment({ count: 8_001 });
+    await expect(loadEodMemberships(env, "2026-09-08")).rejects.toThrow("eod-membership-population-exceeds-bound");
+    expect(queries).toHaveLength(1);
   });
 
   it("recovers historical verification only from checksum-verified publications with identical immutable members", async () => {

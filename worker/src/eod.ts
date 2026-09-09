@@ -1429,6 +1429,7 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
          FROM universe_versions v
         WHERE v.status IN ('active', 'superseded')
           AND date(COALESCE(v.promoted_at, v.created_at)) <= ?
+          AND v.universe_id IN (SELECT value FROM json_each(?))
      )
      SELECT v.universe_id AS universeId, v.id AS versionId, v.source,
             v.source_type AS sourceType, v.source_url AS sourceUrl,
@@ -1436,9 +1437,21 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
             m.ticker
        FROM eligible_versions v JOIN universes u ON u.id = v.universe_id
        JOIN universe_version_members m ON m.version_id = v.id
-      WHERE v.position = 1 AND v.universe_id IN (SELECT value FROM json_each(?))
-      ORDER BY v.universe_id, m.ticker`,
+      WHERE v.position = 1
+      ORDER BY v.universe_id, m.ticker LIMIT 40001
+      /* eod-membership-input-read */`,
   ).bind(targetSession, JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null }>();
+  // The publication populations are capped at five universes of 8,000 members.
+  // Historical version traversal still contributes reads; admission separately
+  // reserves conservative headroom and stops if measured work exceeds it.
+  const populationCounts = new Map<string, number>();
+  for (const row of versions.results ?? []) {
+    const count = (populationCounts.get(row.universeId) ?? 0) + 1;
+    if (!CORE_BREADTH_UNIVERSE_IDS.some((universeId) => universeId === row.universeId) || count > 8_000) {
+      throw new Error("eod-membership-population-exceeds-bound");
+    }
+    populationCounts.set(row.universeId, count);
+  }
   const sourceRows = await getOpsDb(env).prepare(
     `SELECT source_key AS sourceKey, source_label AS source, source_type AS sourceType,
             source_url AS sourceUrl, source_as_of_date AS sourceAsOfDate,

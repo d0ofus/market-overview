@@ -146,4 +146,27 @@ describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => 
     await admission.flush();
     expect((await usage()).results).toEqual([{ date: "2026-09-08", reads: 3020, writes: 12, reservedReads: 0, reservedWrites: 0 }]);
   });
+
+  it("admits the measured full-membership read with a scoped reservation while preserving the daily ceiling", async () => {
+    await storage.db.prepare("INSERT INTO eod_usage(usage_date,rows_read) VALUES('2026-09-08',2200000)").run();
+    const admission = createEodAdmission(storage.db, "membership-run", {now: () => time});
+    const query = [{sql:"WITH eligible_versions AS (SELECT * FROM universe_versions) SELECT * FROM eligible_versions /* eod-membership-input-read */",params:[]}];
+    const settle = await admission(query);
+    const reservation = await storage.db.prepare("SELECT reads,writes FROM eod_budget_reservations").first();
+    expect(reservation).toEqual({reads:170020,writes:2000});
+    await expect(admission(query)).rejects.toThrow("eod-d1-budget-exhausted");
+    await settle({rowsRead:26497,rowsWritten:0,sizeAfter:374763520});
+    await admission.flush();
+    expect((await usage()).results).toEqual([{date:"2026-09-08",reads:2226517,writes:12,reservedReads:0,reservedWrites:0}]);
+  });
+
+  it("reports fixed query classes and measured bounds without exposing SQL or bindings", async () => {
+    const admission = createEodAdmission(storage.db, "run", { now: () => time });
+    const settle = await admission([{sql: "INSERT INTO universe_versions(id) VALUES(?) /* private-literal */", params:["private-binding"]}]);
+    const expected = "eod-d1-query-budget-estimate-exceeded; reads=21/20; writes=9/8; statements=1; classes=insert-universe_versions";
+    await expect(settle({rowsRead:21,rowsWritten:9,sizeAfter:0})).rejects.toThrow(expected);
+    await expect(admission(read)).rejects.toThrow(expected);
+    await admission.flush();
+    expect((await usage()).results).toEqual([{date:"2026-09-08",reads:41,writes:21,reservedReads:0,reservedWrites:0}]);
+  });
 });

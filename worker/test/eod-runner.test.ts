@@ -65,6 +65,25 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     await ops.db.prepare("UPDATE eod_runs SET lease_until=? WHERE id=?").bind(new Date(Date.now()+600_000).toISOString(),runId).run();
     expect((await runEodBatch(env,runId)).status).toBe("not-claimed");
     expect(calls.alpaca).not.toHaveBeenCalled();
+    expect(calls.yahoo).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing durable run instead of reporting a successful duplicate",async () => {
+    const missingId=`eod:shadow:${session}:daily`;
+    await expect(runEodBatch(env,missingId)).rejects.toThrow("EOD run missing.");
+    expect(await ops.db.prepare("SELECT id FROM eod_runs WHERE id=?").bind(missingId).first()).toBeNull();
+    expect(calls.alpaca).not.toHaveBeenCalled();
+    expect(calls.yahoo).not.toHaveBeenCalled();
+  });
+
+  it("leaves a completed durable run unchanged without provider work",async () => {
+    await ops.db.prepare("UPDATE eod_runs SET status='completed',stage='finished',completed_at=? WHERE id=?")
+      .bind(`${session}T21:00:00Z`,runId).run();
+    const before=await ops.db.prepare("SELECT * FROM eod_runs WHERE id=?").bind(runId).first();
+    expect(await runEodBatch(env,runId)).toEqual({status:"not-claimed",published:[]});
+    expect(await ops.db.prepare("SELECT * FROM eod_runs WHERE id=?").bind(runId).first()).toEqual(before);
+    expect(calls.alpaca).not.toHaveBeenCalled();
+    expect(calls.yahoo).not.toHaveBeenCalled();
   });
 
   it("refreshes an officially corrected calendar while retaining frozen constituents and configuration",async () => {

@@ -149,9 +149,11 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   const claim=await runDb.prepare(`UPDATE eod_runs SET status='running',stage='inputs',lease_token=?,lease_until=?,updated_at=?
     WHERE id=? AND status<>'completed' AND (lease_until IS NULL OR lease_until<=?)`)
     .bind(lease,new Date(Date.now()+10*60_000).toISOString(),now,runId,now).run();
-  if (!claim.meta.changes) return {status:"not-claimed",published:[]};
   const run=await runDb.prepare("SELECT * FROM eod_runs WHERE id=?").bind(runId).first<EodRun>();
   if (!run) throw new Error("EOD run missing.");
+  // A duplicate completed/leased run is harmless. A missing durable record is
+  // a bootstrap failure and must reach the CLI's nonzero failure path.
+  if (!claim.meta.changes) return {status:"not-claimed",published:[]};
   let leaseLost=false;
   let heartbeatPending=false;
   const heartbeat=setInterval(() => {

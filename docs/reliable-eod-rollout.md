@@ -1,6 +1,6 @@
 # Reliable EOD rollout
 
-This is an operator runbook, not evidence of a completed deployment. The checked-in defaults are `EOD_RUNNER_MODE="disabled"`, `EOD_READ_ENABLED="false"`, and `EOD_ARCHIVE_PRUNE_ENABLED="false"`. See the [production release record](reliable-eod-production-release.md) for actual provisioning, migration and deployment progress. Pruning and the ten-session observation gate remain incomplete.
+This is an operator runbook, not evidence of a completed cutover. The checked-in configuration now selects `EOD_RUNNER_MODE="shadow"`, with `EOD_READ_ENABLED="false"` and `EOD_ARCHIVE_PRUNE_ENABLED="false"`. New installations must keep the runner disabled until provisioning is verified; this repository has reached shadow validation. See the [production release record](reliable-eod-production-release.md) for actual provisioning, migration and deployment progress. Pruning and the ten-session observation gate remain incomplete.
 
 ## Stage 1 — Inventory, capacity and shared quota
 

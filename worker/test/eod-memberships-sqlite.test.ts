@@ -1,0 +1,44 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { loadEodMemberships } from "../src/eod";
+import type { Env } from "../src/types";
+import { createSqliteD1 } from "./helpers/sqlite-d1";
+
+describe("scoped historical membership reads against real SQLite", () => {
+  let market: ReturnType<typeof createSqliteD1>, ops: ReturnType<typeof createSqliteD1>;
+  beforeEach(() => {
+    market = createSqliteD1(); ops = createSqliteD1();
+    market.migrate("market-data-migrations"); ops.migrate("ops-migrations");
+  }, 30_000);
+  afterEach(() => { market.dispose(); ops.dispose(); });
+
+  it("loads all five complete populations while excluding future and unrelated versions", async () => {
+    const populations = [["sp500-core", 500], ["nasdaq-core", 2500], ["nyse-core", 1500],
+      ["russell2000-core", 1800], ["overall-market-proxy", 4000]] as const;
+    for (const [universe, count] of populations) {
+      await market.db.prepare("INSERT INTO universes(id,name,active_version_id) VALUES(?,?,?)")
+        .bind(universe, universe, `${universe}:future`).run();
+      await market.db.prepare(`INSERT INTO universe_versions
+        (id,universe_id,source,source_type,source_as_of_date,status,member_count,created_at,promoted_at)
+        VALUES(?,?,'official','official','2026-09-08','superseded',?,'2026-09-07 20:00:00','2026-09-07 20:00:00'),
+          (?,?,'future','official','2026-09-09','active',?,'2026-09-09 20:00:00','2026-09-09 20:00:00')`)
+        .bind(`${universe}:past`, universe, count, `${universe}:future`, universe, count).run();
+      const tickers = Array.from({length: count}, (_, index) => `T${String(index).padStart(5, "0")}`);
+      await market.db.prepare(`INSERT INTO universe_version_members(version_id,ticker)
+        SELECT ?,value FROM json_each(?) UNION ALL SELECT ?,value FROM json_each(?)`)
+        .bind(`${universe}:past`, JSON.stringify(tickers), `${universe}:future`, JSON.stringify(tickers)).run();
+    }
+    market.script(`INSERT INTO universes(id,name,active_version_id) VALUES('unrelated','Other','unrelated:past');
+      INSERT INTO universe_versions(id,universe_id,source,status,member_count,created_at)
+      VALUES('unrelated:past','unrelated','other','active',1,'2026-09-07 20:00:00');
+      INSERT INTO universe_version_members(version_id,ticker) VALUES('unrelated:past','EXCLUDED');`);
+    const result = await loadEodMemberships({DB: market.db, MARKET_DATA_DB: market.db, OPS_DB: ops.db} as Env, "2026-09-08");
+    expect(result).toHaveLength(5);
+    for (const [universe, count] of populations) {
+      const row = result.find((membership) => membership.universeId === universe)!;
+      expect(row.versionId).toBe(`${universe}:past`);
+      expect(row.members).toHaveLength(count);
+      expect(row.source).toBe("official");
+    }
+    expect(result.flatMap((row) => row.members)).not.toContain("EXCLUDED");
+  }, 30_000);
+});

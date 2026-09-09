@@ -186,11 +186,37 @@ function maximumReservationWrites(queries:readonly EodSql[]):number {
   return 25_000;
 }
 
+/** Fixed labels make live estimate failures diagnosable without logging SQL,
+ * parameters, database IDs or provider error bodies. */
+function queryDiagnosticClass(query: EodSql): string {
+  for (const label of ["stage", "prune-members", ...MEMBERSHIP_MARKERS.map((marker) => `promote-${marker}`)]) {
+    if (query.sql.trimEnd().endsWith(`/* eod-universe-${label} */`)) return `universe-${label}`;
+  }
+  if (query.sql.trimEnd().endsWith("/* eod-membership-input-read */")) return "universe-session-memberships";
+  if (query.sql.trimEnd().endsWith("/* eod-history-catalog-read */")) return "history-catalog-read";
+  if (query.sql.startsWith("/* eod-capacity-row-sample */")) return "capacity-row-sample";
+  const operation = /^\s*(SELECT|INSERT|UPDATE|DELETE)/i.exec(query.sql)?.[1].toLowerCase() ?? "other";
+  for (const table of ["universe_source_sync_state", "universe_version_members", "universe_versions", "universe_symbols", "universes",
+    "market_calendar_refresh_state", "market_calendar_sessions", "alpaca_daily_bars", "eod_input_revisions", "eod_adjustment_repairs",
+    "eod_publications", "eod_runs", "eod_checkpoints", "provider_budget_counters", "provider_usage_daily", "symbols"]) {
+    if (new RegExp(`\\b${table}\\b`, "i").test(query.sql)) return `${operation}-${table}`;
+  }
+  return `${operation}-other`;
+}
+
 /** Conservative bounds for the repository's fixed, bounded runner SQL. */
 export function estimateEodQueries(queries: readonly EodSql[]): { reads: number; writes: number } {
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if (query.sql.trimEnd().endsWith("/* eod-membership-input-read */")) {
+      // Five overlapping populations can exceed the generic 25k-read estimate
+      // even at normal sizes (26,497 observed in the first full live load).
+      // Reserve four reads per maximum member plus historical-version headroom.
+      // Version history is not capped; measured overruns still stop admission.
+      reads += 5 * 8_000 * 4 + 10_000;
+      continue;
+    }
     if (query.sql.trimEnd().endsWith("/* eod-history-catalog-read */")) {
       // The compact catalog's JSON array is traversed even for a small request;
       // include the bounded full population and revision/repair lookup work.
@@ -359,7 +385,10 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
         stopped = new Error("eod-invalid-d1-usage");
       } else {
         envelope.usedReads += reads; envelope.usedWrites += writes;
-        if (reads > token.reads || writes > token.writes) stopped = new Error("eod-d1-query-budget-estimate-exceeded");
+        if (reads > token.reads || writes > token.writes) {
+          const classes = [...new Set(queries.map(queryDiagnosticClass))].slice(0, 5).join(",");
+          stopped = new Error(`eod-d1-query-budget-estimate-exceeded; reads=${reads}/${token.reads}; writes=${writes}/${token.writes}; statements=${queries.length}; classes=${classes}`);
+        }
       }
       if (usage && usage.sizeAfter >= 400_000_000) stopped = new Error("eod-d1-capacity-critical");
       if (stopped || envelope.date !== clock().toISOString().slice(0, 10)) envelope.draining = true;

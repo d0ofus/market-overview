@@ -2,6 +2,21 @@
 
 Release started 9 September 2026, Australia/Sydney. Production deployment was explicitly authorized. This record distinguishes deployed infrastructure from the remaining live acceptance gates.
 
+## 9 September credential follow-up and first shadow attempt
+
+GitHub CLI workflow authorization is now complete. The user rotated the Alpaca pair in `market-command-worker` and added both environment secrets to `market-eod`; secret names were verified without retrieving values. The Worker's GitHub dispatch token was refreshed. Commit `d52f2e9c813320ed6cc3483186fd66025b22f0ce` published the executable `.github/workflows/eod-market-data.yml`; its Vercel Production deployment reported success.
+
+The first durable run, `eod:shadow:2026-09-08:daily`, was created through the shared coordinator and dispatched as [GitHub run 34352578719](https://github.com/d0ofus/market-overview/actions/runs/34352578719). GitHub authenticated with Alpaca and refreshed verified exchange-calendar coverage from 2020-08-30 through 2027-01-27. This proves calendar authentication, not complete SIP price coverage or successful publication.
+
+The attempt stopped during input loading with 93,321 recorded EOD reads and 40,579 writes, released its reservations and recorded a retry. It exposed two concrete bootstrap defects:
+
+- The official IWM file, dated 4 September, contains three placeholder `-` rows explicitly marked `NO MARKET (E.G. UNLISTED)`: an Arcellx CVR and two OmniAb private vesting positions. Ticker validation ran before the existing non-market exclusion. Reordering only that exclusion now produces 1,944 members from 1,958 source equity rows, preserving three duplicate occurrences, 14 excluded positions and unresolved-identifier diagnostics. Listed malformed identifiers still fail. The fetched issuer payload SHA-256 is `bcd873cca76af13cc1c7aa65f5eaa3ac26f8e2745cc417f6202d6dcc9657005b`.
+- The historical membership join used 26,497 actual D1 reads against a generic 25,000 reservation. The corrected query scopes versions to the five core universes, guards their maximum populations and receives its own conservative reservation; daily limits are unchanged. Safe errors now include query classes and actual/reserved counts. A subsequent admitted live input load passed for all **5,921 unique shared tickers** and all five historical memberships. Retained-version growth can still trigger a measured overrun; the reservation is not a claim that historical growth is mathematically bounded.
+
+A separate regression fixes missing durable run IDs incorrectly returning a successful no-op. Completed or leased duplicate runs remain harmless. No historical memberships were backdated, no accepted page pointers were changed and no history was pruned. Initial bootstrap can span UTC quotas; it does not establish steady-state close-plus-two-hours performance.
+
+The market file measured **374,763,520 bytes** after membership staging. This remains above the 350 MB activation gate. A supported storage remedy with archive parity and measured full-population headroom is still required before active cutover; deleting rows cannot be credited as physical compaction. The earlier deployment record below describes the initial disabled state.
+
 ## Source and validation
 
 - Implementation commit: `88f8bdc`, based on synchronized GitHub main `7696763`.

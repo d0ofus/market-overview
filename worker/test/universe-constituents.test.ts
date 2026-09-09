@@ -165,4 +165,43 @@ describe("universe constituent parsers", () => {
       .toBe("https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/latest-holdings.csv");
     expect(extractIsharesHoldingsCsvUrl('<a href="https://evil.example/holdings.csv">Download</a>')).toBeNull();
   });
+
+  it("excludes issuer-marked unlisted placeholder rows before ticker validation while retaining raw diagnostics", async () => {
+    // Exact relevant row values from the official Sep04 holdings CSV, fetched
+    // Sep09: https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/latest-holdings.csv
+    const csv = [
+      "iShares Russell 2000 ETF",
+      'Fund Holdings as of,"Sep 04, 2026"',
+      "Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Quantity,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date",
+      'UMBF,UMB FINANCIAL,Financials,Equity,"274,657,792.80",0.34,"274,657,792.80","1,910,530.00",143.76,United States,NASDAQ,USD,1.00,USD,-',
+      'ADRO,CHINOOK THERAPEUTICS INC,Health Care,Equity,"223,817.75",0.00,"223,817.75","1,316,575.00",0.17,United States,NO MARKET (E.G. UNLISTED),USD,1.00,USD,-',
+      'ADRO,CHINOOK THERAPEUTICS INC CVR,Health Care,Equity,"138,892.89",0.00,"138,892.89","272,339.00",0.51,United States,NO MARKET (E.G. UNLISTED),USD,1.00,USD,-',
+      '-,ARCELLX INC CVR,Health Care,Equity,"65,585.87",0.00,"65,585.87","936,941.00",0.07,United States,NO MARKET (E.G. UNLISTED),USD,1.00,USD,-',
+      '-,OMNIAB INC $12.50 VESTING Prvt,Health Care,Equity,1.31,0.00,1.31,"130,676.00",0.00,United States,NO MARKET (E.G. UNLISTED),USD,1.00,USD,-',
+      '-,OMNIAB INC $15.00 VESTING Prvt,Health Care,Equity,1.31,0.00,1.31,"130,676.00",0.00,United States,NO MARKET (E.G. UNLISTED),USD,1.00,USD,-',
+    ].join("\n");
+    expect(parseIsharesHoldingsCsvDetailed(csv)).toMatchObject({
+      sourceEquityCount: 6, duplicateTickerCount: 3, blankTickerCount: 0,
+      tickers: ["UMBF"], excludedCount: 5, invalidSourceIdentifiers: [],
+      duplicateSourceIdentifiers: ["-", "ADRO"], excludedSourceIdentifiers: ["non-market:-", "non-market:ADRO"],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(csv)));
+    expect(await loadRussell2000Universe()).toMatchObject({
+      tickers: ["UMBF"], sourceMemberCount: 6, normalizedMemberCount: 1, unresolvedCount: 5,
+      unresolvedTickers: ["duplicate:-", "duplicate:ADRO", "non-market:-", "non-market:ADRO"],
+    });
+  });
+
+  it.each(["1.00", "0.00"])("still rejects a listed placeholder identifier with price %s", async (price) => {
+    const csv = [
+      "iShares Russell 2000 ETF", 'Fund Holdings as of,"Sep 04, 2026"',
+      "Ticker,Name,Asset Class,Price,Exchange", "UMBF,UMB FINANCIAL,Equity,143.76,NASDAQ",
+      `-,UNRESOLVED LISTED EQUITY,Equity,${price},NASDAQ`,
+    ].join("\n");
+    expect(parseIsharesHoldingsCsvDetailed(csv)).toMatchObject({
+      sourceEquityCount: 2, tickers: ["UMBF"], invalidSourceIdentifiers: ["-"], excludedSourceIdentifiers: [],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(csv)));
+    await expect(loadRussell2000Universe()).rejects.toThrow("invalid identifiers: 1");
+  });
 });

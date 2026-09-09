@@ -29,7 +29,7 @@ SQLite fixtures apply the real migrations and exercise publication transactions,
 
 ## Live acceptance still required
 
-The checked-in writer, publication-read and pruning switches remain disabled. The history database has been provisioned and its real binding committed; schema and deployment status are tracked in the [production release record](reliable-eod-production-release.md). Follow the [rollout runbook](reliable-eod-rollout.md) for migration order, secrets, shadow validation, bounded reconstruction, activation and rollback.
+The checked-in runner is configured for shadow validation; publication reads and pruning remain disabled. The history database has been provisioned and its real binding committed; schema and deployment status are tracked in the [production release record](reliable-eod-production-release.md). Follow the [rollout runbook](reliable-eod-rollout.md) for migration order, secrets, shadow validation, bounded reconstruction, activation and rollback.
 
 The audit measured the existing market database at approximately **371 MB**, above the **350 MB** acceptance target. Deleting SQLite rows does not establish that its physical file has shrunk. Resolve and measure that storage constraint before activation/pruning; include existing retained history, indexes, publication/catalog storage, archive revisions and forecast growth. The [shared-budget audit](d1-shared-budget-audit.md) also identifies pre-existing account-wide read pressure and the earnings lookup index included in this change.
 

@@ -343,17 +343,24 @@ export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsPar
     if (rawTicker) seenRawTickers.add(rawTicker);
     const ticker = normalizeTicker(rawTicker);
     const sourceKey = rawTicker || `(blank row ${headerIndex + rowOffset + 2})`;
+    const name = (cells[nameIndex] ?? "").trim();
+    const exchange = (cells[exchangeIndex] ?? "").trim().toLowerCase();
+    const nonMarket = exchange.includes("no market") || exchange.includes("non-nms") || exchange.includes("unlisted");
+    // Issuer exports use "-" for unlisted CVRs/private vesting positions. These
+    // are already outside the market universe regardless of ticker syntax;
+    // preserve their raw counts and explicit exclusion diagnostics.
+    if (nonMarket) {
+      excludedSourceIdentifiers.push(`non-market:${sourceKey}`);
+      continue;
+    }
     if (!ticker || !SAFE_TICKER_RE.test(ticker)) {
       invalidSourceIdentifiers.push(sourceKey);
       continue;
     }
-    const name = (cells[nameIndex] ?? "").trim();
-    const exchange = (cells[exchangeIndex] ?? "").trim().toLowerCase();
     const price = priceIndex >= 0 ? parseCsvNumber(cells[priceIndex] ?? "") : null;
-    const nonMarket = exchange.includes("no market") || exchange.includes("non-nms") || exchange.includes("unlisted");
     const residual = /\b(?:cvr|escrow)\b/i.test(name) || (priceIndex >= 0 && (price == null || price <= 0));
-    if (nonMarket || residual) {
-      excludedSourceIdentifiers.push(`${nonMarket ? "non-market" : "residual"}:${rawTicker}`);
+    if (residual) {
+      excludedSourceIdentifiers.push(`residual:${rawTicker}`);
       continue;
     }
     if (!holdingsByTicker.has(ticker)) {
