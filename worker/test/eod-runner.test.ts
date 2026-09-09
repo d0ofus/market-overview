@@ -4,6 +4,7 @@ import type { Env } from "../src/types";
 import { EOD_METRICS_VERSION } from "../src/eod-metrics";
 import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
+import { loadMarketHistory } from "../src/market-history";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
 vi.mock("../src/market-calendar-cache",() => ({ensureMarketCalendarCoverage:vi.fn()}));
 vi.mock("../src/eod",() => ({refreshBreadthUniverseMemberships:vi.fn(),loadEodMemberships:vi.fn()}));
@@ -31,7 +32,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       SELECT 'sip','SPY',value,100,101,99,100,100,100 FROM json_each(?)`).bind(JSON.stringify(dates.slice(-260))).run();
     const frozen={methodologyVersion:EOD_METRICS_VERSION,calendarDates:dates,tickers:["SPY",...Array.from({length:25},(_,i) => `MISSING${i}`)],
       config:{id:"default",sections:[{id:"s",title:"Market",groups:[{id:"g",title:"Market",dataType:"price",rankingWindowDefault:"1D",showSparkline:true,pinTop10:false,columns:[],items:[{ticker:"SPY",enabled:true,displayName:"S&P ETF",holdings:[]}]}]}]},
-      memberships:["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map((universeId) => ({universeId,versionId:universeId,source:"official",sourceType:"official",sourceUrl:"https://example.test",sourceAsOfDate:session,verifiedAt:`${session}T20:00:00Z`,members:["SPY"]}))};
+      memberships:["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map((universeId) => ({universeId,versionId:universeId,source:"verified proxy",sourceType:universeId==="sp500-core" ? "wikipedia-derived-public-proxy" : universeId==="russell2000-core" ? "official-etf-holdings-proxy" : "public-common-stock-proxy",sourceUrl:"https://example.test",sourceAsOfDate:session,verifiedAt:`${session}T20:00:00Z`,members:["SPY"]}))};
     await ops.db.prepare(`INSERT INTO eod_runs(id,session_date,purpose,mode,status,stage,input_json,created_at,updated_at)
       VALUES(?,?,'daily','active','queued','queued',?,?,?)`).bind(runId,session,JSON.stringify(frozen),`${session}T20:20:00Z`,`${session}T20:20:00Z`).run();
     calls.alpaca.mockImplementation(async (tickers:string[],start:string,_target:string,adjustment="split") => tickers.includes("SPY")
@@ -66,6 +67,36 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect((await runEodBatch(env,runId)).status).toBe("not-claimed");
     expect(calls.alpaca).not.toHaveBeenCalled();
     expect(calls.yahoo).not.toHaveBeenCalled();
+  });
+
+  it("keeps a private90-session storage target small while calculating from the full260-session archive window",async () => {
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");
+      const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<>?").bind(session).run();
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      const hot=await market.db.prepare("SELECT COUNT(*) AS count,MIN(date) AS firstDate FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first<{count:number;firstDate:string}>();
+      expect(hot!.count).toBeLessThanOrEqual(90);
+      expect(hot!.firstDate>=dates.at(-90)!).toBe(true);
+      expect(await loadMarketHistory(archivedEnv,{tickers:["SPY"],feed:"sip"})).toHaveLength(260);
+      const catalog=await market.db.prepare("SELECT payload_json FROM eod_publications WHERE scope='history:catalog'").first<string>("payload_json");
+      expect(JSON.parse(catalog!).rows.find((row:unknown[])=>row[0]==="SPY")[1]).toBe(260);
+      expect(calls.alpaca.mock.calls.some(([,start])=>start===dates.at(-260))).toBe(true);
+    } finally {history.dispose();}
+  },45_000);
+
+  it("stops cooperatively between provider requests without treating a deadline as fallback data failure",async () => {
+    const normal=calls.alpaca.getMockImplementation()!;
+    let stopped=false;
+    calls.alpaca.mockImplementation(async (...args:unknown[])=>{const result=await normal(...args);stopped=true;return result;});
+    await expect(runEodBatch(env,runId,ops.db,{assertContinue:()=>{
+      if(stopped)throw new Error("storage-run-time-slice-complete");
+    }})).rejects.toThrow("storage-run-time-slice-complete");
+    expect(calls.alpaca).toHaveBeenCalledTimes(1);expect(calls.yahoo).not.toHaveBeenCalled();
+    expect(await ops.db.prepare("SELECT status,lease_token,error_message FROM eod_runs WHERE id=?").bind(runId).first())
+      .toMatchObject({status:"retrying",lease_token:null,error_message:"storage-run-time-slice-complete"});
+    expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publication_pointers").first()).toEqual({n:0});
   });
 
   it("rejects a missing durable run instead of reporting a successful duplicate",async () => {

@@ -11,7 +11,9 @@ This phase adds the transfer machinery and closes the remaining reader gaps. It 
 5. Freeze the source through reviewed guards covering every application table. This pauses writes to that database for a consistent copy; reads and workflows using other databases remain available. The freeze persists through runner interruption and UTC quota reset. Schedule this maintenance only after measuring the transfer work and available allowance. Do not silently leave a source frozen following an abandoned migration.
 6. Copy all source feeds/security/year blocks into the history database. Preserve archive-only dates and existing immutable revisions; hot observations win for their exact dates, including reported volume, provenance and timestamps. Read back and decode every block and verify its active pointer. Seed the latest available bar at or before the frozen session for each feed/security into the replacement.
 7. Copy every non-price application table in bounded primary-key pages. Verify exact row values after insertion; a conflicting destination row stops the copy. Preserve the Wrangler migration ledger. Install business triggers after data copy so seed inserts do not rewrite source revisions or invalidate copied catalogs. Target migration-fence metadata starts open and is not copied from the frozen source.
-8. Stop in `awaiting-evidence`. Independently verify complete source/target table manifests, source capture, all archive pointers/checksums, actual destination capacity, full historical consumer outputs, latest-session publications and billed usage. The copy runner cannot switch bindings, prune the source or fabricate these results.
+8. Independently verify every source/target table and archive checksum under durable source, target and history fences. Compare exact consumer outputs across the full frozen ticker population, including MAX, 520-session and five-year-buffer history. Each stage checkpoints and resumes within admission limits.
+9. Record private target ownership before releasing target/history fences. Reconstruct accepted latest-session Overview, each independent breadth scope, and the shared catalog on the replacement. The source remains frozen and publicly bound. Normal ingestion runners defer while this migration owns storage, including jobs queued before the migration started.
+10. Stop in `awaiting-evidence` for final measured publication growth, actual D1 physical size, billed usage and version-correlated Worker runtime checks. The runner does not change public bindings, prune the source or treat private publications as public delivery.
 
 The source is never deleted by this runner. A quota failure records the next UTC reset; network/server failures and a 65-minute time slice resume from checkpoints. Verification failures pause for investigation. Copy writes are idempotent. Ten archive blocks may be replayed after interruption; duplicate blocks are verified and reused. Large non-price pages subdivide before the D1 value limit.
 
@@ -19,7 +21,7 @@ All REST access uses explicit database allowlists and the shared EOD admission l
 
 ## Commands and workflow configuration
 
-`npm run eod:storage -w worker -- create|status|run|resume` is the operator/runner entry point. Commands use these server-side environment variables:
+`npm run eod:storage -w worker -- <command>` is the operator/runner entry point. Commands use these server-side environment variables:
 
 | Variable | Value |
 | --- | --- |
@@ -27,24 +29,57 @@ All REST access uses explicit database allowlists and the shared EOD admission l
 | `CLOUDFLARE_ACCOUNT_ID` | Verified account ID |
 | `CLOUDFLARE_EOD_D1_TOKEN` | Existing D1 credential; never a browser variable |
 | `EOD_MARKET_DATABASE_ID` | Original source database ID during transfer |
+| `EOD_STORAGE_SOURCE_DATABASE_ID` | Immutable original source ID; retained after canonical market ID changes |
 | `EOD_STORAGE_TARGET_DATABASE_ID` | Distinct empty replacement database ID |
 | `EOD_HISTORY_DATABASE_ID` | Existing history database ID |
 | `EOD_OPS_DATABASE_ID` | Existing Ops database ID |
+| `EOD_CORE_DATABASE_ID` | Distinct existing core DB; needed for private bootstrap configuration and memberships |
 | `EOD_STORAGE_SESSION_DATE` | Frozen exchange session; needed for `create` |
 
 The runner reads its actual checkout SHA with `git rev-parse HEAD`. Configure GitHub environment `market-eod` variable `EOD_STORAGE_CODE_REVISION` to that SHA before dispatch. The workflow itself always dispatches on `main`; its checkout remains pinned through a multi-day copy even when unrelated commits land on `main`. A checkout mismatch durably pauses the run.
 
 The workflow `.github/workflows/eod-storage-migration.yml` uses input `migration_id`, the existing Cloudflare secrets, and the same `market-eod-writer` concurrency group as daily ingestion. It does not upload database snapshots or history artifacts.
 
-`authorizeStorageMigrationFreeze` is an operator-only module function: it records the source ID, exact code/schema hashes and the hash of reviewed preflight evidence. It is intentionally separate from `create` and from public/admin HTTP routes. Call `resumeStorageMigration` only after that evidence is complete. Do not manufacture an evidence hash simply to advance the state.
+`authorize` validates complete offline sizing, snapshot identity and frozen inputs before recording the source ID, exact code/schema hashes and preflight hash. Its conservative planning reserve is not final publication-growth evidence. It is separate from `create` and public/admin HTTP routes; replays retain the original evidence time and hash.
+
+| Command | Result |
+| --- | --- |
+| `create`, `authorize` | Create identity, then validate preflight and permit a fenced relocation |
+| `run`, `resume`, `status` | Execute one resumable stage, resume an explicit pause, or inspect durable progress |
+| `reconstruct` | Requeue an already verified private target to reconstruct the latest exchange session |
+| `sample-publications` | Export sanitized accepted payload samples to a local measurement input; no page publication changes |
+| `accept` | Validate matching final growth/capacity/runtime evidence, persist a finite storage forecast and mark ready for cutover |
+| `complete` | Verify the actual 100%-serving Worker version, target bindings and GitHub writer settings; record actual public activation and start monitored delivery |
+
+Final acceptance requires `EOD_STORAGE_ANALYSIS_PATH`, `EOD_STORAGE_PUBLICATION_GROWTH_PATH`, `EOD_STORAGE_CUTOVER_EVIDENCE_PATH` and `EOD_STORAGE_RUNTIME_EVIDENCE_PATH`. Runtime acceptance recollects the matching recent invocation window from the authenticated Cloudflare API; a local JSON file alone is insufficient. Publication sampling uses `EOD_STORAGE_PUBLICATION_SAMPLES_PATH`. See [executable acceptance checks](reliable-eod-storage-acceptance.md). A completed old bootstrap cannot be substituted for the current owner or expected session.
 
 Set Worker `EOD_STORAGE_MIGRATION_ID` only when the reviewed migration owns the market lane. The heartbeat then prioritizes this workflow and preserves existing EOD run records for later recovery. `awaiting-evidence` and `awaiting-cutover` do not repeatedly dispatch. Normal page reads cannot start a transfer. `/api/eod/status` and the admin EOD panel display migration mode, stage, error, row progress, capture state and next retry; unfinished migration keeps market readiness false.
+
+## One-time start after capacity analysis
+
+The local operator script `worker/scripts/start-storage-migration-once.ts` joins completed capacity analysis to the durable migration without changing the canonical public market binding. It requires inherited `EOD_STORAGE_START_APPROVED=true` and `EOD_STORAGE_EXPECTED_COMMIT=<exact committed and pushed 40-character SHA>`. The user must already have authorized this phase; the flag is a persisted operator instruction, not a substitute for missing capacity evidence. It can run through `node --import tsx worker/scripts/start-storage-migration-once.ts` from the repository root or from the opted-in local capacity retry helper.
+
+Required non-secret configuration is `CLOUDFLARE_ACCOUNT_ID`, `EOD_MARKET_DATABASE_ID` (still the source), `EOD_HISTORY_DATABASE_ID`, `EOD_OPS_DATABASE_ID`, `STORAGE_SNAPSHOT_PATH`, `EOD_STORAGE_ANALYSIS_PATH`, `EOD_STORAGE_SNAPSHOT_IDENTITY_PATH` and `EOD_STORAGE_FROZEN_INPUT_PATH`. `EOD_STORAGE_SOURCE_DATABASE_ID`, when present, must equal the canonical source at this phase. Credentials are inherited through `CLOUDFLARE_EOD_D1_TOKEN`, `CLOUDFLARE_API_TOKEN` and optional `CLOUDFLARE_EOD_ANALYTICS_TOKEN`; GitHub CLI must already be authenticated. No local Alpaca secret is needed. The remote storage workflow obtains Alpaca credentials from `market-eod`.
+
+The starter verifies a clean local `main`, the exact GitHub `main` SHA, unchanged evidence files, the frozen-input hash, and the same SQLite-backup hash used by the analyzer (including committed WAL state). The snapshot manifest's reviewed-schema hash and the live source fence hash have distinct purposes and are not equated. It independently reads the actual 100%-serving source Worker version, requiring source/history/Ops bindings, shadow mode and disabled public EOD reads. It performs admitted read-only source schema/fence checks and calls `prepareStoragePreflight` before provisioning. Account inventory must be complete and remain within ten D1 databases and 5 GB including the retained source and projected recent/archive destinations.
+
+The target name and migration ID derive deterministically from the session and code SHA. A matching existing target can be reused only if empty or already owned by this exact durable migration. The source/target/history identity is persisted in Ops before initialization/authorization continues. The starter applies only the additive open history fence migration and its Wrangler ledger through reviewed, admitted SQL; a frozen or incompatible existing history fence blocks it. The existing storage CLI records the reviewed preflight and freeze authorization.
+
+Only three `market-eod` variables are set: immutable `EOD_STORAGE_SOURCE_DATABASE_ID`, `EOD_STORAGE_TARGET_DATABASE_ID` and `EOD_STORAGE_CODE_REVISION`. `EOD_MARKET_DATABASE_ID` stays on the source. After Wrangler identity verification, the same Worker is deployed with `--keep-vars --var EOD_STORAGE_MIGRATION_ID:<id>`; its actual serving version is checked again for unchanged source bindings and the new coordinator ID. Only then is the storage workflow dispatched on `main`. A dispatch acknowledgement is recorded as accepted, never completed. The storage runner controls the actual freeze, verified copying, bootstrap and recovery under its durable leases.
+
+Changed checkout, identity conflicts, missing evidence or exhausted quota stop this local attempt. A provisioned target is retained for deterministic resumption; nothing is deleted to hide a failed attempt. The ignored `worker/tmp/storage-start-once.json` is diagnostic only. Ops owns the migration identity/progress and production history stays in D1. This starter performs no public cutover, source pruning or legacy retirement.
 
 ## Cutover and rollback
 
 Binding cutover requires `EOD_READ_ENABLED=true`, six complete accepted latest page publications and the full matching catalog, including compatibility tuples. See [reader parity requirements](archive-only-reader-parity.md). Copy completion cannot substitute for those checks. Reconstruct the latest session against the replacement while the original binding still serves dated data, then promote only after full-universe validation.
 
+After `accept`, deploy the same approved code with the replacement `MARKET_DATA_DB` binding, `EOD_RUNNER_MODE=active`, `EOD_READ_ENABLED=true`, and matching `EOD_CODE_REVISION`/`EOD_STORAGE_MIGRATION_ID`. Change GitHub's canonical `EOD_MARKET_DATABASE_ID` and runner mode to the replacement and active. Preserve `EOD_STORAGE_SOURCE_DATABASE_ID`. Run `complete` only after those changes are actually serving; it reads the deployed version's bindings and rejects staged settings, split traffic and concurrent deployment changes. Pruning remains a separately gated maintenance action.
+
+The measured retention model covers both SIP and Yahoo, with 260 or 90 recent sessions and a fixed future exchange-session horizon. A forecast does not renew itself merely because maintenance ran. Expiry, population growth and unexpectedly large retained windows require new measured evidence. The admin panel exposes this separately from database connectivity. [Monitoring](reliable-eod-monitoring.md) credits public delivery only after actual activation and requires finalized account-wide UTC usage, including weekends.
+
 The replacement must also contain every original non-price table and the migration ledger. Final verification must check exact destination row counts/hashes and archived pointer IDs/checksums, not merely the number of copied rows or the source price clock. The preliminary logical snapshot and local codec tests are insufficient for this gate.
+
+Population drift during a multi-day migration is a separate acceptance boundary. The private bootstrap refreshes the latest session's actual memberships and shared catalog, while acceptance requires its complete frozen ticker set to match the population used for preflight sizing and reader parity. New listings, removals or membership changes can therefore produce `storage-acceptance-publication-population-mismatch` and stop publication sampling/acceptance. This release deliberately fails closed: obtain new full-population sizing and parity evidence through a reviewed replan before proceeding. Do not trim current constituents to the older preflight population, substitute a different universe, or redate older source evidence to force a match. The copied source and archives remain preserved while that discrepancy is resolved.
 
 Before target activation, explicit abort verifies that the original source is still canonical, the target has never accepted new writes and no live lease exists. `abortStorageMigration` stops resumption before releasing the fence; interrupted aborts can be replayed. After activation, rollback must reconcile new target writes and retain archive-compatible readers. Do not use the pre-activation abort path or restore an older hot-only application version.
 

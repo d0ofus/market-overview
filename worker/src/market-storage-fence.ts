@@ -7,7 +7,7 @@ export type StorageSourcePlan = {schemaHash:string;tables:string[];statements:Ar
 const prefix="market_storage_guard_";
 const tableIdentifier=/^[A-Za-z][A-Za-z0-9_]{0,100}$/;
 function internal(name:string):boolean {
-  return name.startsWith("sqlite_") || name.startsWith("_cf_") || name==="d1_migrations" || name==="market_storage_fence" || name.startsWith(prefix);
+  return name.startsWith("sqlite_") || name.startsWith("_cf_") || name==="market_storage_fence" || name.startsWith(prefix);
 }
 const normalize=(sql:string) => sql.trim().replace(/;\s*$/," ").replace(/\bIF NOT EXISTS\b/ig,"").replace(/\s+/g," ").trim();
 async function schema(source:D1Database):Promise<SchemaObject[]> {

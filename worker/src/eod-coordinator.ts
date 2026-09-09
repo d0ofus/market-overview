@@ -8,6 +8,8 @@ import { eodEnqueueSchema } from "./validation";
 import type { Env, EodHistorySelection, EodStoredHistorySelection, EodInputCorrectionStatus } from "./types";
 import { publicStorageMigrationStatus, storageMigrationBlocksEod } from "./market-storage-control";
 import { coordinateStorageMigration } from "./market-storage-scheduler";
+import { readEodRolloutMonitoring } from "./eod-rollout-monitor";
+import { loadStorageHistoryCapacityStatus } from "./eod-storage-history-capacity";
 
 export type EodPurpose = "daily" | "reconcile" | "backfill" | "maintenance";
 export type EodRun = {
@@ -406,9 +408,11 @@ function objectJson(value: string | undefined): Record<string, unknown> {
 
 export async function eodStatus(env: Env, now = new Date()) {
   const storageMigration=await publicStorageMigrationStatus(env);
+  const monitoring=env.OPS_DB ? await readEodRolloutMonitoring(env,now) : null;
+  const storageCapacity=env.OPS_DB ? await loadStorageHistoryCapacityStatus(env,now) : null;
   const pipelineMode=storageMigration?.blocksEod ? "storage-migration" : env.EOD_RUNNER_MODE ?? "disabled";
   if (!eodEnabled(env)) return {mode:"disabled",runs:[],publications:[],ready:false,
-    pipelineMode,storageMigration,
+    pipelineMode,storageMigration,monitoring,storageCapacity,
     inputRevision:null,completedInputRevision:null,inputCorrectionsPending:null,
     expectedSession:null,missingScopes:[],lastSuccessfulSession:null,scopeHealth:[],
     usage:null,accountUsage:null,quota:undefined,capacity:undefined};
@@ -454,7 +458,7 @@ export async function eodStatus(env: Env, now = new Date()) {
   const unfinished=publicRuns.filter((run) => run.status!=="completed");
   const quotaBlocked=unfinished.some((run) => /budget|quota/i.test(`${run.error_code} ${run.error_message}`));
   const capacityBlocked=unfinished.some((run) => /capacity/i.test(`${run.error_code} ${run.error_message}`));
-  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
+  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,monitoring,storageCapacity,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
     missingScopes,lastSuccessfulSession:lastComplete?.date ?? null,
     scopeHealth:EOD_PUBLICATION_SCOPES.map((scope) => {
       const head=publications.results.find((row) => row.scope===scope);

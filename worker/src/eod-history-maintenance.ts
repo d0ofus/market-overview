@@ -141,6 +141,7 @@ function relocationStatements(db: D1Database, bars: MarketHistoryBar[], cutoffDa
       SELECT b.feed,b.ticker,b.date,?,${relocationIdentity("b")} FROM json_each(?) expected
       JOIN alpaca_daily_bars b ON b.feed=? AND b.ticker=? AND b.date=json_extract(expected.value,'$.date')
       WHERE b.date<? AND (SELECT revision FROM eod_input_clock WHERE id='default')=?
+        AND NOT EXISTS(SELECT 1 FROM eod_adjustment_repairs repair WHERE repair.feed=b.feed AND repair.ticker=b.ticker AND repair.status='pending')
         AND b.o IS json_extract(expected.value,'$.o') AND b.h IS json_extract(expected.value,'$.h')
         AND b.l IS json_extract(expected.value,'$.l') AND b.c IS json_extract(expected.value,'$.c')
         AND b.volume IS json_extract(expected.value,'$.volume') AND b.reported_volume IS json_extract(expected.value,'$.reportedVolume')
@@ -201,13 +202,19 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex > tickers.length) throw new Error("Invalid maintenance cursor.");
   const db = getMarketDataDb(env);
   const feed = input.feed ?? marketDataFeed(env);
-  if (feed !== "sip") throw new Error("Verified retention requires the canonical SIP history catalog.");
+  if (!["sip", "yahoo-eod"].includes(feed)) throw new Error("Verified retention supports only canonical SIP and Yahoo EOD history.");
+  // The full catalog and its global correction clock cover the publication
+  // inputs. Yahoo relocation uses the same exact row identity/clock transaction;
+  // it never changes Yahoo revisions or certifies Yahoo volume as SIP volume.
   await assertPruneCatalog(env, tickers, input.endDate);
   let archivedRows = 0;
   let deletedRows = 0;
   let concurrentCorrections = 0;
   for (let tickerIndex = startIndex; tickerIndex < tickers.length; tickerIndex += 1) {
     const ticker = tickers[tickerIndex];
+    const repair = await db.prepare("SELECT status FROM eod_adjustment_repairs WHERE feed=? AND ticker=?")
+      .bind(feed,ticker).first<{status:string}>();
+    if (repair?.status === "pending") throw new Error(`history-prune-deferred: ${feed}:${ticker} adjustment repair is pending.`);
     const cutoff = await db.prepare(`SELECT MIN(date) as cutoffDate, COUNT(*) as retainedRows FROM (
       SELECT date FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? AND date <= ? ORDER BY date DESC LIMIT ?
     )`).bind(feed, ticker, input.endDate, hotSessions).first<{ cutoffDate: string | null; retainedRows: number }>();

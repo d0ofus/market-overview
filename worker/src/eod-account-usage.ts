@@ -32,9 +32,12 @@ function parseUsage(body: unknown): { rowsRead: number; rowsWritten: number } {
   return usage;
 }
 
-export async function reconcileEodAccountUsage(input:{accountId:string;token:string;ops:D1Database;fetcher?:typeof fetch;now?:Date}) {
-  const now=input.now ?? new Date();
-  const date=now.toISOString().slice(0,10);
+/** Read one explicitly dated account-wide bucket. Historical collection must
+ * retain its real sample time rather than impersonating a previous day's clock. */
+export async function fetchEodAccountUsage(input:{accountId:string;token:string;usageDate:string;fetcher?:typeof fetch}) {
+  const date=input.usageDate;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`))
+    || new Date(`${date}T00:00:00Z`).toISOString().slice(0,10)!==date) throw new Error("eod-account-usage-invalid-date");
   const query=`query EodAccountUsage($accountTag: string!, $start: Date!, $end: Date!) {
     viewer { accounts(filter: {accountTag: $accountTag}) {
       d1AnalyticsAdaptiveGroups(limit: 1000, filter: {date_geq: $start, date_leq: $end}) {
@@ -42,17 +45,23 @@ export async function reconcileEodAccountUsage(input:{accountId:string;token:str
       }
     } }
   }`;
+  const response=await (input.fetcher ?? fetch)("https://api.cloudflare.com/client/v4/graphql",{
+    method:"POST",headers:{Authorization:`Bearer ${input.token}`,"Content-Type":"application/json"},
+    body:JSON.stringify({query,variables:{accountTag:input.accountId,start:date,end:date}}),signal:AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("eod-account-usage-unavailable");
+  }
+  return parseUsage(await response.json());
+}
+
+export async function reconcileEodAccountUsage(input:{accountId:string;token:string;ops:D1Database;fetcher?:typeof fetch;now?:Date}) {
+  const now=input.now ?? new Date();
+  const date=now.toISOString().slice(0,10);
   let usage: { rowsRead:number; rowsWritten:number };
   try {
-    const response=await (input.fetcher ?? fetch)("https://api.cloudflare.com/client/v4/graphql",{
-      method:"POST",headers:{Authorization:`Bearer ${input.token}`,"Content-Type":"application/json"},
-      body:JSON.stringify({query,variables:{accountTag:input.accountId,start:date,end:date}}),signal:AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error("eod-account-usage-unavailable");
-    }
-    usage=parseUsage(await response.json());
+    usage=await fetchEodAccountUsage({...input,usageDate:date});
   } catch (error) {
     const code=error instanceof Error && error.message==="eod-account-usage-invalid"
       ? "eod-account-usage-invalid" : "eod-account-usage-unavailable";

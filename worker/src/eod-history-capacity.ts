@@ -3,6 +3,7 @@ import { eodHash } from "./eod-publication-service";
 import { assertHistoryPruneEvidence, projectHistoryCapacity,
   type HistoryCapacityEvidence, type HistoryReaderEvidence } from "./eod-history-maintenance";
 import type { Env } from "./types";
+import { refreshStorageHistoryMaintenanceEvidence } from "./eod-storage-history-capacity";
 
 const CHUNK_SIZE = 80;
 const MAX_POPULATION = 10_000;
@@ -114,11 +115,14 @@ async function physicalBytes(db: D1Database): Promise<number> {
 export async function refreshHistoryMaintenanceEvidence(env: Env, input: {
   tickers: string[]; codeRevision: string; now?: Date;
 }): Promise<{ capacity: HistoryCapacityEvidence; readers: HistoryReaderEvidence; hotSessions: 260 | 90;
+  feeds?: readonly ("sip" | "yahoo-eod")[];
   sample: { measuredAt: string; sampledSymbols: number; sampledRows: number; proofHash: string; marketPhysicalBytes: number; archivePhysicalBytes: number } }> {
   if (!env.OPS_DB || !env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB) fail("bindings-required");
   const now = input.now ?? new Date();
   const tickers = normalizeTickers(input.tickers);
   if (!tickers.length || tickers.length > MAX_POPULATION || tickers.some((ticker) => !/^[A-Z0-9.^/_-]{1,32}$/.test(ticker))) fail("population-invalid");
+  const storageEvidence = await refreshStorageHistoryMaintenanceEvidence(env, { ...input, tickers, now });
+  if (storageEvidence) return storageEvidence;
   const measurementId = `history-measurement:${input.codeRevision}`;
   let diagnostics: Record<string, unknown> = {};
   try {

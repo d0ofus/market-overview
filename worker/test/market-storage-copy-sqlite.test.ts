@@ -110,6 +110,12 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
       expect(await target.db.prepare("SELECT date FROM alpaca_daily_bars WHERE feed='sip'").first("date")).toBe("2026-09-08");
       await expect(source.db.prepare("UPDATE universes SET name='Lost'").run()).rejects.toThrow("market-storage-source-frozen");
       await assertReviewedStorageSchema(target.db);
+      // The stage engine can retain the live lease and atomically queue its
+      // successor; the direct/operator copy mode above still pauses by default.
+      await resumeStorageMigration(ops.db,identity.id,identity.codeRevision);
+      const staged=(await claimStorageMigration(ops.db,identity.id))!;
+      expect(await runStorageCopy({...context,run:staged.run,leaseToken:staged.leaseToken,retainLeaseOnComplete:true})).toBe("copy-complete");
+      expect((await loadStorageMigration(ops.db,identity.id))?.status).toBe("running");
     } finally {source.dispose();target.dispose();history.dispose();ops.dispose();}
-  },120_000);
+  },180_000);
 });

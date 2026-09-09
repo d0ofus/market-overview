@@ -92,11 +92,13 @@ export async function assertReviewedStorageSchema(db:D1Database,options:{allowMi
 type Cursor={after:StorageCell[]|null;rows:number;hash:string;done:boolean;latestSeed?:StorageRow|null};
 type CopyContext={source:D1Database;target:D1Database;history:D1Database;ops:D1Database;run:StorageMigrationRun;leaseToken:string;
   /** Complete fixed DDL is sent through the reviewed adapter allowlist. */
-  installSourceFence:(statements:readonly string[]) => Promise<void>;deadlineMs?:number};
+  installSourceFence:(statements:readonly string[]) => Promise<void>;deadlineMs?:number;
+  /** The stage orchestrator atomically releases ownership into its next queue. */
+  retainLeaseOnComplete?:boolean};
 
 /** Resumable copy only. Public bindings, publication ownership and source
  * deletion are deliberately separate deployment actions requiring evidence. */
-export async function runStorageCopy(context:CopyContext):Promise<"awaiting-evidence"> {
+export async function runStorageCopy(context:CopyContext):Promise<"awaiting-evidence"|"copy-complete"> {
   const {source,target,history,ops,run,leaseToken}=context,identity=storageMigrationIdentity(run);
   const started=Date.now(),deadline=context.deadlineMs ?? 65*60_000;
   let lastHeartbeat=0;
@@ -185,9 +187,11 @@ export async function runStorageCopy(context:CopyContext):Promise<"awaiting-evid
   await assertReviewedStorageSchema(target);
   await assertStorageSourceFrozen(source,identity,plan.schemaHash);
   await checkpoint("copy-complete",{archivedRows:archive.rows,archiveHash:archive.hash});
-  await pauseStorageMigration(ops,run.id,leaseToken,"storage-final-verification-required",{
+  const completion={
     copied:true,archivedRows:archive.rows,sourceFrozen:true,sourcePreserved:true,
     remaining:["whole-target-verification","full-universe-capacity","consumer-parity","binding-cutover"],
-  });
-  return "awaiting-evidence";
+  };
+  if (context.retainLeaseOnComplete) await progressStorageMigration(ops,run.id,leaseToken,"copy-complete",completion);
+  else await pauseStorageMigration(ops,run.id,leaseToken,"storage-final-verification-required",completion);
+  return context.retainLeaseOnComplete ? "copy-complete" : "awaiting-evidence";
 }

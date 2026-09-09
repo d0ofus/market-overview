@@ -62,6 +62,41 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
     expect(await market.db.prepare("SELECT COUNT(*) as count FROM eod_history_relocations").first()).toEqual({ count: 0 });
   });
 
+  it("relocates Yahoo fallback history to 90 hot rows without changing provenance or correction clocks", async () => {
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,reported_volume,source_provider,adjustment,observed_at,fetched_at)
+      SELECT 'yahoo-eod',ticker,date,o,h,l,c,volume,NULL,'yahoo','split',observed_at,fetched_at FROM alpaca_daily_bars
+      WHERE feed='sip' AND date>=?`).bind(rows.at(-91)!.date).run();
+    const before = await loadMarketHistory(env, { tickers: ["AAA"], feed: "yahoo-eod" });
+    const clock = await market.db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first();
+    expect(await archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
+      hotSessions: 90, feed: "yahoo-eod", maxRows: 1, ...evidence })).toMatchObject({ deletedRows: 1, archivedRows: 1 });
+    expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='yahoo-eod'").first()).toEqual({ count: 90 });
+    expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='sip'").first()).toEqual({ count: 300 });
+    const after = await loadMarketHistory(env, { tickers: ["AAA"], feed: "yahoo-eod" });
+    expect(after.map((row) => [row.date, row.c, row.volume, row.sourceProvider, row.reportedVolume]))
+      .toEqual(before.map((row) => [row.date, row.c, row.volume, row.sourceProvider, row.reportedVolume]));
+    expect(await market.db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first()).toEqual(clock);
+    expect(await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='yahoo-eod' AND ticker='AAA'").first()).toEqual({ revision: 91 });
+  });
+
+  it("keeps Yahoo hot observations when an adjustment repair is pending or begins before the relocation transaction", async () => {
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,source_provider,adjustment,observed_at,fetched_at)
+      SELECT 'yahoo-eod',ticker,date,o,h,l,c,volume,'yahoo','split',observed_at,fetched_at FROM alpaca_daily_bars
+      WHERE feed='sip' AND date>=?`).bind(rows.at(-91)!.date).run();
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('yahoo-eod','AAA','pending','other','2025-01-01','2026-09-08T00:00:00Z')").run();
+    await expect(archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
+      hotSessions: 90, feed: "yahoo-eod", maxRows: 1, ...evidence })).rejects.toThrow("adjustment repair is pending");
+    await market.db.prepare("UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL WHERE feed='yahoo-eod'").run();
+    const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {
+      await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='raced' WHERE feed='yahoo-eod'").run();
+      return market.db.batch(statements);
+    } } as D1Database;
+    const result = await archiveAndPruneMarketHistory({ ...env, MARKET_DATA_DB: wrapped }, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
+      hotSessions: 90, feed: "yahoo-eod", maxRows: 1, ...evidence });
+    expect(result).toMatchObject({ archivedRows: 1, deletedRows: 0, concurrentCorrections: 1 });
+    expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='yahoo-eod'").first()).toEqual({ count: 91 });
+  });
+
   it("keeps an independently corrected hot row when the archived value no longer matches", async () => {
     let corrected = false;
     const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {

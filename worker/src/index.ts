@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, expectedEodSession, registerEodRoutes, requestEodRefresh, type EodRun } from "./eod-coordinator";
+import { EOD_RUNTIME_COORDINATOR_PATH, isEodRuntimeHttpProbe, runEodRuntimeProbe } from "./eod-runtime-telemetry";
 import { loadMarketHistory, loadMarketHistoryCoverage } from "./market-history";
 import { getStoredHoldingStats } from "./eod-holdings-quotes";
 import { EodCatalogUnavailableError, loadEodCatalogRows } from "./eod-catalog-service";
@@ -7832,12 +7833,37 @@ async function publishScheduledBreadthIfReady(env: Env, asOfDate: string): Promi
 }
 
 export default {
-  queue: consumeScannerCacheWakeUps,
-  fetch: app.fetch,
+  queue: async (batch: MessageBatch<unknown>, env: Env): Promise<void> => {
+    if (env.EOD_RUNTIME_CANDIDATE_ONLY === "true") throw new Error("Runtime candidate cannot consume production queues.");
+    return consumeScannerCacheWakeUps(batch, env);
+  },
+  fetch: async (request: Request, env?: Env, ctx?: ExecutionContext): Promise<Response> => {
+    if (!env) return app.fetch(request, env, ctx);
+    const path = new URL(request.url).pathname;
+    const probe = isEodRuntimeHttpProbe(request, env);
+    if (!probe && (env.EOD_RUNTIME_CANDIDATE_ONLY === "true" || path === EOD_RUNTIME_COORDINATOR_PATH)) {
+      return Response.json({ error: "Not found." }, { status: 404 });
+    }
+    if (!probe) return app.fetch(request, env, ctx);
+    try {
+      return await runEodRuntimeProbe(env, path === EOD_RUNTIME_COORDINATOR_PATH ? "coordinator" : "http", path,
+        async (observed) => {
+          if (path === EOD_RUNTIME_COORDINATOR_PATH) {
+            await coordinateEod(observed);
+            return Response.json({ ok: true });
+          }
+          return app.fetch(request, observed, ctx);
+        });
+    } catch {
+      return Response.json({ error: "Runtime probe failed; inspect bounded probe evidence." }, { status: 503 });
+    }
+  },
   email: async (message: any, env: Env): Promise<void> => {
+    if (env.EOD_RUNTIME_CANDIDATE_ONLY === "true") return;
     await handleInboundTradingViewEmail(message, env);
   },
   scheduled: async (event: ScheduledEvent, env: Env, _ctx?: ExecutionContext): Promise<void> => {
+    if (env.EOD_RUNTIME_CANDIDATE_ONLY === "true") return;
     const cronSettings = await loadCentralCronJobSettingsMap(env).catch((error) => {
       console.error("scheduled cron settings load failed; using defaults", error);
       return new Map<string, CronJobValues>();

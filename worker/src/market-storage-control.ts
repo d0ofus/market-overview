@@ -137,6 +137,16 @@ export async function resumeStorageMigration(ops:D1Database,id:string,codeRevisi
     .bind(now.toISOString(),now.toISOString(),id,codeRevision,now.toISOString()).run();
   if (!result.meta.changes) throw new Error("storage-migration-resume-conflict");
 }
+/** Persist stage completion and release its owner directly into the next queue.
+ * A separate pause/resume pair can strand work after quota/network interruption. */
+export async function queueStorageMigrationStage(ops:D1Database,id:string,token:string,stage:string,progress:unknown,now=new Date()):Promise<void> {
+  if (!/^[a-z0-9-]{1,80}$/.test(stage)) throw new Error("storage-migration-stage-invalid");
+  const result=await ops.prepare(`UPDATE market_storage_migrations SET status='queued',stage=?,progress_json=?,
+    next_attempt_at=?,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=?
+    WHERE id=? AND lease_token=? AND status='running' AND lease_until>?`)
+    .bind(stage,boundedJson(progress),now.toISOString(),now.toISOString(),id,token,now.toISOString()).run();
+  if (!result.meta.changes) throw new Error("storage-migration-lease-lost");
+}
 /** Stops resumption before releasing the source. Interrupted aborts remain in
  * 'aborting' and can be replayed; a live copy lease or activated target forbids it. */
 export async function abortStorageMigration(ops:D1Database,source:D1Database,id:string,

@@ -2,7 +2,7 @@ import { afterEach,beforeEach,describe,expect,it,vi } from "vitest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { abortStorageMigration,authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,
   heartbeatStorageMigration,loadStorageMigration,loadStorageMigrationCheckpoint,markStorageMigrationReady,pauseStorageMigration,
-  recordStorageSourceCapture,resumeStorageMigration,saveStorageMigrationCheckpoint,storageMigrationBlocksEod,
+  recordStorageSourceCapture,resumeStorageMigration,saveStorageMigrationCheckpoint,storageMigrationBlocksEod,queueStorageMigrationStage,
   type StorageMigrationIdentity } from "../src/market-storage-control";
 import { assertStorageSourceFrozen,assertStorageTargetEmpty,freezeStorageSource,prepareStorageSourceFence,releaseStorageSourceFence } from "../src/market-storage-fence";
 import { coordinateStorageMigration } from "../src/market-storage-scheduler";
@@ -55,6 +55,16 @@ describe("durable market storage migration controls and source fencing",{timeout
     await expect(heartbeatStorageMigration(ops.db,identity.id,owner.leaseToken,later)).rejects.toThrow("lease-lost");
     await expect(saveStorageMigrationCheckpoint(ops.db,identity.id,owner.leaseToken,{key:"bars:cursor",inputHash:"b".repeat(64),payload:{after:"WRONG"}},later)).rejects.toThrow("lease-lost");
     expect(await loadStorageMigrationCheckpoint(ops.db,identity.id,"bars:cursor")).toMatchObject({payload:{after:"MSFT"}});
+  });
+
+  it("atomically releases a finished stage into its next queue and rejects reuse of the old lease",async()=>{
+    const claimed=(await claimStorageMigration(ops.db,identity.id,{now}))!;
+    await queueStorageMigrationStage(ops.db,identity.id,claimed.leaseToken,"verification-required",{copied:true},now);
+    expect(await run()).toMatchObject({status:"queued",stage:"verification-required",lease_token:null,lease_until:null,
+      next_attempt_at:now.toISOString(),error_code:null,progress_json:'{"copied":true}'});
+    await expect(queueStorageMigrationStage(ops.db,identity.id,claimed.leaseToken,"wrong",{},now)).rejects.toThrow("lease-lost");
+    const next=(await claimStorageMigration(ops.db,identity.id,{now}))!;
+    expect(next.leaseToken).not.toBe(claimed.leaseToken);
   });
   it("persists capture and progress across quota resets while leaving the source frozen",async () => {
     const plan=await install();

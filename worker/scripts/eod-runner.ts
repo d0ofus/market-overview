@@ -3,6 +3,8 @@ import { runEodBatch } from "../src/eod-runner";
 import type { Env } from "../src/types";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { assertEodCutover } from "../src/eod-rollout-service";
+import { finalizeRecentEodUsage, collectEodRolloutMonitoring } from "../src/eod-rollout-monitor";
+import { eodStorageWriterDisposition } from "../src/eod-storage-writer-guard";
 
 function required(name:string):string {
   const value=process.env[name]?.trim();
@@ -44,6 +46,10 @@ async function main() {
     return terminalSettlement;
   }});
   try {
+    const ownership=await eodStorageWriterDisposition(env.OPS_DB!,market);
+    if(ownership!=="canonical") {
+      console.log(JSON.stringify({runId,status:"deferred",reason:ownership}));return;
+    }
     await env.OPS_DB!.prepare("UPDATE eod_runs SET github_run_id=? WHERE id=?")
       .bind(process.env.GITHUB_RUN_ID ?? null,runId).run();
     try {
@@ -55,9 +61,11 @@ async function main() {
         .bind(message,new Date(Date.now()+60*60_000).toISOString(),new Date().toISOString(),runId,new Date().toISOString()).run();
       throw error;
     }
+    await finalizeRecentEodUsage({accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:env.OPS_DB!});
     const outcome=await runEodBatch(env,runId,failureDb);
     console.log(JSON.stringify({runId,status:outcome.status,publications:outcome.published.length}));
     if (outcome.status==="retrying") process.exitCode=1;
+    await collectEodRolloutMonitoring(env).catch(()=>undefined);
   } finally {
     try {
       if (!terminalUsed) await terminalSettlement({rowsRead:0,rowsWritten:0,sizeAfter:0});

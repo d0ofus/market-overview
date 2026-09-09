@@ -10,11 +10,13 @@ import type { Env, DashboardConfigPayload, SnapshotReadyResponse } from "./types
 import { zonedParts } from "./refresh-timing";
 import { writeEodBars } from "./eod-bar-store";
 import { repairEodSecurity, repairEodYahoo, type EodRevisionChange } from "./eod-price-repair";
+import { loadApprovedStorageHotSessions } from "./eod-storage-history-capacity";
 import { cleanupEodRunState } from "./eod-run-maintenance";
 import { runEodHistoryWork } from "./eod-history-runner";
 import { ProviderBudgetExceededError } from "./provider-usage";
 import { encodeEodPayload,decodeEodPayload } from "./eod-publication-codec";
 import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogRow } from "./eod-catalog-service";
+import { assessEodMembershipEvidence } from "./eod-membership-evidence";
 
 type Membership = {universeId:string;versionId:string;source:string;sourceType:string|null;sourceUrl:string|null;sourceAsOfDate:string|null;verifiedAt:string|null;members:string[]};
 type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string};
@@ -139,8 +141,17 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
   };
 }
 
-export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = env.OPS_DB!):Promise<{status:string;published:string[]}> {
+class EodBatchInterruptedError extends Error {
+  constructor(error:unknown) {super(error instanceof Error ? error.message : "eod-run-interrupted");this.name="EodBatchInterruptedError";}
+}
+export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = env.OPS_DB!,options:{assertContinue?:()=>void;hotSessions?:260|90}={}):Promise<{status:string;published:string[]}> {
   if (!env.MARKET_DATA_DB || !env.OPS_DB || !env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) throw new Error("EOD bindings/credentials are incomplete.");
+  let leaseLost=false;
+  const checkContinuation=() => {
+    if (leaseLost) throw new EodBatchInterruptedError(new Error("eod-lease-lost"));
+    try {options.assertContinue?.();} catch(error) {throw new EodBatchInterruptedError(error);}
+  };
+  checkContinuation();
   const lease=crypto.randomUUID();
   const now=new Date().toISOString();
   // Normal coordination uses the same admitted connection as ingestion. The
@@ -154,7 +165,6 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   // A duplicate completed/leased run is harmless. A missing durable record is
   // a bootstrap failure and must reach the CLI's nonzero failure path.
   if (!claim.meta.changes) return {status:"not-claimed",published:[]};
-  let leaseLost=false;
   let heartbeatPending=false;
   const heartbeat=setInterval(() => {
     if (heartbeatPending) return;
@@ -166,6 +176,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       .finally(() => {heartbeatPending=false;});
   },60_000);
   const progress=async (stage:string,value:unknown) => {
+    checkContinuation();
     if (leaseLost) throw new Error("eod-lease-lost");
     const result=await runDb.prepare("UPDATE eod_runs SET stage=?,progress_json=?,lease_until=?,updated_at=? WHERE id=? AND lease_token=?")
       .bind(stage,JSON.stringify(value),new Date(Date.now()+10*60_000).toISOString(),new Date().toISOString(),runId,lease).run();
@@ -173,7 +184,9 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   };
   const published:string[]=[];
   try {
+    checkContinuation();
     await cleanupEodRunState(env,{maxRows:1000});
+    checkContinuation();
     await ensureMarketCalendarCoverage(env,run.session_date);
     const session=await env.MARKET_DATA_DB.prepare("SELECT close_at as closeAt FROM market_calendar_sessions WHERE session_date=?")
       .bind(run.session_date).first<{closeAt:string}>();
@@ -181,7 +194,9 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     const [closeHour,closeMinute]=(session?.closeAt ?? "99:99").split(":").map(Number);
     if (!session || run.session_date>local.localDate
       || (run.session_date===local.localDate && local.minutesOfDay<closeHour*60+closeMinute+20)) throw new Error("eod-session-not-complete");
+    checkContinuation();
     await refreshBreadthUniverseMemberships(env);
+    checkContinuation();
     const frozen=JSON.parse(run.input_json || "{}") as Partial<FrozenInputs>;
     const inputs=frozen.methodologyVersion===EOD_METRICS_VERSION && frozen.tickers?.length && frozen.memberships?.length===5
       ? frozen as FrozenInputs : await loadEodInputs(env,run.session_date);
@@ -238,8 +253,11 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       if (!inputs.memberships.some((row) => row.universeId===universeId)) errors[universeId]="membership-unavailable-for-session";
     }
     const start=inputs.calendarDates.at(-260)!;
+    const hotSessions=options.hotSessions ?? await loadApprovedStorageHotSessions(env) ?? 260;
+    const hotStart=inputs.calendarDates.at(-hotSessions)!;
     const publishedScopes=new Set<string>();
     const publishReadyScopes=async () => {
+      checkContinuation();
       if (leaseLost) throw new Error("eod-lease-lost");
       const overviewTickers=Array.from(new Set(["SPY",...inputs.config.sections.flatMap((section) => section.groups.flatMap((group) => group.items.filter((item) => item.enabled).map((item) => item.ticker)))]));
       const overviewRows=overviewTickers.filter((ticker) => ticker!=="SPY" || inputs.config.sections.some((section) => section.groups.some((group) => group.items.some((item) => item.enabled && item.ticker==="SPY"))));
@@ -256,13 +274,14 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         }
       }
       for (const membership of inputs.memberships) {
+        checkContinuation();
         const scope=`breadth:${membership.universeId}`;
         if (publishedScopes.has(scope) || !membership.members.every((ticker) => features.has(ticker))) continue;
         // Verification and source effective date are separate facts. A fresh
         // verification of an unchanged list must not age the immutable version.
-        const verifiedDate=membership.verifiedAt?.slice(0,10) ?? membership.sourceAsOfDate;
-        const age=verifiedDate ? inputs.calendarDates.filter((date) => date>verifiedDate).length : Infinity;
-        if (age>5 || membership.sourceType==="bundled-fallback") { errors[membership.universeId]="membership-unverified-or-expired"; continue; }
+        const membershipEvidence=assessEodMembershipEvidence(membership,run.session_date,inputs.calendarDates);
+        if (!membershipEvidence.publishable) { errors[membership.universeId]=membershipEvidence.reason!; continue; }
+        const age=membershipEvidence.ageSessions!;
         const result=computeEodBreadthMetrics({universeId:membership.universeId,targetSession:run.session_date,
           calendarDates:inputs.calendarDates,members:membership.members.map((ticker) => ({ticker})),bars:[],features});
         if (!result.publishable) { errors[membership.universeId]="breadth-coverage-below-threshold"; continue; }
@@ -302,7 +321,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       const pending=await env.MARKET_DATA_DB.prepare("SELECT ticker FROM eod_adjustment_repairs WHERE feed='sip' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
         .bind(JSON.stringify(tickers)).all<{ticker:string}>();
       for (const row of pending.results) {
-        const repaired=await repairEodSecurity(env,provider,row.ticker,run.session_date,start);
+        checkContinuation();
+        const repaired=await repairEodSecurity(env,provider,row.ticker,run.session_date,hotStart);
         ownRevisionChanges.push(...repaired.revisions);
       }
       // Load retained history once for both EOD features and compact catalog
@@ -311,6 +331,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       const yahooPending=await env.MARKET_DATA_DB.prepare("SELECT ticker,start_date as startDate FROM eod_adjustment_repairs WHERE feed='yahoo-eod' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
         .bind(JSON.stringify(tickers)).all<{ticker:string;startDate:string}>();
       for (const row of yahooPending.results) {
+        checkContinuation();
         const repaired=await repairEodYahoo(env,provider,row.ticker,run.session_date,row.startDate,history.filter((bar) => bar.ticker===row.ticker));
         ownRevisionChanges.push(...repaired.revisions);
       }
@@ -323,12 +344,15 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       }
       const updated:EodPriceBar[]=[];
       try {
+        checkContinuation();
         const adjusted=await provider.alpaca(tickers,fetchStart,run.session_date);
+        checkContinuation();
         if (adjusted.some((bar) => !inputs.calendarDates.includes(bar.date))) throw new Error("alpaca-unexpected-exchange-session");
         for (const [ticker,error] of provider.symbolErrors) errors[ticker]=error;
         let raw:EodPriceBar[]=[];
-        try { raw=await provider.alpaca(tickers,fetchStart,run.session_date,"raw"); }
+        try {checkContinuation();raw=await provider.alpaca(tickers,fetchStart,run.session_date,"raw");checkContinuation();}
         catch (error) {
+          if (error instanceof EodBatchInterruptedError) throw error;
           const message=error instanceof Error ? error.message : "raw-volume-unavailable";
           if (/d1|budget storage|quota|capacity|market-history/.test(message)) throw error;
           errors["reportedVolume"]=message;
@@ -344,7 +368,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           return old && Math.abs(old.c/bar.c-1)>0.00001;
         }).map((bar) => bar.ticker));
         for (const ticker of rebased) {
-          const repaired=await repairEodSecurity(env,provider,ticker,run.session_date,start);
+          checkContinuation();
+          const repaired=await repairEodSecurity(env,provider,ticker,run.session_date,hotStart);
           ownRevisionChanges.push(...repaired.revisions);
           history=history.filter((bar) => bar.ticker!==ticker);
           history.push(...await loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:run.session_date}) as EodPriceBar[]);
@@ -354,7 +379,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         // Cold bootstrap stores the latest overlap first. Older missing inputs
         // go straight to verified blocks instead of consuming a day's hot writes.
         const overlapStart=inputs.calendarDates.at(-5)!;
-        const archiveOnly=env.MARKET_HISTORY_DB ? updated.filter((bar) => bar.date<overlapStart && !existingKeys.has(`${bar.ticker}:${bar.date}`)) : [];
+        const archiveOnly=env.MARKET_HISTORY_DB ? updated.filter((bar) => bar.date<hotStart || (bar.date<overlapStart && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
+        checkContinuation();
         if (archiveOnly.length) {
           const archived=await archiveMarketHistoryBars(env,archiveOnly);
           ownRevisionChanges.push(...archived.revisionChanges);
@@ -363,6 +389,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         const changed=await writeEodBars(env,updated.filter((bar) => !archiveKeys.has(`${bar.ticker}:${bar.date}`)));
         changed.forEach((count,ticker) => ownRevisionChanges.push({feed:"sip",ticker,count}));
       } catch(error) {
+        if (error instanceof EodBatchInterruptedError) throw error;
         const message=error instanceof Error ? error.message : "price-fetch-failed";
         if (/d1|budget|quota|capacity|adjustment-repair|market-history/.test(message)) throw error;
         tickers.forEach((ticker) => {errors[ticker]=message;});
@@ -371,6 +398,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       updated.forEach((bar) => merged.set(`${bar.ticker}:${bar.date}`,bar));
       const chunkFeatures:Array<[string,EodTickerMetrics]>=[];
       for (const ticker of tickers) {
+        checkContinuation();
         const own=[...merged.values()].filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split");
         const cachedFallback=cachedYahoo.filter((bar) => bar.ticker===ticker);
         const validatedFallback=yahooWindowMatchesAlpaca(ticker,cachedFallback,own) ? cachedFallback : [];
@@ -380,6 +408,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           yahooAttempts++;
           try {
             const fallback=await provider.yahoo(ticker,start,run.session_date,own);
+            checkContinuation();
             if (fallback.some((bar) => !inputs.calendarDates.includes(bar.date))) throw new Error("yahoo-unexpected-exchange-session");
             // Compact fallback history is separate from the canonical SIP table.
             if (env.MARKET_HISTORY_DB) {
@@ -389,6 +418,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
             bars=[...bars.filter((bar) => bar.sourceProvider!=="yahoo"),...fallback.map(metricBar)];
             metric=computeEodTickerMetrics({ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars});
           } catch(error) {
+            if (error instanceof EodBatchInterruptedError) throw error;
             const message=error instanceof Error ? error.message : "fallback-unavailable";
             if (error instanceof ProviderBudgetExceededError && error.providerKey==="yahoo") yahooAttempts=200;
             else if (/d1|budget|quota|capacity|market-history/.test(message)) throw error;
@@ -408,6 +438,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         after.find((row) => row.feed==="sip" && row.ticker===ticker)?.revision ?? 0));
       chunkCatalog.forEach((row) => catalogRows.set(row.ticker,row));
       const value:FeatureCheckpoint={features:chunkFeatures,catalogRows:chunkCatalog,revisions:after,errors:Object.fromEntries(tickers.filter((ticker) => errors[ticker]).map((ticker) => [ticker,errors[ticker]]))};
+      checkContinuation();
       await env.OPS_DB.prepare(`INSERT INTO eod_checkpoints(run_id,chunk_key,input_hash,payload_json,updated_at) VALUES(?,?,?,?,?)
         ON CONFLICT(run_id,chunk_key) DO UPDATE SET input_hash=excluded.input_hash,payload_json=excluded.payload_json,updated_at=excluded.updated_at`)
         .bind(runId,key,await eodHash([inputHash,after]),JSON.stringify(await encodeEodPayload(value)),new Date().toISOString()).run();
@@ -422,6 +453,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     if (!inputClock || !Number.isSafeInteger(inputClock.revision)) throw new Error("eod-input-clock-unavailable");
     if (catalogRows.size!==inputs.tickers.length) throw new Error("eod-catalog-population-incomplete");
     const catalog=encodeEodCatalogPayload(run.session_date,[...catalogRows.values()]);
+    checkContinuation();
     const catalogPublicationId=await storeEodPublication(env,{scope:EOD_CATALOG_SCOPE,sessionDate:run.session_date,
       inputHash:await eodHash(catalog),methodologyVersion:EOD_CATALOG_METHODOLOGY_VERSION,payload:catalog,
       promote:run.mode==="active",revisions});

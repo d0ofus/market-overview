@@ -215,7 +215,7 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
-    if (query.sql.trimEnd().endsWith("/* storage-copy-page */")) {
+    if (query.sql.trimEnd().endsWith("/* storage-copy-page */") || query.sql.trimEnd().endsWith("/* storage-verification-year */")) {
       // Keyset pages are capped at 250 rows and use the complete primary key.
       // The same label covers read-back verification; no OFFSET/full-table scan.
       reads+=2_000; continue;

@@ -5,7 +5,7 @@ param(
 )
 
 # One-time local diagnostic retry. This is not an application scheduler and
-# never freezes a source, writes production prices, or changes a D1 binding.
+# only starts an authorized storage transfer when explicitly configured below.
 # Credentials are inherited from the launching process; no secret is written.
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -59,6 +59,17 @@ try {
     --output worker/tmp/eod-storage-analysis.json *>> $LogPath
   if ($LASTEXITCODE -ne 0) { throw 'storage-retry-analysis-incomplete' }
   Write-RetryState 'analysis-complete' 'preliminary-capacity-only-no-cutover'
+  if ($env:EOD_STORAGE_START_APPROVED -eq 'true') {
+    Assert-ReviewedCheckout
+    $env:EOD_STORAGE_EXPECTED_COMMIT = $ExpectedCommit
+    $env:EOD_STORAGE_ANALYSIS_PATH = Join-Path $RepoRoot 'worker/tmp/eod-storage-analysis.json'
+    $env:EOD_STORAGE_SNAPSHOT_IDENTITY_PATH = "$Snapshot.identity.json"
+    $env:EOD_STORAGE_FROZEN_INPUT_PATH = "$Snapshot.tickers.json"
+    Write-RetryState 'storage-preflight' 'authorized-relocation-only-public-cutover-remains-gated'
+    & node --import tsx worker/scripts/start-storage-migration-once.ts *>> $LogPath
+    if ($LASTEXITCODE -ne 0) { throw 'storage-retry-relocation-start-incomplete' }
+    Write-RetryState 'storage-dispatched' 'accepted-dispatch-not-completed-transfer'
+  }
 } catch {
   $Reason = $_.Exception.Message
   if ($Reason -notmatch '^storage-retry-[a-z-]+$') { $Reason = 'storage-retry-stopped' }

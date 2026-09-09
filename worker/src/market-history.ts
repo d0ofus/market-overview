@@ -419,7 +419,7 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
   if (!db) throw new Error("MARKET_HISTORY_DB is required to archive market history.");
   if (options.verifiedHotRelocation && (env.EOD_ARCHIVE_PRUNE_ENABLED !== "true"
     || !["shadow", "active"].includes(env.EOD_RUNNER_MODE ?? "") || options.repairFenceToken || input.length > 500
-    || input.some((bar) => bar.feed.trim().toLowerCase() !== "sip"))) {
+    || input.some((bar) => !["sip", "yahoo-eod"].includes(bar.feed.trim().toLowerCase())))) {
     fail("Verified hot relocation is restricted to bounded enabled retention.");
   }
   const groups = new Map<string, MarketHistoryBar[]>();

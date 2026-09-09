@@ -23,6 +23,11 @@ export type Env = {
   EOD_RUNNER_MODE?: "disabled" | "shadow" | "active";
   EOD_READ_ENABLED?: string;
   EOD_CODE_REVISION?: string;
+  EOD_RUNTIME_PROBE_ID?: string;
+  EOD_RUNTIME_CANDIDATE_ONLY?: string;
+  EOD_RUNTIME_PROBE_UNTIL?: string;
+  EOD_RUNTIME_TARGET_DATABASE_ID?: string;
+  EOD_VERSION_METADATA?: {id:string;tag?:string;timestamp?:string};
   EOD_ARCHIVE_PRUNE_ENABLED?: string;
   EOD_RUNNER_SECRET?: string;
   EOD_GITHUB_TOKEN?: string;

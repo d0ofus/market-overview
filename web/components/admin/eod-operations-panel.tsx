@@ -59,10 +59,30 @@ export function EodOperationsPanel() {
             {data.storageMigration.errorCode ? <p className="text-amber-300">{data.storageMigration.errorCode}</p> : null}
             <p className="text-slate-400">{data.storageMigration.nextAttemptAt ? `Next retry: ${timestamp(data.storageMigration.nextAttemptAt)}` : "No automatic retry scheduled."} Updated: {timestamp(data.storageMigration.updatedAt)}</p>
           </div> : null}
+          <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+            <p className="font-semibold">Monitored delivery: {data.monitoring ? `${data.monitoring.consecutivePassedSessions}/${data.monitoring.requiredSessions} consecutive sessions` : "Awaiting evidence"}</p>
+            <p className="mt-1 text-slate-400">{data.monitoring?.eligibleForRetirement && !data.monitoring.stale ? "Delivery and finalized usage checks passed. Legacy retirement still requires runtime validation." : "Legacy retirement remains blocked until delivery, usage and runtime checks pass."}</p>
+            {data.monitoring ? <>
+              <p className={data.monitoring.stale ? "text-amber-300" : "text-slate-400"}>Checked: {timestamp(data.monitoring.checkedAt)}{data.monitoring.stale ? " (outdated)" : ""}</p>
+              {data.monitoring.reasons.length ? <p className="text-amber-300">{data.monitoring.reasons.join(", ")}</p> : null}
+              <details className="mt-2 text-xs text-slate-400"><summary className="cursor-pointer">Session and finalized UTC usage checks</summary>
+                {data.monitoring.sessions.map((session) => <p className="mt-1" key={session.sessionDate}>{session.sessionDate}: {session.status} · Deadline {timestamp(session.deadlineAt)} · First complete public delivery {timestamp(session.firstCompletePublicationAt)}{session.reasons.length ? ` · ${session.reasons.join(", ")}` : ""}</p>)}
+                {data.monitoring.usageDays.map((day) => <p className="mt-1" key={day.usageDate}>UTC {day.usageDate}: {day.status}{day.reasons.length ? ` · ${day.reasons.join(", ")}` : ""}</p>)}
+              </details>
+            </> : <p className="text-xs text-slate-500">The daily monitoring job records actual publication times and finalized account usage. Missing evidence does not count as a passed session.</p>}
+          </div>
           {data.missingScopes?.length ? <InlineAlert tone="info">Awaiting current publications: {data.missingScopes.join(", ")}</InlineAlert> : null}
           {data.inputCorrectionsPending === true ? <InlineAlert tone="info">Stored inputs changed after the completed publication run. Corrected publications are pending (input revision {count(data.inputRevision)}; published run revision {count(data.completedInputRevision)}).</InlineAlert> : null}
           {data.inputCorrectionsPending === null ? <InlineAlert tone="info">Input correction status is unknown; the latest input clock or completed-run watermark is unavailable.</InlineAlert> : null}
           {data.capacity?.warning ? <InlineAlert tone="danger">{data.capacity.warning}</InlineAlert> : null}
+          {data.storageCapacity ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+            <p className="font-semibold">Measured storage: {data.storageCapacity.status}</p>
+            <p className="text-slate-400">Recent history: {data.storageCapacity.hotSessions} sessions. Archived history remains available.</p>
+            <p className="text-slate-400">Market bytes: {count(data.storageCapacity.marketPhysicalBytes)}; archive bytes: {count(data.storageCapacity.archivePhysicalBytes)}</p>
+            <p className="text-slate-400">Forecast covers {data.storageCapacity.forecastSessions} sessions through {data.storageCapacity.forecastLastSession}; expires {timestamp(data.storageCapacity.horizonExpiresAt)}.</p>
+            <p className="text-slate-400">Checked: {timestamp(data.storageCapacity.checkedAt)}</p>
+            {data.storageCapacity.error ? <p className="text-amber-300">{data.storageCapacity.error}</p> : null}
+          </div> : null}
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
               <p className="font-semibold">Tracked EOD usage · {data.quota?.usageDate ?? "Unavailable"}</p>

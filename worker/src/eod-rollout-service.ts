@@ -5,6 +5,7 @@ import { assertHistoryPruneEvidence } from "./eod-history-maintenance";
 import { eodHash } from "./eod-publication-service";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE } from "./eod-catalog-service";
+import { collectEodRolloutMonitoring } from "./eod-rollout-monitor";
 import type { Env } from "./types";
 
 const universeIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"] as const;
@@ -261,6 +262,10 @@ export function validateEodRetirementEvidence(input: unknown, codeRevision: stri
   for (const session of proof.sessions) {
     assertMeasurements(session.measurements, session.limits);
     assertScopes(session.scopes, session.sessionDate);
+    // US EOD deadlines occur on the exchange date in UTC. A previous cheap
+    // bucket cannot stand in for the day's actual processing allowance.
+    if (session.measurements.usageDate !== session.deadlineAt.slice(0, 10)
+      || session.deadlineAt.slice(0, 10) !== session.sessionDate) fail("retirement-usage-date-mismatch");
     if (Date.parse(session.publishedAt) > Date.parse(session.deadlineAt)) fail("retirement-deadline-missed");
   }
   return proof;
@@ -276,11 +281,23 @@ export async function assertEodRetirement(env: Env, codeRevision: string): Promi
   const calendar = await env.MARKET_DATA_DB!.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT 10")
     .bind(expected).all<{session_date:string}>();
   const proof = validateEodRetirementEvidence(parseObject(row.evidence_json), codeRevision, calendar.results.map((value) => value.session_date));
+  const monitored = await collectEodRolloutMonitoring(env);
+  // This independently resolves actual calendar close + two hours, first
+  // acceptance per scope, public activation and finalized whole-UTC-day usage
+  // including weekends. Submitted evidence cannot fill absent observations.
+  if (!monitored.eligibleForRetirement) fail(`retirement-monitoring-incomplete:${monitored.reasons.join(",")}`);
   for (const session of proof.sessions) {
+    const observed = monitored.sessions.find((value) => value.sessionDate === session.sessionDate);
+    if (!observed || observed.status !== "passed" || observed.runId !== session.runId
+      || observed.deadlineAt !== session.deadlineAt || observed.firstCompletePublicationAt !== session.publishedAt
+      || session.scopes.some((scope) => !observed.scopes.some((value) => value.scope === scope.scope
+        && value.publicationId === scope.publicationId))) fail("retirement-monitored-evidence-mismatch");
     const run = await env.OPS_DB!.prepare("SELECT mode,purpose,status,session_date,deadline_at,deadline_missed FROM eod_runs WHERE id=?")
       .bind(session.runId).first<StoredRun>();
-    if (!run || run.mode !== "active" || run.purpose !== "daily" || run.status !== "completed" || run.session_date !== session.sessionDate
-      || run.deadline_missed || run.deadline_at !== session.deadlineAt) fail("retirement-run-mismatch");
+    // Catalog retries/corrections may complete later than page delivery. Its
+    // latest run status/timestamp is not the first successful public delivery.
+    if (!run || run.mode !== "active" || run.purpose !== "daily" || run.session_date !== session.sessionDate
+      || run.deadline_at !== session.deadlineAt) fail("retirement-run-mismatch");
     const publications = await checkPublications(env, session.scopes, false);
     for (const publication of publications.values()) if (!publication.accepted_at
       || Date.parse(publication.accepted_at) > Date.parse(session.deadlineAt)

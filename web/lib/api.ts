@@ -5,6 +5,18 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 export type EodPublicationStatus = {
   mode: string;
   pipelineMode?: string;
+  storageCapacity?: {
+    status: "unmeasured" | "ready" | "failed" | "expired"; checkedAt: string | null; error: string | null;
+    hotSessions: 260 | 90; feeds: string[]; forecastSessions: number; forecastAnchorSession: string;
+    forecastLastSession: string; horizonExpiresAt: string; marketPhysicalBytes: number | null; archivePhysicalBytes: number | null;
+  } | null;
+  monitoring?: {
+    checkedAt: string; requiredSessions: number; consecutivePassedSessions: number; eligibleForRetirement: boolean;
+    latestEvaluatedSession: string | null; reasons: string[]; stale?: boolean;
+    sessions: Array<{sessionDate: string; deadlineAt: string; firstCompletePublicationAt: string | null;
+      status: "passed" | "failed" | "pending"; reasons: string[]}>;
+    usageDays: Array<{usageDate: string; status: "passed" | "failed" | "pending"; reasons: string[]}>;
+  } | null;
   storageMigration?: {
     id: string; status: string; stage: string; failedStage: string | null; errorCode: string | null;
     nextAttemptAt: string | null; updatedAt: string; sessionDate: string; blocksEod: boolean;

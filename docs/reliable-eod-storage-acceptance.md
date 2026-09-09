@@ -1,0 +1,41 @@
+# Executable storage acceptance
+
+`worker/src/market-storage-acceptance.ts` collects read-only evidence. It does not promote publications, change bindings, release source protection or turn a copied database into an approved production target. Passing local tests proves the collector's behavior; the production evidence still has to be collected under the shared D1 allowance.
+
+## Consumer parity
+
+`verifyStorageConsumerBatch` works through the complete frozen shared ticker manifest in batches of one to ten tickers. The caller persists its returned checkpoint through the migration lease. Every checkpoint binds the migration identity, source/target/history captures, ticker manifest, calendar and contract version. The caller supplies the whole-copy verifier's actual three-database fence checks before and after each batch. A changed capture requires new evidence rather than combining observations taken across different revisions.
+
+The collector compares original-source reads with target-plus-archive reads. It checks all retained SIP and Yahoo observations, including provenance, collection timestamps, null volume and gaps. Separate real reader calls verify trailing 520 OHLCV observations, 1,330 closing observations including the fetch buffer, and full history coverage. It also compares the shared OHLCV inputs used by watchlists, relative strength and earnings, the full catalog output used by scans, and the actual versioned ticker calculations used by Overview and Breadth. These are reader/calculation contracts; they do not purport to run every external workflow or certify historically missing provider observations.
+
+Every requested ticker contributes to each check. Missing and short SIP histories are counted explicitly. They remain missing coverage, not proof that five years of data exists. A checksum mismatch, missing archive, changed target observation or interrupted capture prevents a completed evidence artifact. Baseline parity should run while the copy verifier's captures remain frozen, before private target bootstrap. Any later parity pass needs fresh target/history captures while preserving the original exact-copy proof separately.
+
+## Accepted publication checks
+
+`verifyStorageAcceptedPublications` reads the actual completed private run and all seven accepted pointers: Overview, five breadth universes and the history catalog. It requires matching session dates, run publication references, payload checksums, methodology, input clock, membership counts and daily coverage thresholds. It compares the complete configured Overview section/group/ticker manifest, and requires the catalog's compatibility supplement for every frozen ticker. The existing catalog reader then checks every tuple, SIP revision and pending adjustment repair.
+
+The resulting evidence contains the actual publication IDs/checksums, membership and catalog hashes. It does not fabricate successful publications from shadow candidates. Live Worker CPU/query telemetry and the existing rollout/retirement evidence remain separate gates.
+
+## Publication growth measurement
+
+Collect `collectStoragePublicationGrowthSamples` only after the seven accepted private publications pass the preceding check. Write its JSON result to an ignored operator artifact, then run:
+
+```powershell
+python worker/scripts/measure-eod-publication-growth.py --schema-sqlite worker/tmp/eod-storage-source.sqlite --samples-json worker/tmp/eod-publication-samples.json --output worker/tmp/eod-publication-growth.json
+```
+
+The script never connects to production. It copies the actual publication table/index schema and existing publication rows into a disposable SQLite database. Eight copies of the seven real accepted payloads, with fixture-only unique IDs and input hashes, measure allocated table and index growth. The source database is opened read-only and checksummed before and after. The report retains the sampled publication IDs/checksums, source snapshot hash, reviewed revision, schema/population hashes and fixture hash. These sizing rows are never market observations or deployment input.
+
+The default finite forecast is 20 additional exchange sessions with two revisions per session. This is an operating horizon, not a retention policy or a claim that storage is bounded forever. Daily capacity monitoring must refresh that horizon while preserving every historical publication. No publication deletion is introduced. The analyzer's `--publication-growth-reserve-bytes` value must equal the reserve calculated from this measured report; the old default zero cannot pass final acceptance.
+
+`validateStorageCapacityAnalysis` rejects incomplete or stale captures, mismatched source snapshots, reduced shared/fallback populations, unmeasured publication reserves and models without ten sessions of sweep headroom. It selects 260 sessions only if the fully populated dual-feed model fits below 350 MB, otherwise evaluates 90. Both retain the same archived analytical history. Fresh target/history D1 `size_after` metadata must fit the model, and the growth samples must still match the accepted publication references. Copy tooling, local fixtures, `under350MB` flags or `parityPassed` booleans alone cannot satisfy this check.
+
+## Approved retention and daily capacity monitoring
+
+Final acceptance calls `storeStorageHistoryMaintenanceApproval` with the measured capacity/model, accepted publications, original three-database capture and completed consumer parity. It stores an immutable measured-layout proof and a revision-specific pointer. The existing `refreshHistoryMaintenanceEvidence` automatically uses that proof rather than requiring a separately hand-written legacy `history-capacity` record. Legacy approvals retain their existing behavior.
+
+For a migrated database, bounded revision-aware counts cover both SIP and Yahoo. Remaining capacity uses the actual full-population SQLite price table/index pages per modeled row, the live physical D1 files and measured publication reserve. It does not multiply JSON lengths into an unrelated storage estimate. Counts include the extra row needed to detect a breached retention-plus-ten-session sweep window. Missing physical metadata, changed populations, exhausted budgets or a forecast expiry prevent approval instead of assuming storage shrank.
+
+`refreshApprovedStorageHistoryCapacity` is a daily monitor entry point independent of the pruning flag. It loads the complete approved population and compares it with the latest accepted catalog before refreshing measurement checkpoints. `loadStorageHistoryCapacityStatus` reads one small cached Ops record and exposes the measurement time, model hash, accepted run/session, finite calendar horizon, physical sizes and errors. A measurement older than 24 hours is shown as unmeasured; the fixed forecast horizon cannot renew itself by merely redating a physical size check. Renewal requires a newly accepted measured model and preserves every historical publication.
+
+Keep `EOD_ARCHIVE_PRUNE_ENABLED=false` through private bootstrap and initial validation. Private bootstrap receives the preflight's selected 90/260 hot window while keeping the full calculation lookback. After validated public cutover, `EOD_ARCHIVE_PRUNE_ENABLED=true`, `EOD_READ_ENABLED=true` and the approved `EOD_CODE_REVISION` allow bounded retention for both feeds. Each feed has a separate durable cursor, so a Yahoo failure does not replay completed SIP deletion. Both feeds use exact archive read-back, full observation identity, the global input clock and pending-repair guards. Yahoo prices retain Yahoo provenance and never acquire verified SIP volume through relocation. No source database, historical publication or market-history series is deleted by this approval helper.
