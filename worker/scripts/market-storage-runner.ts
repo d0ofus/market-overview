@@ -10,12 +10,13 @@ import { runStoragePipeline, loadStoragePreflight } from "../src/market-storage-
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
 import { prepareStorageSourceFence, assertStorageSourceFrozen } from "../src/market-storage-fence";
 import { storageHash } from "../src/market-storage-pages";
-import { validateStorageCapacityAnalysis, verifyStorageAcceptedPublications, collectStoragePublicationGrowthSamples, type StorageAcceptanceCapture, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
+import { verifyStorageAcceptedPublications, collectStoragePublicationGrowthSamples, type StorageAcceptanceCapture, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
+import { buildStorageCutoverEvidence, storeStorageCutoverProof } from "../src/market-storage-cutover-evidence";
 import { storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
 import { refreshHistoryMaintenanceEvidence } from "../src/eod-history-capacity";
 import { collectRuntimeEvidence, validateRuntimeEvidence, type RuntimeEvidence } from "../src/eod-runtime-evidence";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
-import { validateEodCutoverEvidence, assertEodCutover } from "../src/eod-rollout-service";
+import { assertEodCutover } from "../src/eod-rollout-service";
 import { expectedEodSession } from "../src/eod-coordinator";
 import { finalizeRecentEodUsage, collectEodRolloutMonitoring } from "../src/eod-rollout-monitor";
 import type { Env } from "../src/types";
@@ -83,11 +84,40 @@ async function main():Promise<void> {
       const actual=await assertStorageSourceFrozen(sourceDb,storageMigrationIdentity(existing),existing.source_schema_hash);
       if(actual.revision!==existing.source_revision)throw new Error("storage-source-capture-changed");
     };
+    const collectAuthenticatedRuntime=async () => {
+      const requested=file("EOD_STORAGE_RUNTIME_EVIDENCE_PATH") as RuntimeEvidence;
+      if(requested?.identity?.codeRevision!==codeRevision || requested.identity.targetDatabaseId!==target
+        || requested.identity.historyDatabaseId!==history || requested.identity.opsDatabaseId!==ops
+        || !core || requested.identity.coreDatabaseId!==core
+        || !Number.isFinite(requested.window?.to) || requested.window.to>Date.now()
+        || Date.now()-requested.window.to>86_400_000)throw new Error("storage-runtime-evidence-identity-or-age-mismatch");
+      await validateRuntimeEvidence(requested,requested.identity);
+      // Authenticate the recorded window again; a local JSON hash is not remote
+      // attestation. Missing or truncated logs must leave acceptance pending.
+      const runtime=await collectRuntimeEvidence({accountId,token:process.env.CLOUDFLARE_API_TOKEN || token,
+        identity:requested.identity,from:requested.window.from,to:requested.window.to});
+      await validateRuntimeEvidence(runtime,requested.identity);
+      return runtime;
+    };
+    const buildProof=async (runId:string,tickers:string[],expected:string,sourceSnapshotSha256:string) => {
+      const capture=await loadStorageMigrationCheckpoint(meteredOps,id,"verification:complete");
+      const consumers=await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete");
+      if(!capture || !consumers || capture.inputHash!==consumers.inputHash)throw new Error("storage-reader-verification-required");
+      const captured=capture.payload as StorageAcceptanceCapture;
+      if(capture.inputHash!==captured.captureHash || captured.sourceCapture.schemaHash!==existing.source_schema_hash
+        || captured.sourceCapture.revision!==existing.source_revision)throw new Error("storage-reader-source-capture-mismatch");
+      const runtime=await collectAuthenticatedRuntime(),analysis=file("EOD_STORAGE_ANALYSIS_PATH");
+      const built=await buildStorageCutoverEvidence({env,identity:storageMigrationIdentity(existing),runId,tickers,expectedSession:expected,
+        capture:captured,consumers:consumers.payload as StorageConsumerEvidence,
+        analysis,publicationGrowth:file("EOD_STORAGE_PUBLICATION_GROWTH_PATH"),sourceSnapshotSha256,
+        runtime,runtimeIdentity:runtime.identity,assertSourceCapture:assertOriginalCapture});
+      return {...built,runtime,analysis,capture,consumers};
+    };
     if (command==="status") {
       console.log(JSON.stringify({id,status:existing.status,stage:existing.stage,nextRetry:existing.next_attempt_at,
         failedStage:existing.error_code,freezeAuthorized:existing.freeze_authorized===1,progress:JSON.parse(existing.progress_json)}));return;
     }
-    if(command==="sample-publications" || command==="complete") {
+    if(command==="sample-publications" || command==="build-cutover-evidence" || command==="complete") {
       if(existing.code_revision!==codeRevision)throw new Error("storage-run-code-revision-mismatch");
       await assertOriginalCapture();
       if(command==="complete" && existing.status!=="awaiting-cutover")throw new Error("storage-activation-not-ready");
@@ -99,6 +129,15 @@ async function main():Promise<void> {
       if(await storageHash(currentOwner?.payload)!==await storageHash(owner))throw new Error("storage-completed-bootstrap-owner-mismatch");
       const expected=await expectedEodSession(env);
       if(!expected)throw new Error("storage-acceptance-calendar-unavailable");
+      if(command==="build-cutover-evidence") {
+        const built=await buildProof(owner.runId,preflight.tickers,expected,preflight.evidence.sourceSnapshotHash);
+        const output=required("EOD_STORAGE_CUTOVER_EVIDENCE_PATH");
+        writeFileSync(output,JSON.stringify(built.proof,null,2)+"\n");
+        writeFileSync(`${output}.provenance.json`,JSON.stringify(built.provenance,null,2)+"\n");
+        console.log(JSON.stringify({id,status:"cutover-evidence-built",session:expected,scopes:built.proof.scopes.length,
+          tickers:built.proof.sharedTickers.count,hotSessions:built.capacity.hotSessions,
+          forecastSessions:built.capacity.forecastSessions,proofHash:built.provenance.proofHash,publicCutover:false}));return;
+      }
       const publications=await verifyStorageAcceptedPublications({env,identity:storageMigrationIdentity(existing),
         runId:owner.runId,tickers:preflight.tickers,expectedSession:expected});
       if(command==="sample-publications") {
@@ -186,43 +225,20 @@ async function main():Promise<void> {
         if(await storageHash(currentOwner?.payload)!==await storageHash(owner))throw new Error("storage-completed-bootstrap-owner-mismatch");
         const expected=await expectedEodSession(env);
         if(!expected)throw new Error("storage-acceptance-calendar-unavailable");
-        const publications=await verifyStorageAcceptedPublications({env,identity:storageMigrationIdentity(claimed.run),
-          runId:owner.runId,tickers:preflight.tickers,expectedSession:expected});
-        const analysis=file("EOD_STORAGE_ANALYSIS_PATH");
-        const capacity=await validateStorageCapacityAnalysis({analysis,
-          publicationGrowth:file("EOD_STORAGE_PUBLICATION_GROWTH_PATH"),identity:storageMigrationIdentity(claimed.run),
-          tickers:preflight.tickers,sourceSchemaHash:preflight.evidence.sourceSchemaHash,
-          sourceSnapshotSha256:preflight.evidence.sourceSnapshotHash,publications,target:targetDb,history:historyDb});
-        const proof=validateEodCutoverEvidence(file("EOD_STORAGE_CUTOVER_EVIDENCE_PATH"),codeRevision);
-        const requestedRuntime=file("EOD_STORAGE_RUNTIME_EVIDENCE_PATH") as RuntimeEvidence;
-        if(requestedRuntime?.identity?.codeRevision!==codeRevision || requestedRuntime.identity.targetDatabaseId!==target
-          || requestedRuntime.identity.historyDatabaseId!==history || requestedRuntime.identity.opsDatabaseId!==ops
-          || !core || requestedRuntime.identity.coreDatabaseId!==core
-          || !Number.isFinite(requestedRuntime.window?.to) || requestedRuntime.window.to>Date.now()
-          || Date.now()-requestedRuntime.window.to>86_400_000)throw new Error("storage-runtime-evidence-identity-or-age-mismatch");
-        await validateRuntimeEvidence(requestedRuntime,requestedRuntime.identity);
-        // Authenticate and collect the exact window again. A local JSON hash
-        // alone cannot attest that these were actual Cloudflare invocations.
-        const runtime=await collectRuntimeEvidence({accountId,token:process.env.CLOUDFLARE_API_TOKEN || token,
-          identity:requestedRuntime.identity,from:requestedRuntime.window.from,to:requestedRuntime.window.to});
-        await validateRuntimeEvidence(runtime,requestedRuntime.identity);
-        for(const name of ["httpCpuMs","coordinatorCpuMs","queriesPerInvocation","queryDurationMs"] as const) {
-          if(runtime.measurements[name]===null || runtime.measurements[name]!==proof.measurements[name])throw new Error("storage-runtime-measurement-mismatch");
-        }
-        if(proof.runId!==owner.runId || proof.retention.hotSessions!==capacity.hotSessions || proof.sessionDate!==expected
-          || proof.scopes.some((row)=>!publications.scopes.some((actual)=>actual.scope===row.scope && actual.id===row.publicationId))) {
-          throw new Error("storage-cutover-measurements-conflict");
-        }
+        // Rebuild at acceptance: a reviewed artifact cannot override fresh
+        // publications, measured capacity, runtime logs or account reservations.
+        const {proof,provenance,publications,capacity,runtime,analysis,capture,consumers}=
+          await buildProof(owner.runId,preflight.tickers,expected,preflight.evidence.sourceSnapshotHash);
         await meteredOps.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES('cutover',?,?) ON CONFLICT(id) DO UPDATE SET evidence_json=excluded.evidence_json,updated_at=excluded.updated_at")
           .bind(JSON.stringify(proof),new Date().toISOString()).run();
         await assertEodCutover(env,codeRevision);
-        const capture=await loadStorageMigrationCheckpoint(meteredOps,id,"verification:complete");
-        const consumers=await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete");
-        if(!capture || !consumers)throw new Error("storage-reader-verification-required");
         await storeStorageHistoryMaintenanceApproval(env,{capacity,analysis,publications,tickers:preflight.tickers,
           capture:capture.payload as StorageAcceptanceCapture,consumers:consumers.payload as StorageConsumerEvidence});
         await refreshHistoryMaintenanceEvidence(env,{tickers:preflight.tickers,codeRevision});
-        const evidence={version:1,publications,capacity,runtimeEvidenceHash:runtime.evidenceHash,cutoverProofHash:await storageHash(proof),publicBindingChanged:false};
+        const storageProof=await storeStorageCutoverProof(meteredOps,{identity:storageMigrationIdentity(claimed.run),proof,provenance});
+        const evidence={version:1,publications,capacity,runtimeEvidenceHash:runtime.evidenceHash,cutoverProofHash:storageProof.record.proofHash,
+          storageCutoverProofId:storageProof.id,
+          cutoverProvenance:provenance,publicBindingChanged:false};
         await markStorageMigrationReady(meteredOps,id,claimed.leaseToken,evidence);
         console.log(JSON.stringify({id,status:"awaiting-cutover",session:expected,hotSessions:capacity.hotSessions}));return;
       }

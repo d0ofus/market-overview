@@ -80,10 +80,19 @@ def measure(source_path: Path, samples_path: Path, code_revision: str, sets: int
         if len(payload) > 8_000_000 or hashlib.sha256(payload).hexdigest() != row["payload_checksum"]:
             raise ValueError("Stored publication payload checksum mismatch")
         json.loads(payload)
-    source_hash = digest_file(source_path)
-    source = sqlite3.connect(source_path.resolve().as_uri() + "?mode=ro", uri=True)
+    original_hash = digest_file(source_path)
+    original = sqlite3.connect(source_path.resolve().as_uri() + "?mode=ro", uri=True)
+    capture_directory = tempfile.TemporaryDirectory(prefix="market-eod-growth-capture-")
+    capture_path = Path(capture_directory.name) / "source.sqlite"
+    source = sqlite3.connect(capture_path)
     source.row_factory = sqlite3.Row
     try:
+        # Match analyze-eod-storage.snapshot exactly: a committed SQLite backup,
+        # including WAL, before any fixture or analysis transformation. Hashing
+        # the original file instead deadlocked acceptance on its different
+        # SQLite header, and omitted committed pages still present in the WAL.
+        original.backup(source)
+        source_hash = digest_file(capture_path)
         schema = source.execute("SELECT type,name,sql FROM sqlite_schema WHERE tbl_name='eod_publications' AND sql IS NOT NULL ORDER BY type DESC,name").fetchall()
         tables = [row for row in schema if row["type"] == "table"]
         if len(tables) != 1:
@@ -132,7 +141,9 @@ def measure(source_path: Path, samples_path: Path, code_revision: str, sets: int
                       "publicationRows": sets * 7, "forecastSessions": forecast_sessions, "revisionsPerSession": revisions}
     finally:
         source.close()
-    if digest_file(source_path) != source_hash:
+        original.close()
+        capture_directory.cleanup()
+    if digest_file(source_path) != original_hash:
         raise ValueError("Source snapshot changed during measurement")
     return result
 

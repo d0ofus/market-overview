@@ -12,6 +12,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "measure-eod-publication-growth.p
 spec = importlib.util.spec_from_file_location("publication_growth", SCRIPT)
 growth = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(growth)
+analysis_spec = importlib.util.spec_from_file_location("storage_analysis", SCRIPT.with_name("analyze-eod-storage.py"))
+analysis = importlib.util.module_from_spec(analysis_spec)
+analysis_spec.loader.exec_module(analysis)
 
 
 class PublicationGrowthTests(unittest.TestCase):
@@ -61,13 +64,36 @@ class PublicationGrowthTests(unittest.TestCase):
 
     def test_measures_real_rows_and_indexes_without_mutating_source(self):
         before = growth.digest_file(self.source)
+        captured = self.directory / "analyzer-capture.sqlite"
+        analysis.snapshot(self.source, captured).close()
         result = growth.measure(self.source, self.samples_path, self.revision, sets=8)
         self.assertEqual(result["publicationRows"], 56)
         self.assertEqual(result["forecastSessions"], 20)
         self.assertEqual(result["sourcePublicationIds"], [row["id"] for row in self.samples["rows"]])
         self.assertGreater(result["afterBytes"], result["beforeBytes"])
-        self.assertEqual(result["sourceSnapshotSha256"], before)
+        self.assertEqual(result["sourceSnapshotSha256"], growth.digest_file(captured))
         self.assertEqual(growth.digest_file(self.source), before)
+
+    def test_backup_hash_matches_analyzer_with_committed_wal(self):
+        writer = sqlite3.connect(self.source)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE committed_wal_provenance(value TEXT)")
+            writer.execute("INSERT INTO committed_wal_provenance VALUES('capture includes this committed page')")
+            writer.commit()
+            captured = self.directory / "analyzer-wal-capture.sqlite"
+            analysis.snapshot(self.source, captured).close()
+            original_hash = growth.digest_file(self.source)
+            captured_hash = growth.digest_file(captured)
+            self.assertNotEqual(original_hash, captured_hash)
+            result = growth.measure(self.source, self.samples_path, self.revision)
+            self.assertEqual(result["sourceSnapshotSha256"], captured_hash)
+            self.assertEqual(growth.digest_file(self.source), original_hash)
+            self.assertEqual(writer.execute("SELECT value FROM committed_wal_provenance").fetchone()[0],
+                             "capture includes this committed page")
+        finally:
+            writer.close()
 
     def test_rejects_partial_wrong_revision_and_corrupted_payloads(self):
         with self.assertRaisesRegex(ValueError, "reviewed checkout"):
