@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
 import { EOD_METRICS_VERSION } from "../src/eod-metrics";
+import { eodRetirementSessionCutoff, EOD_RETIREMENT_POLICY_VERSION, EOD_ROLLOUT_MONITOR_KEY } from "../src/eod-retirement-policy";
 import { collectEodRolloutMonitoring, finalizeEodUsageDay, finalizeRecentEodUsage, readEodRolloutMonitoring } from "../src/eod-rollout-monitor";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
@@ -45,11 +46,14 @@ describe("production delivery monitoring on migrated SQLite", { timeout: 30_000 
     storage.script(`${statements.join(";\n")};`);
   });
 
-  it("credits ten real sessions, all six scopes and every finalized UTC bucket including the holiday/weekends", async () => {
+  it("credits three consecutive real sessions with all six scopes and their whole UTC-day budgets", async () => {
     const result = await collectEodRolloutMonitoring(env, now);
     expect(result.eligibleForRetirement).toBe(true);
-    expect(result.consecutivePassedSessions).toBe(10);
-    expect(result.usageDays).toHaveLength(15);
+    expect(result).toMatchObject({ version: 2, policyVersion: EOD_RETIREMENT_POLICY_VERSION, requiredSessions: 3, consecutivePassedSessions: 3 });
+    expect(result.sessions.map((session) => session.sessionDate)).toEqual(["2026-11-24", "2026-11-25", "2026-11-27"]);
+    expect(result.usageDays).toHaveLength(4);
+    expect(result.usageDays.filter((day) => day.requiredForRetirement)).toHaveLength(3);
+    expect(result.usageDays.find((day) => day.usageDate === "2026-11-26")?.requiredForRetirement).toBe(false);
     expect(result.sessions.at(-1)).toMatchObject({ sessionDate: "2026-11-27", deadlineAt: "2026-11-27T20:00:00.000Z",
       firstCompletePublicationAt: "2026-11-27T19:00:00.000Z", status: "passed" });
     expect((await readEodRolloutMonitoring(env, now))?.eligibleForRetirement).toBe(true);
@@ -72,10 +76,10 @@ describe("production delivery monitoring on migrated SQLite", { timeout: 30_000 
     expect((await collectEodRolloutMonitoring(env, now)).reasons).toContain("public-activation-evidence-missing-or-invalid");
   });
   it("does not hide a missing active run or a single missing universe", async () => {
-    storage.script("DELETE FROM eod_runs WHERE session_date='2026-11-20'; DELETE FROM eod_publications WHERE scope='breadth:sp500-core' AND session_date='2026-11-27';");
+    storage.script("DELETE FROM eod_runs WHERE session_date='2026-11-24'; DELETE FROM eod_publications WHERE scope='breadth:sp500-core' AND session_date='2026-11-27';");
     const result = await collectEodRolloutMonitoring(env, now);
     expect(result.eligibleForRetirement).toBe(false);
-    expect(result.sessions.find((session) => session.sessionDate === "2026-11-20")?.reasons).toContain("active-daily-run-missing");
+    expect(result.sessions.find((session) => session.sessionDate === "2026-11-24")?.reasons).toContain("active-daily-run-missing");
     expect(result.sessions.at(-1)?.missingScopes).toEqual(["breadth:sp500-core"]);
   });
   it("uses the actual early-close deadline and rejects an observation accepted before the session closed", async () => {
@@ -84,17 +88,67 @@ describe("production delivery monitoring on migrated SQLite", { timeout: 30_000 
     storage.script("UPDATE eod_publications SET accepted_at='2026-11-27T17:59:00Z' WHERE session_date='2026-11-27';");
     expect((await collectEodRolloutMonitoring(env, now)).eligibleForRetirement).toBe(false);
   });
-  it("does not substitute an intraday sample or a missing weekend for full-day quota evidence", async () => {
-    storage.script("DELETE FROM eod_rollout_evidence WHERE id='monitoring:utc-usage:2026-11-21';");
+  it("does not require holiday evidence but never substitutes an intraday trading-day sample", async () => {
+    storage.script("DELETE FROM eod_rollout_evidence WHERE id='monitoring:utc-usage:2026-11-26';");
     let result = await collectEodRolloutMonitoring(env, now);
-    expect(result.eligibleForRetirement).toBe(false);
-    expect(result.usageDays.find((day) => day.usageDate === "2026-11-21")?.status).toBe("pending");
+    expect(result.eligibleForRetirement).toBe(true);
+    expect(result.usageDays.find((day) => day.usageDate === "2026-11-26")).toMatchObject({ status: "pending", requiredForRetirement: false });
     storage.script("UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.sampledAt','2026-11-27T23:00:00Z') WHERE id='monitoring:utc-usage:2026-11-27';");
     result = await collectEodRolloutMonitoring(env, now);
     expect(result.sessions.at(-1)?.status).toBe("pending");
+    expect(result.eligibleForRetirement).toBe(false);
+  });
+  it("retains missing and over-budget weekend telemetry without adding a weekend retirement check", async () => {
+    storage.script(`DELETE FROM market_calendar_sessions WHERE session_date>'2026-11-24';
+      DELETE FROM eod_rollout_evidence WHERE id='monitoring:utc-usage:2026-11-21';
+      UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.accountRowsWritten',9000000)
+        WHERE id='monitoring:utc-usage:2026-11-22';`);
+    const result = await collectEodRolloutMonitoring(env, now);
+    expect(result.sessions.map((session) => session.sessionDate)).toEqual(["2026-11-20", "2026-11-23", "2026-11-24"]);
+    expect(result.eligibleForRetirement).toBe(true);
+    expect(result.usageDays.find((day) => day.usageDate === "2026-11-21")).toMatchObject({ status: "pending", requiredForRetirement: false });
+    expect(result.usageDays.find((day) => day.usageDate === "2026-11-22")).toMatchObject({ status: "failed", requiredForRetirement: false });
+    expect((await readEodRolloutMonitoring(env, now))?.eligibleForRetirement).toBe(true);
+  });
+  it.each([
+    { at: "2026-11-25T00:30:00Z", expected: "2026-11-24", cutoff: "2026-11-23", sessions: ["2026-11-19", "2026-11-20", "2026-11-23"] },
+    { at: "2026-11-26T00:30:00Z", expected: "2026-11-25", cutoff: "2026-11-24", sessions: ["2026-11-20", "2026-11-23", "2026-11-24"] },
+  ])("passes on a weekday at $at using finalizable sessions while newer usage is pending", async ({ at, expected, cutoff, sessions }) => {
+    const weekdayNow = new Date(at);
+    storage.script(`UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.sampledAt',${quoted(`${at.slice(0,10)}T00:00:00.000Z`)})
+        WHERE id LIKE 'monitoring:utc-usage:%';
+      DELETE FROM eod_rollout_evidence WHERE id LIKE 'monitoring:utc-usage:%'
+        AND (id>'monitoring:utc-usage:${cutoff}' OR id IN ('monitoring:utc-usage:2026-11-21','monitoring:utc-usage:2026-11-22'));`);
+    const result = await collectEodRolloutMonitoring(env, weekdayNow);
+    expect(eodRetirementSessionCutoff(expected, weekdayNow)).toBe(cutoff);
+    expect(result).toMatchObject({ usageFinalizationCutoff: cutoff, latestEvaluatedSession: cutoff,
+      eligibleForRetirement: true, consecutivePassedSessions: 3 });
+    expect(result.sessions.map((session) => session.sessionDate)).toEqual(sessions);
+    expect(result.newerSessions).toHaveLength(1);
+    expect(result.newerSessions[0]).toMatchObject({ sessionDate: expected, status: "pending", missingScopes: [], lateScopes: [] });
+    expect(result.usageDays.find((day) => day.usageDate === expected)).toMatchObject({ requiredForRetirement: false, status: "pending" });
+    expect((await readEodRolloutMonitoring(env, weekdayNow))?.eligibleForRetirement).toBe(true);
+    // The cutoff is calendar-based: absent eligible evidence cannot cause a
+    // fallback to older cheap dates or be mistaken for unfinalizable new work.
+    storage.script(`DELETE FROM eod_rollout_evidence WHERE id='monitoring:utc-usage:${cutoff}';`);
+    const missing = await collectEodRolloutMonitoring(env, weekdayNow);
+    expect(missing.sessions.map((session) => session.sessionDate)).toEqual(sessions);
+    expect(missing.eligibleForRetirement).toBe(false);
+  });
+  it("keeps a known newer missed delivery ineligible without requiring that day's unsettled usage", async () => {
+    const weekdayNow = new Date("2026-11-26T00:30:00Z");
+    storage.script(`UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.sampledAt','2026-11-26T00:00:00.000Z')
+        WHERE id LIKE 'monitoring:utc-usage:%';
+      DELETE FROM eod_rollout_evidence WHERE id LIKE 'monitoring:utc-usage:%' AND id>'monitoring:utc-usage:2026-11-24';
+      UPDATE eod_publications SET accepted_at='2026-11-26T00:00:00Z' WHERE session_date='2026-11-25' AND scope='overview:default';`);
+    const result = await collectEodRolloutMonitoring(env, weekdayNow);
+    expect(result.consecutivePassedSessions).toBe(3);
+    expect(result.eligibleForRetirement).toBe(false);
+    expect(result.reasons).toContain("newer-session-delivery-failed");
+    expect(result.newerSessions[0]?.lateScopes).toEqual(["overview:default"]);
   });
   it.each(["eodRowsRead", "eodRowsWritten", "accountRowsRead", "accountRowsWritten"])("blocks retirement for actual %s excess", async (field) => {
-    storage.script(`UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.${field}',9000000) WHERE id='monitoring:utc-usage:2026-11-22';`);
+    storage.script(`UPDATE eod_rollout_evidence SET evidence_json=json_set(evidence_json,'$.${field}',9000000) WHERE id='monitoring:utc-usage:2026-11-25';`);
     expect((await collectEodRolloutMonitoring(env, now)).eligibleForRetirement).toBe(false);
   });
   it("keeps shadow mode and stale cached status ineligible", async () => {
@@ -103,8 +157,21 @@ describe("production delivery monitoring on migrated SQLite", { timeout: 30_000 
     expect(await readEodRolloutMonitoring(env, new Date("2026-12-02T00:30:00Z"))).toMatchObject({ stale: true, eligibleForRetirement: false });
   });
   it("rejects calendar evidence that lacks the observed range", async () => {
-    storage.script("UPDATE market_calendar_refresh_state SET covered_start='2026-11-20';");
+    storage.script("UPDATE market_calendar_refresh_state SET covered_start='2026-11-25';");
     expect((await collectEodRolloutMonitoring(env, now)).reasons).toContain("exchange-calendar-coverage-incomplete");
+  });
+  it("does not reuse an old ten-session cache or accept mismatched cached policy/counts", async () => {
+    const result = await collectEodRolloutMonitoring(env, now);
+    const old = { ...result, version: 1, requiredSessions: 10, consecutivePassedSessions: 10, eligibleForRetirement: true };
+    delete (old as Partial<typeof result>).policyVersion;
+    storage.script(`DELETE FROM eod_rollout_evidence WHERE id=${quoted(EOD_ROLLOUT_MONITOR_KEY)};
+      INSERT INTO eod_rollout_evidence VALUES('monitoring:ten-sessions',${quoted(JSON.stringify(old))},${quoted(now.toISOString())});`);
+    expect(await readEodRolloutMonitoring(env, now)).toBeNull();
+    const { usageFinalizationCutoff: _, ...withoutCutoff } = result;
+    for (const invalid of [old, withoutCutoff, { ...result, policyVersion: "ten-trading-sessions-v1" }, { ...result, requiredSessions: 10 }]) {
+      storage.script(`INSERT OR REPLACE INTO eod_rollout_evidence VALUES(${quoted(EOD_ROLLOUT_MONITOR_KEY)},${quoted(JSON.stringify(invalid))},${quoted(now.toISOString())});`);
+      expect(await readEodRolloutMonitoring(env, now)).toBeNull();
+    }
   });
   it("finalizes an actual prior UTC bucket without redating its analytics sample or lowering recorded usage", async () => {
     storage.script("INSERT INTO eod_usage VALUES('2026-11-27',200,20,0,0); INSERT INTO market_data_daily_usage(usage_date,rows_read,rows_written) VALUES('2026-11-27',3000,200);");

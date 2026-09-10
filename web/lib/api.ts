@@ -2,6 +2,11 @@ import type { OverviewRecovery, OverviewServingState, QuoteFreshnessStatus, Snap
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8787";
 
+export type EodMonitoredSession = {
+  sessionDate: string; deadlineAt: string; firstCompletePublicationAt: string | null;
+  status: "passed" | "failed" | "pending"; reasons: string[];
+};
+
 export type EodPublicationStatus = {
   mode: string;
   pipelineMode?: string;
@@ -11,11 +16,12 @@ export type EodPublicationStatus = {
     forecastLastSession: string; horizonExpiresAt: string; marketPhysicalBytes: number | null; archivePhysicalBytes: number | null;
   } | null;
   monitoring?: {
+    version?: number; policyVersion?: string;
     checkedAt: string; requiredSessions: number; consecutivePassedSessions: number; eligibleForRetirement: boolean;
     latestEvaluatedSession: string | null; reasons: string[]; stale?: boolean;
-    sessions: Array<{sessionDate: string; deadlineAt: string; firstCompletePublicationAt: string | null;
-      status: "passed" | "failed" | "pending"; reasons: string[]}>;
-    usageDays: Array<{usageDate: string; status: "passed" | "failed" | "pending"; reasons: string[]}>;
+    usageFinalizationCutoff?: string | null; newerSessions?: EodMonitoredSession[];
+    sessions: EodMonitoredSession[];
+    usageDays: Array<{usageDate: string; status: "passed" | "failed" | "pending"; reasons: string[]; requiredForRetirement?: boolean}>;
   } | null;
   storageMigration?: {
     id: string; status: string; stage: string; failedStage: string | null; errorCode: string | null;
@@ -55,6 +61,23 @@ export type EodPublicationStatus = {
 
 export function getEodPublicationStatus(options?: { signal?: AbortSignal }): Promise<EodPublicationStatus> {
   return getJson<EodPublicationStatus>("/api/eod/status", options);
+}
+
+export type EodRecoveryStatus = {
+  checkedAt: string;
+  controller: {
+    status: "running" | "waiting" | "paused" | "completed";
+    stage: string; reason: string; nextAttemptAt: string | null; updatedAt: string; codeRevision: string; stale: boolean;
+  } | null;
+  configuration: {
+    status: "pending" | "recorded" | "mismatch"; codeRevision: string | null;
+    activationCodeRevision: string | null; recordedAt: string | null;
+  };
+  activation: { activatedAt: string; codeRevision: string } | null;
+};
+
+export function getEodRecoveryStatus(options?: { signal?: AbortSignal }): Promise<EodRecoveryStatus> {
+  return adminFetch<EodRecoveryStatus>("/api/admin/eod/recovery-status", options);
 }
 
 export type AlertsSessionFilter = "all" | "premarket" | "regular" | "after-hours";

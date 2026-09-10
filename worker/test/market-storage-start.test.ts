@@ -60,6 +60,29 @@ describe("reviewed one-time storage start ordering", () => {
     await expect(startStorageMigrationOnce(input, deps)).rejects.toThrow("complete-analysis-required");
     expect(deps.createDatabase).not.toHaveBeenCalled(); expect(deps.createRun).not.toHaveBeenCalled();
   });
+  it("rejects the measured 90-session layout that fits physically but lacks publication headroom", async () => {
+    const { input, analysis, deps } = await setup();
+    // September 10 production sizing: preserving the shared population and
+    // legacy tables leaves only 27,075,456 bytes before publication reserves.
+    input.tickers = Array.from({ length: 5921 }, (_, index) => `T${String(index).padStart(5, "0")}`);
+    analysis.population = { count: input.tickers.length, sha256: await storageHash(input.tickers) };
+    analysis.archive.sourceRows = 1_989_616;
+    analysis.archive.withAdditionalCompleteRevisionAndTransientBytes = 207_986_688;
+    analysis.bootstrap.database.physicalBytes = 115_458_048;
+    for (const model of analysis.retentionModels) {
+      model.sharedTickers = input.tickers.length; model.fallbackTickerReserve = input.tickers.length;
+      model.modeledSipRows = input.tickers.length * (model.hotSessions + model.sweepHeadroomSessions);
+      model.modeledFallbackRows = model.modeledSipRows;
+      model.database.physicalBytes = model.hotSessions === 90 ? 322_924_544 : 673_886_208;
+      model.projectedBytes = model.database.physicalBytes;
+      model.under350MB = model.projectedBytes < 350_000_000;
+    }
+    expect(analysis.retentionModels.find((model) => model.hotSessions === 90)?.under350MB).toBe(true);
+    await expect(startStorageMigrationOnce(input, deps)).rejects.toThrow("storage-preflight-insufficient-headroom");
+    expect(deps.createDatabase).not.toHaveBeenCalled(); expect(deps.createRun).not.toHaveBeenCalled();
+    expect(deps.authorizeRun).not.toHaveBeenCalled(); expect(deps.configureGitHub).not.toHaveBeenCalled();
+    expect(deps.deployCoordinator).not.toHaveBeenCalled(); expect(deps.dispatch).not.toHaveBeenCalled();
+  });
   it("does not create a target when a full free database inventory leaves no slot", async () => {
     const { input, deps } = await setup();
     const existing = await deps.listDatabases();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryDependencies } from "../src/eod-local-recovery";
+import { localRecoveryChildReason, localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryDependencies } from "../src/eod-local-recovery";
 import type { StorageMigrationRun } from "../src/market-storage-control";
 
 function fixture(status: StorageMigrationRun["status"], error = "storage-final-acceptance-required") {
@@ -17,6 +17,12 @@ function fixture(status: StorageMigrationRun["status"], error = "storage-final-a
   return { deps, calls };
 }
 describe("restartable local recovery ordering", () => {
+  it("preserves the measured capacity blocker without forwarding arbitrary child output", () => {
+    const reason = localRecoveryChildReason('untrusted provider body\n{"status":"paused","reason":"storage-preflight-insufficient-headroom"}');
+    expect(reason).toBe("storage-preflight-insufficient-headroom");
+    expect(localRecoveryFailure(reason!, "start")).toMatchObject({ status: "paused", nextAttemptAt: null, reason });
+    expect(localRecoveryChildReason('{"reason":"secret-value"}')).toBeNull();
+  });
   it("never activates before fresh durable acceptance", async () => {
     const { deps, calls } = fixture("awaiting-evidence");
     expect((await runLocalStorageRecovery(deps)).status).toBe("completed");

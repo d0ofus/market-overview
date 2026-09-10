@@ -203,7 +203,7 @@ async function main(): Promise<void> {
           targetDatabaseId: target, codeRevision, observedAt: new Date().toISOString() }));
       },
     });
-    console.log(JSON.stringify({ id, ...result, monitoring: "ten-trading-sessions-required", sourcePreserved: true, pruneEnabled: false }));
+    console.log(JSON.stringify({ id, ...result, monitoring: "three-trading-sessions-required", sourcePreserved: true, pruneEnabled: false }));
   } finally { await admission.flush(); }
 }
 main().catch((error: unknown) => {

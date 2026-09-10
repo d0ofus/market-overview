@@ -2,10 +2,11 @@ import { z } from "zod";
 import { eodDeadline, EOD_PUBLICATION_SCOPES, expectedEodSession } from "./eod-coordinator";
 import { fetchEodAccountUsage } from "./eod-account-usage";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
+import { eodRetirementSessionCutoff, EOD_RETIREMENT_POLICY_VERSION, EOD_RETIREMENT_REQUIRED_SESSIONS,
+  EOD_ROLLOUT_MONITOR_KEY, EOD_USAGE_FINALIZATION_DELAY_DAYS } from "./eod-retirement-policy";
 import type { Env } from "./types";
 
 const DAY_MS = 86_400_000;
-const MONITOR_KEY = "monitoring:ten-sessions";
 const USAGE_PREFIX = "monitoring:utc-usage:";
 const counters = z.number().int().nonnegative().safe();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
@@ -32,12 +33,14 @@ export type EodSessionMonitoring = {
   status: "passed" | "failed" | "pending"; reasons: string[];
 };
 export type EodUsageMonitoring = {
-  usageDate: string; status: "passed" | "failed" | "pending"; reasons: string[]; evidence: EodFinalizedUsage | null;
+  usageDate: string; requiredForRetirement: boolean;
+  status: "passed" | "failed" | "pending"; reasons: string[]; evidence: EodFinalizedUsage | null;
 };
 export type EodRolloutMonitoring = {
-  version: 1; methodologyVersion: string; checkedAt: string; mode: string;
-  requiredSessions: 10; consecutivePassedSessions: number; eligibleForRetirement: boolean;
+  version: 2; policyVersion: typeof EOD_RETIREMENT_POLICY_VERSION; methodologyVersion: string; checkedAt: string; mode: string;
+  requiredSessions: typeof EOD_RETIREMENT_REQUIRED_SESSIONS; consecutivePassedSessions: number; eligibleForRetirement: boolean;
   latestEvaluatedSession: string | null; sessions: EodSessionMonitoring[]; usageDays: EodUsageMonitoring[];
+  usageFinalizationCutoff: string | null; newerSessions: EodSessionMonitoring[];
   reasons: string[]; stale?: boolean;
 };
 
@@ -65,7 +68,7 @@ export async function finalizeEodUsageDay(input: {
 }): Promise<EodFinalizedUsage> {
   const now = input.now ?? new Date();
   if (!date.safeParse(input.usageDate).success) throw new Error("eod-monitor-invalid-usage-date");
-  const finalizedAfter = new Date(Date.parse(`${input.usageDate}T00:00:00Z`) + 2 * DAY_MS);
+  const finalizedAfter = new Date(Date.parse(`${input.usageDate}T00:00:00Z`) + EOD_USAGE_FINALIZATION_DELAY_DAYS * DAY_MS);
   if (now < finalizedAfter) throw new Error("eod-monitor-usage-day-not-finalizable");
   const [eod, local, previous] = await Promise.all([
     input.ops.prepare("SELECT rows_read,rows_written,reserved_reads,reserved_writes FROM eod_usage WHERE usage_date=?")
@@ -111,8 +114,9 @@ export async function finalizeRecentEodUsage(input: {
   // two slots still recheck recent days for late account corrections.
   const missing = await input.ops.prepare(`SELECT usage_date FROM eod_usage WHERE usage_date>=? AND usage_date<=?
     AND NOT EXISTS (SELECT 1 FROM eod_rollout_evidence WHERE id=?||eod_usage.usage_date)
-    ORDER BY usage_date LIMIT 1`).bind(previousDate(30), previousDate(4), USAGE_PREFIX).first<{ usage_date: string }>();
-  const days = [previousDate(2), previousDate(3), missing?.usage_date ?? previousDate(4)];
+    ORDER BY usage_date LIMIT 1`).bind(previousDate(30), previousDate(EOD_USAGE_FINALIZATION_DELAY_DAYS + 2), USAGE_PREFIX).first<{ usage_date: string }>();
+  const days = [previousDate(EOD_USAGE_FINALIZATION_DELAY_DAYS), previousDate(EOD_USAGE_FINALIZATION_DELAY_DAYS + 1),
+    missing?.usage_date ?? previousDate(EOD_USAGE_FINALIZATION_DELAY_DAYS + 2)];
   for (const usageDate of days) {
     try { await finalizeEodUsageDay({ ...input, now, usageDate }); results.push({ usageDate, status: "recorded" }); }
     catch (error) {
@@ -129,28 +133,41 @@ export async function finalizeRecentEodUsage(input: {
 }
 
 /** Collect evidence in GitHub/maintenance, not during public page reads. Every
- * exchange session and UTC day in the interval must exist; later corrections
+ * evaluated exchange session needs its whole UTC-day usage; intervening weekend
+ * and holiday buckets remain operational telemetry, not retirement gates. Later corrections
  * cannot erase an on-time first publication or convert a late one into a pass. */
 export async function collectEodRolloutMonitoring(env: Env, now = new Date()): Promise<EodRolloutMonitoring> {
   if (!env.OPS_DB || !env.MARKET_DATA_DB) throw new Error("eod-monitor-bindings-required");
   const result: EodRolloutMonitoring = {
-    version: 1, methodologyVersion: EOD_METRICS_VERSION, checkedAt: now.toISOString(), mode: env.EOD_RUNNER_MODE ?? "disabled",
-    requiredSessions: 10, consecutivePassedSessions: 0, eligibleForRetirement: false,
-    latestEvaluatedSession: null, sessions: [], usageDays: [], reasons: [],
+    version: 2, policyVersion: EOD_RETIREMENT_POLICY_VERSION, methodologyVersion: EOD_METRICS_VERSION,
+    checkedAt: now.toISOString(), mode: env.EOD_RUNNER_MODE ?? "disabled",
+    requiredSessions: EOD_RETIREMENT_REQUIRED_SESSIONS, consecutivePassedSessions: 0, eligibleForRetirement: false,
+    latestEvaluatedSession: null, sessions: [], usageDays: [], reasons: [], usageFinalizationCutoff: null, newerSessions: [],
   };
   const expected = await expectedEodSession(env, now);
   if (!expected) result.reasons.push("exchange-calendar-unavailable");
+  const cutoff = expected ? eodRetirementSessionCutoff(expected, now) : null;
+  result.usageFinalizationCutoff = cutoff;
   const calendar = expected ? await env.MARKET_DATA_DB.prepare(`SELECT session_date AS sessionDate,close_at AS closeAt
-    FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT 11`)
-    .bind(expected).all<{ sessionDate: string; closeAt: string }>() : { results: [] };
+    FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT ?`)
+    .bind(cutoff, EOD_RETIREMENT_REQUIRED_SESSIONS).all<{ sessionDate: string; closeAt: string }>() : { results: [] };
   const closed = calendar.results.map((session) => ({ ...session, deadlineAt: eodDeadline(session.sessionDate, session.closeAt) }))
-    .filter((session) => Date.parse(session.deadlineAt) <= now.getTime()).slice(0, 10).reverse();
-  if (closed.length !== 10) result.reasons.push("ten-calendar-sessions-unavailable");
+    .filter((session) => Date.parse(session.deadlineAt) <= now.getTime()).slice(0, EOD_RETIREMENT_REQUIRED_SESSIONS).reverse();
+  // At most the two recent UTC dates can be newer than the finalization cutoff.
+  // Observe their delivery separately so missing unsettled usage cannot slide
+  // the retirement window forever, while a known recent delivery failure stays visible.
+  const recentCalendar = expected ? await env.MARKET_DATA_DB.prepare(`SELECT session_date AS sessionDate,close_at AS closeAt
+    FROM market_calendar_sessions WHERE session_date>? AND session_date<=? ORDER BY session_date LIMIT ?`)
+    .bind(cutoff, expected, EOD_USAGE_FINALIZATION_DELAY_DAYS + 1).all<{ sessionDate: string; closeAt: string }>() : { results: [] };
+  const recentClosed = recentCalendar.results.map((session) => ({ ...session, deadlineAt: eodDeadline(session.sessionDate, session.closeAt) }))
+    .filter((session) => Date.parse(session.deadlineAt) <= now.getTime());
+  if (closed.length !== EOD_RETIREMENT_REQUIRED_SESSIONS) result.reasons.push("required-calendar-sessions-unavailable");
   if (env.EOD_RUNNER_MODE !== "active") result.reasons.push("active-operation-not-started");
   if (env.EOD_READ_ENABLED !== "true") result.reasons.push("public-eod-reads-disabled");
   if (closed.length) {
-    const first = closed[0]!.sessionDate, last = closed.at(-1)!.sessionDate;
-    result.latestEvaluatedSession = last;
+    const observedSessions = [...closed, ...recentClosed];
+    const first = closed[0]!.sessionDate, last = observedSessions.at(-1)!.sessionDate;
+    result.latestEvaluatedSession = closed.at(-1)!.sessionDate;
     const [coverage, runs, publications, usage, activationRow] = await Promise.all([
       env.MARKET_DATA_DB.prepare("SELECT covered_start,covered_end FROM market_calendar_refresh_state WHERE id='default'")
         .first<{ covered_start: string; covered_end: string }>(),
@@ -178,20 +195,21 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
       result.reasons.push("exchange-calendar-coverage-incomplete");
     }
     const usageByDate = new Map(usage.results.map((row) => [row.id.slice(USAGE_PREFIX.length), parseJson(row.evidence_json)]));
+    const retirementDates = new Set(closed.map((session) => session.sessionDate));
     for (let time = Date.parse(`${first}T00:00:00Z`); time <= Date.parse(`${last}T00:00:00Z`); time += DAY_MS) {
       const usageDate = new Date(time).toISOString().slice(0, 10), parsed = finalizedUsageSchema.safeParse(usageByDate.get(usageDate));
-      const row: EodUsageMonitoring = { usageDate, status: "pending", reasons: [], evidence: null };
+      const row: EodUsageMonitoring = { usageDate, requiredForRetirement: retirementDates.has(usageDate), status: "pending", reasons: [], evidence: null };
       if (!parsed.success) row.reasons.push("finalized-utc-usage-missing");
       else if (parsed.data.usageDate !== usageDate || Date.parse(parsed.data.sampledAt) > now.getTime()
-        || Date.parse(parsed.data.finalizedAfter) !== time + 2 * DAY_MS
-        || Date.parse(parsed.data.sampledAt) < time + 2 * DAY_MS) row.reasons.push("finalized-utc-usage-invalid");
+        || Date.parse(parsed.data.finalizedAfter) !== time + EOD_USAGE_FINALIZATION_DELAY_DAYS * DAY_MS
+        || Date.parse(parsed.data.sampledAt) < time + EOD_USAGE_FINALIZATION_DELAY_DAYS * DAY_MS) row.reasons.push("finalized-utc-usage-invalid");
       else {
         row.evidence = parsed.data; row.reasons = usageReasons(parsed.data);
         row.status = row.reasons.length ? "failed" : "passed";
       }
       result.usageDays.push(row);
     }
-    for (const session of closed) {
+    for (const session of observedSessions) {
       const rows = publications.results.filter((row) => row.session_date === session.sessionDate);
       const scopes = rows.map((row) => ({ scope: row.scope, publicationId: row.id, acceptedAt: row.accepted_at }));
       const missingScopes = EOD_PUBLICATION_SCOPES.filter((scope) => !scopes.some((row) => row.scope === scope));
@@ -207,7 +225,8 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
       const deliveryFailed = reasons.length > 0;
       const day = result.usageDays.find((row) => row.usageDate === session.sessionDate)!;
       reasons.push(...day.reasons);
-      result.sessions.push({ ...session, runId, scopes, missingScopes, lateScopes, reasons,
+      const destination = retirementDates.has(session.sessionDate) ? result.sessions : result.newerSessions;
+      destination.push({ ...session, runId, scopes, missingScopes, lateScopes, reasons,
         firstCompletePublicationAt: !missingScopes.length && scopes.every((row) => Number.isFinite(Date.parse(row.acceptedAt)))
           && activatedAt !== null
           ? new Date(Math.max(activatedAt, ...scopes.map((row) => Date.parse(row.acceptedAt)))).toISOString() : null,
@@ -219,13 +238,14 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
       result.consecutivePassedSessions++;
     }
     if (result.sessions.some((session) => session.status === "failed")) result.reasons.push("session-delivery-or-budget-failed");
-    if (result.usageDays.some((day) => day.status === "pending")) result.reasons.push("finalized-utc-usage-pending");
-    if (result.usageDays.some((day) => day.status === "failed")) result.reasons.push("utc-operating-budget-exceeded");
-    result.eligibleForRetirement = result.reasons.length === 0 && result.consecutivePassedSessions === 10;
+    if (result.newerSessions.some((session) => session.status === "failed")) result.reasons.push("newer-session-delivery-failed");
+    if (result.usageDays.some((day) => day.requiredForRetirement && day.status === "pending")) result.reasons.push("finalized-utc-usage-pending");
+    if (result.usageDays.some((day) => day.requiredForRetirement && day.status === "failed")) result.reasons.push("utc-operating-budget-exceeded");
+    result.eligibleForRetirement = result.reasons.length === 0 && result.consecutivePassedSessions === EOD_RETIREMENT_REQUIRED_SESSIONS;
   }
   await env.OPS_DB.prepare(`INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?)
     ON CONFLICT(id) DO UPDATE SET evidence_json=excluded.evidence_json,updated_at=excluded.updated_at`)
-    .bind(MONITOR_KEY, JSON.stringify(result), now.toISOString()).run();
+    .bind(EOD_ROLLOUT_MONITOR_KEY, JSON.stringify(result), now.toISOString()).run();
   return result;
 }
 
@@ -233,14 +253,19 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
 export async function readEodRolloutMonitoring(env: Env, now = new Date()): Promise<EodRolloutMonitoring | null> {
   if (!env.OPS_DB) return null;
   const row = await env.OPS_DB.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?")
-    .bind(MONITOR_KEY).first<{ evidence_json: string }>();
+    .bind(EOD_ROLLOUT_MONITOR_KEY).first<{ evidence_json: string }>();
   const value = row ? parseJson(row.evidence_json) as Partial<EodRolloutMonitoring> | null : null;
-  if (!value || value.version !== 1 || value.methodologyVersion !== EOD_METRICS_VERSION
-    || !Array.isArray(value.sessions) || !Array.isArray(value.usageDays) || !Array.isArray(value.reasons)
+  if (!value || value.version !== 2 || value.policyVersion !== EOD_RETIREMENT_POLICY_VERSION
+    || value.requiredSessions !== EOD_RETIREMENT_REQUIRED_SESSIONS || value.methodologyVersion !== EOD_METRICS_VERSION
+    || !Array.isArray(value.sessions) || !Array.isArray(value.newerSessions) || !Array.isArray(value.usageDays) || !Array.isArray(value.reasons)
+    || !(value.usageFinalizationCutoff === null || date.safeParse(value.usageFinalizationCutoff).success)
     || typeof value.checkedAt !== "string" || !Number.isFinite(Date.parse(value.checkedAt))) return null;
   const stale = Date.parse(value.checkedAt) > now.getTime() || now.getTime() - Date.parse(value.checkedAt) > 30 * 60 * 60_000;
   return { ...value as EodRolloutMonitoring, stale,
-    eligibleForRetirement: value.eligibleForRetirement === true && !stale && env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true",
+    eligibleForRetirement: value.eligibleForRetirement === true && value.consecutivePassedSessions === EOD_RETIREMENT_REQUIRED_SESSIONS
+      && value.sessions.length === EOD_RETIREMENT_REQUIRED_SESSIONS && value.sessions.every((session) => session.status === "passed")
+      && value.newerSessions.every((session) => session.status !== "failed")
+      && !stale && env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true",
     reasons: stale ? [...value.reasons, "monitor-sample-stale"] : value.reasons,
   };
 }

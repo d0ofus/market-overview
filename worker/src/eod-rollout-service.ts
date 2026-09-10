@@ -6,6 +6,7 @@ import { eodHash } from "./eod-publication-service";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE } from "./eod-catalog-service";
 import { collectEodRolloutMonitoring } from "./eod-rollout-monitor";
+import { eodRetirementSessionCutoff, EOD_RETIREMENT_POLICY_VERSION, EOD_RETIREMENT_REQUIRED_SESSIONS } from "./eod-retirement-policy";
 import type { Env } from "./types";
 
 const universeIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"] as const;
@@ -247,18 +248,19 @@ export async function assertEodCutover(env: Env, codeRevision: string): Promise<
 }
 
 const retirementSchema = z.object({
-  version: z.literal(1), codeRevision: z.string(), methodologyVersion: z.literal(EOD_METRICS_VERSION),
+  version: z.literal(2), policyVersion: z.literal(EOD_RETIREMENT_POLICY_VERSION),
+  codeRevision: z.string(), methodologyVersion: z.literal(EOD_METRICS_VERSION),
   sessions: z.array(z.object({ sessionDate: date, runId: z.string().min(1), deadlineAt: timestamp,
-    publishedAt: timestamp, scopes: z.array(scopeSchema).length(6), measurements: measurementsSchema, limits: limitsSchema }).strict()).length(10),
+    publishedAt: timestamp, scopes: z.array(scopeSchema).length(6), measurements: measurementsSchema, limits: limitsSchema }).strict()).length(EOD_RETIREMENT_REQUIRED_SESSIONS),
 }).strict();
 export function validateEodRetirementEvidence(input: unknown, codeRevision: string, exchangeSessions: string[]) {
   const parsed = retirementSchema.safeParse(input);
   if (!parsed.success) fail("retirement-schema");
   const proof = parsed.data;
   assertIdentity(codeRevision, proof.codeRevision);
-  const expected = [...new Set(exchangeSessions)].sort().slice(-10);
+  const expected = [...new Set(exchangeSessions)].sort().slice(-EOD_RETIREMENT_REQUIRED_SESSIONS);
   const actual = proof.sessions.map((session) => session.sessionDate).sort();
-  if (expected.length !== 10 || actual.some((session, index) => session !== expected[index])) fail("retirement-ten-consecutive-sessions");
+  if (expected.length !== EOD_RETIREMENT_REQUIRED_SESSIONS || actual.some((session, index) => session !== expected[index])) fail("retirement-consecutive-trading-sessions");
   for (const session of proof.sessions) {
     assertMeasurements(session.measurements, session.limits);
     assertScopes(session.scopes, session.sessionDate);
@@ -271,20 +273,23 @@ export function validateEodRetirementEvidence(input: unknown, codeRevision: stri
   return proof;
 }
 
-/** Separate retirement check: ten sessions are not an initial active-writer prerequisite. */
+/** Separate retirement check: the observed streak is not an initial active-writer prerequisite. */
 export async function assertEodRetirement(env: Env, codeRevision: string): Promise<void> {
   if (env.EOD_RUNNER_MODE !== "active") fail("retirement-active-mode-required");
   await assertEodCutover(env, codeRevision);
   const row = await env.OPS_DB!.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='retirement'").first<{evidence_json:string}>();
   if (!row) fail("retirement-required");
-  const expected = await expectedEodSession(env);
-  const calendar = await env.MARKET_DATA_DB!.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT 10")
-    .bind(expected).all<{session_date:string}>();
+  const now = new Date(), expected = await expectedEodSession(env, now);
+  if (!expected) fail("retirement-calendar-unavailable");
+  const cutoff = eodRetirementSessionCutoff(expected, now);
+  const calendar = await env.MARKET_DATA_DB!.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT ?")
+    .bind(cutoff, EOD_RETIREMENT_REQUIRED_SESSIONS).all<{session_date:string}>();
   const proof = validateEodRetirementEvidence(parseObject(row.evidence_json), codeRevision, calendar.results.map((value) => value.session_date));
-  const monitored = await collectEodRolloutMonitoring(env);
+  const monitored = await collectEodRolloutMonitoring(env, now);
   // This independently resolves actual calendar close + two hours, first
   // acceptance per scope, public activation and finalized whole-UTC-day usage
-  // including weekends. Submitted evidence cannot fill absent observations.
+  // for the evaluated exchange dates. Nontrading-day telemetry does not gate
+  // retirement. Submitted evidence cannot fill absent trading observations.
   if (!monitored.eligibleForRetirement) fail(`retirement-monitoring-incomplete:${monitored.reasons.join(",")}`);
   for (const session of proof.sessions) {
     const observed = monitored.sessions.find((value) => value.sessionDate === session.sessionDate);

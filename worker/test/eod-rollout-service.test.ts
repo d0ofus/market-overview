@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertEodCutover, validateEodCutoverEvidence, validateEodRetirementEvidence, type EodCutoverEvidence } from "../src/eod-rollout-service";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
 import { EOD_METRICS_VERSION } from "../src/eod-metrics";
+import { eodRetirementSessionCutoff, EOD_RETIREMENT_POLICY_VERSION } from "../src/eod-retirement-policy";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS } from "../src/eod-history-maintenance";
 import { encodeEodPayload, eodPayloadSummary } from "../src/eod-publication-codec";
 import { eodHash } from "../src/eod-publication-service";
@@ -32,7 +33,7 @@ function evidence(): EodCutoverEvidence {
 }
 
 describe("bounded cutover proof validation", () => {
-  it("allows one measured full-scope cutover without requiring ten sessions", () => {
+  it("allows one measured full-scope cutover before the retirement observation streak", () => {
     expect(validateEodCutoverEvidence(evidence(), revision, now).sessionDate).toBe("2026-11-27");
   });
   it("rejects missing proof, wrong code, stale measurements and inflated provider ceilings", () => {
@@ -58,20 +59,34 @@ describe("bounded cutover proof validation", () => {
       (proof: EodCutoverEvidence) => { proof.readers.consumers = ["overview"]; },
     ]) { const proof = evidence(); mutate(proof); expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow(); }
   });
-  it("requires ten consecutive exchange sessions, deadlines and budgets only for retirement", () => {
-    const dates = ["2026-11-13", "2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27"];
-    const proof = { version: 1, codeRevision: revision, methodologyVersion: EOD_METRICS_VERSION,
+  it("requires the current three-session policy, consecutive exchange sessions, deadlines and budgets for retirement", () => {
+    const dates = ["2026-11-24", "2026-11-25", "2026-11-27"];
+    const proof = { version: 2, policyVersion: EOD_RETIREMENT_POLICY_VERSION, codeRevision: revision, methodologyVersion: EOD_METRICS_VERSION,
       sessions: dates.map((sessionDate) => ({ sessionDate, runId: `eod:active:${sessionDate}:daily`,
         deadlineAt: `${sessionDate}T23:00:00Z`, publishedAt: `${sessionDate}T22:00:00Z`,
         scopes: evidence().scopes.map((scope) => ({ ...scope, sessionDate, publicationId: `${scope.publicationId}-${sessionDate}` })),
         measurements: { ...evidence().measurements, usageDate: sessionDate }, limits: evidence().limits })) };
-    expect(validateEodRetirementEvidence(proof, revision, dates).sessions).toHaveLength(10);
+    expect(validateEodRetirementEvidence(proof, revision, dates).sessions).toHaveLength(3);
+    expect(() => validateEodRetirementEvidence({ ...proof, version: 1 }, revision, dates)).toThrow(/retirement-schema/);
+    expect(() => validateEodRetirementEvidence({ ...proof, policyVersion: "ten-trading-sessions-v1" }, revision, dates)).toThrow(/retirement-schema/);
     expect(() => validateEodRetirementEvidence({ ...proof, sessions: proof.sessions.slice(1) }, revision, dates)).toThrow(/retirement-schema/);
-    proof.sessions[0]!.sessionDate = "2026-11-12";
+    proof.sessions[0]!.sessionDate = "2026-11-23";
     expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/consecutive/);
     proof.sessions[0]!.sessionDate = dates[0]!;
-    proof.sessions[0]!.publishedAt = "2026-11-14T00:00:00Z";
+    proof.sessions[0]!.publishedAt = "2026-11-25T00:00:00Z";
     expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/deadline/);
+    proof.sessions[0]!.publishedAt = `${dates[0]}T22:00:00Z`;
+    proof.sessions[0]!.measurements.httpCpuMs = 11;
+    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/measured-limits/);
+    proof.sessions[0]!.measurements.httpCpuMs = 5;
+    proof.sessions[0]!.measurements.usageDate = "2026-11-22";
+    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/usage-date-mismatch/);
+  });
+  it("selects the same finalizable calendar cutoff on weekdays, UTC rollover and weekends", () => {
+    expect(eodRetirementSessionCutoff("2026-11-25", new Date("2026-11-26T00:30:00Z"))).toBe("2026-11-24");
+    expect(eodRetirementSessionCutoff("2026-11-25", new Date("2026-11-25T23:59:59Z"))).toBe("2026-11-23");
+    expect(eodRetirementSessionCutoff("2026-11-27", new Date("2026-11-30T00:30:00Z"))).toBe("2026-11-27");
+    expect(() => eodRetirementSessionCutoff("2026-02-30", now)).toThrow(/cutoff-invalid/);
   });
 });
 

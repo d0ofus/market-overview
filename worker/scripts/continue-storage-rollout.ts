@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { fetchEodAccountUsage, reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryResult } from "../src/eod-local-recovery";
+import { localRecoveryChildReason, localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryResult } from "../src/eod-local-recovery";
 import { loadStorageMigration } from "../src/market-storage-control";
+import { storeEodControllerReport, type EodControllerReport } from "../src/eod-recovery-status";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const tmp = resolve(root, "worker/tmp");
@@ -35,9 +36,16 @@ async function main(): Promise<void> {
     || (previous.status === "waiting" && previous.nextAttemptAt && Date.parse(previous.nextAttemptAt) > now.getTime()))) {
     console.log(JSON.stringify({ status: previous.status, stage: previous.stage, nextAttemptAt: previous.nextAttemptAt, reason: previous.reason })); return;
   }
+  let reportOps: D1Database | undefined, pendingReport: EodControllerReport | undefined;
+  const publish = async () => {
+    if (!reportOps || !pendingReport) return;
+    try { await storeEodControllerReport(reportOps, pendingReport); }
+    catch { console.log(JSON.stringify({ status: "recovery-status-sync-pending" })); }
+  };
   const save = (result: LocalRecoveryResult | { status: "running"; stage: string; nextAttemptAt: null; reason: string }) => {
     const temporary = statePath + ".next";
-    writeFileSync(temporary, JSON.stringify({ ...result, codeRevision: input.codeRevision, updatedAt: new Date().toISOString(), pid: process.pid }, null, 2));
+    pendingReport = { version: 1, ...result, codeRevision: input.codeRevision, updatedAt: new Date().toISOString() };
+    writeFileSync(temporary, JSON.stringify({ ...pendingReport, pid: process.pid }, null, 2));
     renameSync(temporary, statePath);
     console.log(JSON.stringify(result));
   };
@@ -64,6 +72,8 @@ async function main(): Promise<void> {
       const native = error as { stdout?: string; stderr?: string; code?: string };
       const detail = String(native.stdout ?? "") + String(native.stderr ?? "");
       // Only sanitized fixed categories leave failed native processes.
+      const knownReason = localRecoveryChildReason(detail);
+      if (knownReason) throw new Error(knownReason);
       if (/storage-acceptance-completed-latest-run-required/.test(detail)) throw new Error("storage-local-bootstrap-refresh-required");
       if (/quota|budget|daily-read|daily-write|maximum.*rows|exceeded.*rows/i.test(detail)) throw new Error("storage-local-budget-exhausted");
       if (/timeout|network|unavailable|runtime-evidence-incomplete|runtime-pending|logs.*pending|measurement-window-required|await-actual-coordinator-window/i.test(detail) || native.code === "ETIMEDOUT") throw new Error("storage-local-transient-unavailable");
@@ -95,9 +105,11 @@ async function main(): Promise<void> {
     admission = createEodAdmission(rawOps,`local-recovery:${migrationId}`, { reconcileAccountUsage: () => reconcileEodAccountUsage({
       accountId: input.accountId,token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops: rawOps }) });
     const ops = createEodD1Database({ accountId: input.accountId,token,databaseId: input.opsDatabaseId,allowedDatabaseIds,admission });
-    const phase = (name: string) => {
+    reportOps = ops;
+    const phase = async (name: string) => {
       if (Date.now()-now.getTime()>35*60_000) throw new Error("storage-local-attempt-timeout");
       stage = name; save({ status: "running", stage, reason: "", nextAttemptAt: null });
+      await publish();
     };
     const variables = () => {
       const body = JSON.parse(command("gh",["api","repos/d0ofus/market-overview/environments/market-eod/variables?per_page=100"])) as { total_count: number; variables: {name:string;value:string}[] };
@@ -134,12 +146,12 @@ async function main(): Promise<void> {
     const result = await runLocalStorageRecovery({ assertCheckout,
       hasStarted: coordinatorStarted,
       hasCompleteSnapshot: async () => existsSync(snapshot + ".metadata.json") && (read(snapshot + ".metadata.json") as {complete?:boolean}).complete === true,
-      capture: async () => { phase("capture"); node("market-storage-snapshot.ts"); },
+      capture: async () => { await phase("capture"); node("market-storage-snapshot.ts"); },
       analyzePreflight: async () => {
-        phase("capacity-analysis"); command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,
+        await phase("capacity-analysis"); command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,
           "--tickers-json",snapshot+".tickers.json","--session-date",sessionDate,"--history-sqlite",historySnapshot,"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
       },
-      start: async () => { phase("start"); node("start-storage-migration-once.ts"); if (!target()) throw new Error("storage-local-start-not-persisted"); },
+      start: async () => { await phase("start"); node("start-storage-migration-once.ts"); if (!target()) throw new Error("storage-local-start-not-persisted"); },
       loadMigration: async () => {
         const run = await loadStorageMigration(ops,migrationId);
         if (!run || run.code_revision !== input.codeRevision || run.source_database_id !== input.sourceDatabaseId
@@ -147,7 +159,7 @@ async function main(): Promise<void> {
         return run;
       },
       prepareAcceptance: async () => {
-        phase("publication-samples");
+        await phase("publication-samples");
         env.EOD_STORAGE_PUBLICATION_SAMPLES_PATH = resolve(tmp,"eod-publication-samples.json");
         node("market-storage-runner.ts",["sample-publications"]);
         const samples = read(env.EOD_STORAGE_PUBLICATION_SAMPLES_PATH) as {samplesHash:string;rows:Array<{session_date:string}>};
@@ -159,20 +171,20 @@ async function main(): Promise<void> {
         env.EOD_STORAGE_RUNTIME_EVIDENCE_PATH = resolve(artifactDirectory,"runtime-evidence.json");
         env.EOD_STORAGE_CUTOVER_EVIDENCE_PATH = resolve(artifactDirectory,"cutover-evidence.json");
         env.EOD_STORAGE_ANALYSIS_PATH = resolve(artifactDirectory,"storage-analysis.json");
-        phase("publication-growth");
+        await phase("publication-growth");
         command("python",[resolve(root,"worker/scripts/measure-eod-publication-growth.py"),"--schema-sqlite",snapshot,
           "--samples-json",env.EOD_STORAGE_PUBLICATION_SAMPLES_PATH,"--output",env.EOD_STORAGE_PUBLICATION_GROWTH_PATH],env);
         const growth = read(env.EOD_STORAGE_PUBLICATION_GROWTH_PATH) as {afterBytes:number;beforeBytes:number;completeSessionSets:number;forecastSessions:number;revisionsPerSession:number};
         const reserve = Math.ceil((growth.afterBytes-growth.beforeBytes)/growth.completeSessionSets)*growth.forecastSessions*growth.revisionsPerSession;
         if (!Number.isSafeInteger(reserve) || reserve <= 0) throw new Error("storage-local-growth-measurement-invalid");
-        phase("final-capacity");
+        await phase("final-capacity");
         command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,"--tickers-json",snapshot+".tickers.json",
           "--session-date",sessionDate,"--history-sqlite",historySnapshot,"--publication-growth-reserve-bytes",String(reserve),"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
-        phase("runtime-candidate"); node("prepare-eod-runtime-candidate.ts",["run"]);
-        phase("cutover-evidence"); node("market-storage-runner.ts",["build-cutover-evidence"]);
+        await phase("runtime-candidate"); node("prepare-eod-runtime-candidate.ts",["run"]);
+        await phase("cutover-evidence"); node("market-storage-runner.ts",["build-cutover-evidence"]);
       },
-      accept: async () => { phase("acceptance"); node("market-storage-runner.ts",["accept"]); },
-      activate: async () => { phase("activation"); node("activate-storage-migration-once.ts"); },
+      accept: async () => { await phase("acceptance"); node("market-storage-runner.ts",["accept"]); },
+      activate: async () => { await phase("activation"); node("activate-storage-migration-once.ts"); },
     });
     save(result);
   } catch (error) {
@@ -187,6 +199,7 @@ async function main(): Promise<void> {
       }
     } else { save(localRecoveryFailure(message,stage)); process.exitCode = 1; }
   } finally {
+    await publish();
     try { await admission?.flush(); } finally { if (existsSync(lockPath)) unlinkSync(lockPath); }
   }
 }

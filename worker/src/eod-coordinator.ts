@@ -10,6 +10,7 @@ import { publicStorageMigrationStatus, storageMigrationBlocksEod } from "./marke
 import { coordinateStorageMigration } from "./market-storage-scheduler";
 import { readEodRolloutMonitoring } from "./eod-rollout-monitor";
 import { loadStorageHistoryCapacityStatus } from "./eod-storage-history-capacity";
+import { registerEodRecoveryRoutes } from "./eod-recovery-status";
 
 export type EodPurpose = "daily" | "reconcile" | "backfill" | "maintenance";
 export type EodRun = {
@@ -477,6 +478,7 @@ export async function eodStatus(env: Env, now = new Date()) {
 }
 
 export function registerEodRoutes(app: Hono<{Bindings:Env}>) {
+  registerEodRecoveryRoutes(app);
   app.get("/api/eod/status",async (c) => {
     c.header("Cache-Control","no-store");
     return c.json(await eodStatus(c.env));

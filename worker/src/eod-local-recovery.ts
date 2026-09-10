@@ -29,7 +29,7 @@ export async function runLocalStorageRecovery(deps: LocalRecoveryDependencies, n
   let run = await deps.loadMigration();
   if (run.status === "completed") {
     await deps.activate(); // Completed replay independently verifies live bindings.
-    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "ten-trading-session-monitoring-remains" };
+    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "three-trading-session-monitoring-remains" };
   }
   if (run.status === "awaiting-evidence") {
     if (run.error_code !== "storage-final-acceptance-required") return {
@@ -47,7 +47,7 @@ export async function runLocalStorageRecovery(deps: LocalRecoveryDependencies, n
     await deps.activate();
     const completed = await deps.loadMigration();
     if (completed.status !== "completed") throw new Error("storage-local-cutover-not-persisted");
-    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "ten-trading-session-monitoring-remains" };
+    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "three-trading-session-monitoring-remains" };
   }
   if (["aborted", "aborting"].includes(run.status)) return { status: "paused", stage: run.stage, nextAttemptAt: null, reason: run.status };
   return { status: "waiting", stage: run.stage, reason: "durable-github-stage-in-progress",
@@ -65,4 +65,17 @@ export function localRecoveryFailure(message: string, stage: string, now = new D
   };
   return { status: "paused", stage, nextAttemptAt: null,
     reason: /^(?:storage|runtime|eod)-[a-z0-9-]{1,110}$/.test(message) ? message : "storage-local-review-required" };
+}
+
+/** Preserve a useful fixed operator failure instead of swallowing it in the
+ * parent process. Only known capacity categories may cross this boundary. */
+export function localRecoveryChildReason(output: string): string | null {
+  for (const line of output.split(/\r?\n/)) {
+    try {
+      const value = JSON.parse(line) as { reason?: unknown };
+      if (["storage-preflight-insufficient-headroom", "storage-preflight-insufficient-archive-headroom",
+        "storage-start-free-account-capacity-exceeded"].includes(String(value?.reason))) return String(value.reason);
+    } catch { /* Provider bodies and arbitrary stderr are never forwarded. */ }
+  }
+  return null;
 }

@@ -111,6 +111,6 @@ Before target activation, explicit abort verifies that the original source is st
 | Production validation | Full shared universe and all six scopes; reader/output parity; actual D1 sizes/reads/index writes and Worker CPU/query limits |
 | Public cutover | Verified replacement binding, accepted publication pointers, dated coverage/reasons, commentary and refresh behavior on both pages |
 | Historical recovery | Bounded corrections/backfills with date-appropriate membership; explicit gaps and unverified legacy results where evidence is absent |
-| Monitoring and retirement | Ten consecutive trading sessions published within two hours of actual close and within agreed budgets; then retire replaced writers while preserving archive-compatible rollback |
+| Monitoring and retirement | Three consecutive trading sessions published within two hours of actual close and within agreed budgets, with finalized whole-day usage for those trading dates and no weekend/holiday bucket requirement; then retire replaced writers while preserving archive-compatible rollback |
 
 Free-tier allowance can make initial transfer and reconstruction span multiple UTC days. The two-hour delivery target is measured during normal daily operation after bootstrap, and cannot be claimed from a successful workflow dispatch or a healthy database connection.
