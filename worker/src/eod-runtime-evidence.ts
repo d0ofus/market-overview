@@ -26,6 +26,28 @@ type LogEvent={source?:unknown;$metadata?:{requestId?:string;service?:string;id?
   $workers?:{requestId?:string;scriptName?:string;scriptVersion?:{id?:string};cpuTimeMs?:number;outcome?:string;truncated?:boolean;
     event?:{response?:{status?:number}}};timestamp?:number};
 type Fetcher=typeof fetch;
+const TELEMETRY_EVENT_LIMIT=2000;
+// Cloudflare's events view has a nested events/count result. Query sampling is
+// separate from the Worker's head_sampling_rate; both must preserve every event.
+// Contract: cloudflare-typescript/src/resources/workers/observability/telemetry.ts
+const queryStatisticsSchema=z.object({bytes_read:finite,elapsed:finite,rows_read:finite,abr_level:finite.optional()});
+const queryResultSchema=z.object({
+  run:z.object({status:z.enum(["STARTED","COMPLETED"]),statistics:queryStatisticsSchema.optional()}),
+  statistics:queryStatisticsSchema,
+  events:z.object({count:finite.int().optional(),events:z.array(z.object({
+    source:z.union([z.string(),z.record(z.unknown())]),dataset:z.string(),timestamp:finite,
+    $metadata:z.object({id:z.string().min(1),requestId:z.string().optional(),service:z.string().optional(),
+      statusCode:finite.optional(),type:z.string().optional()}).passthrough(),
+    $workers:z.object({requestId:z.string().optional(),scriptName:z.string().optional(),
+      scriptVersion:z.object({id:z.string().optional()}).passthrough().optional(),cpuTimeMs:finite.optional(),
+      outcome:z.string().optional(),truncated:z.boolean().optional(),
+      event:z.object({response:z.object({status:finite.optional()}).passthrough().optional()}).passthrough().optional(),
+    }).passthrough().optional(),
+  }).passthrough()).max(TELEMETRY_EVENT_LIMIT)}),
+});
+function invocationEvent(event:LogEvent):boolean {
+  return event.$metadata?.type==="cf-worker-event";
+}
 function requiredBindings(id:RuntimeEvidenceIdentity):Record<string,string> {
   return {MARKET_DATA_DB:id.targetDatabaseId,MARKET_HISTORY_DB:id.historyDatabaseId,OPS_DB:id.opsDatabaseId,DB:id.coreDatabaseId,
     EOD_READ_ENABLED:"true",EOD_RUNTIME_CANDIDATE_ONLY:"true",
@@ -83,7 +105,7 @@ function summaryFrom(source:unknown):z.infer<typeof summarySchema>|null {
 /** Inputs are only the actual version API response and raw event API records.
  * Never accepts GraphQL percentiles, wall time or request-average ratios. */
 export async function buildRuntimeEvidence(identity:RuntimeEvidenceIdentity,version:unknown,events:LogEvent[],window:{from:number;to:number},
-  completeWindow:boolean,collectedAt=new Date().toISOString()):Promise<RuntimeEvidence> {
+  completeWindow:boolean,collectedAt=new Date().toISOString(),queryUnavailableReasons:readonly string[]=[]):Promise<RuntimeEvidence> {
   identity=identitySchema.parse(identity);
   const deployment=z.object({id:z.string(),resources:z.object({bindings:z.array(z.object({name:z.string(),type:z.string(),
     id:z.string().optional(),database_id:z.string().optional(),text:z.string().optional()}))})}).parse(version);
@@ -97,7 +119,7 @@ export async function buildRuntimeEvidence(identity:RuntimeEvidenceIdentity,vers
   }
   assertBindings(identity,versionBindings);
   if(!Number.isFinite(window.from)||!Number.isFinite(window.to)||window.to<=window.from||window.to-window.from>86_400_000)throw new Error("runtime-invalid-window");
-  const unavailableReasons=completeWindow?[]:["runtime-log-query-truncated"];
+  const unavailableReasons=[...(completeWindow?[]:["runtime-log-query-truncated"]),...queryUnavailableReasons];
   const summaries=events.flatMap((event)=>{const summary=summaryFrom(event.source);return summary?.probeId===identity.probeId?[{event,summary}]:[];});
   const summaryRequests=new Set(summaries.map(({event})=>event.$workers?.requestId??event.$metadata?.requestId).filter(Boolean));
   // CPU exhaustion and pre-admission failures can prevent a final summary. Do
@@ -109,7 +131,7 @@ export async function buildRuntimeEvidence(identity:RuntimeEvidenceIdentity,vers
         || (event.$metadata?.statusCode ?? worker.event?.response?.status ?? 0)>=500))
       unavailableReasons.push(`runtime-window-failed-invocation:${worker.requestId??"missing-request-id"}`);
     if(worker?.scriptName===identity.workerName && worker.scriptVersion?.id===identity.workerVersion
-      && !summaryFrom(event.source) && (worker.outcome!==undefined || worker.cpuTimeMs!==undefined || event.$metadata?.type==="cf-worker-event")
+      && invocationEvent(event)
       && (!worker.requestId || !summaryRequests.has(worker.requestId) || typeof worker.cpuTimeMs!=="number"
         || !Number.isFinite(worker.cpuTimeMs) || worker.cpuTimeMs<0))
       unavailableReasons.push(`runtime-window-unmatched-invocation:${worker.requestId??"missing-request-id"}`);
@@ -118,6 +140,7 @@ export async function buildRuntimeEvidence(identity:RuntimeEvidenceIdentity,vers
   for(const {event,summary} of summaries) {
     const requestId=event.$workers?.requestId??event.$metadata?.requestId;
     const correlated=events.filter((row)=>requestId && (row.$workers?.requestId??row.$metadata?.requestId)===requestId
+      && invocationEvent(row)
       && row.$workers?.scriptName===identity.workerName && row.$workers?.scriptVersion?.id===identity.workerVersion
       && typeof row.$workers?.cpuTimeMs==="number" && Number.isFinite(row.$workers.cpuTimeMs) && row.$workers.cpuTimeMs>=0);
     if(!requestId || event.$workers?.scriptVersion?.id!==identity.workerVersion || event.$workers?.scriptName!==identity.workerName
@@ -148,11 +171,22 @@ export async function collectRuntimeEvidence(input:{accountId:string;token:strin
     const data=await response.json() as {success?:boolean;result?:unknown};if(!data.success||!data.result)throw new Error("runtime-cloudflare-response-invalid");return data.result;
   };
   const version=await call(`/workers/scripts/${encodeURIComponent(identity.workerName)}/versions/${identity.workerVersion}`);
-  const response=await call("/workers/observability/telemetry/query",{queryId:`eod-runtime-${identity.probeId}`,view:"events",limit:2000,dry:true,
+  const response=await call("/workers/observability/telemetry/query",{queryId:`eod-runtime-${identity.probeId}`,view:"events",limit:TELEMETRY_EVENT_LIMIT,dry:true,
     timeframe:{from:input.from,to:input.to},parameters:{datasets:["cloudflare-workers"],filterCombination:"and",
-      filters:[{key:"$metadata.service",operation:"eq",type:"string",value:identity.workerName}]}}) as {events?:{events?:LogEvent[];count?:number}|LogEvent[]};
-  const events=Array.isArray(response.events)?response.events:response.events?.events;
-  if(!Array.isArray(events))throw new Error("runtime-cloudflare-events-unavailable");
-  const count=Array.isArray(response.events)?events.length:response.events?.count;
-  return buildRuntimeEvidence(identity,version,events,{from:input.from,to:input.to},events.length<2000 && typeof count==="number" && count===events.length);
+      filters:[{key:"$metadata.service",operation:"eq",type:"string",value:identity.workerName}]}});
+  const parsed=queryResultSchema.safeParse(response);
+  if(!parsed.success)throw new Error("runtime-cloudflare-query-metadata-unavailable");
+  const {run,statistics,events:{events,count}}=parsed.data;
+  const reasons:string[]=[];
+  if(run.status!=="COMPLETED")reasons.push("runtime-log-query-not-completed");
+  if((statistics.abr_level??1)!==1 || (run.statistics?.abr_level??1)!==1)reasons.push("runtime-log-query-sampled");
+  // Pagination uses an event's $metadata.id as the request offset cursor. There
+  // is no documented nextCursor response. We deliberately do not page: require
+  // the whole reported count below the limit and unique event cursor IDs.
+  if(new Set(events.map(event=>event.$metadata.id)).size!==events.length)reasons.push("runtime-log-query-duplicate-events");
+  if(events.some(event=>event.dataset!=="cloudflare-workers" || event.timestamp<input.from || event.timestamp>input.to)) {
+    reasons.push("runtime-log-query-event-scope-mismatch");
+  }
+  return buildRuntimeEvidence(identity,version,events,{from:input.from,to:input.to},
+    events.length<TELEMETRY_EVENT_LIMIT && count!==undefined && count===events.length,new Date().toISOString(),reasons);
 }

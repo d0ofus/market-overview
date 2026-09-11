@@ -16,9 +16,24 @@ function fixture() {
       codeRevision:identity.codeRevision,workerVersion:identity.workerVersion,targetDatabaseId:identity.targetDatabaseId,eodReadEnabled:true,
       startedAt:"2026-09-10T01:10:00.000Z",finishedAt:"2026-09-10T01:10:01.000Z",outcome:"ok",complete:true,cpuSource:"cloudflare-invocation-log-required",
       stats:{queries:i+10,rowsRead:20,rowsWritten:5,maxQueryDurationMs:i+0.5,failedQueries:0,missingMetadata:0}};
-    const workers={requestId:`request-${i}`,scriptName:identity.workerName,scriptVersion:{id:identity.workerVersion}};
-    return [{source:JSON.stringify(summary),$workers:workers},{source:"invocation",$workers:{...workers,cpuTimeMs:i+1,outcome:"ok",wallTimeMs:10000}}];
+    const workers={requestId:`request-${i}`,scriptName:identity.workerName,scriptVersion:{id:identity.workerVersion},eventType:"fetch"};
+    const shared={dataset:"cloudflare-workers",timestamp:Date.parse(summary.finishedAt)};
+    return [{...shared,source:i%2?summary:JSON.stringify(summary),$workers:workers,
+      $metadata:{id:`summary-${i}`,type:"cf-worker-log",service:identity.workerName,requestId:workers.requestId}},
+    {...shared,source:"invocation",$metadata:{id:`invocation-${i}`,type:"cf-worker-event",service:identity.workerName,requestId:workers.requestId},
+      $workers:{...workers,cpuTimeMs:i+1,outcome:"ok",wallTimeMs:10000}}];
   });
+}
+function queryFixture() {
+  const events=fixture(),statistics={bytes_read:1024,elapsed:0.025,rows_read:events.length};
+  return {run:{id:"query-run",accountId:"a".repeat(32),dry:true,granularity:60,
+    query:{id:`eod-runtime-${identity.probeId}`,adhoc:true,parameters:{datasets:["cloudflare-workers"]}},
+    status:"COMPLETED",timeframe:window,userId:"operator",statistics},statistics,
+    events:{count:events.length,events,fields:[],series:[]}};
+}
+function collectResult(result:unknown) {
+  const fetcher=vi.fn(async(_url:RequestInfo|URL,init?:RequestInit)=>Response.json({success:true,result:init?.method==="GET"?version():result}));
+  return {fetcher,promise:collectRuntimeEvidence({accountId:"a".repeat(32),token:"private-unit-token",identity,...window,fetcher})};
 }
 describe("raw invocation evidence",()=>{
   it("binds paid runtime measurements to the actual deployed budget profile",async()=>{
@@ -54,14 +69,32 @@ describe("raw invocation evidence",()=>{
     expect(absent.complete).toBe(false);expect(absent.measurements.httpCpuMs).toBeNull();
     expect((await buildRuntimeEvidence(identity,version(),fixture().slice(0,8),window,true)).complete).toBe(false);
     await expect(validateRuntimeEvidence(await buildRuntimeEvidence(identity,version(),fixture(),window,false),identity)).rejects.toThrow("incomplete");
-    const withFailure=[...fixture(),{source:"invocation",$workers:{requestId:"failed-without-summary",scriptName:identity.workerName,
+    const withFailure=[...fixture(),{source:"invocation",$metadata:{type:"cf-worker-event"},$workers:{requestId:"failed-without-summary",scriptName:identity.workerName,
       scriptVersion:{id:identity.workerVersion},outcome:"exceededCpu",cpuTimeMs:51}}];
     expect((await buildRuntimeEvidence(identity,version(),withFailure,window,true)).complete).toBe(false);
     for(const extra of [{outcome:"ok",cpuTimeMs:3},{outcome:"ok"}]) {
-      const unmatched=[...fixture(),{source:"invocation",$workers:{requestId:"unmatched",scriptName:identity.workerName,
+      const unmatched=[...fixture(),{source:"invocation",$metadata:{type:"cf-worker-event"},$workers:{requestId:"unmatched",scriptName:identity.workerName,
         scriptVersion:{id:identity.workerVersion},...extra}}];
       expect((await buildRuntimeEvidence(identity,version(),unmatched,window,true)).complete).toBe(false);
     }
+  });
+  it("does not mistake ordinary custom logs carrying outcome for invocation CPU records",async()=>{
+    const event=fixture()[0];
+    const custom={...event,source:{message:"read completed"},$metadata:{...event.$metadata,id:"ordinary-log"},
+      $workers:{...event.$workers,outcome:"ok"}};
+    expect((await buildRuntimeEvidence(identity,version(),[...fixture(),custom],window,true)).complete).toBe(true);
+    // Even a CPU-looking field on a custom log cannot replace platform evidence.
+    const fabricated=fixture().map(row=>row.source==="invocation"?{...row,$metadata:{...row.$metadata,type:"cf-worker-log"}}:row);
+    expect((await buildRuntimeEvidence(identity,version(),fabricated,window,true)).measurements.httpCpuMs).toBeNull();
+    expect((await buildRuntimeEvidence(identity,version(),[...fixture(),{...custom,$workers:{...custom.$workers,outcome:"exception"}}],window,true)).complete).toBe(false);
+  });
+  it("requires exact version, request identity, a single invocation and CPU even when application summaries exist",async()=>{
+    for(const altered of [
+      fixture().map(row=>row.source==="invocation"?{...row,$workers:{...row.$workers,scriptVersion:{id:uuid(99)}}}:row),
+      fixture().map(row=>row.source==="invocation"?{...row,$workers:{...row.$workers,requestId:"other"},$metadata:{...row.$metadata,requestId:"other"}}:row),
+      [...fixture(),fixture()[1]],
+      fixture().map(row=>row.source==="invocation"?{...row,$workers:{...row.$workers,cpuTimeMs:undefined}}:row),
+    ])expect((await buildRuntimeEvidence(identity,version(),altered,window,true)).complete).toBe(false);
   });
   it("rejects altered metrics even when a supplied file recomputes its own hash",async()=>{
     const artifact=await buildRuntimeEvidence(identity,version(),fixture(),window,true);artifact.measurements.httpCpuMs=0;
@@ -69,9 +102,49 @@ describe("raw invocation evidence",()=>{
     await expect(validateRuntimeEvidence(artifact,identity)).rejects.toThrow("measurement-mismatch");
   });
   it("uses authenticated fixed API calls and treats reported total beyond returned records as incomplete",async()=>{
-    const fetcher=vi.fn(async(_url:RequestInfo|URL,init?:RequestInit)=>Response.json({success:true,result:init?.method==="GET"?version():{events:{events:fixture(),count:11}}}));
-    const artifact=await collectRuntimeEvidence({accountId:"a".repeat(32),token:"private-unit-token",identity,...window,fetcher});
+    const result=queryFixture();result.events.count=11;
+    const {fetcher,promise}=collectResult(result),artifact=await promise;
     expect(artifact.complete).toBe(false);expect(fetcher).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(artifact)).not.toContain("private-unit-token");
+  });
+  it("accepts the official nested response with a completed unsampled query and unique event cursors",async()=>{
+    for(const abr of [undefined,1]) {
+      const result=queryFixture();Object.assign(result.statistics,{abr_level:abr});
+      const {fetcher,promise}=collectResult(result),artifact=await promise;
+      expect(await validateRuntimeEvidence(artifact,identity)).toEqual(artifact);
+      const [url,init]=fetcher.mock.calls[1];
+      expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${"a".repeat(32)}/workers/observability/telemetry/query`);
+      expect(JSON.parse(String(init?.body))).toEqual({queryId:"eod-runtime-probe",view:"events",limit:2000,dry:true,timeframe:window,
+        parameters:{datasets:["cloudflare-workers"],filterCombination:"and",filters:[{key:"$metadata.service",operation:"eq",type:"string",value:"candidate"}]}});
+    }
+  });
+  it("keeps unfinished or adaptively sampled queries incomplete even when counts match",async()=>{
+    const pending=queryFixture();pending.run.status="STARTED";
+    expect((await collectResult(pending).promise).unavailableReasons).toContain("runtime-log-query-not-completed");
+    for(const field of ["statistics","run"] as const) {
+      const result=queryFixture();
+      if(field==="statistics")Object.assign(result.statistics,{abr_level:2});
+      else result.run.statistics={...result.run.statistics,...{abr_level:2}};
+      expect((await collectResult(result).promise).unavailableReasons).toContain("runtime-log-query-sampled");
+    }
+  });
+  it("does not infer full coverage from absent totals, duplicate cursors or a full result page",async()=>{
+    const missing=queryFixture();
+    expect((await collectResult({...missing,events:{events:missing.events.events}}).promise).complete).toBe(false);
+    const duplicate=queryFixture();duplicate.events.events[1].$metadata.id=duplicate.events.events[0].$metadata.id;
+    expect((await collectResult(duplicate).promise).unavailableReasons).toContain("runtime-log-query-duplicate-events");
+    const full=queryFixture();full.events.events=Array.from({length:2000},(_,i)=>({...full.events.events[0],
+      source:"ordinary log",$metadata:{...full.events.events[0].$metadata,id:`event-${i}`}}));full.events.count=2000;
+    expect((await collectResult(full).promise).unavailableReasons).toContain("runtime-log-query-truncated");
+  });
+  it("rejects undocumented array responses and missing query statistics without accepting an artifact",async()=>{
+    const result=queryFixture();
+    for(const malformed of [{events:fixture()}, {...result,run:undefined}, {...result,statistics:undefined}]) {
+      await expect(collectResult(malformed).promise).rejects.toThrow("runtime-cloudflare-query-metadata-unavailable");
+    }
+    for(const row of [{dataset:"another-dataset"},{timestamp:window.from-1}]) {
+      const invalid=queryFixture();Object.assign(invalid.events.events[0],row);
+      expect((await collectResult(invalid).promise).unavailableReasons).toContain("runtime-log-query-event-scope-mismatch");
+    }
   });
 });

@@ -270,14 +270,15 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
       reads+=8_000; continue;
     }
     if (query.sql.trimEnd().endsWith("/* storage-copy-page */") || query.sql.trimEnd().endsWith("/* storage-verification-year */")) {
-      // Keyset pages are capped at 250 rows and use the complete primary key.
+      // Keyset pages are capped at 250 rows; copy readback admits one extra row
+      // to detect unexpected destination keys. Both use the complete primary key.
       // The same label covers read-back verification; no OFFSET/full-table scan.
       reads+=2_000; continue;
     }
     if (query.sql.trimEnd().endsWith("/* storage-copy-insert */")) {
       let rows:unknown;
       try { rows=JSON.parse(String(query.params[0])); } catch { throw new Error("storage-copy-invalid-batch"); }
-      if (!Array.isArray(rows) || rows.length>100) throw new Error("storage-copy-invalid-batch");
+      if (!Array.isArray(rows) || rows.length>250) throw new Error("storage-copy-invalid-batch");
       reads+=rows.length*8+32; writes+=rows.length*8+16; continue;
     }
     if (query.sql.trimEnd().endsWith("/* storage-reviewed-ddl */")) {

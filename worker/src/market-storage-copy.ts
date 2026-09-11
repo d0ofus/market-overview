@@ -1,6 +1,6 @@
 import { STORAGE_INDEXES, STORAGE_TABLES, STORAGE_TRIGGERS } from "./market-storage-schema";
 import { canonicalStorageRows, copyStorageRows, createStoragePriceYearReader, readStoragePage, storageHash, storageRowKey,
-  storageTable, type StorageCell, type StorageRow } from "./market-storage-pages";
+  storageTable, STORAGE_TABLE_PAGE_ROWS, type StorageCell, type StorageRow } from "./market-storage-pages";
 import { decodeMarketHistoryBlock, encodeMarketHistoryBlock, marketHistoryBarsEqual, type MarketHistoryBar, type MarketHistoryBlock } from "./market-history";
 import { assertStorageSourceFrozen, assertStorageTargetEmpty, freezeStorageSource, prepareStorageSourceFence } from "./market-storage-fence";
 import { heartbeatStorageMigration, loadStorageMigrationCheckpoint, pauseStorageMigration, progressStorageMigration,
@@ -218,16 +218,24 @@ export async function runStorageCopy(context:CopyContext):Promise<"awaiting-evid
   }
   for (const table of [...STORAGE_TABLES.filter((table) => table.name!==bars.name),MIGRATION_LEDGER]) {
     let cursor=await restore<Cursor>(`table:${table.name}`) ?? {after:null,rows:0,hash:await storageHash([]),done:false};
+    let lastProgress=Date.now();
+    const report=async () => {
+      await progressStorageMigration(ops,run.id,leaseToken,"tables",{table:table.name,rows:cursor.rows,archivedRows:archive.rows});
+      context.onCopyProgress?.({stage:"tables",checkpoint:`table:${table.name}`,rows:cursor.rows,archivedRows:archive.rows,elapsedMs:Date.now()-started});
+      lastProgress=Date.now();
+    };
     while (!cursor.done) {
       await check();
-      const rows=await readStoragePage(source,table,cursor.after,100);
+      const rows=await readStoragePage(source,table,cursor.after,STORAGE_TABLE_PAGE_ROWS);
       await copyStorageRows(target,table,rows);
+      // Continue the saved hash chain and full primary key from older 100-row
+      // checkpoints. Transport width is not part of captured source identity.
       cursor={after:rows.length ? storageRowKey(table,rows.at(-1)!) : cursor.after,rows:cursor.rows+rows.length,
-        hash:await storageHash([cursor.hash,canonicalStorageRows(table,rows)]),done:rows.length<100};
+        hash:await storageHash([cursor.hash,canonicalStorageRows(table,rows)]),done:rows.length<STORAGE_TABLE_PAGE_ROWS};
       await checkpoint(`table:${table.name}`,cursor);
+      if (!cursor.done && Date.now()-lastProgress>=30_000) await report();
     }
-    await progressStorageMigration(ops,run.id,leaseToken,"tables",{table:table.name,rows:cursor.rows,archivedRows:archive.rows});
-    context.onCopyProgress?.({stage:"tables",checkpoint:`table:${table.name}`,rows:cursor.rows,archivedRows:archive.rows,elapsedMs:Date.now()-started});
+    await report();
   }
   // Installing business triggers last preserves the exact copied revision
   // clock/catalog relationship. No seed INSERT can invalidate frozen evidence.

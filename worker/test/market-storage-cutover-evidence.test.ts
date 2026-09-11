@@ -36,8 +36,8 @@ async function runtimeFixture(revision = identity.codeRevision) {
         cpuSource: "cloudflare-invocation-log-required", stats: { queries: i + 2, rowsRead: 10, rowsWritten: 1,
           maxQueryDurationMs: i + 0.5, missingMetadata: 0, failedQueries: 0 } };
       const worker = { requestId: `request-${i}`, scriptName: runtimeIdentity.workerName, scriptVersion: { id: uuid(6) } };
-      return [{ source: JSON.stringify(summary), $workers: worker },
-        { source: "invocation", $workers: { ...worker, cpuTimeMs: i + 1, outcome: "ok" } }];
+      return [{ source: JSON.stringify(summary), $metadata: { type: "cf-worker-log" }, $workers: worker },
+        { source: "invocation", $metadata: { type: "cf-worker-event" }, $workers: { ...worker, cpuTimeMs: i + 1, outcome: "ok" } }];
     });
   return buildRuntimeEvidence({ ...runtimeIdentity, codeRevision: revision }, version, events, { from: now - 30_000, to: now - 10_000 }, true);
 }

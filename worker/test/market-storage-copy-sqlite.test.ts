@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { STORAGE_INDEXES,STORAGE_TABLES,STORAGE_TRIGGERS } from "../src/market-storage-schema";
 import { assertReviewedStorageSchema,copyStorageArchiveBlock,runStorageCopy,STORAGE_TARGET_DDL } from "../src/market-storage-copy";
-import { canonicalStorageRows,copyStorageRows,readStoragePage,storageTable } from "../src/market-storage-pages";
-import { authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,loadStorageMigration,loadStorageMigrationCheckpoint,resumeStorageMigration } from "../src/market-storage-control";
+import { canonicalStorageRows,copyStorageRows,readStoragePage,storageTable,storageHash,storageRowKey } from "../src/market-storage-pages";
+import { authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,loadStorageMigration,loadStorageMigrationCheckpoint,resumeStorageMigration,saveStorageMigrationCheckpoint } from "../src/market-storage-control";
+import { estimateEodQueries } from "../src/eod-d1-rest";
 import { prepareStorageSourceFence } from "../src/market-storage-fence";
 import { loadMarketHistory,loadVerifiedArchivedMarketHistory,type MarketHistoryBar } from "../src/market-history";
 import type { Env } from "../src/types";
@@ -17,6 +18,28 @@ const bar=(date:string,close=10):MarketHistoryBar => ({feed:"sip",ticker:"TEST",
   volume:null,reportedVolume:null,reportedVolumeCollectedAt:null,sourceProvider:"alpaca",adjustment:"split",observedAt:null,fetchedAt:"2026-09-09"});
 
 describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
+  it("copies and replays 250 complete rows, verifies the final row, and detects an extra destination key",async()=>{
+    const target=createSqliteD1();
+    try {
+      target.script(schema);
+      const table=storageTable("overview_provider_catalog_cache");
+      const rows=Array.from({length:250},(_,i)=>({provider_key:`p${String(i*2).padStart(4,"0")}`,catalog_date:"2026-09-08",symbols_json:`["T${i}"]`,fetched_at:"2026-09-09"}));
+      const batches=vi.spyOn(target.db,"batch");
+      await copyStorageRows(target.db,table,rows);await copyStorageRows(target.db,table,rows);
+      expect(batches.mock.calls).toHaveLength(2);expect(batches.mock.calls[0][0]).toHaveLength(2);
+      const statements=batches.mock.calls[0][0] as unknown as Array<{sql:string;params:unknown[]}>;
+      expect(statements[1].sql).toContain("LIMIT 251");
+      expect(estimateEodQueries(statements)).toEqual({reads:4032,writes:2016});
+      expect(canonicalStorageRows(table,await readStoragePage(target.db,table,null))).toBe(canonicalStorageRows(table,rows));
+      await target.db.prepare("UPDATE overview_provider_catalog_cache SET symbols_json='wrong' WHERE provider_key='p0498'").run();
+      await expect(copyStorageRows(target.db,table,rows)).rejects.toThrow("storage-target-readback-mismatch");
+      await target.db.prepare("UPDATE overview_provider_catalog_cache SET symbols_json=? WHERE provider_key='p0498'").bind(rows[249].symbols_json).run();
+      await target.db.prepare("INSERT INTO overview_provider_catalog_cache VALUES('p0251','2026-09-08','extra','2026-09-09')").run();
+      await expect(copyStorageRows(target.db,table,rows)).rejects.toThrow("storage-target-readback-mismatch");
+      await expect(copyStorageRows(target.db,table,[...rows,rows[0]])).rejects.toThrow("storage-copy-invalid-batch");
+      expect(()=>estimateEodQueries([{sql:statements[0].sql,params:[JSON.stringify(Array(251).fill([]))]}])).toThrow("storage-copy-invalid-batch");
+    } finally {target.dispose();vi.restoreAllMocks();}
+  });
   it("uses complete composite keys and rejects modified destination rows on retry",async () => {
     const source=createSqliteD1(),target=createSqliteD1();
     try {
@@ -78,6 +101,9 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
         source.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c) VALUES('sip','TEST','2026-09-09',12,12,12,12)"),
         source.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c) VALUES('iex','TEST','2026-09-08',9,9,9,9)"),
         source.db.prepare("INSERT INTO universes(id,name) VALUES('test','Retained Universe')")]);
+      const supportTable=storageTable("overview_provider_catalog_cache");
+      const supportRows=Array.from({length:601},(_,i)=>({provider_key:`p${String(i).padStart(4,"0")}`,catalog_date:"2026-09-08",symbols_json:`["T${i}"]`,fetched_at:"2026-09-09"}));
+      for(let offset=0;offset<supportRows.length;offset+=250) await copyStorageRows(source.db,supportTable,supportRows.slice(offset,offset+250));
       const revisions=await source.db.prepare("SELECT * FROM eod_input_revisions ORDER BY feed,ticker").all();
       const clock=await source.db.prepare("SELECT revision FROM eod_input_clock").first();
       await createStorageMigration(ops.db,identity);
@@ -109,7 +135,28 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
       expect(await history.db.prepare("SELECT COUNT(*) AS count FROM market_history_block_pointers").first("count")).toBe(3);
       await deferStorageMigration(ops.db,identity.id,resumed!.leaseToken,"d1-network-error",{now:new Date(Date.now()-16*60_000)});
       const replay=await claimStorageMigration(ops.db,identity.id);
-      await runStorageCopy({...context,run:replay!.run,leaseToken:replay!.leaseToken});
+      // Emulate a durable old 100-row checkpoint against this exact capture.
+      const oldPage=supportRows.slice(0,100),oldHash=await storageHash([await storageHash([]),canonicalStorageRows(supportTable,oldPage)]);
+      const capture=await source.db.prepare("SELECT schema_hash AS schemaHash,snapshot_revision AS revision FROM market_storage_fence WHERE id='default'").first();
+      await copyStorageRows(target.db,supportTable,oldPage);
+      await saveStorageMigrationCheckpoint(ops.db,identity.id,replay!.leaseToken,{key:`table:${supportTable.name}`,inputHash:await storageHash([identity,capture]),
+        payload:{after:storageRowKey(supportTable,oldPage.at(-1)!),rows:100,hash:oldHash,done:false}});
+      const realNow=Date.now.bind(Date);let elapsed=0;
+      vi.spyOn(Date,"now").mockImplementation(()=>realNow()+elapsed);
+      const tableProgress:number[]=[];
+      const delayedTarget={...target.db,batch:async<T>(statements:D1PreparedStatement[])=>{
+        const result=await target.db.batch<T>(statements);
+        if((statements[0] as unknown as {sql:string}).sql.includes('INSERT INTO "overview_provider_catalog_cache"')) elapsed+=31_000;
+        return result;
+      }} as D1Database;
+      await runStorageCopy({...context,target:delayedTarget,run:replay!.run,leaseToken:replay!.leaseToken,
+        onCopyProgress:progress=>{if(progress.checkpoint===`table:${supportTable.name}`)tableProgress.push(progress.rows);}});
+      vi.restoreAllMocks();
+      expect(tableProgress).toEqual([350,600,601]);
+      let mixedHash=oldHash;
+      for(let offset=100;offset<supportRows.length;offset+=250) mixedHash=await storageHash([mixedHash,canonicalStorageRows(supportTable,supportRows.slice(offset,offset+250))]);
+      expect(await loadStorageMigrationCheckpoint(ops.db,identity.id,`table:${supportTable.name}`)).toMatchObject({payload:{rows:601,hash:mixedHash,done:true,after:["p0600","2026-09-08"]}});
+      expect(await target.db.prepare("SELECT COUNT(*) AS count FROM overview_provider_catalog_cache").first("count")).toBe(601);
       const state=await loadStorageMigration(ops.db,identity.id);
       expect(state?.status).toBe("awaiting-evidence");expect(state?.error_code).toBe("storage-final-verification-required");
       expect((await source.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars").first("count"))).toBe(4);
@@ -129,6 +176,6 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
       const staged=(await claimStorageMigration(ops.db,identity.id))!;
       expect(await runStorageCopy({...context,run:staged.run,leaseToken:staged.leaseToken,retainLeaseOnComplete:true})).toBe("copy-complete");
       expect((await loadStorageMigration(ops.db,identity.id))?.status).toBe("running");
-    } finally {source.dispose();target.dispose();history.dispose();ops.dispose();}
+    } finally {vi.restoreAllMocks();source.dispose();target.dispose();history.dispose();ops.dispose();}
   },180_000);
 });

@@ -1,6 +1,6 @@
 import { assertReviewedStorageSchema, storageBar } from "./market-storage-copy";
 import { STORAGE_TABLES } from "./market-storage-schema";
-import { canonicalStorageRows, createStoragePriceYearReader, quoteStorageIdentifier, readStoragePage, storageHash, storageRowKey,
+import { canonicalStorageRows, createStoragePriceYearReader, quoteStorageIdentifier, readStoragePage, storageHash, storageRowKey, STORAGE_TABLE_PAGE_ROWS,
   storageTable, type StorageCell, type StorageRow, type StorageTable } from "./market-storage-pages";
 import { assertStorageSourceFrozen, freezeStorageSource, prepareStorageSourceFence } from "./market-storage-fence";
 import { heartbeatStorageMigration, loadStorageMigrationCheckpoint, progressStorageMigration,
@@ -289,9 +289,9 @@ export async function runStorageVerification(context:Context & {
     let cursor=await state.load<Cursor>(`verification:table:${table.name}`) ?? await emptyCursor();
     while (!cursor.done) {
       await check();
-      const [left,right]=await Promise.all([readStoragePage(source,table,cursor.after,100),readStoragePage(target,table,cursor.after,100)]);
+      const [left,right]=await Promise.all([readStoragePage(source,table,cursor.after,STORAGE_TABLE_PAGE_ROWS),readStoragePage(target,table,cursor.after,STORAGE_TABLE_PAGE_ROWS)]);
       if (canonicalStorageRows(table,left)!==canonicalStorageRows(table,right)) throw new Error(`storage-verification-table-mismatch-${table.name.replaceAll("_","-")}`);
-      cursor=await advance(table,cursor,left,100);await state.save(`verification:table:${table.name}`,cursor);
+      cursor=await advance(table,cursor,left,STORAGE_TABLE_PAGE_ROWS);await state.save(`verification:table:${table.name}`,cursor);
     }
     tables.push({name:table.name,rows:cursor.rows,hash:cursor.hash});
     await progressStorageMigration(context.ops,run.id,context.leaseToken,"verification-tables",{table:table.name,rows:cursor.rows});

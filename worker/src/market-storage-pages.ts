@@ -3,6 +3,7 @@ import { STORAGE_TABLES } from "./market-storage-schema";
 export type StorageCell = string | number | null;
 export type StorageRow = Record<string, StorageCell>;
 export type StorageTable = {name:string;columns:readonly string[];key:readonly string[];sql:string};
+export const STORAGE_TABLE_PAGE_ROWS = 250;
 export function storageTable(name: string): StorageTable {
   const table=STORAGE_TABLES.find((table) => table.name===name);
   if (!table) throw new Error("storage-table-not-reviewed");
@@ -29,8 +30,8 @@ export async function storageHash(value:unknown):Promise<string> {
   const bytes=new TextEncoder().encode(JSON.stringify(value));
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256",bytes))].map((byte) => byte.toString(16).padStart(2,"0")).join("");
 }
-export async function readStoragePage(db:D1Database,table:StorageTable,after:StorageCell[]|null,limit=250):Promise<StorageRow[]> {
-  if (!Number.isInteger(limit) || limit<1 || limit>250 || (after && after.length!==table.key.length)) throw new Error("storage-page-invalid");
+export async function readStoragePage(db:D1Database,table:StorageTable,after:StorageCell[]|null,limit=STORAGE_TABLE_PAGE_ROWS):Promise<StorageRow[]> {
+  if (!Number.isInteger(limit) || limit<1 || limit>STORAGE_TABLE_PAGE_ROWS || (after && after.length!==table.key.length)) throw new Error("storage-page-invalid");
   const key=table.key.map(quoteStorageIdentifier).join(",");
   const where=after ? `WHERE (${key}) > (${after.map(() => "?").join(",")})` : "";
   const result=await db.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM ${quoteStorageIdentifier(table.name)}
@@ -88,7 +89,7 @@ export function createStoragePriceYearReader(db:D1Database,after:StorageCell[]|n
  * concurrently modified destination and conceal the conflict. */
 export async function copyStorageRows(target:D1Database,table:StorageTable,rows:StorageRow[]):Promise<void> {
   if (!rows.length) return;
-  if (rows.length>100) throw new Error("storage-copy-invalid-batch");
+  if (rows.length>STORAGE_TABLE_PAGE_ROWS) throw new Error("storage-copy-invalid-batch");
   const json=canonicalStorageRows(table,rows);
   if (new TextEncoder().encode(json).length>1_800_000) {
     if (rows.length===1) throw new Error("storage-copy-row-exceeds-d1-limit");
@@ -102,7 +103,7 @@ export async function copyStorageRows(target:D1Database,table:StorageTable,rows:
     ON CONFLICT DO NOTHING /* storage-copy-insert */`).bind(json);
   const key=table.key.map(quoteStorageIdentifier).join(","), marks=table.key.map(() => "?").join(",");
   const readback=target.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM ${quoteStorageIdentifier(table.name)}
-    WHERE (${key}) >= (${marks}) AND (${key}) <= (${marks}) ORDER BY ${key} LIMIT 101 /* storage-copy-page */`)
+    WHERE (${key}) >= (${marks}) AND (${key}) <= (${marks}) ORDER BY ${key} LIMIT ${rows.length+1} /* storage-copy-page */`)
     .bind(...storageRowKey(table,rows[0]),...storageRowKey(table,rows.at(-1)!));
   // D1 executes these in order in one transaction. Replay remains idempotent,
   // and verification observes exactly the destination committed by this batch.

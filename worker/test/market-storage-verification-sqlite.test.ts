@@ -29,12 +29,14 @@ function install(db:D1Database) {
     for (let offset=0;offset<statements.length;offset+=20) await db.batch(statements.slice(offset,offset+20).map((sql) => db.prepare(sql)));
   };
 }
-async function fixture(options:{baseline?:boolean;archive?:boolean}={}) {
+async function fixture(options:{baseline?:boolean;archive?:boolean;supportRows?:number}={}) {
   const source=createSqliteD1(),target=createSqliteD1(),history=createSqliteD1(),ops=createSqliteD1();
   const dispose=() => {source.dispose();target.dispose();history.dispose();ops.dispose();};
   try {
     const common=readFileSync("market-data-migrations/0009_market_storage_fence.sql","utf8")+ledger
-      +"INSERT INTO universes(id,name) VALUES('test','Retained'),('z','Tail');";
+      +"INSERT INTO universes(id,name) VALUES('test','Retained'),('z','Tail');"
+      +(options.supportRows ? `WITH RECURSIVE rows(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM rows WHERE n+1<${options.supportRows})
+        INSERT INTO overview_provider_catalog_cache SELECT printf('p%04d',n),'2026-09-08','[]','2026-09-09' FROM rows;` : "");
     source.script(schema+common+sourcePrices+triggers);target.script(schema+common+targetPrices+triggers);
     history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
       +readFileSync("ops-migrations/0011_market_storage_execution.sql","utf8"));
@@ -64,7 +66,7 @@ async function fixture(options:{baseline?:boolean;archive?:boolean}={}) {
 
 describe("independent whole-storage verification on real SQLite",{timeout:180_000},() => {
   it("resumes a bounded verification, proves exact tables/hot rows and retained old archive revisions, and never claims live acceptance",async () => {
-    const f=await fixture();
+    const f=await fixture({supportRows:501});
     try {
       await expect(runStorageVerification({...f.context,deadlineMs:0})).rejects.toThrow("storage-verification-time-slice-complete");
       expect(await loadStorageMigrationCheckpoint(f.ops.db,identity.id,"verification:captures")).not.toBeNull();
@@ -75,6 +77,9 @@ describe("independent whole-storage verification on real SQLite",{timeout:180_00
         archive:{baselineBlockRows:2,baselinePointerRows:1,blockRows:4,pointerRows:2}});
       expect(evidence.tables).toHaveLength(STORAGE_TABLES.length);
       expect(evidence.tables.find((row) => row.name==="d1_migrations")?.rows).toBe(1);
+      expect(evidence.tables.find((row) => row.name==="overview_provider_catalog_cache")?.rows).toBe(501);
+      expect(await loadStorageMigrationCheckpoint(f.ops.db,identity.id,"verification:table:overview_provider_catalog_cache"))
+        .toMatchObject({payload:{rows:501,pages:3,done:true}});
       expect(evidence.remainingLiveGates).toContain("consumer-parity");
       expect((await loadStorageMigration(f.ops.db,identity.id))?.status).toBe("running");
       expect(await runStorageVerification(f.context)).toEqual(evidence);
@@ -87,12 +92,13 @@ describe("independent whole-storage verification on real SQLite",{timeout:180_00
       await expect(runStorageVerification(f.context)).rejects.toThrow("storage-migration-source-capture-changed");
     } finally {f.dispose();}
   });
-  it.each(["extra-tail","missing-row","altered-ledger"] as const)("rejects non-price mismatch in either direction: %s",async (kind) => {
-    const f=await fixture();
+  it.each(["extra-tail","missing-row","altered-ledger","altered-third-page"] as const)("rejects non-price mismatch in either direction: %s",async (kind) => {
+    const f=await fixture({supportRows:kind==="altered-third-page" ? 501 : 0});
     try {
       if (kind==="extra-tail") await f.target.db.prepare("INSERT INTO universes(id,name) VALUES('zz','Unexpected')").run();
       if (kind==="missing-row") await f.target.db.prepare("DELETE FROM universes WHERE id='z'").run();
       if (kind==="altered-ledger") await f.target.db.prepare("UPDATE d1_migrations SET name='wrong.sql'").run();
+      if (kind==="altered-third-page") await f.target.db.prepare("UPDATE overview_provider_catalog_cache SET symbols_json='wrong' WHERE provider_key='p0500'").run();
       await expect(runStorageVerification(f.context)).rejects.toThrow("storage-verification-table-mismatch");
       expect(await loadStorageMigrationCheckpoint(f.ops.db,identity.id,"verification:complete")).toBeNull();
     } finally {f.dispose();}
