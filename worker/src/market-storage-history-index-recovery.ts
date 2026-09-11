@@ -11,6 +11,7 @@ import type { EodRun } from "./eod-coordinator";
 import { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 import { EOD_CATALOG_SCOPE } from "./eod-catalog-service";
 import { EOD_HISTORY_POINTER_INDEX_DDL, EOD_HISTORY_POINTER_INDEX_MAX_ROWS } from "./eod-d1-rest";
+import { loadStorageIndexLoaderContinuation } from "./market-storage-history-index-continuation";
 
 const hash=z.string().regex(/^[a-f0-9]{64}$/),sha=z.string().regex(/^[a-f0-9]{40}$/);
 export const STORAGE_HISTORY_INDEX_RECOVERY_FROM_REVISION="b7ba8201d3be0a49997ec68759e75cd3fd7c2cb1";
@@ -260,8 +261,24 @@ export async function approveStorageHistoryIndexRecovery(input:StorageHistoryInd
   if(!latest || !await loadStorageHistoryIndexAmendment(ops,latest,plan))fail("readback-conflict");return {execution,plan,recovery};
 }
 
-export async function loadStorageHistoryIndexAmendment(ops:D1Database,run:StorageMigrationRun,plan:StoragePopulationPlan):Promise<StorageHistoryPointerIndexAmendment|null> {
-  const text=await read(ops,storageHistoryIndexRecoveryKey(run.id,plan.codeRevision));if(!text)return null;
+export async function loadStorageHistoryIndexAmendment(ops:D1Database,run:StorageMigrationRun,value:StoragePopulationPlan):Promise<StorageHistoryPointerIndexAmendment|null> {
+  // loadStorageValidationPlan adds these two derived accessors. They are not
+  // part of the immutable signed plan. Preserve all other fields so unknown
+  // additions still fail the plan hash instead of being silently discarded.
+  const {bootstrapInputs,sizingHash,...plan}=value as StoragePopulationPlan & {bootstrapInputs?:unknown;sizingHash?:unknown};
+  if((bootstrapInputs!==undefined || sizingHash!==undefined)
+    && (!hash.safeParse(sizingHash).success || !await same(bootstrapInputs,plan.inputs)))fail("derived-plan-mismatch");
+  if(sizingHash!==undefined) {
+    const sizing=parse<{planHash:string;prepared:{hash:string}}>(await read(ops,`storage-population-sizing:${plan.planHash}`));
+    if(sizing.planHash!==plan.planHash || sizing.prepared?.hash!==sizingHash)fail("derived-plan-mismatch");
+  }
+  const text=await read(ops,storageHistoryIndexRecoveryKey(run.id,plan.codeRevision));
+  if(!text) {
+    const continuation=await loadStorageIndexLoaderContinuation(ops,run,plan);if(!continuation)return null;
+    const amendment=await loadStorageHistoryIndexAmendment(ops,continuation.previousRun,continuation.previousPlan);
+    if(!amendment||await storageHash(amendment)!==continuation.amendmentHash)fail("continued-amendment-mismatch");
+    return amendment;
+  }
   const recovery=await integrity(parse<StorageHistoryIndexRecovery>(text)),execution=await assertStorageExecutionRevision(ops,run,plan.codeRevision);
   const old=await integrity(parse<Baseline>(await read(ops,baselineKey(run.id,plan.codeRevision))));
   const previous=parse<StoragePopulationPlan>(await read(ops,`storage-population-plan:${run.id}:${recovery.previousPlanHash}`));

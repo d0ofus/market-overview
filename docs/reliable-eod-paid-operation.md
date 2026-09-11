@@ -39,6 +39,8 @@ For the already captured, first-chunk bootstrap failure, `worker/scripts/recover
 
 This recovery preserves the original copy and consumer proof dates, pending price repairs and partial bootstrap writes. It does not repeat completed parity checks, rewrite the original schema capture, or clear unrelated provider/quota failures. The final full-population capacity measurement must include the indexes before public cutover. Subsequent session plans may inherit the amendment only through authenticated, immutable lineage with the same capture and ticker population.
 
+The runtime validation reader adds `bootstrapInputs` and `sizingHash` to its returned plan. The amendment loader validates those derived values and excludes them from the immutable plan hash; unknown additional fields still fail validation. `worker/scripts/continue-storage-history-indexes.ts` handles the specifically reviewed correction to this integration. It preserves the original index approval through a separate executor continuation, verifies the complete checkpoint manifest and the recorded index migration, and updates only the plan, owner and executor references. It leaves the queued price run intact.
+
 ## Daily code ownership
 
 The `market-eod` environment variable `EOD_PRODUCTION_CODE_REVISION` pins both ordinary daily ingestion and the daily monitor to the exact approved code. Their workflow files still run from `main`, but checkout and `EOD_CODE_REVISION` use this pin. With no pin, the original `github.sha` checkout remains the fallback. Each runner verifies the declared revision against `git rev-parse HEAD`; the triggering main SHA never impersonates pinned execution.
