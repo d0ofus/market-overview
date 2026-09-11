@@ -6,6 +6,7 @@ import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntime
   runtimeCandidatePublicationHash, assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow, type CandidateProbeState } from "../src/eod-runtime-candidate";
 import type { StorageMigrationIdentity, StorageMigrationRun } from "../src/market-storage-control";
 import type { StoragePublicationEvidence } from "../src/market-storage-acceptance";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const migration: StorageMigrationIdentity = { id: "market-storage:test", sourceDatabaseId: uuid(1), targetDatabaseId: uuid(2), historyDatabaseId: uuid(3), sessionDate: "2026-09-10", codeRevision: "a".repeat(40) };
 const identity = () => runtimeCandidateIdentity({ migration, sessionDate: "2026-09-10", opsDatabaseId: uuid(4), coreDatabaseId: uuid(5) });
@@ -17,12 +18,21 @@ function reviewed() {
     queues: { consumers: [{ queue: "live" }] }, triggers: { crons: ["* * * * *"] }, routes: ["live.example/*"], send_email: [{ name: "MAIL" }] };
 }
 describe("protected runtime candidate configuration", () => {
-  it("defers new expiring candidates outside real windows while allowing collection and completed samples", () => {
+  it("preserves the paid profile and rejects measurements under a different profile", async () => {
+    const paidIdentity=await runtimeCandidateIdentity({migration,sessionDate:migration.sessionDate,
+      opsDatabaseId:uuid(4),coreDatabaseId:uuid(5),budgetProfile:"paid"});
+    const config=reviewed(), paid={...config,vars:{...config.vars,EOD_BUDGET_PROFILE:"paid"}};
+    const options={mainPath:"/repo/worker/src/index.ts",probeUntil,now};
+    expect(prepareRuntimeCandidateConfig(paid,paidIdentity,options).vars.EOD_BUDGET_PROFILE).toBe("paid");
+    expect(()=>prepareRuntimeCandidateConfig(config,paidIdentity,options)).toThrow("budget-profile-mismatch");
+    expect(()=>prepareRuntimeCandidateConfig(paid,{...paidIdentity,budgetProfile:"free"},options)).toThrow("budget-profile-mismatch");
+  });
+  it("measures actual overnight recovery after close without a new opening window", () => {
     const session = { sessionDate: "2026-09-10", closeAt: "16:00" };
-    for (const stamp of ["2026-09-10T05:00:00Z", "2026-09-10T16:00:00Z", "2026-09-10T20:19:00Z"]) {
+    for (const stamp of ["2026-09-10T05:00:00Z", "2026-09-10T13:05:00Z", "2026-09-10T16:00:00Z", "2026-09-10T20:19:00Z"]) {
       expect(() => assertRuntimeCandidateWindow(new Date(stamp), session)).toThrow("await-actual-coordinator-window");
     }
-    for (const stamp of ["2026-09-10T13:05:00Z", "2026-09-10T20:20:00Z", "2026-09-11T00:05:00Z"]) {
+    for (const stamp of ["2026-09-10T20:20:00Z", "2026-09-11T00:05:00Z", "2026-09-11T05:00:00Z", "2026-09-12T20:30:00Z"]) {
       expect(() => assertRuntimeCandidateWindow(new Date(stamp), session)).not.toThrow();
     }
     expect(() => assertRuntimeCandidateWindow(new Date("2026-09-12T20:30:00Z"), null)).toThrow("await-actual-coordinator-window");
@@ -76,7 +86,8 @@ describe("protected runtime candidate configuration", () => {
     const bindings = input.d1_databases as Array<{ binding: string; database_id: string }>;
     const read = (name: string) => bindings.find((row) => row.binding === name)!.database_id;
     const id = await runtimeCandidateIdentity({ migration: { ...migration, sourceDatabaseId: read("MARKET_DATA_DB"), historyDatabaseId: read("MARKET_HISTORY_DB") },
-      sessionDate: migration.sessionDate, opsDatabaseId: read("OPS_DB"), coreDatabaseId: read("DB") });
+      sessionDate: migration.sessionDate, opsDatabaseId: read("OPS_DB"), coreDatabaseId: read("DB"),
+      budgetProfile:resolveEodBudgetProfile((input.vars as Record<string,string>).EOD_BUDGET_PROFILE).name });
     expect(prepareRuntimeCandidateConfig(input, id, { mainPath: "/repo/worker/src/index.ts", probeUntil, now }).name).toBe(id.workerName);
   });
   it("derives a private replayable credential without a production admin secret or local secret file", async () => {

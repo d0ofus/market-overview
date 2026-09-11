@@ -1,21 +1,24 @@
 import { eodHash } from "./eod-publication-service";
 import { EOD_RUNTIME_COORDINATOR_PATH, EOD_RUNTIME_HTTP_PATHS } from "./eod-runtime-telemetry";
-import type { StorageMigrationIdentity, StorageMigrationRun } from "./market-storage-control";
+import { storageExecutionRevision, type StorageMigrationIdentity, type StorageMigrationRun } from "./market-storage-control";
+import { resolveEodBudgetProfile, type EodBudgetProfileName } from "./eod-budget-profile";
 import type { RuntimeEvidenceIdentity } from "./eod-runtime-evidence";
 import type { StoragePublicationEvidence } from "./market-storage-acceptance";
-import { eodSlot } from "./eod-coordinator";
-import { zonedParts } from "./refresh-timing";
+import { eodDeadline } from "./eod-coordinator";
 
 export function assertRuntimeCandidateWindow(now: Date, session: { sessionDate: string; closeAt: string } | null): void {
-  const local = zonedParts(now, "America/New_York");
-  if (!session || session.sessionDate !== local.localDate
-    || (!eodSlot(now, session) && !(local.minutesOfDay >= 9 * 60 && local.minutesOfDay < 10 * 60))) {
+  // The production coordinator performs deadline, correction and missed-run
+  // recovery checks overnight too. Measure that real execution without a
+  // synthetic clock or waiting for another market opening. The CLI supplies
+  // the verified latest eligible publication session, including holidays.
+  const eligibleAt = session ? Date.parse(eodDeadline(session.sessionDate, session.closeAt)) - 100 * 60_000 : NaN;
+  if (!Number.isFinite(eligibleAt) || now.getTime() < eligibleAt || now.getTime() - eligibleAt > 7 * 86_400_000) {
     throw new Error("runtime-candidate-await-actual-coordinator-window");
   }
 }
 
 /** Collection and completed/ambiguous samples allocate no expiring resources.
- * New configuration, deployment and further probes require a real window. */
+ * New probes require an actually closed eligible session. */
 export function runtimeCandidateRequiresWindow(command: "prepare" | "run" | "collect", state?: {
   secretsInstalled?: boolean; samples?: CandidateProbeState;
 }): boolean {
@@ -42,6 +45,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 export async function runtimeCandidateIdentity(input: {
   migration: StorageMigrationIdentity; sessionDate: string; opsDatabaseId: string; coreDatabaseId: string; attempt?: number;
+  budgetProfile?: EodBudgetProfileName;
 }): Promise<CandidateIdentity> {
   const attempt = input.attempt ?? 1, migration = input.migration;
   if (!Number.isInteger(attempt) || attempt < 1 || attempt > 4 || !/^\d{4}-\d{2}-\d{2}$/.test(input.sessionDate)
@@ -51,13 +55,14 @@ export async function runtimeCandidateIdentity(input: {
   const suffix = (await eodHash([migration.id, input.sessionDate, migration.codeRevision, attempt])).slice(0, 24);
   return { migrationId: migration.id, sourceDatabaseId: migration.sourceDatabaseId, targetDatabaseId: migration.targetDatabaseId,
     historyDatabaseId: migration.historyDatabaseId, opsDatabaseId: input.opsDatabaseId, coreDatabaseId: input.coreDatabaseId,
-    sessionDate: input.sessionDate, codeRevision: migration.codeRevision, attempt, workerName: `market-eod-probe-${suffix}`, probeId: `eod-${suffix}` };
+    sessionDate: input.sessionDate, codeRevision: migration.codeRevision, attempt, workerName: `market-eod-probe-${suffix}`, probeId: `eod-${suffix}`,
+    ...(input.budgetProfile ? {budgetProfile:input.budgetProfile} : {}) };
 }
 
 export function assertCandidateMigrationState(run: StorageMigrationRun, identity: StorageMigrationIdentity, now = new Date()): void {
   if (run.status !== "awaiting-evidence" || run.stage !== "storage-final-acceptance-required" || run.freeze_authorized !== 1
     || !run.source_schema_hash || run.source_revision === null || (run.lease_until && run.lease_until > now.toISOString())
-    || run.id !== identity.id || run.code_revision !== identity.codeRevision || run.source_database_id !== identity.sourceDatabaseId
+    || run.id !== identity.id || storageExecutionRevision(run) !== identity.codeRevision || run.source_database_id !== identity.sourceDatabaseId
     || run.target_database_id !== identity.targetDatabaseId || run.history_database_id !== identity.historyDatabaseId
     || run.session_date !== identity.sessionDate) throw new Error("runtime-candidate-private-bootstrap-not-ready");
 }
@@ -82,6 +87,9 @@ export function prepareRuntimeCandidateConfig(reviewed: unknown, identity: Candi
     throw new Error("runtime-candidate-plaintext-secrets-or-vars-invalid");
   }
   result.vars = { ...vars } as Record<string, string>;
+  if(resolveEodBudgetProfile(result.vars.EOD_BUDGET_PROFILE).name!==resolveEodBudgetProfile(identity.budgetProfile).name) {
+    throw new Error("runtime-candidate-budget-profile-mismatch");
+  }
   // A private candidate must execute the coordinator body instead of returning
   // at the production storage-ownership gate. No regular event trigger is kept.
   delete result.vars.EOD_STORAGE_MIGRATION_ID;

@@ -145,3 +145,6 @@ describe("public D1 REST adapter contract", () => {
     expect(/budget|quota|capacity/i.test(error!.message)).toBe(daily);
   });
 });
+
+// Fake transports need no wall-clock pacing; the limiter has its own clock-controlled tests.
+vi.mock("../src/eod-rest-request-limiter", () => ({ pacedEodRestFetch: (_account: string, _token: string, fetcher: typeof fetch, url: RequestInfo | URL, init: RequestInit | (() => RequestInit)) => fetcher(url, typeof init === "function" ? init() : init) }));

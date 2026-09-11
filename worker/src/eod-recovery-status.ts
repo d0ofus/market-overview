@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { isAdminRequestAuthorized } from "./auth";
-import { loadStorageMigration } from "./market-storage-control";
+import { loadStorageMigration, storageExecutionRevision } from "./market-storage-control";
+import { assertStorageExecutionRevision } from "./market-storage-execution";
 import type { Env } from "./types";
 
 export const EOD_CONTROLLER_STATUS_KEY = "recovery:local-controller";
@@ -49,9 +50,10 @@ export async function loadEodRecoveryStatus(env: Env, now = new Date()) {
   const activation = activationSchema.safeParse(records.get("monitoring:public-activation"));
   const configuration = eodConfigurationRecordSchema.safeParse(records.get(EOD_CONFIGURATION_KEY));
   const migration = env.EOD_STORAGE_MIGRATION_ID ? await loadStorageMigration(env.OPS_DB, env.EOD_STORAGE_MIGRATION_ID) : null;
+  if (migration?.execution_revision) await assertStorageExecutionRevision(env.OPS_DB,migration,storageExecutionRevision(migration));
   const active = activation.success && Date.parse(activation.data.activatedAt) <= now.getTime() ? activation.data : null;
   const verifiedCutover = Boolean(migration?.status === "completed" && active
-    && active.marketDatabaseId === migration.target_database_id && active.codeRevision === migration.code_revision
+    && active.marketDatabaseId === migration.target_database_id && active.codeRevision === storageExecutionRevision(migration)
     && env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true");
   const recorded = configuration.success && active && verifiedCutover
     && configuration.data.migrationId === migration?.id && configuration.data.marketDatabaseId === migration?.target_database_id

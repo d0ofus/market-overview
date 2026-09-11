@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { refreshHistoryMaintenanceEvidence } from "../src/eod-history-capacity";
-import { loadStorageHistoryCapacityStatus, refreshApprovedStorageHistoryCapacity, storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
+import { initializeStorageHistoryConfigurationStatus, loadApprovedStorageHotSessions, loadStorageHistoryCapacityStatus, refreshApprovedStorageHistoryCapacity,
+  storageHistoryConfigurationReference, storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
 import { eodHash } from "../src/eod-publication-service";
 import { STORAGE_CONSUMER_CONTRACTS, type StorageAcceptanceCapture, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
 import type { Env } from "../src/types";
 import { EOD_YAHOO_ARCHIVE_LAYOUT, EOD_YAHOO_ARCHIVE_MODEL_SESSIONS, EOD_YAHOO_ARCHIVE_TICKER_LIMIT } from "../src/eod-storage-layout";
+import type { EodCutoverEvidence } from "../src/eod-rollout-service";
+import { EOD_METRICS_VERSION } from "../src/eod-metrics";
 
 describe("archive-first measured layout maintenance", { timeout: 30_000 }, () => {
   let market: ReturnType<typeof createSqliteD1>, history: ReturnType<typeof createSqliteD1>, ops: ReturnType<typeof createSqliteD1>, env: Env;
@@ -132,5 +135,60 @@ describe("archive-first measured layout maintenance", { timeout: 30_000 }, () =>
       .toMatchObject({ status: "unmeasured", error: "live-capacity-measurement-stale" });
     await market.db.prepare("UPDATE eod_publications SET payload_json=? WHERE id='catalog'").bind(JSON.stringify({ rows: [["AAA"], ["NEW"]] })).run();
     await expect(refreshApprovedStorageHistoryCapacity(env, now)).rejects.toThrow("population-changed-remeasurement-required");
+  });
+  async function configLink(approved: Awaited<ReturnType<typeof approve>>) {
+    const next = "c".repeat(40), source = approved.proof;
+    const proof: EodCutoverEvidence = { version: 1, codeRevision: next, methodologyVersion: EOD_METRICS_VERSION,
+      measuredAt: now.toISOString(), runId: source.publicationRunId, sessionDate: source.horizon.anchorSession,
+      sharedTickers: { count: 1, processed: 1 },
+      fullUniverseCounts: EOD_PUBLICATION_SCOPES.slice(1).map((scope) => ({ universeId: scope.slice(8) as EodCutoverEvidence["fullUniverseCounts"][number]["universeId"],
+        memberCount: 1, attemptedCount: 1, observedCount: 1 })),
+      scopes: EOD_PUBLICATION_SCOPES.map((scope) => ({ scope, publicationId: scope, sessionDate: identity.sessionDate })),
+      measurements: { usageDate: identity.sessionDate, eodRowsRead: 1, eodRowsWritten: 1, accountRowsRead: 1, accountRowsWritten: 1,
+        httpCpuMs: 1, coordinatorCpuMs: 1, queriesPerInvocation: 1, queryDurationMs: 1, source: "fixture" },
+      limits: { httpCpuMs: 10, coordinatorCpuMs: 10, queriesPerInvocation: 50, queryDurationMs: 30000 },
+      capacity: { measuredAt: source.capacity.measuredAt, marketDatabaseBytes: source.capacity.projectedMarketBytes,
+        priceTableAndIndexBytes: source.model.priceTableAndIndexBytes, priceRows: source.model.modeledPriceRows,
+        retainedPriceRows: source.model.modeledPriceRows, archiveDatabaseBytes: source.capacity.liveHistoryBytes,
+        additionalArchiveBytes: source.capacity.projectedHistoryBytes - source.capacity.liveHistoryBytes },
+      readers: { contractVersion: source.readers.contractVersion, checkedAt: source.readers.checkedAt,
+        consumers: source.readers.consumers, parityPassed: true },
+      retention: { hotSessions: 90, sweepHeadroomSessions: 10 } };
+    const reference = await storageHistoryConfigurationReference(env, { sourceRevision: revision, nextRevision: next, proof, now });
+    const transition = { version: 1, policy: "canonical-config-only-v1", migrationId: identity.id,
+      activationCodeRevision: revision, codeRevision: next, proofHash: await eodHash(proof), sourceProofHash: "f".repeat(64),
+      approvedConfigHash: "1".repeat(64), candidateConfigHash: "2".repeat(64), ...reference };
+    await ops.db.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?),(?,?,?)")
+      .bind(`config-transition:${next}`, JSON.stringify(transition), now.toISOString(), `active:${next}`,
+        JSON.stringify({ version: 1, codeRevision: next, proofHash: transition.proofHash, proof }), now.toISOString()).run();
+    return { next, nextEnv: { ...env, EOD_CODE_REVISION: next }, proof, transition };
+  }
+  it("links only the immutable 90-session model across a configuration-only revision without redating evidence", async () => {
+    await seed("sip", 91); const approved = await approve(90, true), before = JSON.stringify(approved);
+    await refreshHistoryMaintenanceEvidence(env, { tickers, codeRevision: revision, now });
+    const { next, nextEnv } = await configLink(approved);
+    await initializeStorageHistoryConfigurationStatus(nextEnv, now);
+    expect(await loadApprovedStorageHotSessions(nextEnv)).toBe(90);
+    expect(await loadStorageHistoryCapacityStatus(nextEnv, now)).toMatchObject({ status: "ready", proofHash: approved.proofHash,
+      hotSessions: 90, horizonExpiresAt: approved.proof.horizon.expiresAt, checkedAt: now.toISOString() });
+    const result = await refreshHistoryMaintenanceEvidence(nextEnv, { tickers, codeRevision: next, now });
+    expect(result.readers).toMatchObject({ codeRevision: next, checkedAt: approved.proof.readers.checkedAt });
+    expect(result.sample.proofHash).toBe(approved.proofHash);
+    expect(await ops.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?")
+      .bind(`history-storage-proof:${approved.proofHash}`).first("evidence_json")).toBe(before);
+    const expired = new Date(approved.proof.horizon.expiresAt);
+    await expect(refreshHistoryMaintenanceEvidence(nextEnv, { tickers, codeRevision: next, now: expired })).rejects.toThrow("forecast-horizon-expired");
+    expect(await loadApprovedStorageHotSessions(nextEnv)).toBe(90);
+  });
+  it("fails closed on missing config capacity lineage or a different retained layout", async () => {
+    const approved = await approve(90), { next, nextEnv, proof, transition } = await configLink(approved);
+    await expect(storageHistoryConfigurationReference(env, { sourceRevision: revision, nextRevision: next,
+      proof: { ...proof, retention: { ...proof.retention, hotSessions: 260 } }, now })).rejects.toThrow("config-capacity-mismatch");
+    await ops.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?")
+      .bind(JSON.stringify({ ...transition, historyCapacityProofHash: "0".repeat(64) }), `config-transition:${next}`).run();
+    await expect(loadApprovedStorageHotSessions(nextEnv)).rejects.toThrow("config-source-approval-required");
+    await ops.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?")
+      .bind(JSON.stringify({ ...transition, historyCapacityProofHash: undefined }), `config-transition:${next}`).run();
+    await expect(loadApprovedStorageHotSessions(nextEnv)).rejects.toThrow("config-link-invalid");
   });
 });

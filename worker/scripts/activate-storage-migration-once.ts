@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -5,7 +6,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationIdentity, type StorageMigrationIdentity } from "../src/market-storage-control";
+import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationIdentity, storageExecutionIdentity, type StorageMigrationIdentity } from "../src/market-storage-control";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { activateStorageMigrationOnce, validateStorageActivationState } from "../src/market-storage-activate-once";
 import { inspectStorageActivationDeployment, type StorageWorkerBinding } from "../src/market-storage-activation-inspect";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
@@ -71,19 +73,21 @@ async function main(): Promise<void> {
   };
   const allowedDatabaseIds = [source, target, history, ops];
   const rawOps = createEodD1Database({ accountId, token, databaseId: ops, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `storage-activate:${id}`, { writeCredit: 500,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }),
+  const admission = createEodAdmission(rawOps, `storage-activate:${id}`, { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), writeCredit: 500,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }),
   });
   const database = (databaseId: string) => createEodD1Database({ accountId, token, databaseId, allowedDatabaseIds, admission });
   const opsDb = database(ops), sourceDb = database(source), targetDb = database(target), historyDb = database(history);
   try {
     const initial = await loadStorageMigration(opsDb, id);
     if (!initial || initial.source_database_id !== source || initial.target_database_id !== target || initial.history_database_id !== history
-      || initial.code_revision !== codeRevision || (process.env.EOD_STORAGE_SESSION_DATE && process.env.EOD_STORAGE_SESSION_DATE !== initial.session_date)) {
+      || (process.env.EOD_STORAGE_SESSION_DATE && process.env.EOD_STORAGE_SESSION_DATE !== initial.session_date)) {
       throw new Error("storage-activate-durable-identity-conflict");
     }
-    const identity: StorageMigrationIdentity = storageMigrationIdentity(initial), input = { identity, opsDatabaseId: ops };
-    const env: Env = { DB: targetDb, MARKET_DATA_DB: targetDb, MARKET_HISTORY_DB: historyDb, OPS_DB: opsDb,
+    const executionApproval = await assertStorageExecutionRevision(opsDb,initial,codeRevision);
+    const storageIdentity = storageMigrationIdentity(initial);
+    const identity: StorageMigrationIdentity = storageExecutionIdentity(initial), input = { identity, opsDatabaseId: ops, executionApproval };
+    const env: Env = { EOD_BUDGET_PROFILE:process.env.EOD_BUDGET_PROFILE, DB: targetDb, MARKET_DATA_DB: targetDb, MARKET_HISTORY_DB: historyDb, OPS_DB: opsDb,
       EOD_CODE_REVISION: codeRevision, EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", EOD_ARCHIVE_PRUNE_ENABLED: "false" };
     const targetDetails = object(await request(`d1/database/${target}`));
     if (targetDetails?.uuid !== target || typeof targetDetails.name !== "string") throw new Error("storage-activate-target-database-unverified");
@@ -122,19 +126,20 @@ async function main(): Promise<void> {
       }
       return serving;
     };
-    const verifyGitHub = async (): Promise<{ marketDatabaseId: string; mode: "shadow" | "active" }> => {
+    const verifyGitHub = async (): Promise<{ marketDatabaseId: string; mode: "shadow" | "active"; productionCodeRevision: string | null }> => {
       if (object(object(githubJson(`repos/${repository}/git/ref/heads/main`))?.object)?.sha !== codeRevision) throw new Error("storage-activate-github-main-revision-mismatch");
       const response = object(githubJson(`repos/${repository}/environments/market-eod/variables?per_page=100`));
       if (!Array.isArray(response?.variables) || response.total_count !== response.variables.length) throw new Error("storage-activate-github-variables-incomplete");
       const vars = new Map(response.variables.map((row) => { const value = object(row); return [String(value?.name), String(value?.value)]; }));
       for (const [name, expected] of [["CLOUDFLARE_ACCOUNT_ID", accountId], ["EOD_STORAGE_SOURCE_DATABASE_ID", source],
-        ["EOD_STORAGE_TARGET_DATABASE_ID", target], ["EOD_STORAGE_CODE_REVISION", codeRevision],
+        ["EOD_STORAGE_TARGET_DATABASE_ID", target], ["EOD_STORAGE_CODE_REVISION", initial.code_revision],
         ["EOD_HISTORY_DATABASE_ID", history], ["EOD_OPS_DATABASE_ID", ops], ["EOD_CORE_DATABASE_ID", core]]) {
         if (vars.get(name) !== expected) throw new Error("storage-activate-github-immutable-identity-conflict");
       }
+      if ((vars.get("EOD_STORAGE_EXECUTION_REVISION") ?? initial.code_revision) !== codeRevision) throw new Error("storage-activate-github-execution-revision-conflict");
       const mode = vars.get("EOD_RUNNER_MODE") ?? "shadow";
       if (mode !== "shadow" && mode !== "active") throw new Error("storage-activate-github-mode-invalid");
-      return { marketDatabaseId: vars.get("EOD_MARKET_DATABASE_ID") ?? "", mode };
+      return { marketDatabaseId: vars.get("EOD_MARKET_DATABASE_ID") ?? "", mode, productionCodeRevision: vars.get("EOD_PRODUCTION_CODE_REVISION") ?? null };
     };
     const readEvidence = async (key: string) => {
       const row = await opsDb.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(key).first<string>("evidence_json");
@@ -145,6 +150,7 @@ async function main(): Promise<void> {
       loadState: async () => {
         const run = await loadStorageMigration(opsDb, id);
         if (!run) throw new Error("storage-activate-run-missing");
+        await assertStorageExecutionRevision(opsDb,run,codeRevision);
         const progress = object(JSON.parse(run.progress_json)), latestProofHash = progress?.cutoverProofHash;
         if (typeof latestProofHash !== "string" || !/^[a-f0-9]{64}$/.test(latestProofHash)) throw new Error("storage-activate-storage-proof-reference-invalid");
         const state = await validateStorageActivationState(input, run, await readEvidence(`active:${codeRevision}`),
@@ -155,7 +161,7 @@ async function main(): Promise<void> {
         return state;
       },
       verifyPublications: async (state) => {
-        const frozen = await assertStorageSourceFrozen(sourceDb, identity, state.run.source_schema_hash!);
+        const frozen = await assertStorageSourceFrozen(sourceDb, storageIdentity, state.run.source_schema_hash!);
         if (frozen.revision !== state.run.source_revision) throw new Error("storage-activate-source-capture-changed");
         const preflight = await loadStoragePreflight(opsDb, state.run);
         const bootstrap = await loadStorageMigrationCheckpoint(opsDb, id, "bootstrap:complete"), owner = object(bootstrap?.payload);
@@ -187,6 +193,7 @@ async function main(): Promise<void> {
       },
       verifyPublicTarget: async () => {
         const github = await verifyGitHub();
+        if (github.productionCodeRevision !== codeRevision) throw new Error("storage-activate-github-production-revision-not-persisted");
         await verifyStoragePublicBindings({ accountId, token: controlToken, workerName, identity, opsDatabaseId: ops,
           githubMarketDatabaseId: github.marketDatabaseId, githubRunnerMode: github.mode });
         const serving = await inspectServing();

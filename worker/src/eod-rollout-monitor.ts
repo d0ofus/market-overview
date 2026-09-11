@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 import { z } from "zod";
 import { eodDeadline, EOD_PUBLICATION_SCOPES, expectedEodSession } from "./eod-coordinator";
 import { fetchEodAccountUsage } from "./eod-account-usage";
@@ -51,10 +52,10 @@ function validCounters(row: UsageRow | null): row is UsageRow {
   return row !== null && [row.rows_read, row.rows_written, row.reserved_reads ?? 0, row.reserved_writes ?? 0]
     .every((value) => Number.isSafeInteger(value) && value >= 0);
 }
-function usageReasons(evidence: EodFinalizedUsage): string[] {
+function usageReasons(evidence: EodFinalizedUsage, profile:EodBudgetProfile): string[] {
   const reasons: string[] = [];
-  if (evidence.eodRowsRead > 2_500_000 || evidence.eodRowsWritten > 50_000) reasons.push("eod-daily-budget-exceeded");
-  if (evidence.accountRowsRead > 4_500_000 || evidence.accountRowsWritten > 90_000) reasons.push("account-daily-budget-exceeded");
+  if (evidence.eodRowsRead > profile.eodDaily.reads || evidence.eodRowsWritten > profile.eodDaily.writes) reasons.push("eod-daily-budget-exceeded");
+  if (evidence.accountRowsRead > profile.accountDaily.reads || evidence.accountRowsWritten > profile.accountDaily.writes) reasons.push("account-daily-budget-exceeded");
   if (evidence.eodRowsRead > evidence.accountRowsRead || evidence.eodRowsWritten > evidence.accountRowsWritten) {
     reasons.push("account-usage-does-not-cover-eod");
   }
@@ -206,7 +207,7 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
         || Date.parse(parsed.data.finalizedAfter) !== time + EOD_USAGE_FINALIZATION_DELAY_DAYS * DAY_MS
         || Date.parse(parsed.data.sampledAt) < time + EOD_USAGE_FINALIZATION_DELAY_DAYS * DAY_MS) row.reasons.push("finalized-utc-usage-invalid");
       else {
-        row.evidence = parsed.data; row.reasons = usageReasons(parsed.data);
+        row.evidence = parsed.data; row.reasons = usageReasons(parsed.data,resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE));
         row.status = row.reasons.length ? "failed" : "passed";
       }
       result.usageDays.push(row);
@@ -247,7 +248,7 @@ export async function collectEodRolloutMonitoring(env: Env, now = new Date()): P
   result.operationalReasons = result.reasons;
   result.currentHealth = await collectEodCurrentHealth(env, now);
   result.reasons = [...result.currentHealth.reasons];
-  result.eligibleForRetirement = isEodCurrentHealthReady(result.currentHealth, now);
+  result.eligibleForRetirement = isEodCurrentHealthReady(result.currentHealth, now, resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE).name);
   await env.OPS_DB.prepare(`INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?)
     ON CONFLICT(id) DO UPDATE SET evidence_json=excluded.evidence_json,updated_at=excluded.updated_at`)
     .bind(EOD_ROLLOUT_MONITOR_KEY, JSON.stringify(result), now.toISOString()).run();
@@ -270,7 +271,7 @@ export async function readEodRolloutMonitoring(env: Env, now = new Date()): Prom
   const health = parsedHealth.success ? parsedHealth.data : null;
   // A valid health record can be stale. Discard the predicate's false-branch
   // narrowing so a failed readiness check does not erase that typed record.
-  const currentHealthReady = Boolean(isEodCurrentHealthReady(health, now));
+  const currentHealthReady = Boolean(isEodCurrentHealthReady(health, now, resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE).name));
   const healthExpired = health?.status === "passed" && !currentHealthReady;
   const currentHealth = healthExpired ? { ...health!, status: "pending" as const,
     reasons: [...health!.reasons, "current-health-evidence-expired"] } : health;

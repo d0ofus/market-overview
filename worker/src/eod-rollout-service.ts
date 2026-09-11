@@ -1,5 +1,7 @@
+import { assertEodRollingBudget, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 import { z } from "zod";
-import { EOD_PUBLICATION_SCOPES, expectedEodSession } from "./eod-coordinator";
+import { expectedEodSession } from "./eod-coordinator";
+import { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
 import { assertHistoryPruneEvidence } from "./eod-history-maintenance";
 import { eodHash } from "./eod-publication-service";
@@ -20,15 +22,15 @@ const count = z.number().int().nonnegative().safe();
 const positiveCount = count.positive();
 const scopeSchema = z.object({ scope: z.enum(EOD_PUBLICATION_SCOPES), publicationId: z.string().min(1), sessionDate: date }).strict();
 const measurementsSchema = z.object({
-  usageDate: date, eodRowsRead: count.max(2_500_000), eodRowsWritten: count.max(50_000),
-  accountRowsRead: count.max(4_500_000), accountRowsWritten: count.max(90_000),
+  usageDate: date, eodRowsRead: count, eodRowsWritten: count,
+  accountRowsRead: count, accountRowsWritten: count,
   httpCpuMs: z.number().finite().nonnegative(), coordinatorCpuMs: z.number().finite().nonnegative(),
   queriesPerInvocation: count, queryDurationMs: z.number().finite().nonnegative(),
   source: z.string().trim().min(1),
 }).strict();
 const limitsSchema = z.object({
-  httpCpuMs: z.number().positive().max(10), coordinatorCpuMs: z.number().positive().max(10),
-  queriesPerInvocation: positiveCount.max(50), queryDurationMs: z.number().positive().max(30_000),
+  httpCpuMs: z.number().positive().max(1_000), coordinatorCpuMs: z.number().positive().max(1_000),
+  queriesPerInvocation: positiveCount.max(300), queryDurationMs: z.number().positive().max(30_000),
 }).strict();
 const capacitySchema = z.object({
   measuredAt: timestamp, marketDatabaseBytes: positiveCount, priceTableAndIndexBytes: positiveCount,
@@ -38,6 +40,7 @@ const readersSchema = z.object({
   contractVersion: positiveCount, checkedAt: timestamp, consumers: z.array(z.string()), parityPassed: z.literal(true),
 }).strict();
 export const eodCutoverEvidenceSchema = z.object({
+  budgetProfile: z.enum(["free", "paid"]).optional(),
   version: z.literal(1), codeRevision: z.string().regex(/^[a-f0-9]{40}$/i), methodologyVersion: z.literal(EOD_METRICS_VERSION),
   measuredAt: timestamp, runId: z.string().min(1), sessionDate: date,
   sharedTickers: z.object({ count: positiveCount, processed: positiveCount }).strict(),
@@ -58,7 +61,11 @@ function fail(reason: string): never { throw new Error(`eod-cutover-proof-${reas
 function assertIdentity(codeRevision: string, actual: string): void {
   if (!/^[a-f0-9]{40}$/i.test(codeRevision) || actual !== codeRevision) fail("code-revision-mismatch");
 }
-function assertMeasurements(measurements: z.infer<typeof measurementsSchema>, limits: z.infer<typeof limitsSchema>): void {
+function assertMeasurements(measurements: z.infer<typeof measurementsSchema>, limits: z.infer<typeof limitsSchema>, profile: EodBudgetProfile): void {
+  if (measurements.eodRowsRead > profile.eodDaily.reads || measurements.eodRowsWritten > profile.eodDaily.writes
+    || measurements.accountRowsRead > profile.accountDaily.reads || measurements.accountRowsWritten > profile.accountDaily.writes
+    || limits.httpCpuMs > profile.runtime.httpCpuMs || limits.coordinatorCpuMs > profile.runtime.coordinatorCpuMs
+    || limits.queriesPerInvocation > profile.runtime.queriesPerInvocation || limits.queryDurationMs > profile.runtime.queryDurationMs) fail("profile-limits-exceeded");
   if (measurements.httpCpuMs > limits.httpCpuMs || measurements.coordinatorCpuMs > limits.coordinatorCpuMs
     || measurements.queriesPerInvocation > limits.queriesPerInvocation || measurements.queryDurationMs >= limits.queryDurationMs
     || measurements.eodRowsRead > measurements.accountRowsRead || measurements.eodRowsWritten > measurements.accountRowsWritten) fail("measured-limits-exceeded");
@@ -69,14 +76,16 @@ function assertScopes(scopes: Array<z.infer<typeof scopeSchema>>, sessionDate: s
 }
 
 /** Validates measured evidence; it does not collect or invent production measurements. */
-export function validateEodCutoverEvidence(input: unknown, codeRevision: string, now = new Date()): EodCutoverEvidence {
+export function validateEodCutoverEvidence(input: unknown, codeRevision: string, now = new Date(), expectedProfile?: string): EodCutoverEvidence {
   const parsed = eodCutoverEvidenceSchema.safeParse(input);
   if (!parsed.success) fail(`invalid-schema:${parsed.error.issues[0]?.path.join(".") ?? "root"}`);
   const proof = parsed.data;
+  const profile = resolveEodBudgetProfile(proof.budgetProfile);
+  if (expectedProfile !== undefined && profile.name !== resolveEodBudgetProfile(expectedProfile).name) fail("budget-profile-mismatch");
   assertIdentity(codeRevision, proof.codeRevision);
   const age = now.getTime() - Date.parse(proof.measuredAt);
   if (age < 0 || age > 86_400_000) fail("measurement-expired");
-  assertMeasurements(proof.measurements, proof.limits);
+  assertMeasurements(proof.measurements, proof.limits, profile);
   assertScopes(proof.scopes, proof.sessionDate);
   if (proof.sharedTickers.count !== proof.sharedTickers.processed
     || new Set(proof.fullUniverseCounts.map((row) => row.universeId)).size !== 5) fail("universe-set-incomplete");
@@ -114,14 +123,16 @@ async function checkPublications(env: Env, scopes: EodCutoverEvidence["scopes"],
 }
 
 async function checkRecordedUsage(env: Env, measurements: z.infer<typeof measurementsSchema>): Promise<void> {
+  const profile = resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
   const [eod, account] = await Promise.all([
     env.OPS_DB!.prepare("SELECT rows_read,rows_written FROM eod_usage WHERE usage_date=?").bind(measurements.usageDate).first<{rows_read:number;rows_written:number}>(),
     env.OPS_DB!.prepare("SELECT rows_read,rows_written,error FROM eod_account_usage WHERE usage_date=?").bind(measurements.usageDate).first<{rows_read:number;rows_written:number;error:string|null}>(),
   ]);
   // Counters can rise after the measurement (including guard bookkeeping).
   // They must still fit the ceilings; they are not an immutable telemetry sample.
-  if (!eod || !account || account.error || eod.rows_read > 2_500_000 || eod.rows_written > 50_000
-    || account.rows_read > 4_500_000 || account.rows_written > 90_000) fail("recorded-usage-mismatch");
+  if (!eod || !account || account.error || eod.rows_read > profile.eodDaily.reads || eod.rows_written > profile.eodDaily.writes
+    || account.rows_read > profile.accountDaily.reads || account.rows_written > profile.accountDaily.writes) fail("recorded-usage-mismatch");
+  await assertEodRollingBudget(env.OPS_DB!, profile);
 }
 
 const catalogRowSchema = z.tuple([
@@ -198,6 +209,8 @@ export async function assertEodCutover(env: Env, codeRevision: string, candidate
     assertIdentity(codeRevision, parsed.data.codeRevision);
     assertIdentity(codeRevision, parsed.data.proof.codeRevision);
     if (Date.parse(parsed.data.approvedAt) > Date.now() || await eodHash(parsed.data.proof) !== parsed.data.proofHash) fail("durable-approval-integrity");
+    if (resolveEodBudgetProfile(parsed.data.proof.budgetProfile).name !== resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE).name) fail("budget-profile-mismatch");
+    assertMeasurements(parsed.data.proof.measurements, parsed.data.proof.limits, resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE));
     return parsed.data.proof;
   };
   // Approval is durable for this exact revision. Live admission still checks
@@ -210,7 +223,7 @@ export async function assertEodCutover(env: Env, codeRevision: string, candidate
   const row = candidateProof === undefined
     ? await env.OPS_DB.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='cutover'").first<{evidence_json:string}>() : null;
   if (candidateProof === undefined && !row) fail("required");
-  const proof = validateEodCutoverEvidence(candidateProof === undefined ? parseObject(row!.evidence_json) : candidateProof, codeRevision);
+  const proof = validateEodCutoverEvidence(candidateProof === undefined ? parseObject(row!.evidence_json) : candidateProof, codeRevision, new Date(), resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE).name);
   if (approved && await eodHash(approved) !== await eodHash(proof)) fail("durable-approval-candidate-conflict");
   const run = await env.OPS_DB.prepare("SELECT id,session_date,mode,purpose,status,input_json,progress_json,completed_at,completed_input_clock FROM eod_runs WHERE id=?")
     .bind(proof.runId).first<StoredRun>();

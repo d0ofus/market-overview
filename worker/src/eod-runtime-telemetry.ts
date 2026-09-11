@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "./eod-budget-profile";
 import { isAdminRequestAuthorized } from "./auth";
 import { createEodAdmission,type D1Admission,type EodSql } from "./eod-d1-rest";
 import { eodHash } from "./eod-publication-service";
@@ -86,7 +87,7 @@ export async function runEodRuntimeProbe<T>(env:Env,category:"http"|"coordinator
   const value=config(env);if(!value)throw new Error("runtime-probe-disabled-or-invalid");
   const startedAt=new Date().toISOString(),sampleId=crypto.randomUUID(),stats=emptyRuntimeStats();
   const rawOps=observeRuntimeDatabase(env.OPS_DB!,stats);
-  const admission=createEodAdmission(rawOps,`runtime:${value.probeId}:${sampleId}`,{readCredit:50_000,writeCredit:500});
+  const admission=createEodAdmission(rawOps,`runtime:${value.probeId}:${sampleId}`,{profile:resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE),readCredit:50_000,writeCredit:500});
   const wrapped=new Map<D1Database,D1Database>();
   const database=(db:D1Database)=>{let result=wrapped.get(db);if(!result){result=observeRuntimeDatabase(db,stats,admission);wrapped.set(db,result);}return result;};
   const meteredOps=database(env.OPS_DB!),configurationHash=await eodHash(value);

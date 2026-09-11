@@ -4,7 +4,7 @@ import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { STORAGE_INDEXES,STORAGE_TABLES,STORAGE_TRIGGERS } from "../src/market-storage-schema";
 import { assertReviewedStorageSchema,copyStorageArchiveBlock,runStorageCopy,STORAGE_TARGET_DDL } from "../src/market-storage-copy";
 import { canonicalStorageRows,copyStorageRows,readStoragePage,storageTable } from "../src/market-storage-pages";
-import { authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,loadStorageMigration,resumeStorageMigration } from "../src/market-storage-control";
+import { authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,loadStorageMigration,loadStorageMigrationCheckpoint,resumeStorageMigration } from "../src/market-storage-control";
 import { prepareStorageSourceFence } from "../src/market-storage-fence";
 import { loadMarketHistory,loadVerifiedArchivedMarketHistory,type MarketHistoryBar } from "../src/market-history";
 import type { Env } from "../src/types";
@@ -70,7 +70,8 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
         +readFileSync("market-data-migrations/0009_market_storage_fence.sql","utf8")
         +"CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);"
         +"INSERT INTO d1_migrations(name) VALUES('0009_market_storage_fence.sql');");
-      history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8"));
+      history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
+        +readFileSync("ops-migrations/0011_market_storage_execution.sql","utf8"));
       await source.db.prepare("INSERT INTO eod_input_clock VALUES('default',0)").run();
       await source.db.batch([source.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c) VALUES('sip','TEST','2025-12-31',10,10,10,10)"),
         source.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c) VALUES('sip','TEST','2026-09-08',11,11,11,11)"),
@@ -96,7 +97,19 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
       await expect(runStorageCopy({...context,run:run2!.run,leaseToken:run2!.leaseToken,deadlineMs:0})).rejects.toThrow("storage-run-time-slice-complete");
       await deferStorageMigration(ops.db,identity.id,run2!.leaseToken,"storage-resume-required",{now:new Date(Date.now()-16*60_000)});
       const resumed=await claimStorageMigration(ops.db,identity.id);
-      await runStorageCopy({...context,run:resumed!.run,leaseToken:resumed!.leaseToken});
+      let archiveBatches=0;
+      const interruptedHistory={...history.db,batch:async <T>(statements:D1PreparedStatement[]) => {
+        const results=await history.db.batch<T>(statements);
+        if(++archiveBatches===3)throw new Error("d1-network-error");
+        return results;
+      }} as D1Database;
+      await expect(runStorageCopy({...context,history:interruptedHistory,run:resumed!.run,leaseToken:resumed!.leaseToken}))
+        .rejects.toThrow("d1-network-error");
+      expect(await loadStorageMigrationCheckpoint(ops.db,identity.id,"archives")).toBeNull();
+      expect(await history.db.prepare("SELECT COUNT(*) AS count FROM market_history_block_pointers").first("count")).toBe(3);
+      await deferStorageMigration(ops.db,identity.id,resumed!.leaseToken,"d1-network-error",{now:new Date(Date.now()-16*60_000)});
+      const replay=await claimStorageMigration(ops.db,identity.id);
+      await runStorageCopy({...context,run:replay!.run,leaseToken:replay!.leaseToken});
       const state=await loadStorageMigration(ops.db,identity.id);
       expect(state?.status).toBe("awaiting-evidence");expect(state?.error_code).toBe("storage-final-verification-required");
       expect((await source.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars").first("count"))).toBe(4);

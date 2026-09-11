@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
@@ -170,3 +170,6 @@ describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => 
     expect((await usage()).results).toEqual([{date:"2026-09-08",reads:41,writes:21,reservedReads:0,reservedWrites:0}]);
   });
 });
+
+// Fake transports need no wall-clock pacing; the limiter has its own clock-controlled tests.
+vi.mock("../src/eod-rest-request-limiter", () => ({ pacedEodRestFetch: (_account: string, _token: string, fetcher: typeof fetch, url: RequestInfo | URL, init: RequestInit | (() => RequestInit)) => fetcher(url, typeof init === "function" ? init() : init) }));

@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,11 +21,11 @@ async function main() {
   if (!token) throw new Error("eod-recovery-report-credential-unavailable");
   const analyticsToken = process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token;
   const usage = await fetchEodAccountUsage({ accountId: config.accountId, token: analyticsToken, usageDate: new Date().toISOString().slice(0, 10) });
-  if (usage.rowsRead >= 4_500_000 || usage.rowsWritten >= 90_000) throw new Error("eod-recovery-report-quota-deferred");
+  if (usage.rowsRead >= resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE).accountDaily.reads || usage.rowsWritten >= resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE).accountDaily.writes) throw new Error("eod-recovery-report-quota-deferred");
   const options = { accountId: config.accountId, token, databaseId: config.opsDatabaseId, allowedDatabaseIds: [config.opsDatabaseId] };
   const rawOps = createEodD1Database(options);
-  const admission = createEodAdmission(rawOps, "eod-recovery-status", { readCredit: 100, writeCredit: 20,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId: config.accountId, token: analyticsToken, ops: rawOps }) });
+  const admission = createEodAdmission(rawOps, "eod-recovery-status", { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), readCredit: 100, writeCredit: 20,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId: config.accountId, token: analyticsToken, ops: rawOps }) });
   try { await storeEodControllerReport(createEodD1Database({ ...options, admission }), { version: 1, ...state }); }
   finally { await admission.flush(); }
   console.log(JSON.stringify({ status: "recovery-status-published", observedAt: state.updatedAt }));

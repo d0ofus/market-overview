@@ -1,3 +1,4 @@
+import { assertEodRollingBudget, resolveEodBudgetProfile } from "./eod-budget-profile";
 import type { Env } from "./types";
 import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
@@ -5,9 +6,7 @@ import { getOpsDb } from "./ops-db";
 // About 315 US sessions, preserving the 252-session feature horizon with
 // substantial holiday/listing headroom while staying within D1 Free capacity.
 const DEFAULT_RETENTION_DAYS = 460;
-const DEFAULT_DAILY_WRITE_BUDGET = 90_000;
 const DEFAULT_CRITICAL_WRITE_RESERVE = 20_000;
-const DEFAULT_DAILY_READ_BUDGET = 4_500_000;
 const DEFAULT_CRITICAL_READ_RESERVE = 500_000;
 const DEFAULT_WARN_BYTES = 400_000_000;
 const DEFAULT_HALT_BYTES = 450_000_000;
@@ -88,13 +87,20 @@ function nextUtcReset(now = new Date()): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5)).toISOString();
 }
 
+function marketDataBudget(env: Env, kind: "reads" | "writes"): number {
+  const profile=resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE), limit=profile.accountDaily[kind];
+  const configured=positiveInteger(kind==="reads" ? env.MARKET_DATA_DAILY_READ_BUDGET : env.MARKET_DATA_DAILY_WRITE_BUDGET, limit);
+  return profile.name==="paid" ? Math.min(configured>0 ? configured : limit,limit) : configured;
+}
+
 export async function assertMarketDataWriteBudget(env: Env, now = new Date()): Promise<void> {
-  const budget = positiveInteger(env.MARKET_DATA_DAILY_WRITE_BUDGET, DEFAULT_DAILY_WRITE_BUDGET);
+  await assertEodRollingBudget(getOpsDb(env), resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE), now);
+  const budget = marketDataBudget(env, "writes");
   if (budget === 0) return;
   await assertMarketDataWriteLimit(env, budget, "daily rate limit", now);
   await assertMarketDataReadLimit(
     env,
-    positiveInteger(env.MARKET_DATA_DAILY_READ_BUDGET, DEFAULT_DAILY_READ_BUDGET),
+    marketDataBudget(env, "reads"),
     "daily read limit",
     now,
   );
@@ -105,7 +111,8 @@ export async function assertMarketDataBackgroundWriteBudget(
   estimatedWrites = 0,
   now = new Date(),
 ): Promise<void> {
-  const budget = positiveInteger(env.MARKET_DATA_DAILY_WRITE_BUDGET, DEFAULT_DAILY_WRITE_BUDGET);
+  await assertEodRollingBudget(getOpsDb(env), resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE), now, {reads:0,writes:Math.max(0,Math.trunc(estimatedWrites))});
+  const budget = marketDataBudget(env, "writes");
   if (budget === 0) return;
   const reserve = Math.min(
     budget,
@@ -118,7 +125,7 @@ export async function assertMarketDataBackgroundWriteBudget(
     now,
     Math.max(0, Math.trunc(estimatedWrites)),
   );
-  const readBudget = positiveInteger(env.MARKET_DATA_DAILY_READ_BUDGET, DEFAULT_DAILY_READ_BUDGET);
+  const readBudget = marketDataBudget(env, "reads");
   const readReserve = Math.min(
     readBudget,
     positiveInteger(env.MARKET_DATA_CRITICAL_READ_RESERVE, DEFAULT_CRITICAL_READ_RESERVE),
@@ -131,8 +138,9 @@ export async function assertMarketDataCriticalWorkBudget(
   estimates: { rowsRead?: number; rowsWritten?: number },
   now = new Date(),
 ): Promise<void> {
-  const writeBudget = positiveInteger(env.MARKET_DATA_DAILY_WRITE_BUDGET, DEFAULT_DAILY_WRITE_BUDGET);
-  const readBudget = positiveInteger(env.MARKET_DATA_DAILY_READ_BUDGET, DEFAULT_DAILY_READ_BUDGET);
+  await assertEodRollingBudget(getOpsDb(env), resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE), now, {reads:Math.max(0,Math.trunc(estimates.rowsRead ?? 0)),writes:Math.max(0,Math.trunc(estimates.rowsWritten ?? 0))});
+  const writeBudget = marketDataBudget(env, "writes");
+  const readBudget = marketDataBudget(env, "reads");
   if (writeBudget > 0) {
     await assertMarketDataWriteLimit(
       env,

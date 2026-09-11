@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { eodHash } from "./eod-publication-service";
 import { EOD_RUNTIME_COORDINATOR_PATH, EOD_RUNTIME_HTTP_PATHS, EOD_RUNTIME_PROBE_LIMIT } from "./eod-runtime-telemetry";
+import { resolveEodBudgetProfile } from "./eod-budget-profile";
 
 const finite=z.number().finite().nonnegative();
 const identitySchema=z.object({probeId:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),workerName:z.string().min(1),
   workerVersion:z.string().uuid(),codeRevision:z.string().regex(/^[a-f0-9]{40}$/),targetDatabaseId:z.string().uuid(),
-  historyDatabaseId:z.string().uuid(),opsDatabaseId:z.string().uuid(),coreDatabaseId:z.string().uuid()}).strict();
+  historyDatabaseId:z.string().uuid(),opsDatabaseId:z.string().uuid(),coreDatabaseId:z.string().uuid(),
+  budgetProfile:z.enum(["free","paid"]).optional()}).strict();
 export type RuntimeEvidenceIdentity=z.infer<typeof identitySchema>;
 const statsSchema=z.object({queries:finite.int(),rowsRead:finite.int(),rowsWritten:finite.int(),maxQueryDurationMs:finite,
   missingMetadata:finite.int(),failedQueries:finite.int()}).strict();
@@ -27,10 +29,14 @@ type Fetcher=typeof fetch;
 function requiredBindings(id:RuntimeEvidenceIdentity):Record<string,string> {
   return {MARKET_DATA_DB:id.targetDatabaseId,MARKET_HISTORY_DB:id.historyDatabaseId,OPS_DB:id.opsDatabaseId,DB:id.coreDatabaseId,
     EOD_READ_ENABLED:"true",EOD_RUNTIME_CANDIDATE_ONLY:"true",
-    EOD_RUNTIME_PROBE_ID:id.probeId,EOD_CODE_REVISION:id.codeRevision,EOD_RUNTIME_TARGET_DATABASE_ID:id.targetDatabaseId};
+    EOD_RUNTIME_PROBE_ID:id.probeId,EOD_CODE_REVISION:id.codeRevision,EOD_RUNTIME_TARGET_DATABASE_ID:id.targetDatabaseId,
+    ...(id.budgetProfile ? {EOD_BUDGET_PROFILE:id.budgetProfile} : {})};
 }
 function assertBindings(id:RuntimeEvidenceIdentity,bindings:Record<string,string>):void {
   for(const [name,value] of Object.entries(requiredBindings(id)))if(bindings[name]!==value)throw new Error(`runtime-version-binding-mismatch:${name}`);
+  if(resolveEodBudgetProfile(bindings.EOD_BUDGET_PROFILE).name!==resolveEodBudgetProfile(id.budgetProfile).name) {
+    throw new Error("runtime-version-binding-mismatch:EOD_BUDGET_PROFILE");
+  }
 }
 function summarize(samples:RuntimeEvidence["samples"]):RuntimeEvidence["measurements"] {
   const maximum=(values:number[])=>values.length?Math.max(...values):null;
@@ -83,7 +89,7 @@ export async function buildRuntimeEvidence(identity:RuntimeEvidenceIdentity,vers
     id:z.string().optional(),database_id:z.string().optional(),text:z.string().optional()}))})}).parse(version);
   if(deployment.id!==identity.workerVersion)throw new Error("runtime-worker-version-mismatch");
   const versionBindings:Record<string,string>={};
-  for(const binding of deployment.resources.bindings)if(Object.hasOwn(requiredBindings(identity),binding.name)) {
+  for(const binding of deployment.resources.bindings)if(Object.hasOwn(requiredBindings(identity),binding.name) || binding.name==="EOD_BUDGET_PROFILE") {
     if(Object.hasOwn(versionBindings,binding.name))throw new Error("runtime-binding-duplicate");
     if(["DB","MARKET_DATA_DB","MARKET_HISTORY_DB","OPS_DB"].includes(binding.name) ? binding.type!=="d1" : binding.type!=="plain_text")throw new Error("runtime-binding-type-mismatch");
     if(binding.id && binding.database_id && binding.id!==binding.database_id)throw new Error("runtime-binding-conflicting-id");

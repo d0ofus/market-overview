@@ -103,6 +103,15 @@ export function EodOperationsPanel() {
             <span>Expected session: <strong>{data.expectedSession ?? "Unavailable"}</strong></span>
             <span>Last complete session: <strong>{data.lastSuccessfulSession ?? "Unavailable"}</strong></span>
           </div>
+          {data.budget ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+            <p className="font-semibold">Processing budget: {data.budget.profile === "paid" ? "Workers Paid" : "Workers Free"}</p>
+            <p className="mt-1 text-slate-400">Daily EOD limits: {count(data.budget.limits.eodDaily.reads)} reads / {count(data.budget.limits.eodDaily.writes)} writes. Account limits: {count(data.budget.limits.accountDaily.reads)} reads / {count(data.budget.limits.accountDaily.writes)} writes.</p>
+            {data.budget.limits.rolling31 ? <>
+              <p className="text-slate-400">Account usage over 31 UTC days: {count(data.budget.rolling31?.rowsRead)} / {count(data.budget.limits.rolling31.reads)} reads; {count(data.budget.rolling31?.rowsWritten)} / {count(data.budget.limits.rolling31.writes)} writes.</p>
+              <p className="text-xs text-slate-500">Admission also includes outstanding reservations. These operating limits preserve headroom; Cloudflare billing remains account-wide. Storage retains the Free-compatible archive layout.</p>
+            </> : null}
+            {data.budget.unavailableReason ? <p className="text-amber-300">Budget check: {data.budget.unavailableReason}</p> : null}
+          </div> : null}
           {data.storageMigration ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
             <p className="font-semibold">Storage migration: {data.storageMigration.status}</p>
             <p className="mt-1 text-slate-400">Stage: {data.storageMigration.failedStage ?? data.storageMigration.stage} · Session: {data.storageMigration.sessionDate}</p>

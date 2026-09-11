@@ -9,6 +9,20 @@ export type EodMonitoredSession = {
 
 export type EodPublicationStatus = {
   mode: string;
+  budget?: {
+    profile: "free" | "paid";
+    limits: {
+      eodDaily: { reads: number; writes: number }; accountDaily: { reads: number; writes: number };
+      rolling31: { reads: number; writes: number } | null;
+      runtime: { httpCpuMs: number; coordinatorCpuMs: number; queriesPerInvocation: number; queryDurationMs: number };
+    };
+    usageDate: string;
+    daily: { eodRowsRead: number | null; eodRowsWritten: number | null; reservedReads: number | null;
+      reservedWrites: number | null; accountRowsRead: number | null; accountRowsWritten: number | null; sampledAt: string | null } | null;
+    rolling31: { windowStart: string; windowEnd: string; sampledAt: string; rowsRead: number; rowsWritten: number;
+      reservedReads: number; reservedWrites: number } | null;
+    unavailableReason: string | null;
+  };
   pipelineMode?: string;
   storageCapacity?: {
     status: "unmeasured" | "ready" | "failed" | "expired"; checkedAt: string | null; error: string | null;

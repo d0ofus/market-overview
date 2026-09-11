@@ -36,6 +36,16 @@ describe("actual public binding verification",()=>{
     const fetcher=vi.fn<typeof fetch>();await expect(verifyStoragePublicBindings({...args(),githubMarketDatabaseId:identity.sourceDatabaseId,fetcher})).rejects.toThrow("github-bindings-mismatch");
     expect(fetcher).not.toHaveBeenCalled();
   });
+  it("verifies actual enabled pruning for canonical production configuration",async()=>{
+    const enabled=[...bindings(),{name:"EOD_ARCHIVE_PRUNE_ENABLED",type:"plain_text",text:"true"}];
+    expect(await verifyStoragePublicBindings({...args(),expectedArchivePruneEnabled:true,fetcher:fetcherFor({bindings:enabled})}))
+      .toMatchObject({archivePruneEnabled:true});
+    await expect(verifyStoragePublicBindings({...args(),expectedArchivePruneEnabled:true,
+      fetcher:fetcherFor({bindings:enabled.map(row=>row.name==="EOD_ARCHIVE_PRUNE_ENABLED"?{...row,text:"false"}:row)})}))
+      .rejects.toThrow("public-prune-mismatch");
+    await expect(verifyStoragePublicBindings({...args(),expectedArchivePruneEnabled:true,fetcher:fetcherFor()}))
+      .rejects.toThrow("binding-missing-or-ambiguous");
+  });
   it("rejects stale source, disabled public reads, and ambiguous bindings",async()=>{
     for(const wrong of [bindings().map(row=>row.name==="MARKET_DATA_DB"?{...row,id:identity.sourceDatabaseId}:row),
       bindings().map(row=>row.name==="EOD_READ_ENABLED"?{...row,text:"false"}:row),[...bindings(),bindings()[0]]]) {

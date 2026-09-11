@@ -1,3 +1,4 @@
+import { assertEodRollingBudget, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 import { EOD_PUBLICATION_SCOPES } from "./eod-coordinator";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS } from "./eod-history-maintenance";
@@ -8,9 +9,9 @@ import { validateRuntimeEvidence, type RuntimeEvidence, type RuntimeEvidenceIden
 import { validateStorageCapacityAnalysis, validateStorageConsumerEvidence, verifyStorageAcceptedPublications,
   type StorageAcceptanceCapture, type StorageConsumerEvidence } from "./market-storage-acceptance";
 import type { StorageMigrationIdentity } from "./market-storage-control";
+import { resolveStorageExecutionIdentity } from "./market-storage-execution";
 import type { Env } from "./types";
 
-const LIMITS = { httpCpuMs: 10, coordinatorCpuMs: 10, queriesPerInvocation: 50, queryDurationMs: 30_000 };
 function fail(reason: string): never { throw new Error(`storage-cutover-builder-${reason}`); }
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -30,7 +31,7 @@ function count(value: unknown): number {
 /** Fixed, indexed, current UTC-day reads. Account analytics may lag actual D1
  * queries: the conservative local high-water ledger is retained explicitly.
  * Reservations count against admission but never impersonate billed rows. */
-export async function collectStorageCutoverUsage(ops: D1Database, now = new Date()) {
+export async function collectStorageCutoverUsage(ops: D1Database, now = new Date(), profile: EodBudgetProfile = resolveEodBudgetProfile()) {
   const usageDate = now.toISOString().slice(0, 10);
   const [eod, account, local] = await Promise.all([
     ops.prepare("SELECT rows_read,rows_written,reserved_reads,reserved_writes FROM eod_usage WHERE usage_date=?")
@@ -47,11 +48,12 @@ export async function collectStorageCutoverUsage(ops: D1Database, now = new Date
   const reservedReads = count(eod.reserved_reads), reservedWrites = count(eod.reserved_writes);
   const accountRowsRead = Math.max(count(account.rows_read), count(local.rows_read));
   const accountRowsWritten = Math.max(count(account.rows_written), count(local.rows_written));
-  if (eodRowsRead + reservedReads > 2_500_000 || eodRowsWritten + reservedWrites > 50_000
-    || accountRowsRead + reservedReads > 4_500_000 || accountRowsWritten + reservedWrites > 90_000
+  if (eodRowsRead + reservedReads > profile.eodDaily.reads || eodRowsWritten + reservedWrites > profile.eodDaily.writes
+    || accountRowsRead + reservedReads > profile.accountDaily.reads || accountRowsWritten + reservedWrites > profile.accountDaily.writes
     || eodRowsRead > accountRowsRead || eodRowsWritten > accountRowsWritten) fail("quota-headroom-unavailable");
+  const rolling31 = await assertEodRollingBudget(ops, profile, now);
   return { measurements: { usageDate, eodRowsRead, eodRowsWritten, accountRowsRead, accountRowsWritten },
-    provenance: { measuredAt: now.toISOString(), usageDate, eod, account, local, reservedReads, reservedWrites } };
+    provenance: { budgetProfile: profile.name, rolling31, measuredAt: now.toISOString(), usageDate, eod, account, local, reservedReads, reservedWrites } };
 }
 
 /** Read-only assembly, with no caller-provided success flags or metric counts.
@@ -65,12 +67,16 @@ export async function buildStorageCutoverEvidence(input: {
   sourceSnapshotSha256: string; runtime: RuntimeEvidence; runtimeIdentity: RuntimeEvidenceIdentity;
   assertSourceCapture: () => Promise<void>; now?: Date;
 }) {
-  const now = input.now ?? new Date(), { env, identity } = input;
+  const now = input.now ?? new Date(), { env } = input;
+  const profile = resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
   if (!env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB || !env.OPS_DB) fail("bindings-missing");
+  const execution = await resolveStorageExecutionIdentity(env.OPS_DB, input.identity, env.EOD_CODE_REVISION ?? "");
+  const identity = execution.identity;
   if (env.EOD_CODE_REVISION !== identity.codeRevision || input.runtimeIdentity.codeRevision !== identity.codeRevision
     || input.runtimeIdentity.targetDatabaseId !== identity.targetDatabaseId
     || input.runtimeIdentity.historyDatabaseId !== identity.historyDatabaseId
-    || await eodHash(input.capture.identity) !== await eodHash(identity)) fail("identity-mismatch");
+    || resolveEodBudgetProfile(input.runtimeIdentity.budgetProfile).name !== profile.name
+    || await eodHash(input.capture.identity) !== await eodHash(input.identity)) fail("identity-mismatch");
   await input.assertSourceCapture();
   await validateStorageConsumerEvidence(input.consumers, input.capture, input.tickers);
   const runtime = await validateRuntimeEvidence(input.runtime, input.runtimeIdentity);
@@ -121,12 +127,12 @@ export async function buildStorageCutoverEvidence(input: {
   // Collect usage last, so completed validation reads are included in admission
   // counters. The surrounding REST adapter accounts for these final reads too.
   const finishedAt = input.now ?? new Date();
-  const usage = await collectStorageCutoverUsage(env.OPS_DB, finishedAt);
-  const proof = validateEodCutoverEvidence({ version: 1, codeRevision: identity.codeRevision,
+  const usage = await collectStorageCutoverUsage(env.OPS_DB, finishedAt, profile);
+  const proof = validateEodCutoverEvidence({ version: 1, budgetProfile: profile.name, codeRevision: identity.codeRevision,
     methodologyVersion: EOD_METRICS_VERSION, measuredAt: finishedAt.toISOString(), runId: input.runId,
     sessionDate: input.expectedSession, sharedTickers: { count: tickers.length, processed: count(progress.symbols) }, fullUniverseCounts,
     scopes: EOD_PUBLICATION_SCOPES.map((scope) => ({ scope, publicationId: publications.scopes.find((row) => row.scope === scope)!.id,
-      sessionDate: input.expectedSession })), limits: LIMITS,
+      sessionDate: input.expectedSession })), limits: profile.runtime,
     measurements: { ...usage.measurements, ...runtime.measurements,
       source: "Cloudflare raw invocation logs; D1 account analytics and conservative local high-water ledger; real SQLite full dual-feed layout plus measured publication growth" },
     // The legacy rollout schema expects a storage layout. These are the actual
@@ -139,8 +145,9 @@ export async function buildStorageCutoverEvidence(input: {
     readers: { contractVersion: input.consumers.readerContractVersion, checkedAt: input.consumers.completedAt,
       consumers: [...MARKET_HISTORY_REQUIRED_CONSUMERS], parityPassed: true },
     retention: { hotSessions: capacity.hotSessions, sweepHeadroomSessions: count(model.sweepHeadroomSessions) },
-  }, identity.codeRevision, finishedAt);
+  }, identity.codeRevision, finishedAt, profile.name);
   const provenance = { version: 1, identity, captureHash: input.capture.captureHash,
+    ...(execution.record ? { storageIdentity: input.identity, executionApprovalHash: execution.record.evidenceHash } : {}),
     sourceSnapshotSha256: input.sourceSnapshotSha256, consumerEvidenceHash: input.consumers.evidenceHash,
     publicationEvidenceHash: publications.evidenceHash, runtimeEvidenceHash: runtime.evidenceHash,
     analysisHash: capacity.analysisHash, publicationGrowthHash: await eodHash(input.publicationGrowth),

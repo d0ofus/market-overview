@@ -1,3 +1,4 @@
+import { assertEodRollingBudget, eodBudgetWindow, resolveEodBudgetProfile } from "./eod-budget-profile";
 import { z } from "zod";
 import { eodDeadline, eodInputCorrectionStatus, EOD_PUBLICATION_SCOPES, expectedEodSession } from "./eod-coordinator";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
@@ -8,6 +9,8 @@ const publicActivationSchema = z.object({ version: z.literal(1), activatedAt: z.
   codeRevision: z.string().regex(/^[a-f0-9]{40}$/i), marketDatabaseId: z.string().uuid(),
 }).strict();
 export const eodCurrentHealthSchema = z.object({
+  budgetProfile: z.enum(["free", "paid"]).optional(),
+  rollingQuota: z.object({ windowStart:z.string(),windowEnd:z.string(),sampledAt:z.string(),rowsRead:count,rowsWritten:count,reservedReads:count,reservedWrites:count }).nullable().optional(),
   checkedAt: z.string().datetime({ offset: true }), codeRevision: z.string().nullable(),
   status: z.enum(["passed", "failed", "pending"]), expectedSession: z.string().nullable(),
   publicationCount: count, missingScopes: z.array(z.string()), completedRunId: z.string().nullable(),
@@ -23,7 +26,8 @@ const valid = (value: unknown): value is number => typeof value === "number" && 
  * provider fetches, and no absent observations converted into success. Admission
  * still verifies live D1 capacities and cutover still verifies payloads/coverage. */
 export async function collectEodCurrentHealth(env: Env, now = new Date()): Promise<EodCurrentHealth> {
-  const result: EodCurrentHealth = { checkedAt: now.toISOString(), codeRevision: env.EOD_CODE_REVISION ?? null,
+  const profile=resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
+  const result: EodCurrentHealth = { budgetProfile:profile.name,rollingQuota:null,checkedAt: now.toISOString(), codeRevision: env.EOD_CODE_REVISION ?? null,
     status: "pending", expectedSession: null, publicationCount: 0, missingScopes: [...EOD_PUBLICATION_SCOPES],
     completedRunId: null, inputCorrectionsPending: null, reasons: [], usageDate: now.toISOString().slice(0, 10), quotaSampledAt: null, quota: null };
   if (!env.OPS_DB || !env.MARKET_DATA_DB) { result.reasons.push("current-health-bindings-unavailable"); return result; }
@@ -79,24 +83,35 @@ export async function collectEodCurrentHealth(env: Env, now = new Date()): Promi
       accountRowsRead: Math.max(account!.rows_read, local!.rows_read), accountRowsWritten: Math.max(account!.rows_written, local!.rows_written),
       reservedReads: eod!.reserved_reads, reservedWrites: eod!.reserved_writes };
     const quota = result.quota;
-    if (quota.eodRowsRead + quota.reservedReads > 2_500_000 || quota.eodRowsWritten + quota.reservedWrites > 50_000
-      || quota.accountRowsRead + quota.reservedReads > 4_500_000 || quota.accountRowsWritten + quota.reservedWrites > 90_000
+    if (quota.eodRowsRead + quota.reservedReads > profile.eodDaily.reads || quota.eodRowsWritten + quota.reservedWrites > profile.eodDaily.writes
+      || quota.accountRowsRead + quota.reservedReads > profile.accountDaily.reads || quota.accountRowsWritten + quota.reservedWrites > profile.accountDaily.writes
       || quota.eodRowsRead > quota.accountRowsRead || quota.eodRowsWritten > quota.accountRowsWritten) result.reasons.push("current-quota-headroom-unavailable");
+  }
+  if (profile.rolling31) {
+    try { result.rollingQuota=await assertEodRollingBudget(env.OPS_DB,profile,now); }
+    catch (error) { result.reasons.push(error instanceof Error && error.message==="eod-rolling-budget-exhausted" ? "current-rolling-quota-headroom-unavailable" : "current-rolling-quota-unavailable"); }
   }
   result.status = result.reasons.length === 0 ? "passed" : result.reasons.some((reason) => /incomplete|mismatch|pending|headroom/.test(reason)) ? "failed" : "pending";
   return result;
 }
 
-export function isEodCurrentHealthReady(value: unknown, now = new Date()): value is EodCurrentHealth {
+export function isEodCurrentHealthReady(value: unknown, now = new Date(), expectedProfile?: string): value is EodCurrentHealth {
   const parsed = eodCurrentHealthSchema.safeParse(value);
   if (!parsed.success) return false;
-  const health = parsed.data, age = now.getTime() - Date.parse(health.checkedAt), quotaAge = health.quotaSampledAt ? now.getTime() - Date.parse(health.quotaSampledAt) : NaN;
+  const health = parsed.data, profile=resolveEodBudgetProfile(parsed.data.budgetProfile);
+  if (expectedProfile!==undefined && profile.name!==resolveEodBudgetProfile(expectedProfile).name) return false;
+  if (profile.rolling31) {
+    const rolling=health.rollingQuota, age=rolling ? now.getTime()-Date.parse(rolling.sampledAt) : NaN;
+    if (!rolling || rolling.windowStart!==eodBudgetWindow(now).start || rolling.windowEnd!==now.toISOString().slice(0,10) || !Number.isFinite(age) || age<0 || age>300_000
+      || rolling.rowsRead+rolling.reservedReads>profile.rolling31.reads || rolling.rowsWritten+rolling.reservedWrites>profile.rolling31.writes) return false;
+  }
+  const age = now.getTime() - Date.parse(health.checkedAt), quotaAge = health.quotaSampledAt ? now.getTime() - Date.parse(health.quotaSampledAt) : NaN;
   return health.status === "passed" && health.reasons.length === 0 && health.expectedSession !== null
     && health.codeRevision !== null && /^[a-f0-9]{40}$/i.test(health.codeRevision)
     && /^\d{4}-\d{2}-\d{2}$/.test(health.expectedSession) && health.publicationCount === 6 && health.missingScopes.length === 0
     && health.completedRunId !== null && health.inputCorrectionsPending === false && health.quota !== null
     && health.usageDate === now.toISOString().slice(0, 10) && age >= 0 && age <= 300_000 && quotaAge >= 0 && quotaAge <= 300_000
-    && health.quota.eodRowsRead + health.quota.reservedReads <= 2_500_000 && health.quota.eodRowsWritten + health.quota.reservedWrites <= 50_000
-    && health.quota.accountRowsRead + health.quota.reservedReads <= 4_500_000 && health.quota.accountRowsWritten + health.quota.reservedWrites <= 90_000
+    && health.quota.eodRowsRead + health.quota.reservedReads <= profile.eodDaily.reads && health.quota.eodRowsWritten + health.quota.reservedWrites <= profile.eodDaily.writes
+    && health.quota.accountRowsRead + health.quota.reservedReads <= profile.accountDaily.reads && health.quota.accountRowsWritten + health.quota.reservedWrites <= profile.accountDaily.writes
     && health.quota.eodRowsRead <= health.quota.accountRowsRead && health.quota.eodRowsWritten <= health.quota.accountRowsWritten;
 }

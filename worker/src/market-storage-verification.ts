@@ -1,6 +1,6 @@
 import { assertReviewedStorageSchema, storageBar } from "./market-storage-copy";
 import { STORAGE_TABLES } from "./market-storage-schema";
-import { canonicalStorageRows, quoteStorageIdentifier, readStoragePage, storageHash, storageRowKey,
+import { canonicalStorageRows, createStoragePriceYearReader, quoteStorageIdentifier, readStoragePage, storageHash, storageRowKey,
   storageTable, type StorageCell, type StorageRow, type StorageTable } from "./market-storage-pages";
 import { assertStorageSourceFrozen, freezeStorageSource, prepareStorageSourceFence } from "./market-storage-fence";
 import { heartbeatStorageMigration, loadStorageMigrationCheckpoint, progressStorageMigration,
@@ -148,6 +148,45 @@ async function activeBlock(history:D1Database,pointer:Pointer):Promise<{block:Ma
   }
   return current;
 }
+async function loadBlocks(history:D1Database,ids:readonly string[]):Promise<Map<string,{block:MarketHistoryBlock;bars:MarketHistoryBar[]}>> {
+  const unique=[...new Set(ids)],loaded=new Map<string,{block:MarketHistoryBlock;bars:MarketHistoryBar[]}>();
+  for(let offset=0;offset<unique.length;offset+=8) {
+    const selected=unique.slice(offset,offset+8);
+    const results=await history.batch<MarketHistoryBlock>(selected.map((id)=>history.prepare(
+      `SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=?`).bind(id)));
+    for(let index=0;index<selected.length;index++) {
+      const block=results[index].results[0];
+      if(!block || block.id!==selected[index])throw new Error("storage-verification-archive-block-missing-or-unverified");
+      loaded.set(block.id,{block,bars:await decodeMarketHistoryBlock(block)});
+    }
+  }
+  return loaded;
+}
+async function activeBlocks(history:D1Database,pointers:Pointer[]):Promise<Array<{block:MarketHistoryBlock;bars:MarketHistoryBar[]}>> {
+  if(pointers.length>8)throw new Error("storage-verification-archive-batch-too-large");
+  const loaded=await loadBlocks(history,pointers.flatMap((pointer)=>pointer.previous_block_id
+    ? [pointer.block_id,pointer.previous_block_id] : [pointer.block_id]));
+  return pointers.map((pointer)=>{
+    const current=loaded.get(pointer.block_id)!;
+    if(!current.block.verifiedAt)throw new Error("storage-verification-archive-block-missing-or-unverified");
+    if(current.block.feed!==pointer.feed || current.block.ticker!==pointer.ticker || current.block.calendarYear!==pointer.calendar_year) {
+      throw new Error("storage-verification-archive-pointer-identity-mismatch");
+    }
+    const previous=pointer.previous_block_id ? loaded.get(pointer.previous_block_id)!.block : null;
+    if(previous && (previous.feed!==pointer.feed || previous.ticker!==pointer.ticker || previous.calendarYear!==pointer.calendar_year)) {
+      throw new Error("storage-verification-previous-pointer-identity-mismatch");
+    }
+    return current;
+  });
+}
+async function verifyArchivePage(history:D1Database,table:StorageTable,rows:StorageRow[],check:()=>Promise<void>):Promise<void> {
+  for(let offset=0;offset<rows.length;offset+=8) {
+    await check();
+    const selected=rows.slice(offset,offset+8);
+    if(table===BLOCKS)await loadBlocks(history,selected.map((row)=>String(row.id)));
+    else await activeBlocks(history,selected as Pointer[]);
+  }
+}
 async function sourceYear(source:D1Database,feed:StorageCell,ticker:StorageCell,year:StorageCell):Promise<StorageRow[]> {
   const table=storageTable("alpaca_daily_bars");
   const rows=await source.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM alpaca_daily_bars
@@ -194,11 +233,7 @@ export async function captureStorageHistoryBaseline(context:Context & {history:D
     while (!cursor.done) {
       await check();
       const rows=await readStoragePage(context.history,table,cursor.after,50);
-      for (const row of rows) {
-        await check();
-        if (table===BLOCKS) await loadBlock(context.history,String(row.id));
-        else await activeBlock(context.history,row as Pointer);
-      }
+      await verifyArchivePage(context.history,table,rows,check);
       await pages.save(`history-baseline:${label}:page:${cursor.pages}`,rows);
       cursor=await advance(table,cursor,rows,50);
       await pages.save(`history-baseline:${label}:cursor`,cursor);
@@ -264,36 +299,41 @@ export async function runStorageVerification(context:Context & {
   const priceTable=storageTable("alpaca_daily_bars");
   type PriceCursor=Cursor & {latest:StorageRow|null;hotRows:number;hotHash:string};
   let prices=await state.load<PriceCursor>("verification:prices") ?? {...await emptyCursor(),latest:null,hotRows:0,hotHash:await storageHash([])};
-  let uncheckpointed=0;
+  const readYears=createStoragePriceYearReader(source,prices.after);
   while (!prices.done) {
     await check();
-    const first=(await readStoragePage(source,priceTable,prices.after,1))[0];
-    if (!first) {prices.done=true;await state.save("verification:prices",prices);break;}
-    const year=Number(String(first.date).slice(0,4)),rows=await sourceYear(source,first.feed,first.ticker,year);
-    if (!rows.length) throw new Error("storage-verification-source-year-empty");
-    const pointer=await loadPointer(history,first.feed,first.ticker,year),current=await activeBlock(history,pointer);
-    const archived=new Map(current.bars.map((bar) => [bar.date,bar]));
-    for (const row of rows) if (!archived.has(String(row.date)) || !marketHistoryBarsEqual(storageBar(row),archived.get(String(row.date))!)) {
-      throw new Error("storage-verification-source-price-not-preserved");
-    }
-    const last=rows.at(-1)!,after=storageRowKey(priceTable,last),next=(await readStoragePage(source,priceTable,after,1))[0];
-    let latest=rows.filter((row) => String(row.date)<=run.session_date).at(-1) ?? prices.latest;
-    let hotRows=prices.hotRows,hotHash=prices.hotHash;
-    if (!next || next.feed!==last.feed || next.ticker!==last.ticker) {
-      if (latest) {
-        const hot=await target.prepare(`SELECT ${priceTable.columns.map(quoteStorageIdentifier).join(",")} FROM alpaca_daily_bars
-          WHERE feed=? AND ticker=? ORDER BY date LIMIT 2 /* storage-copy-page */`).bind(last.feed,last.ticker).all<StorageRow>();
-        if (canonicalStorageRows(priceTable,hot.results)!==canonicalStorageRows(priceTable,[latest])) throw new Error("storage-verification-hot-seed-mismatch");
-        hotRows++;hotHash=await storageHash([hotHash,canonicalStorageRows(priceTable,[latest])]);
+    const {groups,next}=await readYears();
+    if(!groups.length) {prices.done=true;await state.save("verification:prices",prices);break;}
+    const pointerRows=await history.batch<Pointer>(groups.map((rows)=>history.prepare(`SELECT feed,ticker,calendar_year,block_id,previous_block_id,updated_at
+      FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=?`)
+      .bind(rows[0].feed,rows[0].ticker,Number(String(rows[0].date).slice(0,4)))));
+    if(pointerRows.some((result)=>result.results.length!==1))throw new Error("storage-verification-archive-pointer-missing");
+    const archivedGroups=await activeBlocks(history,pointerRows.map((result)=>result.results[0]));
+    const seeds:StorageRow[]=[];
+    for(let index=0;index<groups.length;index++) {
+      const rows=groups[index],last=rows.at(-1)!,following=groups[index+1]?.[0] ?? next;
+      const archived=new Map(archivedGroups[index].bars.map((bar)=>[bar.date,bar]));
+      for(const row of rows)if(!archived.has(String(row.date)) || !marketHistoryBarsEqual(storageBar(row),archived.get(String(row.date))!)) {
+        throw new Error("storage-verification-source-price-not-preserved");
       }
-      latest=null;
+      let latest=rows.filter((row)=>String(row.date)<=run.session_date).at(-1) ?? prices.latest;
+      let hotRows=prices.hotRows,hotHash=prices.hotHash;
+      if(!following || following.feed!==last.feed || following.ticker!==last.ticker) {
+        if(latest) {seeds.push(latest);hotRows++;hotHash=await storageHash([hotHash,canonicalStorageRows(priceTable,[latest])]);}
+        latest=null;
+      }
+      prices={...prices,after:storageRowKey(priceTable,last),rows:prices.rows+rows.length,
+        hash:await storageHash([prices.hash,canonicalStorageRows(priceTable,rows)]),done:!following,pages:prices.pages+1,latest,hotRows,hotHash};
     }
-    prices={...prices,after,rows:prices.rows+rows.length,hash:await storageHash([prices.hash,canonicalStorageRows(priceTable,rows)]),
-      done:!next,pages:prices.pages+1,latest,hotRows,hotHash};
-    if (++uncheckpointed>=10 || prices.done) {
-      await state.save("verification:prices",prices);uncheckpointed=0;
-      await progressStorageMigration(context.ops,run.id,context.leaseToken,"verification-prices",{rows:prices.rows,hotRows});
+    if(seeds.length) {
+      const results=await target.batch<StorageRow>(seeds.map((seed)=>target.prepare(`SELECT ${priceTable.columns.map(quoteStorageIdentifier).join(",")} FROM alpaca_daily_bars
+        WHERE feed=? AND ticker=? ORDER BY date LIMIT 2 /* storage-copy-page */`).bind(seed.feed,seed.ticker)));
+      if(results.some((result,index)=>canonicalStorageRows(priceTable,result.results)!==canonicalStorageRows(priceTable,[seeds[index]]))) {
+        throw new Error("storage-verification-hot-seed-mismatch");
+      }
     }
+    await state.save("verification:prices",prices);
+    await progressStorageMigration(context.ops,run.id,context.leaseToken,"verification-prices",{rows:prices.rows,hotRows:prices.hotRows});
   }
   // Independent destination walk detects extra securities, future rows or
   // duplicate feed windows that a source-driven existence check would miss.
@@ -311,10 +351,7 @@ export async function runStorageVerification(context:Context & {
     let cursor=await state.load<Cursor>(`verification:archive:${label}`) ?? await emptyCursor();
     while (!cursor.done) {
       await check();const rows=await readStoragePage(history,table,cursor.after,50);
-      for (const row of rows) {
-        await check();
-        if (table===BLOCKS) await loadBlock(history,String(row.id)); else await activeBlock(history,row as Pointer);
-      }
+      await verifyArchivePage(history,table,rows,check);
       cursor=await advance(table,cursor,rows,50);await state.save(`verification:archive:${label}`,cursor);
       await progressStorageMigration(context.ops,run.id,context.leaseToken,"verification-archives",{table:label,rows:cursor.rows});
     }

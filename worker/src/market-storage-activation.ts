@@ -11,6 +11,7 @@ export type StorageBindingEvidence = {
   version: 1; workerName: string; codeRevision: string; marketDatabaseId: string;
   historyDatabaseId: string; opsDatabaseId: string; observedAt: string;
   deploymentId: string; versionId: string;
+  archivePruneEnabled?: boolean;
 };
 /** Verify the version actually serving all traffic, not the latest upload or
  * script /settings. Re-read the deployment after its immutable version detail
@@ -21,6 +22,7 @@ export type StorageBindingEvidence = {
 export async function verifyStoragePublicBindings(input: {
   accountId: string; token: string; workerName: string; identity: StorageMigrationIdentity;
   opsDatabaseId: string; githubMarketDatabaseId: string; githubRunnerMode: string; fetcher?: typeof fetch;
+  expectedArchivePruneEnabled?: boolean;
 }): Promise<StorageBindingEvidence> {
   if (!/^[a-f0-9]{32}$/.test(input.accountId) || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(input.workerName)) {
     throw new Error("storage-activation-worker-identity-invalid");
@@ -84,11 +86,14 @@ export async function verifyStoragePublicBindings(input: {
     || variable("EOD_RUNNER_MODE") !== "active" || variable("EOD_READ_ENABLED") !== "true"
     || variable("EOD_CODE_REVISION") !== input.identity.codeRevision
     || variable("EOD_STORAGE_MIGRATION_ID") !== input.identity.id) throw new Error("storage-activation-public-bindings-mismatch");
+  if (input.expectedArchivePruneEnabled !== undefined
+    && variable("EOD_ARCHIVE_PRUNE_ENABLED") !== String(input.expectedArchivePruneEnabled)) throw new Error("storage-activation-public-prune-mismatch");
   const confirmed = await activeDeployment();
   if (confirmed.id !== deployment.id || confirmed.versionId !== deployment.versionId || confirmed.createdOn !== deployment.createdOn) {
     throw new Error("storage-activation-deployment-changed-during-verification");
   }
   return { version: 1, workerName: input.workerName, codeRevision: input.identity.codeRevision,
     marketDatabaseId: input.identity.targetDatabaseId, historyDatabaseId: input.identity.historyDatabaseId,
-    opsDatabaseId: input.opsDatabaseId, observedAt: new Date().toISOString(), deploymentId: deployment.id, versionId: deployment.versionId };
+    opsDatabaseId: input.opsDatabaseId, observedAt: new Date().toISOString(), deploymentId: deployment.id, versionId: deployment.versionId,
+    ...(input.expectedArchivePruneEnabled === undefined ? {} : { archivePruneEnabled: input.expectedArchivePruneEnabled }) };
 }

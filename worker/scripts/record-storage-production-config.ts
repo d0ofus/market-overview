@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -5,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import { parse } from "smol-toml";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { loadStorageMigration, storageMigrationIdentity } from "../src/market-storage-control";
+import { loadStorageMigration, storageMigrationIdentity, storageExecutionRevision } from "../src/market-storage-control";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
 import { storeEodProductionConfiguration, validateEodProductionConfiguration } from "../src/eod-production-configuration";
+import { loadApprovedStorageHotSessions } from "../src/eod-storage-history-capacity";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error("storage-production-config-setting-missing"); return value; };
@@ -46,25 +49,43 @@ async function main(): Promise<void> {
   if (initialGithub.githubMainRevision !== codeRevision) throw new Error("storage-production-config-github-main-mismatch");
   const allowedDatabaseIds = [marketDatabaseId, historyDatabaseId, opsDatabaseId];
   const rawOps = createEodD1Database({ accountId, token, databaseId: opsDatabaseId, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `production-configuration:${codeRevision}`, { writeCredit: 100,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }) });
+  const admission = createEodAdmission(rawOps, `production-configuration:${codeRevision}`, { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), writeCredit: 100,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }) });
   const ops = createEodD1Database({ accountId, token, databaseId: opsDatabaseId, allowedDatabaseIds, admission });
   const readEvidence = async (id: string) => { const row = await ops.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?")
     .bind(id).first<string>("evidence_json"); return row ? JSON.parse(row) as unknown : null; };
   try {
     const migration = await loadStorageMigration(ops, migrationId);
     if (!migration || migration.status !== "completed") throw new Error("storage-production-config-completed-migration-required");
+    await assertStorageExecutionRevision(ops,migration,storageExecutionRevision(migration));
     const activation = await readEvidence("monitoring:public-activation"), codeApproval = await readEvidence(`active:${codeRevision}`);
-    const binding = await verifyStoragePublicBindings({ accountId, token: controlToken, workerName,
+    const readBinding = (observed: ReturnType<typeof github>) => verifyStoragePublicBindings({ accountId, token: controlToken, workerName,
       identity: { ...storageMigrationIdentity(migration), codeRevision }, opsDatabaseId,
-      githubMarketDatabaseId: initialGithub.githubVariables.get("EOD_MARKET_DATABASE_ID") ?? "",
-      githubRunnerMode: initialGithub.githubVariables.get("EOD_RUNNER_MODE") ?? "" });
+      githubMarketDatabaseId: observed.githubVariables.get("EOD_MARKET_DATABASE_ID") ?? "",
+      githubRunnerMode: observed.githubVariables.get("EOD_RUNNER_MODE") ?? "", expectedArchivePruneEnabled: true });
+    let binding = await readBinding(initialGithub);
     // The serving verifier reads deployment -> immutable version -> deployment.
     // Re-read GitHub and the local checkout immediately before the admitted write.
     assertCheckout();
-    const finalGithub = github();
-    const record = await validateEodProductionConfiguration({ accountId, workerName, codeRevision, migrationId,
+    let finalGithub = github();
+    if (await loadApprovedStorageHotSessions({ DB: ops, OPS_DB: ops, EOD_CODE_REVISION: codeRevision }) !== 90) {
+      throw new Error("storage-production-config-ninety-session-approval-required");
+    }
+    const validate = () => validateEodProductionConfiguration({ accountId, workerName, codeRevision, migrationId,
       marketDatabaseId, historyDatabaseId, opsDatabaseId, trackedConfig, ...finalGithub, migration, activation, codeApproval, binding });
+    try { await validate(); }
+    catch (error) {
+      // This specific final validator result is emitted only after every other
+      // actual config, serving-version and approval check passes. Never replace
+      // observed GitHub values in a local map to manufacture a completed proof.
+      if (!(error instanceof Error) || error.message !== "storage-production-config-github-activation-pending") throw error;
+      assertCheckout();
+      command("gh", ["variable", "set", "EOD_PRODUCTION_CODE_REVISION", "--env", "market-eod", "--repo", repository, "--body", codeRevision]);
+      command("gh", ["variable", "set", "EOD_ARCHIVE_PRUNE_ENABLED", "--env", "market-eod", "--repo", repository, "--body", "true"]);
+      finalGithub = github(); binding = await readBinding(finalGithub);
+    }
+    assertCheckout();
+    const record = await validate();
     const stored = await storeEodProductionConfiguration(ops, record);
     console.log(JSON.stringify({ status: "recorded", ...stored }));
   } finally { await admission.flush(); }

@@ -9,6 +9,7 @@ import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-stora
 import { loadMarketHistory, loadMarketHistoryCoverage, loadMarketHistoryOhlcv, type MarketHistoryBar } from "./market-history";
 import type { StorageMigrationIdentity } from "./market-storage-control";
 import type { Env } from "./types";
+import { createStorageCapturedReadCache } from "./market-storage-read-cache";
 
 /** These are executable reader/output contracts, not a list of asserted booleans.
  * MAX is read once per provider/security; trailing readers are invoked separately
@@ -86,14 +87,33 @@ export async function verifyStorageConsumerBatch(input: {
     || Object.values(state.history).some((value) => !count(value) || value > state.nextTicker)) fail("checkpoint-capture-mismatch");
   await input.assertCapture();
   const end = Math.min(tickers.length, state.nextTicker + max);
-  const sourceEnv: Env = { ...input.sourceEnv, EOD_RUNNER_MODE: "shadow", ALPACA_DAILY_FEED: "sip" };
-  const targetEnv: Env = { ...input.targetEnv, EOD_RUNNER_MODE: "shadow", ALPACA_DAILY_FEED: "sip" };
+  const cached=createStorageCapturedReadCache();
+  const readers=(env:Env):Env => ({...env,DB:cached(env.DB),
+    ...(env.MARKET_DATA_DB ? {MARKET_DATA_DB:cached(env.MARKET_DATA_DB)} : {}),
+    ...(env.MARKET_HISTORY_DB ? {MARKET_HISTORY_DB:cached(env.MARKET_HISTORY_DB)} : {}),
+    EOD_RUNNER_MODE:"shadow",ALPACA_DAILY_FEED:"sip"});
+  const sourceEnv=readers(input.sourceEnv),targetEnv=readers(input.targetEnv);
+  const request={tickers:tickers.slice(state.nextTicker,end),endDate:session,feed:"sip"};
+  // Execute each actual reader once for the whole bounded ticker group. The
+  // 520/1330 SQL limits and coverage query remain independent contracts; the
+  // cache only shares identical captured reads, never a substitute array slice.
+  const [allSource,allTarget,allSourceYahoo,allTargetYahoo,allOhlcv520,allCloses1330,allCoverage]=await Promise.all([
+    loadMarketHistory(sourceEnv,request),loadMarketHistory(targetEnv,request),
+    loadMarketHistory(sourceEnv,{...request,feed:"yahoo-eod"}),loadMarketHistory(targetEnv,{...request,feed:"yahoo-eod"}),
+    loadMarketHistoryOhlcv(targetEnv,{...request,limitPerTicker:520}),
+    // 1,300 closing observations and the existing thirty-observation buffer.
+    loadMarketHistory(targetEnv,{...request,limitPerTicker:1_330}),loadMarketHistoryCoverage(targetEnv,request),
+  ]);
+  const grouped=(rows:MarketHistoryBar[]):Map<string,MarketHistoryBar[]> => {
+    const result=new Map<string,MarketHistoryBar[]>();
+    for (const row of rows) {const group=result.get(row.ticker) ?? [];group.push(row);result.set(row.ticker,group);}
+    return result;
+  };
+  const sourceRows=grouped(allSource),targetRows=grouped(allTarget),sourceYahooRows=grouped(allSourceYahoo),targetYahooRows=grouped(allTargetYahoo),
+    ohlcvRows=grouped(allOhlcv520),closeRows=grouped(allCloses1330);
   for (let index = state.nextTicker; index < end; index++) {
-    const ticker = tickers[index], request = { tickers: [ticker], endDate: session, feed: "sip" };
-    const [source, target, sourceYahoo, targetYahoo] = await Promise.all([
-      loadMarketHistory(sourceEnv, request), loadMarketHistory(targetEnv, request),
-      loadMarketHistory(sourceEnv, { ...request, feed: "yahoo-eod" }), loadMarketHistory(targetEnv, { ...request, feed: "yahoo-eod" }),
-    ]);
+    const ticker=tickers[index],source=sourceRows.get(ticker) ?? [],target=targetRows.get(ticker) ?? [],
+      sourceYahoo=sourceYahooRows.get(ticker) ?? [],targetYahoo=targetYahooRows.get(ticker) ?? [];
     const compare = async (name: Consumer, expected: unknown, actual: unknown, observations: number) => {
       const expectedHash = await eodHash(expected), actualHash = await eodHash(actual);
       if (expectedHash !== actualHash) fail(`consumer-mismatch:${name}:${ticker}`);
@@ -101,19 +121,13 @@ export async function verifyStorageConsumerBatch(input: {
       check.tickers++; check.observations += observations; check.hash = await eodHash([check.hash, ticker, expectedHash, observations]);
     };
     await compare("ticker-max", [barIdentity(source), barIdentity(sourceYahoo)], [barIdentity(target), barIdentity(targetYahoo)], source.length + sourceYahoo.length);
-    const [ohlcv520, closes1330, coverage] = await Promise.all([
-      loadMarketHistoryOhlcv(targetEnv, { ...request, limitPerTicker: 520 }),
-      // 1,300 closing observations plus the existing thirty-observation fetch
-      // buffer; this is deliberately stricter than the current 5Y 1261+30 call.
-      loadMarketHistory(targetEnv, { ...request, limitPerTicker: 1_330 }),
-      loadMarketHistoryCoverage(targetEnv, request),
-    ]);
+    const ohlcv520=ohlcvRows.get(ticker) ?? [],closes1330=closeRows.get(ticker) ?? [];
     const expectedOhlcv = source.slice(-520).map((bar) => ({ ...bar, volume: bar.volume ?? 0 }));
     await compare("patterns-520", barIdentity(expectedOhlcv), barIdentity(ohlcv520), expectedOhlcv.length);
     const closeOutput = (bars: MarketHistoryBar[]) => bars.map((bar) => [bar.date, bar.c]);
     await compare("correlation-5y", closeOutput(source.slice(-1_330)), closeOutput(closes1330), Math.min(1_330, source.length));
     const expectedCoverage = source.length ? [[ticker, { ticker, firstDate: source[0].date, lastDate: source.at(-1)!.date, barCount: source.length }]] : [];
-    await compare("coverage-and-repair", expectedCoverage, [...coverage], source.length);
+    await compare("coverage-and-repair", expectedCoverage, allCoverage.has(ticker) ? [[ticker,allCoverage.get(ticker)!]] : [], source.length);
     const ohlcvOutput = (bars: MarketHistoryBar[]) => bars.map((bar) => [bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume ?? 0]);
     // These workflows share the range/ordered OHLCV contract. Their algorithms
     // retain identical inputs including gaps, null-volume compatibility and dates.

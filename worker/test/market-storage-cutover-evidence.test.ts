@@ -8,6 +8,8 @@ import { EOD_RUNTIME_COORDINATOR_PATH, type RuntimeProbeSummary } from "../src/e
 import { verifyStorageAcceptedPublications, verifyStorageConsumerBatch, type StorageAcceptanceCapture } from "../src/market-storage-acceptance";
 import { buildStorageCutoverEvidence, collectStorageCutoverUsage, storeStorageCutoverProof } from "../src/market-storage-cutover-evidence";
 import type { Env } from "../src/types";
+import { createStorageMigration } from "../src/market-storage-control";
+import { storageExecutionKey } from "../src/market-storage-execution";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -18,18 +20,18 @@ const capture: StorageAcceptanceCapture = { identity, captureHash: "b".repeat(64
   historyCapture: { schemaHash: "d".repeat(64), revision: 0 } };
 const runtimeIdentity: RuntimeEvidenceIdentity = { probeId: "private-probe", workerName: "candidate", workerVersion: uuid(6),
   codeRevision: identity.codeRevision, targetDatabaseId: uuid(2), historyDatabaseId: uuid(3), opsDatabaseId: uuid(4), coreDatabaseId: uuid(5) };
-async function runtimeFixture() {
+async function runtimeFixture(revision = identity.codeRevision) {
   const now = Date.now(), stamp = new Date(now - 20_000).toISOString();
   const bindings = { DB: uuid(5), MARKET_DATA_DB: uuid(2), MARKET_HISTORY_DB: uuid(3), OPS_DB: uuid(4),
     EOD_READ_ENABLED: "true", EOD_RUNTIME_CANDIDATE_ONLY: "true", EOD_RUNTIME_PROBE_ID: "private-probe",
-    EOD_CODE_REVISION: identity.codeRevision, EOD_RUNTIME_TARGET_DATABASE_ID: uuid(2) };
+    EOD_CODE_REVISION: revision, EOD_RUNTIME_TARGET_DATABASE_ID: uuid(2) };
   const version = { id: runtimeIdentity.workerVersion, resources: { bindings: Object.entries(bindings).map(([name, value]) =>
     ["DB", "MARKET_DATA_DB", "MARKET_HISTORY_DB", "OPS_DB"].includes(name)
       ? { name, type: "d1", id: value, database_id: value } : { name, type: "plain_text", text: value }) } };
   const events = ["/api/dashboard", "/api/dashboard", "/api/breadth/dashboard", "/api/breadth/dashboard", EOD_RUNTIME_COORDINATOR_PATH]
     .flatMap((route, i) => {
       const summary: RuntimeProbeSummary = { event: "eod-runtime-probe-v1", probeId: "private-probe", sampleId: uuid(i + 10),
-        category: i === 4 ? "coordinator" : "http", route, codeRevision: identity.codeRevision, workerVersion: uuid(6),
+        category: i === 4 ? "coordinator" : "http", route, codeRevision: revision, workerVersion: uuid(6),
         targetDatabaseId: uuid(2), eodReadEnabled: true, startedAt: stamp, finishedAt: stamp, outcome: "ok", complete: true,
         cpuSource: "cloudflare-invocation-log-required", stats: { queries: i + 2, rowsRead: 10, rowsWritten: 1,
           maxQueryDurationMs: i + 0.5, missingMetadata: 0, failedQueries: 0 } };
@@ -37,7 +39,7 @@ async function runtimeFixture() {
       return [{ source: JSON.stringify(summary), $workers: worker },
         { source: "invocation", $workers: { ...worker, cpuTimeMs: i + 1, outcome: "ok" } }];
     });
-  return buildRuntimeEvidence(runtimeIdentity, version, events, { from: now - 30_000, to: now - 10_000 }, true);
+  return buildRuntimeEvidence({ ...runtimeIdentity, codeRevision: revision }, version, events, { from: now - 30_000, to: now - 10_000 }, true);
 }
 
 describe("actual-evidence storage cutover builder", () => {
@@ -78,11 +80,12 @@ describe("actual-evidence storage cutover builder", () => {
   }, 30_000);
   afterEach(() => { market.dispose(); history.dispose(); ops.dispose(); });
   async function fixture() {
+    const executionIdentity = { ...identity, codeRevision: env.EOD_CODE_REVISION! };
     const consumers = (await verifyStorageConsumerBatch({ sourceEnv: env, targetEnv: env, capture, tickers,
       calendarDates: [identity.sessionDate], assertCapture: async () => {}, maxTickers: 2 })).evidence!;
-    const publications = await verifyStorageAcceptedPublications({ env, identity, runId, tickers, expectedSession: identity.sessionDate });
+    const publications = await verifyStorageAcceptedPublications({ env, identity: executionIdentity, runId, tickers, expectedSession: identity.sessionDate });
     const stamp = new Date().toISOString(), tickerHash = await eodHash(tickers);
-    const growth = { version: 1, measuredAt: stamp, codeRevision: identity.codeRevision, tickerHash, schemaHash: capture.sourceCapture.schemaHash,
+    const growth = { version: 1, measuredAt: stamp, codeRevision: executionIdentity.codeRevision, tickerHash, schemaHash: capture.sourceCapture.schemaHash,
       fixtureSha256: "e".repeat(64), beforeBytes: 4096, afterBytes: 12288, measurementMethod: "sqlite-real-publication-schema-v1",
       sourceSnapshotSha256: "f".repeat(64), sourcePublicationIds: publications.scopes.map((row) => row.id),
       sourcePublicationChecksums: publications.scopes.map((row) => row.checksum), sourceSessionDate: identity.sessionDate,
@@ -96,9 +99,33 @@ describe("actual-evidence storage cutover builder", () => {
         preservedOtherFeedOrNonSharedSeedRows: 0,
         database: { physicalBytes: 2_000_000, priceTableAndIndexBytes: 1_000_000 }, publicationGrowthReserveBytes: 163840, projectedBytes: 2163840 })) };
     return { env, identity, runId, tickers, expectedSession: identity.sessionDate, capture, consumers, analysis,
-      publicationGrowth: growth, sourceSnapshotSha256: "f".repeat(64), runtime: await runtimeFixture(), runtimeIdentity,
+      publicationGrowth: growth, sourceSnapshotSha256: "f".repeat(64), runtime: await runtimeFixture(executionIdentity.codeRevision),
+      runtimeIdentity: { ...runtimeIdentity, codeRevision: executionIdentity.codeRevision },
       assertSourceCapture: async () => {} };
   }
+  it("binds fresh runtime and publications to the approved executor while preserving the original capture", async () => {
+    const revision = "d".repeat(40), freezeHash = "e".repeat(64);
+    await createStorageMigration(ops.db, identity);
+    const unsigned = { version: 1, policy: "preserve-storage-capture-execution-v1", storageIdentity: identity,
+      fromRevision: identity.codeRevision, codeRevision: revision, predecessorHash: null,
+      sourceCapture: capture.sourceCapture, freezeEvidenceHash: freezeHash, checkpointCount: 0,
+      checkpointManifestHash: "f".repeat(64), changedFiles: ["worker/src/eod-budget-profile.ts"], diffHash: "a".repeat(64),
+      approvedAt: new Date().toISOString(), storagePolicy: { hotSessions: 90, marketBytes: 350_000_000,
+        archiveBytes: 350_000_000, databaseCount: 10, accountBytes: 5_000_000_000 } };
+    const record = { ...unsigned, evidenceHash: await eodHash(unsigned) };
+    await ops.db.prepare("UPDATE market_storage_migrations SET source_schema_hash=?,source_revision=0,freeze_evidence_hash=?,execution_revision=?,execution_evidence_hash=? WHERE id=?")
+      .bind(capture.sourceCapture.schemaHash, freezeHash, revision, record.evidenceHash, identity.id).run();
+    await ops.db.prepare("INSERT INTO eod_rollout_evidence VALUES(?,?,?)")
+      .bind(storageExecutionKey(identity.id, revision), JSON.stringify(record), unsigned.approvedAt).run();
+    env.EOD_CODE_REVISION = revision;
+    const input = await fixture(), built = await buildStorageCutoverEvidence(input);
+    expect(built.proof.codeRevision).toBe(revision);
+    expect(built.provenance).toMatchObject({ identity: { ...identity, codeRevision: revision }, storageIdentity: identity,
+      executionApprovalHash: record.evidenceHash, captureHash: capture.captureHash });
+    expect(input.capture.identity.codeRevision).toBe(identity.codeRevision);
+    await ops.db.prepare("DELETE FROM eod_rollout_evidence WHERE id=?").bind(storageExecutionKey(identity.id, revision)).run();
+    await expect(buildStorageCutoverEvidence(input)).rejects.toThrow("storage-execution-record-invalid");
+  }, 30_000);
   it("derives the six scopes, all universe counts, parity, dual-feed model and actual usage without operator metrics", async () => {
     const built = await buildStorageCutoverEvidence(await fixture());
     expect(built.proof.sharedTickers).toEqual({ count: 2, processed: 2 });

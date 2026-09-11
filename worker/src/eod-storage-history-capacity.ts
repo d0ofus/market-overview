@@ -4,6 +4,8 @@ import { validateStorageConsumerEvidence, type StorageAcceptanceCapture, type St
   type validateStorageCapacityAnalysis } from "./market-storage-acceptance";
 import type { Env } from "./types";
 import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
+import { resolveStorageExecutionIdentity } from "./market-storage-execution";
+import type { EodCutoverEvidence } from "./eod-rollout-service";
 
 type AcceptedCapacity = Awaited<ReturnType<typeof validateStorageCapacityAnalysis>>;
 const FEEDS = ["sip", "yahoo-eod"] as const;
@@ -13,6 +15,7 @@ type Approval = {
   version: 1; kind: "storage-layout-v1"; codeRevision: string; approvedAt: string; proofHash: string;
   proof: { identity: StorageAcceptanceCapture["identity"]; tickerHash: string; tickers: string[]; publicationRunId: string;
     consumerProofHash: string; readers: HistoryReaderEvidence; capacity: AcceptedCapacity;
+    storageIdentity?: StorageAcceptanceCapture["identity"]; executionApprovalHash?: string;
     model: { measuredAt: string; sourceSnapshotHash: string; priceTableAndIndexBytes: number; modeledPriceRows: number;
       fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number; fallbackStorage?: string };
     horizon: { anchorSession: string; lastCoveredSession: string; expiresAt: string; sessions: number } };
@@ -60,7 +63,9 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   consumers: StorageConsumerEvidence; capture: StorageAcceptanceCapture; tickers: string[]; now?: Date;
 }): Promise<Approval> {
   if (!env.OPS_DB || !env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB) fail("bindings-missing");
-  const now = input.now ?? new Date(), tickers = population(input.tickers), identity = input.capture.identity;
+  const now = input.now ?? new Date(), tickers = population(input.tickers), storageIdentity = input.capture.identity;
+  const execution = await resolveStorageExecutionIdentity(env.OPS_DB,storageIdentity,env.EOD_CODE_REVISION ?? "");
+  const identity = execution.identity;
   if (env.EOD_CODE_REVISION !== identity.codeRevision || new Set(tickers).size !== tickers.length
     || !tickers.length || tickers.length > 10_000) fail("identity-mismatch");
   await validateStorageConsumerEvidence(input.consumers, input.capture, tickers);
@@ -88,6 +93,7 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   const expiresAt = new Date(Date.parse(`${lastCoveredSession}T00:00:00Z`) + 86_400_000).toISOString();
   const proof: Approval["proof"] = { identity, tickerHash: await eodHash(tickers), tickers, publicationRunId: input.publications.runId,
     consumerProofHash: input.consumers.evidenceHash,
+    ...(execution.record ? {storageIdentity,executionApprovalHash:execution.record.evidenceHash} : {}),
     readers: { contractVersion: input.consumers.readerContractVersion, checkedAt: input.consumers.completedAt,
       consumers: [...MARKET_HISTORY_REQUIRED_CONSUMERS], parityPassed: true, codeRevision: identity.codeRevision },
     capacity: input.capacity, model: { measuredAt: String(report.measuredAt), sourceSnapshotHash, priceTableAndIndexBytes: priceBytes,
@@ -109,14 +115,85 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   return approved;
 }
 
+async function assertApproval(approved: Approval, revision: string): Promise<void> {
+  if (approved.version !== 1 || approved.kind !== "storage-layout-v1" || approved.codeRevision !== revision
+    || !digest(approved.proofHash) || await eodHash(approved.proof) !== approved.proofHash
+    || approved.proof.identity.codeRevision !== revision || !Number.isFinite(Date.parse(approved.proof.horizon.expiresAt))) fail("approval-integrity");
+}
+
+function assertConfigCapacity(approved: Approval, proof: EodCutoverEvidence): void {
+  const source = approved.proof;
+  if (source.model.hotSessions !== 90 || proof.retention.hotSessions !== 90
+    || proof.retention.sweepHeadroomSessions !== source.model.sweepHeadroomSessions
+    || proof.runId !== source.publicationRunId || proof.sessionDate !== source.horizon.anchorSession
+    || proof.sharedTickers.count !== source.tickers.length || proof.capacity.measuredAt !== source.capacity.measuredAt
+    || proof.capacity.marketDatabaseBytes !== source.capacity.projectedMarketBytes
+    || proof.capacity.archiveDatabaseBytes !== source.capacity.liveHistoryBytes
+    || proof.capacity.archiveDatabaseBytes + proof.capacity.additionalArchiveBytes !== source.capacity.projectedHistoryBytes
+    || proof.capacity.priceTableAndIndexBytes !== source.model.priceTableAndIndexBytes
+    || proof.capacity.priceRows < source.model.modeledPriceRows
+    || proof.readers.checkedAt !== source.readers.checkedAt || proof.readers.contractVersion !== source.readers.contractVersion
+    || JSON.stringify(proof.readers.consumers) !== JSON.stringify(source.readers.consumers)) fail("config-capacity-mismatch");
+}
+
+/** A config-only commit can reference the exact immutable measured model from
+ * its executor. It cannot refresh a measurement, extend the horizon or change
+ * retention. The caller stores this reference only after the real Git diff and
+ * complete current cutover proof have passed production-config validation. */
+export async function storageHistoryConfigurationReference(env: Env, input: {
+  sourceRevision: string; nextRevision: string; proof: EodCutoverEvidence; now?: Date;
+}): Promise<{ historyCapacityProofHash: string }> {
+  if (!/^[a-f0-9]{40}$/.test(input.nextRevision) || input.nextRevision === input.sourceRevision
+    || input.proof.codeRevision !== input.nextRevision) fail("config-revision-invalid");
+  const approved = await loadApproval({ ...env, EOD_CODE_REVISION: input.sourceRevision }, input.sourceRevision);
+  if (!approved || approved.codeRevision !== input.sourceRevision) fail("config-source-approval-required");
+  const now = input.now ?? new Date();
+  if (now.getTime() < Date.parse(approved.approvedAt) || now.getTime() >= Date.parse(approved.proof.horizon.expiresAt)) fail("forecast-horizon-expired");
+  assertConfigCapacity(approved, input.proof);
+  const immutable = await read<Approval>(env.OPS_DB!, `history-storage-proof:${approved.proofHash}`);
+  if (!immutable || await eodHash(immutable) !== await eodHash(approved)) fail("config-immutable-approval-required");
+  return { historyCapacityProofHash: approved.proofHash };
+}
+
 async function loadApproval(env: Env, revision: string): Promise<Approval | null> {
   if (!env.OPS_DB) return null;
-  const approved = await read<Approval>(env.OPS_DB, `history-storage-approval:${revision}`);
-  if (!approved) return null;
-  if (approved.version !== 1 || approved.kind !== "storage-layout-v1" || approved.codeRevision !== revision
-    || env.EOD_CODE_REVISION !== revision || !digest(approved.proofHash) || await eodHash(approved.proof) !== approved.proofHash
-    || approved.proof.identity.codeRevision !== revision || !Number.isFinite(Date.parse(approved.proof.horizon.expiresAt))) fail("approval-integrity");
+  if (env.EOD_CODE_REVISION !== revision) fail("approval-integrity");
+  const direct = await read<Approval>(env.OPS_DB, `history-storage-approval:${revision}`);
+  if (direct) { await assertApproval(direct, revision); return direct; }
+  const transition = await read<Record<string, unknown>>(env.OPS_DB, `config-transition:${revision}`);
+  if (!transition) return null;
+  // Only the immutable record written by the strict one-file config transition
+  // can bridge code identity. Resolve the pinned immutable proof, not a mutable
+  // latest-approval pointer that might later refer to a different measurement.
+  const original = transition.activationCodeRevision;
+  if (transition.version !== 1 || transition.policy !== "canonical-config-only-v1" || transition.codeRevision !== revision
+    || typeof original !== "string" || !/^[a-f0-9]{40}$/.test(original) || original === revision
+    || !digest(transition.historyCapacityProofHash) || !digest(transition.proofHash)
+    || !digest(transition.approvedConfigHash) || !digest(transition.candidateConfigHash) || !digest(transition.sourceProofHash)) fail("config-link-invalid");
+  const approved = await read<Approval>(env.OPS_DB, `history-storage-proof:${transition.historyCapacityProofHash}`);
+  if (!approved) fail("config-source-approval-required");
+  await assertApproval(approved, original);
+  const approval = await read<Record<string, unknown>>(env.OPS_DB, `active:${revision}`);
+  // Defer this schema import: the rollout coordinator also imports historical
+  // capacity, and eager initialization would capture an undefined scope enum.
+  const { eodCutoverEvidenceSchema } = await import("./eod-rollout-service");
+  const parsed = eodCutoverEvidenceSchema.safeParse(approval?.proof);
+  if (!approval || approval.version !== 1 || approval.codeRevision !== revision || !parsed.success
+    || parsed.data.codeRevision !== revision || approval.proofHash !== transition.proofHash
+    || await eodHash(approval.proof) !== transition.proofHash
+    || transition.migrationId !== approved.proof.identity.id) fail("config-code-approval-required");
+  assertConfigCapacity(approved, parsed.data);
   return approved;
+}
+
+/** Preserve the dated last physical sample when creating the config link.
+ * Absence stays unmeasured; the daily monitor obtains the next real sample. */
+export async function initializeStorageHistoryConfigurationStatus(env: Env, now = new Date()): Promise<void> {
+  if (!env.OPS_DB || !env.EOD_CODE_REVISION) fail("bindings-missing");
+  const approved = await loadApproval(env, env.EOD_CODE_REVISION);
+  if (!approved) fail("config-source-approval-required");
+  const measurement = await read<Record<string, unknown>>(env.OPS_DB, `history-measurement:${approved.codeRevision}`);
+  await write(env.OPS_DB, `history-storage-status:${env.EOD_CODE_REVISION}`, cachedStatus(approved, measurement, now), now);
 }
 
 /** Writers keep the approved hot window even when a capacity forecast expires;
@@ -219,11 +296,15 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
       marketPhysicalBytes, archivePhysicalBytes };
     diagnostics = { capacity, readers: proof.readers, sample, horizon: proof.horizon, analysisHash: proof.capacity.analysisHash,
       hotSessions: proof.model.hotSessions, feeds: FEEDS, feedRows: Object.fromEntries(FEEDS.map((feed) => [feed, samples.filter((row) => row[1] === feed).reduce((sum, row) => sum + row[3], 0)])) };
-    assertHistoryPruneEvidence(capacity, proof.readers, now, input.codeRevision);
+    // loadApproval verified any config-only lineage while retaining the actual
+    // original parity date/hash. Its byte-identical reader is applicable here.
+    const readers = { ...proof.readers, codeRevision: input.codeRevision };
+    diagnostics.readers = readers;
+    assertHistoryPruneEvidence(capacity, readers, now, input.codeRevision);
     const measurement = { status: "ready", ...diagnostics };
     await write(env.OPS_DB, measurementId, measurement, now);
     await write(env.OPS_DB, `history-storage-status:${input.codeRevision}`, cachedStatus(approved,measurement,now), now);
-    return { capacity, readers: proof.readers, hotSessions: proof.model.hotSessions, feeds: FEEDS, sample };
+    return { capacity, readers, hotSessions: proof.model.hotSessions, feeds: FEEDS, sample };
   } catch (error) {
     const measurement = { status: "failed", ...diagnostics, measuredAt: now.toISOString(),
       horizon: proof.horizon, error: error instanceof Error ? error.message : "measurement-failed" };

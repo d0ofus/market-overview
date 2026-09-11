@@ -6,8 +6,9 @@ import { parse } from "smol-toml";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { expectedEodSession } from "../src/eod-coordinator";
-import { zonedParts } from "../src/refresh-timing";
-import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationIdentity } from "../src/market-storage-control";
+import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationIdentity, storageExecutionIdentity } from "../src/market-storage-control";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { loadStoragePreflight } from "../src/market-storage-pipeline";
 import { assertStorageVerificationCapture, type StorageVerificationEvidence } from "../src/market-storage-verification";
 import { validateStorageConsumerEvidence, verifyStorageAcceptedPublications, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
@@ -35,27 +36,30 @@ async function main(): Promise<void> {
   const allowedDatabaseIds = [sourceId, targetId, historyId, opsId, coreId];
   if (!/^[a-f0-9]{32}$/.test(accountId) || new Set(allowedDatabaseIds).size !== 5) throw new Error("runtime-candidate-account-or-databases-invalid");
   const rawOps = createEodD1Database({ accountId, token: d1Token, databaseId: opsId, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `runtime-prepare:${migrationId}`, { readCredit: 50_000, writeCredit: 500,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }) });
+  const budgetProfile = resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE);
+  const admission = createEodAdmission(rawOps, `runtime-prepare:${migrationId}`, { readCredit: 50_000, writeCredit: 500, profile:budgetProfile,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps, profile:budgetProfile }) });
   const database = (databaseId: string) => createEodD1Database({ accountId, token: d1Token, databaseId, allowedDatabaseIds, admission });
   const env: Env = { DB: database(coreId), MARKET_DATA_DB: database(targetId), MARKET_HISTORY_DB: database(historyId), OPS_DB: database(opsId),
-    EOD_CODE_REVISION: codeRevision, EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", EOD_ARCHIVE_PRUNE_ENABLED: "false", ALPACA_DAILY_FEED: "sip" };
+    EOD_CODE_REVISION: codeRevision, EOD_BUDGET_PROFILE:budgetProfile.name, EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", EOD_ARCHIVE_PRUNE_ENABLED: "false", ALPACA_DAILY_FEED: "sip" };
   const source = database(sourceId);
   try {
     const initial = await loadStorageMigration(env.OPS_DB!, migrationId);
-    if (!initial || initial.code_revision !== codeRevision || initial.source_database_id !== sourceId || initial.target_database_id !== targetId
+    if (!initial || initial.source_database_id !== sourceId || initial.target_database_id !== targetId
       || initial.history_database_id !== historyId) throw new Error("runtime-candidate-migration-identity-conflict");
-    const migration = storageMigrationIdentity(initial);
+    await assertStorageExecutionRevision(env.OPS_DB!,initial,codeRevision);
+    const captureIdentity = storageMigrationIdentity(initial), migration = storageExecutionIdentity(initial);
     const eligible = async (session?: string): Promise<{ session: string; publicationHash: string }> => {
       const current = await loadStorageMigration(env.OPS_DB!, migrationId);
       if (!current) throw new Error("runtime-candidate-migration-missing");
+      await assertStorageExecutionRevision(env.OPS_DB!,current,codeRevision);
       assertCandidateMigrationState(current, migration);
       const preflight = await loadStoragePreflight(env.OPS_DB!, current);
       const verified = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "verification:complete"), capture = verified?.payload as StorageVerificationEvidence | undefined;
       if (!capture || capture.schemaVersion !== 1 || !capture.verified || capture.captureHash !== verified?.inputHash
-        || await storageHash(capture.identity) !== await storageHash(migration) || capture.sourceCapture.schemaHash !== current.source_schema_hash
+        || await storageHash(capture.identity) !== await storageHash(captureIdentity) || capture.sourceCapture.schemaHash !== current.source_schema_hash
         || capture.sourceCapture.revision !== current.source_revision) throw new Error("runtime-candidate-whole-copy-required");
-      await assertStorageVerificationCapture(source, migration, capture.sourceCapture);
+      await assertStorageVerificationCapture(source, captureIdentity, capture.sourceCapture);
       const parity = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "consumer-parity:complete");
       if (!parity || parity.inputHash !== capture.captureHash) throw new Error("runtime-candidate-consumer-parity-required");
       await validateStorageConsumerEvidence(parity.payload as StorageConsumerEvidence, capture, preflight.tickers);
@@ -66,22 +70,22 @@ async function main(): Promise<void> {
         || await storageHash(owner.payload) !== await storageHash(completed) || completed.targetDatabaseId !== targetId || completed.sessionDate !== expected
         || completed.runId !== `eod:active:${expected}:daily` || (session && session !== expected)) throw new Error("runtime-candidate-completed-latest-bootstrap-required");
       const publications = await verifyStorageAcceptedPublications({ env, identity: migration, runId: completed.runId, tickers: preflight.tickers, expectedSession: expected });
-      await assertStorageVerificationCapture(source, migration, capture.sourceCapture);
+      await assertStorageVerificationCapture(source, captureIdentity, capture.sourceCapture);
       return { session: expected, publicationHash: await runtimeCandidatePublicationHash(publications) };
     };
     const ready = await eligible();
     const identity = await runtimeCandidateIdentity({ migration, sessionDate: ready.session, opsDatabaseId: opsId, coreDatabaseId: coreId,
-      attempt: Number(process.env.EOD_RUNTIME_ATTEMPT ?? "1") });
+      attempt: Number(process.env.EOD_RUNTIME_ATTEMPT ?? "1"), budgetProfile:budgetProfile.name });
     const directory = resolve(workerRoot, "tmp", identity.workerName), statePath = resolve(directory, "state.json"), configPath = resolve(directory, "wrangler.jsonc");
     const assertCoordinatorWindow = async (): Promise<void> => {
-      const now = new Date(), local = zonedParts(now, "America/New_York");
+      const now = new Date();
       const session = await env.MARKET_DATA_DB!.prepare("SELECT session_date AS sessionDate,close_at AS closeAt FROM market_calendar_sessions WHERE session_date=?")
-        .bind(local.localDate).first<{ sessionDate: string; closeAt: string }>();
+        .bind(ready.session).first<{ sessionDate: string; closeAt: string }>();
       assertRuntimeCandidateWindow(now, session);
     };
     const savedState = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as State : undefined;
-    // Do not spend an attempt's expiry overnight or before close. The periodic
-    // driver can return later without a persisted, already-expired candidate.
+    // Measure real current-time coordinator execution once the latest accepted
+    // session is eligible; overnight recovery does not require an opening bell.
     if (runtimeCandidateRequiresWindow(command as "prepare" | "run" | "collect", savedState)) await assertCoordinatorWindow();
     mkdirSync(directory, { recursive: true });
     const persist = (value: State) => { const pending = statePath + ".pending"; writeFileSync(pending, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 }); renameSync(pending, statePath); };
@@ -155,7 +159,7 @@ async function main(): Promise<void> {
       if (deployment?.versions?.length !== 1 || version?.percentage !== 100 || !version.version_id) throw new Error("runtime-candidate-exclusive-deployment-required");
       const actual = await api(`/workers/scripts/${identity.workerName}/versions/${version.version_id}`);
       const expected: RuntimeEvidenceIdentity = { probeId: identity.probeId, workerName: identity.workerName, workerVersion: version.version_id,
-        codeRevision, targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId };
+        codeRevision, targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId, budgetProfile:budgetProfile.name };
       await buildRuntimeEvidence(expected, actual, [], { from: Date.now() - 1000, to: Date.now() }, true);
       const bindings = (actual?.resources as { bindings?: Array<{ name: string; type: string; text?: string }> })?.bindings ?? [];
       if (bindings.filter((row) => row.name === "EOD_RUNNER_MODE" && row.type === "plain_text" && row.text === "active").length !== 1
@@ -183,7 +187,7 @@ async function main(): Promise<void> {
     if (!state.samples?.probes.length) throw new Error("runtime-candidate-probes-required");
     state.samples.to ??= Date.now(); persist(state);
     const runtimeIdentity: RuntimeEvidenceIdentity = { probeId: identity.probeId, workerName: identity.workerName, workerVersion: state.workerVersion!, codeRevision,
-      targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId };
+      targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId, budgetProfile:budgetProfile.name };
     let evidence;
     for (let attempt = 0; attempt < 5; attempt++) {
       try { evidence = await collectRuntimeEvidence({ accountId, token, identity: runtimeIdentity, from: state.samples.from, to: state.samples.to }); }

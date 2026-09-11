@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { resolveEodRunnerCodeRevision } from "../src/eod-runner-revision";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { createEodD1Database, createEodAdmission } from "../src/eod-d1-rest";
 import { runEodBatch } from "../src/eod-runner";
 import type { Env } from "../src/types";
@@ -12,6 +15,9 @@ function required(name:string):string {
   return value;
 }
 async function main() {
+  const codeRevision = resolveEodRunnerCodeRevision({ actualRevision: execFileSync("git", ["rev-parse", "HEAD"],
+    { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }).trim(),
+    productionRevision: process.env.EOD_PRODUCTION_CODE_REVISION, codeRevision: process.env.EOD_CODE_REVISION, githubSha: process.env.GITHUB_SHA });
   const runId=required("EOD_RUN_ID");
   if (!/^eod:(shadow|active):\d{4}-\d{2}-\d{2}:(daily|reconcile|backfill|maintenance)$/.test(runId)) throw new Error("Invalid run ID");
   const accountId=required("CLOUDFLARE_ACCOUNT_ID");
@@ -20,16 +26,16 @@ async function main() {
   const history=process.env.EOD_HISTORY_DATABASE_ID?.trim();
   const allowedDatabaseIds=[core,market,ops,...(history ? [history] : [])];
   const rawOps=createEodD1Database({accountId,token,databaseId:ops,allowedDatabaseIds});
-  const admission=createEodAdmission(rawOps,runId,{reconcileAccountUsage:() => reconcileEodAccountUsage({
+  const admission=createEodAdmission(rawOps,runId,{ profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),reconcileAccountUsage:() => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),
     accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:rawOps,
   })});
   const database=(databaseId:string) => createEodD1Database({accountId,token,databaseId,allowedDatabaseIds,admission});
-  const env:Env={
+  const env:Env={ EOD_BUDGET_PROFILE:process.env.EOD_BUDGET_PROFILE,
     DB:database(core),MARKET_DATA_DB:database(market),OPS_DB:database(ops),
     MARKET_HISTORY_DB:history ? database(history) : undefined,
     MARKET_DATA_DB_REQUIRED:"true",OPS_DB_REQUIRED:"true",
     EOD_RUNNER_MODE:runId.includes(":active:") ? "active" : "shadow",
-    EOD_CODE_REVISION:process.env.GITHUB_SHA,
+    EOD_CODE_REVISION:codeRevision,
     EOD_READ_ENABLED:"true",
     EOD_ARCHIVE_PRUNE_ENABLED:process.env.EOD_ARCHIVE_PRUNE_ENABLED ?? "false",
     ALPACA_API_KEY:required("ALPACA_API_KEY"),ALPACA_API_SECRET:required("ALPACA_API_SECRET"),
@@ -53,7 +59,7 @@ async function main() {
     await env.OPS_DB!.prepare("UPDATE eod_runs SET github_run_id=? WHERE id=?")
       .bind(process.env.GITHUB_RUN_ID ?? null,runId).run();
     try {
-      await assertEodCutover(env,env.EOD_RUNNER_MODE==="active" ? required("GITHUB_SHA") : "");
+      await assertEodCutover(env,env.EOD_RUNNER_MODE==="active" ? codeRevision : "");
     } catch (error) {
       const message=error instanceof Error ? error.message.slice(0,500) : "eod-cutover-proof-failed";
       await failureDb.prepare(`UPDATE eod_runs SET status='retrying',stage='cutover',error_code='cutover-proof',error_message=?,

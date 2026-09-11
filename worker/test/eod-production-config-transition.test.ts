@@ -21,6 +21,7 @@ function configs() {
       { binding: "MARKET_HISTORY_DB", database_id: identity.historyDatabaseId, database_name: "history", migrations_dir: "history-migrations" }] };
   const candidate = structuredClone(approved);
   candidate.vars.EOD_RUNNER_MODE = "active"; candidate.vars.EOD_READ_ENABLED = "true";
+  candidate.vars.EOD_ARCHIVE_PRUNE_ENABLED = "true";
   candidate.d1_databases[0].database_id = identity.targetDatabaseId; candidate.d1_databases[0].database_name = "market-target";
   return { approved, candidate };
 }
@@ -69,7 +70,7 @@ describe("narrow canonical production configuration transition", () => {
     if (kind === "cron") candidate.triggers.crons = ["* * * * *"];
     if (kind === "queue") candidate.queues.consumers[0].queue = "other";
     if (kind === "history") candidate.d1_databases[1].database_id = identity.sourceDatabaseId;
-    if (kind === "prune") candidate.vars.EOD_ARCHIVE_PRUNE_ENABLED = "true";
+    if (kind === "prune") candidate.vars.EOD_ARCHIVE_PRUNE_ENABLED = "false";
     if (kind === "compatibility") candidate.compatibility_date = "2026-09-10";
     const candidateToml = stringify(kind === "revision" ? { ...candidate, vars: { ...candidate.vars, EOD_CODE_REVISION: oldRevision } } : candidate);
     await expect(delta({ candidateToml })).rejects.toThrow(/config/);

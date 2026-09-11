@@ -1,3 +1,5 @@
+import { eodBudgetWindow, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
+
 /** Account-wide analytics includes databases and workflows outside EOD. It can
  * lag live queries, so admission also keeps a conservative local high-water mark. */
 function record(value: unknown): Record<string, unknown> | null {
@@ -56,9 +58,66 @@ export async function fetchEodAccountUsage(input:{accountId:string;token:string;
   return parseUsage(await response.json());
 }
 
-export async function reconcileEodAccountUsage(input:{accountId:string;token:string;ops:D1Database;fetcher?:typeof fetch;now?:Date}) {
+export async function fetchEodAccountUsageWindow(input:{accountId:string;token:string;fetcher?:typeof fetch;now?:Date}) {
+  const window=eodBudgetWindow(input.now);
+  const response=await (input.fetcher ?? fetch)("https://api.cloudflare.com/client/v4/graphql",{
+    method:"POST",headers:{Authorization:`Bearer ${input.token}`,"Content-Type":"application/json"},signal:AbortSignal.timeout(15_000),
+    body:JSON.stringify({query:`query EodAccountUsageWindow($accountTag: string!, $start: Date!, $end: Date!) {
+      viewer { accounts(filter: {accountTag: $accountTag}) {
+        d1AnalyticsAdaptiveGroups(limit: 1000, filter: {date_geq: $start, date_leq: $end}) {
+          dimensions { date } sum { rowsRead rowsWritten }
+        }
+      } }
+    }`,variables:{accountTag:input.accountId,start:window.start,end:window.end}}),
+  });
+  if (!response.ok) {await response.body?.cancel().catch(()=>undefined);throw new Error("eod-account-window-unavailable");}
+  const body:unknown=await response.json();
+  // Validate the complete account envelope first. A wholly empty window is
+  // unknown; omitted dates within a successful nonempty grouped range are zero
+  // activity, subsequently bounded by each day's preserved local high-water.
+  parseUsage(body);
+  const groups=record((record(record(record(body)?.data)?.viewer)?.accounts as unknown[])[0])!.d1AnalyticsAdaptiveGroups as unknown[];
+  const days=new Map<string,{rowsRead:number;rowsWritten:number}>();
+  for (let index=0;index<31;index++) days.set(new Date(Date.parse(`${window.start}T00:00:00Z`)+index*86_400_000).toISOString().slice(0,10),{rowsRead:0,rowsWritten:0});
+  const seen=new Set<string>();
+  for (const group of groups) {
+    const date=record(record(group)?.dimensions)?.date, sum=record(record(group)?.sum)!;
+    if (typeof date!=="string" || !days.has(date) || seen.has(date)) throw new Error("eod-account-window-invalid");
+    seen.add(date);days.set(date,{rowsRead:Math.ceil(sum.rowsRead as number),rowsWritten:Math.ceil(sum.rowsWritten as number)});
+  }
+  return days;
+}
+
+export async function reconcileEodAccountUsage(input:{accountId:string;token:string;ops:D1Database;fetcher?:typeof fetch;now?:Date;profile?:EodBudgetProfile}) {
   const now=input.now ?? new Date();
   const date=now.toISOString().slice(0,10);
+  const profile=resolveEodBudgetProfile(input.profile?.name);
+  if (profile.rolling31) {
+    let days:Map<string,{rowsRead:number;rowsWritten:number}>;
+    try { days=await fetchEodAccountUsageWindow({...input,now}); }
+    catch {
+      await input.ops.prepare("UPDATE eod_account_usage SET error='eod-account-window-unavailable' WHERE usage_date=?").bind(date).run().catch(()=>undefined);
+      throw new Error("eod-account-window-unavailable");
+    }
+    // Mark the current bucket unavailable until the final atomic batch. Older
+    // fresh rows from a prior collection must not make a partial retry usable.
+    await input.ops.prepare("UPDATE eod_account_usage SET error='eod-account-window-refreshing' WHERE usage_date=?").bind(date).run();
+    const statements=[...days].flatMap(([usageDate,usage])=>[
+      input.ops.prepare(`INSERT INTO eod_account_usage(usage_date,rows_read,rows_written,sampled_at) VALUES(?,?,?,?)
+        ON CONFLICT(usage_date) DO UPDATE SET rows_read=MAX(rows_read,excluded.rows_read),rows_written=MAX(rows_written,excluded.rows_written),
+        sampled_at=excluded.sampled_at,error=NULL`).bind(usageDate,usage.rowsRead,usage.rowsWritten,now.toISOString()),
+      input.ops.prepare(`INSERT INTO market_data_daily_usage(usage_date,bars_written,rows_read,rows_written,updated_at) VALUES(?,0,?+?,?+?,?)
+        ON CONFLICT(usage_date) DO UPDATE SET rows_read=MAX(rows_read,?)+?,rows_written=MAX(rows_written,?)+?,updated_at=excluded.updated_at`)
+        .bind(usageDate,usage.rowsRead,usageDate===date ? 256 : 0,usage.rowsWritten,usageDate===date ? 256 : 0,now.toISOString(),
+          usage.rowsRead,usageDate===date ? 256 : 0,usage.rowsWritten,usageDate===date ? 256 : 0),
+    ]);
+    statements.push(input.ops.prepare(`INSERT INTO eod_usage(usage_date,rows_read,rows_written) VALUES(?,256,256)
+      ON CONFLICT(usage_date) DO UPDATE SET rows_read=rows_read+256,rows_written=rows_written+256`).bind(date));
+    // Refreshing all 31 buckets may span batches. Admission requires every row
+    // fresh, so a failed partial refresh never manufactures a complete window.
+    for(let offset=0;offset<statements.length;offset+=32) await input.ops.batch(statements.slice(offset,offset+32));
+    return days.get(date)!;
+  }
   let usage: { rowsRead:number; rowsWritten:number };
   try {
     usage=await fetchEodAccountUsage({...input,usageDate:date});

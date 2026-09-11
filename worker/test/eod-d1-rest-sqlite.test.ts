@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEodAdmission, createEodD1Database, type EodSql } from "../src/eod-d1-rest";
 import { storeEodPublication, type EodPublicationInput } from "../src/eod-publication-service";
 import type { Env } from "../src/types";
@@ -115,3 +115,6 @@ describe("public REST batches against real migrated SQLite", {timeout:20_000}, (
     await admission.flush();
   });
 });
+
+// Fake transports need no wall-clock pacing; the limiter has its own clock-controlled tests.
+vi.mock("../src/eod-rest-request-limiter", () => ({ pacedEodRestFetch: (_account: string, _token: string, fetcher: typeof fetch, url: RequestInfo | URL, init: RequestInit | (() => RequestInit)) => fetcher(url, typeof init === "function" ? init() : init) }));

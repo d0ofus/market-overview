@@ -36,7 +36,8 @@ async function fixture(options:{baseline?:boolean;archive?:boolean}={}) {
     const common=readFileSync("market-data-migrations/0009_market_storage_fence.sql","utf8")+ledger
       +"INSERT INTO universes(id,name) VALUES('test','Retained'),('z','Tail');";
     source.script(schema+common+sourcePrices+triggers);target.script(schema+common+targetPrices+triggers);
-    history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8"));
+    history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
+      +readFileSync("ops-migrations/0011_market_storage_execution.sql","utf8"));
     const prior=await copyStorageArchiveBlock(history.db,[oldBar("2026-01-02"),oldBar("2026-09-08")]);
     // Preserve a superseded immutable revision as well as current pointer rows.
     const priorActive=await copyStorageArchiveBlock(history.db,[oldBar("2026-01-02"),oldBar("2026-09-08",10)]);

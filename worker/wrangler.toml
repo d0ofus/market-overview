@@ -16,6 +16,8 @@ OPS_DB_REQUIRED = "true"
 MARKET_PIPELINE_MODE = "canary"
 EOD_RUNNER_MODE = "shadow"
 EOD_READ_ENABLED = "false"
+EOD_BUDGET_PROFILE = "paid"
+EOD_CLOUDFLARE_ACCOUNT_ID = "5ddf4343b603f05fed83f9e102b4b553"
 EOD_ARCHIVE_PRUNE_ENABLED = "false"
 EOD_GITHUB_REPOSITORY = "d0ofus/market-overview"
 EOD_GITHUB_WORKFLOW = "eod-market-data.yml"
@@ -110,3 +112,8 @@ crons = [
   "*/5 * * * *",
   "11,26,41,56 * * * *",
 ]
+
+# Bound CPU exposure on Paid. Storage retention and capacity limits above stay
+# Free-compatible; switching back to Free requires a current runtime/usage check.
+[limits]
+cpu_ms = 1000

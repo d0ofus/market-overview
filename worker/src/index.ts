@@ -1,3 +1,4 @@
+import { refreshEodAccountUsageHeartbeat } from "./eod-account-usage-heartbeat";
 import { Hono } from "hono";
 import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, expectedEodSession, registerEodRoutes, requestEodRefresh, type EodRun } from "./eod-coordinator";
 import { EOD_RUNTIME_COORDINATOR_PATH, isEodRuntimeHttpProbe, runEodRuntimeProbe } from "./eod-runtime-telemetry";
@@ -7864,6 +7865,9 @@ export default {
   },
   scheduled: async (event: ScheduledEvent, env: Env, _ctx?: ExecutionContext): Promise<void> => {
     if (env.EOD_RUNTIME_CANDIDATE_ONLY === "true") return;
+    await refreshEodAccountUsageHeartbeat(env, new Date(event.scheduledTime || Date.now())).catch(() => {
+      console.error("eod-account-heartbeat-unavailable");
+    });
     const cronSettings = await loadCentralCronJobSettingsMap(env).catch((error) => {
       console.error("scheduled cron settings load failed; using defaults", error);
       return new Map<string, CronJobValues>();

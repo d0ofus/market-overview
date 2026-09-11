@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -71,8 +72,8 @@ async function main(): Promise<void> {
   };
   const allowedDatabaseIds = [source, history, ops];
   const rawOps = createEodD1Database({ accountId, token, databaseId: ops, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `storage-start:${migrationId}`, { writeCredit: 500,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId,
+  const admission = createEodAdmission(rawOps, `storage-start:${migrationId}`, { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), writeCredit: 500,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId,
       token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }),
   });
   const database = (databaseId: string, reviewedDdl?: string[]) => createEodD1Database({ accountId, token, databaseId,

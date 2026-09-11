@@ -29,15 +29,16 @@ async function fixture() {
     source_database_id: source, target_database_id: target, history_database_id: history, code_revision: originalRevision } as StorageMigrationRun;
   return { accountId: "c".repeat(32), workerName: "market-command-worker", codeRevision: currentRevision,
     migrationId: migration.id, marketDatabaseId: target, historyDatabaseId: history, opsDatabaseId: ops,
-    trackedConfig: { name: "market-command-worker", vars: { EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true" },
+    trackedConfig: { name: "market-command-worker", vars: { EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", EOD_ARCHIVE_PRUNE_ENABLED: "true" },
       d1_databases: [{ binding: "MARKET_DATA_DB", database_id: target }, { binding: "MARKET_HISTORY_DB", database_id: history }, { binding: "OPS_DB", database_id: ops }] },
     githubMainRevision: currentRevision, githubVariables: new Map(Object.entries({ CLOUDFLARE_ACCOUNT_ID: "c".repeat(32),
-      EOD_MARKET_DATABASE_ID: target, EOD_HISTORY_DATABASE_ID: history, EOD_OPS_DATABASE_ID: ops, EOD_STORAGE_SOURCE_DATABASE_ID: source, EOD_RUNNER_MODE: "active" })),
+      EOD_MARKET_DATABASE_ID: target, EOD_HISTORY_DATABASE_ID: history, EOD_OPS_DATABASE_ID: ops, EOD_STORAGE_SOURCE_DATABASE_ID: source, EOD_RUNNER_MODE: "active",
+      EOD_PRODUCTION_CODE_REVISION: currentRevision, EOD_ARCHIVE_PRUNE_ENABLED: "true" })),
     migration, activation: { version: 1, activatedAt: "2026-09-09T21:30:00Z", codeRevision: originalRevision, marketDatabaseId: target },
     codeApproval: { version: 1, codeRevision: currentRevision, methodologyVersion: EOD_METRICS_VERSION, approvedAt: stamp,
       proofHash: await storageHash(proof), proof },
     binding: { version: 1 as const, workerName: "market-command-worker", codeRevision: currentRevision, marketDatabaseId: target,
-      historyDatabaseId: history, opsDatabaseId: ops, observedAt: stamp, deploymentId, versionId: workerVersion }, now: new Date("2026-09-10T02:00:30Z") };
+      historyDatabaseId: history, opsDatabaseId: ops, observedAt: stamp, deploymentId, versionId: workerVersion, archivePruneEnabled: true }, now: new Date("2026-09-10T02:00:30Z") };
 }
 describe("verified production configuration milestone", () => {
   it("records a later approved SHA while preserving original migration activation identity", async () => {
@@ -90,6 +91,20 @@ describe("verified production configuration milestone", () => {
     }
     const f = await fixture(); f.now = new Date("2026-09-10T02:05:00Z");
     await expect(validateEodProductionConfiguration(f)).rejects.toThrow("serving-version-mismatch");
+  });
+  it("returns activation pending only after real serving, approval and canonical configuration checks pass", async () => {
+    const f = await fixture(); f.githubVariables.delete("EOD_PRODUCTION_CODE_REVISION"); f.githubVariables.delete("EOD_ARCHIVE_PRUNE_ENABLED");
+    await expect(validateEodProductionConfiguration(f)).rejects.toThrow("github-activation-pending");
+    f.binding.archivePruneEnabled = false;
+    await expect(validateEodProductionConfiguration(f)).rejects.toThrow("serving-version-mismatch");
+    f.binding.archivePruneEnabled = true; f.codeApproval.proofHash = "0".repeat(64);
+    await expect(validateEodProductionConfiguration(f)).rejects.toThrow("current-code-approval-required");
+  });
+  it("rejects an unrelated production pin and disabled tracked pruning", async () => {
+    const f = await fixture(); f.githubVariables.set("EOD_PRODUCTION_CODE_REVISION", "d".repeat(40));
+    await expect(validateEodProductionConfiguration(f)).rejects.toThrow("github-activation-conflict");
+    f.githubVariables.set("EOD_PRODUCTION_CODE_REVISION", currentRevision); f.trackedConfig.vars.EOD_ARCHIVE_PRUNE_ENABLED = "false";
+    await expect(validateEodProductionConfiguration(f)).rejects.toThrow("tracked-canonical-config-required");
   });
 });
 describe("configuration persistence on the real Ops schema", () => {

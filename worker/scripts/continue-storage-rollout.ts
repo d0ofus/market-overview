@@ -6,12 +6,16 @@ import { z } from "zod";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { fetchEodAccountUsage, reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { localRecoveryChildReason, localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryResult } from "../src/eod-local-recovery";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { loadStorageMigration } from "../src/market-storage-control";
 import { storeEodControllerReport, type EodControllerReport } from "../src/eod-recovery-status";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const tmp = resolve(root, "worker/tmp");
 const configuration = z.object({ version: z.literal(1), codeRevision: z.string().regex(/^[a-f0-9]{40}$/),
+  migrationId: z.string().regex(/^market-storage:[A-Za-z0-9._:-]+$/).optional(), storageCodeRevision: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+  budgetProfile: z.enum(["free","paid"]).optional(),
   afterUtc: z.string().datetime(), accountId: z.string().regex(/^[a-f0-9]{32}$/), sourceDatabaseId: z.string().uuid(),
   historyDatabaseId: z.string().uuid(), opsDatabaseId: z.string().uuid(), coreDatabaseId: z.string().uuid(),
   snapshotPath: z.string(), historySnapshotPath: z.string(), frozenRunId: z.string().regex(/^eod:shadow:\d{4}-\d{2}-\d{2}:daily$/),
@@ -82,8 +86,10 @@ async function main(): Promise<void> {
   };
   const token = process.env.CLOUDFLARE_EOD_D1_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
   if (!token || !process.env.CLOUDFLARE_API_TOKEN) { unlinkSync(lockPath); throw new Error("storage-local-credential-unavailable"); }
-  const sessionDate = input.frozenRunId.split(":")[2], migrationId = `market-storage:${sessionDate}:${input.codeRevision.slice(0,12)}`;
-  const env: NodeJS.ProcessEnv = { ...process.env, CLOUDFLARE_ACCOUNT_ID: input.accountId, CLOUDFLARE_EOD_D1_TOKEN: token,
+  const sessionDate = input.frozenRunId.split(":")[2], storageCodeRevision = input.storageCodeRevision ?? input.codeRevision;
+  const migrationId = input.migrationId ?? `market-storage:${sessionDate}:${storageCodeRevision.slice(0,12)}`;
+  const profile = resolveEodBudgetProfile(input.budgetProfile ?? process.env.EOD_BUDGET_PROFILE);
+  const env: NodeJS.ProcessEnv = { ...process.env, EOD_BUDGET_PROFILE: profile.name, CLOUDFLARE_ACCOUNT_ID: input.accountId, CLOUDFLARE_EOD_D1_TOKEN: token,
     EOD_MARKET_DATABASE_ID: input.sourceDatabaseId, EOD_STORAGE_SOURCE_DATABASE_ID: input.sourceDatabaseId,
     EOD_HISTORY_DATABASE_ID: input.historyDatabaseId, EOD_OPS_DATABASE_ID: input.opsDatabaseId, EOD_CORE_DATABASE_ID: input.coreDatabaseId,
     EOD_STORAGE_MIGRATION_ID: migrationId, EOD_SNAPSHOT_RUN_ID: input.frozenRunId, STORAGE_SNAPSHOT_PATH: snapshot,
@@ -99,11 +105,11 @@ async function main(): Promise<void> {
   try {
     await assertCheckout();
     const usage = await fetchEodAccountUsage({ accountId: input.accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, usageDate: now.toISOString().slice(0,10) });
-    if (usage.rowsRead >= 4_500_000 || usage.rowsWritten >= 90_000) throw new Error("storage-local-budget-exhausted");
+    if (usage.rowsRead >= profile.accountDaily.reads || usage.rowsWritten >= profile.accountDaily.writes) throw new Error("storage-local-budget-exhausted");
     const allowedDatabaseIds = [input.sourceDatabaseId,input.historyDatabaseId,input.opsDatabaseId,input.coreDatabaseId];
     const rawOps = createEodD1Database({ accountId: input.accountId,token,databaseId: input.opsDatabaseId,allowedDatabaseIds });
-    admission = createEodAdmission(rawOps,`local-recovery:${migrationId}`, { reconcileAccountUsage: () => reconcileEodAccountUsage({
-      accountId: input.accountId,token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops: rawOps }) });
+    admission = createEodAdmission(rawOps,`local-recovery:${migrationId}`, { profile, reconcileAccountUsage: () => reconcileEodAccountUsage({
+      accountId: input.accountId,token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops: rawOps,profile }) });
     const ops = createEodD1Database({ accountId: input.accountId,token,databaseId: input.opsDatabaseId,allowedDatabaseIds,admission });
     reportOps = ops;
     const phase = async (name: string) => {
@@ -119,7 +125,8 @@ async function main(): Promise<void> {
     const target = () => {
       const vars = variables(), id = vars.get("EOD_STORAGE_TARGET_DATABASE_ID");
       if (!id) return null;
-      if (vars.get("EOD_STORAGE_CODE_REVISION") !== input.codeRevision || vars.get("EOD_STORAGE_SOURCE_DATABASE_ID") !== input.sourceDatabaseId
+      if (vars.get("EOD_STORAGE_CODE_REVISION") !== storageCodeRevision
+        || (vars.get("EOD_STORAGE_EXECUTION_REVISION") ?? storageCodeRevision) !== input.codeRevision || vars.get("EOD_STORAGE_SOURCE_DATABASE_ID") !== input.sourceDatabaseId
         || !z.string().uuid().safeParse(id).success || allowedDatabaseIds.includes(id)) throw new Error("storage-local-github-identity-conflict");
       env.EOD_STORAGE_TARGET_DATABASE_ID = id; return id;
     };
@@ -154,8 +161,9 @@ async function main(): Promise<void> {
       start: async () => { await phase("start"); node("start-storage-migration-once.ts"); if (!target()) throw new Error("storage-local-start-not-persisted"); },
       loadMigration: async () => {
         const run = await loadStorageMigration(ops,migrationId);
-        if (!run || run.code_revision !== input.codeRevision || run.source_database_id !== input.sourceDatabaseId
+        if (!run || run.code_revision !== storageCodeRevision || run.source_database_id !== input.sourceDatabaseId
           || run.target_database_id !== env.EOD_STORAGE_TARGET_DATABASE_ID || run.history_database_id !== input.historyDatabaseId) throw new Error("storage-local-migration-identity-conflict");
+        await assertStorageExecutionRevision(ops,run,input.codeRevision);
         return run;
       },
       prepareAcceptance: async () => {

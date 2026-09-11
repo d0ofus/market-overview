@@ -20,6 +20,8 @@ jobs:
     environment: market-eod
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.EOD_PRODUCTION_CODE_REVISION || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -28,7 +30,10 @@ jobs:
       - name: Run the resumable daily pipeline
         run: npm run eod:run -w worker
         env:
+          EOD_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION || github.sha }}
           EOD_RUN_ID: ${{ inputs.run_id }}
+          EOD_PRODUCTION_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+          EOD_BUDGET_PROFILE: ${{ vars.EOD_BUDGET_PROFILE || 'free' }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           EOD_CORE_DATABASE_ID: ${{ vars.EOD_CORE_DATABASE_ID }}
           EOD_MARKET_DATABASE_ID: ${{ vars.EOD_MARKET_DATABASE_ID }}

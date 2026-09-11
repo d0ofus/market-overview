@@ -13,7 +13,7 @@ function ordered(value: unknown): unknown {
 }
 
 /** Git must prove every tracked file outside this TOML is byte-identical to the
- * migration's approved revision. Only this source-to-target config transition
+ * migration's approved execution revision. Only this source-to-target config transition
  * may reuse its runtime measurements; arbitrary later code cannot use it. */
 export async function validateProductionConfigDelta(input: {
   identity: StorageMigrationIdentity; nextRevision: string; changedFiles: string[];
@@ -30,6 +30,7 @@ export async function validateProductionConfigDelta(input: {
     || Object.hasOwn(nextVars, "EOD_CODE_REVISION") || !Array.isArray(approved.d1_databases)) fail("approved-source-config-invalid");
   const expected = structuredClone(approved), expectedVars = object(expected.vars)!;
   expectedVars.EOD_RUNNER_MODE = "active"; expectedVars.EOD_READ_ENABLED = "true";
+  expectedVars.EOD_ARCHIVE_PRUNE_ENABLED = "true";
   if (nextVars.EOD_STORAGE_MIGRATION_ID !== undefined) {
     if (nextVars.EOD_STORAGE_MIGRATION_ID !== input.identity.id) fail("migration-identity-changed");
     expectedVars.EOD_STORAGE_MIGRATION_ID = input.identity.id;

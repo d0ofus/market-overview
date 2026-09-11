@@ -1,11 +1,14 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { claimStorageMigration, createStorageMigration, deferStorageMigration, loadStorageMigration,
   pauseStorageMigration, resumeStorageMigration, authorizeStorageMigrationFreeze, storageMigrationIdentity,
-  loadStorageMigrationCheckpoint, markStorageMigrationReady, completeStorageMigration } from "../src/market-storage-control";
-import { STORAGE_BUSINESS_DDL, STORAGE_TARGET_DDL } from "../src/market-storage-copy";
+  loadStorageMigrationCheckpoint, markStorageMigrationReady, completeStorageMigration, storageExecutionIdentity } from "../src/market-storage-control";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
+import { STORAGE_BUSINESS_DDL, STORAGE_TARGET_DDL, type StorageCopyProgress } from "../src/market-storage-copy";
+import { classifyStorageFailure } from "../src/market-storage-failure";
 import { runStoragePipeline, loadStoragePreflight } from "../src/market-storage-pipeline";
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
 import { prepareStorageSourceFence, assertStorageSourceFrozen } from "../src/market-storage-fence";
@@ -42,12 +45,12 @@ async function main():Promise<void> {
   if(core && [source,target,history,ops].includes(core)) throw new Error("storage-core-database-identity-conflict");
   const allowedDatabaseIds=[source,target,history,ops,...(core ? [core] : [])];
   const rawOps=createEodD1Database({accountId,token,databaseId:ops,allowedDatabaseIds});
-  const admission=createEodAdmission(rawOps,id,{writeCredit:500,reconcileAccountUsage:() => reconcileEodAccountUsage({
+  const admission=createEodAdmission(rawOps,id,{ profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),writeCredit:500,reconcileAccountUsage:() => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),
     accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:rawOps,
   })});
   const database=(databaseId:string,reviewedDdl?:readonly string[]) => createEodD1Database({accountId,token,databaseId,allowedDatabaseIds,admission,reviewedDdl});
   const meteredOps=database(ops),sourceDb=database(source),targetDb=database(target,[...STORAGE_TARGET_DDL,...STORAGE_BUSINESS_DDL]),historyDb=database(history);
-  const env:Env={DB:core ? database(core) : targetDb,MARKET_DATA_DB:targetDb,MARKET_HISTORY_DB:historyDb,OPS_DB:meteredOps,
+  const env:Env={ EOD_BUDGET_PROFILE:process.env.EOD_BUDGET_PROFILE,DB:core ? database(core) : targetDb,MARKET_DATA_DB:targetDb,MARKET_HISTORY_DB:historyDb,OPS_DB:meteredOps,
     EOD_CODE_REVISION:codeRevision,EOD_RUNNER_MODE:"active",EOD_READ_ENABLED:"true",EOD_ARCHIVE_PRUNE_ENABLED:"false",
     ALPACA_API_KEY:process.env.ALPACA_API_KEY,ALPACA_API_SECRET:process.env.ALPACA_API_SECRET,
     ALPACA_DAILY_FEED:"sip",ALPACA_DAILY_ADJUSTMENT:"split",ALPACA_REQUESTS_PER_MINUTE_HARD:"160",YAHOO_REQUESTS_PER_DAY_HARD:"250"};
@@ -79,6 +82,7 @@ async function main():Promise<void> {
     const existing=await loadStorageMigration(meteredOps,id);
     if (!existing || existing.source_database_id!==source || existing.target_database_id!==target
       || existing.history_database_id!==history) throw new Error("storage-run-database-identity-conflict");
+    if (command!=="status") await assertStorageExecutionRevision(meteredOps,existing,codeRevision);
     const assertOriginalCapture=async () => {
       if(!existing.source_schema_hash || existing.source_revision===null)throw new Error("storage-source-capture-required");
       const actual=await assertStorageSourceFrozen(sourceDb,storageMigrationIdentity(existing),existing.source_schema_hash);
@@ -118,7 +122,6 @@ async function main():Promise<void> {
         failedStage:existing.error_code,freezeAuthorized:existing.freeze_authorized===1,progress:JSON.parse(existing.progress_json)}));return;
     }
     if(command==="sample-publications" || command==="build-cutover-evidence" || command==="complete") {
-      if(existing.code_revision!==codeRevision)throw new Error("storage-run-code-revision-mismatch");
       await assertOriginalCapture();
       if(command==="complete" && existing.status!=="awaiting-cutover")throw new Error("storage-activation-not-ready");
       const preflight=await loadStoragePreflight(meteredOps,existing);
@@ -138,7 +141,7 @@ async function main():Promise<void> {
           tickers:built.proof.sharedTickers.count,hotSessions:built.capacity.hotSessions,
           forecastSessions:built.capacity.forecastSessions,proofHash:built.provenance.proofHash,publicCutover:false}));return;
       }
-      const publications=await verifyStorageAcceptedPublications({env,identity:storageMigrationIdentity(existing),
+      const publications=await verifyStorageAcceptedPublications({env,identity:storageExecutionIdentity(existing),
         runId:owner.runId,tickers:preflight.tickers,expectedSession:expected});
       if(command==="sample-publications") {
         const samples=await collectStoragePublicationGrowthSamples(env,publications,preflight.evidence.sourceSchemaHash);
@@ -153,7 +156,7 @@ async function main():Promise<void> {
       }
       const variables=githubVariables();
       const binding=await verifyStoragePublicBindings({accountId,token:process.env.CLOUDFLARE_API_TOKEN || token,
-        workerName:process.env.EOD_WORKER_NAME ?? "market-command-worker",identity:storageMigrationIdentity(existing),opsDatabaseId:ops,
+        workerName:process.env.EOD_WORKER_NAME ?? "market-command-worker",identity:storageExecutionIdentity(existing),opsDatabaseId:ops,
         githubMarketDatabaseId:variables.get("EOD_MARKET_DATABASE_ID") ?? "",githubRunnerMode:variables.get("EOD_RUNNER_MODE") ?? ""});
       const activation={version:1,activatedAt:binding.observedAt,codeRevision,marketDatabaseId:target};
       // Keep the actual first observed public activation on replay. It is not
@@ -167,7 +170,6 @@ async function main():Promise<void> {
       console.log(JSON.stringify({id,status:"completed",session:expected,monitoring:"no-observation-period"}));return;
     }
     if(command==="authorize") {
-      if(codeRevision!==existing.code_revision)throw new Error("storage-run-code-revision-mismatch");
       const snapshotSource=file("EOD_STORAGE_SNAPSHOT_IDENTITY_PATH") as {accountId:string;sourceDatabaseId:string;runId:string};
       const frozen=file("EOD_STORAGE_FROZEN_INPUT_PATH") as {tickers:string[];calendarDates:string[]};
       const schema=await prepareStorageSourceFence(sourceDb);
@@ -191,29 +193,25 @@ async function main():Promise<void> {
         .bind(evidenceId,JSON.stringify(record),new Date().toISOString()).run();
       const stored=await meteredOps.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(evidenceId).first<string>("evidence_json");
       if(!stored || JSON.parse(stored).hash!==record.hash)throw new Error("storage-preflight-existing-evidence-conflict");
-      await authorizeStorageMigrationFreeze(meteredOps,id,{sourceDatabaseId:source,codeRevision,schemaHash:schema.schemaHash,evidenceHash:record.hash});
-      if(existing.status==="awaiting-evidence")await resumeStorageMigration(meteredOps,id,codeRevision);
+      await authorizeStorageMigrationFreeze(meteredOps,id,{sourceDatabaseId:source,codeRevision:existing.code_revision,schemaHash:schema.schemaHash,evidenceHash:record.hash});
+      if(existing.status==="awaiting-evidence")await resumeStorageMigration(meteredOps,id,existing.code_revision);
       console.log(JSON.stringify({id,status:"authorized-for-relocation",hotSessions:prepared.evidence.hotSessions,publicCutover:false}));return;
     }
     if(command==="reconstruct") {
-      if(codeRevision!==existing.code_revision || !await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete"))throw new Error("storage-verified-bootstrap-required");
+      if(!await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete"))throw new Error("storage-verified-bootstrap-required");
       const result=await meteredOps.prepare("UPDATE market_storage_migrations SET status='queued',stage='bootstrap',error_code=NULL,next_attempt_at=?,updated_at=? WHERE id=? AND status IN ('awaiting-evidence','awaiting-cutover') AND (lease_until IS NULL OR lease_until<=?)")
         .bind(new Date().toISOString(),new Date().toISOString(),id,new Date().toISOString()).run();
       if(!result.meta.changes)throw new Error("storage-reconstruct-transition-conflict");
       console.log(JSON.stringify({id,status:"queued",purpose:"latest-private-bootstrap"}));return;
     }
     if (command==="resume") {
-      if(codeRevision!==existing.code_revision) throw new Error("storage-run-code-revision-mismatch");
       await resumeStorageMigration(meteredOps,id,existing.code_revision);console.log(JSON.stringify({id,status:"queued"}));return;
     }
     if (!["run","accept"].includes(command)) throw new Error("storage-command-unsupported");
-    if(command==="accept" && existing.status==="awaiting-evidence")await resumeStorageMigration(meteredOps,id,codeRevision);
-    const claimed=await claimStorageMigration(meteredOps,id,{githubRunId:process.env.GITHUB_RUN_ID});
+    if(command==="accept" && existing.status==="awaiting-evidence")await resumeStorageMigration(meteredOps,id,existing.code_revision);
+    const claimed=await claimStorageMigration(meteredOps,id,{githubRunId:process.env.GITHUB_RUN_ID,executionRevision:codeRevision});
     if (!claimed) {console.log(JSON.stringify({id,status:"not-claimed"}));return;}
-    if (codeRevision!==existing.code_revision) {
-      await pauseStorageMigration(failureDb,id,claimed.leaseToken,"storage-run-code-revision-mismatch",{sourcePreserved:true});
-      console.log(JSON.stringify({id,status:"awaiting-evidence",reason:"code-revision-mismatch"}));process.exitCode=1;return;
-    }
+    let copyProgress:StorageCopyProgress|undefined,lastProgressLog=0;
     try {
       if(command==="accept") {
         await assertOriginalCapture();
@@ -235,7 +233,7 @@ async function main():Promise<void> {
         await storeStorageHistoryMaintenanceApproval(env,{capacity,analysis,publications,tickers:preflight.tickers,
           capture:capture.payload as StorageAcceptanceCapture,consumers:consumers.payload as StorageConsumerEvidence});
         await refreshHistoryMaintenanceEvidence(env,{tickers:preflight.tickers,codeRevision});
-        const storageProof=await storeStorageCutoverProof(meteredOps,{identity:storageMigrationIdentity(claimed.run),proof,provenance});
+        const storageProof=await storeStorageCutoverProof(meteredOps,{identity:storageExecutionIdentity(claimed.run),proof,provenance});
         const evidence={version:1,publications,capacity,runtimeEvidenceHash:runtime.evidenceHash,cutoverProofHash:storageProof.record.proofHash,
           storageCutoverProofId:storageProof.id,
           cutoverProvenance:provenance,publicBindingChanged:false};
@@ -245,17 +243,22 @@ async function main():Promise<void> {
       await finalizeRecentEodUsage({accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:meteredOps});
       const status=await runStoragePipeline({source:sourceDb,target:targetDb,history:historyDb,ops:meteredOps,
         run:claimed.run,leaseToken:claimed.leaseToken,installSourceFence:installer(source),installTargetFence:installer(target),installHistoryFence:installer(history),
-        bootstrapEnv:core && env.ALPACA_API_KEY && env.ALPACA_API_SECRET ? env : undefined,bootstrapFailureDb});
+        bootstrapEnv:core && env.ALPACA_API_KEY && env.ALPACA_API_SECRET ? env : undefined,bootstrapFailureDb,
+        onCopyProgress:(progress) => {
+          copyProgress=progress;
+          if(Date.now()-lastProgressLog>=60_000) {
+            console.log(JSON.stringify({event:"storage-copy-progress",id,...progress}));lastProgressLog=Date.now();
+          }
+        }});
       console.log(JSON.stringify({id,status}));
       await collectEodRolloutMonitoring(env).catch(()=>undefined);
     } catch (error:unknown) {
-      const message=error instanceof Error ? error.message : "storage-copy-failed";
-      const quota=/budget-exhausted|quota-exhausted|capacity-exceeded/.test(message);
-      const transient=quota || /network-error|request-timeout|d1-http-(429|5\d\d)|d1-response-invalid-json: status=5\d\d|time-slice-complete|bootstrap-incomplete|bootstrap-retry-not-due/.test(message);
-      if (transient) await deferStorageMigration(failureDb,id,claimed.leaseToken,quota ? "storage-quota-deferred" : "storage-resume-required",{quota});
+      const failure=classifyStorageFailure(error);
+      if (failure.retryable) await deferStorageMigration(failureDb,id,claimed.leaseToken,failure.code,{quota:failure.quota});
       else await pauseStorageMigration(failureDb,id,claimed.leaseToken,
-        /^[a-z0-9-]{1,100}$/.test(message) ? message : "storage-copy-verification-failed",{sourcePreserved:true});
-      console.error(JSON.stringify({id,status:transient ? "retrying" : "awaiting-evidence",reason:quota ? "quota" : "copy-interrupted"}));
+        failure.code,{sourcePreserved:true,...(copyProgress ? {copyProgress} : {})});
+      console.error(JSON.stringify({id,status:failure.retryable ? "retrying" : "awaiting-evidence",reason:failure.code,
+        stage:copyProgress?.stage ?? claimed.run.stage,failure,...(copyProgress ? {lastCompletedCheckpoint:copyProgress} : {})}));
       process.exitCode=1;
     }
   } finally {

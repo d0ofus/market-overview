@@ -45,7 +45,22 @@ describe("bounded cutover proof validation", () => {
   });
   it.each(["eodRowsRead", "eodRowsWritten", "accountRowsRead", "accountRowsWritten"] as const)("rejects over-budget %s", (metric) => {
     const proof = evidence(); proof.measurements[metric] = 9_000_000;
-    expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow(/invalid-schema/);
+    expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow(/profile-limits-exceeded/);
+  });
+  it("binds Paid daily and runtime limits explicitly and rejects Free/Paid proof reuse", () => {
+    const proof = evidence(); proof.budgetProfile = "paid";
+    proof.measurements = { ...proof.measurements, eodRowsRead: 10_000_000, accountRowsRead: 20_000_000,
+      eodRowsWritten: 1_000_000, accountRowsWritten: 2_000_000, httpCpuMs: 200, coordinatorCpuMs: 300, queriesPerInvocation: 150 };
+    proof.limits = { httpCpuMs: 1_000, coordinatorCpuMs: 1_000, queriesPerInvocation: 300, queryDurationMs: 30_000 };
+    expect(validateEodCutoverEvidence(proof, revision, now, "paid").budgetProfile).toBe("paid");
+    expect(() => validateEodCutoverEvidence(proof, revision, now, "free")).toThrow("budget-profile-mismatch");
+    expect(() => validateEodCutoverEvidence(evidence(), revision, now, "paid")).toThrow("budget-profile-mismatch");
+    delete proof.budgetProfile;
+    expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow("profile-limits-exceeded");
+    proof.budgetProfile = "paid"; proof.measurements.eodRowsWritten = 8_000_001;
+    expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow("profile-limits-exceeded");
+    proof.measurements.eodRowsWritten = 1_000_000; proof.capacity.marketDatabaseBytes = 450_000_000;
+    expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow(/350 MB/);
   });
   it("rejects measured CPU/query overruns, missing scopes, partial catalog processing and missing sweep headroom", () => {
     for (const mutate of [

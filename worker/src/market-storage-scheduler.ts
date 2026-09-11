@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "./eod-budget-profile";
 import { loadStorageMigration, type StorageMigrationRun } from "./market-storage-control";
 import type { Env } from "./types";
 
@@ -47,9 +48,10 @@ export async function coordinateStorageMigration(env:Env,now=new Date()):Promise
     a.rows_read AS accountReads,a.rows_written AS accountWrites FROM (SELECT ? AS usage_date) day
     LEFT JOIN eod_usage e ON e.usage_date=day.usage_date LEFT JOIN market_data_daily_usage a ON a.usage_date=day.usage_date`)
     .bind(timestamp.slice(0,10)).first<{reads:number|null;writes:number|null;reservedReads:number|null;reservedWrites:number|null;accountReads:number|null;accountWrites:number|null}>();
+  const profile=resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
   const value=(number:number|null|undefined) => typeof number==="number" && Number.isFinite(number) && number>=0 ? number : 0;
-  if (value(usage?.reads)+value(usage?.reservedReads)+100>2_500_000 || value(usage?.writes)+value(usage?.reservedWrites)+64>50_000
-    || value(usage?.accountReads)+value(usage?.reservedReads)+100>4_500_000 || value(usage?.accountWrites)+value(usage?.reservedWrites)+64>90_000) {
+  if (value(usage?.reads)+value(usage?.reservedReads)+100>profile.eodDaily.reads || value(usage?.writes)+value(usage?.reservedWrites)+64>profile.eodDaily.writes
+    || value(usage?.accountReads)+value(usage?.reservedReads)+100>profile.accountDaily.reads || value(usage?.accountWrites)+value(usage?.reservedWrites)+64>profile.accountDaily.writes) {
     await ops.prepare(`UPDATE market_storage_migrations SET status='retrying',error_code='storage-resource-budget',next_attempt_at=?,updated_at=?
       WHERE id=? AND status IN ('queued','dispatching','dispatched','running','retrying') AND (lease_until IS NULL OR lease_until<=?)
       AND (next_attempt_at IS NULL OR next_attempt_at<=?)`)

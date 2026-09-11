@@ -1,9 +1,10 @@
 import { eodCutoverEvidenceSchema, validateEodCutoverEvidence } from "./eod-rollout-service";
 import { storageHash } from "./market-storage-pages";
-import { storageMigrationIdentity, type StorageMigrationIdentity, type StorageMigrationRun } from "./market-storage-control";
+import { storageExecutionIdentity, type StorageMigrationIdentity, type StorageMigrationRun } from "./market-storage-control";
+import { validateStorageExecutionEvidence, type StorageExecutionRecord } from "./market-storage-execution";
 import type { StoragePublicationEvidence } from "./market-storage-acceptance";
 
-export type StorageActivationInput = { identity: StorageMigrationIdentity; opsDatabaseId: string };
+export type StorageActivationInput = { identity: StorageMigrationIdentity; opsDatabaseId: string; executionApproval?: StorageExecutionRecord|null };
 export type StorageActivationState = { run: StorageMigrationRun; proofHash: string; activationRecorded: boolean };
 export type StorageServingState = { side: "source" | "target"; versionId: string; deploymentId: string };
 export type StorageActivationDependencies = {
@@ -11,8 +12,8 @@ export type StorageActivationDependencies = {
   loadState(): Promise<StorageActivationState>;
   verifyPublications(state: StorageActivationState): Promise<void>;
   inspectServing(): Promise<StorageServingState>;
-  verifyGitHub(): Promise<{ marketDatabaseId: string; mode: "shadow" | "active" }>;
-  setGitHubVariable(name: "EOD_MARKET_DATABASE_ID" | "EOD_RUNNER_MODE", value: string): Promise<void>;
+  verifyGitHub(): Promise<{ marketDatabaseId: string; mode: "shadow" | "active"; productionCodeRevision: string | null }>;
+  setGitHubVariable(name: "EOD_MARKET_DATABASE_ID" | "EOD_RUNNER_MODE" | "EOD_PRODUCTION_CODE_REVISION", value: string): Promise<void>;
   authenticate(): Promise<void>;
   deployTarget(expectedSource: StorageServingState): Promise<void>;
   verifyPublicTarget(): Promise<void>;
@@ -26,10 +27,11 @@ const hash = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.t
  * approval; this orchestrator cannot manufacture acceptance from a local file. */
 export async function validateStorageActivationState(input: StorageActivationInput, run: StorageMigrationRun,
   approvalInput: unknown, storageProofInput: unknown, activationInput: unknown, now = new Date()): Promise<StorageActivationState> {
-  if (await storageHash(storageMigrationIdentity(run)) !== await storageHash(input.identity)
+  if (await storageHash(storageExecutionIdentity(run)) !== await storageHash(input.identity)
     || !["awaiting-cutover", "completed"].includes(run.status) || run.freeze_authorized !== 1
     || !hash(run.source_schema_hash) || !hash(run.freeze_evidence_hash) || !Number.isSafeInteger(run.source_revision)
     || run.source_revision === null || run.source_revision < 0) throw new Error("storage-activate-durable-run-not-ready");
+  await validateStorageExecutionEvidence(input.executionApproval,run,input.identity.codeRevision);
   if (run.status !== "completed" && (run.lease_token !== null || (run.lease_until !== null
     && (!Number.isFinite(Date.parse(run.lease_until)) || Date.parse(run.lease_until) > now.getTime())))) {
     throw new Error("storage-activate-live-lease");
@@ -102,13 +104,15 @@ export async function activateStorageMigrationOnce(input: StorageActivationInput
   const validateGithub = () => {
     if (![input.identity.sourceDatabaseId, input.identity.targetDatabaseId].includes(github.marketDatabaseId)
       || !["shadow", "active"].includes(github.mode)
+      || (github.productionCodeRevision !== null && github.productionCodeRevision !== input.identity.codeRevision)
       || (github.marketDatabaseId === input.identity.sourceDatabaseId && github.mode === "active")) {
       throw new Error("storage-activate-github-state-conflict");
     }
   };
   validateGithub();
   if (state.run.status === "completed") {
-    if (serving.side !== "target" || github.marketDatabaseId !== input.identity.targetDatabaseId || github.mode !== "active") {
+    if (serving.side !== "target" || github.marketDatabaseId !== input.identity.targetDatabaseId || github.mode !== "active"
+      || github.productionCodeRevision !== input.identity.codeRevision) {
       throw new Error("storage-activate-completed-binding-drift");
     }
     await deps.verifyPublicTarget();
@@ -124,6 +128,13 @@ export async function activateStorageMigrationOnce(input: StorageActivationInput
   await deps.authenticate();
   await recheck();
   github = await deps.verifyGitHub(); validateGithub();
+  if (github.productionCodeRevision !== input.identity.codeRevision) {
+    await deps.setGitHubVariable("EOD_PRODUCTION_CODE_REVISION", input.identity.codeRevision);
+    await deps.journal("github-production-revision-set").catch(() => undefined);
+  }
+  await recheck();
+  github = await deps.verifyGitHub(); validateGithub();
+  if (github.productionCodeRevision !== input.identity.codeRevision) throw new Error("storage-activate-github-production-revision-not-persisted");
   if (github.marketDatabaseId !== input.identity.targetDatabaseId) {
     await deps.setGitHubVariable("EOD_MARKET_DATABASE_ID", input.identity.targetDatabaseId);
     await deps.journal("github-target-set").catch(() => undefined);
@@ -137,7 +148,8 @@ export async function activateStorageMigrationOnce(input: StorageActivationInput
   }
   await recheck();
   github = await deps.verifyGitHub();
-  if (github.marketDatabaseId !== input.identity.targetDatabaseId || github.mode !== "active") throw new Error("storage-activate-github-not-active");
+  if (github.marketDatabaseId !== input.identity.targetDatabaseId || github.mode !== "active"
+    || github.productionCodeRevision !== input.identity.codeRevision) throw new Error("storage-activate-github-not-active");
   const current = await deps.inspectServing();
   if (serving.side === "target" && current.side !== "target") throw new Error("storage-activate-target-regressed");
   serving = current;

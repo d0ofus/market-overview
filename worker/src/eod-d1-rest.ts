@@ -1,3 +1,6 @@
+import { pacedEodRestFetch } from "./eod-rest-request-limiter";
+import { assertEodRollingBudget, eodBudgetWindow, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
+
 /** Node-side D1 bridge. Only repository SQL reaches this adapter; it is never an HTTP SQL endpoint. */
 export type EodSql = { sql:string; params:unknown[] };
 export type EodUsage = { rowsRead:number; rowsWritten:number; sizeAfter:number };
@@ -120,10 +123,10 @@ export function createEodD1Database(options: {
     try {
       let response: Response;
       try {
-        response = await (options.fetcher ?? fetch)(
+        response = await pacedEodRestFetch(options.accountId, options.token, options.fetcher ?? fetch,
           `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/d1/database/${options.databaseId}/query`,
-          {method:"POST",headers:{Authorization:`Bearer ${options.token}`,"Content-Type":"application/json"},
-            body:requestBody,signal:AbortSignal.timeout(30_000)},
+          () => ({method:"POST",headers:{Authorization:`Bearer ${options.token}`,"Content-Type":"application/json"},
+            body:requestBody,signal:AbortSignal.timeout(30_000)}),
         );
       } catch (error) {
         throw new Error(error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name) ? "d1-request-timeout" : "d1-network-error");
@@ -298,6 +301,7 @@ type Envelope = {
   usedReads: number; usedWrites: number; pendingReads: number; pendingWrites: number;
   pending: Set<{ reads: number; writes: number; done: boolean }>;
   draining: boolean; closed: boolean;
+  expiresAt: number;
 };
 
 /**
@@ -310,10 +314,13 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
   readCredit?: number;
   writeCredit?: number;
   now?: () => Date;
+  profile?: EodBudgetProfile;
 } = {}): EodAdmission {
   const clock = options.now ?? (() => new Date());
-  const readCredit = Math.max(LEDGER_READS + 1, Math.min(250_000, Math.trunc(options.readCredit ?? 50_000)));
-  const writeCredit = Math.max(LEDGER_WRITES + 1, Math.min(10_000, Math.trunc(options.writeCredit ?? 2_000)));
+  const profile = resolveEodBudgetProfile(options.profile?.name);
+  const ledgerReads = profile.rolling31 ? 1_024 : LEDGER_READS, ledgerWrites = profile.rolling31 ? 32 : LEDGER_WRITES;
+  const readCredit = Math.max(ledgerReads + 1, Math.min(250_000, Math.trunc(options.readCredit ?? 50_000)));
+  const writeCredit = Math.max(ledgerWrites + 1, Math.min(10_000, Math.trunc(options.writeCredit ?? 2_000)));
   if (!Number.isFinite(readCredit) || !Number.isFinite(writeCredit)) throw new Error("Invalid EOD admission credits.");
   const envelopes = new Set<Envelope>();
   let current: Envelope | null = null;
@@ -348,26 +355,48 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
     if (current === envelope) current = null;
   }
   async function reserve(date: string, needed: { reads: number; writes: number }, maximumWrites:number): Promise<Envelope> {
-    const minimumReads = needed.reads + LEDGER_READS;
-    const minimumWrites = needed.writes + LEDGER_WRITES;
+    const minimumReads = needed.reads + ledgerReads;
+    const minimumWrites = needed.writes + ledgerWrites;
     if (minimumReads > 250_000 || minimumWrites > maximumWrites) throw new Error("eod-query-exceeds-bounded-reservation");
     const sizes = [{ reads: Math.max(readCredit, minimumReads), writes: Math.max(writeCredit, minimumWrites) }];
     if (sizes[0].reads !== minimumReads || sizes[0].writes !== minimumWrites) sizes.push({ reads: minimumReads, writes: minimumWrites });
     for (const size of sizes) {
+      const window = eodBudgetWindow(clock());
+      let rolling: Awaited<ReturnType<typeof assertEodRollingBudget>>;
+      try { rolling = await assertEodRollingBudget(ops, profile, clock(), size); }
+      catch (error) {
+        if (error instanceof Error && error.message === "eod-rolling-budget-exhausted" && size !== sizes.at(-1)) continue;
+        throw error;
+      }
+      const monthlySql = profile.rolling31 ? `
+          AND (SELECT COUNT(*) FROM eod_account_usage WHERE usage_date>=? AND usage_date<=?
+            AND error IS NULL AND sampled_at>=? AND sampled_at<=? AND date(usage_date)=usage_date)=31
+          AND (SELECT SUM(MAX(a.rows_read,COALESCE(l.rows_read,0))+COALESCE(e.reserved_reads,0))
+            FROM eod_account_usage a LEFT JOIN market_data_daily_usage l ON l.usage_date=a.usage_date
+            LEFT JOIN eod_usage e ON e.usage_date=a.usage_date WHERE a.usage_date>=? AND a.usage_date<=?)+?<=?
+          AND (SELECT SUM(MAX(a.rows_written,COALESCE(l.rows_written,0))+COALESCE(e.reserved_writes,0))
+            FROM eod_account_usage a LEFT JOIN market_data_daily_usage l ON l.usage_date=a.usage_date
+            LEFT JOIN eod_usage e ON e.usage_date=a.usage_date WHERE a.usage_date>=? AND a.usage_date<=?)+?<=?` : "";
+      const monthlyParams = profile.rolling31 ? [window.start,window.end,window.freshAfter,window.now,
+        window.start,window.end,size.reads,profile.rolling31.reads,window.start,window.end,size.writes,profile.rolling31.writes] : [];
       const id = crypto.randomUUID();
       const result = await ops.batch([
         ops.prepare("INSERT INTO eod_usage(usage_date) VALUES(?) ON CONFLICT DO NOTHING").bind(date),
         ops.prepare(`UPDATE eod_usage SET reserved_reads=reserved_reads+?,reserved_writes=reserved_writes+?
-          WHERE usage_date=? AND rows_read+reserved_reads+?<=2500000 AND rows_written+reserved_writes+?<=50000
-          AND COALESCE((SELECT rows_read FROM market_data_daily_usage WHERE usage_date=?),0)+reserved_reads+?<=4500000
-          AND COALESCE((SELECT rows_written FROM market_data_daily_usage WHERE usage_date=?),0)+reserved_writes+?<=90000`)
-          .bind(size.reads,size.writes,date,size.reads,size.writes,date,size.reads,date,size.writes),
+          WHERE usage_date=? AND rows_read+reserved_reads+?<=? AND rows_written+reserved_writes+?<=?
+          AND MAX(COALESCE((SELECT rows_read FROM market_data_daily_usage WHERE usage_date=?),0),
+            COALESCE((SELECT rows_read FROM eod_account_usage WHERE usage_date=eod_usage.usage_date),0))+reserved_reads+?<=?
+          AND MAX(COALESCE((SELECT rows_written FROM market_data_daily_usage WHERE usage_date=?),0),
+            COALESCE((SELECT rows_written FROM eod_account_usage WHERE usage_date=eod_usage.usage_date),0))+reserved_writes+?<=?${monthlySql}`)
+          .bind(size.reads,size.writes,date,size.reads,profile.eodDaily.reads,size.writes,profile.eodDaily.writes,
+            date,size.reads,profile.accountDaily.reads,date,size.writes,profile.accountDaily.writes,...monthlyParams),
         // changes() refers to the immediately preceding guarded UPDATE in this transaction.
         ops.prepare(`INSERT INTO eod_budget_reservations(id,usage_date,run_id,reads,writes,created_at)
           SELECT ?,?,?,?,?,? WHERE changes()=1`).bind(id,date,runId,size.reads,size.writes,clock().toISOString()),
       ]);
       if (!Number(result[1]?.meta?.changes ?? 0)) continue;
-      const envelope: Envelope = { id,date,...size,usedReads:LEDGER_READS,usedWrites:LEDGER_WRITES,
+      const envelope: Envelope = { id,date,...size,usedReads:ledgerReads,usedWrites:ledgerWrites,
+        expiresAt: rolling ? Date.parse(rolling.sampledAt)+300_000 : Infinity,
         pendingReads:0,pendingWrites:0,pending:new Set(),draining:false,closed:false };
       envelopes.add(envelope);
       return envelope;
@@ -395,7 +424,7 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
       }
     }
     const estimate = estimateEodQueries(queries);
-    if (current && (current.date !== date || current.draining
+    if (current && (current.date !== date || current.draining || now.getTime()>=current.expiresAt
       || current.reads-current.usedReads-current.pendingReads < estimate.reads
       || current.writes-current.usedWrites-current.pendingWrites < estimate.writes)) {
       current.draining = true;

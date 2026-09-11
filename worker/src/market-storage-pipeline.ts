@@ -1,4 +1,4 @@
-import { runStorageCopy } from "./market-storage-copy";
+import { runStorageCopy, type StorageCopyProgress } from "./market-storage-copy";
 import { captureStorageHistoryBaseline, runStorageVerification, assertStorageVerificationCapture,
   releaseStorageVerificationFence, type StorageVerificationEvidence } from "./market-storage-verification";
 import { verifyStorageConsumerBatch, validateStorageConsumerEvidence, type StorageConsumerCheckpoint,
@@ -36,6 +36,7 @@ export async function runStoragePipeline(input: {
   run: StorageMigrationRun; leaseToken: string; installSourceFence: Installer;
   installTargetFence: Installer; installHistoryFence: Installer;
   bootstrapEnv?: Env; bootstrapFailureDb?: D1Database; deadlineMs?: number;
+  onCopyProgress?:(progress:StorageCopyProgress)=>void;
 }): Promise<string> {
   const { run, ops, leaseToken } = input, identity = storageMigrationIdentity(run);
   const started=Date.now(),duration=input.deadlineMs ?? 65*60_000;
@@ -94,7 +95,7 @@ export async function runStoragePipeline(input: {
     while (remaining()>0) {
       await heartbeatStorageMigration(ops, run.id, leaseToken);
       const result = await verifyStorageConsumerBatch({ sourceEnv, targetEnv, capture,
-        tickers: preflight.tickers, calendarDates: preflight.calendarDates, checkpoint, maxTickers: 5, assertCapture });
+        tickers: preflight.tickers, calendarDates: preflight.calendarDates, checkpoint, maxTickers: 10, assertCapture });
       checkpoint = result.checkpoint;
       await save("consumer-parity:cursor", capture.captureHash, checkpoint);
       await progressStorageMigration(ops, run.id, leaseToken, "consumer-parity", {

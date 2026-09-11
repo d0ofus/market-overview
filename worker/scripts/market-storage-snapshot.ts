@@ -1,3 +1,4 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 /** Read-only, quota-metered logical snapshot for offline capacity measurement.
  * Local checkpoints are analysis inputs only; production history never depends
  * on this file, an Actions artifact, or cache. No source freeze or deletion. */
@@ -47,8 +48,8 @@ async function main():Promise<void> {
   }).trim();
   const allowedDatabaseIds=[source,ops];
   const rawOps=createEodD1Database({accountId,token,databaseId:ops,allowedDatabaseIds});
-  const admission=createEodAdmission(rawOps,"market-storage:capacity-snapshot",{writeCredit:200,
-    reconcileAccountUsage:() => reconcileEodAccountUsage({accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:rawOps})});
+  const admission=createEodAdmission(rawOps,"market-storage:capacity-snapshot",{ profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),writeCredit:200,
+    reconcileAccountUsage:() => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:rawOps})});
   const db=createEodD1Database({accountId,token,databaseId:source,allowedDatabaseIds,admission});
   const meteredOps=createEodD1Database({accountId,token,databaseId:ops,allowedDatabaseIds,admission});
   let complete=false,rows=0,captureOpened=false;

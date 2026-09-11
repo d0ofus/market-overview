@@ -1,3 +1,6 @@
+import { resolveEodRunnerCodeRevision } from "../src/eod-runner-revision";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
+import { execFileSync } from "node:child_process";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { collectEodRolloutMonitoring, finalizeRecentEodUsage } from "../src/eod-rollout-monitor";
@@ -11,6 +14,10 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
+  const actualRevision = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }).trim();
+  const codeRevision = resolveEodRunnerCodeRevision({ actualRevision, productionRevision: process.env.EOD_PRODUCTION_CODE_REVISION,
+    codeRevision: process.env.EOD_CODE_REVISION, githubSha: process.env.GITHUB_SHA });
   const accountId = required("CLOUDFLARE_ACCOUNT_ID"), token = required("CLOUDFLARE_EOD_D1_TOKEN");
   const market = required("EOD_MARKET_DATABASE_ID"), ops = required("EOD_OPS_DATABASE_ID");
   const history = required("EOD_HISTORY_DATABASE_ID");
@@ -18,13 +25,14 @@ async function main(): Promise<void> {
   const allowedDatabaseIds = [market, ops, history];
   if (new Set(allowedDatabaseIds).size !== allowedDatabaseIds.length) throw new Error("eod-monitor-database-identity-conflict");
   const rawOps = createEodD1Database({ accountId, token, databaseId: ops, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `eod-monitor:${new Date().toISOString().slice(0, 10)}`, {
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: analyticsToken, ops: rawOps }),
+  const admission = createEodAdmission(rawOps, `eod-monitor:${new Date().toISOString().slice(0, 10)}`, { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE),
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId, token: analyticsToken, ops: rawOps }),
   });
   const database = (databaseId: string) => createEodD1Database({ accountId, token, databaseId, allowedDatabaseIds, admission });
   const env = {
+    EOD_BUDGET_PROFILE: process.env.EOD_BUDGET_PROFILE,
     DB: database(market), MARKET_DATA_DB: database(market), OPS_DB: database(ops), MARKET_HISTORY_DB: database(history),
-    EOD_CODE_REVISION: process.env.EOD_STORAGE_CODE_REVISION,
+    EOD_CODE_REVISION: codeRevision,
     MARKET_DATA_DB_REQUIRED: "true", OPS_DB_REQUIRED: "true",
     EOD_RUNNER_MODE: process.env.EOD_RUNNER_MODE === "active" ? "active" : "shadow",
     EOD_READ_ENABLED: process.env.EOD_RUNNER_MODE === "active" ? "true" : "false",

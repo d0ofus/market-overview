@@ -2,7 +2,7 @@ import { z } from "zod";
 import { EOD_CONFIGURATION_KEY, eodConfigurationRecordSchema } from "./eod-recovery-status";
 import { eodCutoverEvidenceSchema } from "./eod-rollout-service";
 import { storageHash } from "./market-storage-pages";
-import type { StorageMigrationRun } from "./market-storage-control";
+import { storageExecutionRevision, type StorageMigrationRun } from "./market-storage-control";
 import type { StorageBindingEvidence } from "./market-storage-activation";
 
 export type EodProductionConfiguration = z.infer<typeof eodConfigurationRecordSchema>;
@@ -27,7 +27,7 @@ export async function validateEodProductionConfiguration(input: {
     || run.target_database_id !== input.marketDatabaseId || run.history_database_id !== input.historyDatabaseId
     || new Set([run.source_database_id, run.target_database_id, run.history_database_id, input.opsDatabaseId]).size !== 4) fail("completed-migration-required");
   const activation = activationSchema.safeParse(input.activation);
-  if (!activation.success || activation.data.codeRevision !== run.code_revision || activation.data.marketDatabaseId !== run.target_database_id
+  if (!activation.success || activation.data.codeRevision !== storageExecutionRevision(run) || activation.data.marketDatabaseId !== run.target_database_id
     || Date.parse(activation.data.activatedAt) > now.getTime()) fail("original-activation-mismatch");
   const approval = object(input.codeApproval), proof = eodCutoverEvidenceSchema.safeParse(approval?.proof);
   if (!approval || approval.version !== 1 || approval.codeRevision !== input.codeRevision || !proof.success
@@ -36,7 +36,8 @@ export async function validateEodProductionConfiguration(input: {
     || Date.parse(approval.approvedAt) > now.getTime() || await storageHash(approval.proof) !== approval.proofHash) fail("current-code-approval-required");
   const config = object(input.trackedConfig), vars = object(config?.vars);
   if (!config || config.name !== input.workerName || (config.account_id !== undefined && config.account_id !== input.accountId)
-    || vars?.EOD_RUNNER_MODE !== "active" || vars.EOD_READ_ENABLED !== "true" || !Array.isArray(config.d1_databases)) fail("tracked-canonical-config-required");
+    || vars?.EOD_RUNNER_MODE !== "active" || vars.EOD_READ_ENABLED !== "true" || vars.EOD_ARCHIVE_PRUNE_ENABLED !== "true"
+    || !Array.isArray(config.d1_databases)) fail("tracked-canonical-config-required");
   const databases = config.d1_databases.map(object);
   if (databases.some((row) => !row) || new Set(databases.map((row) => row!.binding)).size !== databases.length) fail("tracked-bindings-ambiguous");
   for (const [binding, id] of [["MARKET_DATA_DB", input.marketDatabaseId], ["MARKET_HISTORY_DB", input.historyDatabaseId], ["OPS_DB", input.opsDatabaseId]]) {
@@ -54,7 +55,17 @@ export async function validateEodProductionConfiguration(input: {
   const binding = input.binding, age = now.getTime() - Date.parse(binding.observedAt);
   if (binding.version !== 1 || binding.workerName !== input.workerName || binding.codeRevision !== input.codeRevision
     || binding.marketDatabaseId !== input.marketDatabaseId || binding.historyDatabaseId !== input.historyDatabaseId
-    || binding.opsDatabaseId !== input.opsDatabaseId || !Number.isFinite(age) || age < 0 || age > 120_000) fail("serving-version-mismatch");
+    || binding.opsDatabaseId !== input.opsDatabaseId || binding.archivePruneEnabled !== true
+    || !Number.isFinite(age) || age < 0 || age > 120_000) fail("serving-version-mismatch");
+  // These are the final two activation variables. A dedicated pending result
+  // is available only after every independent real observation above passed,
+  // allowing the CLI to set them and re-read actual GitHub state before saving.
+  const productionPin = input.githubVariables.get("EOD_PRODUCTION_CODE_REVISION"), prune = input.githubVariables.get("EOD_ARCHIVE_PRUNE_ENABLED");
+  if (productionPin !== input.codeRevision || prune !== "true") {
+    if ((productionPin === undefined || productionPin === activation.data.codeRevision || productionPin === input.codeRevision)
+      && (prune === undefined || prune === "false" || prune === "true")) fail("github-activation-pending");
+    fail("github-activation-conflict");
+  }
   return eodConfigurationRecordSchema.parse({ version: 1, codeRevision: input.codeRevision,
     activationCodeRevision: activation.data.codeRevision, recordedAt: now.toISOString(), marketDatabaseId: input.marketDatabaseId,
     migrationId: run.id, workerVersion: binding.versionId });

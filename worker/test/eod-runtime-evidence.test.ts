@@ -21,6 +21,16 @@ function fixture() {
   });
 }
 describe("raw invocation evidence",()=>{
+  it("binds paid runtime measurements to the actual deployed budget profile",async()=>{
+    const paidIdentity={...identity,budgetProfile:"paid" as const};
+    const paidVersion=version();
+    paidVersion.resources.bindings.push({name:"EOD_BUDGET_PROFILE",type:"plain_text",text:"paid"});
+    const artifact=await buildRuntimeEvidence(paidIdentity,paidVersion,fixture(),window,true);
+    expect(await validateRuntimeEvidence(artifact,paidIdentity)).toEqual(artifact);
+    await expect(buildRuntimeEvidence(paidIdentity,version(),fixture(),window,true)).rejects.toThrow("EOD_BUDGET_PROFILE");
+    await expect(buildRuntimeEvidence(identity,paidVersion,fixture(),window,true)).rejects.toThrow("EOD_BUDGET_PROFILE");
+    await expect(validateRuntimeEvidence(artifact,identity)).rejects.toThrow("identity-mismatch");
+  });
   it("derives real maxima from correlated CPU and per-invocation D1 counters only",async()=>{
     const artifact=await buildRuntimeEvidence(identity,version(),fixture(),window,true);
     expect(await validateRuntimeEvidence(artifact,identity)).toEqual(artifact);

@@ -1,16 +1,19 @@
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { loadStorageMigration, storageMigrationIdentity } from "../src/market-storage-control";
+import { loadStorageMigration, storageExecutionIdentity } from "../src/market-storage-control";
+import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { validateStorageActivationState } from "../src/market-storage-activate-once";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
 import { validateProductionConfigDelta, deriveProductionConfigProof } from "../src/eod-production-config-transition";
 import { collectEodCurrentHealth, isEodCurrentHealthReady } from "../src/eod-current-health";
 import { assertEodCutover } from "../src/eod-rollout-service";
 import { eodHash } from "../src/eod-publication-service";
+import { storageHistoryConfigurationReference, initializeStorageHistoryConfigurationStatus } from "../src/eod-storage-history-capacity";
 import type { Env } from "../src/types";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -64,8 +67,8 @@ async function main(): Promise<void> {
   assertCheckout(); const initialGithub = github();
   const allowedDatabaseIds = [target, history, opsId];
   const rawOps = createEodD1Database({ accountId, token, databaseId: opsId, allowedDatabaseIds });
-  const admission = createEodAdmission(rawOps, `config-transition:${revision}`, { writeCredit: 100,
-    reconcileAccountUsage: () => reconcileEodAccountUsage({ accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }) });
+  const admission = createEodAdmission(rawOps, `config-transition:${revision}`, { profile: resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), writeCredit: 100,
+    reconcileAccountUsage: () => reconcileEodAccountUsage({profile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE), accountId, token: process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token, ops: rawOps }) });
   const database = (databaseId: string) => createEodD1Database({ accountId, token, databaseId, allowedDatabaseIds, admission });
   const ops = database(opsId), marketDb = database(target), historyDb = database(history);
   const evidence = async (id: string): Promise<unknown> => {
@@ -76,19 +79,21 @@ async function main(): Promise<void> {
     const migration = await loadStorageMigration(ops, migrationId);
     if (!migration || migration.status !== "completed" || migration.target_database_id !== target || migration.history_database_id !== history
       || !migration.completed_at || !Number.isFinite(Date.parse(migration.completed_at)) || Date.parse(migration.completed_at) > Date.now()) fail("completed-migration-required");
-    const identity = storageMigrationIdentity(migration), progress = object(JSON.parse(migration.progress_json));
+    const identity = storageExecutionIdentity(migration), progress = object(JSON.parse(migration.progress_json));
     if (typeof progress?.cutoverProofHash !== "string" || !/^[a-f0-9]{64}$/.test(progress.cutoverProofHash)) fail("source-proof-reference-invalid");
     const sourceApproval = await evidence(`active:${identity.codeRevision}`), sourceProof = object(await evidence(`storage-cutover-proof:${progress.cutoverProofHash}`));
-    await validateStorageActivationState({ identity, opsDatabaseId: opsId }, migration, sourceApproval, sourceProof, await evidence("monitoring:public-activation"));
+    const executionApproval = await assertStorageExecutionRevision(ops,migration,identity.codeRevision);
+    await validateStorageActivationState({ identity, opsDatabaseId: opsId, executionApproval }, migration, sourceApproval, sourceProof, await evidence("monitoring:public-activation"));
     const assertGithub = () => {
       const vars = github();
       for (const [name, value] of [["CLOUDFLARE_ACCOUNT_ID", accountId], ["EOD_MARKET_DATABASE_ID", target], ["EOD_HISTORY_DATABASE_ID", history],
         ["EOD_OPS_DATABASE_ID", opsId], ["EOD_STORAGE_SOURCE_DATABASE_ID", identity.sourceDatabaseId], ["EOD_STORAGE_TARGET_DATABASE_ID", target],
-        ["EOD_STORAGE_CODE_REVISION", identity.codeRevision], ["EOD_RUNNER_MODE", "active"]]) {
+        ["EOD_STORAGE_CODE_REVISION", migration.code_revision], ["EOD_RUNNER_MODE", "active"]]) {
         if (vars.get(name) !== value || initialGithub.get(name) !== value) fail("github-canonical-identity-mismatch");
       }
     };
     assertGithub();
+    if ((initialGithub.get("EOD_STORAGE_EXECUTION_REVISION") ?? migration.code_revision) !== identity.codeRevision) fail("github-execution-revision-mismatch");
     const changedFiles = command("git", ["diff", "--no-ext-diff", "--name-only", "--no-renames", "-z", identity.codeRevision, revision, "--"]).split("\0").filter(Boolean);
     const approvedToml = command("git", ["show", `${identity.codeRevision}:worker/wrangler.toml`]);
     const capacities = await inventory();
@@ -102,7 +107,7 @@ async function main(): Promise<void> {
       }
     };
     const actual = await serving();
-    const env: Env = { DB: marketDb, MARKET_DATA_DB: marketDb, MARKET_HISTORY_DB: historyDb, OPS_DB: ops,
+    const env: Env = { EOD_BUDGET_PROFILE:process.env.EOD_BUDGET_PROFILE, DB: marketDb, MARKET_DATA_DB: marketDb, MARKET_HISTORY_DB: historyDb, OPS_DB: ops,
       EOD_RUNNER_MODE: "active", EOD_READ_ENABLED: "true", EOD_CODE_REVISION: actual.codeRevision, EOD_STORAGE_MIGRATION_ID: migrationId };
     const assertNoLease = async () => {
       if (await ops.prepare("SELECT id FROM eod_runs WHERE lease_until>? LIMIT 1").bind(new Date().toISOString()).first()) fail("active-writer-retry-required");
@@ -119,14 +124,16 @@ async function main(): Promise<void> {
     if (confirmed.versionId !== actual.versionId || confirmed.deploymentId !== actual.deploymentId) fail("serving-version-changed");
     // This executes full existing acceptance validation and immutably creates
     // active:<new SHA>. No approval hash or measured timestamp is copied forward.
+    const historyReference = await storageHistoryConfigurationReference(env, { sourceRevision: identity.codeRevision, nextRevision: revision, proof });
     await assertEodCutover({ ...env, EOD_CODE_REVISION: revision }, revision, proof);
     const record = { version: 1, policy: "canonical-config-only-v1", migrationId, activationCodeRevision: identity.codeRevision,
-      codeRevision: revision, sourceProofHash: progress.cutoverProofHash, proofHash: await eodHash(proof), ...delta };
+      codeRevision: revision, sourceProofHash: progress.cutoverProofHash, proofHash: await eodHash(proof), ...delta, ...historyReference };
     const key = `config-transition:${revision}`, previous = await evidence(key);
     if (previous && await eodHash(previous) !== await eodHash(record)) fail("lineage-conflict");
     await ops.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")
       .bind(key, JSON.stringify(record), new Date().toISOString()).run();
     if (await eodHash(await evidence(key)) !== await eodHash(record)) fail("lineage-write-conflict");
+    await initializeStorageHistoryConfigurationStatus({ ...env, EOD_CODE_REVISION: revision });
     console.log(JSON.stringify({ status: "approved", codeRevision: revision, activationCodeRevision: identity.codeRevision,
       migrationId, targetDatabaseId: target, next: "deploy-canonical-config-then-record-production-configuration" }));
   } finally { await admission.flush(); }

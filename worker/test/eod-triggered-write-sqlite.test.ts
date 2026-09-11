@@ -78,10 +78,12 @@ describe("business-row proof with D1 trigger-inclusive metadata", { timeout: 30_
     const other = await copyStorageArchiveBlock(history.db, [bar(20)]);
     await history.db.prepare("UPDATE market_history_block_pointers SET block_id=? WHERE feed='sip' AND ticker='TEST'").bind(original.id).run();
     let casResult: D1Result<{ block_id: string }> | undefined;
+    let batches = 0;
     const raced = { prepare: history.db.prepare.bind(history.db), batch: async (statements: D1PreparedStatement[]) => {
-      await history.db.prepare("UPDATE market_history_block_pointers SET block_id=? WHERE feed='sip' AND ticker='TEST'").bind(other.id).run();
+      const promotion = ++batches === 3;
+      if (promotion) await history.db.prepare("UPDATE market_history_block_pointers SET block_id=? WHERE feed='sip' AND ticker='TEST'").bind(other.id).run();
       const results = await history.db.batch<{ block_id: string }>(statements);
-      casResult = results[1];
+      if (promotion) casResult = results[1];
       return results;
     } } as D1Database;
     await expect(copyStorageArchiveBlock(raced, [bar(30)])).rejects.toThrow("storage-archive-concurrent-change");
@@ -111,3 +113,6 @@ describe("business-row proof with D1 trigger-inclusive metadata", { timeout: 30_
     expect(await history.db.prepare("SELECT COUNT(*) AS count FROM market_history_blocks").first("count")).toBe(0);
   });
 });
+
+// Fake transports need no wall-clock pacing; the limiter has its own clock-controlled tests.
+vi.mock("../src/eod-rest-request-limiter", () => ({ pacedEodRestFetch: (_account: string, _token: string, fetcher: typeof fetch, url: RequestInfo | URL, init: RequestInit | (() => RequestInit)) => fetcher(url, typeof init === "function" ? init() : init) }));

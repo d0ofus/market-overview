@@ -67,6 +67,26 @@ describe("executable storage consumer acceptance", () => {
     expect(last.evidence).not.toBeNull(); expect(checks).toBe(4);
     expect(last.evidence?.checks["correlation-5y"].observations).toBe(1_335);
     expect(last.evidence?.history).toEqual({ missing: 2, shorterThan520: 3, shorterThan1330: 3 });
+    const reads:Array<{sql:string;params:unknown[]}>=[];
+    const counted=(db:D1Database):D1Database => ({...db,prepare:(sql:string) => {
+      const wrap=(statement:D1PreparedStatement,params:unknown[]=[]):D1PreparedStatement => new Proxy(statement,{
+        get(target,key) {
+          if(key==="bind")return (...values:unknown[])=>wrap(target.bind(...values),values);
+          if(key==="all")return async()=>{reads.push({sql,params});return target.all();};
+          const value:unknown=Reflect.get(target,key);return typeof value==="function" ? value.bind(target) : value;
+        },
+      });
+      return wrap(db.prepare(sql));
+    }}) as D1Database;
+    const sourceDb=counted(source.db),targetDb=counted(target.db),historyDb=counted(history.db);
+    const together=await verifyStorageConsumerBatch({...input,maxTickers:4,
+      sourceEnv:{...sourceEnv,DB:sourceDb,MARKET_DATA_DB:sourceDb},
+      targetEnv:{...targetEnv,DB:targetDb,MARKET_DATA_DB:targetDb,MARKET_HISTORY_DB:historyDb}});
+    expect(together.checkpoint.checks).toEqual(last.checkpoint.checks);
+    expect(together.checkpoint.outputHash).toBe(last.checkpoint.outputHash);
+    expect(reads.filter((read)=>read.sql.includes("ROW_NUMBER()") && read.params.at(-1)===520)).toHaveLength(1);
+    expect(reads.filter((read)=>read.sql.includes("ROW_NUMBER()") && read.params.at(-1)===1330)).toHaveLength(1);
+    expect(reads.length).toBeLessThanOrEqual(12);
     await expect(validateStorageConsumerEvidence(last.evidence!, capture, input.tickers)).resolves.toBeUndefined();
     await expect(validateStorageConsumerEvidence({ ...last.evidence!, nextTicker: 3 }, capture, input.tickers)).rejects.toThrow("consumer-proof-incomplete");
     await expect(verifyStorageConsumerBatch({ ...input, checkpoint: first.checkpoint, tickers: ["AAA", "IPO", "NONE"] })).rejects.toThrow("checkpoint-capture-mismatch");

@@ -1,3 +1,4 @@
+import { readEodBudgetStatus, resolveEodBudgetProfile } from "./eod-budget-profile";
 import { Hono } from "hono";
 import { isAdminRequestAuthorized } from "./auth";
 import { getMarketDataDb } from "./market-data-db";
@@ -11,6 +12,8 @@ import { coordinateStorageMigration } from "./market-storage-scheduler";
 import { readEodRolloutMonitoring } from "./eod-rollout-monitor";
 import { loadStorageHistoryCapacityStatus } from "./eod-storage-history-capacity";
 import { registerEodRecoveryRoutes } from "./eod-recovery-status";
+import { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
+export { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 
 export type EodPurpose = "daily" | "reconcile" | "backfill" | "maintenance";
 export type EodRun = {
@@ -25,9 +28,6 @@ export type EodRun = {
   history_tickers_json?:string|null; history_sessions?:520|1400;
   completed_input_clock?:number|null;
 };
-
-export const EOD_PUBLICATION_SCOPES = ["overview:default", "breadth:sp500-core", "breadth:nasdaq-core",
-  "breadth:nyse-core", "breadth:russell2000-core", "breadth:overall-market-proxy"] as const;
 
 function validSessionDate(date: string): boolean {
   const ms = Date.parse(`${date}T00:00:00Z`);
@@ -212,11 +212,11 @@ async function deferEodDispatchForKnownQuota(env: Env, run: EodRun, now: Date): 
   const known=(value:number|null):value is number => typeof value==="number" && Number.isFinite(value) && value>=0;
   const reservedReads=known(usage.reservedReads) ? usage.reservedReads : 0;
   const reservedWrites=known(usage.reservedWrites) ? usage.reservedWrites : 0;
-  const minimumReads=100, minimumWrites=64;
-  const eodBlocked=(known(usage.eodReads) && usage.eodReads+reservedReads+minimumReads>2_500_000)
-    || (known(usage.eodWrites) && usage.eodWrites+reservedWrites+minimumWrites>50_000);
-  const accountBlocked=(known(usage.accountReads) && usage.accountReads+reservedReads+minimumReads>4_500_000)
-    || (known(usage.accountWrites) && usage.accountWrites+reservedWrites+minimumWrites>90_000);
+  const minimumReads=100, minimumWrites=64, profile=resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
+  const eodBlocked=(known(usage.eodReads) && usage.eodReads+reservedReads+minimumReads>profile.eodDaily.reads)
+    || (known(usage.eodWrites) && usage.eodWrites+reservedWrites+minimumWrites>profile.eodDaily.writes);
+  const accountBlocked=(known(usage.accountReads) && usage.accountReads+reservedReads+minimumReads>profile.accountDaily.reads)
+    || (known(usage.accountWrites) && usage.accountWrites+reservedWrites+minimumWrites>profile.accountDaily.writes);
   if (!eodBlocked && !accountBlocked) return false;
   const next=new Date(Date.parse(`${date}T00:00:00Z`)+86_400_000+5*60_000).toISOString();
   const message=`Known ${accountBlocked ? "account" : "EOD"} quota ledger has insufficient control allowance; retry after the UTC reset.`;
@@ -408,12 +408,13 @@ function objectJson(value: string | undefined): Record<string, unknown> {
 }
 
 export async function eodStatus(env: Env, now = new Date()) {
+  const budget=await readEodBudgetStatus(env.OPS_DB,resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE),now);
   const storageMigration=await publicStorageMigrationStatus(env);
   const monitoring=env.OPS_DB ? await readEodRolloutMonitoring(env,now) : null;
   const storageCapacity=env.OPS_DB ? await loadStorageHistoryCapacityStatus(env,now) : null;
   const pipelineMode=storageMigration?.blocksEod ? "storage-migration" : env.EOD_RUNNER_MODE ?? "disabled";
   if (!eodEnabled(env)) return {mode:"disabled",runs:[],publications:[],ready:false,
-    pipelineMode,storageMigration,monitoring,storageCapacity,
+    pipelineMode,storageMigration,monitoring,storageCapacity,budget,
     inputRevision:null,completedInputRevision:null,inputCorrectionsPending:null,
     expectedSession:null,missingScopes:[],lastSuccessfulSession:null,scopeHealth:[],
     usage:null,accountUsage:null,quota:undefined,capacity:undefined};
@@ -459,7 +460,7 @@ export async function eodStatus(env: Env, now = new Date()) {
   const unfinished=publicRuns.filter((run) => run.status!=="completed");
   const quotaBlocked=unfinished.some((run) => /budget|quota/i.test(`${run.error_code} ${run.error_message}`));
   const capacityBlocked=unfinished.some((run) => /capacity/i.test(`${run.error_code} ${run.error_message}`));
-  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,monitoring,storageCapacity,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
+  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,monitoring,storageCapacity,budget,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
     missingScopes,lastSuccessfulSession:lastComplete?.date ?? null,
     scopeHealth:EOD_PUBLICATION_SCOPES.map((scope) => {
       const head=publications.results.find((row) => row.scope===scope);

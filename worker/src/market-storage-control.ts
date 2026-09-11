@@ -8,6 +8,7 @@ export type StorageMigrationIdentity = {
 export type StorageMigrationRun = {
   id: string; source_database_id: string; target_database_id: string; history_database_id: string;
   session_date: string; code_revision: string;
+  execution_revision?: string|null; execution_evidence_hash?: string|null;
   status: "queued"|"dispatching"|"dispatched"|"running"|"retrying"|"awaiting-evidence"|"awaiting-cutover"|"completed"|"aborting"|"aborted";
   stage: string; source_schema_hash: string|null; source_revision: number|null;
   freeze_authorized: number; freeze_evidence_hash: string|null;
@@ -32,6 +33,14 @@ export function storageMigrationIdentity(run: StorageMigrationRun): StorageMigra
   return {id:run.id,sourceDatabaseId:run.source_database_id,targetDatabaseId:run.target_database_id,
     historyDatabaseId:run.history_database_id,sessionDate:run.session_date,codeRevision:run.code_revision};
 }
+/** Copy/fence identities retain the original revision forever. Fresh runtime
+ * and publication evidence uses the separately approved executor. */
+export function storageExecutionRevision(run: StorageMigrationRun): string {
+  return run.execution_revision ?? run.code_revision;
+}
+export function storageExecutionIdentity(run: StorageMigrationRun): StorageMigrationIdentity {
+  return { ...storageMigrationIdentity(run), codeRevision: storageExecutionRevision(run) };
+}
 export async function loadStorageMigration(ops: D1Database, id: string): Promise<StorageMigrationRun|null> {
   validId(id);
   return ops.prepare("SELECT * FROM market_storage_migrations WHERE id=?").bind(id).first<StorageMigrationRun>();
@@ -52,15 +61,17 @@ export async function createStorageMigration(ops: D1Database, input: StorageMigr
     || run.session_date!==input.sessionDate || run.code_revision!==input.codeRevision) throw new Error("storage-migration-identity-conflict");
   return run;
 }
-export async function claimStorageMigration(ops: D1Database,id: string, options: {githubRunId?: string;now?: Date} = {}): Promise<{run:StorageMigrationRun;leaseToken:string}|null> {
+export async function claimStorageMigration(ops: D1Database,id: string, options: {githubRunId?: string;executionRevision?:string;now?: Date} = {}): Promise<{run:StorageMigrationRun;leaseToken:string}|null> {
   validId(id);
   const now=options.now ?? new Date(), timestamp=now.toISOString(), token=crypto.randomUUID();
   if (options.githubRunId && !/^\d+$/.test(options.githubRunId)) throw new Error("storage-migration-invalid-github-run");
   const result=await ops.prepare(`UPDATE market_storage_migrations SET status='running',lease_token=?,lease_until=?,
     github_run_id=COALESCE(?,github_run_id),dispatch_token=NULL,updated_at=? WHERE id=?
     AND status IN ('queued','dispatching','dispatched','running','retrying')
+    AND (? IS NULL OR COALESCE(execution_revision,code_revision)=?)
     AND (lease_until IS NULL OR lease_until<=?) AND (next_attempt_at IS NULL OR next_attempt_at<=? OR status IN ('dispatching','dispatched'))`)
-    .bind(token,new Date(now.getTime()+STORAGE_LEASE_MS).toISOString(),options.githubRunId ?? null,timestamp,id,timestamp,timestamp).run();
+    .bind(token,new Date(now.getTime()+STORAGE_LEASE_MS).toISOString(),options.githubRunId ?? null,timestamp,id,
+      options.executionRevision ?? null,options.executionRevision ?? null,timestamp,timestamp).run();
   const run=await loadStorageMigration(ops,id);
   if (!run) throw new Error("storage-migration-run-missing");
   return result.meta.changes ? {run,leaseToken:token} : null;
@@ -171,7 +182,7 @@ export async function completeStorageMigration(ops:D1Database,id:string,input:{t
   if (!hash.test(input.cutoverEvidenceHash)) throw new Error("storage-migration-cutover-evidence-invalid");
   const result=await ops.prepare(`UPDATE market_storage_migrations SET status='completed',stage='cutover',
     progress_json=json_set(progress_json,'$.cutoverEvidenceHash',?),completed_at=?,updated_at=?
-    WHERE id=? AND target_database_id=? AND code_revision=? AND status='awaiting-cutover'`)
+    WHERE id=? AND target_database_id=? AND COALESCE(execution_revision,code_revision)=? AND status='awaiting-cutover'`)
     .bind(input.cutoverEvidenceHash,now.toISOString(),now.toISOString(),id,input.targetDatabaseId.toLowerCase(),input.codeRevision).run();
   if (!result.meta.changes) throw new Error("storage-migration-cutover-not-ready");
 }

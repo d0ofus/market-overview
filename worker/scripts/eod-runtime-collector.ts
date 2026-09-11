@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { collectRuntimeEvidence } from "../src/eod-runtime-evidence";
+import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 
 const required=(key:string):string=>{const value=process.env[key]?.trim();if(!value)throw new Error(`Missing ${key}`);return value;};
 try {
@@ -7,7 +8,7 @@ try {
     identity:{probeId:required("EOD_RUNTIME_PROBE_ID"),workerName:required("EOD_RUNTIME_WORKER_NAME"),workerVersion:required("EOD_RUNTIME_WORKER_VERSION"),
       codeRevision:required("EOD_CODE_REVISION"),targetDatabaseId:required("EOD_RUNTIME_TARGET_DATABASE_ID"),
       historyDatabaseId:required("EOD_RUNTIME_HISTORY_DATABASE_ID"),opsDatabaseId:required("EOD_RUNTIME_OPS_DATABASE_ID"),
-      coreDatabaseId:required("EOD_RUNTIME_CORE_DATABASE_ID")},
+      coreDatabaseId:required("EOD_RUNTIME_CORE_DATABASE_ID"),budgetProfile:resolveEodBudgetProfile(process.env.EOD_BUDGET_PROFILE).name},
     from:Date.parse(required("EOD_RUNTIME_FROM")),to:Date.parse(required("EOD_RUNTIME_TO"))});
   await writeFile(required("EOD_RUNTIME_EVIDENCE_PATH"),JSON.stringify(artifact,null,2)+"\n",{encoding:"utf8",flag:"wx"});
   console.log(JSON.stringify({complete:artifact.complete,evidenceHash:artifact.evidenceHash,samples:artifact.samples.length,

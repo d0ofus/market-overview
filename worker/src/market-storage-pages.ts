@@ -38,6 +38,37 @@ export async function readStoragePage(db:D1Database,table:StorageTable,after:Sto
   for (const row of result.results) storageRowKey(table,row);
   return result.results;
 }
+
+/** Stream the immutable source once in bounded keyset pages. Retain only one
+ * page plus at most eight complete security-years; the durable cursor remains
+ * the final verified year, so losing this in-memory buffer is harmless. */
+export function createStoragePriceYearReader(db:D1Database,after:StorageCell[]|null) {
+  const table=storageTable("alpaca_daily_bars");
+  let cursor=after,buffer:StorageRow[]=[],offset=0,exhausted=false;
+  const peek=async ():Promise<StorageRow|undefined> => {
+    if(offset>=buffer.length && !exhausted) {
+      buffer=await readStoragePage(db,table,cursor,250);offset=0;
+      if(buffer.length)cursor=storageRowKey(table,buffer.at(-1)!);
+      exhausted=buffer.length<250;
+    }
+    return buffer[offset];
+  };
+  return async (maxYears=8):Promise<{groups:StorageRow[][];next:StorageRow|undefined}> => {
+    if(!Number.isInteger(maxYears) || maxYears<1 || maxYears>8)throw new Error("storage-year-batch-invalid");
+    const groups:StorageRow[][]=[];
+    let first=await peek();
+    while(first && groups.length<maxYears) {
+      const key=JSON.stringify([first.feed,first.ticker,String(first.date).slice(0,4)]),rows:StorageRow[]=[];
+      do {
+        rows.push(first);offset++;
+        if(rows.length>366)throw new Error("storage-year-observations-invalid");
+        first=await peek();
+      } while(first && JSON.stringify([first.feed,first.ticker,String(first.date).slice(0,4)])===key);
+      groups.push(rows);
+    }
+    return {groups,next:first};
+  };
+}
 /** Destination has indexes but no business triggers until every data table is
  * copied. Existing rows must be byte-equivalent, so retries cannot overwrite a
  * concurrently modified destination and conceal the conflict. */

@@ -20,6 +20,9 @@ export type Env = {
   DB: D1Database;
   MARKET_DATA_DB?: D1Database;
   MARKET_HISTORY_DB?: D1Database;
+  EOD_BUDGET_PROFILE?: string;
+  EOD_CLOUDFLARE_ACCOUNT_ID?: string;
+  EOD_ANALYTICS_TOKEN?: string;
   EOD_RUNNER_MODE?: "disabled" | "shadow" | "active";
   EOD_READ_ENABLED?: string;
   EOD_CODE_REVISION?: string;
