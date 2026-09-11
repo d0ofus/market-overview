@@ -4,7 +4,7 @@ import type { Env } from "../src/types";
 import { EOD_METRICS_VERSION } from "../src/eod-metrics";
 import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
-import { loadMarketHistory } from "../src/market-history";
+import { archiveMarketHistoryBars, loadMarketHistory } from "../src/market-history";
 import { loadEodMemberships } from "../src/eod";
 import * as configDb from "../src/db";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
@@ -71,6 +71,141 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect(calls.alpaca).not.toHaveBeenCalled();
     expect(calls.yahoo).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { missingOffset: 1, expectedOffset: 5, label: "new target close" },
+    { missingOffset: 3, expectedOffset: 5, label: "gap inside the overlap" },
+    { missingOffset: 63, expectedOffset: 63, label: "older missing anchor" },
+    { missingOffset: null, expectedOffset: 5, label: "complete current window" },
+  ])("preserves five-session reconciliation for $label",async ({missingOffset,expectedOffset})=>{
+    const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    frozen.tickers=["SPY"];
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(frozen),runId).run();
+    if(missingOffset!==null) await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY' AND date=?")
+      .bind(dates.at(-missingOffset)).run();
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    expect(calls.alpaca.mock.calls).toEqual([
+      [["SPY"],dates.at(-expectedOffset),session],
+      [["SPY"],dates.at(-5),session,"raw"],
+    ]);
+    expect(calls.yahoo).not.toHaveBeenCalled();
+    expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first())
+      .toEqual({count:260});
+  });
+
+  it("reads archived history but keeps the healthy five-session overlap entirely in the 90-session hot store",async()=>{
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");
+      const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
+        .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+      frozen.tickers=["SPY"];
+      await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(frozen),runId).run();
+      await archiveMarketHistoryBars(archivedEnv,dates.slice(-260,-90).map(date=>makeBar(date)));
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<? OR date=?").bind(dates.at(-90),session).run();
+      const before=await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all();
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      expect(calls.alpaca.mock.calls).toEqual([
+        [["SPY"],dates.at(-5),session],[["SPY"],dates.at(-5),session,"raw"],
+      ]);
+      expect((await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results).toEqual(before.results);
+      expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first())
+        .toEqual({count:90});
+      expect(await loadMarketHistory(archivedEnv,{tickers:["SPY"],feed:"sip"})).toHaveLength(260);
+    } finally {history.dispose();}
+  });
+
+  it("keeps older raw volume and its collection time while leaving unknown older volume null",async()=>{
+    const knownDate=dates.at(-100)!,unknownDate=dates.at(-200)!;
+    const collectedAt="2026-05-01T21:00:00Z";
+    await market.db.prepare("UPDATE alpaca_daily_bars SET reported_volume=321,reported_volume_collected_at=? WHERE date=?")
+      .bind(collectedAt,knownDate).run();
+    await market.db.prepare("UPDATE alpaca_daily_bars SET reported_volume=NULL,reported_volume_collected_at=NULL WHERE date=?")
+      .bind(unknownDate).run();
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    expect(calls.alpaca.mock.calls.filter(args=>args[3]==="raw").every(args=>args[1]===dates.at(-5))).toBe(true);
+    expect(calls.alpaca.mock.calls.some(args=>args[3]!=="raw" && args[1]===dates.at(-260))).toBe(true);
+    expect(await market.db.prepare("SELECT reported_volume,reported_volume_collected_at FROM alpaca_daily_bars WHERE date=?")
+      .bind(knownDate).first()).toEqual({reported_volume:321,reported_volume_collected_at:collectedAt});
+    expect(await market.db.prepare("SELECT reported_volume,reported_volume_collected_at FROM alpaca_daily_bars WHERE date=?")
+      .bind(unknownDate).first()).toEqual({reported_volume:null,reported_volume_collected_at:null});
+  });
+
+  it("does not reload or rewrite unchanged archive years when a sibling keeps the price request at 260 sessions",async()=>{
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");
+      const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      await archiveMarketHistoryBars(archivedEnv,dates.slice(-260).map(date=>makeBar(date)));
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<?").bind(dates.at(-90)).run();
+      const blocksBefore=(await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results;
+      const pointersBefore=(await history.db.prepare("SELECT * FROM market_history_block_pointers ORDER BY calendar_year").all()).results;
+      const revisionBefore=await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='SPY'").first();
+      const prepare=vi.spyOn(history.db,"prepare");
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      // Two price chunks, each with exactly one SIP and one Yahoo range read.
+      // No additional per-security/year archive read or mutation is needed.
+      const during=prepare.mock.calls.map(([sql])=>sql);
+      expect(during.filter(sql=>sql.includes("FROM market_history_block_pointers p"))).toHaveLength(4);
+      expect(during.some(sql=>/^\s*(INSERT|UPDATE|DELETE)/i.test(sql))).toBe(false);
+      prepare.mockRestore();
+      expect((await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results).toEqual(blocksBefore);
+      expect((await history.db.prepare("SELECT * FROM market_history_block_pointers ORDER BY calendar_year").all()).results).toEqual(pointersBefore);
+      expect(await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='SPY'").first()).toEqual(revisionBefore);
+    } finally {history.dispose();}
+  });
+
+  it("still repairs a changed adjustment basis across the full retained price and raw-volume window",async()=>{
+    calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.includes("SPY")
+      ? dates.filter(date=>date>=start).map(date=>({...makeBar(date,50),adjustment,reportedVolume:200})) : []);
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    const rawCalls=calls.alpaca.mock.calls.filter(args=>args[3]==="raw");
+    expect(rawCalls[0][1]).toBe(dates.at(-5));
+    expect(rawCalls.some(args=>args[0].length===1 && args[0][0]==="SPY" && args[1]===dates.at(-260))).toBe(true);
+    expect(await market.db.prepare("SELECT status FROM eod_adjustment_repairs WHERE feed='sip' AND ticker='SPY'").first())
+      .toEqual({status:"complete"});
+    expect(await market.db.prepare("SELECT MIN(c) AS low,MAX(c) AS high,MIN(reported_volume) AS volume FROM alpaca_daily_bars").first())
+      .toEqual({low:50,high:50,volume:200});
+  });
+
+  it("repairs archived and hot split prices coherently without duplicate archive writes or revision accounting",async()=>{
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");
+      const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      await archiveMarketHistoryBars(archivedEnv,dates.slice(-260,-90).map(date=>makeBar(date)));
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<?").bind(dates.at(-90)).run();
+      const before=await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='SPY'")
+        .first<number>("revision");
+      calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.includes("SPY")
+        ? dates.filter(date=>date>=start).map(date=>({...makeBar(date,50),adjustment,reportedVolume:200,
+          reportedVolumeCollectedAt:adjustment==="raw" ? "2026-09-04T21:00:00Z" : null})) : []);
+      const prepare=vi.spyOn(history.db,"prepare");
+      // Completion exercises the runner's exact before + own changes = after
+      // check, including both archive correction increments and hot triggers.
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      const archiveWrites=prepare.mock.calls.filter(([sql])=>/^\s*INSERT OR IGNORE INTO market_history_blocks\b/.test(sql));
+      const years=new Set(dates.slice(-260).map(date=>date.slice(0,4))).size;
+      expect(archiveWrites).toHaveLength(years);
+      prepare.mockRestore();
+      const after=await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='SPY'")
+        .first<number>("revision");
+      expect(after).toBe(before!+years*2+90);
+      const retained=await loadMarketHistory(archivedEnv,{tickers:["SPY"],feed:"sip"});
+      expect(retained).toHaveLength(260);
+      expect(retained.every(bar=>bar.o===50 && bar.h===51 && bar.l===49 && bar.c===50
+        && bar.adjustment==="split" && bar.reportedVolume===200
+        && bar.reportedVolumeCollectedAt==="2026-09-04T21:00:00Z")).toBe(true);
+      expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first())
+        .toEqual({count:90});
+      expect(await market.db.prepare("SELECT status,owner_token FROM eod_adjustment_repairs WHERE feed='sip' AND ticker='SPY'").first())
+        .toEqual({status:"complete",owner_token:null});
+      expect(calls.alpaca.mock.calls.some(args=>args[3]==="raw" && args[0].length===1
+        && args[0][0]==="SPY" && args[1]===dates.at(-260))).toBe(true);
+    } finally {history.dispose();}
+  },60_000);
   it("rejects a private storage plan that would trim a newly measured member before any provider writes",async()=>{
     const saved=await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json");
     const planned=JSON.parse(saved!) as FrozenInputs;

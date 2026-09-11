@@ -1,7 +1,7 @@
 import { loadConfig } from "./db";
 import { refreshBreadthUniverseMemberships, loadEodMemberships } from "./eod";
 import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
-import { loadMarketHistory, archiveMarketHistoryBars } from "./market-history";
+import { loadMarketHistory, archiveMarketHistoryBars, marketHistoryBarsMateriallyEqual } from "./market-history";
 import { EodPriceProvider, yahooWindowMatchesAlpaca, type EodPriceBar } from "./eod-price-provider";
 import { computeEodTickerMetrics, computeEodBreadthMetrics, EOD_METRICS_VERSION, type EodMetricBar, type EodTickerMetrics } from "./eod-metrics";
 import { eodHash, storeEodPublication } from "./eod-publication-service";
@@ -374,13 +374,19 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       }
       const cachedYahoo=env.MARKET_HISTORY_DB
         ? await loadMarketHistory(env,{tickers,feed:"yahoo-eod",startDate:start,endDate:run.session_date}) as EodPriceBar[] : [];
-      let fetchStart=inputs.calendarDates.at(-5)!;
+      const overlapStart=inputs.calendarDates.at(-5)!;
+      let fetchStart=overlapStart;
       const existingKeys=new Set(history.filter((bar) => bar.sourceProvider==="alpaca" && bar.adjustment==="split").map((bar) => `${bar.ticker}:${bar.date}`));
       for (const date of inputs.calendarDates.slice(-260)) {
         if (tickers.some((ticker) => {
           const lifecycle = getEtfLifecycle(ticker);
           return (!lifecycle || date <= lifecycle.lastTradingDate) && !existingKeys.has(`${ticker}:${date}`);
-        })) { fetchStart=date; break; }
+        })) {
+          // A newly closed session is normally absent. It must not shorten the
+          // five-session correction overlap; older gaps may only extend it.
+          if (date<fetchStart) fetchStart=date;
+          break;
+        }
       }
       const updated:EodPriceBar[]=[];
       try {
@@ -390,7 +396,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (adjusted.some((bar) => !inputs.calendarDates.includes(bar.date))) throw new Error("alpaca-unexpected-exchange-session");
         for (const [ticker,error] of provider.symbolErrors) errors[ticker]=error;
         let raw:EodPriceBar[]=[];
-        try {checkContinuation();raw=await provider.alpaca(tickers,fetchStart,run.session_date,"raw");checkContinuation();}
+        try {checkContinuation();raw=await provider.alpaca(tickers,overlapStart,run.session_date,"raw");checkContinuation();}
         catch (error) {
           if (error instanceof EodBatchInterruptedError) throw error;
           const message=error instanceof Error ? error.message : "raw-volume-unavailable";
@@ -398,13 +404,19 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           errors["reportedVolume"]=message;
         }
         const rawByKey=new Map(raw.map((bar) => [`${bar.ticker}:${bar.date}`,bar]));
+        const retainedByKey=new Map(history.map((bar) => [`${bar.ticker}:${bar.date}`,bar]));
         for (const bar of adjusted) {
-          const rawBar=rawByKey.get(`${bar.ticker}:${bar.date}`);
+          // Daily volume needs the correction overlap, not a reconstruction of
+          // every older shares-traded observation. Preserve older reported
+          // volume with its original collection time; unknown remains null.
+          // A missing recent raw bar cannot borrow an older collection.
+          const rawBar=bar.date<overlapStart ? retainedByKey.get(`${bar.ticker}:${bar.date}`)
+            : rawByKey.get(`${bar.ticker}:${bar.date}`);
           bar.reportedVolume=rawBar?.reportedVolume ?? null;
           bar.reportedVolumeCollectedAt=rawBar?.reportedVolumeCollectedAt ?? null;
         }
         const rebased=new Set(adjusted.filter((bar) => {
-          const old=history.find((row) => row.ticker===bar.ticker && row.date===bar.date);
+          const old=retainedByKey.get(`${bar.ticker}:${bar.date}`);
           return old && Math.abs(old.c/bar.c-1)>0.00001;
         }).map((bar) => bar.ticker));
         for (const ticker of rebased) {
@@ -416,19 +428,29 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           updated.push(...repaired.bars);
         }
         updated.push(...adjusted.filter((bar) => !rebased.has(bar.ticker)));
+        const retainedAfterRepair=new Map(history.map((bar) => [`${bar.ticker}:${bar.date}`,bar]));
+        const changedBars:EodPriceBar[]=[];
+        for(let i=0;i<updated.length;i++) {
+          const bar=updated[i],stored=retainedAfterRepair.get(`${bar.ticker}:${bar.date}`);
+          if(stored && marketHistoryBarsMateriallyEqual(stored,bar)) {
+            // Reuse the actual stored observation for calculations too: a
+            // recheck must not redate unchanged prices or raw-volume evidence.
+            updated[i]=stored;
+          } else changedBars.push(bar);
+        }
         // Cold bootstrap stores only the target close hot. Missing earlier
         // sessions go directly to verified blocks, including the rest of the
         // five-session reconciliation overlap. Existing hot corrections still
         // update in place. This avoids five days of indexed insert/trigger cost
         // before even one full-universe daily publication can finish.
-        const archiveOnly=env.MARKET_HISTORY_DB ? updated.filter((bar) => bar.date<hotStart || (bar.date<run.session_date && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
+        const archiveOnly=env.MARKET_HISTORY_DB ? changedBars.filter((bar) => bar.date<hotStart || (bar.date<run.session_date && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
         checkContinuation();
         if (archiveOnly.length) {
           const archived=await archiveMarketHistoryBars(env,archiveOnly);
           ownRevisionChanges.push(...archived.revisionChanges);
         }
         const archiveKeys=new Set(archiveOnly.map((bar) => `${bar.ticker}:${bar.date}`));
-        const changed=await writeEodBars(env,updated.filter((bar) => !archiveKeys.has(`${bar.ticker}:${bar.date}`)));
+        const changed=await writeEodBars(env,changedBars.filter((bar) => !archiveKeys.has(`${bar.ticker}:${bar.date}`)));
         changed.forEach((count,ticker) => ownRevisionChanges.push({feed:"sip",ticker,count}));
       } catch(error) {
         if (error instanceof EodBatchInterruptedError) throw error;

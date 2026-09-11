@@ -55,6 +55,12 @@ Final acceptance requires `EOD_STORAGE_ANALYSIS_PATH`, `EOD_STORAGE_PUBLICATION_
 
 Set Worker `EOD_STORAGE_MIGRATION_ID` only when the reviewed migration owns the market lane. The heartbeat then prioritizes this workflow and preserves existing EOD run records for later recovery. `awaiting-evidence` and `awaiting-cutover` do not repeatedly dispatch. Normal page reads cannot start a transfer. `/api/eod/status` and the admin EOD panel display migration mode, stage, error, row progress, capture state and next retry; unfinished migration keeps market readiness false.
 
+### Correcting the future batch before bootstrap
+
+Once consumer verification has begun, the ordinary execution-transition command remains unavailable. A narrowly scoped continuation is available through `approve-storage-execution.ts continue-consumer`, with `EOD_STORAGE_PREVIOUS_PLAN_HASH` identifying the exact selected plan. It requires a clean, pushed checkout, no workflow or database writer, no bootstrap checkpoints, and unchanged frozen source, target and archive captures.
+
+The command compares actual Git objects: the historical reader, consumer calculations, schemas, codecs, configuration, dependencies and input loader must remain unchanged. The permitted application change is confined to the future `runEodBatch` body and its existing material-equality import. A separate immutable continuation record binds this code comparison to the old and new execution revisions. The new executor receives a new plan identity; the old plan, physical sizing measurements and consumer checkpoint payloads retain their original hashes and dates. Selection and execution change atomically. This does not authorize reuse after bootstrap writes or a change to consumer behavior.
+
 ## One-time start after capacity analysis
 
 The local operator script `worker/scripts/start-storage-migration-once.ts` joins completed capacity analysis to the durable migration without changing the canonical public market binding. It requires inherited `EOD_STORAGE_START_APPROVED=true` and `EOD_STORAGE_EXPECTED_COMMIT=<exact committed and pushed 40-character SHA>`. The user must already have authorized this phase; the flag is a persisted operator instruction, not a substitute for missing capacity evidence. It can run through `node --import tsx worker/scripts/start-storage-migration-once.ts` from the repository root or from the opted-in local capacity retry helper.

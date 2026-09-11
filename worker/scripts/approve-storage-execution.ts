@@ -8,11 +8,15 @@ import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { approveStorageExecutionTransition } from "../src/market-storage-execution";
 import { loadStorageMigration, resumeStorageMigration, storageMigrationIdentity } from "../src/market-storage-control";
 import { createStorageWorkflowQuiescence } from "../src/market-storage-github-revocation";
+import { approveStorageConsumerExecutionTransition } from "../src/market-storage-consumer-transition";
+import { collectStorageConsumerCodeContract } from "./storage-consumer-code-contract";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error("storage-execution-setting-missing"); return value; };
 const object = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 async function main(): Promise<void> {
+  const continuation = process.argv[2] === "continue-consumer";
+  if (process.argv.length > 3 || (process.argv[2] !== undefined && !continuation)) throw new Error("storage-execution-command-invalid");
   const accountId = required("CLOUDFLARE_ACCOUNT_ID"), token = required("CLOUDFLARE_EOD_D1_TOKEN"), id = required("EOD_STORAGE_MIGRATION_ID");
   const source = required("EOD_STORAGE_SOURCE_DATABASE_ID"), target = required("EOD_STORAGE_TARGET_DATABASE_ID"), history = required("EOD_HISTORY_DATABASE_ID"), opsId = required("EOD_OPS_DATABASE_ID");
   const fromRevision = required("EOD_STORAGE_PREVIOUS_EXECUTION_REVISION"), repository = process.env.EOD_GITHUB_REPOSITORY ?? "d0ofus/market-overview";
@@ -83,18 +87,24 @@ async function main(): Promise<void> {
     };
     const assertNoWorkflowWriters = createStorageWorkflowQuiescence({ops,repository,migration:storageMigrationIdentity(run),
       fromRevision,codeRevision,revokeRunId,readGitHub:async path=>gh(path),assertRevokedRunClaimFence});
-    const record = await approveStorageExecutionTransition({ops,source:db(source),migrationId:id,fromRevision,codeRevision,
-      changedFiles,diffHash:createHash("sha256").update(diff).digest("hex"),assertReviewedCheckout,assertNoWorkflowWriters});
+    const common = {ops,source:db(source),migrationId:id,fromRevision,codeRevision,
+      changedFiles,diffHash:createHash("sha256").update(diff).digest("hex"),assertReviewedCheckout,assertNoWorkflowWriters};
+    const continued = continuation ? await approveStorageConsumerExecutionTransition({...common,target:db(target),history:db(history),
+      expectedPlanHash:required("EOD_STORAGE_PREVIOUS_PLAN_HASH"),
+      codeContract:collectStorageConsumerCodeContract({root,fromRevision,codeRevision})}) : null;
+    const record = continued?.execution ?? await approveStorageExecutionTransition(common);
     command("gh",["variable","set","EOD_STORAGE_EXECUTION_REVISION","--env","market-eod","--repo",repository,"--body",codeRevision]);
     if (variables().get("EOD_STORAGE_EXECUTION_REVISION") !== codeRevision) throw new Error("storage-execution-github-pin-unconfirmed");
     const latest = await loadStorageMigration(ops,id);
     if (latest?.status === "awaiting-evidence" && latest.error_code === "storage-execution-github-pin-required") await resumeStorageMigration(ops,id,run.code_revision);
     console.log(JSON.stringify({status:"execution-approved",migrationId:id,storageRevision:run.code_revision,executionRevision:codeRevision,
-      evidenceHash:record.evidenceHash,checkpointsPreserved:record.checkpointCount,sourcePreserved:true,hotSessions:90}));
+      evidenceHash:record.evidenceHash,checkpointsPreserved:record.checkpointCount,sourcePreserved:true,hotSessions:90,
+      ...(continued ? {validationPlanHash:continued.plan.planHash,previousPlanHash:required("EOD_STORAGE_PREVIOUS_PLAN_HASH"),
+        validationEvidencePreserved:true} : {})}));
   } finally { await admission.flush(); }
 }
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : "";
-  console.error(JSON.stringify({status:"not-approved",reason:/^storage-execution-[a-z-]+$/.test(message) ? message : "storage-execution-verification-failed"}));
+  console.error(JSON.stringify({status:"not-approved",reason:/^storage-(?:execution|consumer-transition)-[a-z-]+$/.test(message) ? message : "storage-execution-verification-failed"}));
   process.exitCode = 1;
 });

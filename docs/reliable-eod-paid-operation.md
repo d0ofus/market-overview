@@ -27,6 +27,8 @@ The deployed Worker uses an explicit 1,000 ms CPU limit. Runtime acceptance reco
 
 The storage migration ID and original source-code revision identify the frozen source and copy checkpoints. They must remain unchanged after copying begins. A separately recorded execution revision authorizes reviewed implementation changes while preserving the source capture, archive content, target database and completed checkpoints. Promotion requires a quiescent writer and verified source identity. New publications and runtime measurements identify the actual executing revision.
 
+The daily runner always reconciles at least the latest five exchange sessions, even when the only missing bar is today's close. Missing earlier price anchors extend the split-adjusted price request. Ordinary raw share-volume collection stays within the five-session reconciliation window; older stored raw observations retain their original collection times, and older unknown raw volume remains null. Explicit corporate-action repair retains its full-window behavior. An unchanged observation keeps its stored provenance and does not create another archive revision or a duplicate hot-table row merely because it was fetched again.
+
 ## Daily code ownership
 
 The `market-eod` environment variable `EOD_PRODUCTION_CODE_REVISION` pins both ordinary daily ingestion and the daily monitor to the exact approved code. Their workflow files still run from `main`, but checkout and `EOD_CODE_REVISION` use this pin. With no pin, the original `github.sha` checkout remains the fallback. Each runner verifies the declared revision against `git rev-parse HEAD`; the triggering main SHA never impersonates pinned execution.
