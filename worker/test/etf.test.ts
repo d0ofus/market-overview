@@ -186,10 +186,11 @@ describe("ETF constituent parsers", () => {
       asOfDate: "2026-05-15",
     });
     expect(batch).not.toHaveBeenCalled();
-    expect(runs[0]?.args).toContain("official:test-provider");
-    expect(runs[0]?.args).toContain(1);
-    expect(runs[0]?.args[2]).toBe("partial");
-    expect(runs[0]?.args[3]).toContain("retaining the last full holdings from 2026-05-18");
-    expect(runs[0]?.args).toContain("2026-05-18T00:00:00.000Z");
+    const statusWrite = runs.find(row => row.sql.includes("INTO etf_constituent_sync_status"));
+    expect(statusWrite?.args).toContain("official:test-provider");
+    expect(statusWrite?.args).toContain(1);
+    expect(statusWrite?.args[2]).toBe("partial");
+    expect(statusWrite?.args[3]).toContain("retaining the last full holdings from 2026-05-18");
+    expect(statusWrite?.args).toContain("2026-05-18T00:00:00.000Z");
   });
 });

@@ -23,17 +23,29 @@ export function ssgaCurrencyIdentity(name: string): string | null {
 const SSGA_SECTOR_FUTURES: Readonly<Record<string,{root:string;name:string}>> = {
   XLB: {root:"IXD",name:"XAB MATERIALS"}, XLK: {root:"IXT",name:"XAK TECHNOLOGY"},
   XLF: {root:"IXA",name:"XAF FINANCIAL"},
-  XLE: {root:"IXP",name:"XAE ENERGY"}, XLV: {root:"IXC",name:"XAV HEALTH CARE"},
+  XLE: {root:"IXP",name:"XAE ENERGY"}, XOP: {root:"IXP",name:"XAE ENERGY"}, XLV: {root:"IXC",name:"XAV HEALTH CARE"},
   XLI: {root:"IXI",name:"XAI EMINI INDUSTR"}, XLP: {root:"IXR",name:"XAP CONS STAPLES"},
   XLU: {root:"IXS",name:"XAU UTILITIES"}, XLY: {root:"IXY",name:"XAY CONS DISCRET"},
 };
+
+const SSGA_CORPORATE_ACTIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  XLP: { "931CVR013": "CONTRA WALGREENS BOOTS" },
+  XBI: { "592CVR013": "CONTRA METSERA INC", "009CVR044": "CONTRA AKERO THERAPEUT",
+    "457CVR017": "CONTRA INHIBRX INC", "604CVR027": "CONTRA MIRATI THERAPEU",
+    "925CVR011": "CONTRA VERVE THERAPEUT", "096CVR048": "CONTRA BLUEPRINT MEDIC" },
+};
+/** Preserve only issuer-observed identifiers; never turn an unexplained dash
+ * into a security or infer corporate-action identity from a name substring. */
+export function ssgaCorporateActionIdentity(etfTicker: string, name: string, identifier: string): string | null {
+  return SSGA_CORPORATE_ACTIONS[etfTicker]?.[identifier] === name ? identifier : null;
+}
 
 export function etfHoldingAssetType(etfTicker: string, row: Pick<EtfConstituent, "ticker" | "name"> & { source?: string }): EtfHoldingAssetType {
   const ticker = row.ticker.toUpperCase(), name = row.name ?? "";
   if (row.source === "ssga:fund-data") {
     const currency=ssgaCurrencyIdentity(name);
     if (currency && (ticker === "-" || ticker === currency)) return "cash";
-    if (etfTicker === "XLP" && ticker === "931CVR013" && name === "CONTRA WALGREENS BOOTS") return "corporate_action";
+    if (ssgaCorporateActionIdentity(etfTicker, name, ticker)) return "corporate_action";
     // The issuer reports this cash-equivalent fund without an equity ticker.
     // Retain its literal identifier/name; do not invent a tradable stock symbol.
     if (ticker === "-" && /^SSI US GOV MONEY MARKET(?: CLASS)?$/i.test(name.trim())) return "money_market";

@@ -1,7 +1,8 @@
 import type { Env } from "./types";
 import * as XLSX from "xlsx";
 import { ETF_CATALOG_BY_TICKER } from "./etf-catalog";
-import { etfHoldingsIssue, etfHoldingsDateIssue, etfHoldingAssetType, getEtfLifecycle, parseEtfHoldingsDate, ssgaCurrencyIdentity, type EtfHoldingAssetType } from "./etf-holdings-quality";
+import { meteredFetch } from "./provider-usage";
+import { etfHoldingsIssue, etfHoldingsDateIssue, etfHoldingAssetType, getEtfLifecycle, parseEtfHoldingsDate, ssgaCurrencyIdentity, ssgaCorporateActionIdentity, type EtfHoldingAssetType } from "./etf-holdings-quality";
 
 export type EtfConstituent = {
   ticker: string;
@@ -1383,8 +1384,7 @@ export function parseSsgaHoldingsFile(etfTicker: string, buffer: ArrayBuffer, ki
     // Preserve currency and nontradable source identities rather than treating
     // every '-' position as the same security or silently dropping it.
     if (ticker === "-") ticker = ssgaCurrencyIdentity(name) ?? ticker;
-    if (ticker === "-" && etfTicker === "XLP" && name === "CONTRA WALGREENS BOOTS"
-      && String(row[identifierIndex] ?? "").trim() === "931CVR013") ticker = "931CVR013";
+    if (ticker === "-") ticker = ssgaCorporateActionIdentity(etfTicker, name, String(row[identifierIndex] ?? "").trim()) ?? ticker;
     const assetType = etfHoldingAssetType(etfTicker, { ticker, name, source: "ssga:fund-data" });
     if ((ticker === "-" && assetType !== "money_market") || weight === null) throw new Error("ssga-holdings-position-identity-invalid");
     holdings.push({ ticker, name: name || null, weight, assetType });
@@ -1461,9 +1461,31 @@ export async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<
   throw new Error(`SSGA holdings unavailable (${[...new Set(errors)].join(" | ")})`);
 }
 
-async function fetchYahooConstituents(etfTicker: string): Promise<EtfFetchResult> {
+const yahooHoldingsQueues = new WeakMap<Env, { lastStartedAt: number; pending: Promise<void> }>();
+async function requestYahooHoldings(env: Env, url: string): Promise<Response> {
+  let queue = yahooHoldingsQueues.get(env);
+  if (!queue) {
+    queue = { lastStartedAt: 0, pending: Promise.resolve() };
+    yahooHoldingsQueues.set(env, queue);
+  }
+  const state = queue;
+  const request = state.pending.then(async () => {
+    const wait = Math.max(0, 2_000 - (Date.now() - state.lastStartedAt));
+    if (wait) await new Promise<void>(resolve => setTimeout(resolve, wait));
+    state.lastStartedAt = Date.now();
+    return meteredFetch(env, url, { headers: { "User-Agent": "market-command-centre/1.0" } },
+      { providerKey: "yahoo", endpointKey: "etf-top-holdings", caller: "etf-constituents", symbolCount: 1 }, 8_000);
+  });
+  state.pending = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+async function fetchYahooConstituents(env: Env, etfTicker: string): Promise<EtfFetchResult> {
   const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(etfTicker)}?modules=topHoldings`;
-  const res = await fetch(url, { headers: { "User-Agent": "market-command-centre/1.0" } });
+  // Share the Yahoo daily reservation with EOD prices and every other metered
+  // caller. Each actual fallback attempt is charged, including later retries;
+  // a blocked reservation sends no Yahoo request and preserves other fallbacks.
+  const res = await requestYahooHoldings(env, url);
   if (!res.ok) {
     throw new Error(`Yahoo topHoldings fetch failed (${res.status})`);
   }
@@ -1852,7 +1874,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result) {
     source = "yahoo:topHoldings";
     try {
-      result = checkedEtfResult(etfTicker, await fetchYahooConstituents(etfTicker));
+      result = checkedEtfResult(etfTicker, await fetchYahooConstituents(env, etfTicker));
       if (result.holdings.length === 0) throw new Error("Yahoo returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Yahoo sync failed";
