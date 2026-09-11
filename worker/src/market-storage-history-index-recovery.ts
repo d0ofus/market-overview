@@ -14,6 +14,7 @@ import { EOD_HISTORY_POINTER_INDEX_DDL, EOD_HISTORY_POINTER_INDEX_MAX_ROWS } fro
 import { loadStorageIndexLoaderContinuation } from "./market-storage-history-index-continuation";
 import { loadStorageVixContinuation } from "./market-storage-vix-continuation";
 import { loadStoragePopulationExecution } from "./market-storage-population-execution";
+import { loadStorageRepairExecution } from "./market-storage-repair-execution";
 import { loadStorageListingExecution } from "./market-storage-listing-execution";
 
 const hash=z.string().regex(/^[a-f0-9]{64}$/),sha=z.string().regex(/^[a-f0-9]{40}$/);
@@ -277,7 +278,7 @@ export async function loadStorageHistoryIndexAmendment(ops:D1Database,run:Storag
   }
   const text=await read(ops,storageHistoryIndexRecoveryKey(run.id,plan.codeRevision));
   if(!text) {
-    const continuation=await loadStorageListingExecution(ops,run,plan) ?? await loadStoragePopulationExecution(ops,run,plan) ?? await loadStorageVixContinuation(ops,run,plan) ?? await loadStorageIndexLoaderContinuation(ops,run,plan);if(!continuation)return null;
+    const continuation=await loadStorageRepairExecution(ops,run,plan) ?? await loadStorageListingExecution(ops,run,plan) ?? await loadStoragePopulationExecution(ops,run,plan) ?? await loadStorageVixContinuation(ops,run,plan) ?? await loadStorageIndexLoaderContinuation(ops,run,plan);if(!continuation)return null;
     const amendment=await loadStorageHistoryIndexAmendment(ops,continuation.previousRun,continuation.previousPlan);
     if(!amendment||await storageHash(amendment)!==continuation.amendmentHash)fail("continued-amendment-mismatch");
     return amendment;

@@ -5,6 +5,7 @@ import {
 } from "./market-history";
 import type { Env } from "./types";
 import { EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
+import { validateEodCatalogQuarantineState } from "./eod-catalog-quarantine-validation";
 import { eodHash } from "./eod-publication-service";
 
 export const MARKET_HISTORY_READER_CONTRACT_VERSION = 1;
@@ -93,12 +94,12 @@ export function assertHistoryPruneEvidence(
 type MaintenanceEnv = Env & { EOD_ARCHIVE_PRUNE_ENABLED?: string };
 export type HistoryMaintenanceCursor = { tickerIndex: number; afterDate?: string };
 type PruneCatalogHead = { id: string; checksum: string; inputClock: number };
-const pruneCatalogApprovals = new WeakMap<D1Database, { key: string; head: PruneCatalogHead }>();
+const pruneCatalogApprovals = new WeakMap<D1Database, { key: string; head: PruneCatalogHead; quarantined: Set<string> }>();
 
 /** Reusable only while both the immutable catalog and correction clock match.
  * Relocating verified identical rows is revision-neutral; genuine repairs defer
  * pruning until a reconcile run publishes a current full catalog. */
-async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: string): Promise<number> {
+async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: string): Promise<{ inputClock: number; quarantined: Set<string> }> {
   const db = getMarketDataDb(env), key = `${sessionDate}:${JSON.stringify(tickers)}`;
   const readHead = () => db.prepare(`SELECT id,payload_checksum as checksum,
     (SELECT revision FROM eod_input_clock WHERE id='default') as inputClock
@@ -108,7 +109,9 @@ async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: stri
   const head = await readHead();
   if (!head || !head.checksum || !Number.isSafeInteger(head.inputClock) || head.inputClock < 0) return defer("catalog or correction clock is unavailable");
   const cached = pruneCatalogApprovals.get(db);
-  if (cached?.key === key && JSON.stringify(cached.head) === JSON.stringify(head)) return head.inputClock;
+  if (cached?.key === key && JSON.stringify(cached.head) === JSON.stringify(head)) {
+    return { inputClock: head.inputClock, quarantined: cached.quarantined };
+  }
   const publication = await db.prepare("SELECT payload_json as payload,payload_codec as codec FROM eod_publications WHERE id=?")
     .bind(head.id).first<{payload:string;codec:string}>();
   let payload: {rows?:unknown};
@@ -118,12 +121,18 @@ async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: stri
   if (!Array.isArray(rows) || rows.length !== tickers.length) return defer("catalog population is incomplete");
   const actual = new Set(rows.map((row) => Array.isArray(row) ? row[0] : null));
   if (actual.size !== tickers.length || tickers.some((ticker) => !actual.has(ticker))) return defer("catalog population differs from maintenance");
-  try { await loadEodCatalogRows(env, tickers, sessionDate); } catch (error) {
+  let quarantined = new Set<string>();
+  try {
+    if (rows.some(row => Array.isArray(row) && row.length > 10)) {
+      quarantined = new Set((await validateEodCatalogQuarantineState(env, { catalog: payload, tickers, sessionDate })).keys());
+    }
+    await loadEodCatalogRows(env, tickers.filter(ticker => !quarantined.has(ticker)), sessionDate);
+  } catch (error) {
     return defer(error instanceof Error ? error.message : "catalog revision validation failed");
   }
   if (JSON.stringify(await readHead()) !== JSON.stringify(head)) return defer("catalog inputs changed during validation");
-  pruneCatalogApprovals.set(db, { key, head });
-  return head.inputClock;
+  pruneCatalogApprovals.set(db, { key, head, quarantined });
+  return { inputClock: head.inputClock, quarantined };
 }
 
 function relocationIdentity(alias: string): string {
@@ -183,6 +192,7 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   status: "disabled" | "complete" | "partial";
   cursor: HistoryMaintenanceCursor | null;
   archivedRows: number; deletedRows: number; concurrentCorrections: number;
+  deferredRepairs?: string[];
 }> {
   const empty = { archivedRows: 0, deletedRows: 0, concurrentCorrections: 0 };
   if (env.EOD_ARCHIVE_PRUNE_ENABLED !== "true") return { status: "disabled", cursor: input.cursor ?? null, ...empty };
@@ -206,15 +216,20 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   // The full catalog and its global correction clock cover the publication
   // inputs. Yahoo relocation uses the same exact row identity/clock transaction;
   // it never changes Yahoo revisions or certifies Yahoo volume as SIP volume.
-  await assertPruneCatalog(env, tickers, input.endDate);
+  const catalog = await assertPruneCatalog(env, tickers, input.endDate);
+  const deferredRepairs = new Set<string>();
+  const diagnostics = () => deferredRepairs.size ? { deferredRepairs: [...deferredRepairs].sort() } : {};
   let archivedRows = 0;
   let deletedRows = 0;
   let concurrentCorrections = 0;
   for (let tickerIndex = startIndex; tickerIndex < tickers.length; tickerIndex += 1) {
     const ticker = tickers[tickerIndex];
+    // An unavailable catalog is evidence to preserve this security's rows,
+    // never authority to delete them or block maintenance for other members.
+    if (catalog.quarantined.has(ticker)) { deferredRepairs.add(ticker); continue; }
     const repair = await db.prepare("SELECT status FROM eod_adjustment_repairs WHERE feed=? AND ticker=?")
       .bind(feed,ticker).first<{status:string}>();
-    if (repair?.status === "pending") throw new Error(`history-prune-deferred: ${feed}:${ticker} adjustment repair is pending.`);
+    if (repair?.status === "pending") { deferredRepairs.add(ticker); continue; }
     const cutoff = await db.prepare(`SELECT MIN(date) as cutoffDate, COUNT(*) as retainedRows FROM (
       SELECT date FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? AND date <= ? ORDER BY date DESC LIMIT ?
     )`).bind(feed, ticker, input.endDate, hotSessions).first<{ cutoffDate: string | null; retainedRows: number }>();
@@ -238,17 +253,17 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
       }
     }
     for (let offset = 0; offset < candidates.length; offset += 40) {
-      const inputClock = await assertPruneCatalog(env, tickers, input.endDate);
+      const { inputClock } = await assertPruneCatalog(env, tickers, input.endDate);
       const result = await db.batch<{ date: string }>(relocationStatements(db, candidates.slice(offset, offset + 40), cutoff.cutoffDate, inputClock));
       deletedRows += result[1].results.length;
     }
     archivedRows += candidates.length;
     concurrentCorrections = archivedRows - deletedRows;
     if (archivedRows >= maxRows) return {
-      status: "partial", cursor: { tickerIndex, afterDate: candidates.at(-1)!.date }, archivedRows, deletedRows, concurrentCorrections,
+      status: "partial", cursor: { tickerIndex, afterDate: candidates.at(-1)!.date }, archivedRows, deletedRows, concurrentCorrections, ...diagnostics(),
     };
   }
-  return { status: "complete", cursor: null, archivedRows, deletedRows, concurrentCorrections };
+  return { status: deferredRepairs.size ? "partial" : "complete", cursor: null, archivedRows, deletedRows, concurrentCorrections, ...diagnostics() };
 }
 
 /** Bounded PK scan; keeps both active and previous revisions and fresh in-flight blocks. */

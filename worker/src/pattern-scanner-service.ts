@@ -2376,7 +2376,7 @@ export async function loadCanonicalPatternUniverseStats(
 ): Promise<PatternUniverseStats[] | { count: number | string | null }> {
   if (env.EOD_READ_ENABLED === "true") {
     const eligible: PatternUniverseStats[] = [];
-    for (const row of (await loadEodCatalogRows(env, tickers, tradingDate)).values()) {
+    for (const row of (await loadEodCatalogRows(env, tickers, tradingDate, { unavailableRows: "omit" })).values()) {
       if (row.price != null && row.lastDate != null && row.avgDollarVolume20d != null
         && row.price >= profile.prefilterConfig.minPrice
         && row.avgDollarVolume20d >= profile.prefilterConfig.minDollarVolume20d

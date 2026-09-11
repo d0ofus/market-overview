@@ -1,5 +1,6 @@
 import { assertEodRollingBudget, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 import { z } from "zod";
+import { validateEodCatalogQuarantines } from "./eod-catalog-quarantine-validation";
 import { expectedEodSession } from "./eod-coordinator";
 import { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
@@ -142,7 +143,8 @@ const catalogRowSchema = z.tuple([
 ]);
 const catalogSchema = z.object({
   schemaVersion: z.literal(1), sessionDate: date,
-  methodologyVersion: z.literal(EOD_CATALOG_METHODOLOGY_VERSION), rows: z.array(catalogRowSchema),
+  methodologyVersion: z.literal(EOD_CATALOG_METHODOLOGY_VERSION), rows: z.array(z.union([catalogRowSchema,
+    z.tuple([z.string().min(1),z.null(),z.null(),z.null(),z.null(),z.null(),count,z.null(),z.null(),z.null(),z.literal("adjustment-repair-incomplete")])])),
   compatibility: z.object({ schemaVersion: z.literal(1),
     rows: z.array(z.tuple([z.string().min(1), date.nullable(), z.number().finite().nullable(), date.nullable()])),
   }).strict(),
@@ -151,7 +153,7 @@ const catalogSchema = z.object({
 /** Archive consumers need the full compact SIP catalog as well as the six page
  * scopes. Its reference belongs to completed-run progress, not the page proof. */
 async function checkCatalogPublication(env: Env, publicationId: unknown, sessionDate: string,
-  tickers: string[], allowCandidate: boolean): Promise<void> {
+  tickers: string[], allowCandidate: boolean): Promise<unknown> {
   if (typeof publicationId !== "string" || !publicationId) fail("catalog-publication-required");
   const stored = await env.MARKET_DATA_DB!.prepare(`SELECT id,scope,session_date,status,methodology_version,
     payload_json as payload,payload_codec as payloadCodec,payload_base64 as payloadBase64,payload_checksum,accepted_at
@@ -168,11 +170,14 @@ async function checkCatalogPublication(env: Env, publicationId: unknown, session
   if (rows.length !== tickers.length || actual.size !== tickers.length || rows.some((row) => !expected.has(row[0]))) {
     fail("catalog-publication-population");
   }
+  const quarantined = new Set(rows.filter(row => row.length === 11).map(row => row[0]));
+  const healthyRows = rows.filter((row): row is z.infer<typeof catalogRowSchema> => row.length === 10);
+  const healthyTickers = new Set(tickers.filter(ticker => !quarantined.has(ticker)));
   const compatibility = parsed.data.compatibility.rows;
   const compatibilityByTicker = new Map(compatibility.map((row) => [row[0], row]));
-  if (compatibility.length !== tickers.length || compatibilityByTicker.size !== tickers.length
-    || compatibility.some((row) => !expected.has(row[0]))) fail("catalog-compatibility-population");
-  for (const row of rows) {
+  if (compatibility.length !== healthyTickers.size || compatibilityByTicker.size !== healthyTickers.size
+    || compatibility.some((row) => !healthyTickers.has(row[0]))) fail("catalog-compatibility-population");
+  for (const row of healthyRows) {
     const [ticker, barCount, firstDate, lastDate, price, avgDollarVolume20d, , previousPrice, volume, avgVolume30d] = row;
     if (barCount === 0
       ? [firstDate, lastDate, price, avgDollarVolume20d, previousPrice, volume, avgVolume30d].some((value) => value !== null)
@@ -191,8 +196,9 @@ async function checkCatalogPublication(env: Env, publicationId: unknown, session
     LEFT JOIN eod_input_revisions actual ON actual.feed='sip' AND actual.ticker=json_extract(expected.value,'$[0]')
     LEFT JOIN eod_adjustment_repairs repair ON repair.feed='sip' AND repair.ticker=json_extract(expected.value,'$[0]')
     WHERE COALESCE(actual.revision,0)<>json_extract(expected.value,'$[6]') OR repair.status='pending'`)
-    .bind(JSON.stringify(rows)).first<{count:number}>();
+    .bind(JSON.stringify(healthyRows)).first<{count:number}>();
   if (!stale || stale.count !== 0) fail("catalog-publication-inputs-changed");
+  return decoded;
 }
 
 /** The CLI must pass its actual GITHUB_SHA before claiming an active run. Shadow never requires approval. */
@@ -234,10 +240,12 @@ export async function assertEodCutover(env: Env, codeRevision: string, candidate
   if (inputs.methodologyVersion !== EOD_METRICS_VERSION || new Set(tickers).size !== proof.sharedTickers.count
     || tickers.length !== proof.sharedTickers.count || progress.symbols !== proof.sharedTickers.processed
     || proof.scopes.some((scope) => !published.includes(scope.publicationId))) fail("shared-catalog-count-mismatch");
-  await checkCatalogPublication(env, progress.catalogPublicationId, proof.sessionDate, tickers, run.mode === "shadow");
+  const catalog = await checkCatalogPublication(env, progress.catalogPublicationId, proof.sessionDate, tickers, run.mode === "shadow");
   const memberships = Array.isArray(inputs.memberships) ? inputs.memberships.map(object) : [];
   if (memberships.length !== 5) fail("frozen-memberships-missing");
   const publications = await checkPublications(env, proof.scopes, run.mode === "shadow");
+  await validateEodCatalogQuarantines(env, { catalog, runId: run.id, frozenInputs: inputs, sessionDate: proof.sessionDate,
+    pages: new Map(proof.scopes.map(scope => [scope.scope, publications.get(scope.publicationId)!.decoded!])) });
   for (const measured of proof.fullUniverseCounts) {
     const membership = memberships.find((value) => value.universeId === measured.universeId);
     const members = strings(membership?.members);

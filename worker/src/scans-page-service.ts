@@ -2884,7 +2884,7 @@ export async function loadDailyBarCoverage(
   const out = new Map<string, DailyBarCoverageRow>();
   if (uniqueTickers.length === 0) return out;
   if (env.EOD_READ_ENABLED === "true") {
-    for (const [ticker, row] of await loadEodCatalogRows(env, uniqueTickers, endDate)) {
+    for (const [ticker, row] of await loadEodCatalogRows(env, uniqueTickers, endDate, { unavailableRows: "omit" })) {
       if (row.lastDate != null) out.set(ticker, { ticker, lastDate: row.lastDate, barCount: row.barCount });
     }
     return out;
@@ -3995,7 +3995,7 @@ export async function loadScheduledRelativeStrengthUniverseCandidates(
       if (ticker) symbols.set(ticker, symbol);
     }
     if (env.EOD_READ_ENABLED === "true") {
-      for (const [ticker, row] of await loadEodCatalogRows(env, chunk, expectedTradingDate)) {
+      for (const [ticker, row] of await loadEodCatalogRows(env, chunk, expectedTradingDate, { unavailableRows: "omit" })) {
         marketMetrics.set(ticker, {
           price: row.price, previousPrice: row.previousPrice, volume: row.volume, avgVolume: row.avgVolume30d,
         });

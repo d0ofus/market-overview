@@ -5,6 +5,7 @@ import { EOD_METRICS_VERSION, computeEodTickerMetrics, type EodTickerMetrics } f
 import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
 import { archiveMarketHistoryBars, loadMarketHistory } from "../src/market-history";
+import { loadEodCatalogRows } from "../src/eod-catalog-service";
 import { loadEodMemberships } from "../src/eod";
 import * as configDb from "../src/db";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
@@ -447,6 +448,146 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       expect(await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='SPY'").first()).toEqual(revisionBefore);
     } finally {history.dispose();}
   });
+
+  async function configureRepairPopulation(count=20) {
+    const inputs=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    inputs.tickers=["SPY",...Array.from({length:count-2},(_,index)=>`OK${index}`),"BNRG"];
+    inputs.config.sections[0].groups[0].items.push({...inputs.config.sections[0].groups[0].items[0],ticker:"BNRG",displayName:"BNRG"});
+    inputs.memberships.forEach(row=>row.members=row.universeId==="sp500-core" ? ["SPY"] : [...inputs.tickers]);
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(inputs),runId).run();
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,reported_volume)
+      SELECT 'sip',ticker.value,date.value,100,101,99,100,100,100 FROM json_each(?) ticker CROSS JOIN json_each(?) date`)
+      .bind(JSON.stringify(inputs.tickers.filter(ticker=>ticker!=="SPY")),JSON.stringify(dates.slice(-260))).run();
+    calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>
+      dates.filter(date=>date>=start).map(date=>({...makeBar(date),ticker,adjustment}))));
+    return inputs;
+  }
+
+  async function repairFeature(ticker="BNRG") {
+    const encoded=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'").bind(runId).first<string>("payload_json"))!);
+    const chunk=await decodeEodPayload({...encoded,payload:"{}"}) as {features:Array<[string,EodTickerMetrics&{unavailableReason?:string}]>;errors:Record<string,string>};
+    return {chunk,metric:chunk.features.find(([symbol])=>symbol===ticker)![1]};
+  }
+
+  it("quarantines only an incomplete pending SIP repair, preserves archive/hot data and lets95percent universes publish",async()=>{
+    const inputs=await configureRepairPopulation(),history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      await archiveMarketHistoryBars(archivedEnv,dates.slice(-260,-90).map(date=>({...makeBar(date),ticker:"BNRG"})));
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE feed='sip' AND ticker='BNRG' AND date<?").bind(dates.at(-90)).run();
+      await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at) VALUES('sip','BNRG','pending',?,'2000-01-01T00:00:00Z') ON CONFLICT(feed,ticker) DO UPDATE SET status='pending',start_date=excluded.start_date,updated_at=excluded.updated_at,owner_token=NULL").bind(dates.at(-260)).run();
+      const hot=(await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG' ORDER BY date").all()).results;
+      const blocks=(await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results;
+      const pointers=(await history.db.prepare("SELECT * FROM market_history_block_pointers ORDER BY block_id").all()).results;
+      const revision=await market.db.prepare("SELECT * FROM eod_input_revisions WHERE feed='sip' AND ticker='BNRG'").first();
+      const complete=calls.alpaca.getMockImplementation()!;
+      calls.alpaca.mockImplementation(async(...args:unknown[])=>{
+        const bars=await complete(...args);return (args[0] as string[]).includes("BNRG") ? bars.filter((bar:{date:string})=>bar.date!==dates.at(-260)) : bars;
+      });
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      const {metric,chunk}=await repairFeature();expect(metric).toMatchObject({price:null,change1d:null,above200Sma:null,reportedVolume:null,sourceSessions:0,unavailableReason:"adjustment-repair-incomplete"});
+      expect(metric.sparkline.every(value=>value===null)).toBe(true);expect(chunk.errors.BNRG).toBe("adjustment-repair-incomplete");
+      expect(calls.alpaca.mock.calls.filter(([tickers])=>tickers.includes("BNRG"))).toHaveLength(1);
+      expect(calls.yahoo.mock.calls.some(([ticker])=>ticker==="BNRG")).toBe(false);
+      expect((await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG' ORDER BY date").all()).results).toEqual(hot);
+      expect((await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results).toEqual(blocks);
+      expect((await history.db.prepare("SELECT * FROM market_history_block_pointers ORDER BY block_id").all()).results).toEqual(pointers);
+      expect(await market.db.prepare("SELECT * FROM eod_input_revisions WHERE feed='sip' AND ticker='BNRG'").first()).toEqual(revision);
+      expect(await market.db.prepare("SELECT status,start_date,owner_token FROM eod_adjustment_repairs WHERE ticker='BNRG'").first())
+        .toMatchObject({status:"pending",start_date:dates.at(-260),owner_token:expect.any(String)});
+      await expect(loadMarketHistory(archivedEnv,{tickers:["BNRG"],feed:"sip"})).rejects.toThrow("adjustment-repair-pending");
+      const breadth=await market.db.prepare("SELECT payload_json AS payload,payload_codec AS payloadCodec,payload_base64 AS payloadBase64 FROM eod_publications WHERE scope='breadth:russell2000-core' AND status='accepted'").first<{payload:string;payloadCodec:string;payloadBase64:string}>();
+      expect(await decodeEodPayload(breadth!)).toMatchObject({publishable:true,metrics:{totalUniverseMembers:20,memberCount:19,metricCoverage:{advancers:{eligiblePopulation:20,eligibleCount:19,missingCount:1}}}});
+      const catalog=JSON.parse((await market.db.prepare("SELECT payload_json FROM eod_publications WHERE scope='history:catalog' AND status='accepted'").first<string>("payload_json"))!);
+      expect(catalog.rows.find((row:unknown[])=>row[0]==="BNRG")).toEqual(["BNRG",null,null,null,null,null,(revision as {revision:number}).revision,null,null,null,"adjustment-repair-incomplete"]);
+      expect(catalog.compatibility.rows).toHaveLength(19);
+      await expect(loadEodCatalogRows(archivedEnv,inputs.tickers,session)).rejects.toThrow("retained history is quarantined");
+      expect((await loadEodCatalogRows(archivedEnv,inputs.tickers,session,{unavailableRows:"omit"})).size).toBe(19);
+      // An ordinary later retry retries the unavailable feature; it does not
+      // clear the fence until the real full retained repair actually succeeds.
+      await market.db.prepare("UPDATE eod_adjustment_repairs SET updated_at='2000-01-01T00:00:00Z' WHERE ticker='BNRG'").run();
+      await ops.db.prepare("UPDATE eod_runs SET status='retrying',next_attempt_at=NULL WHERE id=?").bind(runId).run();
+      calls.alpaca.mockImplementation(complete);
+      expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
+      expect((await repairFeature()).metric).toMatchObject({price:100,change1d:0});
+      expect((await repairFeature()).metric).not.toHaveProperty("unavailableReason");
+      expect(await market.db.prepare("SELECT status,owner_token FROM eod_adjustment_repairs WHERE ticker='BNRG'").first()).toEqual({status:"complete",owner_token:null});
+      expect((await loadEodCatalogRows(archivedEnv,inputs.tickers,session)).size).toBe(20);
+    } finally {history.dispose();}
+  },90_000);
+
+  it("keeps late repair quarantine visible within the100error status cap",async()=>{
+    const inputs=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    const missing=Array.from({length:101},(_,index)=>`MISSING${index}`);
+    inputs.tickers=["SPY",...missing,"BNRG"];
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(inputs),runId).run();
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,reported_volume)
+      SELECT 'sip','BNRG',value,100,101,99,100,100,100 FROM json_each(?)`).bind(JSON.stringify(dates.slice(-260))).run();
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at) VALUES('sip','BNRG','pending',?,'2000-01-01T00:00:00Z')").bind(dates.at(-260)).run();
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    const summary=JSON.parse((await ops.db.prepare("SELECT progress_json FROM eod_runs WHERE id=?").bind(runId).first<string>("progress_json"))!) as {errors:Record<string,string>;errorCount:number};
+    expect(summary.errorCount).toBe(102);
+    expect(Object.keys(summary.errors)).toEqual(["BNRG",...missing.slice(0,99)]);
+    expect(summary.errors.BNRG).toBe("adjustment-repair-incomplete");
+    expect(summary.errors.MISSING0).toBe("yahoo-unavailable");
+    expect(calls.alpaca.mock.calls.filter(([tickers])=>tickers.includes("BNRG"))).toHaveLength(1);
+    expect(await market.db.prepare("SELECT status FROM eod_adjustment_repairs WHERE ticker='BNRG'").first()).toEqual({status:"pending"});
+  },60_000);
+
+  it("quarantines an incomplete newly detected rebase without storing the partial new basis",async()=>{
+    await configureRepairPopulation();
+    const before=(await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG' ORDER BY date").all()).results;
+    const normal=calls.alpaca.getMockImplementation()!;
+    calls.alpaca.mockImplementation(async(...args:unknown[])=>{
+      const rows=await normal(...args);return rows.filter((bar:{ticker:string;date:string})=>bar.ticker!=="BNRG"||bar.date!==dates.at(-260))
+        .map((bar:ReturnType<typeof makeBar>)=>bar.ticker==="BNRG"?{...bar,o:50,h:51,l:49,c:50}:bar);
+    });
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    expect((await repairFeature()).metric).toMatchObject({price:null,unavailableReason:"adjustment-repair-incomplete"});
+    expect((await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG' ORDER BY date").all()).results).toEqual(before);
+    expect(calls.yahoo.mock.calls.some(([ticker])=>ticker==="BNRG")).toBe(false);
+  },60_000);
+
+  it("quarantines incomplete Yahoo repairs without mixing the unaffected SIP basis or changing archive data",async()=>{
+    await configureRepairPopulation();const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");const archivedEnv={...env,MARKET_HISTORY_DB:history.db};
+      const yahoo=dates.slice(-260).map(date=>({...makeBar(date),ticker:"BNRG",feed:"yahoo-eod",sourceProvider:"yahoo"}));
+      await archiveMarketHistoryBars(archivedEnv,yahoo);
+      await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at) VALUES('yahoo-eod','BNRG','pending',?,'2000-01-01T00:00:00Z') ON CONFLICT(feed,ticker) DO UPDATE SET status='pending',start_date=excluded.start_date,updated_at=excluded.updated_at,owner_token=NULL").bind(dates.at(-260)).run();
+      const before=(await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results;
+      calls.yahoo.mockImplementation(async(ticker:string)=>ticker==="BNRG"?yahoo.slice(1):[]);
+      expect((await runEodBatch(archivedEnv,runId)).status).toBe("completed");
+      expect((await repairFeature()).metric).toMatchObject({price:null,unavailableReason:"adjustment-repair-incomplete"});
+      expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("BNRG"))).toBe(false);
+      expect(calls.yahoo.mock.calls.filter(([ticker])=>ticker==="BNRG")).toHaveLength(1);
+      expect((await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results).toEqual(before);
+      expect(await market.db.prepare("SELECT status FROM eod_adjustment_repairs WHERE ticker='BNRG'").first()).toEqual({status:"pending"});
+    } finally {history.dispose();}
+  },60_000);
+
+  it.each(["d1-quota-exhausted","adjustment-repair-fence-lost","adjustment-repair-incomplete:unexpected"])("does not quarantine %s",async reason=>{
+    await configureRepairPopulation(2);
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at) VALUES('sip','BNRG','pending',?,'2000-01-01T00:00:00Z') ON CONFLICT(feed,ticker) DO UPDATE SET status='pending',start_date=excluded.start_date,updated_at=excluded.updated_at,owner_token=NULL").bind(dates.at(-260)).run();
+    calls.alpaca.mockRejectedValue(new Error(reason));
+    await expect(runEodBatch(env,runId)).rejects.toThrow(reason);
+    expect(await ops.db.prepare("SELECT COUNT(*) AS n FROM eod_checkpoints WHERE run_id=?").bind(runId).first()).toEqual({n:0});
+  });
+
+  it("does not quarantine a currently owned repair or reuse a good checkpoint after a repair fence appears",async()=>{
+    const inputs=await configureRepairPopulation(2);
+    inputs.memberships.forEach(row=>row.members=[...inputs.tickers]);await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(inputs),runId).run();
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token) VALUES('sip','BNRG','pending',?,?,'live-owner')").bind(dates.at(-260),new Date().toISOString()).run();
+    await ops.db.prepare("UPDATE eod_runs SET status='retrying',next_attempt_at=NULL WHERE id=?").bind(runId).run();calls.alpaca.mockClear();
+    await expect(runEodBatch(env,runId)).rejects.toThrow("adjustment-repair-already-owned");expect(calls.alpaca).not.toHaveBeenCalled();
+    await market.db.prepare("UPDATE eod_adjustment_repairs SET updated_at='2000-01-01T00:00:00Z' WHERE ticker='BNRG'").run();
+    const normal=calls.alpaca.getMockImplementation()!;calls.alpaca.mockImplementation(async(...args:unknown[])=>{
+      const bars=await normal(...args);return (args[0] as string[]).includes("BNRG")?bars.filter((bar:{date:string})=>bar.date!==dates.at(-260)):bars;
+    });
+    expect((await runEodBatch(env,runId)).status).toBe("retrying");
+    expect((await repairFeature()).metric).toMatchObject({price:null,unavailableReason:"adjustment-repair-incomplete"});
+  },60_000);
 
   it("still repairs a changed adjustment basis across the full retained price and raw-volume window",async()=>{
     calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.includes("SPY")

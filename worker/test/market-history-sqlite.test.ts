@@ -89,8 +89,9 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
       SELECT 'yahoo-eod',ticker,date,o,h,l,c,volume,'yahoo','split',observed_at,fetched_at FROM alpaca_daily_bars
       WHERE feed='sip' AND date>=?`).bind(rows.at(-91)!.date).run();
     await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('yahoo-eod','AAA','pending','other','2025-01-01','2026-09-08T00:00:00Z')").run();
-    await expect(archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
-      hotSessions: 90, feed: "yahoo-eod", maxRows: 1, ...evidence })).rejects.toThrow("adjustment repair is pending");
+    expect(await archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
+      hotSessions: 90, feed: "yahoo-eod", maxRows: 1, ...evidence }))
+      .toMatchObject({ status: "partial", cursor: null, deletedRows: 0, deferredRepairs: ["AAA"] });
     await market.db.prepare("UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL WHERE feed='yahoo-eod'").run();
     const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {
       await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='raced' WHERE feed='yahoo-eod'").run();
@@ -132,6 +133,50 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
     expect(await market.db.prepare("SELECT COUNT(*) as count FROM alpaca_daily_bars").first()).toEqual({ count: 300 });
     expect(await archive.db.prepare("SELECT COUNT(*) as count FROM market_history_blocks").first()).toEqual({ count: 0 });
   });
+
+  async function publishQuarantinedCatalog() {
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,source_provider,adjustment,observed_at,fetched_at)
+      VALUES('sip','BNRG','2025-01-02',10,11,9,10,100,'alpaca','split',?,?)`).bind(now.toISOString(),now.toISOString()).run();
+    await market.db.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token)
+      VALUES('sip','BNRG','pending','2025-01-02',?,'incomplete-repair-owner')`).bind(now.toISOString()).run();
+    const revision = (await market.db.prepare("SELECT revision FROM eod_input_revisions WHERE feed='sip' AND ticker='AAA'")
+      .first<{revision:number}>())!.revision;
+    const payload = encodeEodCatalogPayload(rows.at(-1)!.date, [buildEodCatalogRow("AAA", rows, revision),
+      { ticker: "BNRG", sourceRevision: 1, unavailableReason: "adjustment-repair-incomplete" }]);
+    await market.db.prepare(`INSERT INTO eod_publications(id,scope,session_date,revision,input_hash,methodology_version,
+      payload_json,payload_checksum,payload_codec,status,created_at)
+      VALUES('catalog-quarantine','history:catalog',?,1000,'quarantine',?,?,?,'json','accepted',?)`)
+      .bind(rows.at(-1)!.date,EOD_CATALOG_METHODOLOGY_VERSION,JSON.stringify(payload),await eodHash(payload),now.toISOString()).run();
+    return payload;
+  }
+
+  it("prunes healthy history while retaining every row and fence of an explicitly quarantined member", async () => {
+    await publishQuarantinedCatalog();
+    const before = await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG'").all();
+    const fence = await market.db.prepare("SELECT * FROM eod_adjustment_repairs WHERE ticker='BNRG'").first();
+    const result = await archiveAndPruneMarketHistory(env, { tickers: ["AAA", "BNRG"], endDate: rows.at(-1)!.date,
+      hotSessions: 90, ...evidence });
+    expect(result).toMatchObject({ status: "partial", cursor: null, archivedRows: 210, deletedRows: 210, deferredRepairs: ["BNRG"] });
+    expect((await market.db.prepare("SELECT * FROM alpaca_daily_bars WHERE ticker='BNRG'").all()).results).toEqual(before.results);
+    expect(await market.db.prepare("SELECT * FROM eod_adjustment_repairs WHERE ticker='BNRG'").first()).toEqual(fence);
+    expect(await loadMarketHistory(env, { tickers: ["AAA"] })).toEqual(rows);
+    await expect(loadMarketHistory(env, { tickers: ["BNRG"] })).rejects.toThrow("adjustment-repair-pending:BNRG");
+  });
+
+  it.each(["positive-price", "missing-fence", "changed-revision", "invented-compatibility"] as const)
+    ("refuses quarantine authority with %s before pruning any member", async reason => {
+      const payload = await publishQuarantinedCatalog();
+      if (reason === "positive-price") payload.rows[1]![4] = 10;
+      if (reason === "missing-fence") await market.db.prepare("DELETE FROM eod_adjustment_repairs WHERE ticker='BNRG'").run();
+      if (reason === "changed-revision") await market.db.prepare("UPDATE eod_input_revisions SET revision=revision+1 WHERE ticker='BNRG'").run();
+      if (reason === "invented-compatibility") payload.compatibility!.rows.push(["BNRG",null,null,null]);
+      await market.db.prepare("UPDATE eod_publications SET payload_json=?,payload_checksum=? WHERE id='catalog-quarantine'")
+        .bind(JSON.stringify(payload),await eodHash(payload)).run();
+      await expect(archiveAndPruneMarketHistory(env, { tickers: ["AAA", "BNRG"], endDate: rows.at(-1)!.date,
+        hotSessions: 90, ...evidence })).rejects.toThrow("history-prune-deferred");
+      expect(await market.db.prepare("SELECT COUNT(*) as count FROM alpaca_daily_bars").first()).toEqual({ count: 301 });
+      expect(await archive.db.prepare("SELECT COUNT(*) as count FROM market_history_blocks").first()).toEqual({ count: 0 });
+    });
 
   it("does not let the neutral relocation option import absent or changed hot values", async () => {
     for (const bar of [{ ...rows[0], c: 999 }, { ...rows[0], date: "2024-01-02" }]) {

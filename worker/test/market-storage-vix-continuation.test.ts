@@ -10,6 +10,7 @@ import { approveStoragePopulationExecution,resumeStoragePopulationExecution,stor
   type StoragePopulationExecutionCodeContract } from "../src/market-storage-population-execution";
 import { approveStorageListingExecution,resumeStorageListingExecution,storageListingExecutionKey,STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,
   type StorageListingExecutionCodeContract } from "../src/market-storage-listing-execution";
+import { approveStorageRepairExecution,resumeStorageRepairExecution,storageRepairExecutionKey,STORAGE_REPAIR_EXECUTION_PREVIOUS_REVISION, type StorageRepairExecutionCodeContract } from "../src/market-storage-repair-execution";
 import { loadStorageMigration,resumeStorageMigration,claimStorageMigration } from "../src/market-storage-control";
 import { loadStorageValidationPlan,type StoragePopulationPlan } from "../src/market-storage-population-plan";
 import { promoteStoragePopulationExpansion } from "../src/market-storage-population-promotion";
@@ -30,7 +31,7 @@ import * as eodRunner from "../src/eod-runner";
 import { registerListingEvidence, loadFrozenListingEvidence } from "../src/eod-listing-evidence";
 import type { Env } from "../src/types";
 
-const revision=STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION,quarantineRevision=STORAGE_POPULATION_EXECUTION_PREVIOUS_REVISION,populationRevision=STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,listingRevision="e".repeat(40),stamp="2026-09-11T14:00:00.000Z";
+const revision=STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION,quarantineRevision=STORAGE_POPULATION_EXECUTION_PREVIOUS_REVISION,populationRevision=STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,listingRevision=STORAGE_REPAIR_EXECUTION_PREVIOUS_REVISION,repairRevision="e".repeat(40),stamp="2026-09-11T14:00:00.000Z";
 type Databases=ReturnType<typeof createStorageIndexDatabases>;
 let databases:Databases|undefined;
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers();if(databases)Object.values(databases).forEach(db=>db.dispose());databases=undefined;});
@@ -41,7 +42,7 @@ async function prepared() {
   history.script(`CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name VARCHAR(255) UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);
     INSERT INTO d1_migrations(name,applied_at) VALUES('0001_history.sql','2026-09-08 00:00:00'),('0002_market_storage_fence.sql','2026-09-08 00:00:00');`);
   const tickers=["VIX","SPY",...Array.from({length:6317},(_,i)=>`A${String(i).padStart(5,"0")}`)];
-  tickers[153]="RSHO";
+  tickers[153]="RSHO";tickers[6125]="BNRG";
   const f=await seedStorageIndexRecovery(dbs,{tickers,checkpointCount:84,copyComplete:true,authenticBaseline:true});
   await ops.db.prepare("INSERT INTO provider_budget_counters(provider_key,window_kind,window_bucket,request_count,updated_at) VALUES('yahoo','day','2026-09-11',7,?)")
     .bind(stamp).run();
@@ -127,7 +128,7 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
       admission:async queries=>{const estimate=estimateEodQueries(queries);return async usage=>{expect(usage.rowsRead).toBeLessThanOrEqual(estimate.reads);expect(usage.rowsWritten).toBeLessThanOrEqual(estimate.writes);};},
       fetcher:async(_url,init)=>{const body=JSON.parse(String(init?.body)) as EodSql|{batch:EodSql[]},queries="batch" in body?body.batch:[body];
         for(const query of queries){expect(query.params.length).toBeLessThanOrEqual(100);for(const value of query.params)if(typeof value==="string")expect(Buffer.byteLength(value)).toBeLessThanOrEqual(2_000_000);}
-        if(queries.some(row=>/storage-(vix-continuation|population-execution|listing-execution|population-promotion)-guard-rejected/.test(row.sql)))wire.push(queries);
+        if(queries.some(row=>/storage-(vix-continuation|population-execution|listing-execution|repair-execution|population-promotion)-guard-rejected/.test(row.sql)))wire.push(queries);
         return Response.json({success:true,result:await batch(queries.map(row=>ops.db.prepare(row.sql).bind(...row.params)))});}});
     const lost={prepare:rest.prepare.bind(rest),batch:async(statements:D1PreparedStatement[])=>{await rest.batch(statements);throw new Error("vix-lost-ack");}} as unknown as D1Database;
     await expect(approveStorageVixContinuation({...f.input,ops:lost})).rejects.toThrow("vix-lost-ack");
@@ -262,21 +263,60 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
     await expect(runStoragePipeline({source:source.db,target:target.db,history:history.db,ops:ops.db,run:claimed!.run,leaseToken:claimed!.leaseToken,
       installSourceFence:install,installTargetFence:install,installHistoryFence:install,bootstrapEnv:{...f.env,EOD_CODE_REVISION:listingRevision},bootstrapFailureDb:ops.db})).rejects.toThrow("vix-real-price-boundary");
     expect(run).toHaveBeenCalledOnce();expect(run.mock.calls[0][3]?.storageInputs).toEqual(f.plan.inputs);expect(install).not.toHaveBeenCalled();
+    // Exact R19 incomplete-repair admission preserves all prices and fences.
+    vi.setSystemTime(new Date("2026-09-11T14:31:00.000Z"));
+    await ops.db.prepare("UPDATE market_storage_migrations SET status='awaiting-evidence',stage='bootstrap',error_code='storage-copy-verification-failed',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,next_attempt_at=NULL,updated_at='2026-09-11T14:15:00.000Z' WHERE id=?").bind(identity.id).run();
+    await ops.db.prepare("UPDATE eod_runs SET status='retrying',stage='prices',error_code='runner-error',error_message='adjustment-repair-incomplete',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,completed_at=NULL,completed_input_clock=NULL,next_attempt_at='2026-09-11T14:30:00.000Z',updated_at='2026-09-11T14:15:00.000Z',progress_json=? WHERE id=?")
+      .bind(JSON.stringify({chunk:245,total:253,symbols:6125}),f.eodId).run();
+    await target.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token) VALUES('sip','BNRG','pending','2026-01-02','2026-09-11T14:15:00.000Z','preserved-r19-owner')").run();
+    for(const scope of EOD_PUBLICATION_SCOPES.filter(scope=>scope!=="overview:default").slice(0,3))await storeEodPublication({...f.env,EOD_CODE_REVISION:listingRevision},
+      {scope,sessionDate:listing.plan.sessionDate,inputHash:await storageHash(["partial",scope]),methodologyVersion:EOD_METRICS_VERSION,payload:{asOfDate:listing.plan.sessionDate,scope},promote:true,revisions:[]});
+    const repairFields:Omit<StorageRepairExecutionCodeContract,"evidenceHash">={version:1,policy:"incomplete-repair-quarantine-contracts-v1",fromRevision:listingRevision,
+      codeRevision:repairRevision,protectedFileCount:4,protectedManifestHash:"1".repeat(64),integrationContractHash:"2".repeat(64),reviewedChangesHash:"3".repeat(64),beforeTreeHash:"4".repeat(64),afterTreeHash:"5".repeat(64)};
+    const repairInput={...f.input,now:new Date(),fromRevision:listingRevision,codeRevision:repairRevision,expectedPlanHash:listing.plan.planHash,repairTicker:"BNRG",
+      changedFiles:["worker/src/eod-runner.ts","worker/src/eod-catalog-service.ts"],codeContract:{...repairFields,evidenceHash:await storageHash(repairFields)},
+      measurePhysical:async()=>({targetBytes:1_000_000,historyBytes:1_000_000,measuredAt:new Date().toISOString()})};
+    const beforeRepair=await snapshots(),oldListingRecord=await ops.db.prepare("SELECT * FROM eod_rollout_evidence WHERE id=?").bind(storageListingExecutionKey(identity.id,listingRevision)).first();
+    expect(beforeRepair.pointers).toHaveLength(5);
+    await expect(approveStorageRepairExecution({...repairInput,repairTicker:"SPY"})).rejects.toThrow("repair-ticker-outside-failed-chunk");
+    await ops.db.prepare("UPDATE eod_runs SET lease_until='2026-09-11T14:40:00.000Z' WHERE id=?").bind(f.eodId).run();
+    await expect(approveStorageRepairExecution(repairInput)).rejects.toThrow("incomplete-repair-boundary-required");
+    await ops.db.prepare("UPDATE eod_runs SET lease_until=NULL WHERE id=?").bind(f.eodId).run();
+    const lastFeature=beforeRepair.features.find(row=>row.chunk_key==="features:252")!;
+    const lastPageRace={prepare:ops.db.prepare.bind(ops.db),batch:async(statements:D1PreparedStatement[])=>{
+      await ops.db.prepare("UPDATE eod_checkpoints SET payload_json='{}' WHERE run_id=? AND chunk_key='features:252'").bind(f.eodId).run();return batch(statements);
+    }} as unknown as D1Database;
+    await expect(approveStorageRepairExecution({...repairInput,ops:lastPageRace})).rejects.toThrow("malformed JSON");
+    expect(await ops.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(storageRepairExecutionKey(identity.id,repairRevision)).first()).toBeNull();
+    await ops.db.prepare("UPDATE eod_checkpoints SET payload_json=? WHERE run_id=? AND chunk_key='features:252'").bind(lastFeature.payload_json,f.eodId).run();
+    await expect(approveStorageRepairExecution({...repairInput,ops:lost})).rejects.toThrow("vix-lost-ack");
+    const repair=await approveStorageRepairExecution({...repairInput,ops:rest});
+    expect(wire).toHaveLength(5);expect(wire[4]).toHaveLength(8);
+    expect(repair.continuation.featureCheckpointCount).toBe(253);expect(repair.continuation.repairRows).toEqual(beforeRepair.repairs.filter(row=>row.ticker==="BNRG"));
+    expect(repair.continuation.failureBoundary).toMatchObject({migrationStatus:"awaiting-evidence",migrationError:"storage-copy-verification-failed",eodError:"adjustment-repair-incomplete"});
+    expect(await snapshots()).toEqual(beforeRepair);
+    expect(await ops.db.prepare("SELECT * FROM eod_rollout_evidence WHERE id=?").bind(storageListingExecutionKey(identity.id,listingRevision)).first()).toEqual(oldListingRecord);
+    const repairRun=(await loadStorageMigration(ops.db,identity.id))!,repairPlan=await loadStorageValidationPlan(ops.db,repairRun);
+    expect(await loadStorageHistoryIndexAmendment(ops.db,repairRun,repairPlan)).toEqual(f.amendment);
+    await resumeStorageRepairExecution(ops.db,identity.id,repairRevision);
+    expect(await ops.db.prepare("SELECT status,error_code,next_attempt_at FROM market_storage_migrations WHERE id=?").bind(identity.id).first())
+      .toEqual({status:"queued",error_code:null,next_attempt_at:"2026-09-11T14:30:00.000Z"});
+    expect(await snapshots()).toEqual(beforeRepair);
     // Once the real older owner is completed, a separately captured append-only
     // delta can be promoted without rewriting any of the original proofs.
     vi.setSystemTime(new Date("2026-09-11T21:00:00.000Z"));
     const expansionStamp=new Date().toISOString();
     target.script("INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source) VALUES('2026-09-11','09:30','16:00','alpaca');");
-    const expandedEnv={...f.env,EOD_CODE_REVISION:listingRevision};
+    const expandedEnv={...f.env,EOD_CODE_REVISION:repairRevision};
     for(const scope of [...EOD_PUBLICATION_SCOPES,EOD_CATALOG_SCOPE].filter(value=>value!=="overview:default")) {
-      await storeEodPublication(expandedEnv,{scope,sessionDate:listing.plan.sessionDate,inputHash:await storageHash(scope),
-        methodologyVersion:EOD_METRICS_VERSION,payload:{asOfDate:listing.plan.sessionDate,scope},promote:true,revisions:[]});
+      await storeEodPublication(expandedEnv,{scope,sessionDate:repair.plan.sessionDate,inputHash:await storageHash(scope),
+        methodologyVersion:EOD_METRICS_VERSION,payload:{asOfDate:repair.plan.sessionDate,scope},promote:true,revisions:[]});
     }
     const pointers=(await target.db.prepare("SELECT scope,publication_id FROM eod_publication_pointers ORDER BY scope").all<{scope:string;publication_id:string}>()).results;
     const clock=(await target.db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision"))!;
     await ops.db.prepare("UPDATE market_storage_migrations SET status='awaiting-evidence',stage='bootstrap',error_code='storage-population-expansion-required',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,updated_at=? WHERE id=?")
       .bind(expansionStamp,identity.id).run();
-    const added=Array.from({length:11},(_,i)=>i===0?"GOLS":`ZZDELTA${i.toString().padStart(2,"0")}`),allTickers=[...listing.plan.tickers,...added].sort();
+    const added=Array.from({length:11},(_,i)=>i===0?"GOLS":`ZZDELTA${i.toString().padStart(2,"0")}`),allTickers=[...repair.plan.tickers,...added].sort();
     // Synthetic text exercises the exact reviewed fund/date identity, not a
     // generic document that could confuse a unit with a common-stock listing.
     const listingQuote="Gabelli Opportunities in Live and Sports ETF (GOLS) is now trading. Article published January 2, 2026.";
@@ -286,23 +326,23 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
       effectiveFromSession:"2026-09-11",sourceUrl:"https://gabelli.com/research/gabelli-introduces-gols-a-new-way-to-access-the-global-sports-economy/",
       sourceDateText:"January 2, 2026",sourcePublishedDateText:"January 2, 2026",sourceQuote:listingQuote,supersedesHash:null},`<p>${listingQuote}</p>`,
       {ticker:added[0]!,issuerName:"Gabelli Opportunities in Live and Sports ETF",exchange:"NYSE Arca",assetClass:"etf",firstRetainedDate:null},
-      listingRevision,new Date(expansionStamp));
+      repairRevision,new Date(expansionStamp));
     expect(await loadFrozenListingEvidence(expandedEnv,allTickers,"2026-09-10")).toBeUndefined();
     const listingEvidence=await loadFrozenListingEvidence(expandedEnv,allTickers,"2026-09-11");expect(listingEvidence?.entries).toHaveLength(1);
     expect(await ops.db.prepare("SELECT * FROM eod_runs WHERE id=?").bind(f.eodId).first()).toEqual(oldDailyBytes);
     expect(await target.db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision")).toBe(clock);
-    const nextInputs:eodRunner.FrozenInputs={...listing.plan.inputs,tickers:allTickers,listingEvidence,calendarDates:[...listing.plan.inputs.calendarDates,"2026-09-11"],
+    const nextInputs:eodRunner.FrozenInputs={...repair.plan.inputs,tickers:allTickers,listingEvidence,calendarDates:[...repair.plan.inputs.calendarDates,"2026-09-11"],
       memberships:["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map(universeId=>({universeId,
         versionId:`actual:${universeId}:2026-09-11`,source:"public-fixture",sourceType:universeId==="sp500-core"?"public-index-constituents-proxy":
           universeId==="russell2000-core"?"official-etf-holdings-proxy":"public-common-stock-proxy",sourceUrl:null,
         sourceAsOfDate:universeId==="sp500-core"?null:"2026-09-11",verifiedAt:expansionStamp,members:allTickers}))};
     const currentInputs=vi.spyOn(eodRunner,"loadEodInputs").mockResolvedValue(nextInputs);
     const marketCapture=await captureOpenStorageDatabase(target.db),historyCapture=await captureOpenStorageDatabase(history.db);
-    const captureFields={identity,sourceCapture:listing.plan.capture.sourceCapture,targetCapture:marketCapture,historyCapture};
+    const captureFields={identity,sourceCapture:repair.plan.capture.sourceCapture,targetCapture:marketCapture,historyCapture};
     const capture={...captureFields,captureHash:await storageHash(captureFields)};
     const assertCapture=async()=>{expect(await captureOpenStorageDatabase(target.db)).toEqual(marketCapture);expect(await captureOpenStorageDatabase(history.db)).toEqual(historyCapture);};
     const current=(await loadStorageMigration(ops.db,identity.id))!;
-    const deltaInput={ops:ops.db,run:current,previousPlan:listing.plan,sourceEnv:{...expandedEnv,DB:source.db,
+    const deltaInput={ops:ops.db,run:current,previousPlan:repair.plan,sourceEnv:{...expandedEnv,DB:source.db,
       MARKET_DATA_DB:source.db,MARKET_HISTORY_DB:undefined},targetEnv:expandedEnv,capture,addedTickers:added,assertCapture,maxTickers:10};
     const partialDelta=await verifyStoragePopulationDelta(deltaInput);expect(partialDelta.evidence).toBeNull();
     const delta=await verifyStoragePopulationDelta({...deltaInput,checkpoint:partialDelta.checkpoint});
@@ -311,8 +351,8 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
       retentionModels:f.analysis.retentionModels.map(model=>({...model,sharedTickers:6330,modeledSipRows:6330*(model.hotSessions+10),
         modeledFallbackRows:6330*(model.hotSessions+10),fallbackTickerReserve:6330}))};
     const sizing=await prepareStoragePreflight({analysis,identity,tickers:allTickers,accountId,snapshotSource:f.snapshotSource,
-      sourceSchemaHash:listing.plan.capture.sourceCapture.schemaHash,hotSessions:90});
-    const promotionInput={env:expandedEnv,source:source.db,migrationId:identity.id,expectedPlanHash:listing.plan.planHash,
+      sourceSchemaHash:repair.plan.capture.sourceCapture.schemaHash,hotSessions:90});
+    const promotionInput={env:expandedEnv,source:source.db,migrationId:identity.id,expectedPlanHash:repair.plan.planHash,
       deltaCapture:capture,deltaEvidence:delta.evidence!,preparedSizing:sizing,assertReviewedCheckout:vi.fn(async()=>undefined),
       assertNoWorkflowWriters:vi.fn(async()=>undefined),assertDeltaCapture:assertCapture,measurePhysical:async()=>({
         targetBytes:1_000_000,historyBytes:1_000_000,measuredAt:expansionStamp})};
@@ -326,10 +366,10 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
     await expect(promoteStoragePopulationExpansion({...promotionInput,env:{...expandedEnv,OPS_DB:lost}})).rejects.toThrow("vix-lost-ack");
     const promoted=await promoteStoragePopulationExpansion({...promotionInput,env:{...expandedEnv,OPS_DB:rest}});
     expect(promoted.status).toBe("already-promoted");expect(promoted.plan.tickers).toHaveLength(6330);
-    expect(promoted.plan.inputs.listingEvidence).toEqual(listingEvidence);expect(Object.hasOwn(listing.plan.inputs,"listingEvidence")).toBe(false);
-    expect(wire).toHaveLength(5);expect(wire[4]).toHaveLength(8);
-    expect(new TextEncoder().encode(JSON.stringify({batch:wire[4]})).length).toBeLessThan(8_000_000);
-    expect(promoted.plan.capture).toEqual(listing.plan.capture);
+    expect(promoted.plan.inputs.listingEvidence).toEqual(listingEvidence);expect(Object.hasOwn(repair.plan.inputs,"listingEvidence")).toBe(false);
+    expect(wire).toHaveLength(6);expect(wire[5]).toHaveLength(8);
+    expect(new TextEncoder().encode(JSON.stringify({batch:wire[5]})).length).toBeLessThan(8_000_000);
+    expect(promoted.plan.capture).toEqual(repair.plan.capture);
     expect(await snapshots()).toEqual(priorExpansion);
     expect(await ops.db.prepare("SELECT * FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='bootstrap:owner'").bind(identity.id).first()).toEqual(priorOwner);
     const promotedRun=(await loadStorageMigration(ops.db,identity.id))!,promotedPlan=await loadStorageValidationPlan(ops.db,promotedRun);
@@ -337,7 +377,7 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
     expect(composite.version).toBe(2);expect(composite.tickerCount).toBe(6330);
     if(composite.version!==2)throw new Error("expected-composite");
     expect(composite.baseline.evidence.completedAt).toBe(stamp);expect(composite.delta.evidence.completedAt).toBe(expansionStamp);
-    expect(composite.delta.tickers).toEqual(added);expect(composite.baseline.tickers).toEqual(listing.plan.tickers);
+    expect(composite.delta.tickers).toEqual(added);expect(composite.baseline.tickers).toEqual(repair.plan.tickers);
     expect(await loadStorageHistoryIndexAmendment(ops.db,promotedRun,promotedPlan)).toEqual(f.amendment);
     currentInputs.mockRestore();
 

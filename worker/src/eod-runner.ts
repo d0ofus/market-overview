@@ -16,14 +16,14 @@ import { cleanupEodRunState } from "./eod-run-maintenance";
 import { runEodHistoryWork } from "./eod-history-runner";
 import { ProviderBudgetExceededError } from "./provider-usage";
 import { encodeEodPayload,decodeEodPayload } from "./eod-publication-codec";
-import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogRow } from "./eod-catalog-service";
+import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogCheckpointRow } from "./eod-catalog-service";
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
 import { getEtfLifecycle } from "./etf-holdings-quality";
 import { listingDateFor, loadFrozenListingEvidence, validateFrozenListingEvidence, type FrozenListingEvidence } from "./eod-listing-evidence";
 
 type Membership = {universeId:string;versionId:string;source:string;sourceType:string|null;sourceUrl:string|null;sourceAsOfDate:string|null;verifiedAt:string|null;members:string[]};
 export type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string;listingEvidence?:FrozenListingEvidence};
-type FeatureCheckpoint = {features:Array<[string,EodTickerMetrics]>;catalogRows:EodCatalogRow[];revisions:Array<{feed:string;ticker:string;revision:number}>;errors:Record<string,string>};
+type FeatureCheckpoint = {features:Array<[string,EodTickerMetrics]>;catalogRows:EodCatalogCheckpointRow[];revisions:Array<{feed:string;ticker:string;revision:number}>;errors:Record<string,string>};
 const metricBar = (bar:EodPriceBar):EodMetricBar => ({
   ticker:bar.ticker,sessionDate:bar.date,close:bar.c,open:bar.o,high:bar.h,low:bar.l,
   reportedVolume:bar.reportedVolume ?? null,sourceProvider:bar.sourceProvider === "yahoo" ? "yahoo" : "alpaca",
@@ -301,8 +301,9 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     }
     const provider=new EodPriceProvider(env);
     const features=new Map<string,EodTickerMetrics>();
-    const catalogRows=new Map<string,EodCatalogRow>();
+    const catalogRows=new Map<string,EodCatalogCheckpointRow>();
     const revisions:Array<{feed:string;ticker:string;revision:number}>=[];
+    const quarantinedInputs=new Set<string>();
     const errors:Record<string,string>={};
     for (const scope of EOD_PUBLICATION_SCOPES) if (scope.startsWith("breadth:")) {
       const universeId=scope.slice("breadth:".length);
@@ -321,7 +322,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         && overviewRows.some((ticker) => features.get(ticker)?.price!=null)) {
         const overview=overviewPayload(inputs,features,run.session_date,errors);
         if ((overview.freshnessCurrentCount ?? 0)>0) {
-          const used=revisions.filter((row) => overviewTickers.includes(row.ticker));
+          const used=revisions.filter((row) => !quarantinedInputs.has(row.ticker) && overviewTickers.includes(row.ticker));
           published.push(await storeEodPublication(env,{scope:"overview:default",sessionDate:run.session_date,
             inputHash:await eodHash([inputs.config,overviewTickers.map((ticker) => featureIdentity(features.get(ticker))),used,
               overviewTickers.filter((ticker) => features.get(ticker)?.price==null).map((ticker) => [ticker,errors[ticker] ?? null])]),
@@ -342,7 +343,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           calendarDates:inputs.calendarDates,members:membership.members.map((ticker) => ({ticker,
             ...(inputs.listingEvidence ? {verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {})})),bars:[],features});
         if (!result.publishable) { errors[membership.universeId]="breadth-coverage-below-threshold"; continue; }
-        const used=revisions.filter((row) => membership.members.includes(row.ticker));
+        const used=revisions.filter((row) => !quarantinedInputs.has(row.ticker) && membership.members.includes(row.ticker));
         const {volumeCollection:_collection,...metricIdentity}=result;
         const scopeHash=await eodHash(inputs.listingEvidence ? [membership,metricIdentity,used,inputs.listingEvidence.evidenceHash] : [membership,metricIdentity,used]);
         const {members:memberTickers,...membershipMetadata}=membership;
@@ -365,11 +366,15 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     for (const [index,tickers] of chunks(inputs.tickers,25).entries()) {
       await progress("prices",{chunk:index,total:Math.ceil(inputs.tickers.length/25),symbols:features.size});
       const existingRevisions=await inputRevisions(env,tickers);
+      // A repair fence may be installed without changing price revisions. It
+      // must invalidate even an otherwise reusable feature checkpoint.
+      const pending=await env.MARKET_DATA_DB.prepare("SELECT feed,ticker,start_date as startDate FROM eod_adjustment_repairs WHERE feed IN ('sip','yahoo-eod') AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
+        .bind(JSON.stringify(tickers)).all<{feed:string;ticker:string;startDate:string}>();
       const key=`features:${index}`;
       const checkpoint=await env.OPS_DB.prepare("SELECT input_hash as hash,payload_json as payload FROM eod_checkpoints WHERE run_id=? AND chunk_key=?")
         .bind(runId,key).first<{hash:string;payload:string}>();
       const signature=await eodHash([inputHash,existingRevisions]);
-      if (run.purpose==="daily" && checkpoint?.hash===signature) {
+      if (run.purpose==="daily" && pending.results.length===0 && checkpoint?.hash===signature) {
         const stored=JSON.parse(checkpoint.payload) as FeatureCheckpoint & {payloadCodec?:string;payloadBase64?:string};
         const cached=stored.payloadCodec ? await decodeEodPayload({...stored,payload:"{}"}) as FeatureCheckpoint : stored;
         if (cached.catalogRows?.length===tickers.length && cached.catalogRows.every((row) => row.compatibility)
@@ -387,32 +392,42 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         }
       }
       const ownRevisionChanges:EodRevisionChange[]=[];
-      const pending=await env.MARKET_DATA_DB.prepare("SELECT ticker FROM eod_adjustment_repairs WHERE feed='sip' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
-        .bind(JSON.stringify(tickers)).all<{ticker:string}>();
-      for (const row of pending.results) {
+      const repairQuarantined=new Set<string>();
+      const quarantineIncomplete=(ticker:string,error:unknown)=>{
+        // Ownership, storage, quota and concurrency errors remain run failures.
+        // Only a provider repair lacking required retained dates is local.
+        if (!(error instanceof Error) || error.message!=="adjustment-repair-incomplete") throw error;
+        repairQuarantined.add(ticker);quarantinedInputs.add(ticker);errors[ticker]=error.message;
+      };
+      for (const row of pending.results.filter((row) => row.feed==="sip")) {
         checkContinuation();
-        const repaired=await repairEodSecurity(env,provider,row.ticker,run.session_date,hotStart);
-        ownRevisionChanges.push(...repaired.revisions);
+        try {
+          const repaired=await repairEodSecurity(env,provider,row.ticker,run.session_date,hotStart);
+          ownRevisionChanges.push(...repaired.revisions);
+        } catch(error) {quarantineIncomplete(row.ticker,error);}
       }
-      // Load retained history once for both EOD features and compact catalog
-      // counts. Later Worker prefilters never scan/decompress this population.
-      let history=await loadMarketHistory(env,{tickers,feed:"sip",endDate:run.session_date}) as EodPriceBar[];
-      const yahooPending=await env.MARKET_DATA_DB.prepare("SELECT ticker,start_date as startDate FROM eod_adjustment_repairs WHERE feed='yahoo-eod' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
-        .bind(JSON.stringify(tickers)).all<{ticker:string;startDate:string}>();
+      // Never bypass a pending fence to manufacture ordinary features/catalog
+      // metadata. An incomplete repair keeps all old observations quarantined.
+      const sipTickers=tickers.filter((ticker) => !repairQuarantined.has(ticker));
+      let history=sipTickers.length ? await loadMarketHistory(env,{tickers:sipTickers,feed:"sip",endDate:run.session_date}) as EodPriceBar[] : [];
       const yahooRepairDiagnostics=new Map<string,string>();
-      for (const row of yahooPending.results) {
+      for (const row of pending.results.filter((row) => row.feed==="yahoo-eod" && !repairQuarantined.has(row.ticker))) {
         checkContinuation();
-        const repaired=await repairEodYahoo(env,provider,row.ticker,run.session_date,row.startDate,history.filter((bar) => bar.ticker===row.ticker));
-        ownRevisionChanges.push(...repaired.revisions);
-        if (repaired.diagnostic) yahooRepairDiagnostics.set(row.ticker,repaired.diagnostic);
+        try {
+          const repaired=await repairEodYahoo(env,provider,row.ticker,run.session_date,row.startDate,history.filter((bar) => bar.ticker===row.ticker));
+          ownRevisionChanges.push(...repaired.revisions);
+          if (repaired.diagnostic) yahooRepairDiagnostics.set(row.ticker,repaired.diagnostic);
+        } catch(error) {quarantineIncomplete(row.ticker,error);}
       }
-      const cachedYahoo=env.MARKET_HISTORY_DB
-        ? await loadMarketHistory(env,{tickers,feed:"yahoo-eod",startDate:start,endDate:run.session_date}) as EodPriceBar[] : [];
+      history=history.filter((bar) => !repairQuarantined.has(bar.ticker));
+      const priceTickers=tickers.filter((ticker) => !repairQuarantined.has(ticker));
+      const cachedYahoo=env.MARKET_HISTORY_DB && priceTickers.length
+        ? await loadMarketHistory(env,{tickers:priceTickers,feed:"yahoo-eod",startDate:start,endDate:run.session_date}) as EodPriceBar[] : [];
       const overlapStart=inputs.calendarDates.at(-5)!;
       let fetchStart=overlapStart;
       const existingKeys=new Set(history.filter((bar) => bar.sourceProvider==="alpaca" && bar.adjustment==="split").map((bar) => `${bar.ticker}:${bar.date}`));
       for (const date of inputs.calendarDates.slice(-260)) {
-        if (tickers.some((ticker) => {
+        if (priceTickers.some((ticker) => {
           const lifecycle = getEtfLifecycle(ticker);
           const listing=listingDateFor(inputs.listingEvidence,ticker);
           return (!lifecycle || date <= lifecycle.lastTradingDate) && (!listing || date>=listing) && !existingKeys.has(`${ticker}:${date}`);
@@ -424,14 +439,14 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         }
       }
       const updated:EodPriceBar[]=[];
-      try {
+      if (priceTickers.length) try {
         checkContinuation();
-        const adjusted=await provider.alpaca(tickers,fetchStart,run.session_date);
+        const adjusted=await provider.alpaca(priceTickers,fetchStart,run.session_date);
         checkContinuation();
         if (adjusted.some((bar) => !inputs.calendarDates.includes(bar.date))) throw new Error("alpaca-unexpected-exchange-session");
         for (const [ticker,error] of provider.symbolErrors) errors[ticker]=error;
         let raw:EodPriceBar[]=[];
-        try {checkContinuation();raw=await provider.alpaca(tickers,overlapStart,run.session_date,"raw");checkContinuation();}
+        try {checkContinuation();raw=await provider.alpaca(priceTickers,overlapStart,run.session_date,"raw");checkContinuation();}
         catch (error) {
           if (error instanceof EodBatchInterruptedError) throw error;
           const message=error instanceof Error ? error.message : "raw-volume-unavailable";
@@ -456,11 +471,13 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         }).map((bar) => bar.ticker));
         for (const ticker of rebased) {
           checkContinuation();
-          const repaired=await repairEodSecurity(env,provider,ticker,run.session_date,hotStart);
-          ownRevisionChanges.push(...repaired.revisions);
           history=history.filter((bar) => bar.ticker!==ticker);
-          history.push(...await loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:run.session_date}) as EodPriceBar[]);
-          updated.push(...repaired.bars);
+          try {
+            const repaired=await repairEodSecurity(env,provider,ticker,run.session_date,hotStart);
+            ownRevisionChanges.push(...repaired.revisions);
+            history.push(...await loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:run.session_date}) as EodPriceBar[]);
+            updated.push(...repaired.bars);
+          } catch(error) {quarantineIncomplete(ticker,error);}
         }
         updated.push(...adjusted.filter((bar) => !rebased.has(bar.ticker)));
         const retainedAfterRepair=new Map(history.map((bar) => [`${bar.ticker}:${bar.date}`,bar]));
@@ -491,13 +508,19 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (error instanceof EodBatchInterruptedError) throw error;
         const message=error instanceof Error ? error.message : "price-fetch-failed";
         if (/d1|budget|quota|capacity|adjustment-repair|market-history/.test(message)) throw error;
-        tickers.forEach((ticker) => {errors[ticker]=message;});
+        priceTickers.filter((ticker) => !repairQuarantined.has(ticker)).forEach((ticker) => {errors[ticker]=message;});
       }
       const merged=new Map(history.map((bar) => [`${bar.ticker}:${bar.date}`,bar]));
       updated.forEach((bar) => merged.set(`${bar.ticker}:${bar.date}`,bar));
       const chunkFeatures:Array<[string,EodTickerMetrics]>=[];
       for (const ticker of tickers) {
         checkContinuation();
+        if (repairQuarantined.has(ticker)) {
+          const metric=Object.assign(computeEodTickerMetrics({ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars:[],
+            ...(inputs.listingEvidence ? {explainHistory:true,verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {})}),
+            {unavailableReason:"adjustment-repair-incomplete"});
+          features.set(ticker,metric);chunkFeatures.push([ticker,metric]);continue;
+        }
         const repairDiagnostic=yahooRepairDiagnostics.get(ticker);
         if (repairDiagnostic) errors[ticker]=repairDiagnostic;
         const lifecycle = getEtfLifecycle(ticker);
@@ -556,8 +579,11 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (revision.revision!==expected) throw new Error("eod-concurrent-input-correction");
       }
       revisions.push(...after);
-      const chunkCatalog=tickers.map((ticker) => buildEodCatalogRow(ticker,[...merged.values()],
-        after.find((row) => row.feed==="sip" && row.ticker===ticker)?.revision ?? 0));
+      const chunkCatalog:EodCatalogCheckpointRow[]=tickers.map((ticker) => {
+        const sourceRevision=after.find((row) => row.feed==="sip" && row.ticker===ticker)?.revision ?? 0;
+        return repairQuarantined.has(ticker) ? {ticker,sourceRevision,unavailableReason:"adjustment-repair-incomplete"}
+          : buildEodCatalogRow(ticker,[...merged.values()],sourceRevision);
+      });
       chunkCatalog.forEach((row) => catalogRows.set(row.ticker,row));
       const value:FeatureCheckpoint={features:chunkFeatures,catalogRows:chunkCatalog,revisions:after,errors:Object.fromEntries(tickers.filter((ticker) => errors[ticker]).map((ticker) => [ticker,errors[ticker]]))};
       checkContinuation();
@@ -566,7 +592,9 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         .bind(runId,key,await eodHash([inputHash,after]),JSON.stringify(await encodeEodPayload(value)),new Date().toISOString()).run();
       await publishReadyScopes();
     }
-    const errorSummary={errors:Object.fromEntries(Object.entries(errors).slice(0,100)),errorCount:Object.keys(errors).length};
+    const errorSummary={errors:Object.fromEntries(Object.entries(errors)
+      .sort((a,b)=>Number(b[1]==="adjustment-repair-incomplete")-Number(a[1]==="adjustment-repair-incomplete"))
+      .slice(0,100)),errorCount:Object.keys(errors).length};
     await progress("publication",{symbols:features.size,...errorSummary});
     await publishReadyScopes();
     // Capture BEFORE the guarded publication. A subsequent writer must remain
@@ -578,7 +606,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     checkContinuation();
     const catalogPublicationId=await storeEodPublication(env,{scope:EOD_CATALOG_SCOPE,sessionDate:run.session_date,
       inputHash:await eodHash(catalog),methodologyVersion:EOD_CATALOG_METHODOLOGY_VERSION,payload:catalog,
-      promote:run.mode==="active",revisions});
+      promote:run.mode==="active",revisions:revisions.filter((row) => !quarantinedInputs.has(row.ticker))});
     const complete=published.length===6;
     await runDb.prepare(`UPDATE eod_runs SET status=?,stage='finished',progress_json=?,lease_until=NULL,lease_token=NULL,
       completed_at=?,updated_at=?,next_attempt_at=?,error_code=?,completed_input_clock=? WHERE id=? AND lease_token=?`)

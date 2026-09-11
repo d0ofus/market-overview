@@ -7,11 +7,11 @@ import { getStoredHoldingStats } from "../src/eod-holdings-quotes";
 import { loadCatalogSectorTrending } from "../src/sector-trending-service";
 import { loadAlpacaBarMetrics } from "../src/overview-current-data";
 import { isOverviewSnapshotStale } from "../src/overview-snapshot";
-import { getStored1dStatsMap } from "../src/index";
+import { getStored1dStatsMap, loadTickersMissingBarHistory } from "../src/index";
 import { refreshDailyBarsIncremental } from "../src/daily-bars";
 import type { MarketDataProvider } from "../src/provider";
 import { loadCanonicalPatternUniverseStats, type PatternProfile } from "../src/pattern-scanner-service";
-import { loadDailyBarCoverage } from "../src/scans-page-service";
+import { loadDailyBarCoverage, loadScheduledRelativeStrengthUniverseCandidates } from "../src/scans-page-service";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
@@ -110,6 +110,38 @@ describe("market migration with one hot session and older prices only in archive
       .toMatchObject({fetchedRows:0,writtenRows:0,skippedCurrentTickers:1,currentDateTickers:1,missingCurrentDateTickers:0});
     expect(provider.getDailyBars).not.toHaveBeenCalled();
     expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars").first()).toEqual({count:0});
+  },30_000);
+
+  it("preserves unavailable members while healthy scan and pattern metadata remains usable", async () => {
+    const source=bars("AAA");
+    await hotRows(source.slice(-1));
+    const payload=encodeEodCatalogPayload(session,[buildEodCatalogRow("AAA",source,1),
+      {ticker:"BNRG",sourceRevision:0,unavailableReason:"adjustment-repair-incomplete"}]);
+    await market.db.prepare(`INSERT INTO eod_publications(id,scope,session_date,revision,input_hash,methodology_version,payload_json,payload_codec,status,created_at)
+      VALUES('catalog','history:catalog',?,1,'hash',?,?,'json','accepted',?)`)
+      .bind(session,EOD_CATALOG_METHODOLOGY_VERSION,JSON.stringify(payload),`${session}T21:00:00Z`).run();
+    await market.db.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token)
+      VALUES('sip','BNRG','pending','2025-04-14',?,'unchanged-owner')`).bind(`${session}T21:00:00Z`).run();
+    const profile={prefilterConfig:{minPrice:1,minDollarVolume20d:1,minBars:520}} as PatternProfile;
+    expect(await loadCanonicalPatternUniverseStats(env,profile,session,["AAA","BNRG"],null,null)).toEqual({count:1});
+    const coverage=await loadDailyBarCoverage(env,["AAA","BNRG"],session);
+    expect([...coverage.keys()]).toEqual(["AAA"]);
+    expect(coverage.get("AAA")?.barCount).toBe(520);
+    expect(await loadTickersMissingBarHistory(env,["AAA","BNRG"],520)).toEqual(["BNRG"]);
+    const core=createSqliteD1();
+    try {
+      core.script(`CREATE TABLE symbols(ticker TEXT,name TEXT,sector TEXT,industry TEXT,exchange TEXT,asset_class TEXT,shares_outstanding REAL);
+        INSERT INTO symbols VALUES('AAA','Healthy company',NULL,NULL,'NYSE','equity',1000);
+        INSERT INTO symbols VALUES('BNRG','Unavailable company',NULL,NULL,'NASDAQ','equity',1000);`);
+      await market.db.prepare(`INSERT INTO post_close_daily_bar_refresh_job_items(job_id,ordinal,ticker,status,bar_date)
+        VALUES('fixture',0,'AAA','completed',?),('fixture',1,'BNRG','completed',?)`).bind(session,session).run();
+      const candidates=await loadScheduledRelativeStrengthUniverseCandidates({...env,DB:core.db,OPS_DB:market.db},"fixture",session);
+      expect(candidates.map(row => row.ticker)).toEqual(["AAA","BNRG"]);
+      expect(candidates[0]).toMatchObject({price:619,marketCap:619000});
+      expect(candidates[1]).toMatchObject({price:null,change1d:null,marketCap:null,relativeVolume:null,avgVolume:null});
+      expect(await market.db.prepare("SELECT status,owner_token FROM eod_adjustment_repairs WHERE ticker='BNRG'").first())
+        .toEqual({status:"pending",owner_token:"unchanged-owner"});
+    } finally {core.dispose();}
   },30_000);
 
   it("rejects mismatched or unsupported pointed manifests without reading archive bodies", async () => {

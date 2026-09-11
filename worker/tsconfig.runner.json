@@ -32,6 +32,7 @@
     "scripts/continue-storage-population-execution.ts",
     "scripts/eod-population-expansion-operator.ts",
     "scripts/expand-storage-population.ts",
-    "scripts/continue-storage-listing-execution.ts"
+    "scripts/continue-storage-listing-execution.ts",
+    "scripts/continue-storage-repair-execution.ts"
   ]
 }

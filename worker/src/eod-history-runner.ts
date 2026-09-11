@@ -42,6 +42,11 @@ export async function runEodHistoryWork(env:Env,input:{
   if ((saved.nextTicker ?? 0)>=input.tickers.length && Object.keys(missing).length) {
     saved.nextTicker=0;
     saved.pricesDone=false;
+    if (Object.values(missing).some(reason => reason==="history-prune-adjustment-repair-pending")) {
+      saved.pruneFeedsDone=[];
+      saved.pruneCursor=null;
+      saved.pruneFeed=undefined;
+    }
   }
   const start=input.calendarDates.at(-historySessions);
   if (!start) throw new Error("eod-deep-calendar-incomplete");
@@ -51,29 +56,44 @@ export async function runEodHistoryWork(env:Env,input:{
     .bind(input.runId,selectionHash,JSON.stringify(value),new Date().toISOString()).run();
   if (!saved.pricesDone) for (let index=saved.nextTicker ?? 0;index<input.tickers.length;index+=10) {
     const tickers=input.tickers.slice(index,index+10);
+    const unavailable=new Set<string>();
+    // A failed replacement leaves its durable price fence in place. Isolate
+    // only this known coverage failure; quota, transport and ownership errors
+    // must still stop the attempt with their existing retry policy.
+    const repair=async (ticker:string):Promise<boolean> => {
+      try { await repairEodSecurity(env,provider,ticker,input.sessionDate,hotStart); return true; }
+      catch (error) {
+        if (!(error instanceof Error) || error.message!=="adjustment-repair-incomplete") throw error;
+        unavailable.add(ticker);
+        missing[ticker]="adjustment-repair-incomplete";
+        return false;
+      }
+    };
     await input.progress("deep-history",{nextTicker:index,total:input.tickers.length});
     const pending=await env.MARKET_DATA_DB!.prepare("SELECT ticker FROM eod_adjustment_repairs WHERE feed='sip' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
       .bind(JSON.stringify(tickers)).all<{ticker:string}>();
-    for (const row of pending.results) await repairEodSecurity(env,provider,row.ticker,input.sessionDate,hotStart);
-    let old=await loadMarketHistory(env,{tickers,feed:"sip",startDate:start,endDate:input.sessionDate});
+    for (const row of pending.results) await repair(row.ticker);
+    let old=await loadMarketHistory(env,{tickers:tickers.filter(ticker => !unavailable.has(ticker)),feed:"sip",startDate:start,endDate:input.sessionDate});
     const expected=input.calendarDates.slice(-historySessions);
     // A complete row count alone does not establish session or source coverage.
     // Rotate one tenth of the complete universe through a full price recheck each
     // week; missing history always takes priority regardless of the rotation.
     const rotation=Math.floor(Date.parse(`${input.sessionDate}T00:00:00Z`)/(7*86400_000))%10;
-    const rotated=input.reconcileHistory ? tickers.filter((_,i) => (index+i)%10===rotation) : [];
+    const rotated=input.reconcileHistory ? tickers.filter((ticker,i) => !unavailable.has(ticker)
+      && !pending.results.some(row => row.ticker===ticker) && (index+i)%10===rotation) : [];
     // Recheck the actually retained deep window, without expanding the entire
     // shared catalog to five years. Explicit selected jobs request 1,400 sessions.
-    for (const ticker of rotated) await repairEodSecurity(env,provider,ticker,input.sessionDate,hotStart);
+    for (const ticker of rotated) await repair(ticker);
     if (rotated.length) {
       old=old.filter((bar) => !rotated.includes(bar.ticker));
-      old.push(...await loadMarketHistory(env,{tickers:rotated,feed:"sip",startDate:start,endDate:input.sessionDate}));
+      old.push(...await loadMarketHistory(env,{tickers:rotated.filter(ticker => !unavailable.has(ticker)),feed:"sip",startDate:start,endDate:input.sessionDate}));
     }
     const needs=tickers.filter((ticker) => {
+      if (unavailable.has(ticker)) return false;
       const dates=new Set(old.filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split").map((bar) => bar.date));
       return expected.some((date) => !dates.has(date));
     });
-    for (const ticker of tickers) if (!needs.includes(ticker)) delete missing[ticker];
+    for (const ticker of tickers) if (!unavailable.has(ticker) && !needs.includes(ticker)) delete missing[ticker];
     if (needs.length) {
       const prices=await provider.alpaca(needs,start,input.sessionDate);
       if (prices.some((bar) => !expected.includes(bar.date))) throw new Error("alpaca-unexpected-exchange-session");
@@ -92,7 +112,7 @@ export async function runEodHistoryWork(env:Env,input:{
         // keep the target session explicitly unavailable.
         let available=old.filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split");
         if (bars.some((bar) => {const prior=keys.get(`${ticker}:${bar.date}`);return prior && !marketHistoryBarsMateriallyEqual(prior,bar);})) {
-          await repairEodSecurity(env,provider,ticker,input.sessionDate,hotStart);
+          if (!await repair(ticker)) continue;
           available=await loadMarketHistory(env,{tickers:[ticker],feed:"sip",startDate:start,endDate:input.sessionDate});
         } else if (bars.some((bar) => !keys.has(`${ticker}:${bar.date}`))) {
           await archiveMarketHistoryBars(env,bars);
@@ -126,6 +146,7 @@ export async function runEodHistoryWork(env:Env,input:{
         const result=await archiveAndPruneMarketHistory(env,{tickers:input.tickers,endDate:input.sessionDate,
           hotSessions:evidence.hotSessions,capacity:evidence.capacity,readers:evidence.readers,cursor:pruneCursor ?? undefined,maxRows:500,feed});
         pruneCursor=result.cursor;
+        for (const ticker of result.deferredRepairs ?? []) missing[ticker]="history-prune-adjustment-repair-pending";
         if (!pruneCursor) completedFeeds.add(feed);
         await save({nextTicker:input.tickers.length,missing,pricesDone:true,pruneCursor,pruneFeed:feed,pruneFeedsDone:[...completedFeeds]});
       } while (pruneCursor);

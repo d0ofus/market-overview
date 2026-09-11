@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateEodCatalogQuarantines } from "./eod-catalog-quarantine-validation";
 import { buildEodCatalogRow, EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
 import { EOD_PUBLICATION_SCOPES } from "./eod-coordinator";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS, MARKET_HISTORY_READER_CONTRACT_VERSION } from "./eod-history-maintenance";
@@ -325,14 +326,18 @@ export async function verifyStorageAcceptedPublications(input: {
   const overview = decoded.get("overview:default")!;
   if (await eodHash(overviewManifest(frozen.config, true)) !== await eodHash(overviewManifest(overview, false))) fail("overview-configured-sections-not-preserved");
   const catalog = decoded.get(EOD_CATALOG_SCOPE)!;
+  const quarantined = await validateEodCatalogQuarantines(env, { catalog, runId: input.runId,
+    frozenInputs: frozen, sessionDate: input.expectedSession, pages: decoded });
+  const healthyTickers = tickers.filter(ticker => !quarantined.has(ticker));
   const catalogTickers = (value: unknown) => Array.isArray(value) ? value.map((row) => Array.isArray(row) ? row[0] : null) : [];
   const catalogRows = catalogTickers(catalog.rows), compatibility = object(catalog.compatibility);
   const compatibleRows = catalogTickers(compatibility.rows);
   if (catalog.schemaVersion !== 1 || catalog.sessionDate !== input.expectedSession || compatibility.schemaVersion !== 1
-    || await eodHash([...catalogRows].sort()) !== tickerHash || await eodHash([...compatibleRows].sort()) !== tickerHash) fail("catalog-complete-compatibility-required");
+    || await eodHash([...catalogRows].sort()) !== tickerHash
+    || await eodHash([...compatibleRows].sort()) !== await eodHash(healthyTickers)) fail("catalog-complete-compatibility-required");
   // This checks all tuple semantics, pending repairs and the exact SIP revisions.
-  const catalogMap = await loadEodCatalogRows(env, tickers, input.expectedSession);
-  if (catalogMap.size !== tickers.length || [...catalogMap.values()].some((row) => !row.compatibility)) fail("catalog-row-compatibility-missing");
+  const catalogMap = await loadEodCatalogRows(env, healthyTickers, input.expectedSession);
+  if (catalogMap.size !== healthyTickers.length || [...catalogMap.values()].some((row) => !row.compatibility)) fail("catalog-row-compatibility-missing");
   if (await clock() !== before) fail("publication-inputs-changed");
   const unsigned = { version: 1 as const, identity: input.identity, runId: input.runId, sessionDate: input.expectedSession,
     inputClock: run.inputClock, tickerHash, tickerCount: tickers.length, checkedAt: new Date().toISOString(),

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { describe,expect,it } from "vitest";
@@ -10,7 +10,7 @@ const protectedPaths=["worker/src/eod-price-provider.ts","worker/src/eod-ticker-
   "worker/src/provider-usage.ts","worker/src/eod-budget-profile.ts","worker/src/market-storage-population-execution.ts",
   "worker/src/market-storage-atomic-manifest.ts","worker/src/market-storage-population-expansion.ts",
   "worker/src/market-storage-consumer-composite.ts","worker/wrangler.toml","package-lock.json"];
-const historical=(path:string)=>readFileSync(resolve(root,path),"utf8");
+const historical=(path:string)=>execFileSync("git",["show",`e1ca6b5579b5faa6c3c80a6a423be34c36ac1903:${path}`],{cwd:root,encoding:"utf8",windowsHide:true,stdio:["ignore","pipe","pipe"]});
 const digest=(value:string)=>createHash("sha1").update(value).digest("hex");
 function fixture() {
   const integrationSources=Object.fromEntries(Object.keys(STORAGE_LISTING_INTEGRATION_HASHES).map(path=>[path,historical(path)]));

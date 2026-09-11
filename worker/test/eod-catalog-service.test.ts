@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildEodCatalogRow, encodeEodCatalogPayload, EOD_CATALOG_METHODOLOGY_VERSION, loadEodCatalogRows, type EodCatalogRow } from "../src/eod-catalog-service";
+import { decodeEodCatalogUnavailableTuple, buildEodCatalogRow, encodeEodCatalogPayload, EOD_CATALOG_METHODOLOGY_VERSION, loadEodCatalogRows, type EodCatalogRow, type EodCatalogCheckpointRow } from "../src/eod-catalog-service";
 import { loadCanonicalPatternUniverseStats, type PatternProfile } from "../src/pattern-scanner-service";
 import { loadDailyBarCoverage, loadScheduledRelativeStrengthUniverseCandidates } from "../src/scans-page-service";
 import { archiveMarketHistoryBars, type MarketHistoryBar } from "../src/market-history";
@@ -23,7 +23,7 @@ describe("compact full-history catalog metadata", () => {
   }, 30_000);
   afterEach(() => { storage?.dispose(); vi.useRealTimers(); });
 
-  async function publish(rows: EodCatalogRow[], status = "accepted", catalogSession = session) {
+  async function publish(rows: EodCatalogCheckpointRow[], status = "accepted", catalogSession = session) {
     const payload = encodeEodCatalogPayload(catalogSession, rows);
     await storage.db.prepare(`INSERT INTO eod_publications
       (id,scope,session_date,revision,input_hash,methodology_version,payload_json,payload_codec,status,created_at)
@@ -53,6 +53,30 @@ describe("compact full-history catalog metadata", () => {
       previousPrice: 10, volume: null, avgDollarVolume20d: 950, avgVolume30d: 100 });
     expect(buildEodCatalogRow("NONE", bars, 0)).toMatchObject({ barCount: 0, firstDate: null, lastDate: null, price: null });
     expect(encodeEodCatalogPayload(session, [metadata]).rows[0]).toHaveLength(10);
+  });
+
+  it("encodes unknown retained history explicitly and never revives a quarantined catalog after its fence clears",async()=>{
+    const missing={ticker:"BNRG",sourceRevision:0,unavailableReason:"adjustment-repair-incomplete" as const};
+    const payload=encodeEodCatalogPayload(session,[row("ABC"),missing]);
+    expect(payload.rows[1]).toEqual(["BNRG",null,null,null,null,null,0,null,null,null,"adjustment-repair-incomplete"]);
+    expect(decodeEodCatalogUnavailableTuple(payload.rows[1])).toEqual(missing);
+    expect(decodeEodCatalogUnavailableTuple(payload.rows[0])).toBeNull();
+    expect(()=>decodeEodCatalogUnavailableTuple([...payload.rows[1],"extra"])).toThrow("invalid unavailable");
+    expect(()=>decodeEodCatalogUnavailableTuple(["BNRG",0,null,null,null,null,0,null,null,null,"adjustment-repair-incomplete"])).toThrow("invalid unavailable");
+    await publish([row("ABC"),missing]);
+    await storage.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at) VALUES('sip','BNRG','pending','2025-04-14','2026-09-08T20:00:00Z')").run();
+    await expect(loadEodCatalogRows(env,["ABC","BNRG"],session)).rejects.toThrow("retained history is quarantined");
+    expect([...(await loadEodCatalogRows(env,["ABC","BNRG"],session,{unavailableRows:"omit"})).keys()]).toEqual(["ABC"]);
+    await storage.db.prepare("UPDATE eod_adjustment_repairs SET status='complete' WHERE ticker='BNRG'").run();
+    await expect(loadEodCatalogRows(env,["BNRG"],session)).rejects.toThrow("retained history is quarantined");
+    expect((await loadEodCatalogRows(env,["BNRG"],session,{unavailableRows:"omit"})).size).toBe(0);
+  });
+
+  it("keeps healthy catalog payloads byte-identical without unavailable metadata",()=>{
+    const actual=buildEodCatalogRow("ABC",[],7);
+    const expected={schemaVersion:1,sessionDate:session,methodologyVersion:EOD_CATALOG_METHODOLOGY_VERSION,
+      rows:[["ABC",0,null,null,null,null,7,null,null,null]],compatibility:{schemaVersion:1,rows:[["ABC",null,null,null]]}};
+    expect(JSON.stringify(encodeEodCatalogPayload(session,[actual]))).toBe(JSON.stringify(expected));
   });
 
   it("prefilters all6000 securities and preserves800-bar counts with bounded SQL and no history decompression", async () => {

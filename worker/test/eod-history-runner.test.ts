@@ -78,6 +78,47 @@ describe("bounded durable history requests",{timeout:30_000},() => {
     await runEodHistoryWork(env,{...input(),hotSessions:90});
     expect(mocks.repair).toHaveBeenCalledWith(env,expect.anything(),"SPY",session,calendar.at(-90));
   });
+  it("isolates an incomplete repair, preserves its fence and resumes its coverage later",async () => {
+    const fence={feed:"sip",ticker:"BNRG",status:"pending",owner_token:"original-owner",start_date:"2025-04-14",updated_at:"2026-09-04T21:00:00Z"};
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES(?,?,?,?,?,?)")
+      .bind(fence.feed,fence.ticker,fence.status,fence.owner_token,fence.start_date,fence.updated_at).run();
+    mocks.repair.mockRejectedValueOnce(new Error("adjustment-repair-incomplete"));
+    mocks.load.mockImplementation(async (_env:Env,query:{tickers:string[]}) => {
+      expect(query.tickers).not.toContain("BNRG");
+      return query.tickers.flatMap(ticker => calendar.slice(-520).map(date => bar(ticker,date)));
+    });
+    const work={...input(),tickers:["BNRG","SPY"]};
+    expect(await runEodHistoryWork(env,work)).toMatchObject({coverageStatus:"partial",missing:{BNRG:"adjustment-repair-incomplete"}});
+    expect(mocks.alpaca).not.toHaveBeenCalled();
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(await market.db.prepare("SELECT * FROM eod_adjustment_repairs WHERE ticker='BNRG'").first()).toEqual(fence);
+    const checkpoint=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE chunk_key='history:cursor'")
+      .first<string>("payload_json"))!);
+    expect(checkpoint).toMatchObject({pricesDone:true,nextTicker:2,missing:{BNRG:"adjustment-repair-incomplete"}});
+    mocks.repair.mockImplementationOnce(async () => {
+      await market.db.prepare("UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL WHERE ticker='BNRG'").run();
+      return {bars:[],revisions:[]};
+    });
+    mocks.load.mockImplementation(async (_env:Env,query:{tickers:string[]}) => query.tickers.flatMap(ticker => calendar.slice(-520).map(date => bar(ticker,date))));
+    expect(await runEodHistoryWork(env,work)).toMatchObject({coverageStatus:"complete",missing:{}});
+    expect(mocks.repair).toHaveBeenCalledTimes(2);
+  });
+  it.each(["d1-quota-exhausted","d1-network-error","adjustment-repair-already-owned","adjustment-repair-fence-lost"])("does not quarantine %s",async error => {
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('sip','SPY','pending','owner','2025-01-01','2026-09-04T21:00:00Z')").run();
+    mocks.repair.mockRejectedValueOnce(new Error(error));
+    await expect(runEodHistoryWork(env,input())).rejects.toThrow(error);
+    expect(mocks.load).not.toHaveBeenCalled();
+    expect(mocks.alpaca).not.toHaveBeenCalled();
+    expect(await ops.db.prepare("SELECT COUNT(*) as n FROM eod_checkpoints").first()).toEqual({n:0});
+  });
+  it("does not archive a changed adjustment basis when its full replacement is incomplete",async () => {
+    mocks.load.mockResolvedValue([{...bar("SPY",calendar.at(-2)!),c:50}]);
+    mocks.alpaca.mockResolvedValue([bar("SPY",calendar.at(-2)!),bar("SPY")]);
+    mocks.repair.mockRejectedValueOnce(new Error("adjustment-repair-incomplete"));
+    expect(await runEodHistoryWork(env,input())).toMatchObject({coverageStatus:"partial",missing:{SPY:"adjustment-repair-incomplete"}});
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.load).toHaveBeenCalledTimes(1);
+  });
   it("resumes the Yahoo retention cursor without repeating completed SIP pruning",async () => {
     mocks.load.mockResolvedValue(calendar.slice(-520).map((date) => bar("SPY",date)));
     const evidence=vi.spyOn(capacity,"refreshHistoryMaintenanceEvidence").mockResolvedValue({hotSessions:90,feeds:["sip","yahoo-eod"],capacity:{},readers:{},sample:{}} as never);

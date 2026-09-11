@@ -1261,8 +1261,8 @@ async function loadTickersMissingBarHistory(env: Env, tickers: string[], minBars
   if (env.EOD_READ_ENABLED === "true") {
     const session = await expectedEodSession(env);
     if (!session) throw new EodCatalogUnavailableError("the expected completed exchange session cannot be verified");
-    const catalog = await loadEodCatalogRows(env, unique, session);
-    return unique.filter((ticker) => catalog.get(ticker)!.barCount < minBars);
+    const catalog = await loadEodCatalogRows(env, unique, session, { unavailableRows: "omit" });
+    return unique.filter((ticker) => !catalog.has(ticker) || catalog.get(ticker)!.barCount < minBars);
   }
   if (env.MARKET_HISTORY_DB) {
     const coverage=await loadMarketHistoryCoverage(env,{tickers:unique});

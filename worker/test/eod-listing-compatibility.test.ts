@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, expect, it, vi } from "vitest";
 import * as metrics from "../src/eod-metrics";
+import { buildEodCatalogRow, encodeEodCatalogPayload } from "../src/eod-catalog-service";
+import type { MarketHistoryBar } from "../src/market-history";
 import { overviewPayload, type FrozenInputs } from "../src/eod-runner";
 import { getEtfLifecycle } from "../src/etf-holdings-quality";
 import { reviewedEodTickerAlias } from "../src/eod-ticker-aliases";
@@ -18,6 +19,14 @@ const oldRunner=ts.createSourceFile("old.ts",oldSource("worker/src/eod-runner.ts
 const oldOverview=oldRunner.statements.find((node):node is ts.FunctionDeclaration=>ts.isFunctionDeclaration(node)&&node.name?.text==="overviewPayload")!;
 const previousOverview=new Function("computeEodTickerMetrics","getEtfLifecycle","reviewedEodTickerAlias",
   `${compile(oldOverview.getText(oldRunner).replace(/^export\s+/,""))};return overviewPayload;`)(oldMetrics.computeEodTickerMetrics,getEtfLifecycle,reviewedEodTickerAlias) as typeof overviewPayload;
+// The old module has one runtime database import. The two pure functions must
+// never use it; fail explicitly instead of substituting current catalog logic.
+const oldCatalog=new Function("exports","require",`${compile(oldSource("worker/src/eod-catalog-service.ts"))}; return exports;`)({},
+  (specifier:string)=>{
+    if(specifier!=="./market-data-db") throw new Error(`Unexpected predecessor catalog import: ${specifier}`);
+    return {getMarketDataDb:()=>{throw new Error("Pure catalog compatibility fixture must not access a database");}};
+  }) as {buildEodCatalogRow:typeof buildEodCatalogRow;encodeEodCatalogPayload:typeof encodeEodCatalogPayload};
+
 afterEach(()=>vi.useRealTimers());
 
 it("preserves R18 byte-for-byte metrics, Overview, breadth and catalog contract when listing evidence is omitted",()=>{
@@ -37,6 +46,17 @@ it("preserves R18 byte-for-byte metrics, Overview, breadth and catalog contract 
     expect(JSON.stringify(metrics.computeEodBreadthMetrics({...input,features:current})))
       .toBe(JSON.stringify(oldMetrics.computeEodBreadthMetrics({...input,features:previous})));
   }
-  expect(readFileSync("src/eod-catalog-service.ts","utf8").replace(/\r\n/g,"\n"))
-    .toBe(oldSource("worker/src/eod-catalog-service.ts").replace(/\r\n/g,"\n"));
+  const historyBars:MarketHistoryBar[]=bars.map((bar,index)=>({ticker:bar.ticker,date:bar.sessionDate,
+    o:bar.open??bar.close!,h:bar.high??bar.close!,l:bar.low??bar.close!,c:bar.close!,
+    volume:index%11 ? 200:null,reportedVolume:bar.reportedVolume??null,
+    reportedVolumeCollectedAt:bar.reportedVolume===null ? null:`${session}T21:00:00Z`,
+    feed:bar.sourceFeed??"sip",sourceProvider:bar.sourceProvider==="yahoo" ? "yahoo":"alpaca",adjustment:"split",
+    observedAt:`${session}T21:00:00Z`,fetchedAt:`${session}T21:00:00Z`}));
+  historyBars.push({...historyBars[0],feed:"yahoo-eod",sourceProvider:"yahoo",c:999_999});
+  const currentCatalog=tickers.map((ticker,index)=>buildEodCatalogRow(ticker,historyBars,10+index));
+  const previousCatalog=tickers.map((ticker,index)=>oldCatalog.buildEodCatalogRow(ticker,historyBars,10+index));
+  expect(currentCatalog.map(row=>[row.ticker,row.barCount])).toEqual([["SPY",400],["BRTM",1],["UNKNOWN",0],["RSHO",0],["EATZ",5]]);
+  expect(JSON.stringify(currentCatalog)).toBe(JSON.stringify(previousCatalog));
+  expect(JSON.stringify(encodeEodCatalogPayload(session,currentCatalog)))
+    .toBe(JSON.stringify(oldCatalog.encodeEodCatalogPayload(session,previousCatalog)));
 });
