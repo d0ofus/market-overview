@@ -246,6 +246,11 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if(query.sql.trimEnd().endsWith("/* eod-population-withdrawal */")) {
+      // Exact Ops audit/pointer DML checks bounded checkpoint key ranges and
+      // current account-wide owner rows; only one evidence row can change.
+      reads+=4_000;writes+=16;continue;
+    }
     const holdingsMarker=HOLDINGS_MARKERS.find(marker=>query.sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`));
     if (holdingsMarker) {
       const count=holdingsQuerySize(query,holdingsMarker);

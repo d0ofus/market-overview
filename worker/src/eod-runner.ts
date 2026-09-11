@@ -51,8 +51,10 @@ export async function loadEodInputs(env:Env,session:string):Promise<FrozenInputs
   return {config,memberships,tickers,calendarDates,methodologyVersion:EOD_METRICS_VERSION};
 }
 
-async function inputRevisions(env:Env,tickers:string[]) {
-  const rows=await env.MARKET_DATA_DB!.prepare("SELECT feed,ticker,revision FROM eod_input_revisions WHERE ticker IN (SELECT value FROM json_each(?)) ORDER BY feed,ticker")
+export async function inputRevisions(env:Env,tickers:string[]) {
+  // The primary key starts with feed. Constrain both key parts so a 25-symbol
+  // checkpoint never scans revisions for the entire ingested population.
+  const rows=await env.MARKET_DATA_DB!.prepare("SELECT feed,ticker,revision FROM eod_input_revisions WHERE feed IN ('sip','yahoo-eod') AND ticker IN (SELECT value FROM json_each(?)) ORDER BY feed,ticker")
     .bind(JSON.stringify(tickers)).all<{feed:string;ticker:string;revision:number}>();
   const relevant=rows.results.filter((row) => row.feed==="sip" || row.feed==="yahoo-eod");
   for (const ticker of tickers) for (const feed of ["sip","yahoo-eod"]) {
