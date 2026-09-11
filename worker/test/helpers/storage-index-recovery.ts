@@ -3,7 +3,7 @@ import { createSqliteD1 } from "./sqlite-d1";
 import { authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,loadStorageMigration,pauseStorageMigration,
   progressStorageMigration,recordStorageSourceCapture,saveStorageMigrationCheckpoint } from "../../src/market-storage-control";
 import { freezeStorageSource,prepareStorageSourceFence } from "../../src/market-storage-fence";
-import { releaseStorageVerificationFence } from "../../src/market-storage-verification";
+import { captureStorageHistoryBaseline, releaseStorageVerificationFence } from "../../src/market-storage-verification";
 import { prepareStoragePreflight } from "../../src/market-storage-preflight";
 import { approveStoragePopulationSizing,storeStoragePopulationPlan } from "../../src/market-storage-population-plan";
 import { STORAGE_HISTORY_INDEX_RECOVERY_FROM_REVISION } from "../../src/market-storage-history-index-recovery";
@@ -13,6 +13,7 @@ import { STORAGE_CONSUMER_CONTRACTS } from "../../src/market-storage-acceptance"
 import { MARKET_HISTORY_READER_CONTRACT_VERSION } from "../../src/eod-history-maintenance";
 import { EOD_HISTORY_POINTER_INDEX_DDL } from "../../src/eod-d1-rest";
 import { storageHash } from "../../src/market-storage-pages";
+import { encodeMarketHistoryBlock } from "../../src/market-history";
 import { EOD_METRICS_VERSION } from "../../src/eod-metrics";
 import type { FrozenInputs } from "../../src/eod-runner";
 
@@ -36,10 +37,22 @@ export function createStorageIndexDatabases() {
 
 export async function seedStorageIndexRecovery(
   {source,target,history,ops}:ReturnType<typeof createStorageIndexDatabases>,
-  options:{population?:number;checkpointCount?:number;tickers?:string[];config?:FrozenInputs["config"];copyComplete?:boolean}={}
+  options:{population?:number;checkpointCount?:number;tickers?:string[];config?:FrozenInputs["config"];copyComplete?:boolean;authenticBaseline?:boolean}={}
 ) {
     const population=options.tickers?.length ?? options.population ?? 1,checkpointCount=options.checkpointCount ?? 4;
     const now=new Date(),stamp=now.toISOString();await createStorageMigration(ops.db,identity,now);
+    let oldBlockId="old";
+    if(options.authenticBaseline) {
+      const block=await encodeMarketHistoryBlock([{ticker:"A",date:"2025-01-02",o:100,h:101,l:99,c:100,volume:100,feed:"sip",
+        sourceProvider:"alpaca",adjustment:"split",observedAt:stamp,fetchedAt:stamp}]);
+      history.script("DELETE FROM market_history_block_pointers; DELETE FROM market_history_blocks;");
+      await history.db.prepare(`INSERT INTO market_history_blocks(id,feed,ticker,calendar_year,schema_version,codec,checksum,row_count,first_date,last_date,uncompressed_bytes,payload_base64)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(block.id,block.feed,block.ticker,block.calendarYear,block.schemaVersion,block.codec,block.checksum,block.rowCount,
+          block.firstDate,block.lastDate,block.uncompressedBytes,block.payloadBase64).run();
+      await history.db.prepare("INSERT INTO market_history_block_pointers(feed,ticker,calendar_year,block_id) VALUES('sip','A',2025,?)").bind(block.id).run();
+      await history.db.prepare("UPDATE market_history_blocks SET verified_at=? WHERE id=?").bind(stamp,block.id).run();
+      oldBlockId=block.id;
+    }
     const captures=[];
     for(const db of [source,target,history]) {const fence=await prepareStorageSourceFence(db.db);db.script(fence.statements.map(row=>row.sql).join("\n"));
       captures.push(await freezeStorageSource(db.db,identity,fence.schemaHash,now));}
@@ -55,9 +68,11 @@ export async function seedStorageIndexRecovery(
     await ops.db.prepare("INSERT INTO eod_rollout_evidence VALUES(?,?,?)").bind(`storage-preflight:${identity.id}`,JSON.stringify({...preflight,tickers,calendarDates:[identity.sessionDate]}),stamp).run();
     await authorizeStorageMigrationFreeze(ops.db,identity.id,{sourceDatabaseId:identity.sourceDatabaseId,codeRevision:from,schemaHash,evidenceHash:preflight.hash},now);
     const owner=(await claimStorageMigration(ops.db,identity.id,{now}))!;await recordStorageSourceCapture(ops.db,identity.id,owner.leaseToken,sourceCapture,now);
-    const baselineHash="e".repeat(64),originalCopyCaptureHash=await storageHash([identity,sourceCapture,targetCapture,historyCapture,baselineHash,"verification-v1"]);
+    const baseline=options.authenticBaseline?await captureStorageHistoryBaseline({ops:ops.db,run:(await loadStorageMigration(ops.db,identity.id))!,
+      leaseToken:owner.leaseToken,history:history.db,installHistoryFence:async statements=>{history.script(statements.join("\n"));}}):null;
+    const baselineHash=baseline?.hash??"e".repeat(64),originalCopyCaptureHash=await storageHash([identity,sourceCapture,targetCapture,historyCapture,baselineHash,"verification-v1"]);
     await saveStorageMigrationCheckpoint(ops.db,identity.id,owner.leaseToken,{key:"verification:complete",inputHash:originalCopyCaptureHash,
-      payload:{schemaVersion:1,verified:true,identity,sourceCapture,targetCapture,historyCapture,captureHash:originalCopyCaptureHash,archive:{baselineHash}}},now);
+      payload:{schemaVersion:1,verified:true,identity,sourceCapture,targetCapture,historyCapture,captureHash:originalCopyCaptureHash,archive:{baselineHash,...(baseline?{baselinePointerRows:baseline.pointerRows,baselineBlockRows:baseline.blockRows}:{})}}},now);
     const fields={identity,sourceCapture,targetCapture,historyCapture},capture={...fields,captureHash:await storageHash(fields)};
     const inputs:FrozenInputs={config:options.config ?? {} as FrozenInputs["config"],tickers,calendarDates:[identity.sessionDate,"2026-09-10"],methodologyVersion:EOD_METRICS_VERSION,
       memberships:["sp500","nasdaq100","nasdaq","russell2000","overall"].map(universeId=>({universeId,versionId:`v:${universeId}`,source:"official",sourceType:"official",
@@ -77,7 +92,7 @@ export async function seedStorageIndexRecovery(
     await ops.db.prepare("UPDATE market_storage_migrations SET status='awaiting-evidence' WHERE id=?").bind(identity.id).run();
     await releaseStorageVerificationFence(target.db,identity,targetCapture);await releaseStorageVerificationFence(history.db,identity,historyCapture);
     // These are legitimate partial bootstrap writes. Index repair must preserve them.
-    await history.db.prepare("UPDATE market_history_blocks SET verified_at=? WHERE id='old'").bind(stamp).run();
+    await history.db.prepare("UPDATE market_history_blocks SET verified_at=? WHERE id=?").bind(stamp,oldBlockId).run();
     await target.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('sip','QQQE','pending','expired-owner','2025-01-02',?)").bind(stamp).run();
     await ops.db.prepare(`INSERT INTO eod_runs(id,session_date,purpose,mode,status,stage,input_json,progress_json,error_code,error_message,next_attempt_at,created_at,updated_at)
       VALUES(?,'2026-09-10','daily','active','retrying','prices',?,?,'resource-budget',?,'2026-09-12T00:05:00.000Z',?,?)`)
@@ -100,5 +115,5 @@ export async function seedStorageIndexRecovery(
       changedFiles:["worker/history-migrations/0003_history_pointer_indexes.sql"],diffHash:"f".repeat(64),codeContract:validateStorageHistoryIndexCodeTrees(codeInput()),
       assertReviewedCheckout:vi.fn(async()=>undefined),assertNoWorkflowWriters:vi.fn(async()=>undefined),now,
       measurePhysical:async()=>({targetBytes:await bytes(target.db),historyBytes:await bytes(history.db),measuredAt:stamp})};
-    return {input,plan,eodId};
+    return {input,plan,eodId,analysis,snapshotSource};
   }

@@ -3,6 +3,7 @@ import { captureStorageHistoryBaseline, runStorageVerification, assertStorageVer
   releaseStorageVerificationFence, releaseStorageHistoryVerificationFence, freezeStorageVerificationTarget, type StorageVerificationEvidence } from "./market-storage-verification";
 import { verifyStorageConsumerBatch, validateStorageConsumerEvidence, type StorageConsumerCheckpoint,
   type StorageConsumerEvidence } from "./market-storage-acceptance";
+import { loadStoragePlanConsumerProof } from "./market-storage-consumer-composite";
 import { loadStorageMigrationCheckpoint, pauseStorageMigration, progressStorageMigration, queueStorageMigrationStage,
   saveStorageMigrationCheckpoint, storageMigrationIdentity, heartbeatStorageMigration, type StorageMigrationRun } from "./market-storage-control";
 import { storageHash } from "./market-storage-pages";
@@ -167,7 +168,8 @@ export async function runStoragePipeline(input: {
     throw new Error("storage-run-time-slice-complete");
   }
   if (consumers.inputHash !== capture.captureHash) throw new Error("storage-consumer-capture-mismatch");
-  await validateStorageConsumerEvidence(consumers.payload as StorageConsumerEvidence, capture, plan.tickers);
+  if (plan.populationExpansionHash) await loadStoragePlanConsumerProof(ops, run, plan);
+  else await validateStorageConsumerEvidence(consumers.payload as StorageConsumerEvidence, capture, plan.tickers);
   const bootstrap = await load("bootstrap:owner");
   const expected = await expectedEodSession(env);
   if (!expected) throw new Error("storage-bootstrap-calendar-unavailable");
@@ -205,6 +207,18 @@ export async function runStoragePipeline(input: {
           throw new Error("storage-population-verified-memberships-required");
         }
         if (await storageHash([...nextInputs.tickers].sort())!==await storageHash(plan.tickers)) {
+          const added = nextInputs.tickers.filter(ticker => !plan.tickers.includes(ticker));
+          if (!plan.populationExpansionHash && added.length > 0 && added.length <= 100
+            && plan.tickers.every(ticker => nextInputs.tickers.includes(ticker))
+            && await storageHash(nextInputs.config) === await storageHash(plan.inputs.config)) {
+            await pauseStorageMigration(ops, run.id, leaseToken, "storage-population-expansion-required", {
+              previousPlanHash: plan.planHash, completedSession: owner.sessionDate, expectedSession: expected,
+              previousTickerCount: plan.tickers.length, nextTickerCount: nextInputs.tickers.length,
+              addedTickers: [...added].sort(), nextInputsHash: await storageHash(nextInputs),
+              sourcePreserved: true, publicBindingChanged: false,
+            });
+            return "awaiting-evidence";
+          }
           throw new Error("storage-population-live-recapture-required");
         }
         await storeStoragePopulationPlan(ops,run,{inputs:nextInputs,capture:plan.capture,

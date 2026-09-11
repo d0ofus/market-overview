@@ -17,7 +17,8 @@ import { loadEodInputs } from "../src/eod-runner";
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
 import { prepareStorageSourceFence, assertStorageSourceFrozen } from "../src/market-storage-fence";
 import { storageHash } from "../src/market-storage-pages";
-import { verifyStorageAcceptedPublications, collectStoragePublicationGrowthSamples, type StorageAcceptanceCapture, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
+import { loadStoragePlanConsumerProof } from "../src/market-storage-consumer-composite";
+import { verifyStorageAcceptedPublications, collectStoragePublicationGrowthSamples, type StorageAcceptanceCapture } from "../src/market-storage-acceptance";
 import { buildStorageCutoverEvidence, storeStorageCutoverProof } from "../src/market-storage-cutover-evidence";
 import { storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
 import { refreshHistoryMaintenanceEvidence } from "../src/eod-history-capacity";
@@ -121,8 +122,7 @@ async function main():Promise<void> {
     const buildProof=async (runId:string,tickers:string[],expected:string,sourceSnapshotSha256:string) => {
       const plan=await loadStorageValidationPlan(meteredOps,existing);
       const capture={inputHash:plan.capture.captureHash,payload:plan.capture};
-      const consumers=await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete");
-      if(!capture || !consumers || capture.inputHash!==consumers.inputHash)throw new Error("storage-reader-verification-required");
+      const consumers=await loadStoragePlanConsumerProof(meteredOps,existing,plan);
       const captured=capture.payload as StorageAcceptanceCapture;
       if(capture.inputHash!==captured.captureHash || captured.sourceCapture.schemaHash!==existing.source_schema_hash
         || captured.sourceCapture.revision!==existing.source_revision)throw new Error("storage-reader-source-capture-mismatch");
@@ -131,7 +131,7 @@ async function main():Promise<void> {
       }
       const runtime=await collectAuthenticatedRuntime(runId,tickers,expected,plan.planHash),analysis=file("EOD_STORAGE_ANALYSIS_PATH");
       const built=await buildStorageCutoverEvidence({env,identity:storageMigrationIdentity(existing),runId,tickers,expectedSession:expected,
-        capture:captured,consumers:consumers.payload as StorageConsumerEvidence,
+        capture:captured,consumers,
         analysis,publicationGrowth:file("EOD_STORAGE_PUBLICATION_GROWTH_PATH"),sourceSnapshotSha256,
         runtime,runtimeIdentity:runtime.identity,assertSourceCapture:assertOriginalCapture,validationPlanHash:plan.planHash});
       return {...built,runtime,analysis,capture,consumers};
@@ -236,7 +236,7 @@ async function main():Promise<void> {
       console.log(JSON.stringify({id,status:"authorized-for-relocation",hotSessions:prepared.evidence.hotSessions,publicCutover:false}));return;
     }
     if(command==="reconstruct") {
-      if(!await loadStorageMigrationCheckpoint(meteredOps,id,"consumer-parity:complete"))throw new Error("storage-verified-bootstrap-required");
+      await loadStoragePlanConsumerProof(meteredOps,existing,await loadStorageValidationPlan(meteredOps,existing));
       const result=await meteredOps.prepare("UPDATE market_storage_migrations SET status='queued',stage='bootstrap',error_code=NULL,next_attempt_at=?,updated_at=? WHERE id=? AND status IN ('awaiting-evidence','awaiting-cutover') AND (lease_until IS NULL OR lease_until<=?)")
         .bind(new Date().toISOString(),new Date().toISOString(),id,new Date().toISOString()).run();
       if(!result.meta.changes)throw new Error("storage-reconstruct-transition-conflict");
@@ -270,7 +270,7 @@ async function main():Promise<void> {
           .bind(JSON.stringify(proof),new Date().toISOString()).run();
         await assertEodCutover(env,codeRevision);
         await storeStorageHistoryMaintenanceApproval(env,{capacity,analysis,publications,tickers:plan.tickers,
-          capture:capture.payload as StorageAcceptanceCapture,consumers:consumers.payload as StorageConsumerEvidence});
+          capture:capture.payload as StorageAcceptanceCapture,consumers});
         await refreshHistoryMaintenanceEvidence(env,{tickers:plan.tickers,codeRevision});
         const storageProof=await storeStorageCutoverProof(meteredOps,{identity:storageExecutionIdentity(claimed.run),proof,provenance});
         const evidence={version:1,publications,capacity,runtimeEvidenceHash:runtime.evidenceHash,cutoverProofHash:storageProof.record.proofHash,

@@ -10,6 +10,11 @@ import { buildStorageCutoverEvidence, collectStorageCutoverUsage, storeStorageCu
 import type { Env } from "../src/types";
 import { createStorageMigration } from "../src/market-storage-control";
 import { storageExecutionKey } from "../src/market-storage-execution";
+import { composeStorageConsumerProof, storagePopulationCompositeKey, storagePopulationExpansionKey } from "../src/market-storage-consumer-composite";
+import { storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
+import type { FrozenInputs } from "../src/eod-runner";
+import type { StoragePopulationPlan } from "../src/market-storage-population-plan";
+import type { StoragePopulationExpansionRecord } from "../src/market-storage-population-expansion";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -168,6 +173,64 @@ describe("actual-evidence storage cutover builder", () => {
     await expect(buildStorageCutoverEvidence({ ...input, consumers: stale })).rejects.toThrow("current archive parity");
     await market.db.prepare("UPDATE eod_input_clock SET revision=revision+1 WHERE id='default'").run();
     await expect(buildStorageCutoverEvidence(input)).rejects.toThrow("publication-inputs-changed");
+  }, 30_000);
+  it("accepts a stored disjoint proof downstream without redating the original parity or mutating accepted publications", async () => {
+    const input = await fixture();
+    await createStorageMigration(ops.db, identity);
+    const baseline = (await verifyStorageConsumerBatch({ sourceEnv: env, targetEnv: env, capture,
+      tickers: ["AAA"], calendarDates: [identity.sessionDate], assertCapture: async () => {}, maxTickers: 1 })).evidence!;
+    const deltaFields = { identity, sourceCapture: capture.sourceCapture,
+      targetCapture: { ...capture.targetCapture, revision: 1 }, historyCapture: { ...capture.historyCapture, revision: 1 } };
+    const deltaCapture = { ...deltaFields, captureHash: await eodHash(deltaFields) };
+    const delta = (await verifyStorageConsumerBatch({ sourceEnv: env, targetEnv: env, capture: deltaCapture,
+      tickers: ["NONE"], calendarDates: [identity.sessionDate], assertCapture: async () => {}, maxTickers: 1 })).evidence!;
+    const originalParityBytes = JSON.stringify(baseline), stamp = new Date().toISOString();
+    const frozen = JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    const parentFields = { version: 1 as const, codeRevision: identity.codeRevision, sourcePreflightHash: "1".repeat(64),
+      sourceSnapshotHash: input.sourceSnapshotSha256, originalCopyCaptureHash: "2".repeat(64), createdAt: baseline.completedAt,
+      sessionDate: identity.sessionDate, inputs: { ...frozen, tickers: ["AAA"], calendarDates: [identity.sessionDate] },
+      capture, tickers: ["AAA"], calendarDates: [identity.sessionDate] };
+    const parent: StoragePopulationPlan = { ...parentFields, planHash: await eodHash(parentFields) };
+    const absenceFields = { version: 1 as const, migrationId: identity.id, addedTickerHash: await eodHash(["NONE"]),
+      baselineHash: "3".repeat(64), baselineCaptureHash: "4".repeat(64), pointerRows: 0, pointerPages: 1,
+      pointerHash: "5".repeat(64), blockRows: 0, blockPages: 1, blockHash: "6".repeat(64), checkedAt: stamp };
+    const recordFields = { version: 1 as const, policy: "append-only-population-delta-v1" as const,
+      migrationId: identity.id, codeRevision: identity.codeRevision, previousPlanHash: parent.planHash,
+      previousConsumerProofHash: baseline.evidenceHash, previousTickerHash: await eodHash(parent.tickers), addedTickers: ["NONE"],
+      nextTickerHash: await eodHash(tickers), nextInputsHash: await eodHash(frozen), sessionDate: identity.sessionDate,
+      originalCopyCaptureHash: parent.originalCopyCaptureHash, sourceSnapshotHash: input.sourceSnapshotSha256,
+      sourceAbsence: { ...absenceFields, evidenceHash: await eodHash(absenceFields) }, deltaCapture,
+      deltaEvidenceHash: delta.evidenceHash, sizingHash: "7".repeat(64), createdAt: stamp };
+    const record: StoragePopulationExpansionRecord = { ...recordFields, evidenceHash: await eodHash(recordFields) };
+    const consumers = await composeStorageConsumerProof({ capture, baselineTickers: parent.tickers, baseline,
+      deltaCapture, addedTickers: ["NONE"], delta, expansionHash: record.evidenceHash, now: new Date(stamp) });
+    await ops.db.prepare("INSERT INTO market_storage_checkpoints VALUES(?,?,?,?,?)")
+      .bind(identity.id, "consumer-parity:complete", capture.captureHash, originalParityBytes, baseline.completedAt).run();
+    for (const [id, value] of [
+      [`storage-population-plan:${identity.id}:${parent.planHash}`, parent],
+      [storagePopulationExpansionKey(record.evidenceHash), record],
+      [storagePopulationCompositeKey(record.evidenceHash), consumers],
+    ] as const) await ops.db.prepare("INSERT INTO eod_rollout_evidence VALUES(?,?,?)").bind(id, JSON.stringify(value), stamp).run();
+    const publicationBytes = JSON.stringify((await market.db.prepare("SELECT * FROM eod_publications ORDER BY id").all()).results);
+    const built = await buildStorageCutoverEvidence({ ...input, consumers });
+    expect(built.provenance.consumerEvidenceHash).toBe(consumers.evidenceHash);
+    expect(built.proof.sharedTickers).toEqual({ count: 2, processed: 2 });
+    expect(built.proof.readers.checkedAt).toBe(baseline.completedAt);
+    for (let day = 9; day <= 28; day++) await market.db.prepare(
+      "INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source) VALUES(?,'09:30','16:00','fixture')")
+      .bind(`2026-09-${String(day).padStart(2, "0")}`).run();
+    const approval = await storeStorageHistoryMaintenanceApproval(env, { capacity: built.capacity, analysis: input.analysis,
+      publications: built.publications, consumers, capture, tickers });
+    expect(approval.proof).toMatchObject({ consumerProofHash: consumers.evidenceHash, tickers,
+      readers: { checkedAt: baseline.completedAt }, model: { measuredAt: input.analysis.measuredAt } });
+    expect(await ops.db.prepare("SELECT payload_json FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='consumer-parity:complete'")
+      .bind(identity.id).first<string>("payload_json")).toBe(originalParityBytes);
+    expect(JSON.stringify((await market.db.prepare("SELECT * FROM eod_publications ORDER BY id").all()).results)).toBe(publicationBytes);
+    await ops.db.prepare("DELETE FROM eod_rollout_evidence WHERE id=?").bind(storagePopulationExpansionKey(record.evidenceHash)).run();
+    await expect(buildStorageCutoverEvidence({ ...input, consumers })).rejects.toThrow("record-missing");
+    await expect(storeStorageHistoryMaintenanceApproval(env, { capacity: built.capacity, analysis: input.analysis,
+      publications: built.publications, consumers, capture, tickers })).rejects.toThrow("record-missing");
   }, 30_000);
   it("requires current account telemetry and counts outstanding reservations without claiming they were billed", async () => {
     const date = new Date().toISOString().slice(0, 10);

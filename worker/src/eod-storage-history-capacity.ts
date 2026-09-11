@@ -1,7 +1,8 @@
 import { eodHash } from "./eod-publication-service";
 import { assertHistoryPruneEvidence, MARKET_HISTORY_REQUIRED_CONSUMERS, type HistoryCapacityEvidence, type HistoryReaderEvidence } from "./eod-history-maintenance";
-import { validateStorageConsumerEvidence, type StorageAcceptanceCapture, type StorageConsumerEvidence, type StoragePublicationEvidence,
+import { type StorageAcceptanceCapture, type StoragePublicationEvidence,
   type validateStorageCapacityAnalysis } from "./market-storage-acceptance";
+import { validateStorageConsumerProof, type StorageConsumerProof } from "./market-storage-consumer-composite";
 import type { Env } from "./types";
 import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
 import { resolveStorageExecutionIdentity } from "./market-storage-execution";
@@ -67,7 +68,7 @@ function cachedStatus(approved: Approval, measurement: Record<string, unknown> |
  * the finite horizon after it independently passes final acceptance again. */
 export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   capacity: AcceptedCapacity; analysis: unknown; publications: StoragePublicationEvidence;
-  consumers: StorageConsumerEvidence; capture: StorageAcceptanceCapture; tickers: string[]; now?: Date;
+  consumers: StorageConsumerProof; capture: StorageAcceptanceCapture; tickers: string[]; now?: Date;
 }): Promise<Approval> {
   if (!env.OPS_DB || !env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB) fail("bindings-missing");
   const now = input.now ?? new Date(), tickers = population(input.tickers), storageIdentity = input.capture.identity;
@@ -75,7 +76,7 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   const identity = execution.identity;
   if (env.EOD_CODE_REVISION !== identity.codeRevision || new Set(tickers).size !== tickers.length
     || !tickers.length || tickers.length > 10_000) fail("identity-mismatch");
-  await validateStorageConsumerEvidence(input.consumers, input.capture, tickers);
+  await validateStorageConsumerProof(input.consumers, input.capture, tickers, env.OPS_DB);
   const { evidenceHash, ...unsignedPublications } = input.publications;
   if (await eodHash(unsignedPublications) !== evidenceHash || input.publications.tickerHash !== await eodHash(tickers)
     || await eodHash(input.publications.identity) !== await eodHash(identity)) fail("publication-evidence-mismatch");

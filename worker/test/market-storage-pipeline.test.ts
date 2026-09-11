@@ -34,7 +34,7 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
   let input:Parameters<typeof runStoragePipeline>[0],capture:StorageVerificationEvidence;
   let query:ReturnType<typeof vi.fn>;
   let plan:{planHash:string;predecessorPlanHash?:string;sessionDate:string;capture:StorageVerificationEvidence;tickers:string[];
-    calendarDates:string[];originalCopyCaptureHash:string;bootstrapInputs:Record<string,unknown>};
+    calendarDates:string[];originalCopyCaptureHash:string;bootstrapInputs:Record<string,unknown>;inputs:{config:Record<string,unknown>}};
   const planHash="9".repeat(64);
   beforeEach(async()=>{
     vi.useFakeTimers();vi.setSystemTime("2026-09-09T22:30:00Z");
@@ -61,11 +61,11 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
       bootstrapEnv:{DB:core,MARKET_DATA_DB:target,MARKET_HISTORY_DB:history,OPS_DB:ops,EOD_RUNNER_MODE:"active",EOD_ARCHIVE_PRUNE_ENABLED:"false"} as Env,
       bootstrapFailureDb:{} as D1Database};
     plan={planHash,sessionDate:"2026-09-09",capture,tickers:["SPY"],calendarDates:record.calendarDates,
-      originalCopyCaptureHash:capture.captureHash,bootstrapInputs:{tickers:["SPY"]}};
+      originalCopyCaptureHash:capture.captureHash,bootstrapInputs:{tickers:["SPY"]},inputs:{config:{}}};
     mocks.plan.mockImplementation(async()=>plan);mocks.validationPlan.mockImplementation(async()=>plan);
     mocks.indexAmendment.mockResolvedValue(null);
     mocks.freeze.mockResolvedValue(capture.targetCapture);
-    mocks.inputs.mockResolvedValue({tickers:["SPY"],calendarDates:["2026-09-08","2026-09-09"],memberships:
+    mocks.inputs.mockResolvedValue({config:{},tickers:["SPY"],calendarDates:["2026-09-08","2026-09-09"],memberships:
       ["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map(universeId=>({
         universeId,versionId:universeId,sourceType:universeId==="sp500-core" ? "wikipedia-derived-public-proxy"
           : universeId==="russell2000-core" ? "official-etf-holdings-proxy" : "public-common-stock-proxy",
@@ -204,6 +204,31 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     expect(checkpoints.get("bootstrap:owner")?.payload).toEqual(previous);
     expect(checkpoints.has("bootstrap:complete")).toBe(false);
     expect(mocks.queue).toHaveBeenCalledWith(input.ops,identity.id,"lease","storage-latest-bootstrap-required",expect.objectContaining({completedSession:previous.sessionDate}));
+  });
+  it("pauses an append-only next-session population before replacing its completed owner or invoking prices",async()=>{
+    ready();plan.sessionDate="2026-09-08";
+    const owned=owner(),oldRun={status:"completed",session_date:owned.sessionDate,mode:"active",purpose:"daily"};
+    checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:owned});runs.set(owned.runId,oldRun);
+    const next=await mocks.inputs();mocks.inputs.mockResolvedValue({...next,tickers:["SPY","NEW"]});
+    const original=structuredClone(checkpoints.get("consumer-parity:complete"));
+    expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
+    expect(mocks.pause).toHaveBeenCalledWith(input.ops,identity.id,"lease","storage-population-expansion-required",
+      expect.objectContaining({previousPlanHash:planHash,previousTickerCount:1,nextTickerCount:2,addedTickers:["NEW"],
+        completedSession:"2026-09-08",expectedSession:"2026-09-09"}));
+    expect(checkpoints.get("consumer-parity:complete")).toEqual(original);
+    expect(checkpoints.get("bootstrap:owner")).toEqual({inputHash:planHash,payload:owned});
+    expect(runs.get(owned.runId)).toEqual(oldRun);
+    expect(mocks.storePlan).not.toHaveBeenCalled();expect(mocks.consumer).not.toHaveBeenCalled();
+    expect(mocks.batch).not.toHaveBeenCalled();expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+  it.each(["removed-member","changed-config"])("keeps %s outside the bounded append continuation",async reason=>{
+    ready();plan.sessionDate="2026-09-08";
+    const owned=owner();checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:owned});
+    runs.set(owned.runId,{status:"completed",session_date:owned.sessionDate,mode:"active",purpose:"daily"});
+    const next=await mocks.inputs();mocks.inputs.mockResolvedValue({...next,
+      tickers:reason==="removed-member" ? ["NEW"] : ["SPY","NEW"],config:reason==="changed-config" ? {changed:true} : {}});
+    await expect(runStoragePipeline(input)).rejects.toThrow("storage-population-live-recapture-required");
+    expect(mocks.pause).not.toHaveBeenCalled();expect(mocks.storePlan).not.toHaveBeenCalled();expect(mocks.batch).not.toHaveBeenCalled();
   });
   it("rejects collisions with unrelated active runs instead of taking their ownership",async()=>{
     ready();runs.set("eod:active:2026-09-09:daily",{id:"eod:active:2026-09-09:daily"});

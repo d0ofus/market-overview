@@ -6,8 +6,9 @@ import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec
 import { eodHash } from "./eod-publication-service";
 import { validateEodCutoverEvidence, type EodCutoverEvidence } from "./eod-rollout-service";
 import { validateRuntimeEvidence, type RuntimeEvidence, type RuntimeEvidenceIdentity } from "./eod-runtime-evidence";
-import { validateStorageCapacityAnalysis, validateStorageConsumerEvidence, verifyStorageAcceptedPublications,
-  type StorageAcceptanceCapture, type StorageConsumerEvidence } from "./market-storage-acceptance";
+import { validateStorageCapacityAnalysis, verifyStorageAcceptedPublications,
+  type StorageAcceptanceCapture } from "./market-storage-acceptance";
+import { validateStorageConsumerProof, type StorageConsumerProof } from "./market-storage-consumer-composite";
 import type { StorageMigrationIdentity } from "./market-storage-control";
 import { resolveStorageExecutionIdentity } from "./market-storage-execution";
 import type { Env } from "./types";
@@ -64,7 +65,7 @@ export async function collectStorageCutoverUsage(ops: D1Database, now = new Date
  * private bootstrap, whose current accepted publications are checked here. */
 export async function buildStorageCutoverEvidence(input: {
   env: Env; identity: StorageMigrationIdentity; runId: string; tickers: readonly string[]; expectedSession: string;
-  capture: StorageAcceptanceCapture; consumers: StorageConsumerEvidence; analysis: unknown; publicationGrowth: unknown;
+  capture: StorageAcceptanceCapture; consumers: StorageConsumerProof; analysis: unknown; publicationGrowth: unknown;
   sourceSnapshotSha256: string; runtime: RuntimeEvidence; runtimeIdentity: RuntimeEvidenceIdentity;
   assertSourceCapture: () => Promise<void>; validationPlanHash?: string; now?: Date;
 }) {
@@ -79,7 +80,7 @@ export async function buildStorageCutoverEvidence(input: {
     || resolveEodBudgetProfile(input.runtimeIdentity.budgetProfile).name !== profile.name
     || await eodHash(input.capture.identity) !== await eodHash(input.identity)) fail("identity-mismatch");
   await input.assertSourceCapture();
-  await validateStorageConsumerEvidence(input.consumers, input.capture, input.tickers);
+  await validateStorageConsumerProof(input.consumers, input.capture, input.tickers, env.OPS_DB);
   const runtime = await validateRuntimeEvidence(input.runtime, input.runtimeIdentity);
   const runtimeAge = now.getTime() - runtime.window.to, collectedAge = now.getTime() - Date.parse(runtime.collectedAt);
   if (runtimeAge < 0 || runtimeAge > 86_400_000 || collectedAge < 0 || collectedAge > 300_000) fail("runtime-evidence-expired");

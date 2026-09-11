@@ -11,7 +11,7 @@ export type StoragePopulationPlan = {
   version: 1; planHash: string; codeRevision: string; sourcePreflightHash: string; sourceSnapshotHash: string;
   originalCopyCaptureHash: string; createdAt: string; sessionDate: string; inputs: FrozenInputs;
   capture: StorageAcceptanceCapture; tickers: string[]; calendarDates: string[];
-  predecessorPlanHash?: string;
+  predecessorPlanHash?: string; populationExpansionHash?: string;
 };
 export type StorageValidationPlan = StoragePopulationPlan & { bootstrapInputs: FrozenInputs; sizingHash: string };
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -56,9 +56,13 @@ async function assertPlan(ops:D1Database,run:StorageMigrationRun,plan:StoragePop
     || await storageHash(proof.identity)!==await storageHash(storageMigrationIdentity(run))
     || await storageHash(proof.sourceCapture)!==await storageHash(plan.capture.sourceCapture)
     || proof.captureHash!==await storageHash([proof.identity,proof.sourceCapture,proof.targetCapture,proof.historyCapture,proof.archive.baselineHash,"verification-v1"])) fail("original-copy-proof-mismatch");
+  if (plan.populationExpansionHash !== undefined) {
+    const { validateStoragePopulationExpansionPlan } = await import("./market-storage-population-expansion");
+    await validateStoragePopulationExpansionPlan(ops, run, plan);
+  }
 }
 type Sizing = {version:number;planHash:string;prepared:Awaited<ReturnType<typeof prepareStoragePreflight>>};
-async function assertSizing(run:StorageMigrationRun,plan:StoragePopulationPlan,sizing:Sizing|null):Promise<Sizing> {
+export async function assertStoragePopulationSizing(run:StorageMigrationRun,plan:StoragePopulationPlan,sizing:Sizing|null):Promise<Sizing> {
   const evidence=sizing?.prepared?.evidence;
   if (!sizing || sizing.version!==1 || sizing.planHash!==plan.planHash || !evidence
     || await storageHash(evidence)!==sizing.prepared.hash || evidence.version!==1 || evidence.purpose!=="relocation-preflight"
@@ -89,14 +93,15 @@ export async function storeStoragePopulationPlan(ops: D1Database, run: StorageMi
       || previous.originalCopyCaptureHash!==input.originalCopyCaptureHash || previous.sourceSnapshotHash!==preflight.evidence.sourceSnapshotHash
       || await storageHash(previous.tickers)!==await storageHash([...input.inputs.tickers].sort())
       || previous.sessionDate>=(input.inputs.calendarDates.at(-1) ?? "")) fail("predecessor-mismatch");
-    inherited=await assertSizing(run,previous,await read<Sizing>(ops,`storage-population-sizing:${previous.planHash}`));
+    inherited=await assertStoragePopulationSizing(run,previous,await read<Sizing>(ops,`storage-population-sizing:${previous.planHash}`));
   }
   const unsigned = { version: 1 as const, codeRevision: storageExecutionRevision(run), sourcePreflightHash: preflight.hash,
     sourceSnapshotHash: preflight.evidence.sourceSnapshotHash, originalCopyCaptureHash: input.originalCopyCaptureHash,
     createdAt: now.toISOString(), sessionDate: input.inputs.calendarDates.at(-1)!, inputs: input.inputs, capture: input.capture,
     tickers: [...input.inputs.tickers].sort(), calendarDates: inherited ? [...previous!.calendarDates]
       : input.inputs.calendarDates.filter((date) => date <= run.session_date),
-    ...(input.predecessorPlanHash ? {predecessorPlanHash:input.predecessorPlanHash} : {}) };
+    ...(input.predecessorPlanHash ? {predecessorPlanHash:input.predecessorPlanHash} : {}),
+    ...(inherited && previous?.populationExpansionHash ? {populationExpansionHash:previous.populationExpansionHash} : {}) };
   const plan: StoragePopulationPlan = { ...unsigned, planHash: await storageHash(unsigned) }; assertInputs(plan);
   if (await storageHash(input.capture.identity) !== await storageHash(storageMigrationIdentity(run))
     || input.capture.sourceCapture.schemaHash !== run.source_schema_hash || input.capture.sourceCapture.revision !== run.source_revision) fail("source-capture-conflict");
@@ -119,7 +124,7 @@ export async function storeStoragePopulationPlan(ops: D1Database, run: StorageMi
   ]);
   if (results[1].results.length !== 1) fail("lease-lost");
   if(await storageHash(await read(ops,key(run,plan.planHash)))!==await storageHash(plan)) fail("record-write-conflict");
-  if(inherited && (await assertSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`))).prepared.hash!==inherited.prepared.hash) fail("sizing-conflict");
+  if(inherited && (await assertStoragePopulationSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`))).prepared.hash!==inherited.prepared.hash) fail("sizing-conflict");
   return plan;
 }
 export async function loadStoragePopulationPlan(ops: D1Database, run: StorageMigrationRun): Promise<StoragePopulationPlan | null> {
@@ -141,19 +146,19 @@ export async function approveStoragePopulationSizing(ops: D1Database, run: Stora
   const existing=await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`);
   // An acknowledged immutable approval remains the same physical measurement.
   // Re-running the local analyzer after a lost response cannot redate it.
-  if(existing) return (await assertSizing(run,plan,existing)).prepared.hash;
+  if(existing) return (await assertStoragePopulationSizing(run,plan,existing)).prepared.hash;
   const prepared = await prepareStoragePreflight({ ...input, identity:storageMigrationIdentity(run),tickers:plan.tickers,
     sourceSchemaHash:run.source_schema_hash!,hotSessions:90 });
   if (prepared.evidence.sourceSnapshotHash !== plan.sourceSnapshotHash || prepared.evidence.hotSessions !== 90) fail("sizing-identity-or-retention");
   const record = {version:1,planHash:plan.planHash,prepared}, payload=JSON.stringify(record);
   await ops.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")
     .bind(`storage-population-sizing:${plan.planHash}`,payload,(input.now ?? new Date()).toISOString()).run();
-  const stored=await assertSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`));
+  const stored=await assertStoragePopulationSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`));
   if((await loadStoragePopulationPlan(ops,run))?.planHash!==plan.planHash) fail("sizing-plan-changed");
   return stored.prepared.hash;
 }
 export async function loadStorageValidationPlan(ops: D1Database, run: StorageMigrationRun): Promise<StorageValidationPlan> {
   const plan = await loadStoragePopulationPlan(ops,run); if (!plan) fail("plan-required");
-  const sizing = await assertSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`));
+  const sizing = await assertStoragePopulationSizing(run,plan,await read<Sizing>(ops,`storage-population-sizing:${plan.planHash}`));
   return {...plan,bootstrapInputs:plan.inputs,sizingHash:sizing.prepared.hash};
 }

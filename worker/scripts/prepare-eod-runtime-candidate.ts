@@ -12,7 +12,8 @@ import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
 import { validateStorageValidationBootstrap } from "../src/market-storage-validation-consumers";
 import { assertStorageVerificationCapture, type StorageVerificationEvidence } from "../src/market-storage-verification";
-import { validateStorageConsumerEvidence, verifyStorageAcceptedPublications, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
+import { verifyStorageAcceptedPublications } from "../src/market-storage-acceptance";
+import { loadStoragePlanConsumerProof } from "../src/market-storage-consumer-composite";
 import { storageHash } from "../src/market-storage-pages";
 import { buildRuntimeEvidence, collectRuntimeEvidence, validateRuntimeEvidence, type RuntimeEvidenceIdentity } from "../src/eod-runtime-evidence";
 import { buildRuntimeTailEvidence, claimRuntimeTailAttempt, loadRuntimeTailReceipt, RUNTIME_TAIL_ROUTES,
@@ -67,9 +68,7 @@ async function main(): Promise<void> {
         || await storageHash(capture.identity) !== await storageHash(captureIdentity) || capture.sourceCapture.schemaHash !== current.source_schema_hash
         || capture.sourceCapture.revision !== current.source_revision || capture.captureHash !== plan.originalCopyCaptureHash) throw new Error("runtime-candidate-whole-copy-required");
       await assertStorageVerificationCapture(source, captureIdentity, capture.sourceCapture);
-      const parity = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "consumer-parity:complete");
-      if (!parity || parity.inputHash !== plan.capture.captureHash) throw new Error("runtime-candidate-consumer-parity-required");
-      await validateStorageConsumerEvidence(parity.payload as StorageConsumerEvidence, plan.capture, plan.tickers);
+      await loadStoragePlanConsumerProof(env.OPS_DB!, current, plan);
       const complete = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "bootstrap:complete"), owner = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "bootstrap:owner");
       const expected = await expectedEodSession(env);
       if (!expected || (session && session !== expected)) throw new Error("runtime-candidate-completed-latest-bootstrap-required");
