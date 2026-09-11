@@ -148,6 +148,12 @@ export function EodOperationsPanel() {
             <p className="text-slate-400">Forecast covers {data.storageCapacity.forecastSessions} sessions through {data.storageCapacity.forecastLastSession}; expires {timestamp(data.storageCapacity.horizonExpiresAt)}.</p>
             <p className="text-slate-400">Checked: {timestamp(data.storageCapacity.checkedAt)}</p>
             {data.storageCapacity.error ? <p className="text-amber-300">{data.storageCapacity.error}</p> : null}
+            {data.storageCapacity.renewal ? <div className="mt-2 border-t border-borderSoft/60 pt-2">
+              <p className="font-medium">Capacity renewal: {data.storageCapacity.renewal.status}{data.storageCapacity.renewal.stage ? ` (${data.storageCapacity.renewal.stage})` : ""}</p>
+              <p className="text-slate-400">Updated: {timestamp(data.storageCapacity.renewal.updatedAt)}</p>
+              {data.storageCapacity.renewal.nextAttemptAt ? <p className="text-slate-400">Retry eligible after: {timestamp(data.storageCapacity.renewal.nextAttemptAt)}</p> : null}
+              {data.storageCapacity.renewal.error ? <p className="text-amber-300">{data.storageCapacity.renewal.error}</p> : null}
+            </div> : null}
           </div> : null}
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">

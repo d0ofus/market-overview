@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import { parse } from "smol-toml";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { loadStorageMigration, storageMigrationIdentity, storageExecutionRevision } from "../src/market-storage-control";
+import { loadStorageMigration, storageMigrationIdentity, storageExecutionIdentity, storageExecutionRevision } from "../src/market-storage-control";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
+import { validateStorageActivationState } from "../src/market-storage-activate-once";
+import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
+import { assertStorageAcceptedValidationPlan } from "../src/market-storage-validation-consumers";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
 import { storeEodProductionConfiguration, validateEodProductionConfiguration } from "../src/eod-production-configuration";
 import { loadApprovedStorageHotSessions } from "../src/eod-storage-history-capacity";
@@ -57,8 +60,15 @@ async function main(): Promise<void> {
   try {
     const migration = await loadStorageMigration(ops, migrationId);
     if (!migration || migration.status !== "completed") throw new Error("storage-production-config-completed-migration-required");
-    await assertStorageExecutionRevision(ops,migration,storageExecutionRevision(migration));
+    const executionApproval = await assertStorageExecutionRevision(ops,migration,storageExecutionRevision(migration));
+    const validationPlan = await loadStorageValidationPlan(ops, migration), progress = object(JSON.parse(migration.progress_json));
+    if (typeof progress?.cutoverProofHash !== "string" || !/^[a-f0-9]{64}$/.test(progress.cutoverProofHash)) {
+      throw new Error("storage-production-config-source-proof-required");
+    }
+    const sourceProof = await readEvidence(`storage-cutover-proof:${progress.cutoverProofHash}`);
     const activation = await readEvidence("monitoring:public-activation"), codeApproval = await readEvidence(`active:${codeRevision}`);
+    await validateStorageActivationState({ identity: storageExecutionIdentity(migration), opsDatabaseId, executionApproval, validationPlan },
+      migration, await readEvidence(`active:${storageExecutionRevision(migration)}`), sourceProof, activation);
     const readBinding = (observed: ReturnType<typeof github>) => verifyStoragePublicBindings({ accountId, token: controlToken, workerName,
       identity: { ...storageMigrationIdentity(migration), codeRevision }, opsDatabaseId,
       githubMarketDatabaseId: observed.githubVariables.get("EOD_MARKET_DATABASE_ID") ?? "",
@@ -85,6 +95,7 @@ async function main(): Promise<void> {
       finalGithub = github(); binding = await readBinding(finalGithub);
     }
     assertCheckout();
+    await assertStorageAcceptedValidationPlan(await loadStorageValidationPlan(ops, migration), progress, sourceProof);
     const record = await validate();
     const stored = await storeEodProductionConfiguration(ops, record);
     console.log(JSON.stringify({ status: "recorded", ...stored }));

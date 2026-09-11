@@ -29,6 +29,7 @@ describe("relocation-only capacity preflight",()=>{
     const input=await fixture();input.analysis.retentionModels[0].database.physicalBytes=200_000_000;
     input.analysis.retentionModels[0].projectedBytes=200_000_000;
     expect((await prepareStoragePreflight(input)).evidence.hotSessions).toBe(260);
+    expect((await prepareStoragePreflight({...input,hotSessions:90})).evidence.hotSessions).toBe(90);
   });
   it("rejects incomplete snapshots, copied-row failures and mismatched identities",async()=>{
     const input=await fixture();input.analysis.source.capture.completeDeclared=false;

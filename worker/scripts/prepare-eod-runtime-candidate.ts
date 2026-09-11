@@ -9,7 +9,8 @@ import { expectedEodSession } from "../src/eod-coordinator";
 import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationIdentity, storageExecutionIdentity } from "../src/market-storage-control";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
-import { loadStoragePreflight } from "../src/market-storage-pipeline";
+import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
+import { validateStorageValidationBootstrap } from "../src/market-storage-validation-consumers";
 import { assertStorageVerificationCapture, type StorageVerificationEvidence } from "../src/market-storage-verification";
 import { validateStorageConsumerEvidence, verifyStorageAcceptedPublications, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
 import { storageHash } from "../src/market-storage-pages";
@@ -23,7 +24,7 @@ import type { Env } from "../src/types";
 const workerRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."), repoRoot = resolve(workerRoot, "..");
 const required = (key: string): string => { const value = process.env[key]?.trim(); if (!value) throw new Error(`runtime-candidate-missing:${key}`); return value; };
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
-type State = { version: 1; identity: CandidateIdentity; configHash: string; publicationHash: string; probeUntil: string; deploymentAttempted: boolean;
+type State = { version: 1; identity: CandidateIdentity; configHash: string; publicationHash: string; validationPlanHash: string; probeUntil: string; deploymentAttempted: boolean;
   secretsInstalled?: boolean; candidateCredentialHash?: string; workerVersion?: string; baseUrl?: string; samples?: CandidateProbeState };
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "run";
@@ -49,29 +50,27 @@ async function main(): Promise<void> {
       || initial.history_database_id !== historyId) throw new Error("runtime-candidate-migration-identity-conflict");
     await assertStorageExecutionRevision(env.OPS_DB!,initial,codeRevision);
     const captureIdentity = storageMigrationIdentity(initial), migration = storageExecutionIdentity(initial);
-    const eligible = async (session?: string): Promise<{ session: string; publicationHash: string }> => {
+    const eligible = async (session?: string): Promise<{ session: string; publicationHash: string; validationPlanHash: string }> => {
       const current = await loadStorageMigration(env.OPS_DB!, migrationId);
       if (!current) throw new Error("runtime-candidate-migration-missing");
       await assertStorageExecutionRevision(env.OPS_DB!,current,codeRevision);
       assertCandidateMigrationState(current, migration);
-      const preflight = await loadStoragePreflight(env.OPS_DB!, current);
+      const plan = await loadStorageValidationPlan(env.OPS_DB!, current);
       const verified = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "verification:complete"), capture = verified?.payload as StorageVerificationEvidence | undefined;
       if (!capture || capture.schemaVersion !== 1 || !capture.verified || capture.captureHash !== verified?.inputHash
         || await storageHash(capture.identity) !== await storageHash(captureIdentity) || capture.sourceCapture.schemaHash !== current.source_schema_hash
-        || capture.sourceCapture.revision !== current.source_revision) throw new Error("runtime-candidate-whole-copy-required");
+        || capture.sourceCapture.revision !== current.source_revision || capture.captureHash !== plan.originalCopyCaptureHash) throw new Error("runtime-candidate-whole-copy-required");
       await assertStorageVerificationCapture(source, captureIdentity, capture.sourceCapture);
       const parity = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "consumer-parity:complete");
-      if (!parity || parity.inputHash !== capture.captureHash) throw new Error("runtime-candidate-consumer-parity-required");
-      await validateStorageConsumerEvidence(parity.payload as StorageConsumerEvidence, capture, preflight.tickers);
+      if (!parity || parity.inputHash !== plan.capture.captureHash) throw new Error("runtime-candidate-consumer-parity-required");
+      await validateStorageConsumerEvidence(parity.payload as StorageConsumerEvidence, plan.capture, plan.tickers);
       const complete = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "bootstrap:complete"), owner = await loadStorageMigrationCheckpoint(env.OPS_DB!, migrationId, "bootstrap:owner");
-      const completed = complete?.payload as { runId?: string; sessionDate?: string; targetDatabaseId?: string } | undefined;
       const expected = await expectedEodSession(env);
-      if (!expected || !completed || complete?.inputHash !== capture.captureHash || owner?.inputHash !== capture.captureHash
-        || await storageHash(owner.payload) !== await storageHash(completed) || completed.targetDatabaseId !== targetId || completed.sessionDate !== expected
-        || completed.runId !== `eod:active:${expected}:daily` || (session && session !== expected)) throw new Error("runtime-candidate-completed-latest-bootstrap-required");
-      const publications = await verifyStorageAcceptedPublications({ env, identity: migration, runId: completed.runId, tickers: preflight.tickers, expectedSession: expected });
+      if (!expected || (session && session !== expected)) throw new Error("runtime-candidate-completed-latest-bootstrap-required");
+      const completed = await validateStorageValidationBootstrap(plan, { complete, owner, targetDatabaseId: targetId, expectedSession: expected });
+      const publications = await verifyStorageAcceptedPublications({ env, identity: migration, runId: completed.runId, tickers: plan.tickers, expectedSession: expected });
       await assertStorageVerificationCapture(source, captureIdentity, capture.sourceCapture);
-      return { session: expected, publicationHash: await runtimeCandidatePublicationHash(publications) };
+      return { session: expected, publicationHash: await runtimeCandidatePublicationHash(publications), validationPlanHash: plan.planHash };
     };
     const ready = await eligible();
     const identity = await runtimeCandidateIdentity({ migration, sessionDate: ready.session, opsDatabaseId: opsId, coreDatabaseId: coreId,
@@ -92,19 +91,21 @@ async function main(): Promise<void> {
     let state: State;
     if (savedState) {
       state = savedState;
-      if (state.version !== 1 || state.publicationHash !== ready.publicationHash || await storageHash(state.identity) !== await storageHash(identity)
+      if (state.version !== 1 || state.publicationHash !== ready.publicationHash || state.validationPlanHash !== ready.validationPlanHash || await storageHash(state.identity) !== await storageHash(identity)
         || !existsSync(configPath) || await storageHash(JSON.parse(readFileSync(configPath, "utf8"))) !== state.configHash) throw new Error("runtime-candidate-saved-config-integrity");
     } else {
       if (command === "collect") throw new Error("runtime-candidate-existing-deployment-required");
       const probeUntil = new Date(Date.now() + 2 * 3600_000).toISOString();
       const config = prepareRuntimeCandidateConfig(parse(readFileSync(resolve(workerRoot, "wrangler.toml"), "utf8")), identity,
         { mainPath: resolve(workerRoot, "src/index.ts"), probeUntil });
-      state = { version: 1, identity, configHash: await storageHash(config), publicationHash: ready.publicationHash, probeUntil, deploymentAttempted: false };
+      state = { version: 1, identity, configHash: await storageHash(config), publicationHash: ready.publicationHash,
+        validationPlanHash: ready.validationPlanHash, probeUntil, deploymentAttempted: false };
       writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", { flag: "wx", mode: 0o600 }); persist(state);
     }
     if (command === "prepare") { console.log(JSON.stringify({ status: "candidate-prepared", workerName: identity.workerName, configPath, session: ready.session })); return; }
     const assertSamePublications = async (): Promise<void> => {
-      if ((await eligible(identity.sessionDate)).publicationHash !== state.publicationHash) throw new Error("runtime-candidate-publications-changed-new-attempt-required");
+      const current = await eligible(identity.sessionDate);
+      if (current.publicationHash !== state.publicationHash || current.validationPlanHash !== state.validationPlanHash) throw new Error("runtime-candidate-publications-changed-new-attempt-required");
     };
     const api = async (path: string, allowMissing = false): Promise<Record<string, unknown> | null> => {
       const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });

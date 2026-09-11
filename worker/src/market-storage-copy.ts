@@ -24,7 +24,7 @@ const BLOCK_COLUMNS=`b.id,b.feed,b.ticker,b.calendar_year AS calendarYear,b.sche
   b.checksum,b.row_count AS rowCount,b.first_date AS firstDate,b.last_date AS lastDate,b.uncompressed_bytes AS uncompressedBytes,
   b.payload_base64 AS payloadBase64,b.verified_at AS verifiedAt`;
 
-export const STORAGE_ARCHIVE_BATCH_BLOCKS = 8;
+export const STORAGE_ARCHIVE_BATCH_BLOCKS = 16;
 type ArchiveCopyResult = {id:string;rows:number;checksum:string};
 
 /** Unlike an ingestion recheck, relocation preserves the exact frozen hot
@@ -41,7 +41,7 @@ export async function copyStorageArchiveBlocks(history:D1Database,incoming:Marke
   if (new Set(keys).size!==keys.length) throw new Error("storage-archive-duplicate-year");
   const oldRows=await history.batch<MarketHistoryBlock>(candidates.map((candidate) => history.prepare(
     `SELECT ${BLOCK_COLUMNS} FROM market_history_block_pointers p
-      JOIN market_history_blocks b ON b.id=p.block_id WHERE p.feed=? AND p.ticker=? AND p.calendar_year=?`)
+      JOIN market_history_blocks b ON b.id=p.block_id WHERE p.feed=? AND p.ticker=? AND p.calendar_year=? /* storage-archive-point-read */`)
     .bind(candidate.feed,candidate.ticker,candidate.calendarYear)));
   const prepared=[];
   for (let index=0;index<candidates.length;index++) {
@@ -72,7 +72,7 @@ export async function copyStorageArchiveBlocks(history:D1Database,incoming:Marke
       .bind(block.id,block.feed,block.ticker,block.calendarYear,block.schemaVersion,block.codec,block.checksum,
         block.rowCount,block.firstDate,block.lastDate,block.uncompressedBytes,block.payloadBase64));
     readIndexes.push(writes.length);
-    writes.push(history.prepare(`SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=?`).bind(block.id));
+    writes.push(history.prepare(`SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=? /* storage-archive-point-read */`).bind(block.id));
   }
   const storedRows=await history.batch<MarketHistoryBlock>(writes);
   for (let index=0;index<prepared.length;index++) {
@@ -98,7 +98,7 @@ export async function copyStorageArchiveBlocks(history:D1Database,incoming:Marke
       || promoted[index*2+1].results[0].block_id!==block.id)) throw new Error("storage-archive-concurrent-change");
   }
   const active=await history.batch<{block_id:string}>(prepared.map(({block}) => history.prepare(
-    "SELECT block_id FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=?")
+    "SELECT block_id FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=? /* storage-archive-point-read */")
     .bind(block.feed,block.ticker,block.calendarYear)));
   if (prepared.some(({block},index) => active[index].results[0]?.block_id!==block.id)) throw new Error("storage-archive-concurrent-change");
   return prepared.map(({block}) => ({id:block.id,rows:block.rowCount,checksum:block.checksum}));

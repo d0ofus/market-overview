@@ -75,4 +75,14 @@ describe("execution revision transitions preserve populated migration evidence",
     await expect(assertStorageExecutionRevision(ops.db,run,next)).rejects.toThrow("record-integrity");
     await expect(resolveStorageExecutionIdentity(ops.db,{...identity,targetDatabaseId:identity.sourceDatabaseId},next)).rejects.toThrow("storage-identity-mismatch");
   });
+  it("does not silently transfer a selected population plan or partial consumer cursor to new code",async()=>{
+    await ops.db.prepare("INSERT INTO eod_rollout_evidence VALUES(?,?,?)")
+      .bind(`storage-population-current:${identity.id}`,JSON.stringify({planHash:"e".repeat(64)}),new Date().toISOString()).run();
+    await expect(approveStorageExecutionTransition(input())).rejects.toThrow("late-transition-requires-new-validation");
+    await ops.db.prepare("DELETE FROM eod_rollout_evidence WHERE id=?").bind(`storage-population-current:${identity.id}`).run();
+    await ops.db.prepare("INSERT INTO market_storage_checkpoints VALUES(?,?,?,?,?)")
+      .bind(identity.id,"consumer-parity:cursor","e".repeat(64),"{}",new Date().toISOString()).run();
+    await expect(approveStorageExecutionTransition(input())).rejects.toThrow("late-transition-requires-new-validation");
+    expect((await loadStorageMigration(ops.db,identity.id))?.execution_revision).toBeNull();
+  });
 });

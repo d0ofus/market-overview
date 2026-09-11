@@ -30,7 +30,7 @@ const analysisSchema = z.object({
 export async function prepareStoragePreflight(input: {
   analysis: unknown; identity: StorageMigrationIdentity; tickers: string[];
   snapshotSource: { accountId: string; sourceDatabaseId: string; runId: string };
-  accountId: string; sourceSchemaHash: string; now?: Date;
+  accountId: string; sourceSchemaHash: string; hotSessions?: 260 | 90; now?: Date;
 }) {
   const result = analysisSchema.safeParse(input.analysis);
   if (!result.success) throw new Error("storage-preflight-complete-analysis-required");
@@ -52,7 +52,7 @@ export async function prepareStoragePreflight(input: {
   // 64 MB is explicit planning headroom, not a measured publication forecast.
   // Final acceptance independently requires real stored-payload growth evidence.
   const planningReserveBytes = 64_000_000;
-  const eligible = report.retentionModels.filter((item) => item.sharedTickers === tickers.length
+  const eligible = report.retentionModels.filter((item) => (input.hotSessions === undefined || item.hotSessions === input.hotSessions) && item.sharedTickers === tickers.length
     && storageFallbackModelValid(report, item, tickers.length)
     && item.modeledSipRows === tickers.length * (item.hotSessions + item.sweepHeadroomSessions)
     && item.projectedBytes === item.database.physicalBytes + item.publicationGrowthReserveBytes

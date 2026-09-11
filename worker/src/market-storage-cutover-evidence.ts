@@ -65,7 +65,7 @@ export async function buildStorageCutoverEvidence(input: {
   env: Env; identity: StorageMigrationIdentity; runId: string; tickers: readonly string[]; expectedSession: string;
   capture: StorageAcceptanceCapture; consumers: StorageConsumerEvidence; analysis: unknown; publicationGrowth: unknown;
   sourceSnapshotSha256: string; runtime: RuntimeEvidence; runtimeIdentity: RuntimeEvidenceIdentity;
-  assertSourceCapture: () => Promise<void>; now?: Date;
+  assertSourceCapture: () => Promise<void>; validationPlanHash?: string; now?: Date;
 }) {
   const now = input.now ?? new Date(), { env } = input;
   const profile = resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE);
@@ -147,6 +147,7 @@ export async function buildStorageCutoverEvidence(input: {
     retention: { hotSessions: capacity.hotSessions, sweepHeadroomSessions: count(model.sweepHeadroomSessions) },
   }, identity.codeRevision, finishedAt, profile.name);
   const provenance = { version: 1, identity, captureHash: input.capture.captureHash,
+    ...(input.validationPlanHash ? { validationPlanHash: input.validationPlanHash } : {}),
     ...(execution.record ? { storageIdentity: input.identity, executionApprovalHash: execution.record.evidenceHash } : {}),
     sourceSnapshotSha256: input.sourceSnapshotSha256, consumerEvidenceHash: input.consumers.evidenceHash,
     publicationEvidenceHash: publications.evidenceHash, runtimeEvidenceHash: runtime.evidenceHash,

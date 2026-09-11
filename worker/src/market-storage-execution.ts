@@ -91,8 +91,9 @@ export async function approveStorageExecutionTransition(input: {
   if (!preflight?.evidence || preflight.hash !== run.freeze_evidence_hash || await storageHash(preflight.evidence) !== preflight.hash
     || preflight.evidence.hotSessions !== 90) fail("ninety-session-preflight-required");
   // Existing runtime/bootstrap proof cannot be silently reassigned to new code.
-  if (await input.ops.prepare("SELECT checkpoint_key FROM market_storage_checkpoints WHERE migration_id=? AND (checkpoint_key LIKE 'bootstrap:%' OR checkpoint_key='consumer-parity:complete') LIMIT 1")
-    .bind(run.id).first()) fail("late-transition-requires-new-validation");
+  if (await input.ops.prepare("SELECT checkpoint_key FROM market_storage_checkpoints WHERE migration_id=? AND (checkpoint_key LIKE 'bootstrap:%' OR checkpoint_key LIKE 'consumer-parity:%') LIMIT 1")
+    .bind(run.id).first() || await input.ops.prepare("SELECT id FROM eod_rollout_evidence WHERE id=?")
+      .bind(`storage-population-current:${run.id}`).first()) fail("late-transition-requires-new-validation");
   let after = "", checkpointCount = 0, checkpointManifestHash = await storageHash([]);
   for (;;) {
     const rows = await input.ops.prepare("SELECT checkpoint_key,input_hash,payload_json FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key>? ORDER BY checkpoint_key LIMIT 100")

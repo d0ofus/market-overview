@@ -5,16 +5,22 @@ import type { StorageVerificationEvidence } from "../src/market-storage-verifica
 import type { Env } from "../src/types";
 
 const mocks=vi.hoisted(() => ({copy:vi.fn(),baseline:vi.fn(),verify:vi.fn(),assertCapture:vi.fn(),release:vi.fn(),consumer:vi.fn(),validate:vi.fn(),
-  load:vi.fn(),save:vi.fn(),queue:vi.fn(),pause:vi.fn(),progress:vi.fn(),heartbeat:vi.fn(),expected:vi.fn(),enqueue:vi.fn(),batch:vi.fn()}));
+  load:vi.fn(),save:vi.fn(),queue:vi.fn(),pause:vi.fn(),progress:vi.fn(),heartbeat:vi.fn(),expected:vi.fn(),enqueue:vi.fn(),batch:vi.fn(),
+  plan:vi.fn(),validationPlan:vi.fn(),storePlan:vi.fn(),freeze:vi.fn(),inputs:vi.fn(),refresh:vi.fn(),calendar:vi.fn(),correct:vi.fn()}));
 vi.mock("../src/market-storage-copy",()=>({runStorageCopy:mocks.copy}));
 vi.mock("../src/market-storage-verification",()=>({captureStorageHistoryBaseline:mocks.baseline,runStorageVerification:mocks.verify,
-  assertStorageVerificationCapture:mocks.assertCapture,releaseStorageVerificationFence:mocks.release}));
+  assertStorageVerificationCapture:mocks.assertCapture,releaseStorageVerificationFence:mocks.release,freezeStorageVerificationTarget:mocks.freeze}));
 vi.mock("../src/market-storage-acceptance",()=>({verifyStorageConsumerBatch:mocks.consumer,validateStorageConsumerEvidence:mocks.validate}));
 vi.mock("../src/market-storage-control",async (original)=>({...await original<typeof import("../src/market-storage-control")>(),
   loadStorageMigrationCheckpoint:mocks.load,saveStorageMigrationCheckpoint:mocks.save,queueStorageMigrationStage:mocks.queue,
   pauseStorageMigration:mocks.pause,progressStorageMigration:mocks.progress,heartbeatStorageMigration:mocks.heartbeat}));
 vi.mock("../src/eod-coordinator",()=>({expectedEodSession:mocks.expected,enqueueEodRun:mocks.enqueue}));
-vi.mock("../src/eod-runner",()=>({runEodBatch:mocks.batch}));
+vi.mock("../src/eod-runner",()=>({runEodBatch:mocks.batch,loadEodInputs:mocks.inputs}));
+vi.mock("../src/eod",()=>({refreshBreadthUniverseMemberships:mocks.refresh}));
+vi.mock("../src/market-calendar-cache",()=>({ensureMarketCalendarCoverage:mocks.calendar}));
+vi.mock("../src/market-storage-bootstrap-correction",()=>({requeueStorageBootstrapCorrection:mocks.correct}));
+vi.mock("../src/market-storage-population-plan",()=>({loadStoragePopulationPlan:mocks.plan,
+  loadStorageValidationPlan:mocks.validationPlan,storeStoragePopulationPlan:mocks.storePlan}));
 import { runStoragePipeline } from "../src/market-storage-pipeline";
 
 describe("storage stage orchestration and private bootstrap recovery",()=>{
@@ -24,6 +30,9 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
   let checkpoints:Map<string,{inputHash:string;payload:unknown}>,runs:Map<string,Record<string,unknown>>;
   let input:Parameters<typeof runStoragePipeline>[0],capture:StorageVerificationEvidence;
   let query:ReturnType<typeof vi.fn>;
+  let plan:{planHash:string;predecessorPlanHash?:string;sessionDate:string;capture:StorageVerificationEvidence;tickers:string[];
+    calendarDates:string[];originalCopyCaptureHash:string;bootstrapInputs:Record<string,unknown>};
+  const planHash="9".repeat(64);
   beforeEach(async()=>{
     vi.useFakeTimers();vi.setSystemTime("2026-09-09T22:30:00Z");
     Object.values(mocks).forEach((mock)=>mock.mockReset());
@@ -48,6 +57,19 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     input={source,target,history,ops,run,leaseToken:"lease",installSourceFence:vi.fn(),installTargetFence:vi.fn(),installHistoryFence:vi.fn(),
       bootstrapEnv:{DB:core,MARKET_DATA_DB:target,MARKET_HISTORY_DB:history,OPS_DB:ops,EOD_RUNNER_MODE:"active",EOD_ARCHIVE_PRUNE_ENABLED:"false"} as Env,
       bootstrapFailureDb:{} as D1Database};
+    plan={planHash,sessionDate:"2026-09-09",capture,tickers:["SPY"],calendarDates:record.calendarDates,
+      originalCopyCaptureHash:capture.captureHash,bootstrapInputs:{tickers:["SPY"]}};
+    mocks.plan.mockImplementation(async()=>plan);mocks.validationPlan.mockImplementation(async()=>plan);
+    mocks.freeze.mockResolvedValue(capture.targetCapture);
+    mocks.inputs.mockResolvedValue({tickers:["SPY"],calendarDates:["2026-09-08","2026-09-09"],memberships:
+      ["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map(universeId=>({
+        universeId,versionId:universeId,sourceType:universeId==="sp500-core" ? "wikipedia-derived-public-proxy"
+          : universeId==="russell2000-core" ? "official-etf-holdings-proxy" : "public-common-stock-proxy",
+        sourceAsOfDate:"2026-09-09",verifiedAt:"2026-09-09T20:00:00Z",members:["SPY"]}))});
+    mocks.storePlan.mockImplementation(async(_ops:unknown,_run:unknown,value:{predecessorPlanHash?:string;inputs:Record<string,unknown>})=>{
+      plan={...plan,planHash:"8".repeat(64),predecessorPlanHash:value.predecessorPlanHash,
+        sessionDate:(value.inputs.calendarDates as string[]).at(-1)!,bootstrapInputs:value.inputs};return plan;
+    });
     mocks.load.mockImplementation(async(_db:unknown,_id:string,key:string)=>checkpoints.get(key)??null);
     mocks.save.mockImplementation(async(_db:unknown,_id:string,_token:string,value:{key:string;inputHash:string;payload:unknown})=>{
       checkpoints.set(value.key,{inputHash:value.inputHash,payload:value.payload});
@@ -58,6 +80,7 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
       return {status:"completed",published:[]};
     });
     mocks.enqueue.mockImplementation(async(_env:unknown,date:string)=>({id:`eod:active:${date}:daily`,session_date:date,status:"queued",next_attempt_at:null}));
+    mocks.correct.mockImplementation(async(_env:unknown,request:{runId:string;sessionDate:string})=>({id:request.runId,session_date:request.sessionDate,status:"queued",next_attempt_at:null}));
   });
   afterEach(()=>vi.useRealTimers());
   const verified=()=>{
@@ -98,6 +121,30 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     expect(mocks.assertCapture).toHaveBeenCalledWith(input.source,identity,capture.sourceCapture);
     expect(mocks.release).not.toHaveBeenCalled();expect(checkpoints.has("bootstrap:owner")).toBe(false);
   });
+  it("prepares the actual larger population on the private target, then waits for measured sizing",async()=>{
+    verified();mocks.plan.mockResolvedValue(null);
+    const memberships=["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map(universeId=>({
+      universeId,versionId:universeId,sourceType:universeId==="sp500-core" ? "wikipedia-derived-public-proxy"
+        : universeId==="russell2000-core" ? "official-etf-holdings-proxy" : "public-common-stock-proxy",
+      sourceAsOfDate:"2026-09-09",verifiedAt:"2026-09-09T20:00:00Z",members:["SPY","NEW"]}));
+    mocks.inputs.mockResolvedValue({tickers:["SPY","NEW"],calendarDates:["2026-09-08","2026-09-09"],memberships});
+    mocks.validationPlan.mockRejectedValue(new Error("storage-population-sizing-required"));
+    expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
+    expect(mocks.refresh).toHaveBeenCalledWith(input.bootstrapEnv);
+    expect(mocks.storePlan.mock.calls[0][2]).toMatchObject({inputs:{tickers:["SPY","NEW"]},originalCopyCaptureHash:capture.captureHash});
+    expect(mocks.freeze.mock.calls.every(([db])=>db===input.target)).toBe(true);
+    expect(mocks.release.mock.calls.every(([db])=>db===input.target)).toBe(true);
+    expect(mocks.pause).toHaveBeenCalledWith(input.ops,identity.id,"lease","storage-population-sizing-required",expect.any(Object));
+    expect(mocks.batch).not.toHaveBeenCalled();expect(mocks.consumer).not.toHaveBeenCalled();
+    expect(checkpoints.get("verification:complete")?.payload).toBe(capture);
+  });
+  it("refreezes membership-only target preparation after an upstream failure",async()=>{
+    verified();mocks.plan.mockResolvedValue(null);mocks.refresh.mockRejectedValue(new Error("membership-source-timeout"));
+    await expect(runStoragePipeline(input)).rejects.toThrow("membership-source-timeout");
+    expect(mocks.freeze).toHaveBeenCalledTimes(2);expect(mocks.storePlan).not.toHaveBeenCalled();
+    expect(mocks.release.mock.calls.map(([db])=>db)).toEqual([input.target]);
+    expect(mocks.batch).not.toHaveBeenCalled();
+  });
   it("persists bootstrap ownership before releasing either fence and resumes a partial release",async()=>{
     ready();let fail=true;
     mocks.release.mockImplementation(async(db:D1Database)=>{
@@ -113,7 +160,7 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     expect(checkpoints.get("bootstrap:complete")?.payload).toMatchObject(owner("2026-09-09"));
   });
   it("rolls over only a completed older owner and preserves dated bootstrap history",async()=>{
-    ready();const previous=owner();checkpoints.set("bootstrap:owner",{inputHash:capture.captureHash,payload:previous});
+    ready();plan.sessionDate="2026-09-08";const previous=owner();checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:previous});
     runs.set(previous.runId,{status:"completed",session_date:previous.sessionDate,mode:"active",purpose:"daily"});
     expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
     expect(checkpoints.get("bootstrap-history:2026-09-08")?.payload).toEqual(previous);
@@ -121,7 +168,7 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     expect(mocks.batch.mock.calls[0][1]).toBe("eod:active:2026-09-09:daily");
   });
   it("finishes an incomplete older owner before queueing latest-session recovery",async()=>{
-    ready();const previous=owner();checkpoints.set("bootstrap:owner",{inputHash:capture.captureHash,payload:previous});
+    ready();plan.sessionDate="2026-09-08";const previous=owner();checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:previous});
     runs.set(previous.runId,{status:"retrying",session_date:previous.sessionDate,mode:"active",purpose:"daily"});
     expect(await runStoragePipeline(input)).toBe("queued");
     expect(mocks.batch.mock.calls[0][1]).toBe(previous.runId);
@@ -138,6 +185,28 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     ready();mocks.batch.mockResolvedValue({status:"completed",published:[]});
     await expect(runStoragePipeline(input)).rejects.toThrow("completion-not-persisted");
     expect(checkpoints.has("bootstrap:complete")).toBe(false);
+  });
+  it("rebuilds a completed private run after the clock helper detects a correction",async()=>{
+    ready();const current=owner("2026-09-09");
+    checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:current});
+    runs.set(current.runId,{status:"completed",session_date:current.sessionDate,mode:"active",purpose:"daily"});
+    mocks.enqueue.mockResolvedValue({id:current.runId,status:"completed"});
+    expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
+    expect(mocks.correct).toHaveBeenCalledWith(input.bootstrapEnv,expect.objectContaining({
+      planHash,plannedInputs:plan.bootstrapInputs,runId:current.runId}));
+    expect(mocks.batch).toHaveBeenCalledWith(input.bootstrapEnv,current.runId,input.bootstrapFailureDb,
+      expect.objectContaining({hotSessions:90,storageInputs:plan.bootstrapInputs}));
+    expect(checkpoints.get("bootstrap:complete")?.inputHash).toBe(planHash);
+  });
+  it("retains a completed private run when its actual input clock is unchanged",async()=>{
+    ready();const current=owner("2026-09-09");
+    checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:current});
+    runs.set(current.runId,{status:"completed",session_date:current.sessionDate,mode:"active",purpose:"daily"});
+    mocks.enqueue.mockResolvedValue({id:current.runId,status:"completed"});
+    mocks.correct.mockResolvedValue({id:current.runId,status:"completed"});
+    expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
+    expect(mocks.batch).not.toHaveBeenCalled();
+    expect(checkpoints.get("bootstrap:complete")?.inputHash).toBe(planHash);
   });
   it("passes a cooperative time limit to the writer and never records completion after interruption",async()=>{
     ready();mocks.batch.mockImplementation(async(_env:unknown,_run:string,_db:unknown,options:{assertContinue:()=>void})=>{

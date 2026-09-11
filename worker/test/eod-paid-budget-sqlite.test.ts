@@ -94,15 +94,56 @@ describe("Paid D1 admission retains account-wide rolling limits", { timeout: 30_
     expect(status.daily?.accountRowsRead).toBeNull();
   });
 
-  it("invalidates the whole cached window if a refresh fails between batches", async () => {
+  it("publishes all 31 dates in one atomic bounded batch and leaves the old sample dated after failure", async () => {
     await reconcile();
-    const batch = storage.db.batch.bind(storage.db);
-    let calls = 0;
-    vi.spyOn(storage.db, "batch").mockImplementation(async (queries) => {
-      calls++; if (calls === 2) throw new Error("interrupted"); return batch(queries);
-    });
+    const before=await loadEodRollingUsage(storage.db,paid,now);
+    now=new Date(now.getTime()+60_000);
+    const spy=vi.spyOn(storage.db,"batch").mockRejectedValueOnce(new Error("interrupted"));
     await expect(reconcile()).rejects.toThrow("interrupted");
-    await expect(assertEodRollingBudget(storage.db, paid, now)).rejects.toThrow("window-unavailable");
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toHaveLength(3);
+    expect(await loadEodRollingUsage(storage.db,paid,now)).toEqual(before);
+    now=new Date(initial.getTime()+300_001);
+    await expect(assertEodRollingBudget(storage.db,paid,now)).rejects.toThrow("window-unavailable");
+  });
+
+  it("refreshes from actual sample expiry when collection latency outlasts refresh headroom", async () => {
+    const collect=vi.fn(async()=>{
+      const sample=new Date(now);
+      await reconcileEodAccountUsage({accountId:"account",token:"test",ops:storage.db,profile:paid,now:sample,
+        fetcher:async()=>Response.json(body([group("2026-09-11",1000,100)]))});
+      now=new Date(sample.getTime()+90_000);
+    });
+    const admitted=admission("slow",{reconcileAccountUsage:collect});
+    await (await admitted(query))({rowsRead:1,rowsWritten:1,sizeAfter:0});
+    now=new Date(initial.getTime()+300_001);
+    await expect(admitted(query)).resolves.toBeTypeOf("function");
+    expect(collect).toHaveBeenCalledTimes(2);
+    await admitted.flush();
+  });
+
+  it("reconciles one stale-window rejection before submitting any business query", async () => {
+    const collect=vi.fn(async()=>{await reconcile();});
+    const admitted=admission("stale-credit",{reconcileAccountUsage:collect,writeCredit:40});
+    await (await admitted(query))({rowsRead:20,rowsWritten:8,sizeAfter:0});
+    await storage.db.prepare("UPDATE eod_account_usage SET error='concurrent-source-failure' WHERE usage_date='2026-09-11'").run();
+    await expect(admitted(query)).resolves.toBeTypeOf("function");
+    expect(collect).toHaveBeenCalledTimes(2);
+    await admitted.flush();
+  });
+
+  it("older concurrent collectors cannot regress or poison a newer successful sample", async () => {
+    let release!:()=>void;
+    const pending=new Promise<void>((resolve)=>{release=resolve;});
+    const earlier=reconcileEodAccountUsage({accountId:"account",token:"test",ops:storage.db,profile:paid,now,
+      fetcher:async()=>{await pending;return Response.json(body([group("2026-09-11",2000,200)]));}});
+    now=new Date(initial.getTime()+60_000);await reconcile();release();await earlier;
+    const current=await loadEodRollingUsage(storage.db,paid,now);
+    expect(current?.sampledAt).toBe(now.toISOString());
+    expect(current?.rowsRead).toBeGreaterThanOrEqual(2000);
+    await expect(reconcileEodAccountUsage({accountId:"account",token:"test",ops:storage.db,profile:paid,now:initial,
+      fetcher:async()=>new Response(null,{status:503})})).rejects.toThrow("window-unavailable");
+    expect((await loadEodRollingUsage(storage.db,paid,now))?.sampledAt).toBe(now.toISOString());
   });
 });
 

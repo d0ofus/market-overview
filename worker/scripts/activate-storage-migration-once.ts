@@ -11,7 +11,8 @@ import { assertStorageExecutionRevision } from "../src/market-storage-execution"
 import { activateStorageMigrationOnce, validateStorageActivationState } from "../src/market-storage-activate-once";
 import { inspectStorageActivationDeployment, type StorageWorkerBinding } from "../src/market-storage-activation-inspect";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
-import { loadStoragePreflight } from "../src/market-storage-pipeline";
+import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
+import { assertStorageAcceptedValidationPlan, validateStorageValidationBootstrap } from "../src/market-storage-validation-consumers";
 import { assertStorageSourceFrozen } from "../src/market-storage-fence";
 import { verifyStorageAcceptedPublications, type StoragePublicationEvidence } from "../src/market-storage-acceptance";
 import { expectedEodSession } from "../src/eod-coordinator";
@@ -153,7 +154,8 @@ async function main(): Promise<void> {
         await assertStorageExecutionRevision(opsDb,run,codeRevision);
         const progress = object(JSON.parse(run.progress_json)), latestProofHash = progress?.cutoverProofHash;
         if (typeof latestProofHash !== "string" || !/^[a-f0-9]{64}$/.test(latestProofHash)) throw new Error("storage-activate-storage-proof-reference-invalid");
-        const state = await validateStorageActivationState(input, run, await readEvidence(`active:${codeRevision}`),
+        const validationPlan = await loadStorageValidationPlan(opsDb, run);
+        const state = await validateStorageActivationState({ ...input, validationPlan }, run, await readEvidence(`active:${codeRevision}`),
           await readEvidence(`storage-cutover-proof:${latestProofHash}`), await readEvidence("monitoring:public-activation"));
         if (run.status !== "completed" && await opsDb.prepare("SELECT id FROM eod_runs WHERE lease_until>? LIMIT 1").bind(new Date().toISOString()).first()) {
           throw new Error("storage-activate-eod-live-lease");
@@ -163,14 +165,15 @@ async function main(): Promise<void> {
       verifyPublications: async (state) => {
         const frozen = await assertStorageSourceFrozen(sourceDb, storageIdentity, state.run.source_schema_hash!);
         if (frozen.revision !== state.run.source_revision) throw new Error("storage-activate-source-capture-changed");
-        const preflight = await loadStoragePreflight(opsDb, state.run);
-        const bootstrap = await loadStorageMigrationCheckpoint(opsDb, id, "bootstrap:complete"), owner = object(bootstrap?.payload);
+        const plan = await loadStorageValidationPlan(opsDb, state.run);
+        const progress = object(JSON.parse(state.run.progress_json));
+        await assertStorageAcceptedValidationPlan(plan, progress, await readEvidence(`storage-cutover-proof:${state.proofHash}`));
+        const bootstrap = await loadStorageMigrationCheckpoint(opsDb, id, "bootstrap:complete");
         const currentOwner = await loadStorageMigrationCheckpoint(opsDb, id, "bootstrap:owner");
-        if (!owner || owner.targetDatabaseId !== target || typeof owner.runId !== "string"
-          || await storageHash(currentOwner?.payload) !== await storageHash(owner)) throw new Error("storage-activate-bootstrap-owner-mismatch");
         const expectedSession = await expectedEodSession(env);
         if (!expectedSession) throw new Error("storage-activate-calendar-unavailable");
-        const actual = await verifyStorageAcceptedPublications({ env, identity, runId: owner.runId, tickers: preflight.tickers, expectedSession });
+        const owner = await validateStorageValidationBootstrap(plan, { complete: bootstrap, owner: currentOwner, targetDatabaseId: target, expectedSession });
+        const actual = await verifyStorageAcceptedPublications({ env, identity, runId: owner.runId, tickers: plan.tickers, expectedSession });
         const accepted = JSON.parse(state.run.progress_json).publications as StoragePublicationEvidence;
         const stable = ({ checkedAt: _checkedAt, evidenceHash: _evidenceHash, ...value }: StoragePublicationEvidence) => value;
         if (await storageHash(stable(actual)) !== await storageHash(stable(accepted))) throw new Error("storage-activate-accepted-publications-changed");

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { fetchEodAccountUsage, reconcileEodAccountUsage } from "../src/eod-account-usage";
-import { localRecoveryChildReason, localRecoveryFailure, runLocalStorageRecovery, type LocalRecoveryResult } from "../src/eod-local-recovery";
+import { localRecoveryChildReason, localRecoveryFailure, localRecoveryRequiresBootstrapRefresh, parseLocalPopulationSizing, runLocalStorageRecovery, type LocalRecoveryResult } from "../src/eod-local-recovery";
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { loadStorageMigration } from "../src/market-storage-control";
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
       // Only sanitized fixed categories leave failed native processes.
       const knownReason = localRecoveryChildReason(detail);
       if (knownReason) throw new Error(knownReason);
-      if (/storage-acceptance-completed-latest-run-required/.test(detail)) throw new Error("storage-local-bootstrap-refresh-required");
+      if (localRecoveryRequiresBootstrapRefresh(detail)) throw new Error("storage-local-bootstrap-refresh-required");
       if (/quota|budget|daily-read|daily-write|maximum.*rows|exceeded.*rows/i.test(detail)) throw new Error("storage-local-budget-exhausted");
       if (/timeout|network|unavailable|runtime-evidence-incomplete|runtime-pending|logs.*pending|measurement-window-required|await-actual-coordinator-window/i.test(detail) || native.code === "ETIMEDOUT") throw new Error("storage-local-transient-unavailable");
       throw new Error(`storage-local-${stage}-failed`);
@@ -150,6 +150,21 @@ async function main(): Promise<void> {
       if (actualId !== input.sourceDatabaseId) throw new Error("storage-local-serving-database-conflict");
       return bindings.get("EOD_STORAGE_MIGRATION_ID")?.text === migrationId;
     };
+    const populationInputs = async () => {
+      env.EOD_STORAGE_POPULATION_PLAN_PATH = resolve(tmp,"storage-population-plan.json");
+      node("market-storage-runner.ts",["population-inputs"]);
+      const plan = await parseLocalPopulationSizing(read(env.EOD_STORAGE_POPULATION_PLAN_PATH), {
+        migrationId, codeRevision: input.codeRevision, originalSessionDate: sessionDate,
+      });
+      const directory = resolve(tmp,`storage-population-${plan.planHash}`);
+      mkdirSync(directory,{recursive:true});
+      const tickerPath = resolve(directory,"tickers.json"), payload = JSON.stringify({ tickers: plan.tickers });
+      if (existsSync(tickerPath) && readFileSync(tickerPath,"utf8") !== payload) throw new Error("storage-local-population-artifact-conflict");
+      if (!existsSync(tickerPath)) writeFileSync(tickerPath,payload);
+      // The original .tickers.json remains bound to the frozen source capture.
+      // New population sizing gets its own immutable plan-specific artifact.
+      return { plan, tickerPath, directory };
+    };
     const result = await runLocalStorageRecovery({ assertCheckout,
       hasStarted: coordinatorStarted,
       hasCompleteSnapshot: async () => existsSync(snapshot + ".metadata.json") && (read(snapshot + ".metadata.json") as {complete?:boolean}).complete === true,
@@ -166,7 +181,20 @@ async function main(): Promise<void> {
         await assertStorageExecutionRevision(ops,run,input.codeRevision);
         return run;
       },
+      preparePopulationSizing: async () => {
+        await phase("population-inputs");
+        const { plan, tickerPath, directory } = await populationInputs();
+        env.EOD_STORAGE_ANALYSIS_PATH = resolve(directory,"storage-analysis.json");
+        await phase("population-sizing");
+        command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,
+          "--tickers-json",tickerPath,"--session-date",plan.sessionDate,"--history-sqlite",historySnapshot,"--output",env.EOD_STORAGE_ANALYSIS_PATH],env);
+        await assertCheckout();
+        await phase("population-approval"); node("market-storage-runner.ts",["approve-population"]);
+        command("gh",["workflow","run","eod-storage-migration.yml","--repo","d0ofus/market-overview","--ref","main","-f",`migration_id=${migrationId}`]);
+      },
       prepareAcceptance: async () => {
+        await phase("population-inputs");
+        const { plan, tickerPath } = await populationInputs();
         await phase("publication-samples");
         env.EOD_STORAGE_PUBLICATION_SAMPLES_PATH = resolve(tmp,"eod-publication-samples.json");
         node("market-storage-runner.ts",["sample-publications"]);
@@ -186,8 +214,8 @@ async function main(): Promise<void> {
         const reserve = Math.ceil((growth.afterBytes-growth.beforeBytes)/growth.completeSessionSets)*growth.forecastSessions*growth.revisionsPerSession;
         if (!Number.isSafeInteger(reserve) || reserve <= 0) throw new Error("storage-local-growth-measurement-invalid");
         await phase("final-capacity");
-        command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,"--tickers-json",snapshot+".tickers.json",
-          "--session-date",sessionDate,"--history-sqlite",historySnapshot,"--publication-growth-reserve-bytes",String(reserve),"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
+        command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,"--tickers-json",tickerPath,
+          "--session-date",plan.sessionDate,"--history-sqlite",historySnapshot,"--publication-growth-reserve-bytes",String(reserve),"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
         await phase("runtime-candidate"); node("prepare-eod-runtime-candidate.ts",["run"]);
         await phase("cutover-evidence"); node("market-storage-runner.ts",["build-cutover-evidence"]);
       },
@@ -197,7 +225,8 @@ async function main(): Promise<void> {
     save(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "storage-local-failed";
-    if (message === "storage-local-bootstrap-refresh-required" && stage === "publication-samples") {
+    if (message === "storage-local-bootstrap-refresh-required"
+      && ["publication-samples", "runtime-candidate", "cutover-evidence", "acceptance"].includes(stage)) {
       try {
         node("market-storage-runner.ts",["reconstruct"]);
         command("gh",["workflow","run","eod-storage-migration.yml","--repo","d0ofus/market-overview","--ref","main","-f",`migration_id=${migrationId}`]);

@@ -20,11 +20,18 @@ type Approval = {
       fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number; fallbackStorage?: string };
     horizon: { anchorSession: string; lastCoveredSession: string; expiresAt: string; sessions: number } };
 };
+export type StorageHistoryMaintenanceApproval = Approval;
+export { loadApproval as loadStorageHistoryMaintenanceApproval };
+export type StorageCapacityRenewalPublicStatus = {
+  status: "running" | "failed" | "completed" | "unavailable"; stage: string | null;
+  updatedAt: string | null; nextAttemptAt: string | null; error: string | null;
+};
 export type StorageHistoryCapacityStatus = { status: "unmeasured" | "ready" | "failed" | "expired";
   checkedAt: string | null; error: string | null; hotSessions: 260 | 90; feeds: readonly Feed[];
   forecastSessions: number; forecastAnchorSession: string; forecastLastSession: string; horizonExpiresAt: string;
   forecastRunId: string;
-  analysisHash: string; proofHash: string; marketPhysicalBytes: number | null; archivePhysicalBytes: number | null };
+  analysisHash: string; proofHash: string; marketPhysicalBytes: number | null; archivePhysicalBytes: number | null;
+  renewal?: StorageCapacityRenewalPublicStatus | null };
 function fail(reason: string): never { throw new Error(`eod-history-storage-capacity-${reason}`); }
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 const integer = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -337,16 +344,25 @@ export async function refreshApprovedStorageHistoryCapacity(env: Env, now = new 
   return refreshStorageHistoryMaintenanceEvidence(env, { tickers: approved.proof.tickers, codeRevision: env.EOD_CODE_REVISION, now });
 }
 
-/** One small cached Ops record: never hashes the full ticker manifest or reads
+/** Two small cached Ops records: never hashes the full ticker manifest or reads
  * prices/publications during inexpensive page metadata polling. */
 export async function loadStorageHistoryCapacityStatus(env: Env, now = new Date()): Promise<StorageHistoryCapacityStatus | null> {
   if (!env.OPS_DB || !env.EOD_CODE_REVISION) return null;
   const status = await read<StorageHistoryCapacityStatus>(env.OPS_DB, `history-storage-status:${env.EOD_CODE_REVISION}`);
   if (!status) return null;
   if (!digest(status.proofHash) || !Number.isFinite(Date.parse(status.horizonExpiresAt))) fail("cached-status-invalid");
-  if (now.getTime() >= Date.parse(status.horizonExpiresAt)) return { ...status, status: "expired", error: "forecast-horizon-expired" };
-  if (status.status === "ready" && (!status.checkedAt || now.getTime() - Date.parse(status.checkedAt) > 86_400_000)) {
-    return { ...status, status: "unmeasured", error: "live-capacity-measurement-stale" };
+  let renewal: StorageCapacityRenewalPublicStatus | null;
+  try {
+    const { loadStorageCapacityRenewalStatus } = await import("./eod-storage-capacity-renewal");
+    const record = await loadStorageCapacityRenewalStatus(env, now);
+    renewal = record ? { status: record.status, stage: record.stage, updatedAt: record.updatedAt,
+      nextAttemptAt: record.nextAttemptAt, error: record.error } : null;
+  } catch {
+    renewal = { status: "unavailable", stage: null, updatedAt: null, nextAttemptAt: null, error: "capacity-renewal-status-unavailable" };
   }
-  return status;
+  if (now.getTime() >= Date.parse(status.horizonExpiresAt)) return { ...status, renewal, status: "expired", error: "forecast-horizon-expired" };
+  if (status.status === "ready" && (!status.checkedAt || now.getTime() - Date.parse(status.checkedAt) > 86_400_000)) {
+    return { ...status, renewal, status: "unmeasured", error: "live-capacity-measurement-stale" };
+  }
+  return { ...status, renewal };
 }

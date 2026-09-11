@@ -29,9 +29,13 @@ describe("cross-database price repairs against real SQLite", { timeout: 20_000 }
   }, 30_000);
   afterEach(() => { market.dispose(); archive.dispose(); vi.restoreAllMocks(); });
 
-  it("repairs older retained hot rows and archived copies onto the same split basis", async () => {
+  it.each([false,true])("repairs retained SIP history, taking over an abandoned copied owner when present: %s", async (abandoned) => {
     await writeEodBars(env, [bar(oldDate, 100), bar(target, 60)]);
     await archiveMarketHistoryBars(env, [bar(oldDate, 100)]);
+    if (abandoned) {
+      await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='old-source-run',updated_at='2020-01-01T00:00:00Z' WHERE feed='sip'").run();
+      await expect(loadMarketHistory(env,{tickers:["AAA"],feed:"sip"})).rejects.toThrow("adjustment-repair-pending");
+    }
     const corrected = [bar(oldDate, 50), bar(target, 60)];
     const alpaca = vi.fn(async (_tickers: string[], _start: string, _end: string, adjustment?: string) =>
       corrected.map((row) => ({ ...row, reportedVolume: adjustment === "raw" ? 8000 : null })));

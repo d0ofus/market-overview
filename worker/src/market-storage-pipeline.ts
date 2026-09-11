@@ -1,13 +1,18 @@
 import { runStorageCopy, type StorageCopyProgress } from "./market-storage-copy";
 import { captureStorageHistoryBaseline, runStorageVerification, assertStorageVerificationCapture,
-  releaseStorageVerificationFence, type StorageVerificationEvidence } from "./market-storage-verification";
+  releaseStorageVerificationFence, freezeStorageVerificationTarget, type StorageVerificationEvidence } from "./market-storage-verification";
 import { verifyStorageConsumerBatch, validateStorageConsumerEvidence, type StorageConsumerCheckpoint,
   type StorageConsumerEvidence } from "./market-storage-acceptance";
 import { loadStorageMigrationCheckpoint, pauseStorageMigration, progressStorageMigration, queueStorageMigrationStage,
   saveStorageMigrationCheckpoint, storageMigrationIdentity, heartbeatStorageMigration, type StorageMigrationRun } from "./market-storage-control";
 import { storageHash } from "./market-storage-pages";
 import { expectedEodSession, enqueueEodRun, type EodRun } from "./eod-coordinator";
-import { runEodBatch } from "./eod-runner";
+import { runEodBatch, loadEodInputs } from "./eod-runner";
+import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
+import { refreshBreadthUniverseMemberships } from "./eod";
+import { assessEodMembershipEvidence } from "./eod-membership-evidence";
+import { loadStoragePopulationPlan, loadStorageValidationPlan, storeStoragePopulationPlan } from "./market-storage-population-plan";
+import { requeueStorageBootstrapCorrection } from "./market-storage-bootstrap-correction";
 import type { Env } from "./types";
 
 type Installer = (statements: readonly string[]) => Promise<void>;
@@ -69,16 +74,64 @@ export async function runStoragePipeline(input: {
     const evidence = await runStorageVerification({...input,deadlineMs:remaining()});
     return queueNext("storage-consumer-verification-required", { verified: true, captureHash: evidence.captureHash });
   }
-  const capture = verified.payload as StorageVerificationEvidence;
-  if (capture.schemaVersion !== 1 || capture.verified !== true || verified.inputHash !== capture.captureHash
-    || await storageHash(capture.identity) !== await storageHash(identity)
-    || capture.sourceCapture.schemaHash!==run.source_schema_hash || capture.sourceCapture.revision!==run.source_revision) {
+  const original = verified.payload as StorageVerificationEvidence;
+  if (original.schemaVersion !== 1 || original.verified !== true || verified.inputHash !== original.captureHash
+    || await storageHash(original.identity) !== await storageHash(identity)
+    || original.sourceCapture.schemaHash!==run.source_schema_hash || original.sourceCapture.revision!==run.source_revision) {
     throw new Error("storage-verification-evidence-integrity");
   }
   // Target/history captures prove the original exact copy. They intentionally
   // become historical evidence after private bootstrap writes; the immutable
   // original source must still match its capture on every resumed stage.
-  await assertStorageVerificationCapture(input.source,identity,capture.sourceCapture);
+  await assertStorageVerificationCapture(input.source,identity,original.sourceCapture);
+  if (!input.bootstrapEnv || !input.bootstrapFailureDb) {
+    await pauseStorageMigration(ops, run.id, leaseToken, "storage-bootstrap-bindings-required", { copied: true });
+    return "awaiting-evidence";
+  }
+  const env = input.bootstrapEnv;
+  if (env.MARKET_DATA_DB !== input.target || env.MARKET_HISTORY_DB !== input.history || env.OPS_DB !== ops
+    || env.DB===input.source || env.EOD_RUNNER_MODE !== "active" || env.EOD_ARCHIVE_PRUNE_ENABLED !== "false") throw new Error("storage-bootstrap-binding-conflict");
+  let population = await loadStoragePopulationPlan(ops,run);
+  const existingOwner = await load("bootstrap:owner");
+  const latestSession = await expectedEodSession(env);
+  if (!population || (!existingOwner && latestSession && population.sessionDate < latestSession)) {
+    // Only the independently verified private target receives calendar and
+    // membership updates. A repeated preparation safely refreezes interrupted
+    // target-only writes; the source and original whole-copy proof never move.
+    await progressStorageMigration(ops,run.id,leaseToken,"population-inputs",{originalCopyCaptureHash:original.captureHash});
+    const before = await freezeStorageVerificationTarget(input.target,identity,input.installTargetFence,"market");
+    await releaseStorageVerificationFence(input.target,identity,before);
+    let preparedInputs:Awaited<ReturnType<typeof loadEodInputs>>;
+    try {
+      await ensureMarketCalendarCoverage(env,latestSession ?? run.session_date);
+      const session=await expectedEodSession(env);
+      if (!session) throw new Error("storage-bootstrap-calendar-unavailable");
+      await refreshBreadthUniverseMemberships(env);
+      preparedInputs=await loadEodInputs(env,session);
+      if (preparedInputs.memberships.length!==5 || preparedInputs.memberships.some(row =>
+        !assessEodMembershipEvidence(row,session,preparedInputs.calendarDates).publishable)) {
+        throw new Error("storage-population-verified-memberships-required");
+      }
+    } finally {
+      await freezeStorageVerificationTarget(input.target,identity,input.installTargetFence,"market");
+    }
+    const targetCapture=await freezeStorageVerificationTarget(input.target,identity,input.installTargetFence,"market");
+    await assertStorageVerificationCapture(input.history,identity,original.historyCapture);
+    const captureFields={identity,sourceCapture:original.sourceCapture,targetCapture,historyCapture:original.historyCapture};
+    const nextCapture={...captureFields,captureHash:await storageHash(captureFields)};
+    population=await storeStoragePopulationPlan(ops,run,{inputs:preparedInputs!,capture:nextCapture,
+      originalCopyCaptureHash:original.captureHash,leaseToken});
+  }
+  let plan:Awaited<ReturnType<typeof loadStorageValidationPlan>>;
+  try {plan=await loadStorageValidationPlan(ops,run);} catch(error) {
+    if (!(error instanceof Error) || error.message!=="storage-population-sizing-required") throw error;
+    await pauseStorageMigration(ops,run.id,leaseToken,"storage-population-sizing-required",{
+      planHash:population.planHash,sessionDate:population.sessionDate,tickerCount:population.tickers.length,
+      originalTickerCount:preflight.tickers.length,sourcePreserved:true,publicBindingChanged:false,
+    });
+    return "awaiting-evidence";
+  }
+  const capture=plan.capture;
   const sourceEnv = { DB: input.source, MARKET_DATA_DB: input.source, MARKET_HISTORY_DB: input.history,
     ALPACA_DAILY_FEED: "sip", ALPACA_DAILY_ADJUSTMENT: "split" } as Env;
   const targetEnv = { ...sourceEnv, DB: input.target, MARKET_DATA_DB: input.target };
@@ -87,15 +140,19 @@ export async function runStoragePipeline(input: {
     await assertStorageVerificationCapture(input.target, identity, capture.targetCapture);
     await assertStorageVerificationCapture(input.history, identity, capture.historyCapture);
   };
-  const consumers = await load("consumer-parity:complete");
+  let consumers = await load("consumer-parity:complete");
+  if (consumers && consumers.inputHash!==capture.captureHash) {
+    await save(`consumer-parity:history:${consumers.inputHash}`,consumers.inputHash,consumers.payload);
+    consumers=null;
+  }
   if (!consumers) {
     const saved = await load("consumer-parity:cursor");
-    if (saved && saved.inputHash !== capture.captureHash) throw new Error("storage-consumer-capture-mismatch");
-    let checkpoint = saved?.payload as StorageConsumerCheckpoint | undefined;
+    if (saved && saved.inputHash !== capture.captureHash) await save(`consumer-parity:cursor-history:${saved.inputHash}`,saved.inputHash,saved.payload);
+    let checkpoint = saved?.inputHash===capture.captureHash ? saved.payload as StorageConsumerCheckpoint : undefined;
     while (remaining()>0) {
       await heartbeatStorageMigration(ops, run.id, leaseToken);
       const result = await verifyStorageConsumerBatch({ sourceEnv, targetEnv, capture,
-        tickers: preflight.tickers, calendarDates: preflight.calendarDates, checkpoint, maxTickers: 10, assertCapture });
+        tickers: plan.tickers, calendarDates: plan.calendarDates, checkpoint, maxTickers: 10, assertCapture });
       checkpoint = result.checkpoint;
       await save("consumer-parity:cursor", capture.captureHash, checkpoint);
       await progressStorageMigration(ops, run.id, leaseToken, "consumer-parity", {
@@ -109,20 +166,13 @@ export async function runStoragePipeline(input: {
     throw new Error("storage-run-time-slice-complete");
   }
   if (consumers.inputHash !== capture.captureHash) throw new Error("storage-consumer-capture-mismatch");
-  await validateStorageConsumerEvidence(consumers.payload as StorageConsumerEvidence, capture, preflight.tickers);
-  if (!input.bootstrapEnv || !input.bootstrapFailureDb) {
-    await pauseStorageMigration(ops, run.id, leaseToken, "storage-bootstrap-bindings-required", { consumerParity: true });
-    return "awaiting-evidence";
-  }
+  await validateStorageConsumerEvidence(consumers.payload as StorageConsumerEvidence, capture, plan.tickers);
   const bootstrap = await load("bootstrap:owner");
-  const env = input.bootstrapEnv;
-  if (env.MARKET_DATA_DB !== input.target || env.MARKET_HISTORY_DB !== input.history || env.OPS_DB !== ops
-    || env.DB===input.source || env.EOD_RUNNER_MODE !== "active" || env.EOD_ARCHIVE_PRUNE_ENABLED !== "false") throw new Error("storage-bootstrap-binding-conflict");
   const expected = await expectedEodSession(env);
   if (!expected) throw new Error("storage-bootstrap-calendar-unavailable");
   type Owner={runId:string;sessionDate:string;targetDatabaseId:string};
   let owner=bootstrap?.payload as Owner|undefined;
-  if (bootstrap && (bootstrap.inputHash!==capture.captureHash || owner?.targetDatabaseId!==run.target_database_id
+  if (bootstrap && ((bootstrap.inputHash!==plan.planHash && bootstrap.inputHash!==plan.predecessorPlanHash) || owner?.targetDatabaseId!==run.target_database_id
     || !/^\d{4}-\d{2}-\d{2}$/.test(owner.sessionDate) || owner.sessionDate<run.session_date || owner.sessionDate>expected
     || owner.runId!==`eod:active:${owner.sessionDate}:daily`)) {
     throw new Error("storage-bootstrap-owner-conflict");
@@ -132,7 +182,7 @@ export async function runStoragePipeline(input: {
     const existing=await ops.prepare("SELECT id FROM eod_runs WHERE id=?").bind(runId).first();
     if (existing) throw new Error("storage-bootstrap-existing-active-run");
     const next={runId,sessionDate:expected,targetDatabaseId:run.target_database_id};
-    await save("bootstrap:owner",capture.captureHash,next);
+    await save("bootstrap:owner",plan.planHash,next);
     return next;
   };
   if (owner && owner.sessionDate<expected) {
@@ -144,11 +194,27 @@ export async function runStoragePipeline(input: {
       if (completed.session_date!==owner.sessionDate || completed.mode!=="active" || completed.purpose!=="daily") {
         throw new Error("storage-bootstrap-completed-owner-conflict");
       }
-      await save(`bootstrap-history:${owner.sessionDate}`,capture.captureHash,owner);
+      await save(`bootstrap-history:${owner.sessionDate}`,bootstrap!.inputHash,owner);
+      if (plan.sessionDate<expected) {
+        await ensureMarketCalendarCoverage(env,expected);
+        await refreshBreadthUniverseMemberships(env);
+        const nextInputs=await loadEodInputs(env,expected);
+        if (nextInputs.memberships.length!==5 || nextInputs.memberships.some(row =>
+          !assessEodMembershipEvidence(row,expected,nextInputs.calendarDates).publishable)) {
+          throw new Error("storage-population-verified-memberships-required");
+        }
+        if (await storageHash([...nextInputs.tickers].sort())!==await storageHash(plan.tickers)) {
+          throw new Error("storage-population-live-recapture-required");
+        }
+        await storeStoragePopulationPlan(ops,run,{inputs:nextInputs,capture:plan.capture,
+          originalCopyCaptureHash:plan.originalCopyCaptureHash,predecessorPlanHash:plan.planHash,leaseToken});
+        plan=await loadStorageValidationPlan(ops,run);
+      }
       owner=await claimOwner();
     }
   }
   if (!owner) {
+    if (plan.sessionDate!==expected) throw new Error("storage-population-session-replan-required");
     await assertCapture();
     owner=await claimOwner();
   }
@@ -158,8 +224,11 @@ export async function runStoragePipeline(input: {
   await releaseStorageVerificationFence(input.history, identity, capture.historyCapture);
   await releaseStorageVerificationFence(input.target, identity, capture.targetCapture);
   remaining();
-  const eodRun = await enqueueEodRun(env, owner.sessionDate, "daily");
+  let eodRun = await enqueueEodRun(env, owner.sessionDate, "daily");
   if (eodRun.id !== owner.runId) throw new Error("storage-bootstrap-run-identity-conflict");
+  eodRun=await requeueStorageBootstrapCorrection(env,{migrationId:run.id,migrationLeaseToken:leaseToken,
+    planHash:plan.planHash,targetDatabaseId:run.target_database_id,runId:owner.runId,
+    sessionDate:owner.sessionDate,plannedInputs:plan.bootstrapInputs});
   if (eodRun.next_attempt_at && Date.parse(eodRun.next_attempt_at) > Date.now()) throw new Error("storage-bootstrap-retry-not-due");
   await progressStorageMigration(ops, run.id, leaseToken, "bootstrap", { runId: owner.runId, sessionDate: owner.sessionDate });
   let leaseLost=false,heartbeatTask:Promise<void>|null=null;
@@ -170,7 +239,7 @@ export async function runStoragePipeline(input: {
   try {
     const assertContinue=() => {if(leaseLost)throw new Error("storage-migration-lease-lost");remaining();};
     assertContinue();
-    const outcome = eodRun.status === "completed" ? { status: "completed" } : await runEodBatch(env, owner.runId, input.bootstrapFailureDb,{assertContinue,hotSessions:preflight.evidence.hotSessions});
+    const outcome = eodRun.status === "completed" ? { status: "completed" } : await runEodBatch(env, owner.runId, input.bootstrapFailureDb,{assertContinue,hotSessions:90,storageInputs:plan.bootstrapInputs});
     clearInterval(heartbeat);
     if (heartbeatTask) await heartbeatTask;
     if (leaseLost) throw new Error("storage-migration-lease-lost");
@@ -184,14 +253,14 @@ export async function runStoragePipeline(input: {
     if (persisted?.status!=="completed" || persisted.session_date!==owner.sessionDate || persisted.mode!=="active" || persisted.purpose!=="daily") {
       throw new Error("storage-bootstrap-completion-not-persisted");
     }
-    await save(`bootstrap-history:${owner.sessionDate}`,capture.captureHash,owner);
+    await save(`bootstrap-history:${owner.sessionDate}`,plan.planHash,owner);
     const latestExpected=await expectedEodSession(env);
     if (!latestExpected) throw new Error("storage-bootstrap-calendar-unavailable");
     if (owner.sessionDate<latestExpected) return queueNext("storage-latest-bootstrap-required",{
       completedSession:owner.sessionDate,expectedSession:latestExpected,publicBindingChanged:false,
     });
     if (owner.sessionDate!==latestExpected) throw new Error("storage-bootstrap-future-owner");
-    await save("bootstrap:complete", capture.captureHash, owner);
+    await save("bootstrap:complete", plan.planHash, owner);
     await pauseStorageMigration(ops, run.id, leaseToken, "storage-final-acceptance-required", {
       ...owner, publicBindingChanged: false, expectedSession: expected,
       remaining: ["latest-session-check", "measured-publication-growth", "live-capacity-and-runtime", "public-binding-cutover"],

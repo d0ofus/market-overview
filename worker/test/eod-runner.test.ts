@@ -6,11 +6,13 @@ import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
 import { loadMarketHistory } from "../src/market-history";
 import { loadEodMemberships } from "../src/eod";
+import * as configDb from "../src/db";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
 vi.mock("../src/market-calendar-cache",() => ({ensureMarketCalendarCoverage:vi.fn()}));
 vi.mock("../src/eod",() => ({refreshBreadthUniverseMemberships:vi.fn(),loadEodMemberships:vi.fn()}));
 vi.mock("../src/eod-price-provider",async (original) => ({...await original<typeof import("../src/eod-price-provider")>(),EodPriceProvider:class {alpaca=calls.alpaca;yahoo=calls.yahoo;symbolErrors=new Map();}}));
-import { runEodBatch } from "../src/eod-runner";
+import { runEodBatch, loadEodInputs } from "../src/eod-runner";
+import type { FrozenInputs } from "../src/eod-runner";
 
 describe("EOD resumable runner with real publication and lease SQL", {timeout:30_000}, () => {
   let market:ReturnType<typeof createSqliteD1>,ops:ReturnType<typeof createSqliteD1>;
@@ -68,6 +70,32 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect((await runEodBatch(env,runId)).status).toBe("not-claimed");
     expect(calls.alpaca).not.toHaveBeenCalled();
     expect(calls.yahoo).not.toHaveBeenCalled();
+  });
+  it("rejects a private storage plan that would trim a newly measured member before any provider writes",async()=>{
+    const saved=await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json");
+    const planned=JSON.parse(saved!) as FrozenInputs;
+    planned.tickers.push("NEWLY-LISTED");
+    await expect(runEodBatch(env,runId,ops.db,{hotSessions:90,storageInputs:planned})).rejects.toThrow("storage-bootstrap-input-plan-changed");
+    expect(calls.alpaca).not.toHaveBeenCalled();expect(calls.yahoo).not.toHaveBeenCalled();
+    expect(await market.db.prepare("SELECT COUNT(*) AS n FROM eod_publications").first()).toEqual({n:0});
+    expect(await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json")).toBe(saved);
+  });
+  it("runs a private bootstrap against the exact measured current catalog and membership inputs",async()=>{
+    let planned=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    planned.tickers=["SPY",...planned.tickers.filter(ticker=>ticker!=="SPY").sort()];
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(planned),runId).run();
+    await market.db.prepare("CREATE TABLE symbols(ticker TEXT PRIMARY KEY,is_active INTEGER,catalog_managed INTEGER,asset_class TEXT)").run();
+    await market.db.prepare("INSERT INTO symbols SELECT value,1,1,'equity' FROM json_each(?)")
+      .bind(JSON.stringify(planned.tickers)).run();
+    const config=vi.spyOn(configDb,"loadConfig").mockResolvedValue(planned.config);
+    vi.mocked(loadEodMemberships).mockResolvedValue(structuredClone(planned.memberships));
+    try {
+      planned=await loadEodInputs(env,session);
+      await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(planned),runId).run();
+      expect((await runEodBatch(env,runId,ops.db,{hotSessions:90,storageInputs:planned})).status).toBe("completed");
+      expect(await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))
+        .toBe(JSON.stringify(planned));
+    } finally {config.mockRestore();vi.mocked(loadEodMemberships).mockReset();}
   });
 
   it("keeps a private90-session storage target small while calculating from the full260-session archive window",async () => {

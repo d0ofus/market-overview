@@ -3,8 +3,10 @@ import { storageHash } from "./market-storage-pages";
 import { storageExecutionIdentity, type StorageMigrationIdentity, type StorageMigrationRun } from "./market-storage-control";
 import { validateStorageExecutionEvidence, type StorageExecutionRecord } from "./market-storage-execution";
 import type { StoragePublicationEvidence } from "./market-storage-acceptance";
+import { assertStorageAcceptedValidationPlan, type StorageValidationPlanReference } from "./market-storage-validation-consumers";
 
-export type StorageActivationInput = { identity: StorageMigrationIdentity; opsDatabaseId: string; executionApproval?: StorageExecutionRecord|null };
+export type StorageActivationInput = { identity: StorageMigrationIdentity; opsDatabaseId: string; executionApproval?: StorageExecutionRecord|null;
+  validationPlan?: StorageValidationPlanReference };
 export type StorageActivationState = { run: StorageMigrationRun; proofHash: string; activationRecorded: boolean };
 export type StorageServingState = { side: "source" | "target"; versionId: string; deploymentId: string };
 export type StorageActivationDependencies = {
@@ -80,6 +82,7 @@ export async function validateStorageActivationState(input: StorageActivationInp
   }
   const { evidenceHash, ...unsigned } = publications;
   if (await storageHash(unsigned) !== evidenceHash) throw new Error("storage-activate-publication-evidence-invalid");
+  if (input.validationPlan) await assertStorageAcceptedValidationPlan(input.validationPlan, accepted, storageProof);
   const activation = object(activationInput);
   if (activationInput !== null && (!activation || activation.version !== 1 || activation.codeRevision !== input.identity.codeRevision
     || activation.marketDatabaseId !== input.identity.targetDatabaseId || typeof activation.activatedAt !== "string"

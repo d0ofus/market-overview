@@ -1,4 +1,30 @@
 import type { StorageMigrationRun } from "./market-storage-control";
+import { z } from "zod";
+import { storageHash } from "./market-storage-pages";
+
+const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0,10) === value;
+});
+const populationManifest = z.object({ version: z.literal(1), planHash: z.string().regex(/^[a-f0-9]{64}$/),
+  migrationId: z.string().regex(/^market-storage:[A-Za-z0-9._:-]+$/), codeRevision: z.string().regex(/^[a-f0-9]{40}$/),
+  sessionDate: date, bootstrapSessionDate: date, tickers: z.array(z.string().regex(/^[A-Z0-9][A-Z0-9.^=/-]{0,39}$/)).min(1).max(10_000),
+  tickerHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+/** This small child-process contract selects a sizing artifact, not authority
+ * to approve a plan. The runner separately validates the immutable Ops record. */
+export async function parseLocalPopulationSizing(input: unknown, expected: {
+  migrationId: string; codeRevision: string; originalSessionDate: string;
+}): Promise<z.infer<typeof populationManifest>> {
+  const parsed = populationManifest.safeParse(input);
+  if (!parsed.success) throw new Error("storage-local-population-manifest-invalid");
+  const plan = parsed.data, tickers = [...plan.tickers].sort();
+  if (plan.migrationId !== expected.migrationId || plan.codeRevision !== expected.codeRevision || plan.sessionDate !== expected.originalSessionDate
+    || plan.bootstrapSessionDate < plan.sessionDate || new Set(tickers).size !== tickers.length
+    || JSON.stringify(tickers) !== JSON.stringify(plan.tickers) || await storageHash(tickers) !== plan.tickerHash) {
+    throw new Error("storage-local-population-manifest-identity-conflict");
+  }
+  return plan;
+}
 
 export type LocalRecoveryResult = { status: "waiting" | "paused" | "completed"; stage: string; nextAttemptAt: string | null; reason: string };
 export type LocalRecoveryDependencies = {
@@ -9,6 +35,7 @@ export type LocalRecoveryDependencies = {
   analyzePreflight(): Promise<void>;
   start(): Promise<void>;
   loadMigration(): Promise<StorageMigrationRun>;
+  preparePopulationSizing(run: StorageMigrationRun): Promise<void>;
   prepareAcceptance(run: StorageMigrationRun): Promise<void>;
   accept(): Promise<void>;
   activate(): Promise<void>;
@@ -32,6 +59,18 @@ export async function runLocalStorageRecovery(deps: LocalRecoveryDependencies, n
     return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "production-cutover-complete" };
   }
   if (run.status === "awaiting-evidence") {
+    if (run.error_code === "storage-population-sizing-required") {
+      if (run.lease_until && Date.parse(run.lease_until) > now.getTime()) throw new Error("storage-local-live-lease");
+      await deps.assertCheckout();
+      await deps.preparePopulationSizing(run);
+      run = await deps.loadMigration();
+      // Sizing resumes the existing durable copy/verification run. It does
+      // not constitute reader, runtime, publication or cutover acceptance.
+      if (!["queued", "dispatching", "dispatched", "running", "retrying"].includes(run.status)) throw new Error("storage-local-population-sizing-not-persisted");
+      return { status: "waiting", stage: run.stage, reason: "current-population-sizing-accepted",
+        nextAttemptAt: run.next_attempt_at && Date.parse(run.next_attempt_at) > now.getTime()
+          ? run.next_attempt_at : new Date(now.getTime() + 30 * 60_000).toISOString() };
+    }
     if (run.error_code !== "storage-final-acceptance-required") return {
       status: "paused", stage: run.stage, nextAttemptAt: null, reason: run.error_code ?? "storage-local-review-required",
     };
@@ -65,6 +104,21 @@ export function localRecoveryFailure(message: string, stage: string, now = new D
   };
   return { status: "paused", stage, nextAttemptAt: null,
     reason: /^(?:storage|runtime|eod)-[a-z0-9-]{1,110}$/.test(message) ? message : "storage-local-review-required" };
+}
+
+/** Only an identified stale publication may restart its owned private run.
+ * Changed membership/configuration or an invalid plan requires new evidence. */
+export function localRecoveryRequiresBootstrapRefresh(output: string): boolean {
+  const reasons = new Set(["storage-acceptance-completed-latest-run-required", "storage-acceptance-publication-inputs-changed",
+    "storage-validation-bootstrap-latest-session-required"]);
+  return output.split(/\r?\n/).some((line) => {
+    if (reasons.has(line.trim())) return true;
+    try {
+      const value: unknown = JSON.parse(line);
+      return value !== null && typeof value === "object" && "reason" in value
+        && typeof value.reason === "string" && reasons.has(value.reason);
+    } catch { return false; }
+  });
 }
 
 /** Preserve a useful fixed operator failure instead of swallowing it in the

@@ -28,6 +28,8 @@ export type EodPublicationStatus = {
     status: "unmeasured" | "ready" | "failed" | "expired"; checkedAt: string | null; error: string | null;
     hotSessions: 260 | 90; feeds: string[]; forecastSessions: number; forecastAnchorSession: string;
     forecastLastSession: string; horizonExpiresAt: string; marketPhysicalBytes: number | null; archivePhysicalBytes: number | null;
+    renewal?: { status: "running" | "failed" | "completed" | "unavailable"; stage: string | null;
+      updatedAt: string | null; nextAttemptAt: string | null; error: string | null } | null;
   } | null;
   monitoring?: {
     version?: number; policyVersion?: string;

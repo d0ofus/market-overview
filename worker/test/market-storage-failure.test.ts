@@ -25,4 +25,9 @@ describe("sanitized storage interruption diagnostics", () => {
     expect(classifyStorageFailure(new Error("Authorization: private-value SELECT * FROM private_table")))
       .toEqual({code:"storage-copy-verification-failed",retryable:false,quota:false});
   });
+  it.each(["eod-account-window-unavailable","eod-account-usage-unavailable","eod-account-usage-date-changed",
+    "storage-population-verified-memberships-required"])(
+    "resumes checkpoints after transient telemetry recovery: %s",(code) => {
+      expect(classifyStorageFailure(new Error(code))).toEqual({code,retryable:true,quota:false});
+    });
 });

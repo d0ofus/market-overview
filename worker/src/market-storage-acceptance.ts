@@ -28,7 +28,7 @@ export type StorageAcceptanceCapture = {
 export type StorageConsumerCheckpoint = {
   version: 1; inputHash: string; tickerHash: string; tickerCount: number; nextTicker: number;
   outputHash: string; checks: Record<Consumer, { tickers: number; observations: number; hash: string }>;
-  history: { missing: number; shorterThan520: number; shorterThan1330: number };
+  history: { missing: number; shorterThan520: number; shorterThan1330: number; pendingRepair?: number };
 };
 export type StorageConsumerEvidence = StorageConsumerCheckpoint & {
   completedAt: string; captureHash: string; identity: StorageMigrationIdentity;
@@ -97,13 +97,39 @@ export async function verifyStorageConsumerBatch(input: {
   // Execute each actual reader once for the whole bounded ticker group. The
   // 520/1330 SQL limits and coverage query remain independent contracts; the
   // cache only shares identical captured reads, never a substitute array slice.
-  const [allSource,allTarget,allSourceYahoo,allTargetYahoo,allOhlcv520,allCloses1330,allCoverage]=await Promise.all([
-    loadMarketHistory(sourceEnv,request),loadMarketHistory(targetEnv,request),
-    loadMarketHistory(sourceEnv,{...request,feed:"yahoo-eod"}),loadMarketHistory(targetEnv,{...request,feed:"yahoo-eod"}),
-    loadMarketHistoryOhlcv(targetEnv,{...request,limitPerTicker:520}),
-    // 1,300 closing observations and the existing thirty-observation buffer.
-    loadMarketHistory(targetEnv,{...request,limitPerTicker:1_330}),loadMarketHistoryCoverage(targetEnv,request),
-  ]);
+  const read = (allowPendingAdjustmentRepair = false) => {
+    const selected = { ...request, allowPendingAdjustmentRepair };
+    return Promise.all([
+      loadMarketHistory(sourceEnv,selected),loadMarketHistory(targetEnv,selected),
+      loadMarketHistory(sourceEnv,{...selected,feed:"yahoo-eod"}),loadMarketHistory(targetEnv,{...selected,feed:"yahoo-eod"}),
+      loadMarketHistoryOhlcv(targetEnv,{...selected,limitPerTicker:520}),
+      loadMarketHistory(targetEnv,{...selected,limitPerTicker:1_330}),loadMarketHistoryCoverage(targetEnv,selected),
+    ]);
+  };
+  const pending = new Map<string, string[]>();
+  let loaded: Awaited<ReturnType<typeof read>>;
+  try { loaded = await read(); }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith("market-history-adjustment-repair-pending:")) throw error;
+    const repairRows = (env: Env) => env.MARKET_DATA_DB!.prepare(`SELECT feed,ticker,status,start_date,owner_token,updated_at
+      FROM eod_adjustment_repairs WHERE status='pending' AND feed IN ('sip','yahoo-eod')
+      AND ticker IN (SELECT value FROM json_each(?)) ORDER BY feed,ticker`).bind(JSON.stringify(request.tickers))
+      .all<{feed:string;ticker:string;status:string;start_date:string;owner_token:string|null;updated_at:string}>();
+    const [left,right] = await Promise.all([repairRows(sourceEnv),repairRows(targetEnv)]);
+    if (!left.results.length || await eodHash(left.results) !== await eodHash(right.results)) fail("consumer-pending-repair-mismatch");
+    for (const row of left.results) {
+      // Verify the real public reader remains unavailable on both sides. Raw
+      // comparison below proves preservation only; it cannot certify usability.
+      for (const env of [sourceEnv,targetEnv]) {
+        let failure: unknown;
+        try { await loadMarketHistory(env,{tickers:[row.ticker],feed:row.feed,endDate:session}); } catch (caught) { failure=caught; }
+        if (!(failure instanceof Error) || failure.message !== `market-history-adjustment-repair-pending:${row.ticker}`) fail("consumer-pending-reader-open");
+      }
+      pending.set(row.ticker,[...(pending.get(row.ticker) ?? []),row.feed]);
+    }
+    loaded = await read(true);
+  }
+  const [allSource,allTarget,allSourceYahoo,allTargetYahoo,allOhlcv520,allCloses1330,allCoverage]=loaded;
   const grouped=(rows:MarketHistoryBar[]):Map<string,MarketHistoryBar[]> => {
     const result=new Map<string,MarketHistoryBar[]>();
     for (const row of rows) {const group=result.get(row.ticker) ?? [];group.push(row);result.set(row.ticker,group);}
@@ -114,31 +140,36 @@ export async function verifyStorageConsumerBatch(input: {
   for (let index = state.nextTicker; index < end; index++) {
     const ticker=tickers[index],source=sourceRows.get(ticker) ?? [],target=targetRows.get(ticker) ?? [],
       sourceYahoo=sourceYahooRows.get(ticker) ?? [],targetYahoo=targetYahooRows.get(ticker) ?? [];
+    const pendingFeeds=pending.get(ticker) ?? [],sipPending=pendingFeeds.includes("sip");
+    const unavailable={status:"unavailable",reason:"pending-adjustment-repair",feeds:pendingFeeds};
     const compare = async (name: Consumer, expected: unknown, actual: unknown, observations: number) => {
       const expectedHash = await eodHash(expected), actualHash = await eodHash(actual);
       if (expectedHash !== actualHash) fail(`consumer-mismatch:${name}:${ticker}`);
       const check = state.checks[name];
       check.tickers++; check.observations += observations; check.hash = await eodHash([check.hash, ticker, expectedHash, observations]);
     };
-    await compare("ticker-max", [barIdentity(source), barIdentity(sourceYahoo)], [barIdentity(target), barIdentity(targetYahoo)], source.length + sourceYahoo.length);
+    const sourceMax=[barIdentity(source),barIdentity(sourceYahoo)],targetMax=[barIdentity(target),barIdentity(targetYahoo)];
+    await compare("ticker-max", pendingFeeds.length ? {rows:sourceMax,reader:unavailable} : sourceMax,
+      pendingFeeds.length ? {rows:targetMax,reader:unavailable} : targetMax, source.length + sourceYahoo.length);
     const ohlcv520=ohlcvRows.get(ticker) ?? [],closes1330=closeRows.get(ticker) ?? [];
     const expectedOhlcv = source.slice(-520).map((bar) => ({ ...bar, volume: bar.volume ?? 0 }));
-    await compare("patterns-520", barIdentity(expectedOhlcv), barIdentity(ohlcv520), expectedOhlcv.length);
+    await compare("patterns-520", sipPending ? unavailable : barIdentity(expectedOhlcv), sipPending ? unavailable : barIdentity(ohlcv520), sipPending ? 0 : expectedOhlcv.length);
     const closeOutput = (bars: MarketHistoryBar[]) => bars.map((bar) => [bar.date, bar.c]);
-    await compare("correlation-5y", closeOutput(source.slice(-1_330)), closeOutput(closes1330), Math.min(1_330, source.length));
+    await compare("correlation-5y", sipPending ? unavailable : closeOutput(source.slice(-1_330)), sipPending ? unavailable : closeOutput(closes1330), sipPending ? 0 : Math.min(1_330, source.length));
     const expectedCoverage = source.length ? [[ticker, { ticker, firstDate: source[0].date, lastDate: source.at(-1)!.date, barCount: source.length }]] : [];
     await compare("coverage-and-repair", expectedCoverage, allCoverage.has(ticker) ? [[ticker,allCoverage.get(ticker)!]] : [], source.length);
     const ohlcvOutput = (bars: MarketHistoryBar[]) => bars.map((bar) => [bar.date, bar.o, bar.h, bar.l, bar.c, bar.volume ?? 0]);
     // These workflows share the range/ordered OHLCV contract. Their algorithms
     // retain identical inputs including gaps, null-volume compatibility and dates.
-    await compare("watchlist", ohlcvOutput(source), ohlcvOutput(target), source.length);
-    await compare("relative-strength", ohlcvOutput(source), ohlcvOutput(target), source.length);
-    await compare("earnings-gaps", ohlcvOutput(source), ohlcvOutput(target), source.length);
-    await compare("scans", buildEodCatalogRow(ticker, source, 0), buildEodCatalogRow(ticker, target, 0), source.length);
+    await compare("watchlist", sipPending ? unavailable : ohlcvOutput(source), sipPending ? unavailable : ohlcvOutput(target), sipPending ? 0 : source.length);
+    await compare("relative-strength", sipPending ? unavailable : ohlcvOutput(source), sipPending ? unavailable : ohlcvOutput(target), sipPending ? 0 : source.length);
+    await compare("earnings-gaps", sipPending ? unavailable : ohlcvOutput(source), sipPending ? unavailable : ohlcvOutput(target), sipPending ? 0 : source.length);
+    await compare("scans", sipPending ? unavailable : buildEodCatalogRow(ticker, source, 0), sipPending ? unavailable : buildEodCatalogRow(ticker, target, 0), sipPending ? 0 : source.length);
     const metrics = (bars: MarketHistoryBar[]) => computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: calendar, bars: metricBars(bars) });
-    const sourceMetrics = metrics([...source, ...sourceYahoo]), targetMetrics = metrics([...target, ...targetYahoo]);
-    await compare("overview", sourceMetrics, targetMetrics, source.length + sourceYahoo.length);
-    await compare("breadth", sourceMetrics, targetMetrics, source.length + sourceYahoo.length);
+    const sourceMetrics = pendingFeeds.length ? unavailable : metrics([...source, ...sourceYahoo]), targetMetrics = pendingFeeds.length ? unavailable : metrics([...target, ...targetYahoo]);
+    await compare("overview", sourceMetrics, targetMetrics, pendingFeeds.length ? 0 : source.length + sourceYahoo.length);
+    await compare("breadth", sourceMetrics, targetMetrics, pendingFeeds.length ? 0 : source.length + sourceYahoo.length);
+    if (pendingFeeds.length) state.history.pendingRepair=(state.history.pendingRepair ?? 0)+1;
     state.history.missing += Number(source.length === 0);
     state.history.shorterThan520 += Number(source.length < 520);
     state.history.shorterThan1330 += Number(source.length < 1_330);
@@ -320,6 +351,8 @@ export async function validateStorageCapacityAnalysis(input: {
   analysis: unknown; publicationGrowth: unknown; identity: StorageMigrationIdentity; tickers: readonly string[];
   sourceSchemaHash: string; sourceSnapshotSha256: string; target: D1Database; history: D1Database; now?: Date;
   publications: StoragePublicationEvidence;
+  /** Normal capacity renewal preserves the already approved hot layout. */
+  hotSessions?: 260 | 90;
 }): Promise<{ hotSessions: 260 | 90; projectedMarketBytes: number; projectedHistoryBytes: number;
   liveTargetBytes: number; liveHistoryBytes: number; publicationGrowthReserveBytes: number;
   forecastSessions: number; revisionsPerSession: number; analysisHash: string; measuredAt: string }> {
@@ -347,7 +380,9 @@ export async function validateStorageCapacityAnalysis(input: {
   const models = Array.isArray(report.retentionModels) ? report.retentionModels.map(object) : [];
   const projectedHistoryBytes = archive.withAdditionalCompleteRevisionAndTransientBytes;
   if (typeof projectedHistoryBytes !== "number" || !count(projectedHistoryBytes) || projectedHistoryBytes <= 0 || projectedHistoryBytes >= 350_000_000) fail("history-capacity-headroom-missing");
-  const selected = [260, 90].map((hot) => models.find((model) => model.hotSessions === hot)).find((model) => {
+  if (input.hotSessions !== undefined && input.hotSessions !== 90 && input.hotSessions !== 260) fail("retention-layout-invalid");
+  const selected = (input.hotSessions === undefined ? [260, 90] : [input.hotSessions])
+    .map((hot) => models.find((model) => model.hotSessions === hot)).find((model) => {
     if (!model) return false;
     const database = object(model.database), physical = database.physicalBytes, headroom = model.sweepHeadroomSessions;
     return typeof headroom === "number" && count(headroom) && headroom >= 10 && model.sharedTickers === tickers.length

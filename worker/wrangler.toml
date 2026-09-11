@@ -20,7 +20,6 @@ EOD_BUDGET_PROFILE = "paid"
 EOD_CLOUDFLARE_ACCOUNT_ID = "5ddf4343b603f05fed83f9e102b4b553"
 EOD_ARCHIVE_PRUNE_ENABLED = "false"
 EOD_GITHUB_REPOSITORY = "d0ofus/market-overview"
-EOD_GITHUB_WORKFLOW = "eod-market-data.yml"
 # Default-valued budget, retention, provider-warning and options settings are
 # resolved by their service modules. Avoid redundant bindings: the free plan
 # allows 64 text variables and secrets combined. Keep stricter overrides here.

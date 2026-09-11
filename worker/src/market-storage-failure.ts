@@ -27,7 +27,8 @@ export function classifyStorageFailure(error:unknown):StorageFailure {
   if (invalidJson) return {code:"d1-response-invalid-json",httpStatus:Number(invalidJson[1]),
     retryable:Number(invalidJson[1])>=500,quota:false};
   if (["d1-network-error","d1-request-timeout","storage-run-time-slice-complete","storage-verification-time-slice-complete",
-    "storage-bootstrap-incomplete","storage-bootstrap-retry-not-due"].includes(message)) {
+    "storage-bootstrap-incomplete","storage-bootstrap-retry-not-due","eod-account-window-unavailable",
+    "eod-account-usage-unavailable","eod-account-usage-date-changed","storage-population-verified-memberships-required"].includes(message)) {
     return {code:message,retryable:true,quota:false};
   }
   // These are repository-defined error namespaces. Free-form provider text is

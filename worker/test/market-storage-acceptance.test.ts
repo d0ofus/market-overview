@@ -107,6 +107,22 @@ describe("executable storage consumer acceptance", () => {
       if (++checked === 2) throw new Error("capture-changed");
     } })).rejects.toThrow("capture-changed");
   }, 30_000);
+  it("preserves a copied pending QQQE repair while proving unavailable reader parity and all raw retained prices", async () => {
+    const rows=bars("QQQE",10); await hot(source.db,rows); await hot(target.db,rows.slice(-1)); await archive(rows.slice(0,-1));
+    for (const db of [source.db,target.db]) await db.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,owner_token,updated_at)
+      VALUES('sip','QQQE','pending','2026-09-01','abandoned-original-owner','2026-09-11T00:52:14.698Z')`).run();
+    const input={sourceEnv,targetEnv,capture,tickers:["QQQE","NEW-LISTING"],calendarDates:dates,maxTickers:2,assertCapture:async()=>{}};
+    const result=await verifyStorageConsumerBatch(input);
+    expect(result.evidence?.history).toMatchObject({pendingRepair:1,missing:1});
+    expect(result.evidence?.checks.overview.observations).toBe(0);
+    expect(result.evidence?.checks["patterns-520"].observations).toBe(0);
+    expect(result.evidence?.checks["ticker-max"].observations).toBe(10);
+    await expect(validateStorageConsumerEvidence(result.evidence!,capture,input.tickers)).resolves.toBeUndefined();
+    for (const db of [source.db,target.db]) expect(await db.prepare("SELECT status,owner_token FROM eod_adjustment_repairs WHERE ticker='QQQE'").first())
+      .toEqual({status:"pending",owner_token:"abandoned-original-owner"});
+    await target.db.prepare("UPDATE eod_adjustment_repairs SET status='complete' WHERE ticker='QQQE'").run();
+    await expect(verifyStorageConsumerBatch(input)).rejects.toThrow("consumer-pending-repair-mismatch");
+  },30_000);
   it("requires measured finite publication growth and live physical size for full dual-feed retention", async () => {
     history.script("CREATE TABLE IF NOT EXISTS market_storage_fence(id TEXT PRIMARY KEY,revision INTEGER); INSERT INTO market_storage_fence(id,revision) VALUES('default',0) ON CONFLICT(id) DO NOTHING;");
     const tickers = ["AAA"], tickerHash = await eodHash(tickers), now = new Date("2026-09-08T22:00:00Z");

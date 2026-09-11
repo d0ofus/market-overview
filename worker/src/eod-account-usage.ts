@@ -96,26 +96,34 @@ export async function reconcileEodAccountUsage(input:{accountId:string;token:str
     let days:Map<string,{rowsRead:number;rowsWritten:number}>;
     try { days=await fetchEodAccountUsageWindow({...input,now}); }
     catch {
-      await input.ops.prepare("UPDATE eod_account_usage SET error='eod-account-window-unavailable' WHERE usage_date=?").bind(date).run().catch(()=>undefined);
+      await input.ops.prepare("UPDATE eod_account_usage SET error='eod-account-window-unavailable' WHERE usage_date=? AND sampled_at<=?")
+        .bind(date,now.toISOString()).run().catch(()=>undefined);
       throw new Error("eod-account-window-unavailable");
     }
-    // Mark the current bucket unavailable until the final atomic batch. Older
-    // fresh rows from a prior collection must not make a partial retry usable.
-    await input.ops.prepare("UPDATE eod_account_usage SET error='eod-account-window-refreshing' WHERE usage_date=?").bind(date).run();
-    const statements=[...days].flatMap(([usageDate,usage])=>[
-      input.ops.prepare(`INSERT INTO eod_account_usage(usage_date,rows_read,rows_written,sampled_at) VALUES(?,?,?,?)
+    const values=JSON.stringify([...days].map(([usageDate,usage])=>({usageDate,...usage})));
+    // Publish the complete bounded window atomically. A runner and heartbeat
+    // may collect concurrently; neither exposes an intermediate unavailable
+    // marker or overwrites a newer successful sample's date/error status.
+    await input.ops.batch([
+      input.ops.prepare(`INSERT INTO eod_account_usage(usage_date,rows_read,rows_written,sampled_at)
+        SELECT json_extract(value,'$.usageDate'),json_extract(value,'$.rowsRead'),json_extract(value,'$.rowsWritten'),?
+        FROM json_each(?) WHERE 1
         ON CONFLICT(usage_date) DO UPDATE SET rows_read=MAX(rows_read,excluded.rows_read),rows_written=MAX(rows_written,excluded.rows_written),
-        sampled_at=excluded.sampled_at,error=NULL`).bind(usageDate,usage.rowsRead,usage.rowsWritten,now.toISOString()),
-      input.ops.prepare(`INSERT INTO market_data_daily_usage(usage_date,bars_written,rows_read,rows_written,updated_at) VALUES(?,0,?+?,?+?,?)
-        ON CONFLICT(usage_date) DO UPDATE SET rows_read=MAX(rows_read,?)+?,rows_written=MAX(rows_written,?)+?,updated_at=excluded.updated_at`)
-        .bind(usageDate,usage.rowsRead,usageDate===date ? 256 : 0,usage.rowsWritten,usageDate===date ? 256 : 0,now.toISOString(),
-          usage.rowsRead,usageDate===date ? 256 : 0,usage.rowsWritten,usageDate===date ? 256 : 0),
+        sampled_at=MAX(sampled_at,excluded.sampled_at),
+        error=CASE WHEN excluded.sampled_at>=sampled_at THEN NULL ELSE error END`).bind(now.toISOString(),values),
+      input.ops.prepare(`INSERT INTO market_data_daily_usage(usage_date,bars_written,rows_read,rows_written,updated_at)
+        SELECT json_extract(value,'$.usageDate'),0,
+          json_extract(value,'$.rowsRead')+CASE WHEN json_extract(value,'$.usageDate')=? THEN 256 ELSE 0 END,
+          json_extract(value,'$.rowsWritten')+CASE WHEN json_extract(value,'$.usageDate')=? THEN 256 ELSE 0 END,?
+        FROM json_each(?) WHERE 1
+        ON CONFLICT(usage_date) DO UPDATE SET
+          rows_read=MAX(rows_read,excluded.rows_read-CASE WHEN excluded.usage_date=? THEN 256 ELSE 0 END)+CASE WHEN excluded.usage_date=? THEN 256 ELSE 0 END,
+          rows_written=MAX(rows_written,excluded.rows_written-CASE WHEN excluded.usage_date=? THEN 256 ELSE 0 END)+CASE WHEN excluded.usage_date=? THEN 256 ELSE 0 END,
+          updated_at=MAX(updated_at,excluded.updated_at)`)
+        .bind(date,date,now.toISOString(),values,date,date,date,date),
+      input.ops.prepare(`INSERT INTO eod_usage(usage_date,rows_read,rows_written) VALUES(?,256,256)
+        ON CONFLICT(usage_date) DO UPDATE SET rows_read=rows_read+256,rows_written=rows_written+256`).bind(date),
     ]);
-    statements.push(input.ops.prepare(`INSERT INTO eod_usage(usage_date,rows_read,rows_written) VALUES(?,256,256)
-      ON CONFLICT(usage_date) DO UPDATE SET rows_read=rows_read+256,rows_written=rows_written+256`).bind(date));
-    // Refreshing all 31 buckets may span batches. Admission requires every row
-    // fresh, so a failed partial refresh never manufactures a complete window.
-    for(let offset=0;offset<statements.length;offset+=32) await input.ops.batch(statements.slice(offset,offset+32));
     return days.get(date)!;
   }
   let usage: { rowsRead:number; rowsWritten:number };

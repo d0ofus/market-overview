@@ -33,6 +33,14 @@ The `market-eod` environment variable `EOD_PRODUCTION_CODE_REVISION` pins both o
 
 Initial activation sets the pin to the accepted execution revision before enabling active ingestion. Final configuration recording advances it to the separately approved configuration commit only after checking the serving deployment, actual GitHub identities and the measured 90-session storage approval. It then verifies the real pin and pruning setting before recording completion. Later unrelated main commits do not move the EOD writer. Changing Worker/EOD code requires its own approval and deliberate pin update.
 
+## Capacity renewal
+
+The `EOD storage capacity renewal` workflow checks the approved production population and remaining measured forecast at 00:17, 12:17 and 14:17 UTC daily. The 00:17 attempt can use newly accepted EOD publications and refreshed memberships. It shares the EOD writer concurrency group and checks out the approved production revision. A renewal is due when membership changes or five exchange sessions remain in the forecast. Before public cutover the job is inactive.
+
+Renewal captures the current recent/history databases through admitted, bounded reads and checks their write revisions before, during and after capture. Disposable local SQLite files preserve the real schema and indexes for measurement. An independently flattened archive reference verifies the full current population through the historical reader contracts. Actual accepted publication payloads supply the growth model. Only a successful current measurement can advance the capacity approval; it cannot approve different application code or alter the 90-session storage policy.
+
+The admin storage panel reports renewal progress, failures and the next eligible retry. An interrupted or inconsistent capture is discarded and measured again; the previous approval retains its original dates. Quota exhaustion defers further attempts until the next UTC budget window. These temporary measurement files are not application history and are not uploaded as Actions artifacts. Failure to renew does not fabricate new headroom or extend an expired forecast.
+
 ## Downgrade procedure
 
 1. Complete recovery and optional repair bursts first. Keep normal daily processing and public reads on the same recent/archive layout.

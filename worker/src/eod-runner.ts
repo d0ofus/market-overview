@@ -19,7 +19,7 @@ import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALO
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
 
 type Membership = {universeId:string;versionId:string;source:string;sourceType:string|null;sourceUrl:string|null;sourceAsOfDate:string|null;verifiedAt:string|null;members:string[]};
-type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string};
+export type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string};
 type FeatureCheckpoint = {features:Array<[string,EodTickerMetrics]>;catalogRows:EodCatalogRow[];revisions:Array<{feed:string;ticker:string;revision:number}>;errors:Record<string,string>};
 const metricBar = (bar:EodPriceBar):EodMetricBar => ({
   ticker:bar.ticker,sessionDate:bar.date,close:bar.c,open:bar.o,high:bar.h,low:bar.l,
@@ -144,7 +144,7 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
 class EodBatchInterruptedError extends Error {
   constructor(error:unknown) {super(error instanceof Error ? error.message : "eod-run-interrupted");this.name="EodBatchInterruptedError";}
 }
-export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = env.OPS_DB!,options:{assertContinue?:()=>void;hotSessions?:260|90}={}):Promise<{status:string;published:string[]}> {
+export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = env.OPS_DB!,options:{assertContinue?:()=>void;hotSessions?:260|90;storageInputs?:FrozenInputs}={}):Promise<{status:string;published:string[]}> {
   if (!env.MARKET_DATA_DB || !env.OPS_DB || !env.ALPACA_API_KEY || !env.ALPACA_API_SECRET) throw new Error("EOD bindings/credentials are incomplete.");
   let leaseLost=false;
   const checkContinuation=() => {
@@ -195,12 +195,25 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     if (!session || run.session_date>local.localDate
       || (run.session_date===local.localDate && local.minutesOfDay<closeHour*60+closeMinute+20)) throw new Error("eod-session-not-complete");
     checkContinuation();
-    await refreshBreadthUniverseMemberships(env);
+    if (!options.storageInputs) await refreshBreadthUniverseMemberships(env);
     checkContinuation();
     const frozen=JSON.parse(run.input_json || "{}") as Partial<FrozenInputs>;
-    const inputs=frozen.methodologyVersion===EOD_METRICS_VERSION && frozen.tickers?.length && Array.isArray(frozen.memberships)
+    let inputs=frozen.methodologyVersion===EOD_METRICS_VERSION && frozen.tickers?.length && Array.isArray(frozen.memberships)
       && frozen.memberships.length<=5
-      ? frozen as FrozenInputs : await loadEodInputs(env,run.session_date);
+      ? frozen as FrozenInputs : options.storageInputs ?? await loadEodInputs(env,run.session_date);
+    if (options.storageInputs) {
+      const planned=options.storageInputs;
+      // Private migration writes may begin only with the exact measured full
+      // population and dated memberships. Neither retries nor source refreshes
+      // may quietly append members after capacity and parity were approved.
+      if (planned.calendarDates.at(-1)!==run.session_date || planned.methodologyVersion!==EOD_METRICS_VERSION
+        || planned.memberships.length!==5 || new Set(planned.tickers).size!==planned.tickers.length
+        || (frozen.tickers?.length && await eodHash(frozen)!==await eodHash(planned))
+        || await eodHash(await loadEodInputs(env,run.session_date))!==await eodHash(planned)) {
+        throw new Error("storage-bootstrap-input-plan-changed");
+      }
+      inputs=structuredClone(planned);
+    }
     if (inputs===frozen) {
       const currentCalendar=await env.MARKET_DATA_DB.prepare("SELECT session_date as date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT 1600")
         .bind(run.session_date).all<{date:string}>();

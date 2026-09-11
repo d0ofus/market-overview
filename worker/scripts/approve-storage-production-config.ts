@@ -8,6 +8,8 @@ import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { loadStorageMigration, storageExecutionIdentity } from "../src/market-storage-control";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { validateStorageActivationState } from "../src/market-storage-activate-once";
+import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
+import { assertStorageAcceptedValidationPlan } from "../src/market-storage-validation-consumers";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
 import { validateProductionConfigDelta, deriveProductionConfigProof } from "../src/eod-production-config-transition";
 import { collectEodCurrentHealth, isEodCurrentHealthReady } from "../src/eod-current-health";
@@ -83,7 +85,8 @@ async function main(): Promise<void> {
     if (typeof progress?.cutoverProofHash !== "string" || !/^[a-f0-9]{64}$/.test(progress.cutoverProofHash)) fail("source-proof-reference-invalid");
     const sourceApproval = await evidence(`active:${identity.codeRevision}`), sourceProof = object(await evidence(`storage-cutover-proof:${progress.cutoverProofHash}`));
     const executionApproval = await assertStorageExecutionRevision(ops,migration,identity.codeRevision);
-    await validateStorageActivationState({ identity, opsDatabaseId: opsId, executionApproval }, migration, sourceApproval, sourceProof, await evidence("monitoring:public-activation"));
+    const validationPlan = await loadStorageValidationPlan(ops, migration);
+    await validateStorageActivationState({ identity, opsDatabaseId: opsId, executionApproval, validationPlan }, migration, sourceApproval, sourceProof, await evidence("monitoring:public-activation"));
     const assertGithub = () => {
       const vars = github();
       for (const [name, value] of [["CLOUDFLARE_ACCOUNT_ID", accountId], ["EOD_MARKET_DATABASE_ID", target], ["EOD_HISTORY_DATABASE_ID", history],
@@ -122,12 +125,14 @@ async function main(): Promise<void> {
     assertCheckout(); assertGithub(); await assertNoLease();
     const confirmed = await serving();
     if (confirmed.versionId !== actual.versionId || confirmed.deploymentId !== actual.deploymentId) fail("serving-version-changed");
+    await assertStorageAcceptedValidationPlan(await loadStorageValidationPlan(ops, migration), progress, sourceProof);
     // This executes full existing acceptance validation and immutably creates
     // active:<new SHA>. No approval hash or measured timestamp is copied forward.
     const historyReference = await storageHistoryConfigurationReference(env, { sourceRevision: identity.codeRevision, nextRevision: revision, proof });
     await assertEodCutover({ ...env, EOD_CODE_REVISION: revision }, revision, proof);
     const record = { version: 1, policy: "canonical-config-only-v1", migrationId, activationCodeRevision: identity.codeRevision,
-      codeRevision: revision, sourceProofHash: progress.cutoverProofHash, proofHash: await eodHash(proof), ...delta, ...historyReference };
+      codeRevision: revision, validationPlanHash: validationPlan.planHash,
+      sourceProofHash: progress.cutoverProofHash, proofHash: await eodHash(proof), ...delta, ...historyReference };
     const key = `config-transition:${revision}`, previous = await evidence(key);
     if (previous && await eodHash(previous) !== await eodHash(record)) fail("lineage-conflict");
     await ops.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")

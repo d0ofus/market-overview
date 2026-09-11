@@ -225,12 +225,20 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if(query.sql.trimEnd().endsWith("/* storage-archive-point-read */")) {
+      // Repository-fixed SELECTs use either the complete pointer primary key
+      // and one block join, or a block primary key. No date-range/table scan.
+      reads+=64; continue;
+    }
     if (query.sql.trimEnd().endsWith("/* eod-yahoo-storage-admission */")) {
       // At most 1,000 reserved identities. Count staged blocks as well as
       // pointed revisions; measured overruns still stop the next admission.
       reads += 20_000;
       writes += /^\s*INSERT/i.test(query.sql) ? 8 : 0;
       continue;
+    }
+    if(query.sql.trimEnd().endsWith("/* storage-price-stream-page */")) {
+      reads+=8_000; continue;
     }
     if (query.sql.trimEnd().endsWith("/* storage-copy-page */") || query.sql.trimEnd().endsWith("/* storage-verification-year */")) {
       // Keyset pages are capped at 250 rows and use the complete primary key.
@@ -408,7 +416,8 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
     if (flushed) throw new Error("eod-admission-already-flushed");
     let now = clock();
     let date = now.toISOString().slice(0, 10);
-    if (options.reconcileAccountUsage && (date !== reconciledDate || now.getTime() - reconciledAt >= 5 * 60_000)) {
+    const refreshAccountUsage = async () => {
+      if (!options.reconcileAccountUsage) return;
       for (let attempt = 0; attempt < 2; attempt++) {
         const sampleDate = date;
         await options.reconcileAccountUsage();
@@ -422,6 +431,14 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
         // the new UTC allowance before opening or reusing a credit envelope.
         if (attempt === 1) throw new Error("eod-account-usage-date-changed");
       }
+    };
+    // Analytics are dated at request start. Their five-minute validity ends
+    // before five minutes after a slow response; refresh with headroom and at
+    // the actual captured expiry rather than extending the measured window.
+    if (options.reconcileAccountUsage && (date !== reconciledDate
+      || now.getTime() - reconciledAt >= (profile.rolling31 ? 4 : 5) * 60_000
+      || (current !== null && now.getTime() >= current.expiresAt))) {
+      await refreshAccountUsage();
     }
     const estimate = estimateEodQueries(queries);
     if (current && (current.date !== date || current.draining || now.getTime()>=current.expiresAt
@@ -431,7 +448,18 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
       await close(current);
       current = null;
     }
-    const envelope = current ?? await reserve(date, estimate,maximumReservationWrites(queries));
+    let envelope = current;
+    if (!envelope) {
+      try { envelope = await reserve(date, estimate,maximumReservationWrites(queries)); }
+      catch (error) {
+        if (!options.reconcileAccountUsage || !(error instanceof Error) || error.message !== "eod-account-window-unavailable") throw error;
+        // No business query has been submitted. A concurrent sampler or a
+        // slow collection may expire the cached window between checks; one
+        // authenticated refresh can retry admission, never the actual query.
+        await refreshAccountUsage();
+        envelope = await reserve(date, estimate,maximumReservationWrites(queries));
+      }
+    }
     current = envelope;
     const token = { ...estimate, done: false };
     envelope.pending.add(token);

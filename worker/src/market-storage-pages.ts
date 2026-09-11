@@ -39,22 +39,36 @@ export async function readStoragePage(db:D1Database,table:StorageTable,after:Sto
   return result.results;
 }
 
+/** Fixed-width price rows have a bounded transport size unlike generic payload
+ * tables. This page is also used by read-only capacity captures. */
+export async function readStoragePricePage(db:D1Database,after:StorageCell[]|null):Promise<StorageRow[]> {
+  const table=storageTable("alpaca_daily_bars");
+  if(after && after.length!==table.key.length)throw new Error("storage-page-invalid");
+  const key=table.key.map(quoteStorageIdentifier).join(",");
+  const where=after ? `WHERE (${key}) > (${after.map(() => "?").join(",")})` : "";
+  const rows=(await db.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM "alpaca_daily_bars"
+    ${where} ORDER BY ${key} LIMIT 1000 /* storage-price-stream-page */`).bind(...(after ?? [])).all<StorageRow>()).results;
+  for(const row of rows)storageRowKey(table,row);
+  return rows;
+}
+
 /** Stream the immutable source once in bounded keyset pages. Retain only one
- * page plus at most eight complete security-years; the durable cursor remains
+ * page plus at most sixteen complete security-years; the durable cursor remains
  * the final verified year, so losing this in-memory buffer is harmless. */
 export function createStoragePriceYearReader(db:D1Database,after:StorageCell[]|null) {
   const table=storageTable("alpaca_daily_bars");
   let cursor=after,buffer:StorageRow[]=[],offset=0,exhausted=false;
   const peek=async ():Promise<StorageRow|undefined> => {
     if(offset>=buffer.length && !exhausted) {
-      buffer=await readStoragePage(db,table,cursor,250);offset=0;
+      buffer=await readStoragePricePage(db,cursor);
+      offset=0;
       if(buffer.length)cursor=storageRowKey(table,buffer.at(-1)!);
-      exhausted=buffer.length<250;
+      exhausted=buffer.length<1000;
     }
     return buffer[offset];
   };
   return async (maxYears=8):Promise<{groups:StorageRow[][];next:StorageRow|undefined}> => {
-    if(!Number.isInteger(maxYears) || maxYears<1 || maxYears>8)throw new Error("storage-year-batch-invalid");
+    if(!Number.isInteger(maxYears) || maxYears<1 || maxYears>16)throw new Error("storage-year-batch-invalid");
     const groups:StorageRow[][]=[];
     let first=await peek();
     while(first && groups.length<maxYears) {
@@ -83,12 +97,15 @@ export async function copyStorageRows(target:D1Database,table:StorageTable,rows:
     await copyStorageRows(target,table,rows.slice(middle));
     return;
   }
-  await target.prepare(`INSERT INTO ${quoteStorageIdentifier(table.name)} (${table.columns.map(quoteStorageIdentifier).join(",")})
+  const insert=target.prepare(`INSERT INTO ${quoteStorageIdentifier(table.name)} (${table.columns.map(quoteStorageIdentifier).join(",")})
     SELECT ${table.columns.map((_,index) => `json_extract(value,'$[${index}]')`).join(",")} FROM json_each(?) WHERE 1
-    ON CONFLICT DO NOTHING /* storage-copy-insert */`).bind(json).run();
+    ON CONFLICT DO NOTHING /* storage-copy-insert */`).bind(json);
   const key=table.key.map(quoteStorageIdentifier).join(","), marks=table.key.map(() => "?").join(",");
-  const actual=await target.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM ${quoteStorageIdentifier(table.name)}
+  const readback=target.prepare(`SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM ${quoteStorageIdentifier(table.name)}
     WHERE (${key}) >= (${marks}) AND (${key}) <= (${marks}) ORDER BY ${key} LIMIT 101 /* storage-copy-page */`)
-    .bind(...storageRowKey(table,rows[0]),...storageRowKey(table,rows.at(-1)!)).all<StorageRow>();
+    .bind(...storageRowKey(table,rows[0]),...storageRowKey(table,rows.at(-1)!));
+  // D1 executes these in order in one transaction. Replay remains idempotent,
+  // and verification observes exactly the destination committed by this batch.
+  const actual=(await target.batch<StorageRow>([insert,readback]))[1];
   if (canonicalStorageRows(table,actual.results)!==json) throw new Error("storage-target-readback-mismatch");
 }

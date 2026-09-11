@@ -1,0 +1,63 @@
+name: EOD storage capacity renewal
+on:
+  schedule:
+    # Maintenance before close plus a recovery opportunity after publication.
+    # The post-close attempt can use newly refreshed memberships/publications.
+    - cron: "17 0,12,14 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: market-eod-writer
+  cancel-in-progress: false
+jobs:
+  renew:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    environment: market-eod
+    steps:
+      - name: Check approved production mode
+        id: mode
+        env:
+          EOD_RUNNER_MODE: ${{ vars.EOD_RUNNER_MODE || 'shadow' }}
+          EOD_PRODUCTION_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+        run: |
+          if [ "$EOD_RUNNER_MODE" != "active" ] || [ -z "$EOD_PRODUCTION_CODE_REVISION" ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Capacity renewal is inactive until production cutover is approved.'
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          ref: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+      - uses: actions/setup-node@v4
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          python-version: '3.12'
+      - run: npm ci
+        if: steps.mode.outputs.enabled == 'true'
+      - name: Renew only when the measured horizon or population requires it
+        if: steps.mode.outputs.enabled == 'true'
+        run: node --import tsx worker/scripts/renew-eod-storage-capacity.ts
+        env:
+          EOD_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+          EOD_PRODUCTION_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+          EOD_RUNNER_MODE: ${{ vars.EOD_RUNNER_MODE || 'shadow' }}
+          EOD_BUDGET_PROFILE: ${{ vars.EOD_BUDGET_PROFILE || 'free' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          EOD_CORE_DATABASE_ID: ${{ vars.EOD_CORE_DATABASE_ID }}
+          EOD_MARKET_DATABASE_ID: ${{ vars.EOD_MARKET_DATABASE_ID }}
+          EOD_HISTORY_DATABASE_ID: ${{ vars.EOD_HISTORY_DATABASE_ID }}
+          EOD_OPS_DATABASE_ID: ${{ vars.EOD_OPS_DATABASE_ID }}
+          CLOUDFLARE_EOD_D1_TOKEN: ${{ secrets.CLOUDFLARE_EOD_D1_TOKEN }}
+          CLOUDFLARE_EOD_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_EOD_ANALYTICS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
