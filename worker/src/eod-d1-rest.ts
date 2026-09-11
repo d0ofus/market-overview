@@ -102,10 +102,17 @@ export function createEodD1Database(options: {
       validateEodStatement(query);
     });
     const statements = queries.map(({sql, params}) => ({sql, params: [...params]}));
+    // D1's remote splitter treats a comment after the final DDL semicolon as
+    // an empty second statement. Retain the reviewed text for admission, but
+    // omit only this transport suffix from exact allowlisted DDL. In particular,
+    // preserve every inner trigger statement and ordinary prepared SQL verbatim.
+    const wireStatements = statements.map((statement) => statement.params.length === 0 && options.reviewedDdl?.includes(statement.sql)
+      ? { ...statement, sql: statement.sql.replace(/\s*\/\* storage-reviewed-ddl \*\/\s*$/, "").replace(/;\s*$/, "") }
+      : statement);
     // Public REST uses an object envelope, unlike the internal binding transport.
     // https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
     // One atomic batch retains independent parameter scope and ordered results.
-    const requestBody = JSON.stringify(statements.length === 1 ? statements[0] : { batch: statements });
+    const requestBody = JSON.stringify(wireStatements.length === 1 ? wireStatements[0] : { batch: wireStatements });
     if (textEncoder.encode(requestBody).length > MAX_REQUEST_BYTES) throw new Error("EOD request exceeds the bounded batch payload limit.");
     const settle = await options.admission?.(statements);
     // Ambiguous network failures are not automatically replayed: the caller resumes

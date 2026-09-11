@@ -79,17 +79,30 @@ describe("durable market storage migration controls and source fencing",{timeout
     expect(await assertStorageSourceFrozen(source.db,identity,plan.schemaHash)).toEqual(captured);
     expect(await loadStorageMigrationCheckpoint(ops.db,identity.id,"table:universes")).toMatchObject({payload:{rows:3}});
   });
-  it("requires the entire reviewed trigger set and captures writes immediately before freezing",async () => {
+  it("uses D1-safe CASE boundaries and requires the complete fence while tracking every allowed mutation",async () => {
     const plan=await prepareStorageSourceFence(source.db);
     expect(plan.statements).toHaveLength(plan.tables.length*3);
     expect(plan.tables).toContain("alpaca_daily_bars");expect(plan.tables).toContain("overview_snapshot_pointer");
     expect(plan.tables).not.toContain("market_storage_fence");
+    // SQLite accepts both spellings; the remote D1 splitter rejects bare CASE
+    // END;. Keep this transport regression next to the real SQL behavior test.
+    for (const {sql} of plan.statements) {
+      expect(sql).toContain("SELECT (CASE WHEN");
+      expect(sql).toContain("THEN RAISE(ABORT,'market-storage-source-frozen') END);");
+      expect(sql).not.toMatch(/SELECT\s+CASE\b/);
+    }
     source.script(plan.statements[0].sql);
     await expect(freezeStorageSource(source.db,identity,plan.schemaHash,now)).rejects.toThrow("fence-incomplete");
     source.script(plan.statements.map((statement)=>statement.sql).join("\n"));
     await source.db.prepare("INSERT INTO universes(id,name) VALUES('before','Before freeze')").run();
+    expect(await source.db.prepare("SELECT revision FROM market_storage_fence").first("revision")).toBe(1);
+    await source.db.prepare("UPDATE universes SET name='Updated' WHERE id='before'").run();
+    expect(await source.db.prepare("SELECT revision FROM market_storage_fence").first("revision")).toBe(2);
+    await source.db.prepare("DELETE FROM universes WHERE id='before'").run();
+    expect(await source.db.prepare("SELECT revision FROM market_storage_fence").first("revision")).toBe(3);
+    await source.db.prepare("INSERT INTO universes(id,name) VALUES('before','Before freeze')").run();
     const capture=await freezeStorageSource(source.db,identity,plan.schemaHash,now);
-    expect(capture.revision).toBeGreaterThan(0);
+    expect(capture.revision).toBe(4);
     expect(await source.db.prepare("SELECT name FROM universes WHERE id='before'").first()).toEqual({name:"Before freeze"});
     await expect(source.db.prepare("INSERT INTO universes(id,name) VALUES('after','After freeze')").run()).rejects.toThrow("market-storage-source-frozen");
     await expect(source.db.prepare("UPDATE universes SET name='Changed'").run()).rejects.toThrow("market-storage-source-frozen");

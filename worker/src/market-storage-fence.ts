@@ -23,9 +23,12 @@ async function fence(source:D1Database):Promise<Fence> {
   return value;
 }
 function trigger(table:string,event:"INSERT"|"UPDATE"|"DELETE"):string {
+  // D1's remote SQL splitter can mistake a bare CASE END; for the trigger's
+  // closing END;. Parentheses preserve SQLite semantics and that boundary.
+  // https://github.com/cloudflare/workers-sdk/issues/4727
   return `CREATE TRIGGER IF NOT EXISTS ${prefix}${table}_${event.toLowerCase()} BEFORE ${event} ON "${table}" BEGIN
-    SELECT CASE WHEN COALESCE((SELECT status FROM market_storage_fence WHERE id='default'),'frozen')='frozen'
-      THEN RAISE(ABORT,'market-storage-source-frozen') END;
+    SELECT (CASE WHEN COALESCE((SELECT status FROM market_storage_fence WHERE id='default'),'frozen')='frozen'
+      THEN RAISE(ABORT,'market-storage-source-frozen') END);
     UPDATE market_storage_fence SET revision=revision+1 WHERE id='default' AND released_at IS NULL;
   END;`;
 }

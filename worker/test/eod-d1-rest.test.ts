@@ -8,11 +8,29 @@ const result = (value: number) => ({ success: true, results: [{value}], meta: {r
 describe("public D1 REST adapter contract", () => {
   it("allows complete operator-reviewed trigger DDL only by exact match", async () => {
     const ddl="CREATE TRIGGER guard BEFORE INSERT ON sample BEGIN SELECT RAISE(ABORT,'frozen'); END; /* storage-reviewed-ddl */";
-    const fetcher=vi.fn(async () => Response.json({success:true,result:[result(1)]}));
-    const db=createEodD1Database({...options,fetcher,reviewedDdl:[ddl]});
+    const admission=vi.fn(async () => Object.assign(async () => undefined,{abandon:async () => undefined}));
+    const fetcher=vi.fn(async (_url:RequestInfo|URL,init?:RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        sql:"CREATE TRIGGER guard BEFORE INSERT ON sample BEGIN SELECT RAISE(ABORT,'frozen'); END",params:[],
+      });
+      return Response.json({success:true,result:[result(1)]});
+    });
+    const db=createEodD1Database({...options,fetcher,admission,reviewedDdl:[ddl]});
     await db.prepare(ddl).run();
+    expect(admission).toHaveBeenCalledWith([{sql:ddl,params:[]}]);
     await expect(db.prepare(ddl+" DROP TABLE sample").run()).rejects.toThrow();
     await expect(db.prepare(ddl).bind("unexpected").run()).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it("preserves ordinary SQL and rejects unreviewed trigger bodies even with the DDL accounting label",async () => {
+    const sql="SELECT ? AS value; /* storage-reviewed-ddl */";
+    const fetcher=vi.fn(async (_url:RequestInfo|URL,init?:RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({sql,params:[1]});
+      return Response.json({success:true,result:[result(1)]});
+    });
+    const db=createEodD1Database({...options,fetcher,reviewedDdl:["CREATE TABLE allowed(id TEXT);"]});
+    await db.prepare(sql).bind(1).run();
+    await expect(db.prepare("CREATE TRIGGER unreviewed BEFORE INSERT ON allowed BEGIN SELECT 1; END; /* storage-reviewed-ddl */").run()).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledOnce();
   });
   it("sends a documented object batch with separate parameter arrays and maps ordered results", async () => {
