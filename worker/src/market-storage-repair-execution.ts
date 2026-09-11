@@ -219,7 +219,7 @@ export async function approveStorageRepairExecution(input: StorageRepairExecutio
     if (!target || !Number.isSafeInteger(target.revision) || !Number.isSafeInteger(target.inputClock)
       || history.schemaHash !== amendment.schemaHash || history.indexManifestHash !== amendment.indexManifestHash
       || history.snapshotRevision !== amendment.snapshotRevision || history.revision < amendment.revision) fail("tracked-capture-invalid");
-    const repairs=(await input.target.prepare("SELECT * FROM eod_adjustment_repairs WHERE ticker IN (SELECT value FROM json_each(?)) ORDER BY feed,ticker")
+    const repairs=(await input.target.prepare("SELECT * FROM eod_adjustment_repairs WHERE feed IN ('sip','yahoo-eod') AND ticker IN (SELECT value FROM json_each(?)) ORDER BY feed,ticker")
       .bind(JSON.stringify(repairChunk)).all<Record<string,string|number|null>>()).results;
     const failed=repairs.find(row=>row.feed==="sip"&&row.ticker===input.repairTicker);
     if(!failed||failed.status!=="pending"||typeof failed.owner_token!=="string"||!failed.owner_token

@@ -11,7 +11,7 @@ function fail(reason: string): never { throw new Error(`storage-repair-code-${re
 // incomplete-repair quarantine branches are reviewed. Existing checkpoints,
 // publications and all source/storage evidence remain unchanged by admission.
 export const STORAGE_REPAIR_INTEGRATION_HASHES: Readonly<Record<string,string>> = {
-  "worker/src/market-storage-repair-execution.ts": "9203c93728e9ab5b2e011b26e8ac7c3b57042341b557d5ce8428e62be5bad494",
+  "worker/src/market-storage-repair-execution.ts": "dd1ec572eaed671549041b37ac98c36f8fed789bfec71ba40cc8a3b6b9cfc10e",
   "worker/src/market-storage-history-index-recovery.ts": "661f74006a006e01649cd120063cd26c4964200a774c8d20b3d1d7ce8ec5a1a0",
   "worker/src/eod-runner.ts": "36851b16d274283f0cb9ab712c7e7d1f3b20b278027a76aba94ec977c8d84d7b",
   "worker/src/eod-catalog-service.ts": "845559bee0ea77ea0c9b4f4edcda99853085bbf5e172e826b1d3c51bffdb349f",
