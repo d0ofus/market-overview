@@ -211,6 +211,50 @@ describe("EOD Yahoo identity and price basis", () => {
     ticker:"AAA",date,o:100,h:101,l:99,c:100,volume:1000,reportedVolume:1000,
     feed:"sip",sourceProvider:"alpaca",adjustment:"split",fetchedAt:null,observedAt:null,
   }));
+  // Metadata and timestamps from the single admitted 2026-09-11 VIX identity
+  // diagnostic. Numeric prices/volume below use the synthetic yahooPayload.
+  const vixMetadata = { symbol: "^VIX", exchangeTimezoneName: "America/Chicago", instrumentType: "INDEX", currency: "USD",
+    shortName: "CBOE Volatility Index", longName: "CBOE Volatility Index" };
+  const vixTimestamps = ["2026-09-09T07:00:00.000Z", "2026-09-10T07:00:00.000Z"];
+
+  it("accepts reviewed VIX Chicago metadata while retaining NY session dates and Yahoo volume provenance", async () => {
+    vi.setSystemTime(new Date("2026-09-11T14:09:15Z"));
+    const body = await yahooPayload(vixMetadata, vixTimestamps).json() as { chart: { result: Array<{
+      indicators: { adjclose?: Array<{ adjclose: number[] }> };
+    }> } };
+    body.chart.result[0]!.indicators.adjclose = [{ adjclose: [50, 50] }];
+    request.mockResolvedValueOnce(Response.json(body));
+    const bars = await complete(new EodPriceProvider(env).yahoo("VIX", "2026-09-09", "2026-09-10", []));
+    expect(bars.map((bar) => ({ ticker: bar.ticker, date: bar.date, close: bar.c, volume: bar.volume,
+      reportedVolume: bar.reportedVolume, sourceProvider: bar.sourceProvider, feed: bar.feed, adjustment: bar.adjustment }))).toEqual(
+      ["2026-09-09", "2026-09-10"].map((date) => ({ ticker: "VIX", date, close: 100, volume: 999,
+        reportedVolume: null, sourceProvider: "yahoo", feed: "yahoo-eod", adjustment: "split" })),
+    );
+    expect(decodeURIComponent(new URL(String(request.mock.calls[0]![1])).pathname)).toBe("/v8/finance/chart/^VIX");
+  });
+
+  it.each([
+    { exchangeTimezoneName: "America/New_York" },
+    { exchangeTimezoneName: "Europe/Oslo" },
+    { symbol: "^VVIX" },
+    { instrumentType: "ETF" },
+    { currency: "CAD" },
+    { shortName: "Different index", longName: "Different index" },
+  ])("rejects incompatible VIX metadata despite the mapped Chicago timezone %#", async (meta) => {
+    request.mockResolvedValueOnce(yahooPayload({ ...vixMetadata, ...meta }, vixTimestamps));
+    await expect(complete(new EodPriceProvider(env).yahoo("VIX", "2026-09-09", "2026-09-10", [])))
+      .rejects.toThrow("yahoo-instrument-identity-unverified");
+  });
+
+  it.each([
+    { ticker: "INSR", meta: { symbol: "^INSR", instrumentType: "INDEX", shortName: "NASDAQ Insurance" } },
+    { ticker: "AAA", meta: { symbol: "AAA", instrumentType: "EQUITY", shortName: "Example equity" } },
+  ])("keeps the New York identity requirement for non-VIX $ticker", async ({ ticker, meta }) => {
+    request.mockResolvedValueOnce(yahooPayload({ ...meta, exchangeTimezoneName: "America/Chicago" }));
+    await expect(complete(new EodPriceProvider(env).yahoo(ticker, "2026-09-04", "2026-09-08", sipOverlap())))
+      .rejects.toThrow("yahoo-instrument-identity-unverified");
+  });
+
   it("accepts the exact configured Nasdaq Insurance index only with verified metadata", async () => {
     request.mockResolvedValueOnce(yahooPayload({ symbol: "^INSR", instrumentType: "INDEX", shortName: "NASDAQ Insurance" }));
     const bars = await complete(new EodPriceProvider(env).yahoo("INSR", "2026-09-04", "2026-09-08", []));

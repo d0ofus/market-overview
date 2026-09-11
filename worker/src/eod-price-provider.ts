@@ -10,14 +10,14 @@ export type EodPriceBar = MarketHistoryBar & { reportedVolume: number | null };
 // Exact indices in the audited Overview, never ETF replacements. INSR identity:
 // https://indexes.nasdaq.com/docs/methodology_INSR.pdf. Runtime metadata must
 // still confirm INDEX/USD/name before any mapped Yahoo response is accepted.
-const INDEX_SYMBOLS: Record<string, { symbol: string; name: RegExp }> = {
-  VIX: { symbol: "^VIX", name: /volatility|\bVIX\b/i },
-  XOI: { symbol: "^XOI", name: /oil/i },
-  XAU: { symbol: "^XAU", name: /gold.*silver|silver.*gold/i },
-  XNG: { symbol: "^XNG", name: /natural gas/i },
-  OSX: { symbol: "^OSX", name: /oil.*service/i },
-  BKX: { symbol: "^BKX", name: /bank/i },
-  INSR: { symbol: "^INSR", name: /nasdaq.*insurance|insurance.*nasdaq/i },
+const INDEX_SYMBOLS: Record<string, { symbol: string; name: RegExp; timeZone: "America/New_York" | "America/Chicago" }> = {
+  VIX: { symbol: "^VIX", name: /volatility|\bVIX\b/i, timeZone: "America/Chicago" },
+  XOI: { symbol: "^XOI", name: /oil/i, timeZone: "America/New_York" },
+  XAU: { symbol: "^XAU", name: /gold.*silver|silver.*gold/i, timeZone: "America/New_York" },
+  XNG: { symbol: "^XNG", name: /natural gas/i, timeZone: "America/New_York" },
+  OSX: { symbol: "^OSX", name: /oil.*service/i, timeZone: "America/New_York" },
+  BKX: { symbol: "^BKX", name: /bank/i, timeZone: "America/New_York" },
+  INSR: { symbol: "^INSR", name: /nasdaq.*insurance|insurance.*nasdaq/i, timeZone: "America/New_York" },
 };
 const MARKET_DATE = new Intl.DateTimeFormat("en-CA", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
@@ -244,7 +244,7 @@ export class EodPriceProvider {
     const result = json.chart?.result?.[0];
     const index = INDEX_SYMBOLS[ticker];
     if (json.chart?.error || !result || result.meta?.symbol?.toUpperCase() !== symbol
-      || result.meta?.exchangeTimezoneName !== "America/New_York"
+      || result.meta?.exchangeTimezoneName !== (index?.timeZone ?? "America/New_York")
       || (!index && (result.meta.currency!=="USD" || !["EQUITY","ETF"].includes(result.meta.instrumentType ?? "")))
       || (index && (result.meta.instrumentType !== "INDEX" || result.meta.currency !== "USD"
         || !index.name.test(`${result.meta.shortName ?? ""} ${result.meta.longName ?? ""}`)))) {

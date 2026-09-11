@@ -78,9 +78,14 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect(calls.yahoo).not.toHaveBeenCalled();
   });
 
-  async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent") {
+  async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent",missingSymbol="MISSING0") {
     const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
       .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    if(missingSymbol!=="MISSING0") {
+      frozen.tickers=frozen.tickers.map(ticker=>ticker==="MISSING0" ? missingSymbol : ticker);
+      const group=frozen.config.sections[0].groups[0];
+      group.items.push({...group.items[0],ticker:missingSymbol,displayName:missingSymbol});
+    }
     frozen.memberships.find(row=>row.universeId==="nasdaq-core")!.members=[...frozen.tickers];
     frozen.memberships.find(row=>row.universeId==="russell2000-core")!.members=["MISSING24"];
     await market.db.prepare("CREATE TABLE symbols(ticker TEXT PRIMARY KEY,is_active INTEGER,catalog_managed INTEGER,asset_class TEXT)").run();
@@ -94,7 +99,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     const prices=async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>{
       if(ticker==="MISSING24")return [];
       return dates.filter(date=>date>=start && (ticker==="SPY" || date>=dates.at(-30)!)
-        && !(ticker==="MISSING0" && ((missingCurrent==="price" && date===session)
+        && !(ticker===missingSymbol && ((missingCurrent==="price" && date===session)
           || (missingCurrent==="adjacent" && date===dates.at(-2)))))
         .map(date=>({...makeBar(date),ticker,adjustment}));
     });
@@ -156,6 +161,28 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     await interruptShortHistorySlice(missing);
     expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
     expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+  },60_000);
+
+  it("refetches the retained null VIX checkpoint and publishes a corrected Overview revision",async()=>{
+    await interruptShortHistorySlice("price","VIX");
+    const before=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+    expect(before).toHaveLength(1);
+    const old=before[0] as unknown as {payload_json:string;payload_codec:string;payload_base64:string|null};
+    const oldPayload=await decodeEodPayload({payload:old.payload_json,payloadCodec:old.payload_codec,payloadBase64:old.payload_base64}) as {sections:Array<{groups:Array<{rows:Array<{ticker:string;price:number|null}>}>}>};
+    expect(oldPayload.sections[0].groups[0].rows.find(row=>row.ticker==="VIX")?.price).toBeNull();
+    calls.yahoo.mockImplementation(async(ticker:string)=>{
+      if(ticker!=="VIX")throw new Error("yahoo-unavailable");
+      return dates.slice(-260).map((date,index)=>({...makeBar(date,20+index/100),ticker:"VIX",feed:"yahoo-eod",sourceProvider:"yahoo",reportedVolume:null}));
+    });
+    expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("VIX"))).toBe(true);
+    expect(calls.yahoo.mock.calls.some(([ticker])=>ticker==="VIX")).toBe(true);
+    const after=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+    expect(after).toHaveLength(2);expect(after[0]).toEqual(before[0]);
+    const current=after[1] as unknown as typeof old;
+    const payload=await decodeEodPayload({payload:current.payload_json,payloadCodec:current.payload_codec,payloadBase64:current.payload_base64}) as typeof oldPayload;
+    expect(payload.sections[0].groups[0].rows.find(row=>row.ticker==="VIX")?.price).toBe(22.59);
+    expect(await market.db.prepare("SELECT publication_id FROM eod_publication_pointers WHERE scope='overview:default'").first<string>("publication_id")).toBe(after[1].id);
   },60_000);
 
   it("requires approved storage inputs for planned slice checkpoint reuse",async()=>{
