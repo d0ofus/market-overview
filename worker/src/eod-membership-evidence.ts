@@ -1,3 +1,5 @@
+import { zonedParts } from "./refresh-timing";
+
 /** Page publication checks frozen provenance again: persisted legacy inputs and
  * manually reconstructed runs must not bypass the current membership loader. */
 export type EodMembershipEvidence = {
@@ -17,11 +19,40 @@ function validDate(date: string | null): date is string {
   return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === date;
 }
 
+export function isEodMembershipSourceVerified(universeId: string, sourceType: string | null | undefined): boolean {
+  return Boolean(sourceType && sources[universeId]?.includes(sourceType));
+}
+
+/** SQLite CURRENT_TIMESTAMP is UTC; ISO timestamps must carry their offset.
+ * Verification belongs to the New York civil day, including after UTC midnight. */
+export function membershipVerificationTime(value: string | null | undefined): number | null {
+  if (!value || !validDate(value.slice(0, 10))) return null;
+  const sqlite = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,3})?$/.test(value);
+  const normalized = sqlite ? `${value.replace(" ", "T")}Z` : value;
+  if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)) return null;
+  const time = Date.parse(normalized);
+  return Number.isFinite(time) ? time : null;
+}
+
+export function membershipVerificationDate(value: string | null | undefined): string | null {
+  const time = membershipVerificationTime(value);
+  return time === null ? null : zonedParts(new Date(time), "America/New_York").localDate;
+}
+
+/** Exclusive UTC boundary for versions observed during the target NY day.
+ * US DST changes at 02:00; the offset at target-day noon also applies at its end. */
+export function membershipSessionEndUtc(targetSession: string): string {
+  if (!validDate(targetSession)) throw new Error("membership-session-date-invalid");
+  const noon = new Date(`${targetSession}T12:00:00Z`);
+  const offsetMinutes = zonedParts(noon, "America/New_York").minutesOfDay - 12 * 60;
+  return new Date(noon.getTime() + (12 * 60 - offsetMinutes) * 60_000).toISOString();
+}
+
 export function assessEodMembershipEvidence(membership: EodMembershipEvidence, targetSession: string, calendarDates: string[]): {
   publishable: boolean; reason: string | null; ageSessions: number | null; degraded: boolean;
 } {
   const unavailable = (reason: string) => ({ publishable: false, reason, ageSessions: null, degraded: true });
-  if (!membership.versionId || !membership.sourceType || !sources[membership.universeId]?.includes(membership.sourceType)) {
+  if (!membership.versionId || !isEodMembershipSourceVerified(membership.universeId, membership.sourceType)) {
     return unavailable("membership-source-unverified-or-unrelated");
   }
   if (!validDate(membership.sourceAsOfDate) || membership.sourceAsOfDate > targetSession) {
@@ -29,9 +60,8 @@ export function assessEodMembershipEvidence(membership: EodMembershipEvidence, t
   }
   let evidenceDate = membership.sourceAsOfDate;
   if (membership.verifiedAt !== null) {
-    const verifiedDate = membership.verifiedAt.slice(0, 10), time = Date.parse(membership.verifiedAt);
-    if (!validDate(verifiedDate) || !Number.isFinite(time) || !/[T ]\d{2}:\d{2}/.test(membership.verifiedAt)
-      || verifiedDate > targetSession || new Date(time).toISOString().slice(0, 10) > targetSession
+    const verifiedDate = membershipVerificationDate(membership.verifiedAt);
+    if (!verifiedDate || verifiedDate > targetSession
       || verifiedDate < membership.sourceAsOfDate) return unavailable("membership-verification-invalid-or-future");
     evidenceDate = verifiedDate;
   }

@@ -49,7 +49,15 @@ class OfflineStorageTests(unittest.TestCase):
         self.assertIn("retained_custom_state", report["bootstrap"]["database"]["objects"])
         self.assertIn("retained_custom_state_value", report["bootstrap"]["database"]["objects"])
         self.assertEqual([model["modeledSipRows"] for model in report["retentionModels"]], [540,200])
-        self.assertEqual([model["modeledFallbackRows"] for model in report["retentionModels"]], [540,200])
+        self.assertEqual([model["modeledFallbackRows"] for model in report["retentionModels"]], [0,0])
+        self.assertEqual([model["fallbackStorage"] for model in report["retentionModels"]], [analysis.FALLBACK_LAYOUT]*2)
+        reserve = report["archive"]["fallbackReserve"]
+        self.assertEqual(reserve["totalReservedTickers"],2)
+        self.assertEqual(reserve["modeledRows"],2*analysis.FALLBACK_SESSIONS)
+        self.assertTrue(reserve["roundTripPassed"])
+        self.assertGreater(reserve["physicalBytesAfter"],reserve["physicalBytesBefore"])
+        self.assertEqual(report["archive"]["withAdditionalCompleteRevisionAndTransientBytes"],
+                         reserve["physicalBytesAfter"]*2+analysis.TRANSIENT_ARCHIVE_BYTES)
         self.assertEqual([model["preservedOtherFeedOrNonSharedSeedRows"] for model in report["retentionModels"]], [3,3])
         self.assertEqual(report["population"]["targetSessionSipMissing"], ["MISSING"])
         self.assertFalse(report["consumerParity"]["verified"])
@@ -70,6 +78,27 @@ class OfflineStorageTests(unittest.TestCase):
                              list(self.db.execute("SELECT * FROM eod_input_revisions ORDER BY feed,ticker")))
         finally:
             seed.close()
+
+    def test_fallback_fixture_counts_retained_identities_and_preserves_immutable_revisions(self):
+        archive = sqlite3.connect(":memory:")
+        archive.row_factory = sqlite3.Row
+        archive.executescript((analysis.ROOT/"history-migrations/0001_history.sql").read_text())
+        codec = analysis.Codec()
+        try:
+            first = analysis.archive_fallback_model(archive,codec,["OLD"],"2026-09-08","2026-09-09T01:00:00Z",capacity=1)
+            old = list(archive.execute("SELECT * FROM market_history_blocks ORDER BY id"))
+            second = analysis.archive_fallback_model(archive,codec,["NEW"],"2026-09-09","2026-09-10T01:00:00Z",capacity=1)
+            self.assertEqual(first["totalReservedTickers"],1)
+            self.assertEqual(second["existingTickersOutsidePopulation"],1)
+            self.assertEqual(second["modeledAdditionalTickers"],0)
+            self.assertEqual(second["totalReservedTickers"],1)
+            for row in old:
+                self.assertEqual(row,archive.execute("SELECT * FROM market_history_blocks WHERE id=?",(row["id"],)).fetchone())
+            with self.assertRaisesRegex(analysis.AnalysisError,"exceed"):
+                analysis.archive_fallback_model(archive,codec,["NEW"],"2026-09-09","2026-09-10T01:00:00Z",capacity=0)
+        finally:
+            codec.close()
+            archive.close()
 
     def test_full_population_manifest_accepts_frozen_run_and_rejects_duplicates(self):
         path = Path(self.temporary.name)/"tickers.json"

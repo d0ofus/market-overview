@@ -5,6 +5,7 @@ import { MARKET_HISTORY_REQUIRED_CONSUMERS, MARKET_HISTORY_READER_CONTRACT_VERSI
 import { computeEodTickerMetrics, EOD_METRICS_VERSION, type EodMetricBar } from "./eod-metrics";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { eodHash } from "./eod-publication-service";
+import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
 import { loadMarketHistory, loadMarketHistoryCoverage, loadMarketHistoryOhlcv, type MarketHistoryBar } from "./market-history";
 import type { StorageMigrationIdentity } from "./market-storage-control";
 import type { Env } from "./types";
@@ -336,8 +337,10 @@ export async function validateStorageCapacityAnalysis(input: {
     if (!model) return false;
     const database = object(model.database), physical = database.physicalBytes, headroom = model.sweepHeadroomSessions;
     return typeof headroom === "number" && count(headroom) && headroom >= 10 && model.sharedTickers === tickers.length
-      && model.fallbackTickerReserve === tickers.length && model.modeledSipRows === tickers.length * (Number(model.hotSessions) + headroom)
-      && model.modeledFallbackRows === model.modeledSipRows && typeof physical === "number" && count(physical) && physical > 0
+      && storageFallbackModelValid(report, model, tickers.length) && model.modeledSipRows === tickers.length * (Number(model.hotSessions) + headroom)
+      && (model.fallbackStorage !== EOD_YAHOO_ARCHIVE_LAYOUT
+        || Number(object(archive.fallbackReserve).sessions) >= 260 + growth.forecastSessions)
+      && typeof physical === "number" && count(physical) && physical > 0
       && model.publicationGrowthReserveBytes === publicationGrowthReserveBytes
       && model.projectedBytes === physical + publicationGrowthReserveBytes && model.projectedBytes < 350_000_000;
   });

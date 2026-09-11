@@ -1,6 +1,7 @@
 import { meteredFetch,ProviderBudgetExceededError } from "./provider-usage";
 import type { Env } from "./types";
 import type { MarketHistoryBar } from "./market-history";
+import { assertYahooArchiveCapacity } from "./eod-fallback-storage";
 
 type AlpacaBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 export type EodPriceBar = MarketHistoryBar & { reportedVolume: number | null };
@@ -214,6 +215,7 @@ export class EodPriceProvider {
 
   async yahoo(tickerInput: string, start: string, target: string, overlap: EodPriceBar[]): Promise<EodPriceBar[]> {
     const ticker = tickerInput.trim().toUpperCase();
+    if (this.env.MARKET_HISTORY_DB) await assertYahooArchiveCapacity(this.env.MARKET_HISTORY_DB, ticker);
     const bounds = range(start, target);
     const symbol = yahooEodSymbol(ticker);
     const params = new URLSearchParams({ interval: "1d", period1: String(Math.floor(Date.parse(bounds.start) / 1000)),

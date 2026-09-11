@@ -13,7 +13,7 @@ import { assertStorageVerificationCapture, type StorageVerificationEvidence } fr
 import { validateStorageConsumerEvidence, verifyStorageAcceptedPublications, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
 import { storageHash } from "../src/market-storage-pages";
 import { buildRuntimeEvidence, collectRuntimeEvidence, validateRuntimeEvidence, type RuntimeEvidenceIdentity } from "../src/eod-runtime-evidence";
-import { assertCandidateMigrationState, localRuntimeAdminSecret, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
+import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntimeCandidateCredentialBinding, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
   runtimeCandidatePublicationHash,
   assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow,
   type CandidateIdentity, type CandidateProbeState } from "../src/eod-runtime-candidate";
@@ -23,7 +23,7 @@ const workerRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."), repoR
 const required = (key: string): string => { const value = process.env[key]?.trim(); if (!value) throw new Error(`runtime-candidate-missing:${key}`); return value; };
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
 type State = { version: 1; identity: CandidateIdentity; configHash: string; publicationHash: string; probeUntil: string; deploymentAttempted: boolean;
-  secretsInstalled?: boolean; workerVersion?: string; baseUrl?: string; samples?: CandidateProbeState };
+  secretsInstalled?: boolean; candidateCredentialHash?: string; workerVersion?: string; baseUrl?: string; samples?: CandidateProbeState };
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "run";
   if (!["prepare", "run", "collect"].includes(command)) throw new Error("runtime-candidate-command-invalid");
@@ -115,10 +115,14 @@ async function main(): Promise<void> {
         input: stdin, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], windowsHide: true, timeout: 300_000, maxBuffer: 8_000_000,
       }); } catch { throw new Error(`runtime-candidate-wrangler-${args[0]}-failed`); }
     };
-    let adminSecret = process.env.ADMIN_SECRET;
-    if (!adminSecret && existsSync(resolve(workerRoot, ".dev.vars"))) adminSecret = localRuntimeAdminSecret(readFileSync(resolve(workerRoot, ".dev.vars"), "utf8")) ?? undefined;
-    if (!adminSecret && command !== "collect") throw new Error("runtime-candidate-admin-secret-required");
-    if (adminSecret && (adminSecret.length > 4096 || /[\r\n\0]/.test(adminSecret))) throw new Error("runtime-candidate-admin-secret-invalid");
+    // The independent candidate never receives production's ADMIN_SECRET.
+    // Only the credential fingerprint is persisted; collection needs no secret.
+    const adminSecret = command === "run" ? await privateRuntimeAdminSecret(token, accountId, identity) : null;
+    if (adminSecret) {
+      const candidateCredentialHash = await storageHash(adminSecret);
+      assertRuntimeCandidateCredentialBinding(candidateCredentialHash, state);
+      if (!state.candidateCredentialHash) { state.candidateCredentialHash = candidateCredentialHash; persist(state); }
+    }
     if (!state.secretsInstalled && command !== "collect") {
       if (state.workerVersion || state.samples) throw new Error("runtime-candidate-secret-install-state-conflict");
       if (!state.deploymentAttempted) {

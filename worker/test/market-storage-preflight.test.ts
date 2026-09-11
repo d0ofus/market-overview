@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
 import { storageHash } from "../src/market-storage-pages";
+import { EOD_YAHOO_ARCHIVE_LAYOUT, EOD_YAHOO_ARCHIVE_MODEL_SESSIONS } from "../src/eod-storage-layout";
 
 const identity={id:"market-storage:test",sourceDatabaseId:"10000000-0000-4000-8000-000000000001",
   targetDatabaseId:"10000000-0000-4000-8000-000000000002",historyDatabaseId:"10000000-0000-4000-8000-000000000003",
@@ -48,5 +49,21 @@ describe("relocation-only capacity preflight",()=>{
     await expect(prepareStoragePreflight(input)).rejects.toThrow("population-mismatch");
     input.tickers=["AAPL","SPY"];input.now=new Date("2026-09-20T00:00:00Z");
     await expect(prepareStoragePreflight(input)).rejects.toThrow("measurement-expired");
+  });
+  it("admits measured bounded Yahoo archives without reducing primary coverage or planning headroom",async()=>{
+    const input=await fixture();
+    const fallbackReserve={storage:EOD_YAHOO_ARCHIVE_LAYOUT,capacityTickers:1000,existingTickers:0,
+      existingTickersOutsidePopulation:0,modeledAdditionalTickers:2,totalReservedTickers:2,tickerHash:await storageHash(input.tickers),
+      sessions:EOD_YAHOO_ARCHIVE_MODEL_SESSIONS,modeledRows:2*EOD_YAHOO_ARCHIVE_MODEL_SESSIONS,
+      physicalBytesBefore:1_000_000,physicalBytesAfter:2_000_000,roundTripPassed:true,measurementMethod:"sqlite-real-history-codec-v1"};
+    const analysis={...input.analysis,archive:{...input.analysis.archive,database:{physicalBytes:2_000_000},fallbackReserve,
+      withAdditionalCompleteRevisionAndTransientBytes:4_000_000+4*1024*1024},
+      retentionModels:input.analysis.retentionModels.map((row)=>({...row,fallbackStorage:EOD_YAHOO_ARCHIVE_LAYOUT,modeledFallbackRows:0}))};
+    const result=await prepareStoragePreflight({...input,analysis});
+    expect(result.evidence).toMatchObject({hotSessions:90,planningReserveBytes:64_000_000,projectedRecentBytes:164_000_000});
+    fallbackReserve.roundTripPassed=false;
+    await expect(prepareStoragePreflight({...input,analysis})).rejects.toThrow("insufficient-headroom");
+    fallbackReserve.roundTripPassed=true;fallbackReserve.modeledRows--;
+    await expect(prepareStoragePreflight({...input,analysis})).rejects.toThrow("insufficient-headroom");
   });
 });

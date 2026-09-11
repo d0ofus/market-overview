@@ -164,7 +164,7 @@ async function main():Promise<void> {
       if(!recorded || JSON.parse(recorded).marketDatabaseId!==target || JSON.parse(recorded).codeRevision!==codeRevision)throw new Error("storage-activation-existing-record-conflict");
       await completeStorageMigration(meteredOps,id,{targetDatabaseId:target,codeRevision,cutoverEvidenceHash:await storageHash({binding,publications})});
       await collectEodRolloutMonitoring(env);
-      console.log(JSON.stringify({id,status:"completed",session:expected,monitoring:"three-trading-sessions-required"}));return;
+      console.log(JSON.stringify({id,status:"completed",session:expected,monitoring:"no-observation-period"}));return;
     }
     if(command==="authorize") {
       if(codeRevision!==existing.code_revision)throw new Error("storage-run-code-revision-mismatch");

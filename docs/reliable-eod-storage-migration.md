@@ -89,6 +89,28 @@ Each stage rechecks the accepted durable state. Only an actually serving matchin
 
 **Deployment ownership after cutover:** the checked-in `worker/wrangler.toml` still describes the original source configuration at the accepted SHA. Do not run a bare production `wrangler deploy` from it after activation; that could restore the old binding. For this approved SHA, use the guarded activation entry point to verify/recover cutover. A subsequent code deployment requires a reviewed canonical target configuration and approval for its new SHA, preserving the immutable source identity and archive-compatible readers. This command does not silently edit tracked configuration or claim that the old SHA approves future code.
 
+### Final canonical configuration commit
+
+The local recovery task completes and disables itself after verified public cutover. The Admin configuration milestone remains pending until the separate command below records it. A successful cutover does not imply that checked-in deployment settings have changed.
+
+For the immediate configuration-only follow-up, change **only** `worker/wrangler.toml`: set `MARKET_DATA_DB` to the verified target database ID/name, `EOD_RUNNER_MODE="active"` and `EOD_READ_ENABLED="true"`. Keep pruning disabled and every other runtime setting unchanged. Adding the exact original `EOD_STORAGE_MIGRATION_ID` is allowed. Omit a literal `EOD_CODE_REVISION`; the deployment supplies the actual new SHA. Commit and push that configuration to `main`.
+
+Then run from the repository root, with `EOD_MARKET_DATABASE_ID` set to the target and the original migration/source/history/Ops identities and Cloudflare credentials retained:
+
+```powershell
+node --import tsx worker/scripts/approve-storage-production-config.ts
+$EodConfigRevision = git rev-parse HEAD
+node node_modules/wrangler/bin/wrangler.js whoami
+node node_modules/wrangler/bin/wrangler.js deploy --config worker/wrangler.toml --keep-vars --var "EOD_CODE_REVISION:$EodConfigRevision"
+node --import tsx worker/scripts/record-storage-production-config.ts
+```
+
+Proceed to deployment only if approval succeeds. Keep the original `EOD_STORAGE_CODE_REVISION` and `EOD_STORAGE_SOURCE_DATABASE_ID` GitHub variables unchanged; the migration continues to refer to its original accepted code and source. The canonical market variable and runner mode must already match the activated target. During the short push-to-approval interval, an active GitHub run on the new SHA fails closed and may be retried after approval.
+
+The approval command compares the new Git tree with the migration's approved SHA: the complete tracked application, dependencies and scripts must be byte-identical outside this one configuration file. It permits only the exact settings above, verifies clean local/GitHub `main`, the completed migration, original activation and immutable acceptance proof, sole serving target version, current complete publications/input revisions, current account/EOD quota and actual database sizes within measured projections and the 350 MB limit. It reruns normal acceptance validation to create `active:<new SHA>` and records `config-transition:<new SHA>` lineage. Original CPU, capacity and reader measurement dates are preserved. The proof must still cover the current expected session and remain within its existing validity window; expired evidence or any application change requires a separately reviewed validation path. This exception cannot approve arbitrary subsequent code changes or silently refresh old evidence.
+
+Finally, the recording command independently verifies the new sole serving Worker version and canonical checked-in/GitHub settings before writing `recovery:production-configuration`. Its output must say `recorded`; a quota failure leaves that milestone pending and can be retried. Public activation keeps its original SHA/date while the configuration record identifies the new deployment SHA/version.
+
 ## Cutover and rollback
 
 Binding cutover requires `EOD_READ_ENABLED=true`, six complete accepted latest page publications and the full matching catalog, including compatibility tuples. See [reader parity requirements](archive-only-reader-parity.md). Copy completion cannot substitute for those checks. Reconstruct the latest session against the replacement while the original binding still serves dated data, then promote only after full-universe validation.
@@ -111,6 +133,6 @@ Before target activation, explicit abort verifies that the original source is st
 | Production validation | Full shared universe and all six scopes; reader/output parity; actual D1 sizes/reads/index writes and Worker CPU/query limits |
 | Public cutover | Verified replacement binding, accepted publication pointers, dated coverage/reasons, commentary and refresh behavior on both pages |
 | Historical recovery | Bounded corrections/backfills with date-appropriate membership; explicit gaps and unverified legacy results where evidence is absent |
-| Monitoring and retirement | Three consecutive trading sessions published within two hours of actual close and within agreed budgets, with finalized whole-day usage for those trading dates and no weekend/holiday bucket requirement; then retire replaced writers while preserving archive-compatible rollback |
+| Monitoring and retirement | No elapsed observation period; verify current publications, input revisions, quota and technical cutover requirements before retiring replaced writers, while preserving archive-compatible rollback |
 
 Free-tier allowance can make initial transfer and reconstruction span multiple UTC days. The two-hour delivery target is measured during normal daily operation after bootstrap, and cannot be claimed from a successful workflow dispatch or a healthy database connection.

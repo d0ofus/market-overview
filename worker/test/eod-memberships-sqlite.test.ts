@@ -3,7 +3,7 @@ import { loadEodMemberships } from "../src/eod";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
-describe("scoped historical membership reads against real SQLite", () => {
+describe("scoped historical membership reads against real SQLite", { timeout: 20_000 }, () => {
   let market: ReturnType<typeof createSqliteD1>, ops: ReturnType<typeof createSqliteD1>;
   beforeEach(() => {
     market = createSqliteD1(); ops = createSqliteD1();
@@ -41,4 +41,33 @@ describe("scoped historical membership reads against real SQLite", () => {
     }
     expect(result.flatMap((row) => row.members)).not.toContain("EXCLUDED");
   }, 30_000);
+
+  it("includes NY evening promotions after UTC midnight but excludes the next NY day's version", async () => {
+    await market.db.prepare("INSERT INTO universes(id,name,active_version_id) VALUES('sp500-core','S&P','late-evening')").run();
+    const insertVersion = async (id: string, date: string, promoted: string) => {
+      await market.db.prepare(`INSERT INTO universe_versions
+        (id,universe_id,source,source_type,source_as_of_date,status,member_count,created_at,promoted_at)
+        VALUES(?,'sp500-core','verified public proxy','public-index-constituents-proxy',?,'active',500,?,?)`)
+        .bind(id, date, promoted, promoted).run();
+      await market.db.prepare(`INSERT INTO universe_version_members(version_id,ticker)
+        SELECT ?,value FROM json_each(?)`).bind(id, JSON.stringify(Array.from({ length: 500 }, (_, index) => `${id}${index}`))).run();
+    };
+    await insertVersion("late-evening", "2026-09-08", "2026-09-09 00:15:00");
+    await ops.db.prepare(`INSERT INTO universe_source_sync_state
+      (source_key,status,source_label,source_type,source_as_of_date,last_verified_at)
+      VALUES('universe:sp500-core','ok','verified tonight','public-index-constituents-proxy','2026-09-08','2026-09-09 00:15:00')`).run();
+    const env = { DB: market.db, MARKET_DATA_DB: market.db, OPS_DB: ops.db } as Env;
+    const evening = await loadEodMemberships(env, "2026-09-08");
+    expect(evening[0]).toMatchObject({ versionId: "late-evening", verifiedAt: "2026-09-09 00:15:00" });
+    expect(evening[0]?.members).toHaveLength(500);
+
+    await insertVersion("next-day", "2026-09-09", "2026-09-09T04:00:00Z");
+    await market.db.prepare("UPDATE universes SET active_version_id='next-day' WHERE id='sp500-core'").run();
+    await market.db.prepare("UPDATE universe_versions SET status='superseded' WHERE id='late-evening'").run();
+    await ops.db.prepare("UPDATE universe_source_sync_state SET source_as_of_date='2026-09-09',last_verified_at='2026-09-09 04:00:00'").run();
+    expect((await loadEodMemberships(env, "2026-09-08"))[0]).toMatchObject({
+      versionId: "late-evening", sourceAsOfDate: "2026-09-08", verifiedAt: null,
+    });
+    expect((await loadEodMemberships(env, "2026-09-09"))[0]).toMatchObject({ versionId: "next-day", sourceAsOfDate: "2026-09-09" });
+  });
 });

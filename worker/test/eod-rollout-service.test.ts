@@ -33,7 +33,7 @@ function evidence(): EodCutoverEvidence {
 }
 
 describe("bounded cutover proof validation", () => {
-  it("allows one measured full-scope cutover before the retirement observation streak", () => {
+  it("allows a measured full-scope cutover without elapsed observation requirements", () => {
     expect(validateEodCutoverEvidence(evidence(), revision, now).sessionDate).toBe("2026-11-27");
   });
   it("rejects missing proof, wrong code, stale measurements and inflated provider ceilings", () => {
@@ -59,28 +59,22 @@ describe("bounded cutover proof validation", () => {
       (proof: EodCutoverEvidence) => { proof.readers.consumers = ["overview"]; },
     ]) { const proof = evidence(); mutate(proof); expect(() => validateEodCutoverEvidence(proof, revision, now)).toThrow(); }
   });
-  it("requires the current three-session policy, consecutive exchange sessions, deadlines and budgets for retirement", () => {
-    const dates = ["2026-11-24", "2026-11-25", "2026-11-27"];
-    const proof = { version: 2, policyVersion: EOD_RETIREMENT_POLICY_VERSION, codeRevision: revision, methodologyVersion: EOD_METRICS_VERSION,
-      sessions: dates.map((sessionDate) => ({ sessionDate, runId: `eod:active:${sessionDate}:daily`,
-        deadlineAt: `${sessionDate}T23:00:00Z`, publishedAt: `${sessionDate}T22:00:00Z`,
-        scopes: evidence().scopes.map((scope) => ({ ...scope, sessionDate, publicationId: `${scope.publicationId}-${sessionDate}` })),
-        measurements: { ...evidence().measurements, usageDate: sessionDate }, limits: evidence().limits })) };
-    expect(validateEodRetirementEvidence(proof, revision, dates).sessions).toHaveLength(3);
-    expect(() => validateEodRetirementEvidence({ ...proof, version: 1 }, revision, dates)).toThrow(/retirement-schema/);
-    expect(() => validateEodRetirementEvidence({ ...proof, policyVersion: "ten-trading-sessions-v1" }, revision, dates)).toThrow(/retirement-schema/);
-    expect(() => validateEodRetirementEvidence({ ...proof, sessions: proof.sessions.slice(1) }, revision, dates)).toThrow(/retirement-schema/);
-    proof.sessions[0]!.sessionDate = "2026-11-23";
-    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/consecutive/);
-    proof.sessions[0]!.sessionDate = dates[0]!;
-    proof.sessions[0]!.publishedAt = "2026-11-25T00:00:00Z";
-    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/deadline/);
-    proof.sessions[0]!.publishedAt = `${dates[0]}T22:00:00Z`;
-    proof.sessions[0]!.measurements.httpCpuMs = 11;
-    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/measured-limits/);
-    proof.sessions[0]!.measurements.httpCpuMs = 5;
-    proof.sessions[0]!.measurements.usageDate = "2026-11-22";
-    expect(() => validateEodRetirementEvidence(proof, revision, dates)).toThrow(/usage-date-mismatch/);
+  it("removes elapsed observations but requires current health, matching code, fresh quota and all publications", () => {
+    const currentHealth = { checkedAt: now.toISOString(), codeRevision: revision, status: "passed", expectedSession: "2026-11-27",
+      publicationCount: 6, missingScopes: [], completedRunId: "run", inputCorrectionsPending: false, reasons: [],
+      usageDate: "2026-11-27", quotaSampledAt: now.toISOString(), quota: { eodRowsRead: 100, eodRowsWritten: 10,
+        accountRowsRead: 1000, accountRowsWritten: 100, reservedReads: 0, reservedWrites: 0 } };
+    const proof = { version: 3, policyVersion: EOD_RETIREMENT_POLICY_VERSION, methodologyVersion: EOD_METRICS_VERSION,
+      mode: "active", requiredSessions: 0, eligibleForRetirement: true, sessions: [], currentHealth };
+    expect(validateEodRetirementEvidence(proof, revision, now)).toEqual(currentHealth);
+    for (const invalid of [{ ...proof, version: 2 }, { ...proof, requiredSessions: 3 }, { ...proof, currentHealth: null },
+      { ...proof, currentHealth: { ...currentHealth, publicationCount: 0 } },
+      { ...proof, currentHealth: { ...currentHealth, inputCorrectionsPending: true } },
+      { ...proof, currentHealth: { ...currentHealth, quota: { ...currentHealth.quota, reservedWrites: 50000 } } }]) {
+      expect(() => validateEodRetirementEvidence(invalid, revision, now)).toThrow(/current-health-required/);
+    }
+    expect(() => validateEodRetirementEvidence(proof, "b".repeat(40), now)).toThrow(/code-revision/);
+    expect(() => validateEodRetirementEvidence(proof, revision, new Date(now.getTime()+301000))).toThrow(/current-health-required/);
   });
   it("selects the same finalizable calendar cutoff on weekdays, UTC rollover and weekends", () => {
     expect(eodRetirementSessionCutoff("2026-11-25", new Date("2026-11-26T00:30:00Z"))).toBe("2026-11-24");
@@ -137,6 +131,14 @@ describe("cutover proof against actual migrated SQLite references", { timeout: 3
   }
   it("accepts completed shadow candidates with verified compressed payloads, counts and recorded quota", async () => {
     expect((await assertEodCutover(env, revision))?.sharedTickers.count).toBe(60);
+  });
+  it("validates a narrow explicit new-code proof against real publications and rejects changed inputs even on replay", async () => {
+    const nextRevision = "b".repeat(40), candidate = { ...evidence(), codeRevision: nextRevision };
+    await expect(assertEodCutover(env, nextRevision, candidate)).resolves.toEqual(candidate);
+    const global = await storage.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='cutover'").first<string>("evidence_json");
+    expect(JSON.parse(global!).codeRevision).toBe(revision);
+    await storage.db.prepare("UPDATE eod_publications SET payload_checksum='changed' WHERE scope='overview:default'").run();
+    await expect(assertEodCutover(env, nextRevision, candidate)).rejects.toThrow("publication-integrity");
   });
   it("requires the completed watermark and rejects later Yahoo corrections before initial cutover",async () => {
     await storage.db.prepare("UPDATE eod_runs SET completed_input_clock=NULL").run();

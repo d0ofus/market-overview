@@ -1,14 +1,15 @@
 /** User-approved operating gate. Version changes invalidate cached eligibility
  * and submitted retirement proofs; they do not alter price retention, CPU or
  * account quota limits. Nontrading-day telemetry remains operational evidence. */
-export const EOD_RETIREMENT_REQUIRED_SESSIONS = 3;
-export const EOD_RETIREMENT_POLICY_VERSION = "three-trading-sessions-v1";
+export const EOD_RETIREMENT_REQUIRED_SESSIONS = 0;
+export const EOD_OPERATIONAL_HISTORY_SESSIONS = 3;
+export const EOD_RETIREMENT_POLICY_VERSION = "current-health-no-observation-v1";
 export const EOD_ROLLOUT_MONITOR_KEY = `monitoring:${EOD_RETIREMENT_POLICY_VERSION}`;
 export const EOD_USAGE_FINALIZATION_DELAY_DAYS = 2;
 
 /** Whole-day account analytics retain one additional UTC day for corrections.
  * Evaluate a fixed calendar cutoff, not whichever historical usage rows happen
- * to exist: an absent finalizable trading bucket still blocks retirement. */
+ * to exist. This is operational history only and never gates retirement. */
 export function eodRetirementSessionCutoff(expectedSession: string, now = new Date()): string {
   const expectedTime = Date.parse(`${expectedSession}T00:00:00Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedSession) || !Number.isFinite(expectedTime)

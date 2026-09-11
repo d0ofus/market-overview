@@ -6,6 +6,7 @@ import { eodHash } from "../src/eod-publication-service";
 import { STORAGE_CONSUMER_CONTRACTS, type StorageAcceptanceCapture, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
 import type { Env } from "../src/types";
+import { EOD_YAHOO_ARCHIVE_LAYOUT, EOD_YAHOO_ARCHIVE_MODEL_SESSIONS, EOD_YAHOO_ARCHIVE_TICKER_LIMIT } from "../src/eod-storage-layout";
 
 describe("archive-first measured layout maintenance", { timeout: 30_000 }, () => {
   let market: ReturnType<typeof createSqliteD1>, history: ReturnType<typeof createSqliteD1>, ops: ReturnType<typeof createSqliteD1>, env: Env;
@@ -46,11 +47,19 @@ describe("archive-first measured layout maintenance", { timeout: 30_000 }, () =>
       SELECT ?,'AAA',value,100,101,99,100,100,?,'split',value||'T21:00:00Z' FROM json_each(?)`)
       .bind(feed, feed === "sip" ? "alpaca" : "yahoo", JSON.stringify(dates)).run();
   }
-  async function approve(hot: 260 | 90 = 260) {
-    const tickerHash = await eodHash(tickers), priceRows = (hot + 10) * 2;
+  async function approve(hot: 260 | 90 = 260, archiveOnly = false) {
+    const tickerHash = await eodHash(tickers), priceRows = (hot + 10) * (archiveOnly ? 1 : 2);
     const analysis = { measuredAt: now.toISOString(), source: { snapshotSha256: "e".repeat(64) },
+      ...(archiveOnly ? { archive: { database: { physicalBytes: 600_000 },
+        withAdditionalCompleteRevisionAndTransientBytes: 1_200_000 + 4 * 1024 * 1024,
+        fallbackReserve: { storage: EOD_YAHOO_ARCHIVE_LAYOUT, capacityTickers: EOD_YAHOO_ARCHIVE_TICKER_LIMIT,
+          existingTickers: 0, existingTickersOutsidePopulation: 0, modeledAdditionalTickers: 1, totalReservedTickers: 1,
+          sessions: EOD_YAHOO_ARCHIVE_MODEL_SESSIONS, modeledRows: EOD_YAHOO_ARCHIVE_MODEL_SESSIONS,
+          physicalBytesBefore: 400_000, physicalBytesAfter: 600_000, roundTripPassed: true,
+          measurementMethod: "sqlite-real-history-codec-v1", tickerHash } } } : {}),
       retentionModels: [{ hotSessions: hot, sharedTickers: 1, fallbackTickerReserve: 1, sweepHeadroomSessions: 10,
-        modeledSipRows: hot + 10, modeledFallbackRows: hot + 10, projectedBytes: 1_500_000,
+        ...(archiveOnly ? { fallbackStorage: EOD_YAHOO_ARCHIVE_LAYOUT } : {}),
+        modeledSipRows: hot + 10, modeledFallbackRows: archiveOnly ? 0 : hot + 10, projectedBytes: 1_500_000,
         database: { physicalBytes: 1_000_000, priceTableAndIndexBytes: priceRows * 200 } }] };
     const unsigned = { version: 1 as const, inputHash: "f".repeat(64), tickerHash, tickerCount: 1, nextTicker: 1, outputHash: "f".repeat(64),
       checks: Object.fromEntries(STORAGE_CONSUMER_CONTRACTS.map((name) => [name, { tickers: 1, observations: 1, hash: "f".repeat(64) }])) as StorageConsumerEvidence["checks"],
@@ -75,6 +84,14 @@ describe("archive-first measured layout maintenance", { timeout: 30_000 }, () =>
     expect(samples.every((row) => !row.sql.includes("json_object") && row.params[1] === 271)).toBe(true);
     expect(await loadStorageHistoryCapacityStatus(env, now)).toMatchObject({ status: "ready", hotSessions: 260,
       forecastSessions: 20, forecastAnchorSession: "2026-09-08", forecastLastSession: "2026-09-28" });
+  });
+  it("accepts the measured archive-only model and detects an unauthorized hot fallback outside the current population", async () => {
+    await seed("sip", 91); await approve(90, true);
+    const result = await refreshHistoryMaintenanceEvidence(env, { tickers, codeRevision: revision, now });
+    expect(result.capacity.liveProjection).toMatchObject({ sampledRows: 91, remainingHotRows: 9 });
+    expect(samples.find((row) => row.params[0] === "yahoo-eod")?.params[1]).toBe(1);
+    await market.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,source_provider,adjustment) VALUES('yahoo-eod','UNLISTED','2026-09-09',100,100,100,100,'yahoo','split')").run();
+    await expect(refreshHistoryMaintenanceEvidence(env, { tickers, codeRevision: revision, now })).rejects.toThrow("yahoo-eod-retention-sweep-overflow");
   });
   it("accounts for accumulated fallback rows and fails visibly beyond the 90+10 sweep allowance", async () => {
     await seed("sip", 91); await seed("yahoo-eod", 100); await approve(90);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parse } from "smol-toml";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { assertCandidateMigrationState, localRuntimeAdminSecret, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
+import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntimeCandidateCredentialBinding, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
   runtimeCandidatePublicationHash, assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow, type CandidateProbeState } from "../src/eod-runtime-candidate";
 import type { StorageMigrationIdentity, StorageMigrationRun } from "../src/market-storage-control";
 import type { StoragePublicationEvidence } from "../src/market-storage-acceptance";
@@ -79,12 +79,27 @@ describe("protected runtime candidate configuration", () => {
       sessionDate: migration.sessionDate, opsDatabaseId: read("OPS_DB"), coreDatabaseId: read("DB") });
     expect(prepareRuntimeCandidateConfig(input, id, { mainPath: "/repo/worker/src/index.ts", probeUntil, now }).name).toBe(id.workerName);
   });
-  it("only selects a unique local ADMIN_SECRET without evaluating other credentials or shell syntax", () => {
-    expect(localRuntimeAdminSecret('ALPACA_API_SECRET="do-not-copy"\nADMIN_SECRET="admin-test"\nOTHER=$(secret)')).toBe("admin-test");
-    expect(localRuntimeAdminSecret("ADMIN_SECRET='literal-$()'\n")).toBe("literal-$()");
-    expect(localRuntimeAdminSecret("ALPACA_API_SECRET=ignored")).toBeNull();
-    expect(() => localRuntimeAdminSecret("ADMIN_SECRET=a\nADMIN_SECRET=b")).toThrow("ambiguous");
-    expect(() => localRuntimeAdminSecret('ADMIN_SECRET="a\\nb"')).toThrow("invalid");
+  it("derives a private replayable credential without a production admin secret or local secret file", async () => {
+    const token = "control-token-fixture-".repeat(3), account = "a".repeat(32), id = await identity();
+    const secret = await privateRuntimeAdminSecret(token, account, id);
+    expect(secret).toMatch(/^[a-f0-9]{64}$/);
+    expect(secret).not.toBe(token);
+    expect(secret).toBe(await privateRuntimeAdminSecret(token, account, structuredClone(id)));
+    expect(secret).not.toBe(await privateRuntimeAdminSecret(token, "b".repeat(32), id));
+    expect(secret).not.toBe(await privateRuntimeAdminSecret("rotated-token-fixture-".repeat(3), account, id));
+    const next = await runtimeCandidateIdentity({ migration, sessionDate: migration.sessionDate, opsDatabaseId: uuid(4), coreDatabaseId: uuid(5), attempt: 2 });
+    expect(secret).not.toBe(await privateRuntimeAdminSecret(token, account, next));
+    expect(secret).not.toBe(await privateRuntimeAdminSecret(token, account, { ...id, targetDatabaseId: uuid(99) }));
+    await expect(privateRuntimeAdminSecret(token, account, { ...id, workerName: "production" })).rejects.toThrow("private-credential-input-invalid");
+    await expect(privateRuntimeAdminSecret("", account, id)).rejects.toThrow("private-credential-input-invalid");
+  });
+  it("preserves a matching installed credential on replay and rejects changed or unknown installed credentials", () => {
+    const fingerprint = "a".repeat(64);
+    expect(() => assertRuntimeCandidateCredentialBinding(fingerprint, {})).not.toThrow();
+    expect(() => assertRuntimeCandidateCredentialBinding(fingerprint, { candidateCredentialHash: fingerprint, secretsInstalled: true })).not.toThrow();
+    for (const state of [{ candidateCredentialHash: "b".repeat(64) }, { secretsInstalled: true }]) {
+      expect(() => assertRuntimeCandidateCredentialBinding(fingerprint, state)).toThrow("private-credential-changed-new-attempt-required");
+    }
   });
   it("requires final private bootstrap state and refuses active, failed, leased or mismatched migrations", () => {
     const run = { id: migration.id, source_database_id: uuid(1), target_database_id: uuid(2), history_database_id: uuid(3), session_date: migration.sessionDate,
@@ -101,7 +116,7 @@ describe("candidate HTTP protocol", () => {
   async function fixture() {
     const id = await identity(), states: CandidateProbeState[] = [], eligibility = vi.fn(async () => undefined), version = vi.fn(async () => undefined);
     const fetcher = vi.fn(async () => Response.json({ ok: true }));
-    return { identity: id, baseUrl: `https://${id.workerName}.unit.workers.dev`, adminSecret: "never-in-state",
+    return { identity: id, baseUrl: `https://${id.workerName}.unit.workers.dev`, adminSecret: await privateRuntimeAdminSecret("control-token-fixture-".repeat(3), "a".repeat(32), id),
       state: { from: now.getTime(), to: null, probes: [] } as CandidateProbeState, save: async (value: CandidateProbeState) => { states.push(structuredClone(value)); },
       assertEligible: eligibility, assertCurrentVersion: version, fetcher, states, now: () => now };
   }
@@ -117,6 +132,8 @@ describe("candidate HTTP protocol", () => {
       ["/api/dashboard", "GET"], ["/api/dashboard", "GET"], ["/api/breadth/dashboard", "GET"], ["/api/breadth/dashboard", "GET"], ["/api/admin/eod/runtime-probe/coordinator", "POST"],
     ]);
     expect(calls.every(([, init]) => init.redirect === "error")).toBe(true);
+    expect(calls.every(([, init]) => new Headers(init.headers).get("Authorization") === `Bearer ${options.adminSecret}`)).toBe(true);
+    expect(JSON.stringify(options.states)).not.toContain(options.adminSecret);
   });
   it("does not send any traffic when readiness fails or the destination is production", async () => {
     const options = await fixture(); options.assertEligible.mockRejectedValueOnce(new Error("missing-publication"));

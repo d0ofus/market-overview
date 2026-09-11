@@ -116,6 +116,16 @@ describe("executable storage consumer acceptance", () => {
         return { ...proof, evidenceHash: await eodHash(proof) };
       })() };
     await expect(validateStorageCapacityAnalysis(input)).resolves.toMatchObject({ hotSessions: 90, forecastSessions: 20, publicationGrowthReserveBytes: reserve });
+    const archivedReport = { ...report, archive: { database: { physicalBytes: 1_000_000 },
+      withAdditionalCompleteRevisionAndTransientBytes: 2_000_000 + 4 * 1024 * 1024,
+      fallbackReserve: { storage: "archive-only-bounded-v1", capacityTickers: 1000, existingTickers: 0,
+        existingTickersOutsidePopulation: 0, modeledAdditionalTickers: 1, totalReservedTickers: 1, tickerHash,
+        sessions: 320, modeledRows: 320, physicalBytesBefore: 100_000, physicalBytesAfter: 1_000_000,
+        roundTripPassed: true, measurementMethod: "sqlite-real-history-codec-v1" } },
+      retentionModels: report.retentionModels.map((model) => ({ ...model, modeledFallbackRows: 0, fallbackStorage: "archive-only-bounded-v1" })) };
+    await expect(validateStorageCapacityAnalysis({ ...input, analysis: archivedReport })).resolves.toMatchObject({ hotSessions: 90 });
+    archivedReport.archive.fallbackReserve.modeledRows = 319;
+    await expect(validateStorageCapacityAnalysis({ ...input, analysis: archivedReport })).rejects.toThrow("full-population-capacity-headroom-missing");
     await expect(validateStorageCapacityAnalysis({ ...input, publicationGrowth: { ...growth, afterBytes: growth.beforeBytes } })).rejects.toThrow("growth-identity-mismatch");
     await expect(validateStorageCapacityAnalysis({ ...input, sourceSnapshotSha256: "0".repeat(64) })).rejects.toThrow("snapshot-incomplete");
     report.retentionModels[1].fallbackTickerReserve = 0;

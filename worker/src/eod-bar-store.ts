@@ -4,6 +4,12 @@ import type { EodPriceBar } from "./eod-price-provider";
 /** A bounded JSON parameter avoids hundreds of HTTP round trips and preserves
  * exact per-symbol trigger counts for concurrent-writer detection. */
 export async function writeEodBars(env: Env, bars: EodPriceBar[]): Promise<Map<string, number>> {
+  // The recent-table capacity model reserves primary prices only. Fallback
+  // windows are written and verified by archiveMarketHistoryBars; accepting a
+  // Yahoo row here would silently invalidate that model and its provenance.
+  if (bars.some((bar) => bar.feed !== "sip" || bar.sourceProvider !== "alpaca" || bar.adjustment !== "split")) {
+    throw new Error("eod-hot-store-requires-alpaca-sip-split; fallback-history-must-be-archived");
+  }
   const changed = new Map<string, number>();
   for (let offset = 0; offset < bars.length; offset += 250) {
     const result = await env.MARKET_DATA_DB!.prepare(`INSERT INTO alpaca_daily_bars

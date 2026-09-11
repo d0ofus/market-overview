@@ -6,7 +6,8 @@ import { eodHash } from "./eod-publication-service";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE } from "./eod-catalog-service";
 import { collectEodRolloutMonitoring } from "./eod-rollout-monitor";
-import { eodRetirementSessionCutoff, EOD_RETIREMENT_POLICY_VERSION, EOD_RETIREMENT_REQUIRED_SESSIONS } from "./eod-retirement-policy";
+import { EOD_RETIREMENT_POLICY_VERSION, EOD_RETIREMENT_REQUIRED_SESSIONS } from "./eod-retirement-policy";
+import { isEodCurrentHealthReady } from "./eod-current-health";
 import type { Env } from "./types";
 
 const universeIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"] as const;
@@ -184,7 +185,7 @@ async function checkCatalogPublication(env: Env, publicationId: unknown, session
 }
 
 /** The CLI must pass its actual GITHUB_SHA before claiming an active run. Shadow never requires approval. */
-export async function assertEodCutover(env: Env, codeRevision: string): Promise<EodCutoverEvidence | null> {
+export async function assertEodCutover(env: Env, codeRevision: string, candidateProof?: unknown): Promise<EodCutoverEvidence | null> {
   if (env.EOD_RUNNER_MODE !== "active") return null;
   if (!env.OPS_DB || !env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB) fail("bindings-missing");
   assertIdentity(codeRevision, codeRevision);
@@ -202,10 +203,15 @@ export async function assertEodCutover(env: Env, codeRevision: string): Promise<
   // Approval is durable for this exact revision. Live admission still checks
   // current account usage/capacity for every run; measurements are not redated.
   const approved = await readApproval();
-  if (approved) return approved;
-  const row = await env.OPS_DB.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='cutover'").first<{evidence_json:string}>();
-  if (!row) fail("required");
-  const proof = validateEodCutoverEvidence(parseObject(row.evidence_json), codeRevision);
+  if (approved && candidateProof === undefined) return approved;
+  // The operator's narrow configuration-only transition supplies dated source
+  // evidence explicitly. It receives every normal live validation below; it
+  // cannot overwrite global cutover evidence or bypass checks on replay.
+  const row = candidateProof === undefined
+    ? await env.OPS_DB.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='cutover'").first<{evidence_json:string}>() : null;
+  if (candidateProof === undefined && !row) fail("required");
+  const proof = validateEodCutoverEvidence(candidateProof === undefined ? parseObject(row!.evidence_json) : candidateProof, codeRevision);
+  if (approved && await eodHash(approved) !== await eodHash(proof)) fail("durable-approval-candidate-conflict");
   const run = await env.OPS_DB.prepare("SELECT id,session_date,mode,purpose,status,input_json,progress_json,completed_at,completed_input_clock FROM eod_runs WHERE id=?")
     .bind(proof.runId).first<StoredRun>();
   if (!run || run.status !== "completed" || run.purpose !== "daily" || run.session_date !== proof.sessionDate || !run.completed_at
@@ -247,66 +253,24 @@ export async function assertEodCutover(env: Env, codeRevision: string): Promise<
   return persisted;
 }
 
-const retirementSchema = z.object({
-  version: z.literal(2), policyVersion: z.literal(EOD_RETIREMENT_POLICY_VERSION),
-  codeRevision: z.string(), methodologyVersion: z.literal(EOD_METRICS_VERSION),
-  sessions: z.array(z.object({ sessionDate: date, runId: z.string().min(1), deadlineAt: timestamp,
-    publishedAt: timestamp, scopes: z.array(scopeSchema).length(6), measurements: measurementsSchema, limits: limitsSchema }).strict()).length(EOD_RETIREMENT_REQUIRED_SESSIONS),
-}).strict();
-export function validateEodRetirementEvidence(input: unknown, codeRevision: string, exchangeSessions: string[]) {
-  const parsed = retirementSchema.safeParse(input);
-  if (!parsed.success) fail("retirement-schema");
-  const proof = parsed.data;
-  assertIdentity(codeRevision, proof.codeRevision);
-  const expected = [...new Set(exchangeSessions)].sort().slice(-EOD_RETIREMENT_REQUIRED_SESSIONS);
-  const actual = proof.sessions.map((session) => session.sessionDate).sort();
-  if (expected.length !== EOD_RETIREMENT_REQUIRED_SESSIONS || actual.some((session, index) => session !== expected[index])) fail("retirement-consecutive-trading-sessions");
-  for (const session of proof.sessions) {
-    assertMeasurements(session.measurements, session.limits);
-    assertScopes(session.scopes, session.sessionDate);
-    // US EOD deadlines occur on the exchange date in UTC. A previous cheap
-    // bucket cannot stand in for the day's actual processing allowance.
-    if (session.measurements.usageDate !== session.deadlineAt.slice(0, 10)
-      || session.deadlineAt.slice(0, 10) !== session.sessionDate) fail("retirement-usage-date-mismatch");
-    if (Date.parse(session.publishedAt) > Date.parse(session.deadlineAt)) fail("retirement-deadline-missed");
+/** No elapsed observation gate. A current collector result is required;
+ * submitting an empty observation array never proves production health. */
+export function validateEodRetirementEvidence(input: unknown, codeRevision: string, now = new Date()) {
+  const proof = object(input);
+  if (proof.version !== 3 || proof.policyVersion !== EOD_RETIREMENT_POLICY_VERSION
+    || proof.requiredSessions !== EOD_RETIREMENT_REQUIRED_SESSIONS || proof.methodologyVersion !== EOD_METRICS_VERSION
+    || proof.mode !== "active" || proof.eligibleForRetirement !== true || !isEodCurrentHealthReady(proof.currentHealth, now)) {
+    fail("retirement-current-health-required");
   }
-  return proof;
+  assertIdentity(codeRevision, proof.currentHealth.codeRevision ?? "");
+  return proof.currentHealth;
 }
 
-/** Separate retirement check: the observed streak is not an initial active-writer prerequisite. */
+/** Technical cutover approval, current publication correctness and current
+ * quota still apply. Historical delivery/usage records remain diagnostics. */
 export async function assertEodRetirement(env: Env, codeRevision: string): Promise<void> {
   if (env.EOD_RUNNER_MODE !== "active") fail("retirement-active-mode-required");
   await assertEodCutover(env, codeRevision);
-  const row = await env.OPS_DB!.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id='retirement'").first<{evidence_json:string}>();
-  if (!row) fail("retirement-required");
-  const now = new Date(), expected = await expectedEodSession(env, now);
-  if (!expected) fail("retirement-calendar-unavailable");
-  const cutoff = eodRetirementSessionCutoff(expected, now);
-  const calendar = await env.MARKET_DATA_DB!.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT ?")
-    .bind(cutoff, EOD_RETIREMENT_REQUIRED_SESSIONS).all<{session_date:string}>();
-  const proof = validateEodRetirementEvidence(parseObject(row.evidence_json), codeRevision, calendar.results.map((value) => value.session_date));
-  const monitored = await collectEodRolloutMonitoring(env, now);
-  // This independently resolves actual calendar close + two hours, first
-  // acceptance per scope, public activation and finalized whole-UTC-day usage
-  // for the evaluated exchange dates. Nontrading-day telemetry does not gate
-  // retirement. Submitted evidence cannot fill absent trading observations.
-  if (!monitored.eligibleForRetirement) fail(`retirement-monitoring-incomplete:${monitored.reasons.join(",")}`);
-  for (const session of proof.sessions) {
-    const observed = monitored.sessions.find((value) => value.sessionDate === session.sessionDate);
-    if (!observed || observed.status !== "passed" || observed.runId !== session.runId
-      || observed.deadlineAt !== session.deadlineAt || observed.firstCompletePublicationAt !== session.publishedAt
-      || session.scopes.some((scope) => !observed.scopes.some((value) => value.scope === scope.scope
-        && value.publicationId === scope.publicationId))) fail("retirement-monitored-evidence-mismatch");
-    const run = await env.OPS_DB!.prepare("SELECT mode,purpose,status,session_date,deadline_at,deadline_missed FROM eod_runs WHERE id=?")
-      .bind(session.runId).first<StoredRun>();
-    // Catalog retries/corrections may complete later than page delivery. Its
-    // latest run status/timestamp is not the first successful public delivery.
-    if (!run || run.mode !== "active" || run.purpose !== "daily" || run.session_date !== session.sessionDate
-      || run.deadline_at !== session.deadlineAt) fail("retirement-run-mismatch");
-    const publications = await checkPublications(env, session.scopes, false);
-    for (const publication of publications.values()) if (!publication.accepted_at
-      || Date.parse(publication.accepted_at) > Date.parse(session.deadlineAt)
-      || Date.parse(publication.accepted_at) > Date.parse(session.publishedAt)) fail("retirement-publication-late");
-    await checkRecordedUsage(env, session.measurements);
-  }
+  const now = new Date();
+  validateEodRetirementEvidence(await collectEodRolloutMonitoring(env, now), codeRevision, now);
 }

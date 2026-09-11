@@ -198,7 +198,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     await refreshBreadthUniverseMemberships(env);
     checkContinuation();
     const frozen=JSON.parse(run.input_json || "{}") as Partial<FrozenInputs>;
-    const inputs=frozen.methodologyVersion===EOD_METRICS_VERSION && frozen.tickers?.length && frozen.memberships?.length===5
+    const inputs=frozen.methodologyVersion===EOD_METRICS_VERSION && frozen.tickers?.length && Array.isArray(frozen.memberships)
+      && frozen.memberships.length<=5
       ? frozen as FrozenInputs : await loadEodInputs(env,run.session_date);
     if (inputs===frozen) {
       const currentCalendar=await env.MARKET_DATA_DB.prepare("SELECT session_date as date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date DESC LIMIT 1600")
@@ -215,12 +216,24 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         const proof=verified.find((row) => row.versionId===membership.versionId && row.universeId===membership.universeId);
         const oldDate=membership.verifiedAt ?? membership.sourceAsOfDate ?? "";
         const nextDate=proof?.verifiedAt ?? proof?.sourceAsOfDate ?? "";
-        if (!proof || nextDate<=oldDate || nextDate.slice(0,10)>run.session_date
+        if (!proof || nextDate<=oldDate || !assessEodMembershipEvidence(proof,run.session_date,inputs.calendarDates).publishable
           || proof.members.length!==membership.members.length
           || !proof.members.every((ticker) => membership.members.includes(ticker))) return membership;
         return {...membership,source:proof.source,sourceType:proof.sourceType,sourceUrl:proof.sourceUrl,
           sourceAsOfDate:proof.sourceAsOfDate,verifiedAt:proof.verifiedAt};
       });
+      // A source outage may leave fewer than five memberships at first claim.
+      // Preserve the frozen configuration and every already-known population;
+      // recovery can fill an absent universe without restarting the whole run.
+      const knownTickers=new Set(inputs.tickers);
+      for (const membership of verified) {
+        if (inputs.memberships.some((row) => row.universeId===membership.universeId)
+          || !assessEodMembershipEvidence(membership,run.session_date,inputs.calendarDates).publishable) continue;
+        inputs.memberships.push(membership);
+        for (const ticker of membership.members) if (!knownTickers.has(ticker)) {
+          knownTickers.add(ticker); inputs.tickers.push(ticker);
+        }
+      }
     }
     await runDb.prepare("UPDATE eod_runs SET input_json=? WHERE id=? AND lease_token=?").bind(JSON.stringify(inputs),runId,lease).run();
     // Membership verification and retrieval timestamps do not change a ticker's
@@ -376,10 +389,12 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           updated.push(...repaired.bars);
         }
         updated.push(...adjusted.filter((bar) => !rebased.has(bar.ticker)));
-        // Cold bootstrap stores the latest overlap first. Older missing inputs
-        // go straight to verified blocks instead of consuming a day's hot writes.
-        const overlapStart=inputs.calendarDates.at(-5)!;
-        const archiveOnly=env.MARKET_HISTORY_DB ? updated.filter((bar) => bar.date<hotStart || (bar.date<overlapStart && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
+        // Cold bootstrap stores only the target close hot. Missing earlier
+        // sessions go directly to verified blocks, including the rest of the
+        // five-session reconciliation overlap. Existing hot corrections still
+        // update in place. This avoids five days of indexed insert/trigger cost
+        // before even one full-universe daily publication can finish.
+        const archiveOnly=env.MARKET_HISTORY_DB ? updated.filter((bar) => bar.date<hotStart || (bar.date<run.session_date && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
         checkContinuation();
         if (archiveOnly.length) {
           const archived=await archiveMarketHistoryBars(env,archiveOnly);

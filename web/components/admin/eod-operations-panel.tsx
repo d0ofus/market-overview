@@ -54,7 +54,7 @@ export function EodOperationsPanel() {
     };
   }, [refresh]);
   const summary = buildEodRecoveryView({ recovery, publications: data, recoveryError, publicationError: error });
-  const currentMonitoring = summary.monitoringCount !== null;
+  const currentMonitoring = summary.monitoringPolicyCurrent;
   const deliveryCurrent = Boolean(data?.ready && !error);
   const statusLabel = summary.status === "paused" && summary.reportFreshness !== "current" ? "Paused (last known)"
     : summary.status[0].toUpperCase() + summary.status.slice(1);
@@ -63,7 +63,7 @@ export function EodOperationsPanel() {
 
   return (
     <div className="space-y-4">
-    <AdminCard title="EOD recovery" description="Recovery, verified production configuration and three trading sessions of monitored delivery. Status refreshes every minute while visible." actions={checkButton}>
+    <AdminCard title="EOD recovery" description="Recovery, verified production configuration and current data health. No observation period is required. Status refreshes every minute while visible." actions={checkButton}>
       <div className="space-y-4" aria-live="polite">
         <div className="flex flex-wrap items-center gap-3">
           <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${summary.status === "complete" ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300"
@@ -72,24 +72,24 @@ export function EodOperationsPanel() {
           <span className="text-sm text-slate-400">Stage: <strong className="font-medium text-text">{summary.stage}</strong></span>
         </div>
         {summary.blocker ? <InlineAlert tone={summary.status === "paused" ? "warning" : "info"} title={summary.status === "paused" ? "Needs attention" : "What remains"}>{summary.blocker}</InlineAlert>
-          : <p className="text-sm text-emerald-300">Recovery cutover, configuration recording and the three-session monitoring gate are complete.</p>}
+          : <p className="text-sm text-emerald-300">Recovery cutover and configuration recording are verified. Current delivery and quota health appear separately below.</p>}
         {recoveryError ? <p className="text-xs text-amber-300">Recovery check failed: {recoveryError}{recovery ? " Last-known report retained." : ""}</p> : null}
-        {error ? <p className="text-xs text-amber-300">Publication check failed; delivery and monitoring completion are unverified. Recovery-controller progress is checked independently.</p> : null}
-        <div className="grid gap-3 md:grid-cols-3">
+        {error ? <p className="text-xs text-amber-300">Publication check failed; current delivery and quota health are unverified. Recorded recovery completion is checked independently.</p> : null}
+        <div className="grid gap-3 md:grid-cols-2">
           {summary.milestones.map((milestone) => <div key={milestone.label} className={`rounded-xl border p-3 text-sm ${milestone.status === "complete" ? "border-emerald-400/20" : "border-borderSoft/70"}`}>
             <div className="flex items-start justify-between gap-3"><p className="font-semibold">{milestone.label}</p>
               <span className={`text-xs capitalize ${milestone.status === "complete" ? "text-emerald-300" : milestone.status === "blocked" ? "text-rose-300" : "text-slate-400"}`}>{milestone.status}</span></div>
             <p className="mt-2 text-xs text-slate-400">{milestone.detail}</p>
           </div>)}
         </div>
-        <p className="text-xs text-slate-400">Trading-day usage settles after an additional UTC day; no weekend run is required.</p>
+        <p className="text-xs text-slate-400">No observation period or weekend check is required. Historical operating telemetry continues independently.</p>
         <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
           <div><dt className="text-slate-400">Next recovery retry</dt><dd className="mt-1">{summary.nextRetry ? timestamp(summary.nextRetry) : summary.status === "complete" ? "Recovery finished" : "No retry reported"}</dd></div>
           <div><dt className="text-slate-400">Recovery computer needed</dt><dd className="mt-1"><span className="capitalize">{summary.computerNeeded}</span><p className="mt-1 text-xs text-slate-400">{summary.computerDetail}</p></dd></div>
           <div><dt className="text-slate-400">Last controller report</dt><dd className={`mt-1 ${summary.reportFreshness === "outdated" ? "text-amber-300" : ""}`}>{timestamp(summary.lastReportAt)} <span className="text-xs">({summary.reportFreshness})</span></dd></div>
           <div><dt className="text-slate-400">Last recovery status check</dt><dd className="mt-1">{timestamp(summary.lastCheckedAt)}</dd></div>
         </dl>
-        {recovery?.configuration.recordedAt ? <p className="text-xs text-slate-500">Configuration record: {timestamp(recovery.configuration.recordedAt)}. Monitoring progress is a separate check.</p> : null}
+        {recovery?.configuration.recordedAt ? <p className="text-xs text-slate-500">Configuration record: {timestamp(recovery.configuration.recordedAt)}. Current operational health is checked separately.</p> : null}
       </div>
     </AdminCard>
     <AdminCard title="EOD Publications" description="GitHub batch delivery for Overview and Breadth, targeted within two hours of the actual US exchange close. Visible status refreshes every minute."
@@ -112,21 +112,21 @@ export function EodOperationsPanel() {
             <p className="text-slate-400">{data.storageMigration.nextAttemptAt ? `Next retry: ${timestamp(data.storageMigration.nextAttemptAt)}` : "No automatic retry scheduled."} Updated: {timestamp(data.storageMigration.updatedAt)}</p>
           </div> : null}
           <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
-            <p className="font-semibold">Monitored delivery: {currentMonitoring ? `${data.monitoring!.consecutivePassedSessions}/3 consecutive trading sessions` : "Awaiting current three-session evidence"}</p>
-            <p className="mt-1 text-slate-400">{summary.milestones[2].status === "complete" ? "Delivery and finalized usage checks passed. Configuration recording is verified separately above." : "Three consecutive trading sessions must pass delivery and finalized usage checks. Weekends and exchange holidays do not count."}</p>
+            <p className="font-semibold">Current production health: {summary.currentHealth}</p>
+            <p className="mt-1 text-slate-400">{summary.currentHealth === "passed" ? "Current publication, input revision and quota checks passed." : "Current health needs a fresh publication, input revision and quota check."} This operational status is separate from recorded recovery completion. No observation period is required.</p>
             {data.monitoring ? <>
-              <p className={data.monitoring.stale || error || !currentMonitoring ? "text-amber-300" : "text-slate-400"}>Checked: {timestamp(data.monitoring.checkedAt)}{data.monitoring.stale || error ? " (outdated or unavailable)" : !currentMonitoring ? " (previous monitoring policy; cannot complete the current gate)" : ""}</p>
+              <p className={data.monitoring.stale || error || !currentMonitoring ? "text-amber-300" : "text-slate-400"}>Checked: {timestamp(data.monitoring.checkedAt)}{data.monitoring.stale || error ? " (outdated or unavailable)" : !currentMonitoring ? " (previous monitoring policy; current health unverified)" : ""}</p>
               {data.monitoring.reasons.length ? <p className="text-amber-300">{data.monitoring.reasons.join(", ")}</p> : null}
-              {currentMonitoring && data.monitoring.usageFinalizationCutoff ? <p className="mt-1 text-xs text-slate-400">Finalized trading-session window through {data.monitoring.usageFinalizationCutoff}. Newer deliveries are tracked separately while usage settles.</p> : null}
-              <details className="mt-2 text-xs text-slate-400"><summary className="cursor-pointer">Session and finalized UTC usage checks</summary>
+              {currentMonitoring && data.monitoring.currentHealth ? <p className="mt-1 text-xs text-slate-400">Current session: {data.monitoring.currentHealth.expectedSession ?? "Unavailable"}; verified scopes: {data.monitoring.currentHealth.publicationCount}/6. Quota sampled {timestamp(data.monitoring.currentHealth.quotaSampledAt)}.</p> : null}
+              <details className="mt-2 text-xs text-slate-400"><summary className="cursor-pointer">Historical delivery and usage diagnostics (informational)</summary>
                 {data.monitoring.newerSessions?.length ? <div className="my-2 rounded-lg border border-borderSoft/60 p-2">
                   <p className="font-medium">Newer trading sessions — usage may still be settling</p>
                   {data.monitoring.newerSessions.map((session) => <p className={`mt-1 ${session.status === "failed" ? "text-amber-300" : ""}`} key={session.sessionDate}>{session.sessionDate}: {session.status} · First complete public delivery {timestamp(session.firstCompletePublicationAt)}{session.reasons.length ? ` · ${session.reasons.join(", ")}` : ""}</p>)}
                 </div> : null}
                 {data.monitoring.sessions.map((session) => <p className="mt-1" key={session.sessionDate}>{session.sessionDate}: {session.status} · Deadline {timestamp(session.deadlineAt)} · First complete public delivery {timestamp(session.firstCompletePublicationAt)}{session.reasons.length ? ` · ${session.reasons.join(", ")}` : ""}</p>)}
-                {data.monitoring.usageDays.map((day) => <p className="mt-1" key={day.usageDate}>UTC {day.usageDate}: {day.status}{day.requiredForRetirement === false ? " · Informational; outside the trading-session gate" : ""}{day.reasons.length ? ` · ${day.reasons.join(", ")}` : ""}</p>)}
+                {data.monitoring.usageDays.map((day) => <p className="mt-1" key={day.usageDate}>UTC {day.usageDate}: {day.status} · Informational history{day.reasons.length ? ` · ${day.reasons.join(", ")}` : ""}</p>)}
               </details>
-            </> : <p className="text-xs text-slate-500">The daily monitoring job records actual publication times and finalized account usage. Missing evidence does not count as a passed session.</p>}
+            </> : <p className="text-xs text-slate-500">Current health evidence is unavailable. No observation period is required, but missing publications or quota telemetry cannot establish readiness.</p>}
           </div>
           {data.missingScopes?.length ? <InlineAlert tone="info">Awaiting current publications: {data.missingScopes.join(", ")}</InlineAlert> : null}
           {data.inputCorrectionsPending === true ? <InlineAlert tone="info">Stored inputs changed after the completed publication run. Corrected publications are pending (input revision {count(data.inputRevision)}; published run revision {count(data.completedInputRevision)}).</InlineAlert> : null}

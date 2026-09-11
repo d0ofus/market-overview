@@ -1,5 +1,12 @@
 # Market-Data Freshness Rollout Runbook
 
+Historical runbook for the replaced Worker ingestion path. For Overview and
+Breadth, use [the reliable EOD rollout](reliable-eod-rollout.md) and
+[current monitoring policy](reliable-eod-monitoring.md). The user removed the
+elapsed observation requirement on 2026-09-11; the ten-session gate below is
+superseded. Current correctness, capacity, quota and archive compatibility
+checks still apply before changing production publication ownership.
+
 This runbook is intentionally not executable as a single script. Every remote mutation requires a separate approval, an operator review of the immediately preceding read-only checks, and confirmation that the target database name matches `worker/wrangler.toml`.
 
 ## 1. Local release gate

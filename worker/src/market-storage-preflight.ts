@@ -1,13 +1,14 @@
 import { z } from "zod";
 import { storageHash } from "./market-storage-pages";
 import type { StorageMigrationIdentity } from "./market-storage-control";
+import { storageFallbackModelValid } from "./eod-storage-layout";
 
 const bytes = z.number().int().nonnegative().safe();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const model = z.object({
   hotSessions: z.union([z.literal(260), z.literal(90)]), sweepHeadroomSessions: bytes.min(10),
   sharedTickers: bytes.positive(), modeledSipRows: bytes.positive(), fallbackTickerReserve: bytes.positive(),
-  modeledFallbackRows: bytes.positive(), database: z.object({ physicalBytes: bytes.positive() }).passthrough(),
+  modeledFallbackRows: bytes, database: z.object({ physicalBytes: bytes.positive() }).passthrough(),
   publicationGrowthReserveBytes: bytes, projectedBytes: bytes.positive(), under350MB: z.boolean(),
 }).passthrough();
 const analysisSchema = z.object({
@@ -52,9 +53,8 @@ export async function prepareStoragePreflight(input: {
   // Final acceptance independently requires real stored-payload growth evidence.
   const planningReserveBytes = 64_000_000;
   const eligible = report.retentionModels.filter((item) => item.sharedTickers === tickers.length
-    && item.fallbackTickerReserve === tickers.length
+    && storageFallbackModelValid(report, item, tickers.length)
     && item.modeledSipRows === tickers.length * (item.hotSessions + item.sweepHeadroomSessions)
-    && item.modeledFallbackRows === item.modeledSipRows
     && item.projectedBytes === item.database.physicalBytes + item.publicationGrowthReserveBytes
     && item.database.physicalBytes + Math.max(planningReserveBytes, item.publicationGrowthReserveBytes) < 350_000_000)
     .sort((a, b) => b.hotSessions - a.hotSessions);

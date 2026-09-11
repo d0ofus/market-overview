@@ -29,7 +29,7 @@ export async function runLocalStorageRecovery(deps: LocalRecoveryDependencies, n
   let run = await deps.loadMigration();
   if (run.status === "completed") {
     await deps.activate(); // Completed replay independently verifies live bindings.
-    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "three-trading-session-monitoring-remains" };
+    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "production-cutover-complete" };
   }
   if (run.status === "awaiting-evidence") {
     if (run.error_code !== "storage-final-acceptance-required") return {
@@ -47,7 +47,7 @@ export async function runLocalStorageRecovery(deps: LocalRecoveryDependencies, n
     await deps.activate();
     const completed = await deps.loadMigration();
     if (completed.status !== "completed") throw new Error("storage-local-cutover-not-persisted");
-    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "three-trading-session-monitoring-remains" };
+    return { status: "completed", stage: "public-cutover", nextAttemptAt: null, reason: "production-cutover-complete" };
   }
   if (["aborted", "aborting"].includes(run.status)) return { status: "paused", stage: run.stage, nextAttemptAt: null, reason: run.status };
   return { status: "waiting", stage: run.stage, reason: "durable-github-stage-in-progress",

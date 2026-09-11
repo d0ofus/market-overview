@@ -21,6 +21,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 TARGET_BYTES = 350_000_000
 TRANSIENT_ARCHIVE_BYTES = 4 * 1024 * 1024
+FALLBACK_LAYOUT = "archive-only-bounded-v1"
+FALLBACK_CAPACITY = 1_000
+FALLBACK_SESSIONS = 320
 BAR_FIELDS = ("feed", "ticker", "date", "o", "h", "l", "c", "volume", "fetched_at",
               "source_provider", "adjustment", "observed_at", "reported_volume", "reported_volume_collected_at")
 BLOCK_FIELDS = ("id", "feed", "ticker", "calendar_year", "schema_version", "codec", "checksum", "row_count",
@@ -325,6 +328,85 @@ def remove_triggers(db: sqlite3.Connection) -> list[str]:
     return [row["sql"] for row in triggers]
 
 
+def archive_fallback_model(archive: sqlite3.Connection, codec: Codec, tickers: list[str], session: str,
+                           measured_at: str, capacity: int = FALLBACK_CAPACITY) -> dict[str, Any]:
+    """Disposable full-capacity fixture; never provider observations or a copy.
+
+    Vary full-width OHLC/volume values per security/date so gzip cannot obtain
+    an unrealistically small forecast from repeated constant prices. Every old
+    immutable block stays present, including orphaned revisions and symbols
+    outside the current shared population. Slots are enforced by the writer.
+    """
+    existing = {row[0] for row in archive.execute("SELECT DISTINCT ticker FROM market_history_blocks WHERE feed='yahoo-eod'")}
+    if len(existing) > capacity:
+        raise AnalysisError("Existing Yahoo archive identities exceed the enforced fallback capacity; no history was removed.")
+    selected = sorted(set(tickers) - existing, key=lambda ticker: (-len(ticker), ticker))[:max(0, capacity-len(existing))]
+    population = sorted(existing | set(selected))
+    if not population:
+        raise AnalysisError("The bounded fallback fixture requires a nonempty population.")
+    before = measure(archive)["physicalBytes"]
+    # Width/year distribution follows weekday session slots, with forty future
+    # sessions plus twenty extra observations beyond the initial 260 window.
+    cursor = date.fromisoformat(session)
+    future = 0
+    while future < 40:
+        cursor += timedelta(days=1)
+        future += cursor.weekday() < 5
+    dates: list[str] = []
+    while len(dates) < FALLBACK_SESSIONS:
+        if cursor.weekday() < 5:
+            dates.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    timestamp = session + "T23:59:59.999Z"
+    for ticker in population:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for day in reversed(dates):
+            noise = hashlib.sha256(f"storage-fallback-fixture:{ticker}:{day}".encode()).digest()
+            numbers = [int.from_bytes(noise[index:index+8], "big") / 2**64 for index in (0, 8, 16, 24)]
+            opening, close = 100 + numbers[0]*100, 100 + numbers[1]*100
+            bar = {"ticker": ticker, "date": day, "o": opening, "h": max(opening,close)+numbers[2]*10,
+                   "l": min(opening,close)-numbers[3]*10, "c": close, "volume": int.from_bytes(noise[:4], "big"),
+                   "reportedVolume": None, "feed": "yahoo-eod", "sourceProvider": "yahoo", "adjustment": "split",
+                   "observedAt": timestamp, "fetchedAt": timestamp}
+            groups.setdefault(day[:4], []).append(bar)
+        for year, incoming in groups.items():
+            pointer = archive.execute("SELECT block_id FROM market_history_block_pointers WHERE feed='yahoo-eod' AND ticker=? AND calendar_year=?", (ticker,year)).fetchone()
+            merged: dict[str, dict[str, Any]] = {}
+            if pointer:
+                stored = archive.execute("SELECT * FROM market_history_blocks WHERE id=?", (pointer[0],)).fetchone()
+                if not stored:
+                    raise AnalysisError("Fallback fixture encountered a missing existing pointed block.")
+                merged.update((bar["date"],bar) for bar in codec.call({"block":block_value(stored)})["bars"])
+            # Existing observations remain intact in old immutable revisions;
+            # the synthetic next revision measures fully populated allocation.
+            merged.update((bar["date"],bar) for bar in incoming)
+            bars = [merged[day] for day in sorted(merged)]
+            encoded = codec.call({"bars":bars})
+            if encoded.get("equal") is not True:
+                raise AnalysisError("Fallback fixture codec round-trip failed.")
+            block = encoded["block"]
+            values = (block["id"],block["feed"],block["ticker"],int(year),block["schemaVersion"],block["codec"],
+                      block["checksum"],block["rowCount"],block["firstDate"],block["lastDate"],block["uncompressedBytes"],
+                      block["payloadBase64"],measured_at,measured_at)
+            archive.execute(f"INSERT OR IGNORE INTO market_history_blocks({','.join(BLOCK_FIELDS)}) VALUES({','.join('?' for _ in BLOCK_FIELDS)})",values)
+            stored = archive.execute("SELECT * FROM market_history_blocks WHERE id=?",(block["id"],)).fetchone()
+            if codec.call({"block":block_value(stored)})["bars"] != bars:
+                raise AnalysisError("Stored fallback fixture failed lossless read-back.")
+            archive.execute("""INSERT INTO market_history_block_pointers(feed,ticker,calendar_year,block_id,previous_block_id,updated_at)
+              VALUES('yahoo-eod',?,?,?,?,?) ON CONFLICT(feed,ticker,calendar_year) DO UPDATE SET
+                block_id=excluded.block_id,previous_block_id=excluded.previous_block_id,updated_at=excluded.updated_at""",
+              (ticker,int(year),block["id"],pointer[0] if pointer else None,measured_at))
+    archive.commit()
+    # No VACUUM after inserts: preserve real allocation/slack from growth.
+    after = measure(archive)
+    return {"storage":FALLBACK_LAYOUT,"capacityTickers":capacity,"existingTickers":len(existing),
+            "existingTickersOutsidePopulation":len(existing-set(tickers)),"modeledAdditionalTickers":len(selected),
+            "totalReservedTickers":len(population),"tickerHash":hashlib.sha256(json.dumps(population,separators=(",",":")).encode()).hexdigest(),
+            "sessions":FALLBACK_SESSIONS,"modeledRows":len(population)*FALLBACK_SESSIONS,
+            "physicalBytesBefore":before,"physicalBytesAfter":after["physicalBytes"],"database":after,
+            "roundTripPassed":True,"measurementMethod":"sqlite-real-history-codec-v1"}
+
+
 def make_seed(source: sqlite3.Connection, path: Path, session: str) -> sqlite3.Connection:
     result = sqlite3.connect(path)
     result.row_factory = sqlite3.Row
@@ -343,7 +425,7 @@ def make_seed(source: sqlite3.Connection, path: Path, session: str) -> sqlite3.C
 
 
 def capacity_model(seed: sqlite3.Connection, path: Path, tickers: list[str], session: str, hot: int, headroom: int,
-                   publication_reserve: int, fallback_tickers: list[str]) -> dict[str, Any]:
+                   publication_reserve: int, fallback_tickers: list[str], archived_fallback_tickers: int | None = None) -> dict[str, Any]:
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     try:
@@ -358,12 +440,14 @@ def capacity_model(seed: sqlite3.Connection, path: Path, tickers: list[str], ses
         dates = [(date.fromisoformat(session) - timedelta(days=offset)).isoformat() for offset in range(hot + headroom)]
         timestamp = session + "T23:59:59.999Z"
         sql = f"INSERT INTO alpaca_daily_bars({','.join(identifier(column) for column in columns)}) VALUES({','.join('?' for _ in columns)})"
-        for feed, ticker in [("sip", ticker) for ticker in tickers] + [("yahoo-eod", ticker) for ticker in fallback_tickers]:
+        state_fallback_tickers = tickers if archived_fallback_tickers is not None else fallback_tickers
+        for feed, ticker in [("sip", ticker) for ticker in tickers] + [("yahoo-eod", ticker) for ticker in state_fallback_tickers]:
             base = {"feed": feed, "ticker": ticker, "o": 123.456789, "h": 125.123456, "l": 121.123456, "c": 124.123456,
                     "volume": 123456789.125, "reported_volume": 123456789.125,
                     "fetched_at": timestamp, "observed_at": timestamp, "reported_volume_collected_at": timestamp,
                     "source_provider": "alpaca" if feed == "sip" else "yahoo", "adjustment": "split"}
-            db.executemany(sql, [tuple({**base, "date": day}[column] for column in columns) for day in dates])
+            if feed == "sip" or archived_fallback_tickers is None:
+                db.executemany(sql, [tuple({**base, "date": day}[column] for column in columns) for day in dates])
             # Include compact per-security state even for currently missing
             # catalog symbols. These rows are storage fixtures, never evidence.
             db.execute("""INSERT OR REPLACE INTO eod_input_revisions(feed,ticker,revision,semantic_revision,
@@ -378,7 +462,9 @@ def capacity_model(seed: sqlite3.Connection, path: Path, tickers: list[str], ses
         size = measure(db)
         return {"hotSessions": hot, "sweepHeadroomSessions": headroom, "sharedTickers": len(tickers),
                 "modeledSipRows": len(tickers) * (hot + headroom), "database": size,
-                "fallbackTickerReserve": len(fallback_tickers), "modeledFallbackRows": len(fallback_tickers) * (hot + headroom),
+                "fallbackTickerReserve": len(fallback_tickers) if archived_fallback_tickers is None else archived_fallback_tickers,
+                "modeledFallbackRows": len(fallback_tickers) * (hot + headroom),
+                **({"fallbackStorage":FALLBACK_LAYOUT} if archived_fallback_tickers is not None else {}),
                 "preservedOtherFeedOrNonSharedSeedRows": preserved_rows,
                 "publicationGrowthReserveBytes": publication_reserve,
                 "projectedBytes": size["physicalBytes"] + publication_reserve,
@@ -423,6 +509,7 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
         raise AnalysisError("Use an ISO session date, at least 10 sessions of sweep headroom and a nonnegative publication reserve.")
     if not tickers or len(set(tickers)) != len(tickers):
         raise AnalysisError("All unique frozen shared tickers are required.")
+    archive_only = fallback_reserve is None
     fallback_reserve = len(tickers) if fallback_reserve is None else fallback_reserve
     if fallback_reserve < 0 or fallback_reserve > len(tickers):
         raise AnalysisError("Fallback reserve must be between zero and the full shared population.")
@@ -447,12 +534,20 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
             schema = [dict(row) for row in source.execute("SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")]
             codec = Codec()
             archive_result = archive_all(source, archive, codec, now)
+            if archive_only:
+                fallback = archive_fallback_model(archive,codec,tickers,session,now)
+                archive_result["sourceOnlyDatabase"] = archive_result["database"]
+                archive_result["database"] = fallback.pop("database")
+                archive_result["fallbackReserve"] = fallback
+                archive_result["withAdditionalCompleteRevisionAndTransientBytes"] = fallback["physicalBytesAfter"]*2+TRANSIENT_ARCHIVE_BYTES
+                archive_result["reserveDefinition"] = "Twice measured archive including preserved revisions and enforced bounded Yahoo population plus 4 MiB; fixtures are not market observations."
             seed = make_seed(source, workspace / "seed.sqlite", session)
             seed_size = measure(seed)
             seed_rows = seed.execute("SELECT COUNT(*) FROM alpaca_daily_bars").fetchone()[0]
             observed = {row[0] for row in seed.execute("SELECT ticker FROM alpaca_daily_bars WHERE feed='sip' AND date=?", (session,))}
             models = [capacity_model(seed, workspace / f"retention-{hot}.sqlite", tickers, session, hot, headroom,
-                                     publication_reserve, fallback_tickers) for hot in (260, 90)]
+                                     publication_reserve, [] if archive_only else fallback_tickers,
+                                     archive_result["fallbackReserve"]["totalReservedTickers"] if archive_only else None) for hot in (260, 90)]
             recommendation = next((model["hotSessions"] for model in models if model["under350MB"]
                                    and archive_result["withAdditionalCompleteRevisionAndTransientBytes"] < TARGET_BYTES
                                    and not capture["partialEstimate"]), None)
@@ -471,6 +566,7 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
                         "Actual consumer parity for all historical workflows", "Publication-growth reserve independently measured",
                         "Source/calendar/membership correctness and real runner budgets/CPU", "Concurrent-writer catch-up before binding cutover"]},
                     "limitations": ["Models retain existing non-price rows but do not forecast unrelated workflow growth.",
+                        "All shared SIP tickers retain hot history; Yahoo uses a lossless archive capped at 1000 securities with explicit missing coverage beyond capacity." if archive_only else
                         "Both SIP and Yahoo price windows are reserved for every shared ticker." if fallback_reserve == len(tickers) else
                         "Fallback population is an operator assumption, not a bound implied by the daily Yahoo request limit.",
                         "Representative capacity rows are temporary synthetic storage fixtures, never financial observations.",
@@ -497,7 +593,7 @@ def main() -> int:
     parser.add_argument("--session-date", required=True)
     parser.add_argument("--sweep-headroom-sessions", type=int, default=10)
     parser.add_argument("--publication-growth-reserve-bytes", type=int, default=0)
-    parser.add_argument("--fallback-ticker-reserve", type=int, help="Defaults to every shared ticker; a smaller reserve requires independent evidence.")
+    parser.add_argument("--fallback-ticker-reserve", type=int, help="Diagnostic legacy dual-hot model override; default measures the enforced bounded Yahoo archive layout.")
     parser.add_argument("--allow-partial-estimate", action="store_true", help="Allow incomplete logical captures for estimates only; never recommend retention or certify parity.")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

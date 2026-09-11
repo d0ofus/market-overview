@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assessEodMembershipEvidence } from "../src/eod-membership-evidence";
+import { assessEodMembershipEvidence, membershipSessionEndUtc, membershipVerificationDate } from "../src/eod-membership-evidence";
 
 const calendar = ["2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"];
 const membership = { universeId: "sp500-core", versionId: "immutable-version", sourceType: "wikipedia-derived-public-proxy",
@@ -18,9 +18,22 @@ describe("frozen membership evidence at publication", () => {
   it("does not interpret a future immutable source date as age zero", () => {
     expect(check({ sourceAsOfDate: "2026-09-09" }).reason).toBe("membership-source-date-unavailable-or-future");
   });
-  it.each(["2026-09-09T00:00:00Z", "2026-09-08T23:59:00-12:00", "2026-09-00T00:00:00Z", "2026-08-27T21:00:00Z"])(
+  it.each(["2026-09-09T04:00:00Z", "2026-09-08T23:59:00-12:00", "2026-09-00T00:00:00Z", "2026-08-27T21:00:00Z", "2026-09-08T24:00:00Z"])(
     "rejects future or invalid verification %s", (verifiedAt) => expect(check({ verifiedAt }).publishable).toBe(false),
   );
+  it.each(["2026-09-09T00:15:00Z", "2026-09-09 00:15:00", "2026-09-09T10:15:00+10:00"])(
+    "accepts actual New York evening verification across UTC midnight %s", (verifiedAt) => {
+      expect(check({ verifiedAt })).toMatchObject({ publishable: true, ageSessions: 0, degraded: false });
+      expect(membershipVerificationDate(verifiedAt)).toBe("2026-09-08");
+    },
+  );
+  it("uses daylight-saving aware exclusive observation boundaries", () => {
+    expect(membershipSessionEndUtc("2026-09-08")).toBe("2026-09-09T04:00:00.000Z");
+    expect(membershipSessionEndUtc("2026-01-08")).toBe("2026-01-09T05:00:00.000Z");
+    expect(membershipSessionEndUtc("2026-03-07")).toBe("2026-03-08T05:00:00.000Z");
+    expect(membershipSessionEndUtc("2026-03-08")).toBe("2026-03-09T04:00:00.000Z");
+    expect(membershipSessionEndUtc("2026-11-01")).toBe("2026-11-02T05:00:00.000Z");
+  });
   it.each(["bundled-fallback", "official-etf-holdings-proxy", "legacy-import", ""])("rejects unrelated/unverified source %s", (sourceType) => {
     expect(check({ sourceType }).reason).toBe("membership-source-unverified-or-unrelated");
   });

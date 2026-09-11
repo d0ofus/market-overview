@@ -6,7 +6,8 @@ export type EodRecoveryView = {
   blocker: string | null; stage: string; nextRetry: string | null;
   lastReportAt: string | null; lastCheckedAt: string | null; reportFreshness: "current" | "outdated" | "unavailable";
   computerNeeded: "yes" | "no" | "unknown" | "when recovery resumes"; computerDetail: string;
-  monitoringCount: number | null; requiredSessions: 3; milestones: RecoveryMilestone[];
+  monitoringCount: number | null; requiredSessions: 0; monitoringPolicyCurrent: boolean;
+  currentHealth: "passed" | "failed" | "unverified"; milestones: RecoveryMilestone[];
 };
 const dateValid = (value: string | null | undefined): value is string => Boolean(value && Number.isFinite(Date.parse(value)));
 const stageLabels: Record<string, string> = {
@@ -20,7 +21,9 @@ const reasonLabels: Record<string, string> = {
   "storage-local-transient-retry": "A temporary service failure will be retried automatically.",
   "durable-github-stage-in-progress": "The GitHub recovery job is still working.",
   "runtime-candidate-await-actual-coordinator-window": "Waiting for an exchange update or morning recovery window.",
-  "three-trading-session-monitoring-remains": "Collecting three trading sessions of delivery and finalized usage evidence.",
+  "current-health-checks-remain": "Checking current publication, input revision and quota health.",
+  "production-cutover-complete": "Production cutover is complete. Record and verify production configuration.",
+  "three-trading-session-monitoring-remains": "Current publication and quota health must be verified; no observation period is required.",
   "storage-local-review-required": "Recovery is paused for review; inspect the detailed status below.",
   "storage-preflight-insufficient-headroom": "The proposed recent-price database does not leave enough free storage for safe operation. The storage layout must be revised and measured again.",
   "storage-preflight-insufficient-archive-headroom": "The history archive does not leave enough free storage for safe operation. Archive capacity must be resolved and measured again.",
@@ -35,14 +38,8 @@ function calendarDate(value: string): boolean {
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
-function tradingDate(value: string): boolean {
-  if (!calendarDate(value)) return false;
-  const weekday = new Date(`${value}T00:00:00Z`).getUTCDay();
-  return weekday !== 0 && weekday !== 6;
-}
-
-/** The server supplies exchange-session evidence. Never convert calendar days
- * elapsed into progress, or treat a completed local command as verified setup. */
+/** Recorded cutover/configuration establishes durable recovery completion.
+ * Current operational health is separate and requires explicit fresh evidence. */
 export function buildEodRecoveryView(input: {
   recovery: EodRecoveryStatus | null; publications: EodPublicationStatus | null;
   recoveryError?: string | null; publicationError?: string | null; now?: number;
@@ -61,18 +58,26 @@ export function buildEodRecoveryView(input: {
     || (configuration?.status === "recorded" && activated && !configured)));
   const publicCurrent = Boolean(publications && !input.publicationError);
   const monitoring = publications?.monitoring;
-  const currentPolicy = monitoring?.version === 2 && monitoring.policyVersion === "three-trading-sessions-v1" && monitoring.requiredSessions === 3
-    && typeof monitoring.usageFinalizationCutoff === "string" && calendarDate(monitoring.usageFinalizationCutoff) && Array.isArray(monitoring.newerSessions);
+  const currentPolicy = monitoring?.version === 3 && monitoring.policyVersion === "current-health-no-observation-v1" && monitoring.requiredSessions === 0;
   const count = currentPolicy && Number.isInteger(monitoring.consecutivePassedSessions)
-    && monitoring.consecutivePassedSessions >= 0 && monitoring.consecutivePassedSessions <= 3 ? monitoring.consecutivePassedSessions : null;
-  const monitorCurrent = Boolean(publicCurrent && currentPolicy && !monitoring?.stale && dateValid(monitoring?.checkedAt));
-  const observedSessions = monitoring?.sessions.filter((session) => session.status === "passed" && tradingDate(session.sessionDate)
-    && monitoring.usageFinalizationCutoff && session.sessionDate <= monitoring.usageFinalizationCutoff) ?? [];
-  const monitored = Boolean(monitorCurrent && monitoring?.eligibleForRetirement && count === 3 && monitoring.reasons.length === 0
-    && new Set(observedSessions.map((session) => session.sessionDate)).size === 3 && monitoring.sessions.length === 3
-    && monitoring.newerSessions?.every((session) => session.status !== "failed"));
-  const complete = Boolean(controllerMatches && controller?.status === "completed" && configured && monitored
-    && publicCurrent && publications?.ready && publications.mode === "active" && publications.inputCorrectionsPending === false);
+    && monitoring.consecutivePassedSessions >= 0 ? monitoring.consecutivePassedSessions : null;
+  const fresh = (value: string | null | undefined) => dateValid(value) && Date.parse(value) <= now + 60_000 && Date.parse(value) >= now - 300_000;
+  const monitorCurrent = Boolean(publicCurrent && currentPolicy && !monitoring?.stale && fresh(monitoring?.checkedAt));
+  const health = monitoring?.currentHealth, quota = health?.quota;
+  const quotaValid = Boolean(quota && Object.values(quota).every((value) => Number.isSafeInteger(value) && value >= 0)
+    && quota.eodRowsRead + quota.reservedReads <= 2_500_000 && quota.eodRowsWritten + quota.reservedWrites <= 50_000
+    && quota.accountRowsRead + quota.reservedReads <= 4_500_000 && quota.accountRowsWritten + quota.reservedWrites <= 90_000
+    && quota.eodRowsRead <= quota.accountRowsRead && quota.eodRowsWritten <= quota.accountRowsWritten);
+  const monitored = Boolean(monitorCurrent && monitoring?.eligibleForRetirement && monitoring.reasons.length === 0
+    && health?.status === "passed" && health.reasons.length === 0 && health.expectedSession && calendarDate(health.expectedSession)
+    && health.expectedSession === publications?.expectedSession && health.publicationCount === 6 && health.missingScopes.length === 0
+    && health.completedRunId && health.inputCorrectionsPending === false && fresh(health.checkedAt) && fresh(health.quotaSampledAt)
+    && health.usageDate === new Date(now).toISOString().slice(0,10) && quotaValid);
+  const currentHealth: EodRecoveryView["currentHealth"] = monitored && publications?.ready && publications.mode === "active"
+    && publications.inputCorrectionsPending === false ? "passed"
+    : publicCurrent && (publications?.ready === false || publications?.inputCorrectionsPending === true
+      || (monitorCurrent && health?.status === "failed")) ? "failed" : "unverified";
+  const complete = Boolean(controllerMatches && controller?.status === "completed" && configured);
   const lastReportedPause = controller?.status === "paused";
   const capacityPause = Boolean(lastReportedPause && capacityPauseReasons.has(controller.reason));
   const status: EodRecoveryView["status"] = complete ? "complete" : lastReportedPause || configurationMismatch ? "paused"
@@ -91,16 +96,7 @@ export function buildEodRecoveryView(input: {
       ?? (controller.reason ? recoveryStageLabel(controller.reason) : "Recovery is still in progress.");
     else if (!activated || !controllerMatches) blocker = "Production cutover has not been verified against this recovery run.";
     else if (!configured) blocker = "The local recovery run finished, but production configuration has not been recorded and verified.";
-    else if (input.publicationError || !publications) blocker = "Publication and monitoring status is unavailable. Configuration is recorded; monitoring completion is unverified.";
-    else if (!currentPolicy) blocker = "Awaiting a report for the current three-trading-session policy.";
-    else if (!monitorCurrent) blocker = "The monitoring report is outdated. Awaiting a current delivery and usage check.";
-    else if (publications.inputCorrectionsPending !== false) blocker = publications.inputCorrectionsPending === true
-      ? "Corrected inputs are awaiting new publications." : "Publication correction status is unavailable.";
-    else if (!publications.ready || publications.mode !== "active") blocker = "Current production delivery is not ready. Inspect the publication details below.";
-    else if (monitoring?.newerSessions?.some((session) => session.status === "failed")) blocker = "A newer trading session failed its delivery check. Inspect the monitoring details below.";
-    else blocker = monitored ? "Recovery completion has not been confirmed." : count === 3
-      ? "Three sessions are reported, but remaining delivery or quota checks still need attention."
-      : `${count ?? 0} of 3 trading sessions have passed. Awaiting delivery and finalized usage evidence.`;
+    else blocker = "Recovery completion has not been confirmed.";
   }
   const outdatedRecovery = Boolean(recovery && (!responseCurrent || (controller && !controllerCurrent)));
   const milestones: RecoveryMilestone[] = [
@@ -108,9 +104,6 @@ export function buildEodRecoveryView(input: {
       detail: activated && controllerMatches ? `Production activation verified (${activation!.codeRevision.slice(0, 7)}).` : "The recovered database must be verified in production." },
     { label: "Configuration recorded", status: configured ? "complete" : configurationMismatch ? "blocked" : outdatedRecovery ? "outdated" : "pending",
       detail: configured ? `Recorded production revision ${configuration!.codeRevision!.slice(0, 7)}.` : "A separate production configuration check is required after cutover." },
-    { label: "3 trading sessions", status: monitored ? "complete" : monitoring && (!publicCurrent || !monitorCurrent) ? "outdated" : "pending",
-      detail: currentPolicy ? `${count ?? 0}/3 consecutive trading sessions reported${count === 3 && !monitored ? "; final checks pending" : ""}. Weekends and exchange holidays do not count.`
-        : "Awaiting current three-session evidence. Weekends and exchange holidays do not count." },
   ];
   const computerNeeded = configured ? "no" : capacityPause ? "when recovery resumes" : responseCurrent && controllerCurrent ? "yes" : "unknown";
   return { status, blocker, stage: controller ? recoveryStageLabel(controller.stage) : "Awaiting a recovery report",
@@ -121,5 +114,5 @@ export function buildEodRecoveryView(input: {
       : computerNeeded === "when recovery resumes" ? "The recovery computer will be needed when recovery resumes. Keeping it on does not clear this capacity pause."
       : computerNeeded === "yes" ? "Keep the recovery computer on and signed in until production configuration is recorded."
         : "Computer requirements are unverified until a current recovery report is available.",
-    monitoringCount: count, requiredSessions: 3, milestones };
+    monitoringCount: count, requiredSessions: 0, monitoringPolicyCurrent: currentPolicy, currentHealth, milestones };
 }

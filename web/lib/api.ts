@@ -20,6 +20,14 @@ export type EodPublicationStatus = {
     checkedAt: string; requiredSessions: number; consecutivePassedSessions: number; eligibleForRetirement: boolean;
     latestEvaluatedSession: string | null; reasons: string[]; stale?: boolean;
     usageFinalizationCutoff?: string | null; newerSessions?: EodMonitoredSession[];
+    operationalReasons?: string[];
+    currentHealth?: {
+      checkedAt: string; codeRevision: string | null; status: "passed" | "failed" | "pending";
+      expectedSession: string | null; publicationCount: number; missingScopes: string[]; completedRunId: string | null;
+      inputCorrectionsPending: boolean | null; reasons: string[]; usageDate: string; quotaSampledAt: string | null;
+      quota: { eodRowsRead: number; eodRowsWritten: number; accountRowsRead: number; accountRowsWritten: number;
+        reservedReads: number; reservedWrites: number } | null;
+    } | null;
     sessions: EodMonitoredSession[];
     usageDays: Array<{usageDate: string; status: "passed" | "failed" | "pending"; reasons: string[]; requiredForRetirement?: boolean}>;
   } | null;

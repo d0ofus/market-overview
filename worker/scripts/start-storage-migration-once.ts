@@ -221,7 +221,8 @@ async function main(): Promise<void> {
       deployCoordinator: async (id) => {
         const wrangler = resolve(root, "node_modules/wrangler/bin/wrangler.js");
         command(process.execPath, [wrangler, "whoami"], "wrangler-auth", process.env, resolve(root, "worker"));
-        command(process.execPath, [wrangler, "deploy", "--keep-vars", "--var", `EOD_STORAGE_MIGRATION_ID:${id}`],
+        command(process.execPath, [wrangler, "deploy", "--keep-vars", "--var", `EOD_STORAGE_MIGRATION_ID:${id}`,
+          "--var", `EOD_CODE_REVISION:${codeRevision}`],
           "coordinator-deploy", process.env, resolve(root, "worker"));
       },
       verifyCoordinator: async (id) => { await sourceBindings(id); },

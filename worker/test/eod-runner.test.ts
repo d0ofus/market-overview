@@ -5,6 +5,7 @@ import { EOD_METRICS_VERSION } from "../src/eod-metrics";
 import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
 import { loadMarketHistory } from "../src/market-history";
+import { loadEodMemberships } from "../src/eod";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
 vi.mock("../src/market-calendar-cache",() => ({ensureMarketCalendarCoverage:vi.fn()}));
 vi.mock("../src/eod",() => ({refreshBreadthUniverseMemberships:vi.fn(),loadEodMemberships:vi.fn()}));
@@ -77,7 +78,9 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<>?").bind(session).run();
       expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
       const hot=await market.db.prepare("SELECT COUNT(*) AS count,MIN(date) AS firstDate FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first<{count:number;firstDate:string}>();
-      expect(hot!.count).toBeLessThanOrEqual(90);
+      // A cold bootstrap seeds one hot close per security. Its previous four
+      // reconciliation bars are already available through the archive reader.
+      expect(hot!.count).toBe(1);
       expect(hot!.firstDate>=dates.at(-90)!).toBe(true);
       expect(await loadMarketHistory(archivedEnv,{tickers:["SPY"],feed:"sip"})).toHaveLength(260);
       const catalog=await market.db.prepare("SELECT payload_json FROM eod_publications WHERE scope='history:catalog'").first<string>("payload_json");
@@ -171,5 +174,20 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(input),runId).run();
     expect((await runEodBatch(env,runId)).status).toBe("retrying");
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publication_pointers WHERE scope LIKE 'breadth:%'").first()).toEqual({n:5});
+  });
+
+  it("preserves partially frozen inputs and fills a recovered universe without reloading configuration",async () => {
+    const original=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!);
+    const recovered=original.memberships.pop();
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(original),runId).run();
+    vi.mocked(loadEodMemberships).mockResolvedValueOnce([]);
+    expect((await runEodBatch(env,runId)).status).toBe("retrying");
+    expect(await market.db.prepare("SELECT COUNT(*) AS n FROM eod_publication_pointers").first()).toEqual({n:6});
+    vi.mocked(loadEodMemberships).mockResolvedValueOnce([recovered]);
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+    const inputs=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!);
+    expect(inputs.config).toEqual(original.config);
+    expect(inputs.memberships).toHaveLength(5);
+    expect(inputs.tickers).toEqual(original.tickers);
   });
 });

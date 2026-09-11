@@ -5,16 +5,20 @@ import { getEodRecoveryStatus, type EodPublicationStatus, type EodRecoveryStatus
 
 const checkedAt = "2026-09-15T22:00:00.000Z", now = Date.parse(checkedAt), activationRevision = "a".repeat(40), configurationRevision = "b".repeat(40);
 function recovery(): EodRecoveryStatus {
-  return { checkedAt, controller: { status: "completed", stage: "public-cutover", reason: "three-trading-session-monitoring-remains",
+  return { checkedAt, controller: { status: "completed", stage: "public-cutover", reason: "production-cutover-complete",
     nextAttemptAt: null, updatedAt: "2026-09-10T22:00:00.000Z", codeRevision: activationRevision, stale: false },
     activation: { activatedAt: "2026-09-10T21:00:00.000Z", codeRevision: activationRevision },
     configuration: { status: "recorded", codeRevision: configurationRevision, activationCodeRevision: activationRevision, recordedAt: "2026-09-10T22:00:00.000Z" } };
 }
 function publications(): EodPublicationStatus {
-  return { mode: "active", ready: true, inputCorrectionsPending: false, runs: [], publications: [], monitoring: {
-    version: 2, policyVersion: "three-trading-sessions-v1", checkedAt, requiredSessions: 3, consecutivePassedSessions: 3,
+  return { mode: "active", ready: true, expectedSession: "2026-09-15", inputCorrectionsPending: false, runs: [], publications: [], monitoring: {
+    version: 3, policyVersion: "current-health-no-observation-v1", checkedAt, requiredSessions: 0, consecutivePassedSessions: 0,
     usageFinalizationCutoff: "2026-09-15", newerSessions: [],
     eligibleForRetirement: true, latestEvaluatedSession: "2026-09-15", reasons: [], stale: false,
+    currentHealth: { checkedAt, codeRevision: configurationRevision, status: "passed", expectedSession: "2026-09-15",
+      publicationCount: 6, missingScopes: [], completedRunId: "run-current", inputCorrectionsPending: false, reasons: [],
+      usageDate: "2026-09-15", quotaSampledAt: checkedAt,
+      quota: { eodRowsRead: 100, eodRowsWritten: 10, accountRowsRead: 1000, accountRowsWritten: 100, reservedReads: 0, reservedWrites: 0 } },
     sessions: ["2026-09-11", "2026-09-14", "2026-09-15"].map((sessionDate) => ({ sessionDate, deadlineAt: `${sessionDate}T22:00:00.000Z`,
       firstCompletePublicationAt: `${sessionDate}T21:00:00.000Z`, status: "passed", reasons: [] })),
     usageDays: [{ usageDate: "2026-09-12", status: "pending", reasons: ["informational-weekend-sample"], requiredForRetirement: false }],
@@ -22,33 +26,34 @@ function publications(): EodPublicationStatus {
 }
 const view = (changes: Partial<Parameters<typeof buildEodRecoveryView>[0]> = {}) => buildEodRecoveryView({ recovery: recovery(), publications: publications(), now, ...changes });
 
-test("no data stays pending with a three-session target and unknown computer requirements", () => {
+test("no data stays pending without an observation requirement or invented health", () => {
   const result = view({ recovery: null, publications: null });
-  assert.equal(result.status, "pending"); assert.equal(result.requiredSessions, 3); assert.equal(result.monitoringCount, null);
+  assert.equal(result.status, "pending"); assert.equal(result.requiredSessions, 0); assert.equal(result.monitoringCount, null);
+  assert.equal(result.currentHealth, "unverified");
   assert.equal(result.computerNeeded, "unknown"); assert.ok(result.milestones.every((row) => row.status === "pending"));
 });
 test("a completed local command and passed monitoring cannot stand in for configuration recording", () => {
   const status = recovery(); status.configuration = { status: "pending", codeRevision: null, activationCodeRevision: null, recordedAt: null };
   const result = view({ recovery: status });
   assert.equal(result.status, "pending"); assert.match(result.blocker!, /configuration has not been recorded/);
-  assert.equal(result.milestones[1].status, "pending"); assert.equal(result.milestones[2].status, "complete"); assert.equal(result.computerNeeded, "yes");
+  assert.equal(result.milestones[1].status, "pending"); assert.equal(result.currentHealth, "passed"); assert.equal(result.computerNeeded, "yes");
 });
-test("verified follow-up configuration revision and three actual trading sessions complete independently", () => {
+test("verified cutover and follow-up configuration complete without an observation period", () => {
   const result = view();
   assert.equal(result.status, "complete"); assert.equal(result.blocker, null); assert.equal(result.computerNeeded, "no");
   assert.ok(result.milestones.every((row) => row.status === "complete"));
   assert.match(result.milestones[1].detail, /bbbbbbb/); assert.equal(result.reportFreshness, "current");
 });
-test("stale controller, stale monitoring and failures to refresh never show overall completion", () => {
+test("stale controller cannot verify completion; unavailable health does not undo recorded recovery", () => {
   const status = recovery(); status.controller!.stale = true;
   assert.equal(view({ recovery: status }).status, "pending"); assert.equal(view({ recovery: status }).reportFreshness, "outdated");
   const data = publications(); data.monitoring!.stale = true;
-  assert.notEqual(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).milestones[2].status, "outdated");
+  assert.equal(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).currentHealth, "unverified");
   assert.equal(view({ recoveryError: "quota" }).computerNeeded, "unknown");
   assert.notEqual(view({ recoveryError: "quota" }).status, "complete");
-  assert.equal(view({ publicationError: "quota" }).milestones[2].status, "outdated");
-  assert.notEqual(view({ publicationError: "quota" }).status, "complete");
-  assert.notEqual(view({ publications: null }).status, "complete");
+  assert.equal(view({ publicationError: "quota" }).currentHealth, "unverified");
+  assert.equal(view({ publicationError: "quota" }).status, "complete");
+  assert.equal(view({ publications: null }).status, "complete");
 });
 test("controller progress remains visible when publication status is unavailable", () => {
   const status = recovery(); status.controller = { ...status.controller!, status: "running", stage: "bootstrap", updatedAt: checkedAt, reason: "durable-github-stage-in-progress" };
@@ -79,44 +84,48 @@ test("waiting reports show the actual next retry and never invent a completed st
   const result = view({ recovery: status });
   assert.equal(result.status, "pending"); assert.equal(result.nextRetry, status.controller.nextAttemptAt); assert.match(result.blocker!, /quota reset/);
 });
-test("legacy ten-session cached reports cannot satisfy the new policy", () => {
-  const data = publications(); data.monitoring = { ...data.monitoring!, version: 1, policyVersion: undefined, requiredSessions: 10, consecutivePassedSessions: 10 };
-  const result = view({ publications: data });
-  assert.equal(result.status, "pending"); assert.equal(result.monitoringCount, null); assert.equal(result.requiredSessions, 3);
-  assert.match(result.blocker!, /current three-trading-session policy/);
-});
-test("three-session reports must include the finalized-window metadata and cannot count newer sessions", () => {
-  for (const patch of [{ usageFinalizationCutoff: undefined }, { usageFinalizationCutoff: null }, { usageFinalizationCutoff: "invalid" }, { newerSessions: undefined }]) {
-    const data = publications(); data.monitoring = { ...data.monitoring!, ...patch };
-    assert.equal(view({ publications: data }).status, "pending"); assert.equal(view({ publications: data }).monitoringCount, null);
+test("old three- and ten-session caches cannot establish current health or undo recorded cutover", () => {
+  for (const requiredSessions of [3, 10]) {
+    const data = publications(); data.monitoring = { ...data.monitoring!, version: 2, policyVersion: "three-trading-sessions-v1", requiredSessions, consecutivePassedSessions: requiredSessions };
+    const result = view({ publications: data });
+    assert.equal(result.status, "complete"); assert.equal(result.monitoringCount, null); assert.equal(result.requiredSessions, 0);
+    assert.equal(result.currentHealth, "unverified");
   }
-  const data = publications(); data.monitoring!.usageFinalizationCutoff = "2026-09-14";
-  assert.notEqual(view({ publications: data }).status, "complete");
 });
-test("weekends add no progress and informational weekend usage does not block valid sessions", () => {
-  assert.equal(view().status, "complete"); // Friday + Monday + Tuesday, despite pending Saturday usage.
-  const data = publications(); data.monitoring!.sessions = data.monitoring!.sessions.slice(0, 2);
-  data.monitoring!.consecutivePassedSessions = 2; data.monitoring!.eligibleForRetirement = false;
-  assert.equal(view({ publications: data }).monitoringCount, 2); assert.equal(view({ publications: data }).status, "pending");
-  const corrupt = publications(); corrupt.monitoring!.sessions[1].sessionDate = "2026-09-12";
-  assert.notEqual(view({ publications: corrupt }).status, "complete");
+
+test("empty observation history needs no waiting period; missing current evidence remains unverified", () => {
+  const data = publications(); data.monitoring!.sessions = []; data.monitoring!.usageDays = [];
+  data.monitoring!.newerSessions = []; data.monitoring!.usageFinalizationCutoff = null;
+  assert.equal(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).currentHealth, "passed");
+  data.monitoring!.currentHealth = null;
+  assert.equal(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).currentHealth, "unverified");
 });
-test("newer sessions settling usage do not require waiting for a weekend, while delivery failures remain blocking", () => {
-  const data = publications(); data.monitoring!.usageFinalizationCutoff = "2026-09-15";
-  data.monitoring!.newerSessions = [{ sessionDate: "2026-09-16", deadlineAt: checkedAt, firstCompletePublicationAt: checkedAt, status: "pending", reasons: ["finalized-utc-usage-pending"] }];
-  assert.equal(view({ publications: data }).status, "complete");
-  data.monitoring!.newerSessions[0].status = "failed"; data.monitoring!.eligibleForRetirement = false;
-  data.monitoring!.reasons = ["newer-session-delivery-failed"];
-  assert.equal(view({ publications: data }).status, "pending"); assert.match(view({ publications: data }).blocker!, /newer trading session failed/);
+
+test("historical deadline failures and unsettled days remain informational after current delivery recovers", () => {
+  const data = publications(); data.monitoring!.newerSessions = [{ sessionDate: "2026-09-15", deadlineAt: checkedAt,
+    firstCompletePublicationAt: checkedAt, status: "failed", reasons: ["first-publication-deadline-missed-or-invalid"] }];
+  data.monitoring!.operationalReasons = ["newer-session-delivery-failed"];
+  assert.equal(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).currentHealth, "passed");
 });
-test("missing readiness, input correction evidence or matching activation blocks a green result", () => {
+
+test("aged quota evidence does not reset recorded recovery or claim current health", () => {
+  const data = publications(); data.monitoring!.currentHealth!.quotaSampledAt = "2026-09-15T21:00:00.000Z";
+  assert.equal(view({ publications: data }).status, "complete"); assert.equal(view({ publications: data }).currentHealth, "unverified");
+  data.monitoring!.currentHealth!.quotaSampledAt = checkedAt;
+  data.monitoring!.currentHealth!.quota!.reservedWrites = 90_000;
+  assert.equal(view({ publications: data }).status, "complete"); assert.notEqual(view({ publications: data }).currentHealth, "passed");
+});
+
+test("missing readiness or input revisions blocks current health; mismatched activation blocks recovery", () => {
   for (const patch of [{ ready: false }, { inputCorrectionsPending: true }, { inputCorrectionsPending: null }, { mode: "shadow" }]) {
-    assert.notEqual(view({ publications: { ...publications(), ...patch } }).status, "complete");
+    assert.notEqual(view({ publications: { ...publications(), ...patch } }).currentHealth, "passed");
+    assert.equal(view({ publications: { ...publications(), ...patch } }).status, "complete");
   }
   const status = recovery(); status.controller!.codeRevision = "different";
   assert.notEqual(view({ recovery: status }).status, "complete");
   assert.notEqual(view({ recovery: { ...recovery(), checkedAt: "invalid" } }).status, "complete");
 });
+
 test("recovery API uses the same-origin authenticated admin proxy, never a public Worker request", async (context) => {
   const calls: Array<{ path: RequestInfo | URL; init?: RequestInit }> = [];
   context.mock.method(globalThis, "fetch", async (path: RequestInfo | URL, init?: RequestInit) => {

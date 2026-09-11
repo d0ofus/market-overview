@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setImmediate as yieldToRunner } from "node:timers/promises";
 
 // Real SQLite SQL/transactions/constraints through Python's standard library.
 // This helper never opens a repository or remote database.
@@ -35,10 +36,18 @@ export function createSqliteD1() {
   const invoke = (request: unknown): D1Result[] => JSON.parse(execFileSync("python", ["-c", bridge, file], {
     input: JSON.stringify(request), encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true,
   })) as D1Result[];
+  const invokeAsync = async (request: unknown): Promise<D1Result[]> => {
+    const result = invoke(request);
+    // Long SQLite suites otherwise chain synchronous Python calls through
+    // microtasks and starve Vitest's reporting IPC until its RPC timeout.
+    // Yield real I/O without advancing fake application clocks or weakening SQL.
+    await yieldToRunner();
+    return result;
+  };
   class Statement {
     constructor(readonly sql: string, readonly params: unknown[] = []) {}
     bind(...params: unknown[]) { return new Statement(this.sql, params); }
-    async all<T = Record<string, unknown>>() { return invoke({ queries: [this] })[0] as D1Result<T>; }
+    async all<T = Record<string, unknown>>() { return (await invokeAsync({ queries: [this] }))[0] as D1Result<T>; }
     async run<T = Record<string, unknown>>() { return this.all<T>(); }
     async first<T = Record<string, unknown>>(column?: string): Promise<T | null> {
       const row = (await this.all<Record<string, unknown>>()).results[0];
@@ -47,7 +56,7 @@ export function createSqliteD1() {
   }
   const db = {
     prepare: (sql: string) => new Statement(sql),
-    batch: async (statements: Statement[]) => invoke({ queries: statements }),
+    batch: async (statements: Statement[]) => invokeAsync({ queries: statements }),
   } as unknown as D1Database;
   return {
     db,

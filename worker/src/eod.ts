@@ -11,6 +11,8 @@ import { ensureMarketCalendarCoverage, loadStoredMarketSession } from "./market-
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
+import { isMembershipInfrastructureFailure, membershipRetryNotBefore } from "./membership-source-policy";
+import { isEodMembershipSourceVerified, membershipSessionEndUtc, membershipVerificationDate, membershipVerificationTime } from "./eod-membership-evidence";
 import {
   aggregateDailyMarketFeatures,
   computeAndStoreDailyMarketFeatures,
@@ -197,6 +199,7 @@ type UniverseSourceStatus = {
   sourceType: string | null;
   sourceAsOfDate: string | null;
   lastVerifiedSourceDate: string | null;
+  lastVerifiedAt: string | null;
 };
 
 type BreadthStoreResult = {
@@ -879,7 +882,7 @@ async function loadUniverseSourceStatus(env: Env, sourceKey: string): Promise<Un
             records_count as recordsCount, failure_count as failureCount,
             next_attempt_at as nextAttemptAt, source_type as sourceType,
             source_as_of_date as sourceAsOfDate,
-            last_verified_source_date as lastVerifiedSourceDate
+            last_verified_source_date as lastVerifiedSourceDate, last_verified_at as lastVerifiedAt
        FROM universe_source_sync_state
       WHERE source_key = ? LIMIT 1`,
   )
@@ -901,6 +904,7 @@ async function saveUniverseSourceStatus(
     contentHash?: string | null;
     etag?: string | null;
     lastModified?: string | null;
+    retryNotBefore?: string;
   } = {},
 ): Promise<void> {
   const errorText = errorMessage ? errorMessage.slice(0, 700) : null;
@@ -909,7 +913,10 @@ async function saveUniverseSourceStatus(
   });
   const failureCount = status === "ok" ? 0 : Math.max(0, Number(previous?.failureCount ?? 0)) + 1;
   const retryMinutes = [15, 60, 360, 1_440][Math.min(3, Math.max(0, failureCount - 1))] ?? 1_440;
-  const nextAttemptAt = status === "ok" ? null : new Date(Date.now() + retryMinutes * 60_000).toISOString();
+  // Daily allowance resets at midnight; an accumulated source backoff must
+  // not postpone that recovery by another 24 hours after capacity returns.
+  const nextAttemptAt = status === "ok" ? null : metadata.retryNotBefore
+    ?? new Date(Date.now() + retryMinutes * 60_000).toISOString();
   try {
     await getOpsDb(env).prepare(
       `INSERT INTO universe_source_sync_state
@@ -977,8 +984,7 @@ async function saveUniverseSourceStatus(
 }
 
 export function isUniverseInfrastructureFailure(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /(?:\bD1\b|\bD1_|\bd1-|\beod-|\bSQLITE|database|no such (?:table|column)|quota|budget|capacity|universe-(?:storage|stage|promotion)-)/i.test(message);
+  return isMembershipInfrastructureFailure(error);
 }
 
 function businessDaysAfter(sourceDate: string, now = new Date()): number {
@@ -1067,12 +1073,19 @@ export function shouldRefreshUniverseSource(input: {
   sourceAsOfDate: string | null | undefined;
   nextAttemptAt: string | null | undefined;
   refreshAfterDays: number;
+  verifiedAt?: string | null;
   now?: Date;
 }): boolean {
   const now = input.now ?? new Date();
   const retryDue = !input.nextAttemptAt || Date.parse(input.nextAttemptAt) <= now.getTime();
   if (!retryDue) return false;
   if (input.existingCount === 0 || input.membershipIncomplete || input.status !== "ok") return true;
+  // Source dates and verification dates have different meanings: yesterday's
+  // dated issuer file can be today's successfully verified membership.
+  const verified = membershipVerificationTime(input.verifiedAt);
+  if (verified !== null && verified <= now.getTime()
+    && membershipVerificationDate(input.verifiedAt) === membershipVerificationDate(now.toISOString())
+    && input.sourceAsOfDate && businessDaysAfter(input.sourceAsOfDate, now) <= 5) return false;
   return universeSourceAgeDays(input.sourceAsOfDate, now) >= input.refreshAfterDays;
 }
 
@@ -1086,13 +1099,20 @@ async function syncUniverseFromSource(
   const existing = await loadUniverseTickers(env, def.id);
   const status = await loadUniverseSourceStatus(env, def.sourceKey);
   const membershipIncomplete = def.id === "russell2000-core" && (existing.length < 1_800 || existing.length > 2_100);
+  const cachedAge = status?.sourceAsOfDate ? businessDaysAfter(status.sourceAsOfDate) : Number.POSITIVE_INFINITY;
+  const currentDate = membershipVerificationDate(new Date().toISOString())!;
+  const cachedMembershipUsable = existing.length > 0 && !membershipIncomplete
+    && isEodMembershipSourceVerified(def.id, status?.sourceType)
+    && Boolean(status?.sourceAsOfDate && status.sourceAsOfDate <= currentDate)
+    && cachedAge <= 5;
   const shouldRefresh = shouldRefreshUniverseSource({
     existingCount: existing.length,
-    membershipIncomplete,
+    membershipIncomplete: membershipIncomplete || !cachedMembershipUsable,
     status: status?.status,
     sourceAsOfDate: status?.sourceAsOfDate,
     nextAttemptAt: status?.nextAttemptAt,
     refreshAfterDays: def.refreshAfterDays ?? def.staleAfterDays,
+    verifiedAt: isEodMembershipSourceVerified(def.id, status?.sourceType) ? status?.lastVerifiedAt : null,
   });
 
   let tickers = existing;
@@ -1150,12 +1170,8 @@ async function syncUniverseFromSource(
       if (isUniverseInfrastructureFailure(error)) throw error;
       const message = error instanceof Error ? error.message : "constituent sync failed";
       console.error("breadth universe source sync failed", { universeId: def.id, error: message });
-      await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message);
-      const cachedSourceAgeDays = status?.sourceAsOfDate ? businessDaysAfter(status.sourceAsOfDate) : Number.POSITIVE_INFINITY;
-      const cachedMembershipUsable = existing.length > 0
-        && !membershipIncomplete
-        && cachedSourceAgeDays >= -1
-        && cachedSourceAgeDays <= 5;
+      await saveUniverseSourceStatus(env, def.sourceKey, "error", def.sourceLabel, existing.length, message,
+        { retryNotBefore: membershipRetryNotBefore(error) });
       if (!cachedMembershipUsable) {
         unavailable.push({
           id: def.id,
@@ -1170,7 +1186,9 @@ async function syncUniverseFromSource(
     }
   }
 
-  if (tickers.length === 0) {
+  // Cooldown suppresses requests, never the five-session cache validity gate.
+  // A previous failed attempt cannot extend an expired membership's life.
+  if (tickers.length === 0 || (!shouldRefresh && !cachedMembershipUsable)) {
     unavailable.push({
       id: def.id,
       name: def.name,
@@ -1179,6 +1197,7 @@ async function syncUniverseFromSource(
     return;
   }
 
+  if (!shouldRefresh && status?.status !== "ok") sourceLabel = `${def.sourceLabel} (cached universe reused; source retry pending)`;
   universeTickers.set(def.id, tickers);
   sourceByUniverse.set(def.id, sourceLabel);
 }
@@ -1230,15 +1249,10 @@ async function ensureBreadthUniverseMemberships(
   const universeTickers = new Map<string, string[]>();
   const sourceByUniverse = new Map<string, string>();
   const unavailable: Array<{ id: string; name: string; reason: string }> = [];
-  let nasdaqUniverseCache:
-    | Awaited<ReturnType<typeof loadNasdaqTraderUniverses>>
-    | null = null;
-  const loadNasdaqUniverseCache = async () => {
-    if (!nasdaqUniverseCache) {
-      nasdaqUniverseCache = await loadNasdaqTraderUniverses(env);
-    }
-    return nasdaqUniverseCache;
-  };
+  // Share failures as well as successes: NASDAQ, NYSE and Overall use the same
+  // upstream file, so one outage must not consume three independent retries.
+  let nasdaqUniverseCache: Promise<Awaited<ReturnType<typeof loadNasdaqTraderUniverses>>> | null = null;
+  const loadNasdaqUniverseCache = () => nasdaqUniverseCache ??= loadNasdaqTraderUniverses(env);
 
   await syncUniverseFromSource(
     env,
@@ -1288,15 +1302,7 @@ async function ensureBreadthUniverseMemberships(
       staleAfterDays: 7,
       refreshAfterDays: 1,
       unavailableReason: "S&P 500 constituent source fetch failed and no cached S&P 500 membership is available",
-      fetchTickers: async () => {
-        try {
-          const allCommon = new Set((await loadNasdaqUniverseCache()).allCommonTickers);
-          return await loadSp500Universe(allCommon, env);
-        } catch (error) {
-          if (isUniverseInfrastructureFailure(error)) throw error;
-          return await loadSp500Universe(undefined, env);
-        }
-      },
+      fetchTickers: () => loadSp500Universe(undefined, env),
     },
     universeTickers,
     sourceByUniverse,
@@ -1315,7 +1321,13 @@ async function ensureBreadthUniverseMemberships(
       maxSourceAgeDays: 5,
       unavailableReason: "Russell 2000 constituent source fetch failed and no cached Russell 2000 membership is available",
       fetchTickers: async () => {
-        const activeEquities = new Set((await loadNasdaqUniverseCache()).allActiveEquityTickers);
+        // The directory helps resolve aliases but cannot gate the independent
+        // official issuer source. Preserve unresolvable holdings in coverage.
+        let activeEquities: Set<string> | undefined;
+        if (nasdaqUniverseCache) {
+          try { activeEquities = new Set((await nasdaqUniverseCache).allActiveEquityTickers); }
+          catch (error) { if (isUniverseInfrastructureFailure(error)) throw error; }
+        }
         return await loadRussell2000Universe(activeEquities, env);
       },
     },
@@ -1415,9 +1427,8 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
     return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0,10) === value && value <= targetSession;
   };
   const verifiedTime = (value: string | null | undefined): number | null => {
-    if (!value || !validEvidenceDate(value.slice(0,10))) return null;
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) ? timestamp : null;
+    const date = membershipVerificationDate(value);
+    return validEvidenceDate(date) ? membershipVerificationTime(value) : null;
   };
   const evidenceTime = (membership: Pick<EodMembershipInput,"verifiedAt" | "sourceAsOfDate">): number | null =>
     verifiedTime(membership.verifiedAt) ?? (validEvidenceDate(membership.sourceAsOfDate)
@@ -1428,7 +1439,7 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
          ORDER BY COALESCE(v.promoted_at, v.created_at) DESC, v.id DESC) AS position
          FROM universe_versions v
         WHERE v.status IN ('active', 'superseded')
-          AND date(COALESCE(v.promoted_at, v.created_at)) <= ?
+          AND datetime(COALESCE(v.promoted_at, v.created_at)) < datetime(?)
           AND v.universe_id IN (SELECT value FROM json_each(?))
      )
      SELECT v.universe_id AS universeId, v.id AS versionId, v.source,
@@ -1440,7 +1451,7 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
       WHERE v.position = 1
       ORDER BY v.universe_id, m.ticker LIMIT 40001
       /* eod-membership-input-read */`,
-  ).bind(targetSession, JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null }>();
+  ).bind(membershipSessionEndUtc(targetSession), JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null }>();
   // The publication populations are capped at five universes of 8,000 members.
   // Historical version traversal still contributes reads; admission separately
   // reserves conservative headroom and stops if measured work exceeds it.
@@ -1484,7 +1495,7 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
   for (const membership of memberships.values()) {
     const currentEvidenceTime=evidenceTime(membership);
     if (currentEvidenceTime!==null
-      && countUsMarketTradingSessionsAfter(new Date(currentEvidenceTime).toISOString().slice(0,10),targetSession) <= 5) continue;
+      && countUsMarketTradingSessionsAfter(membership.verifiedAt ? membershipVerificationDate(membership.verifiedAt) : membership.sourceAsOfDate,targetSession) <= 5) continue;
     // Unchanged membership versions may span months. Recover the contemporaneous
     // verification saved in an accepted historical publication, never today's
     // source verification or today's constituent list.

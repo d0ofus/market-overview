@@ -1,5 +1,6 @@
 import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import type { Env } from "./types";
+import { assertYahooArchiveCapacity, EodFallbackStorageFullError, reserveYahooArchiveBlock } from "./eod-fallback-storage";
 
 export const MARKET_HISTORY_SCHEMA_VERSION = 1;
 export const MARKET_HISTORY_HOT_SESSIONS = 260;
@@ -491,6 +492,9 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
         manifests.push(manifest);
         continue;
       }
+      if (encoded.feed === "yahoo-eod") {
+        await assertYahooArchiveCapacity(db, encoded.ticker);
+      }
       const security = `${encoded.feed}:${encoded.ticker}`;
       if (revisionEnabled && !fences.has(security)) {
         const token = options.repairFenceToken ?? crypto.randomUUID();
@@ -510,6 +514,28 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
           if (Number(opened.meta?.changes ?? 0) !== 1) fail("Archive security already has a pending adjustment repair.");
         }
         fences.set(security, { feed: encoded.feed, ticker: encoded.ticker, token, owned: !options.repairFenceToken });
+      }
+      if (encoded.feed === "yahoo-eod") {
+        try {
+          // Claim the correction fence first. A losing concurrent writer must
+          // not leave a fresh unpointed payload on every retry.
+          const usage = await reserveYahooArchiveBlock(db, encoded);
+          rowsRead += usage.rowsRead;
+          rowsWritten += usage.rowsWritten;
+        } catch (error) {
+          const fence = fences.get(security);
+          // A full slot check has changed no archive data or revision clock.
+          // Release only our fence; actual storage failures remain recoverable
+          // through the existing pending-repair path.
+          if (error instanceof EodFallbackStorageFullError && fence?.owned) {
+            const closed = await marketDb.prepare(`UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL,updated_at=?
+              WHERE feed=? AND ticker=? AND status='pending' AND owner_token=?`)
+              .bind(new Date().toISOString(), fence.feed, fence.ticker, fence.token).run();
+            if (closed.meta.changes !== 1) fail("Archive repair fence changed before capacity rejection.");
+            fences.delete(security);
+          }
+          throw error;
+        }
       }
       // Cross-D1 publication is protected by the market-side pending fence. Revisions
       // on both sides of the move invalidate computations that started before it.

@@ -215,6 +215,13 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if (query.sql.trimEnd().endsWith("/* eod-yahoo-storage-admission */")) {
+      // At most 1,000 reserved identities. Count staged blocks as well as
+      // pointed revisions; measured overruns still stop the next admission.
+      reads += 20_000;
+      writes += /^\s*INSERT/i.test(query.sql) ? 8 : 0;
+      continue;
+    }
     if (query.sql.trimEnd().endsWith("/* storage-copy-page */") || query.sql.trimEnd().endsWith("/* storage-verification-year */")) {
       // Keyset pages are capped at 250 rows and use the complete primary key.
       // The same label covers read-back verification; no OFFSET/full-table scan.

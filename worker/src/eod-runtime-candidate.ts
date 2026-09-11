@@ -109,18 +109,30 @@ export function prepareRuntimeCandidateConfig(reviewed: unknown, identity: Candi
   return result;
 }
 
-/** This parser returns only ADMIN_SECRET. Other local provider credentials are
- * never selected, copied or printed. No interpolation or shell evaluation. */
-export function localRuntimeAdminSecret(text: string): string | null {
-  if (text.length > 256_000) throw new Error("runtime-candidate-local-secret-file-too-large");
-  const rows = text.split(/\r?\n/).filter((line) => /^\s*(?:export\s+)?ADMIN_SECRET\s*=/.test(line));
-  if (!rows.length) return null;
-  if (rows.length !== 1) throw new Error("runtime-candidate-admin-secret-ambiguous");
-  let value = rows[0].replace(/^\s*(?:export\s+)?ADMIN_SECRET\s*=\s*/, "").trim();
-  if (value.startsWith('"')) { try { value = JSON.parse(value) as string; } catch { throw new Error("runtime-candidate-admin-secret-invalid"); } }
-  else if (value.startsWith("'")) { if (!value.endsWith("'")) throw new Error("runtime-candidate-admin-secret-invalid"); value = value.slice(1, -1); }
-  if (typeof value !== "string" || value.length < 1 || value.length > 4096 || /[\r\n\0]/.test(value)) throw new Error("runtime-candidate-admin-secret-invalid");
-  return value;
+/** Candidate-only HMAC credential; replay is stable without storing a secret
+ * locally or requiring production ADMIN_SECRET. The control token is never
+ * copied to the probe, and each account/candidate has a separate credential. */
+export async function privateRuntimeAdminSecret(controlToken: string, accountId: string, identity: CandidateIdentity): Promise<string> {
+  if (controlToken.length < 32 || controlToken.length > 4096 || /\s|\0/.test(controlToken)
+    || !/^[a-f0-9]{32}$/.test(accountId) || !/^eod-[a-f0-9]{24}$/.test(identity.probeId)
+    || identity.workerName !== `market-eod-probe-${identity.probeId.slice(4)}`) {
+    throw new Error("runtime-candidate-private-credential-input-invalid");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode(controlToken), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const message = encoder.encode(`market-overview/runtime-candidate/admin/v1\0${accountId}\0${await eodHash(identity)}`);
+  const signature = await crypto.subtle.sign("HMAC", key, message);
+  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function assertRuntimeCandidateCredentialBinding(fingerprint: string, state: {
+  candidateCredentialHash?: string; secretsInstalled?: boolean;
+}): void {
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)
+    || (state.candidateCredentialHash !== undefined && state.candidateCredentialHash !== fingerprint)
+    || (state.secretsInstalled && !state.candidateCredentialHash)) {
+    throw new Error("runtime-candidate-private-credential-changed-new-attempt-required");
+  }
 }
 
 export type CandidateProbeState = { from: number; to: number | null; probes: Array<{

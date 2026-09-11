@@ -3,6 +3,7 @@ import { assertHistoryPruneEvidence, MARKET_HISTORY_REQUIRED_CONSUMERS, type His
 import { validateStorageConsumerEvidence, type StorageAcceptanceCapture, type StorageConsumerEvidence, type StoragePublicationEvidence,
   type validateStorageCapacityAnalysis } from "./market-storage-acceptance";
 import type { Env } from "./types";
+import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
 
 type AcceptedCapacity = Awaited<ReturnType<typeof validateStorageCapacityAnalysis>>;
 const FEEDS = ["sip", "yahoo-eod"] as const;
@@ -13,7 +14,7 @@ type Approval = {
   proof: { identity: StorageAcceptanceCapture["identity"]; tickerHash: string; tickers: string[]; publicationRunId: string;
     consumerProofHash: string; readers: HistoryReaderEvidence; capacity: AcceptedCapacity;
     model: { measuredAt: string; sourceSnapshotHash: string; priceTableAndIndexBytes: number; modeledPriceRows: number;
-      fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number };
+      fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number; fallbackStorage?: string };
     horizon: { anchorSession: string; lastCoveredSession: string; expiresAt: string; sessions: number } };
 };
 export type StorageHistoryCapacityStatus = { status: "unmeasured" | "ready" | "failed" | "expired";
@@ -72,8 +73,8 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   const sourceSnapshotHash = object(report.source).snapshotSha256;
   if (await eodHash(input.analysis) !== input.capacity.analysisHash || !selected || !integer(priceBytes) || priceBytes <= 0
     || !integer(physicalBytes) || physicalBytes < priceBytes || !integer(headroom) || headroom < 10 || !digest(sourceSnapshotHash)
-    || model.sharedTickers !== tickers.length || model.fallbackTickerReserve !== tickers.length
-    || model.modeledSipRows !== tickers.length * (input.capacity.hotSessions + headroom) || model.modeledFallbackRows !== model.modeledSipRows
+    || model.sharedTickers !== tickers.length || !storageFallbackModelValid(report, model, tickers.length)
+    || model.modeledSipRows !== tickers.length * (input.capacity.hotSessions + headroom)
     || model.projectedBytes !== input.capacity.projectedMarketBytes
     || input.capacity.projectedMarketBytes !== physicalBytes + input.capacity.publicationGrowthReserveBytes
     || input.capacity.projectedMarketBytes >= 350_000_000 || input.capacity.projectedHistoryBytes >= 350_000_000
@@ -91,7 +92,8 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
       consumers: [...MARKET_HISTORY_REQUIRED_CONSUMERS], parityPassed: true, codeRevision: identity.codeRevision },
     capacity: input.capacity, model: { measuredAt: String(report.measuredAt), sourceSnapshotHash, priceTableAndIndexBytes: priceBytes,
       modeledPriceRows: Number(model.modeledSipRows) + Number(model.modeledFallbackRows), fullLayoutBytes: physicalBytes,
-      hotSessions: input.capacity.hotSessions, sweepHeadroomSessions: headroom },
+      hotSessions: input.capacity.hotSessions, sweepHeadroomSessions: headroom,
+      ...(model.fallbackStorage === EOD_YAHOO_ARCHIVE_LAYOUT ? { fallbackStorage: EOD_YAHOO_ARCHIVE_LAYOUT } : {}) },
     horizon: { anchorSession: input.publications.sessionDate, lastCoveredSession, expiresAt, sessions: input.capacity.forecastSessions } };
   const proofHash = await eodHash(proof), id = `history-storage-approval:${identity.codeRevision}`;
   const existing = await read<Approval>(env.OPS_DB, id);
@@ -161,6 +163,10 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
   try {
     if (await eodHash(tickers) !== proof.tickerHash || new Set(tickers).size !== tickers.length) fail("population-changed-remeasurement-required");
     if (now.getTime() < Date.parse(approved.approvedAt) || now.getTime() >= Date.parse(proof.horizon.expiresAt)) fail("forecast-horizon-expired");
+    if (proof.model.fallbackStorage === EOD_YAHOO_ARCHIVE_LAYOUT
+      && await env.MARKET_DATA_DB.prepare("SELECT 1 AS present FROM alpaca_daily_bars WHERE feed='yahoo-eod' LIMIT 1").first()) {
+      fail("yahoo-eod-retention-sweep-overflow");
+    }
     const window = proof.model.hotSessions + proof.model.sweepHeadroomSessions;
     const before = await revisions(env, tickers), stateId = `history-storage-sample:${input.codeRevision}`;
     const saved = await read<{ proofHash: string; rowsHash: string; rows: Sample[] }>(env.OPS_DB, stateId);
@@ -172,6 +178,7 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
       }
     }
     for (const feed of FEEDS) {
+      const feedWindow = feed === "yahoo-eod" && proof.model.fallbackStorage === EOD_YAHOO_ARCHIVE_LAYOUT ? 0 : window;
       const missing = tickers.filter((ticker) => !reusable.has(`${feed}:${ticker}`));
       for (let offset = 0; offset < missing.length; offset += 80) {
         const selected = missing.slice(offset, offset + 80);
@@ -181,11 +188,11 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
           COALESCE(r.revision,0) AS revision,(SELECT COUNT(*) FROM (SELECT 1 FROM alpaca_daily_bars b
             WHERE b.feed=? AND b.ticker=t.value ORDER BY date DESC LIMIT ?)) AS retainedRows
           FROM json_each(?) t LEFT JOIN eod_input_revisions r ON r.feed=? AND r.ticker=t.value ORDER BY ticker`)
-          .bind(feed, window + 1, JSON.stringify(selected), feed).all<{ ticker: string; revision: number; retainedRows: number }>();
+          .bind(feed, feedWindow + 1, JSON.stringify(selected), feed).all<{ ticker: string; revision: number; retainedRows: number }>();
         if (rows.results.length !== selected.length) fail("row-sample-incomplete");
         for (const row of rows.results) {
           if (!selected.includes(row.ticker) || !integer(row.revision) || !integer(row.retainedRows)) fail("row-sample-invalid");
-          if (row.retainedRows > window) fail(`${feed}-retention-sweep-overflow`);
+          if (row.retainedRows > feedWindow) fail(`${feed}-retention-sweep-overflow`);
           reusable.set(`${feed}:${row.ticker}`, [row.ticker, feed, row.revision, row.retainedRows]);
         }
         const checkpoint = [...reusable.values()].sort((a, b) => `${a[1]}:${a[0]}`.localeCompare(`${b[1]}:${b[0]}`));
@@ -197,7 +204,7 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
     const [marketPhysicalBytes, archivePhysicalBytes] = await Promise.all([liveSize(env.MARKET_DATA_DB), liveSize(env.MARKET_HISTORY_DB)]);
     const sampledRows = samples.reduce((sum, row) => sum + row[3], 0), remainingHotRows = proof.model.modeledPriceRows - sampledRows;
     // This coefficient comes from exact populated SQLite table/index pages for
-    // full-width dual-feed rows. No JSON-byte estimate or arbitrary multiplier.
+    // the approved full-width hot layout. No JSON-byte estimate or multiplier.
     const priceBytesPerRowBound = Math.ceil(proof.model.priceTableAndIndexBytes / proof.model.modeledPriceRows);
     const additionalArchiveBytes = Math.max(0, proof.capacity.projectedHistoryBytes - proof.capacity.liveHistoryBytes);
     const projectedMarket = Math.max(proof.capacity.projectedMarketBytes,

@@ -1,5 +1,7 @@
 import { SP500_TICKERS } from "./sp500-tickers";
-import { meteredFetchWithRetry, ProviderRequestFailureError } from "./provider-usage";
+import { meteredFetchWithRetry, ProviderRequestFailureError, ProviderBudgetExceededError } from "./provider-usage";
+import { isMembershipInfrastructureFailure } from "./membership-source-policy";
+import { zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
 
 export const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
@@ -99,7 +101,9 @@ async function fetchTextWithMetadata(url: string, env?: Env): Promise<{
         providerKey,
         endpointKey: new URL(url).pathname,
         caller: "universe-membership",
-      }, 15_000, 3)
+      // Durable universe cooldown schedules subsequent attempts. One request
+      // per URL here keeps a single retry from consuming a four/day allowance.
+      }, 15_000, 1)
     : await fetch(url, { headers });
   if (!res.ok) {
     throw new ProviderRequestFailureError(
@@ -432,7 +436,7 @@ export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: E
         tickers,
         // This proxy has no constituent effective-date field. This is the date
         // its current contents were verified; Last-Modified remains separate.
-        sourceAsOfDate: new Date().toISOString().slice(0, 10),
+        sourceAsOfDate: zonedParts(new Date(), "America/New_York").localDate,
         sourceType: "wikipedia-derived-public-proxy",
         sourceUrl: SP500_CSV_URL,
         contentHash: await sha256Text(raw),
@@ -441,6 +445,7 @@ export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: E
       };
     }
   } catch (error) {
+    if (isMembershipInfrastructureFailure(error) || error instanceof ProviderBudgetExceededError) throw error;
     console.error("sp500 constituent source fetch failed; using bundled fallback", error);
   }
   const tickers = dedupeSorted(SP500_TICKERS);
@@ -476,6 +481,7 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, e
     const primary = parseIsharesHoldingsCsvDetailed(csvRaw);
     if (!primary.sourceAsOfDate || !primary.tickers.length) throw new Error("Primary IWM holdings payload is not a dated equity CSV");
   } catch (primaryError) {
+    if (isMembershipInfrastructureFailure(primaryError) || primaryError instanceof ProviderBudgetExceededError) throw primaryError;
     const productPage = await fetchText(IWM_PRODUCT_PAGE_URL, env);
     const discoveredUrl = extractIsharesHoldingsCsvUrl(productPage);
     if (!discoveredUrl) throw primaryError;
