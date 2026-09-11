@@ -333,6 +333,12 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         publishedScopes.add(scope);
       }
     };
+    // A planned 65-minute migration slice resumes already calculated daily
+    // chunks. Missing long horizons stay null; an ordinary retry or a new
+    // session must still attempt to recover them. Check both fields because a
+    // later incomplete-publication result may retain the old error message.
+    const resumePlannedSlice=Boolean(options.storageInputs)
+      && run.error_code==="runner-error" && run.error_message==="storage-run-time-slice-complete";
     let yahooAttempts=0;
     for (const [index,tickers] of chunks(inputs.tickers,25).entries()) {
       await progress("prices",{chunk:index,total:Math.ceil(inputs.tickers.length/25),symbols:features.size});
@@ -346,8 +352,10 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         const cached=stored.payloadCodec ? await decodeEodPayload({...stored,payload:"{}"}) as FeatureCheckpoint : stored;
         if (cached.catalogRows?.length===tickers.length && cached.catalogRows.every((row) => row.compatibility)
           && tickers.every((ticker) => cached.catalogRows.some((row) => row.ticker===ticker))
+          && cached.features.length===tickers.length && tickers.every((ticker) => cached.features.some(([symbol]) => symbol===ticker))
           && tickers.every((ticker) => { const lifecycle=getEtfLifecycle(ticker); return !lifecycle || run.session_date<=lifecycle.lastTradingDate; })
-          && cached.features.every(([,feature]) => feature.price!==null && feature.change1d!==null && feature.above200Sma!==null)) {
+          && cached.features.every(([,feature]) => feature.price!==null && feature.change1d!==null
+            && (feature.above200Sma!==null || resumePlannedSlice))) {
           cached.features.forEach(([ticker,feature]) => features.set(ticker,feature));
           cached.catalogRows.forEach((row) => catalogRows.set(row.ticker,row));
           revisions.push(...cached.revisions); Object.assign(errors,cached.errors);
@@ -535,7 +543,9 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   } catch(error) {
     const message=error instanceof Error ? error.message : "eod-run-failed";
     const budget=/budget|quota|capacity/i.test(message);
-    const next=budget ? new Date(new Date().setUTCHours(24,5,0,0)) : new Date(Date.now()+15*60_000);
+    const plannedSlice=Boolean(options.storageInputs) && error instanceof EodBatchInterruptedError
+      && message==="storage-run-time-slice-complete";
+    const next=plannedSlice ? new Date() : budget ? new Date(new Date().setUTCHours(24,5,0,0)) : new Date(Date.now()+15*60_000);
     await controlDb.prepare(`UPDATE eod_runs SET status='retrying',error_code=?,error_message=?,lease_until=NULL,
       lease_token=NULL,next_attempt_at=?,updated_at=? WHERE id=? AND lease_token=?`)
       .bind(budget ? "resource-budget" : "runner-error",message.slice(0,500),next.toISOString(),new Date().toISOString(),runId,lease).run();

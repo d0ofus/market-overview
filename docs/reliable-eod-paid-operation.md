@@ -29,6 +29,8 @@ The storage migration ID and original source-code revision identify the frozen s
 
 The daily runner always reconciles at least the latest five exchange sessions, even when the only missing bar is today's close. Missing earlier price anchors extend the split-adjusted price request. Ordinary raw share-volume collection stays within the five-session reconciliation window; older stored raw observations retain their original collection times, and older unknown raw volume remains null. Explicit corporate-action repair retains its full-window behavior. An unchanged observation keeps its stored provenance and does not create another archive revision or a duplicate hot-table row merely because it was fetched again.
 
+A planned 65-minute storage-bootstrap yield makes its owned EOD run immediately eligible to resume. It does not impose the provider-failure cooldown. When that same approved bootstrap resumes, a complete chunk with valid current prices and daily returns may retain unavailable 200-day metrics as null instead of repeating the completed price work. Ticker sets, input revisions and calendar signatures must still match. Ordinary retries, changed inputs, reconciliation runs and real current-session failures continue to recheck prices; quota and provider cooldowns are unchanged.
+
 ## Daily code ownership
 
 The `market-eod` environment variable `EOD_PRODUCTION_CODE_REVISION` pins both ordinary daily ingestion and the daily monitor to the exact approved code. Their workflow files still run from `main`, but checkout and `EOD_CODE_REVISION` use this pin. With no pin, the original `github.sha` checkout remains the fallback. Each runner verifies the declared revision against `git rev-parse HEAD`; the triggering main SHA never impersonates pinned execution.

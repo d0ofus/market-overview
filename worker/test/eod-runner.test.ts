@@ -17,6 +17,7 @@ import type { FrozenInputs } from "../src/eod-runner";
 describe("EOD resumable runner with real publication and lease SQL", {timeout:30_000}, () => {
   let market:ReturnType<typeof createSqliteD1>,ops:ReturnType<typeof createSqliteD1>;
   let env:Env;
+  let sliceInputs:FrozenInputs|undefined,restoreSliceConfig:(()=>void)|undefined;
   const session="2026-09-04";
   const runId=`eod:active:${session}:daily`;
   const dates=Array.from({length:400},(_,index) => {
@@ -42,7 +43,10 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       ? dates.filter((date) => date>=start).map((date) => ({...makeBar(date),adjustment})) : []);
     calls.yahoo.mockRejectedValue(new Error("yahoo-unavailable"));
   },30_000);
-  afterEach(() => {market.dispose();ops.dispose();});
+  afterEach(() => {
+    if(restoreSliceConfig) {restoreSliceConfig();vi.mocked(loadEodMemberships).mockReset();}
+    sliceInputs=undefined;restoreSliceConfig=undefined;market.dispose();ops.dispose();
+  });
 
   it("publishes independent pages before a later catalog chunk is interrupted and resumes idempotently",async () => {
     const normal=calls.alpaca.getMockImplementation()!;
@@ -53,6 +57,8 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     await expect(runEodBatch(env,runId)).rejects.toThrow("d1-capacity-test");
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publication_pointers").first()).toEqual({n:6});
     expect(await ops.db.prepare("SELECT status,lease_token FROM eod_runs WHERE id=?").bind(runId).first()).toMatchObject({status:"retrying",lease_token:null});
+    expect(await ops.db.prepare("SELECT next_attempt_at FROM eod_runs WHERE id=?").bind(runId).first<string>("next_attempt_at"))
+      .toBe(new Date(new Date().setUTCHours(24,5,0,0)).toISOString());
     calls.alpaca.mockImplementation(normal);
     expect((await runEodBatch(env,runId)).status).toBe("completed");
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publications").first()).toEqual({n:7});
@@ -71,6 +77,92 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect(calls.alpaca).not.toHaveBeenCalled();
     expect(calls.yahoo).not.toHaveBeenCalled();
   });
+
+  async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent") {
+    const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    frozen.memberships.find(row=>row.universeId==="nasdaq-core")!.members=[...frozen.tickers];
+    frozen.memberships.find(row=>row.universeId==="russell2000-core")!.members=["MISSING24"];
+    await market.db.prepare("CREATE TABLE symbols(ticker TEXT PRIMARY KEY,is_active INTEGER,catalog_managed INTEGER,asset_class TEXT)").run();
+    await market.db.prepare("INSERT INTO symbols SELECT value,1,1,'equity' FROM json_each(?)").bind(JSON.stringify(frozen.tickers)).run();
+    const config=vi.spyOn(configDb,"loadConfig").mockResolvedValue(frozen.config);
+    restoreSliceConfig=()=>config.mockRestore();
+    vi.mocked(loadEodMemberships).mockResolvedValue(structuredClone(frozen.memberships));
+    sliceInputs=await loadEodInputs(env,session);
+    expect(sliceInputs.tickers).toEqual(frozen.tickers);
+    await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(sliceInputs),runId).run();
+    const prices=async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>{
+      if(ticker==="MISSING24")return [];
+      return dates.filter(date=>date>=start && (ticker==="SPY" || date>=dates.at(-30)!)
+        && !(ticker==="MISSING0" && ((missingCurrent==="price" && date===session)
+          || (missingCurrent==="adjacent" && date===dates.at(-2)))))
+        .map(date=>({...makeBar(date),ticker,adjustment}));
+    });
+    let stopped=false;
+    calls.alpaca.mockImplementation(async(...args:Parameters<typeof prices>)=>{
+      if(args[0].includes("MISSING24"))stopped=true;
+      return prices(...args);
+    });
+    await expect(runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs,assertContinue:()=>{
+      if(stopped)throw new Error("storage-run-time-slice-complete");
+    }})).rejects.toThrow("storage-run-time-slice-complete");
+    expect(await ops.db.prepare("SELECT error_code,error_message FROM eod_runs WHERE id=?").bind(runId).first())
+      .toEqual({error_code:"runner-error",error_message:"storage-run-time-slice-complete"});
+    expect(Date.parse((await ops.db.prepare("SELECT next_attempt_at FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("next_attempt_at"))!)).toBeLessThanOrEqual(Date.now());
+    expect(await ops.db.prepare("SELECT chunk_key FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'")
+      .bind(runId).first()).toEqual({chunk_key:"features:0"});
+    calls.alpaca.mockClear();calls.yahoo.mockClear();calls.alpaca.mockImplementation(prices);
+  }
+
+  it("resumes a planned slice past short-history chunks while ordinary recovery still refetches them",async()=>{
+    await interruptShortHistorySlice();
+    expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
+    expect(calls.alpaca.mock.calls.every(([tickers])=>tickers.length===1 && tickers[0]==="MISSING24")).toBe(true);
+    const stored=await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'")
+      .bind(runId).first<string>("payload_json");
+    const metadata=JSON.parse(stored!);
+    const cached=await decodeEodPayload({...metadata,payload:"{}"}) as {features:Array<[string,{above200Sma:boolean|null}]>};
+    expect(cached.features.find(([ticker])=>ticker==="MISSING0")?.[1].above200Sma).toBeNull();
+    expect(await ops.db.prepare("SELECT error_code FROM eod_runs WHERE id=?").bind(runId).first())
+      .toEqual({error_code:"incomplete-publication"});
+    calls.alpaca.mockClear();
+    calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>
+      dates.filter(date=>date>=start).map(date=>({...makeBar(date),ticker,adjustment}))));
+    expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("completed");
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING24"))).toBe(true);
+  },60_000);
+
+  it.each(["revision","calendar"] as const)("invalidates planned slice checkpoints after a %s change",async change=>{
+    await interruptShortHistorySlice();
+    if(change==="revision") await market.db.prepare("UPDATE alpaca_daily_bars SET reported_volume=777 WHERE feed='sip' AND ticker='SPY' AND date=?")
+      .bind(session).run();
+    else {
+      const earlier=new Date(`${dates[0]}T00:00:00Z`);earlier.setUTCDate(earlier.getUTCDate()-1);
+      await market.db.prepare("INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source) VALUES(?,'09:30','16:00','test')")
+        .bind(earlier.toISOString().slice(0,10)).run();
+    }
+    if(change==="calendar") {
+      await expect(runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).rejects.toThrow("storage-bootstrap-input-plan-changed");
+      expect(calls.alpaca).not.toHaveBeenCalled();
+    } else {
+      expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
+      expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("SPY"))).toBe(true);
+    }
+  },60_000);
+
+  it.each(["price","adjacent"] as const)("retries a missing current %s during planned slice continuation",async missing=>{
+    await interruptShortHistorySlice(missing);
+    expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+  },60_000);
+
+  it("requires approved storage inputs for planned slice checkpoint reuse",async()=>{
+    await interruptShortHistorySlice();
+    expect((await runEodBatch(env,runId)).status).toBe("retrying");
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+  },60_000);
 
   it.each([
     { missingOffset: 1, expectedOffset: 5, label: "new target close" },
@@ -256,12 +348,17 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     const normal=calls.alpaca.getMockImplementation()!;
     let stopped=false;
     calls.alpaca.mockImplementation(async (...args:unknown[])=>{const result=await normal(...args);stopped=true;return result;});
+    const earliestRetry=Date.now()+15*60_000;
     await expect(runEodBatch(env,runId,ops.db,{assertContinue:()=>{
       if(stopped)throw new Error("storage-run-time-slice-complete");
     }})).rejects.toThrow("storage-run-time-slice-complete");
     expect(calls.alpaca).toHaveBeenCalledTimes(1);expect(calls.yahoo).not.toHaveBeenCalled();
     expect(await ops.db.prepare("SELECT status,lease_token,error_message FROM eod_runs WHERE id=?").bind(runId).first())
       .toMatchObject({status:"retrying",lease_token:null,error_message:"storage-run-time-slice-complete"});
+    const retryAt=Date.parse((await ops.db.prepare("SELECT next_attempt_at FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("next_attempt_at"))!);
+    expect(retryAt).toBeGreaterThanOrEqual(earliestRetry);
+    expect(retryAt).toBeLessThanOrEqual(Date.now()+15*60_000);
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publication_pointers").first()).toEqual({n:0});
   });
 
