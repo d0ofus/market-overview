@@ -45,6 +45,8 @@ class OfflineStorageTests(unittest.TestCase):
         self.assertEqual(report["archive"]["checkedSourceRows"], 6)
         self.assertEqual(report["archive"]["sourceRowsByFeed"], {"iex":1,"repair-yahoo":1,"sip":4})
         self.assertTrue(report["archive"]["storageRoundTripPassed"])
+        for name in ["idx_market_history_pointers_block_id", "idx_market_history_pointers_previous_block_id"]:
+            self.assertGreater(report["archive"]["database"]["objects"][name], 0)
         self.assertEqual(report["bootstrap"]["recentRowsToInsert"], 4)
         self.assertIn("retained_custom_state", report["bootstrap"]["database"]["objects"])
         self.assertIn("retained_custom_state_value", report["bootstrap"]["database"]["objects"])
@@ -131,6 +133,8 @@ class OfflineStorageTests(unittest.TestCase):
         self.assertGreater(report["archive"]["existingBlocksVerified"], 0)
         self.assertEqual(report["archive"]["newBlocks"], 0)
         self.assertEqual(analysis.digest_file(history), before)
+        for name in ["idx_market_history_pointers_block_id", "idx_market_history_pointers_previous_block_id"]:
+            self.assertGreater(report["archive"]["database"]["objects"][name], 0)
 
     def test_archive_orphan_pointer_outside_source_population_is_rejected(self):
         history = sqlite3.connect(":memory:")

@@ -11,6 +11,22 @@ export type EodAdmission = D1Admission & { flush: () => Promise<void> };
 const textEncoder = new TextEncoder();
 const MAX_REQUEST_BYTES = 8_000_000;
 
+// One reviewed repair may build these indexes over an already populated
+// archive. The operator verifies this row bound before issuing the exact DDL.
+// Ordinary schema installation retains its empty-destination reservation.
+export const EOD_HISTORY_POINTER_INDEX_MAX_ROWS = 20_000;
+export const EOD_HISTORY_POINTER_INDEX_DDL = [
+  "CREATE INDEX IF NOT EXISTS idx_market_history_pointers_block_id ON market_history_block_pointers(block_id) /* storage-history-pointer-index */",
+  "CREATE INDEX IF NOT EXISTS idx_market_history_pointers_previous_block_id ON market_history_block_pointers(previous_block_id) /* storage-history-pointer-index */",
+] as const;
+function historyPointerIndexQuery(query: EodSql): boolean {
+  if (!query.sql.trimEnd().endsWith("/* storage-history-pointer-index */")) return false;
+  if (query.params.length !== 0 || !EOD_HISTORY_POINTER_INDEX_DDL.some((sql) => sql === query.sql)) {
+    throw new Error("storage-history-pointer-index-ddl-invalid");
+  }
+  return true;
+}
+
 /** This runtime adapter accepts one prepared statement per result slot. Keep
  * SQL and bindings separate; joining SQL would change numbered/anonymous bind
  * scope and let a hidden second statement bypass admission and result mapping. */
@@ -110,7 +126,7 @@ export function createEodD1Database(options: {
     // omit only this transport suffix from exact allowlisted DDL. In particular,
     // preserve every inner trigger statement and ordinary prepared SQL verbatim.
     const wireStatements = statements.map((statement) => statement.params.length === 0 && options.reviewedDdl?.includes(statement.sql)
-      ? { ...statement, sql: statement.sql.replace(/\s*\/\* storage-reviewed-ddl \*\/\s*$/, "").replace(/;\s*$/, "") }
+      ? { ...statement, sql: statement.sql.replace(/\s*\/\* (?:storage-reviewed-ddl|storage-history-pointer-index) \*\/\s*$/, "").replace(/;\s*$/, "") }
       : statement);
     // Public REST uses an object envelope, unlike the internal binding transport.
     // https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
@@ -206,6 +222,11 @@ function membershipRows(query:EodSql,limit:number):number {
   return rows.length;
 }
 function maximumReservationWrites(queries:readonly EodSql[]):number {
+  if (queries.some(historyPointerIndexQuery)) {
+    if (queries.length !== 2 || !queries.every(historyPointerIndexQuery)
+      || new Set(queries.map((query) => query.sql)).size !== 2) throw new Error("storage-history-pointer-index-batch-invalid");
+    return 50_000;
+  }
   if (queries.length===3 && HOLDINGS_MARKERS.every((marker,index) => queries[index].sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`))) {
     // Only the reviewed atomic replacement can expand its envelope. Rows and
     // payload remain bounded; daily/profile limits still apply to every credit.
@@ -225,6 +246,7 @@ function maximumReservationWrites(queries:readonly EodSql[]):number {
 /** Fixed labels make live estimate failures diagnosable without logging SQL,
  * parameters, database IDs or provider error bodies. */
 function queryDiagnosticClass(query: EodSql): string {
+  if (historyPointerIndexQuery(query)) return "history-pointer-index-ddl";
   for(const marker of HOLDINGS_MARKERS) if(query.sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`)) return `etf-holdings-${marker}`;
   for (const label of ["stage", "prune-members", ...MEMBERSHIP_MARKERS.map((marker) => `promote-${marker}`)]) {
     if (query.sql.trimEnd().endsWith(`/* eod-universe-${label} */`)) return `universe-${label}`;
@@ -246,6 +268,11 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    if (historyPointerIndexQuery(query)) {
+      reads += EOD_HISTORY_POINTER_INDEX_MAX_ROWS + 16;
+      writes += EOD_HISTORY_POINTER_INDEX_MAX_ROWS + 16;
+      continue;
+    }
     if(query.sql.trimEnd().endsWith("/* eod-population-withdrawal */")) {
       // Exact Ops audit/pointer DML checks bounded checkpoint key ranges and
       // current account-wide owner rows; only one evidence row can change.

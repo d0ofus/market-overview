@@ -1,6 +1,6 @@
 import { runStorageCopy, type StorageCopyProgress } from "./market-storage-copy";
 import { captureStorageHistoryBaseline, runStorageVerification, assertStorageVerificationCapture,
-  releaseStorageVerificationFence, freezeStorageVerificationTarget, type StorageVerificationEvidence } from "./market-storage-verification";
+  releaseStorageVerificationFence, releaseStorageHistoryVerificationFence, freezeStorageVerificationTarget, type StorageVerificationEvidence } from "./market-storage-verification";
 import { verifyStorageConsumerBatch, validateStorageConsumerEvidence, type StorageConsumerCheckpoint,
   type StorageConsumerEvidence } from "./market-storage-acceptance";
 import { loadStorageMigrationCheckpoint, pauseStorageMigration, progressStorageMigration, queueStorageMigrationStage,
@@ -13,6 +13,7 @@ import { refreshBreadthUniverseMemberships } from "./eod";
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
 import { loadStoragePopulationPlan, loadStorageValidationPlan, storeStoragePopulationPlan } from "./market-storage-population-plan";
 import { requeueStorageBootstrapCorrection } from "./market-storage-bootstrap-correction";
+import { loadStorageHistoryIndexAmendment } from "./market-storage-history-index-recovery";
 import type { Env } from "./types";
 
 type Installer = (statements: readonly string[]) => Promise<void>;
@@ -221,7 +222,12 @@ export async function runStoragePipeline(input: {
   // Persist the checked transition before either release. A process failure
   // between the two releases can then resume using the same captured identity.
   // Source stays frozen; no public Worker binding changes here.
-  await releaseStorageVerificationFence(input.history, identity, capture.historyCapture);
+  const historyIndexAmendment = await loadStorageHistoryIndexAmendment(ops, run, plan);
+  if (historyIndexAmendment) {
+    await releaseStorageHistoryVerificationFence(input.history, identity, capture.historyCapture, historyIndexAmendment);
+  } else {
+    await releaseStorageVerificationFence(input.history, identity, capture.historyCapture);
+  }
   await releaseStorageVerificationFence(input.target, identity, capture.targetCapture);
   remaining();
   let eodRun = await enqueueEodRun(env, owner.sessionDate, "daily");

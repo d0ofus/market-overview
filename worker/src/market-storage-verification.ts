@@ -43,21 +43,133 @@ const BLOCK_COLUMNS = `b.id,b.feed,b.ticker,b.calendar_year AS calendarYear,b.sc
   b.payload_base64 AS payloadBase64,b.verified_at AS verifiedAt`;
 const normalizeSql = (sql:string) => sql.replace(/\bIF NOT EXISTS\b/gi,"").replace(/\s+/g,"").replace(/;$/,"");
 
-/** History schema is code reviewed too: callbacks cannot accept extra remote
- * tables/triggers and thereby install arbitrary trigger bodies as approved DDL. */
-export async function assertReviewedStorageHistorySchema(history:D1Database):Promise<void> {
-  const expected = new Map([
-    [BLOCKS.name,normalizeSql(BLOCKS.sql)],[POINTERS.name,normalizeSql(POINTERS.sql)],
-    ["idx_market_history_blocks_security_year",normalizeSql("CREATE INDEX idx_market_history_blocks_security_year ON market_history_blocks (feed,ticker,calendar_year)")],
+export const STORAGE_HISTORY_POINTER_INDEXES = [
+  {name:"idx_market_history_pointers_block_id",sql:"CREATE INDEX idx_market_history_pointers_block_id ON market_history_block_pointers(block_id)"},
+  {name:"idx_market_history_pointers_previous_block_id",sql:"CREATE INDEX idx_market_history_pointers_previous_block_id ON market_history_block_pointers(previous_block_id)"},
+] as const;
+type HistorySchemaPolicy = "legacy"|"indexed"|"compatible";
+type HistorySchemaObject = {type:string;name:string;tableName:string;sql:string|null};
+const HISTORY_FENCE_SQL=`CREATE TABLE market_storage_fence (
+  id TEXT PRIMARY KEY CHECK(id='default'),status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','frozen')),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),migration_id TEXT,code_revision TEXT,schema_hash TEXT,
+  snapshot_revision INTEGER,frozen_at TEXT,released_at TEXT) STRICT, WITHOUT ROWID`;
+/** SQL whitespace may vary, but whitespace inside a quoted value is semantic. */
+function normalizeHistorySql(sql:string):string {
+  const input=sql.trim().replace(/^CREATE\s+(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+/i,"CREATE $1 ");
+  let output="",quote:string|null=null;
+  for(let index=0;index<input.length;index++) {
+    const char=input[index];
+    if(quote) {
+      output+=char;
+      if(char===quote) {if(input[index+1]===quote) output+=input[++index]; else quote=null;}
+    } else if(["'",'"',"`","["].includes(char)) {quote=char==="[" ? "]" : char;output+=char;}
+    else if(!/\s/.test(char)) output+=char;
+  }
+  if(quote) throw new Error("storage-history-schema-not-reviewed");
+  return output.replace(/;$/,"");
+}
+function assertReviewedHistoryObjects(rows:HistorySchemaObject[],policy:HistorySchemaPolicy):void {
+  const expected=new Map([
+    [BLOCKS.name,normalizeHistorySql(BLOCKS.sql)],[POINTERS.name,normalizeHistorySql(POINTERS.sql)],
+    ["idx_market_history_blocks_security_year",normalizeHistorySql("CREATE INDEX idx_market_history_blocks_security_year ON market_history_blocks (feed,ticker,calendar_year)")],
   ]);
-  const rows=await history.prepare("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name").all<{name:string;sql:string}>();
-  for (const row of rows.results) {
-    if (row.name.startsWith("sqlite_") || row.name.startsWith("_cf_") || row.name.startsWith("market_storage_guard_")
-      || row.name==="market_storage_fence" || row.name==="d1_migrations") continue;
-    if (expected.get(row.name)!==normalizeSql(row.sql)) throw new Error("storage-history-schema-not-reviewed");
+  const additions=rows.filter(row=>STORAGE_HISTORY_POINTER_INDEXES.some(index=>index.name===row.name));
+  if((policy==="legacy" && additions.length!==0) || (policy==="indexed" && additions.length!==2)
+    || (additions.length!==0 && additions.length!==2)) throw new Error("storage-history-pointer-index-set-invalid");
+  for(const row of rows) {
+    const addition=STORAGE_HISTORY_POINTER_INDEXES.find(index=>index.name===row.name);
+    if(addition) {
+      if(row.type!=="index" || row.tableName!==POINTERS.name || !row.sql
+        || normalizeHistorySql(row.sql)!==normalizeHistorySql(addition.sql)) throw new Error("storage-history-pointer-index-definition-invalid");
+      continue;
+    }
+    // Prefixes cannot hide an unreviewed index/trigger attached to a business
+    // table. Cloudflare's own metadata tables remain outside the business schema.
+    if(row.name.startsWith("sqlite_") || (row.name.startsWith("_cf_") && row.tableName.startsWith("_cf_"))) continue;
+    if(row.name.startsWith("market_storage_guard_") && row.type==="trigger"
+      && [BLOCKS.name,POINTERS.name,"d1_migrations"].includes(row.tableName)) continue;
+    if(row.name==="market_storage_fence") {
+      if(row.type!=="table" || !row.sql || normalizeHistorySql(row.sql)!==normalizeHistorySql(HISTORY_FENCE_SQL)) {
+        throw new Error("storage-history-fence-schema-not-reviewed");
+      }
+      continue;
+    }
+    if(row.name==="d1_migrations" && row.type==="table") continue;
+    if(!row.sql || expected.get(row.name)!==normalizeHistorySql(row.sql)) throw new Error("storage-history-schema-not-reviewed");
     expected.delete(row.name);
   }
-  if (expected.size) throw new Error("storage-history-schema-incomplete");
+  if(expected.size) throw new Error("storage-history-schema-incomplete");
+}
+
+/** History schema is code reviewed too: callbacks cannot accept extra remote
+ * tables/triggers and thereby install arbitrary trigger bodies as approved DDL. */
+export async function assertReviewedStorageHistorySchema(history:D1Database,policy:HistorySchemaPolicy="compatible"):Promise<void> {
+  const rows=await history.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")
+    .all<HistorySchemaObject>();
+  assertReviewedHistoryObjects(rows.results,policy);
+}
+
+export type StorageHistoryPointerIndexInspection = {
+  version:1;policy:"history-pointer-fk-indexes-v1";historyDatabaseId:string;
+  legacySchemaHash:string;schemaHash:string;indexManifestHash:string;snapshotRevision:number;revision:number;
+};
+export type StorageHistoryPointerIndexAmendment = StorageHistoryPointerIndexInspection;
+/** The operator inspects before/after its exact two-index DDL. This authenticates
+ * the schema/capture only; immutable authorization and before/after row equality
+ * are separate operator evidence. It never relabels the original consumer proof. */
+export async function inspectStorageHistoryPointerIndexSchema(history:D1Database,identity:StorageMigrationIdentity,
+  capture:StorageVerificationCapture,options:{historyDatabaseId:string;policy:"legacy"|"indexed"}):Promise<StorageHistoryPointerIndexInspection> {
+  const fail=(reason:string):never=>{throw new Error(`storage-history-index-${reason}`);};
+  if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(options.historyDatabaseId)
+    || options.historyDatabaseId!==identity.historyDatabaseId || identity.historyDatabaseId===identity.sourceDatabaseId
+    || identity.historyDatabaseId===identity.targetDatabaseId) fail("database-identity-conflict");
+  if(!/^[a-f0-9]{64}$/.test(capture.schemaHash) || !Number.isSafeInteger(capture.revision) || capture.revision<0
+    || !["legacy","indexed"].includes(options.policy)) fail("capture-invalid");
+  const results=await history.batch([
+    history.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"),
+    history.prepare(`SELECT status,revision,migration_id,code_revision,schema_hash,snapshot_revision,released_at
+      FROM market_storage_fence WHERE id='default'`),
+  ]);
+  if(results.length!==2 || results[0].results.length>1000 || results[1].results.length!==1) fail("capture-read-incomplete");
+  const objects=results[0].results as HistorySchemaObject[],state=results[1].results[0] as StorageRow;
+  assertReviewedHistoryObjects(objects,options.policy);
+  if(state.status!=="open" || state.migration_id!==identity.id || state.code_revision!==identity.codeRevision
+    || state.schema_hash!==capture.schemaHash || state.snapshot_revision!==capture.revision || state.released_at!==null
+    || !Number.isSafeInteger(state.revision) || Number(state.revision)<capture.revision) fail("open-capture-mismatch");
+  const internal=(name:string)=>name.startsWith("sqlite_") || name.startsWith("_cf_")
+    || name==="market_storage_fence" || name.startsWith("market_storage_guard_");
+  const canonical=objects.filter(row=>!internal(row.name) && !internal(row.tableName));
+  const legacy=canonical.filter(row=>!STORAGE_HISTORY_POINTER_INDEXES.some(index=>index.name===row.name));
+  const hashObjects=(rows:HistorySchemaObject[])=>storageHash(rows.map(row=>[row.type,row.name,row.tableName,row.sql]));
+  const legacySchemaHash=await hashObjects(legacy);
+  if(legacySchemaHash!==capture.schemaHash) fail("legacy-schema-changed");
+  const tables=legacy.filter(row=>row.type==="table").map(row=>row.name).sort();
+  const guards=objects.filter(row=>row.type==="trigger" && row.name.startsWith("market_storage_guard_"));
+  const expected=new Set(tables.flatMap(table=>(["INSERT","UPDATE","DELETE"] as const).map(event=>normalizeHistorySql(
+    `CREATE TRIGGER IF NOT EXISTS market_storage_guard_${table}_${event.toLowerCase()} BEFORE ${event} ON "${table}" BEGIN
+      SELECT (CASE WHEN COALESCE((SELECT status FROM market_storage_fence WHERE id='default'),'frozen')='frozen'
+        THEN RAISE(ABORT,'market-storage-source-frozen') END);
+      UPDATE market_storage_fence SET revision=revision+1 WHERE id='default' AND released_at IS NULL;
+    END;`))));
+  if(guards.length!==expected.size || guards.some(row=>!row.sql || !expected.has(normalizeHistorySql(row.sql)))) fail("tracking-guards-changed");
+  return {version:1,policy:"history-pointer-fk-indexes-v1",historyDatabaseId:options.historyDatabaseId,
+    legacySchemaHash,schemaHash:await hashObjects(canonical),indexManifestHash:await storageHash(STORAGE_HISTORY_POINTER_INDEXES),
+    snapshotRevision:capture.revision,revision:Number(state.revision)};
+}
+/** Runtime use requires a separately authenticated immutable Ops amendment.
+ * Only already-open HISTORY receives this compatibility check. No fence values,
+ * revision counters, data, or original proof timestamps are changed here. */
+export async function releaseStorageHistoryVerificationFence(history:D1Database,identity:StorageMigrationIdentity,
+  capture:StorageVerificationCapture,amendment:StorageHistoryPointerIndexAmendment):Promise<void> {
+  const actual=await inspectStorageHistoryPointerIndexSchema(history,identity,capture,
+    {historyDatabaseId:amendment.historyDatabaseId,policy:"indexed"});
+  if(amendment.version!==1 || amendment.policy!=="history-pointer-fk-indexes-v1"
+    || amendment.legacySchemaHash!==capture.schemaHash || amendment.legacySchemaHash!==actual.legacySchemaHash
+    || amendment.schemaHash!==actual.schemaHash || amendment.schemaHash===amendment.legacySchemaHash
+    || amendment.indexManifestHash!==actual.indexManifestHash || amendment.snapshotRevision!==capture.revision
+    || !Number.isSafeInteger(amendment.revision) || amendment.revision<capture.revision || actual.revision<amendment.revision) {
+    throw new Error("storage-history-index-amendment-mismatch");
+  }
 }
 
 /** Read-only checks are deliberately reusable by later consumer/cutover gates. */

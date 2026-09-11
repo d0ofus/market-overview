@@ -1,11 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEodD1Database, type D1Settlement } from "../src/eod-d1-rest";
+import { createEodD1Database, EOD_HISTORY_POINTER_INDEX_DDL, type D1Settlement } from "../src/eod-d1-rest";
 
 const options = { accountId: "a".repeat(32), databaseId: "00000000-0000-4000-8000-000000000001",
   token: "test-token", allowedDatabaseIds: ["00000000-0000-4000-8000-000000000001"] };
 const result = (value: number) => ({ success: true, results: [{value}], meta: {rows_read:value, rows_written:0, size_after:8192} });
 
 describe("public D1 REST adapter contract", () => {
+  it("sends the reviewed populated index pair as two unlabelled DDL statements", async () => {
+    const admission = vi.fn(async () => Object.assign(async () => undefined,{abandon:async () => undefined}));
+    const fetcher = vi.fn(async (_url:RequestInfo|URL,init?:RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({batch:EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => ({
+        sql:sql.replace(" /* storage-history-pointer-index */",""),params:[],
+      }))});
+      return Response.json({success:true,result:[result(1),result(1)]});
+    });
+    const db = createEodD1Database({...options,fetcher,admission,reviewedDdl:EOD_HISTORY_POINTER_INDEX_DDL});
+    await db.batch(EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => db.prepare(sql)));
+    expect(admission).toHaveBeenCalledWith(EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => ({sql,params:[]})));
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it("allows complete operator-reviewed trigger DDL only by exact match", async () => {
     const ddl="CREATE TRIGGER guard BEFORE INSERT ON sample BEGIN SELECT RAISE(ABORT,'frozen'); END; /* storage-reviewed-ddl */";
     const admission=vi.fn(async () => Object.assign(async () => undefined,{abandon:async () => undefined}));

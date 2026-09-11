@@ -31,6 +31,14 @@ The daily runner always reconciles at least the latest five exchange sessions, e
 
 A planned 65-minute storage-bootstrap yield makes its owned EOD run immediately eligible to resume. It does not impose the provider-failure cooldown. When that same approved bootstrap resumes, a complete chunk with valid current prices and daily returns may retain unavailable 200-day metrics as null instead of repeating the completed price work. Ticker sets, input revisions and calendar signatures must still match. Ordinary retries, changed inputs, reconciliation runs and real current-session failures continue to recheck prices; quota and provider cooldowns are unchanged.
 
+### Archive pointer index recovery
+
+History migration `0003_history_pointer_indexes.sql` indexes both foreign-key columns on `market_history_block_pointers`. Without these indexes, SQLite scans the entire pointer table twice when deleting an obsolete block, even though the explicit delete selects one block by its primary key. The additional indexes preserve foreign-key validation and are included in the measured storage model.
+
+For the already captured, first-chunk bootstrap failure, `worker/scripts/recover-storage-history-indexes.ts` provides a separate `prepare`, `apply`, then `approve` protocol. Run it from clean, reviewed, pushed `main` with the original migration/database identities, previous execution revision and selected plan hash. Preparation records the real failure, unchanged source/target/history revisions, completed consumer proofs, physical sizes and query plan. Application admits only the two exact indexes, with an explicit populated-index build allowance and a bounded pointer count. Approval verifies the indexed query plan, current Paid headroom and physical capacity before recording an immutable schema amendment and advancing the executor pin.
+
+This recovery preserves the original copy and consumer proof dates, pending price repairs and partial bootstrap writes. It does not repeat completed parity checks, rewrite the original schema capture, or clear unrelated provider/quota failures. The final full-population capacity measurement must include the indexes before public cutover. Subsequent session plans may inherit the amendment only through authenticated, immutable lineage with the same capture and ticker population.
+
 ## Daily code ownership
 
 The `market-eod` environment variable `EOD_PRODUCTION_CODE_REVISION` pins both ordinary daily ingestion and the daily monitor to the exact approved code. Their workflow files still run from `main`, but checkout and `EOD_CODE_REVISION` use this pin. With no pin, the original `github.sha` checkout remains the fallback. Each runner verifies the declared revision against `git rev-parse HEAD`; the triggering main SHA never impersonates pinned execution.

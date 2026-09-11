@@ -1,5 +1,5 @@
 import { vi, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
+import { createEodAdmission, createEodD1Database, EOD_HISTORY_POINTER_INDEX_DDL, EOD_HISTORY_POINTER_INDEX_MAX_ROWS } from "../src/eod-d1-rest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
 describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => {
@@ -13,6 +13,38 @@ describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => 
   }, 30_000);
   afterEach(() => storage.dispose());
   const usage = () => storage.db.prepare("SELECT usage_date as date,rows_read as reads,rows_written as writes,reserved_reads as reservedReads,reserved_writes as reservedWrites FROM eod_usage ORDER BY usage_date").all();
+
+  it("reserves both populated FK index builds and records their actual cost", async () => {
+    const admission = createEodAdmission(storage.db, "history-index-build", { now: () => time });
+    const queries = EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => ({sql,params:[]}));
+    const settle = await admission(queries);
+    expect(await storage.db.prepare("SELECT reads,writes FROM eod_budget_reservations").first()).toEqual({
+      reads: 50_000,
+      writes: 2 * (EOD_HISTORY_POINTER_INDEX_MAX_ROWS + 16) + 12,
+    });
+    await settle({rowsRead:25_586,rowsWritten:25_588,sizeAfter:105_000_000});
+    await admission.flush();
+    expect((await usage()).results).toEqual([{date:"2026-09-08",reads:25_606,writes:25_600,reservedReads:0,reservedWrites:0}]);
+  });
+
+  it("does not let the populated index envelope bypass the remaining daily quota", async () => {
+    await storage.db.prepare("INSERT INTO eod_usage(usage_date,rows_written) VALUES('2026-09-08',10000)").run();
+    const admission = createEodAdmission(storage.db, "history-index-build", { now: () => time });
+    await expect(admission(EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => ({sql,params:[]})))).rejects.toThrow(/budget-exhausted/);
+    await admission.flush();
+    expect(await storage.db.prepare("SELECT reserved_writes AS reserved FROM eod_usage WHERE usage_date='2026-09-08'").first()).toEqual({reserved:0});
+  });
+
+  it("limits the larger DDL envelope to the exact two distinct pointer indexes", async () => {
+    const admission = createEodAdmission(storage.db, "history-index-build", { now: () => time });
+    const first = {sql:EOD_HISTORY_POINTER_INDEX_DDL[0],params:[]};
+    await expect(admission([first])).rejects.toThrow("storage-history-pointer-index-batch-invalid");
+    await expect(admission([first,first])).rejects.toThrow("storage-history-pointer-index-batch-invalid");
+    await expect(admission([{...first,sql:first.sql.replace("(block_id)","(updated_at)")}])).rejects.toThrow("storage-history-pointer-index-ddl-invalid");
+    await expect(admission([{...first,params:[1]}])).rejects.toThrow("storage-history-pointer-index-ddl-invalid");
+    await admission.flush();
+    expect(await storage.db.prepare("SELECT COUNT(*) AS count FROM eod_budget_reservations").first()).toEqual({count:0});
+  });
 
   it("reserves a larger bounded capacity sample before execution and blocks a competing sample near the daily ceiling", async () => {
     await storage.db.prepare("INSERT INTO eod_usage(usage_date,rows_read) VALUES('2026-09-08',2440000)").run();

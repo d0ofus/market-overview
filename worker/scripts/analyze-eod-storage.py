@@ -529,7 +529,13 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
             if actual != set(BAR_FIELDS):
                 raise AnalysisError(f"Source must use migrated 0008 bar schema; incompatible columns: {sorted(actual ^ set(BAR_FIELDS))}")
             if not history_path:
-                archive.executescript((ROOT / "history-migrations/0001_history.sql").read_text(encoding="utf8"))
+                for migration in sorted((ROOT / "history-migrations").glob("*.sql")):
+                    archive.executescript(migration.read_text(encoding="utf8"))
+            else:
+                # Existing snapshots may predate the additive FK indexes. The
+                # disposable model must include their real pages and insertion
+                # cost without altering the supplied historical evidence file.
+                archive.executescript((ROOT / "history-migrations/0003_history_pointer_indexes.sql").read_text(encoding="utf8"))
             source_size = measure(source)
             schema = [dict(row) for row in source.execute("SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")]
             codec = Codec()

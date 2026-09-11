@@ -6,10 +6,12 @@ import type { Env } from "../src/types";
 
 const mocks=vi.hoisted(() => ({copy:vi.fn(),baseline:vi.fn(),verify:vi.fn(),assertCapture:vi.fn(),release:vi.fn(),consumer:vi.fn(),validate:vi.fn(),
   load:vi.fn(),save:vi.fn(),queue:vi.fn(),pause:vi.fn(),progress:vi.fn(),heartbeat:vi.fn(),expected:vi.fn(),enqueue:vi.fn(),batch:vi.fn(),
-  plan:vi.fn(),validationPlan:vi.fn(),storePlan:vi.fn(),freeze:vi.fn(),inputs:vi.fn(),refresh:vi.fn(),calendar:vi.fn(),correct:vi.fn()}));
+  plan:vi.fn(),validationPlan:vi.fn(),storePlan:vi.fn(),freeze:vi.fn(),inputs:vi.fn(),refresh:vi.fn(),calendar:vi.fn(),correct:vi.fn(),
+  indexAmendment:vi.fn(),releaseIndexedHistory:vi.fn()}));
 vi.mock("../src/market-storage-copy",()=>({runStorageCopy:mocks.copy}));
 vi.mock("../src/market-storage-verification",()=>({captureStorageHistoryBaseline:mocks.baseline,runStorageVerification:mocks.verify,
-  assertStorageVerificationCapture:mocks.assertCapture,releaseStorageVerificationFence:mocks.release,freezeStorageVerificationTarget:mocks.freeze}));
+  assertStorageVerificationCapture:mocks.assertCapture,releaseStorageVerificationFence:mocks.release,
+  releaseStorageHistoryVerificationFence:mocks.releaseIndexedHistory,freezeStorageVerificationTarget:mocks.freeze}));
 vi.mock("../src/market-storage-acceptance",()=>({verifyStorageConsumerBatch:mocks.consumer,validateStorageConsumerEvidence:mocks.validate}));
 vi.mock("../src/market-storage-control",async (original)=>({...await original<typeof import("../src/market-storage-control")>(),
   loadStorageMigrationCheckpoint:mocks.load,saveStorageMigrationCheckpoint:mocks.save,queueStorageMigrationStage:mocks.queue,
@@ -19,6 +21,7 @@ vi.mock("../src/eod-runner",()=>({runEodBatch:mocks.batch,loadEodInputs:mocks.in
 vi.mock("../src/eod",()=>({refreshBreadthUniverseMemberships:mocks.refresh}));
 vi.mock("../src/market-calendar-cache",()=>({ensureMarketCalendarCoverage:mocks.calendar}));
 vi.mock("../src/market-storage-bootstrap-correction",()=>({requeueStorageBootstrapCorrection:mocks.correct}));
+vi.mock("../src/market-storage-history-index-recovery",()=>({loadStorageHistoryIndexAmendment:mocks.indexAmendment}));
 vi.mock("../src/market-storage-population-plan",()=>({loadStoragePopulationPlan:mocks.plan,
   loadStorageValidationPlan:mocks.validationPlan,storeStoragePopulationPlan:mocks.storePlan}));
 import { runStoragePipeline } from "../src/market-storage-pipeline";
@@ -60,6 +63,7 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     plan={planHash,sessionDate:"2026-09-09",capture,tickers:["SPY"],calendarDates:record.calendarDates,
       originalCopyCaptureHash:capture.captureHash,bootstrapInputs:{tickers:["SPY"]}};
     mocks.plan.mockImplementation(async()=>plan);mocks.validationPlan.mockImplementation(async()=>plan);
+    mocks.indexAmendment.mockResolvedValue(null);
     mocks.freeze.mockResolvedValue(capture.targetCapture);
     mocks.inputs.mockResolvedValue({tickers:["SPY"],calendarDates:["2026-09-08","2026-09-09"],memberships:
       ["sp500-core","nasdaq-core","nyse-core","russell2000-core","overall-market-proxy"].map(universeId=>({
@@ -158,6 +162,31 @@ describe("storage stage orchestration and private bootstrap recovery",()=>{
     // their old captures are preserved as baseline evidence rather than reused.
     expect(mocks.assertCapture.mock.calls.every(([db])=>db===input.source)).toBe(true);
     expect(checkpoints.get("bootstrap:complete")?.payload).toMatchObject(owner("2026-09-09"));
+  });
+  it("uses an authenticated index amendment only for history while retaining source and consumer proofs",async()=>{
+    ready();const amendment={legacySchemaHash:capture.historyCapture.schemaHash,schemaHash:"2".repeat(64)};
+    mocks.indexAmendment.mockResolvedValue(amendment);
+    expect(await runStoragePipeline(input)).toBe("awaiting-evidence");
+    expect(mocks.indexAmendment).toHaveBeenCalledWith(input.ops,input.run,plan);
+    expect(mocks.releaseIndexedHistory).toHaveBeenCalledWith(input.history,identity,capture.historyCapture,amendment);
+    expect(mocks.release.mock.calls.map(([db])=>db)).toEqual([input.target]);
+    expect(mocks.assertCapture).toHaveBeenCalledWith(input.source,identity,capture.sourceCapture);
+    expect(mocks.consumer).not.toHaveBeenCalled();
+    expect(checkpoints.get("verification:complete")?.payload).toBe(capture);
+    expect(mocks.batch).toHaveBeenCalledOnce();
+  });
+  it("does not release either store or invoke prices when index amendment authentication fails",async()=>{
+    ready();mocks.indexAmendment.mockRejectedValue(new Error("storage-history-index-amendment-invalid"));
+    await expect(runStoragePipeline(input)).rejects.toThrow("amendment-invalid");
+    expect(mocks.release).not.toHaveBeenCalled();expect(mocks.releaseIndexedHistory).not.toHaveBeenCalled();
+    expect(mocks.batch).not.toHaveBeenCalled();expect(checkpoints.has("bootstrap:complete")).toBe(false);
+  });
+  it("does not release the market store or invoke prices when the actual amended history schema differs",async()=>{
+    ready();mocks.indexAmendment.mockResolvedValue({schemaHash:"2".repeat(64)});
+    mocks.releaseIndexedHistory.mockRejectedValue(new Error("storage-history-index-amendment-schema-changed"));
+    await expect(runStoragePipeline(input)).rejects.toThrow("amendment-schema-changed");
+    expect(mocks.release).not.toHaveBeenCalled();expect(mocks.batch).not.toHaveBeenCalled();
+    expect(checkpoints.get("verification:complete")?.payload).toBe(capture);
   });
   it("rolls over only a completed older owner and preserves dated bootstrap history",async()=>{
     ready();plan.sessionDate="2026-09-08";const previous=owner();checkpoints.set("bootstrap:owner",{inputHash:planHash,payload:previous});
