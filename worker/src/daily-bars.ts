@@ -29,20 +29,20 @@ function normalizeTickers(tickers: string[], maxTickers?: number): string[] {
   return typeof maxTickers === "number" ? unique.slice(0, Math.max(1, maxTickers)) : unique;
 }
 
-async function runStatementsInChunks(
+async function runStatementsInChunks<T = never>(
   env: Env,
   db: D1Database,
   statements: D1PreparedStatement[],
   chunkSize = BAR_WRITE_CHUNK_SIZE,
   inspectCapacity = false,
-): Promise<{ changes: number; rowsRead: number; rowsWritten: number }> {
-  const usage = { changes: 0, rowsRead: 0, rowsWritten: 0 };
+): Promise<{ returnedRows: T[]; rowsRead: number; rowsWritten: number }> {
+  const usage = { returnedRows: [] as T[], rowsRead: 0, rowsWritten: 0 };
   for (let index = 0; index < statements.length; index += chunkSize) {
     const chunk = statements.slice(index, index + chunkSize);
     if (chunk.length === 0) continue;
-    const results = await db.batch(chunk);
+    const results = await db.batch<T>(chunk);
     for (const result of results) {
-      usage.changes += Number(result.meta?.changes ?? 0);
+      usage.returnedRows.push(...(result.results ?? []));
       usage.rowsRead += Number(result.meta?.rows_read ?? 0);
       usage.rowsWritten += Number(result.meta?.rows_written ?? result.meta?.changes ?? 0);
       if (inspectCapacity) inspectMarketDataSize(env, result.meta?.size_after);
@@ -212,14 +212,22 @@ async function writeFetchedDailyBars(
   if (barsToWrite.length === 0) return 0;
   void replaceExisting;
   const db = getMarketDataDb(env);
-  const writeUsage = await runStatementsInChunks(
+  const writeUsage = await runStatementsInChunks<{ ticker: string; date: string }>(
     env,
     db,
     barsToWrite.map((bar) =>
       db.prepare(
            `INSERT INTO alpaca_daily_bars
              (feed, ticker, date, o, h, l, c, volume, fetched_at, source_provider, adjustment, observed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+           SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, ?9, ?10, ?11
+           WHERE NOT EXISTS (
+             SELECT 1 FROM alpaca_daily_bars existing
+             WHERE existing.feed=?1 AND existing.ticker=?2 AND existing.date=?3
+               AND ((existing.source_provider='alpaca' AND ?9<>'alpaca') OR (
+                 existing.o IS ?4 AND existing.h IS ?5 AND existing.l IS ?6 AND existing.c IS ?7
+                 AND existing.volume IS ?8 AND existing.source_provider IS ?9 AND existing.adjustment IS ?10
+               ))
+           )
            ON CONFLICT(feed, ticker, date) DO UPDATE SET
              o = excluded.o,
              h = excluded.h,
@@ -242,7 +250,7 @@ async function writeFetchedDailyBars(
                OR alpaca_daily_bars.volume IS NOT excluded.volume
                OR alpaca_daily_bars.source_provider IS NOT excluded.source_provider
                OR alpaca_daily_bars.adjustment IS NOT excluded.adjustment
-             )`,
+             ) RETURNING ticker, date`,
         ).bind(
           (bar.sourceProvider ?? sourceProvider) === "yahoo"
             ? YAHOO_REPAIR_FEED
@@ -262,10 +270,13 @@ async function writeFetchedDailyBars(
     BAR_WRITE_CHUNK_SIZE,
     true,
   );
-  let invalidationUsage = { changes: 0, rowsRead: 0, rowsWritten: 0 };
-  if (writeUsage.changes > 0) {
+  // D1 changes/rows_written includes guard and revision-trigger writes. Only
+  // RETURNING identifies bars changed by this statement, including no-op replay.
+  const barsChanged = writeUsage.returnedRows.length;
+  let invalidationUsage = { returnedRows: [] as never[], rowsRead: 0, rowsWritten: 0 };
+  if (barsChanged > 0) {
     const earliestChangedDateByTicker = new Map<string, string>();
-    for (const bar of barsToWrite) {
+    for (const bar of writeUsage.returnedRows) {
       const ticker = bar.ticker.toUpperCase();
       const current = earliestChangedDateByTicker.get(ticker);
       if (!current || bar.date < current) earliestChangedDateByTicker.set(ticker, bar.date);
@@ -287,11 +298,11 @@ async function writeFetchedDailyBars(
     if (!latest || bar.date > latest) latestByTicker.set(ticker, bar.date);
   }
   await recordMarketDataD1Usage(env, {
-    barsChanged: writeUsage.changes,
+    barsChanged,
     rowsRead: writeUsage.rowsRead + invalidationUsage.rowsRead,
     rowsWritten: writeUsage.rowsWritten + invalidationUsage.rowsWritten,
   });
-  return writeUsage.changes;
+  return barsChanged;
 }
 
 export async function refreshDailyBarsIncremental(env: Env, input: {

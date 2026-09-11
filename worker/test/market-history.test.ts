@@ -77,7 +77,8 @@ function writableArchive() {
           if (!Array.from(pointers.values()).some((pointer) => pointer.id === id || pointer.previous === id)) changes = Number(blocks.delete(id));
         } else throw new Error(`Unexpected archive write: ${sql}`);
         state.writes += changes;
-        return { meta: { changes, rows_read: 1, rows_written: changes } };
+        return { results: changes && sql.includes("RETURNING block_id") ? [{ block_id: String(args[3]) }] : [],
+          meta: { changes, rows_read: 1, rows_written: changes } };
       },
     };
     return statement;

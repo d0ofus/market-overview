@@ -507,11 +507,11 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
           const opened = await marketDb.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token)
             VALUES(?,?,'pending',?,?,?) ON CONFLICT(feed,ticker) DO UPDATE SET
               status='pending',start_date=excluded.start_date,updated_at=excluded.updated_at,owner_token=excluded.owner_token
-            WHERE eod_adjustment_repairs.status='complete'`)
-            .bind(encoded.feed, encoded.ticker, encoded.firstDate, new Date().toISOString(), token).run();
+            WHERE eod_adjustment_repairs.status='complete' RETURNING owner_token AS ownerToken`)
+            .bind(encoded.feed, encoded.ticker, encoded.firstDate, new Date().toISOString(), token).all<{ ownerToken: string }>();
           rowsRead += Number(opened.meta?.rows_read ?? 0);
           rowsWritten += Number(opened.meta?.rows_written ?? opened.meta?.changes ?? 0);
-          if (Number(opened.meta?.changes ?? 0) !== 1) fail("Archive security already has a pending adjustment repair.");
+          if (opened.results.length !== 1 || opened.results[0].ownerToken !== token) fail("Archive security already has a pending adjustment repair.");
         }
         fences.set(security, { feed: encoded.feed, ticker: encoded.ticker, token, owned: !options.repairFenceToken });
       }
@@ -529,9 +529,11 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
           // through the existing pending-repair path.
           if (error instanceof EodFallbackStorageFullError && fence?.owned) {
             const closed = await marketDb.prepare(`UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL,updated_at=?
-              WHERE feed=? AND ticker=? AND status='pending' AND owner_token=?`)
-              .bind(new Date().toISOString(), fence.feed, fence.ticker, fence.token).run();
-            if (closed.meta.changes !== 1) fail("Archive repair fence changed before capacity rejection.");
+              WHERE feed=? AND ticker=? AND status='pending' AND owner_token=? RETURNING feed,ticker`)
+              .bind(new Date().toISOString(), fence.feed, fence.ticker, fence.token).all<{ feed: string; ticker: string }>();
+            if (closed.results.length !== 1 || closed.results[0].feed !== fence.feed || closed.results[0].ticker !== fence.ticker) {
+              fail("Archive repair fence changed before capacity rejection.");
+            }
             fences.delete(security);
           }
           throw error;
@@ -557,21 +559,21 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
       await decodeMarketHistoryBlock(stored);
       if (stored.checksum !== encoded.checksum) fail("Archive read-back checksum differs from the submitted block.");
       const verifiedAt = new Date().toISOString();
-      const promoted = await db.batch([
+      const promoted = await db.batch<{ block_id: string }>([
         db.prepare("UPDATE market_history_blocks SET verified_at = ? WHERE id = ? AND checksum = ?")
           .bind(verifiedAt, encoded.id, encoded.checksum),
         db.prepare(`INSERT INTO market_history_block_pointers (feed, ticker, calendar_year, block_id, updated_at)
           VALUES (?, ?, ?, ?, ?) ON CONFLICT(feed, ticker, calendar_year) DO UPDATE SET
             previous_block_id = market_history_block_pointers.block_id,
             block_id = excluded.block_id, updated_at = excluded.updated_at
-          WHERE market_history_block_pointers.block_id = ?`)
+          WHERE market_history_block_pointers.block_id = ? RETURNING block_id`)
           .bind(encoded.feed, encoded.ticker, encoded.calendarYear, encoded.id, verifiedAt, current[0]?.id ?? null),
       ]);
       for (const result of promoted) {
         rowsRead += Number(result.meta?.rows_read ?? 0);
         rowsWritten += Number(result.meta?.rows_written ?? result.meta?.changes ?? 0);
       }
-      if (Number(promoted[1]?.meta?.changes ?? 0) !== 1) {
+      if (promoted[1].results.length !== 1 || promoted[1].results[0].block_id !== encoded.id) {
         fail("Archive changed concurrently; retry this security/year before pruning any hot rows.");
       }
       await bumpRevision(encoded.feed, encoded.ticker, encoded.lastDate);
@@ -596,11 +598,13 @@ export async function archiveMarketHistoryBars(env: HistoryEnv, input: MarketHis
     if (completed || options.verifiedHotRelocation) {
       for (const fence of fences.values()) if (fence.owned) {
         const closed = await marketDb.prepare(`UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL,updated_at=?
-          WHERE feed=? AND ticker=? AND status='pending' AND owner_token=?`)
-          .bind(new Date().toISOString(), fence.feed, fence.ticker, fence.token).run();
+          WHERE feed=? AND ticker=? AND status='pending' AND owner_token=? RETURNING feed,ticker`)
+          .bind(new Date().toISOString(), fence.feed, fence.ticker, fence.token).all<{ feed: string; ticker: string }>();
         rowsRead += Number(closed.meta?.rows_read ?? 0);
         rowsWritten += Number(closed.meta?.rows_written ?? closed.meta?.changes ?? 0);
-        if (Number(closed.meta?.changes ?? 0) !== 1) fail("Archive repair fence changed before completion.");
+        if (closed.results.length !== 1 || closed.results[0].feed !== fence.feed || closed.results[0].ticker !== fence.ticker) {
+          fail("Archive repair fence changed before completion.");
+        }
       }
     }
   }

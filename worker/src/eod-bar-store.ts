@@ -18,7 +18,14 @@ export async function writeEodBars(env: Env, bars: EodPriceBar[]): Promise<Map<s
         json_extract(value,'$.o'),json_extract(value,'$.h'),json_extract(value,'$.l'),json_extract(value,'$.c'),
         json_extract(value,'$.volume'),json_extract(value,'$.reportedVolume'),json_extract(value,'$.reportedVolumeCollectedAt'),json_extract(value,'$.sourceProvider'),
         json_extract(value,'$.adjustment'),json_extract(value,'$.observedAt'),json_extract(value,'$.fetchedAt')
-      FROM json_each(?) WHERE true
+      FROM json_each(?) incoming WHERE NOT EXISTS (
+        SELECT 1 FROM alpaca_daily_bars stored
+        WHERE stored.feed=json_extract(incoming.value,'$.feed') AND stored.ticker=json_extract(incoming.value,'$.ticker')
+          AND stored.date=json_extract(incoming.value,'$.date')
+          AND stored.o IS json_extract(incoming.value,'$.o') AND stored.h IS json_extract(incoming.value,'$.h')
+          AND stored.l IS json_extract(incoming.value,'$.l') AND stored.c IS json_extract(incoming.value,'$.c')
+          AND stored.volume IS json_extract(incoming.value,'$.volume') AND stored.reported_volume IS json_extract(incoming.value,'$.reportedVolume')
+          AND stored.source_provider IS json_extract(incoming.value,'$.sourceProvider') AND stored.adjustment IS json_extract(incoming.value,'$.adjustment'))
       ON CONFLICT(feed,ticker,date) DO UPDATE SET o=excluded.o,h=excluded.h,l=excluded.l,c=excluded.c,
         volume=excluded.volume,reported_volume=excluded.reported_volume,source_provider=excluded.source_provider,
         reported_volume_collected_at=excluded.reported_volume_collected_at,

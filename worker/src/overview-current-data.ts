@@ -1093,7 +1093,8 @@ export async function refreshOverviewCurrentData(
         cycle_id, cycle_started_at, cursor_offset, processed_tickers,
         lease_token, lease_expires_at, started_at, updated_at)
      VALUES (?, ?, 'running', 1, ?, ?, ?, 0, 0, ?, ?, ?, ?)
-     ON CONFLICT(config_id, session_date) DO NOTHING`,
+     ON CONFLICT(config_id, session_date) DO NOTHING
+     RETURNING lease_token AS leaseToken`,
   ).bind(
     configId,
     sessionDate,
@@ -1104,8 +1105,10 @@ export async function refreshOverviewCurrentData(
     leaseExpiresAt,
     fetchedAt,
     fetchedAt,
-  ).run();
-  if (!previousJob && Number(insertedJob.meta?.changes ?? 0) === 0) {
+  ).all<{ leaseToken: string }>();
+  // Storage guards can write their revision even when this INSERT loses its
+  // conflict. Only the returned business row proves ownership of this lease.
+  if (!previousJob && (insertedJob.results.length !== 1 || insertedJob.results[0].leaseToken !== leaseToken)) {
     const active = await loadOverviewCurrentRefreshJob(env, configId, sessionDate);
     return {
       configId,

@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { refreshDailyBarsIncremental } from "../src/daily-bars";
 import { getProvider, type DailyBar, type MarketDataProvider } from "../src/provider";
 
+function mutationResult(statement: { __sql?: string; __args?: unknown[] }) {
+  return { results: statement.__sql?.includes("RETURNING ticker, date")
+    ? [{ ticker: String(statement.__args?.[1]), date: String(statement.__args?.[2]) }] : [],
+  meta: { changes: 1, rows_written: 1, size_after: 1024 } };
+}
+
 function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
   const barsByTicker = new Map(
     Object.entries(seed).map(([ticker, bars]) => [ticker.toUpperCase(), [...bars]]),
@@ -95,7 +101,7 @@ function createDailyBarsEnv(seed: Record<string, DailyBar[]> = {}) {
         for (const statement of statements) {
           if (statement.__sql) runStatement(statement.__sql, statement.__args ?? []);
         }
-        return statements.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
+        return statements.map(mutationResult);
       },
     },
   } as any;
@@ -233,7 +239,7 @@ describe("refreshDailyBarsIncremental", () => {
             args: statement.__args ?? [],
           });
         }
-        return statements.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
+        return statements.map(mutationResult);
       },
     }) as unknown as D1Database;
     const env = {
@@ -308,7 +314,7 @@ describe("refreshDailyBarsIncremental", () => {
       },
       async batch(rows: Array<{ __sql?: string; __args?: unknown[] }>) {
         statements.push(...rows.map((row) => ({ sql: row.__sql ?? "", args: row.__args ?? [] })));
-        return rows.map(() => ({ meta: { changes: 1, rows_written: 1, size_after: 1024 } }));
+        return rows.map(mutationResult);
       },
     } as unknown as D1Database;
     const provider: MarketDataProvider = {

@@ -154,7 +154,7 @@ function relocationStatements(db: D1Database, bars: MarketHistoryBar[], cutoffDa
         WHERE relocation.operation_id=? AND relocation.feed=alpaca_daily_bars.feed
           AND relocation.ticker=alpaca_daily_bars.ticker AND relocation.date=alpaca_daily_bars.date
           AND relocation.bar_identity IS ${relocationIdentity("alpaca_daily_bars")})
-      AND date IN (SELECT value FROM json_each(?)) AND feed=? AND ticker=? /* eod-history-relocation-delete */`)
+      AND date IN (SELECT value FROM json_each(?)) AND feed=? AND ticker=? RETURNING date /* eod-history-relocation-delete */`)
       .bind(operation, dates, first.feed, first.ticker),
     db.prepare(`DELETE FROM eod_history_relocations WHERE operation_id=?
       AND date IN (SELECT value FROM json_each(?)) AND feed=? AND ticker=? /* eod-history-relocation-cleanup */`)
@@ -239,8 +239,8 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
     }
     for (let offset = 0; offset < candidates.length; offset += 40) {
       const inputClock = await assertPruneCatalog(env, tickers, input.endDate);
-      const result = await db.batch(relocationStatements(db, candidates.slice(offset, offset + 40), cutoff.cutoffDate, inputClock));
-      deletedRows += Number(result[1]?.meta?.changes ?? 0);
+      const result = await db.batch<{ date: string }>(relocationStatements(db, candidates.slice(offset, offset + 40), cutoff.cutoffDate, inputClock));
+      deletedRows += result[1].results.length;
     }
     archivedRows += candidates.length;
     concurrentCorrections = archivedRows - deletedRows;
@@ -269,9 +269,9 @@ export async function cleanupUnpointedHistoryBlocks(env: MaintenanceEnv, input: 
   for (const row of candidates) {
     const result = await db.prepare(`DELETE FROM market_history_blocks WHERE id = ? AND datetime(created_at) < datetime(?)
       AND NOT EXISTS (SELECT 1 FROM market_history_block_pointers WHERE feed = ? AND ticker = ? AND calendar_year = ?
-        AND (block_id = ? OR previous_block_id = ?))`)
-      .bind(row.id, olderThan, row.feed, row.ticker, row.calendarYear, row.id, row.id).run();
-    deletedBlocks += Number(result.meta?.changes ?? 0);
+        AND (block_id = ? OR previous_block_id = ?)) RETURNING id`)
+      .bind(row.id, olderThan, row.feed, row.ticker, row.calendarYear, row.id, row.id).all<{ id: string }>();
+    deletedBlocks += result.results.length;
   }
   return { status: candidates.length === limit ? "partial" : "complete",
     cursor: candidates.length === limit ? candidates.at(-1)!.id : null, deletedBlocks };

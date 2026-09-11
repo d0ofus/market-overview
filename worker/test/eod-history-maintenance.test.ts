@@ -95,7 +95,7 @@ describe("bounded history maintenance", () => {
       batch: async (statements: Array<{ sql: string; args: unknown[] }>) => {
         writes.push(...statements);
         // SQLite reports no match when a value changed since the archived read.
-        return statements.map(() => ({ meta: { changes: 0 } }));
+        return statements.map(() => ({ results: [], meta: { changes: 0 } }));
       },
     };
     try {
@@ -108,6 +108,7 @@ describe("bounded history maintenance", () => {
       expect(writes[0].sql).toContain("observed_at IS json_extract");
       expect(String(writes[0].args[1])).toContain('"reportedVolume":5000');
       expect(writes[1].sql).toContain("relocation.bar_identity IS json_array");
+      expect(writes[1].sql).toContain("RETURNING date");
       expect(writes[2].sql).toContain("eod-history-relocation-cleanup");
       expect(archive).toHaveBeenCalledWith(env, [oldBar], { verifiedHotRelocation: true });
     } finally { archive.mockRestore(); read.mockRestore(); catalogRead.mockRestore(); }

@@ -6,6 +6,7 @@ import { buildEodCatalogRow, encodeEodCatalogPayload, EOD_CATALOG_METHODOLOGY_VE
 import { eodHash } from "../src/eod-publication-service";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
+import { prepareStorageSourceFence } from "../src/market-storage-fence";
 
 describe("history archive and retention against real SQLite", { timeout: 20_000 }, () => {
   let market: ReturnType<typeof createSqliteD1>;
@@ -48,6 +49,10 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
   afterEach(() => { market.dispose(); archive.dispose(); ops.dispose(); });
 
   it("archives before bounded retirement and exactly preserves MAX,520 and260 reads after hot pruning", async () => {
+    for (const storage of [market, archive]) {
+      const plan = await prepareStorageSourceFence(storage.db);
+      storage.script(plan.statements.map((statement) => statement.sql).join("\n"));
+    }
     const first = await archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date, maxRows: 20, ...evidence });
     expect(first).toMatchObject({ status: "partial", archivedRows: 20, deletedRows: 20 });
     const second = await archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: rows.at(-1)!.date, cursor: first.cursor!, ...evidence });

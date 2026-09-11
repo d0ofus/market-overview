@@ -21,7 +21,9 @@ try:
     before=db.total_changes
     cursor=db.execute(query['sql'],query['params'])
     rows=[dict(row) for row in cursor.fetchall()] if cursor.description else []
-    result.append({'success':True,'results':rows,'meta':{'changes':max(0,cursor.rowcount),'rows_read':len(rows),'rows_written':db.total_changes-before}})
+    # D1 reports total changes including trigger writes. Consume RETURNING rows
+    # first: SQLite does not finalize the mutation count until the cursor ends.
+    result.append({'success':True,'results':rows,'meta':{'changes':db.total_changes-before,'rows_read':len(rows),'rows_written':db.total_changes-before}})
   physical_bytes=db.execute('PRAGMA page_count').fetchone()[0]*db.execute('PRAGMA page_size').fetchone()[0]
   for item in result:
    item['meta']['size_after']=physical_bytes

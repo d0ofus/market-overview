@@ -51,14 +51,16 @@ export async function copyStorageArchiveBlock(history:D1Database,incoming:Market
   }
   if (old?.id!==block.id) {
     const now=new Date().toISOString();
-    const result=await history.batch([
+    const result=await history.batch<{block_id:string}>([
       history.prepare("UPDATE market_history_blocks SET verified_at=? WHERE id=? AND checksum=?").bind(now,block.id,block.checksum),
       history.prepare(`INSERT INTO market_history_block_pointers(feed,ticker,calendar_year,block_id,updated_at)
         VALUES(?,?,?,?,?) ON CONFLICT(feed,ticker,calendar_year) DO UPDATE SET
         previous_block_id=market_history_block_pointers.block_id,block_id=excluded.block_id,updated_at=excluded.updated_at
-        WHERE market_history_block_pointers.block_id=?`).bind(block.feed,block.ticker,block.calendarYear,block.id,now,old?.id ?? null),
+        WHERE market_history_block_pointers.block_id=? RETURNING block_id`).bind(block.feed,block.ticker,block.calendarYear,block.id,now,old?.id ?? null),
     ]);
-    if (result[1].meta.changes!==1) throw new Error("storage-archive-concurrent-change");
+    // D1 meta.changes includes fence-trigger writes, even for an UPSERT whose
+    // conditional update lost its race. RETURNING identifies the business row.
+    if (result[1].results.length!==1 || result[1].results[0].block_id!==block.id) throw new Error("storage-archive-concurrent-change");
   }
   const active=await history.prepare("SELECT block_id FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=?")
     .bind(block.feed,block.ticker,block.calendarYear).first<string>("block_id");

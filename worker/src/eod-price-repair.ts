@@ -13,9 +13,9 @@ export async function repairEodSecurity(env:Env, provider:EodPriceProvider, tick
   const acquired=await env.MARKET_DATA_DB!.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at,owner_token)
     VALUES('sip',?,'pending',?,?,?) ON CONFLICT(feed,ticker) DO UPDATE SET status='pending',owner_token=excluded.owner_token,
       start_date=MIN(eod_adjustment_repairs.start_date,excluded.start_date),updated_at=excluded.updated_at
-    WHERE eod_adjustment_repairs.status='complete' OR eod_adjustment_repairs.updated_at<=?`)
-    .bind(ticker,hotStart,new Date().toISOString(),token,new Date(Date.now()-10*60_000).toISOString()).run();
-  if (!acquired.meta.changes) throw new Error("adjustment-repair-already-owned");
+    WHERE eod_adjustment_repairs.status='complete' OR eod_adjustment_repairs.updated_at<=? RETURNING owner_token AS ownerToken`)
+    .bind(ticker,hotStart,new Date().toISOString(),token,new Date(Date.now()-10*60_000).toISOString()).all<{ownerToken:string}>();
+  if (acquired.results.length!==1 || acquired.results[0].ownerToken!==token) throw new Error("adjustment-repair-already-owned");
   const old = await loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:target,allowPendingAdjustmentRepair:true});
   const fence=await env.MARKET_DATA_DB!.prepare("SELECT start_date as startDate FROM eod_adjustment_repairs WHERE feed='sip' AND ticker=?").bind(ticker).first<{startDate:string}>();
   const start=[hotStart,old[0]?.date ?? hotStart,fence?.startDate ?? hotStart].sort()[0];
